@@ -1950,6 +1950,15 @@ void NdtSlamNode::rebuildCleanMap() {
     ROS_INFO("[CleanMap] rebuilding: objects_map=%zu, bev_obs_count=%zu",
              objects_map_->size(), bev_observation_count_.size());
 
+    // ========== Dynamic Deny Gate：获取动态事件的 deny cells ==========
+    std::set<std::pair<int,int>> deny_cells;
+    if (dynamic_event_config_.enabled && dynamic_event_config_.clean_deny_enabled) {
+        deny_cells = dynamic_event_manager_.getDenyCells(0.15, ros::Time::now().toSec());
+        if (!deny_cells.empty()) {
+            ROS_INFO("[CleanMapDynamicGate] deny_cells=%zu", deny_cells.size());
+        }
+    }
+
     const double clean_bev_cell = 0.15;
     const int clean_min_points = 3;
 
@@ -2003,8 +2012,20 @@ void NdtSlamNode::rebuildCleanMap() {
     int near_passed = 0, mid_passed = 0, far_passed = 0;
     int near_failed = 0, mid_failed = 0, far_failed = 0;
 
+    int deny_rejected_cells = 0;
+    int deny_rejected_points = 0;
+
     for (auto& [bk, indices] : bev_indices) {
         total_cells++;
+
+        // ========== Dynamic Deny Gate 检查 ==========
+        std::pair<int,int> bk_pair = {bk.x, bk.y};
+        if (!deny_cells.empty() && deny_cells.find(bk_pair) != deny_cells.end()) {
+            deny_rejected_cells++;
+            deny_rejected_points += indices.size();
+            continue;  // 跳过被动态事件覆盖的 cell
+        }
+
         int obs_count = 0;
         auto it = bev_observation_count_.find(bk);
         if (it != bev_observation_count_.end()) obs_count = it->second;
@@ -2029,6 +2050,11 @@ void NdtSlamNode::rebuildCleanMap() {
             else if (dist < 20.0f) mid_failed++;
             else far_failed++;
         }
+    }
+
+    if (deny_rejected_cells > 0) {
+        ROS_INFO("[CleanMapDynamicGate] rejected_cells=%d, rejected_points=%d",
+                 deny_rejected_cells, deny_rejected_points);
     }
 
     // 更新 clean map（线程安全）
