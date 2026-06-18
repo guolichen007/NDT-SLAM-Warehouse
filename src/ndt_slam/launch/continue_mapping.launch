@@ -1,0 +1,32 @@
+<launch>
+    <!-- 继续建图模式：加载已有地图，继续优化 -->
+
+    <!-- 参数 -->
+    <arg name="map_dir" default="/home/ydkj/NDT-slam-ws/maps/current"/>
+    <arg name="bag_file" default=""/>
+    <arg name="use_sim_time" default="true"/>
+
+    <!-- 设置使用仿真时间 -->
+    <param name="/use_sim_time" value="$(arg use_sim_time)"/>
+
+    <!-- SLAM 节点（继续建图模式） -->
+    <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen">
+        <param name="config_file" value="$(find ndt_slam)/config/dual_lidar_slam_params.yaml"/>
+        <param name="map_file" value="$(arg map_dir)/registration_map.pcd"/>
+        <remap from="/points_raw" to="/merged_points"/>
+    </node>
+
+    <!-- 点云合并节点 -->
+    <node name="pointcloud_merger" pkg="ndt_slam" type="pointcloud_merger" output="screen">
+        <param name="config_file" value="$(find ndt_slam)/config/merger_params.yaml"/>
+    </node>
+
+    <!-- 自动播放bag（如果指定） -->
+    <node if="$(eval bag_file != '')"
+          name="rosbag_play" pkg="rosbag" type="play"
+          args="--clock $(arg bag_file)"/>
+
+    <!-- RViz 可视化 -->
+    <node name="rviz" pkg="rviz" type="rviz"
+          args="-d $(find ndt_slam)/launch/rviz.rviz"/>
+</launch>

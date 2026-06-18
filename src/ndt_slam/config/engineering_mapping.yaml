@@ -1,0 +1,169 @@
+# 工程化建图配置文件
+
+# 会话配置
+session:
+  output_dir: "/data/sessions"
+  session_prefix: "warehouse_session"
+  auto_save: true
+  save_interval: 100  # 每 100 帧保存一次
+
+# 关键帧配置
+keyframe:
+  translation_threshold: 0.5
+  rotation_threshold: 5.0
+  time_threshold: 1.5
+  max_keyframes: 2000
+
+# 地图分层配置
+maps:
+  # 定位地图（稳定结构）
+  localization:
+    voxel_size: 0.3
+    min_height: 0.5
+    max_height: 10.0
+    filter_dynamic: true
+    stability_threshold: 3  # 至少被观测 3 次
+
+  # 细节地图（全量）
+  detail:
+    voxel_size: 0.1
+    filter_dynamic: false
+
+  # 地面地图
+  ground:
+    voxel_size: 0.15
+    height_threshold: 0.3
+
+  # 物体地图（原始）
+  objects_raw:
+    voxel_size: 0.06
+    min_height: 0.15
+
+  # 物体地图（干净）
+  objects_clean:
+    voxel_size: 0.06
+    min_height: 0.25
+    min_observations: 2
+    min_points_per_cell: 3
+
+  # 导航地图
+  navigation:
+    resolution: 0.1
+    obstacle_threshold: 0.65
+    free_threshold: 0.196
+
+# 配准配置
+registration:
+  # 粗配准
+  coarse:
+    type: "ndt_omp"
+    resolution: 1.0
+    step_size: 0.1
+    max_iterations: 50
+    transformation_epsilon: 0.01
+
+  # 精配准
+  refine:
+    type: "icp"
+    max_iterations: 100
+    max_correspondence_distance: 0.5
+    transformation_epsilon: 0.001
+    euclidean_fitness_epsilon: 0.01
+
+# 质量控制
+quality:
+  # 帧质量检查
+  frame:
+    max_fitness: 2.0
+    min_inlier_ratio: 0.3
+    min_transformation_probability: 0.3
+    max_registration_time_ms: 100.0
+
+  # 地图质量检查
+  map:
+    max_thickness: 0.5
+    min_objects_ratio: 0.05
+    max_objects_ratio: 0.95
+
+# 自适应过滤
+adaptive_filter:
+  enabled: true
+
+  # 距离分档
+  distance_thresholds:
+    near: 10.0
+    mid: 20.0
+
+  # SOR 过滤参数
+  sor:
+    near:
+      mean_k: 10
+      stddev_mul_thresh: 2.0
+    mid:
+      mean_k: 8
+      stddev_mul_thresh: 2.5
+    far:
+      mean_k: 5
+      stddev_mul_thresh: 3.0
+
+  # BEV min_height 参数
+  bev_min_height:
+    near: 0.35
+    mid: 0.25
+    far: 0.15
+
+  # 时间一致性参数
+  min_observations:
+    near: 2
+    mid: 1
+    far: 1
+
+# 地面分割
+ground_segmentation:
+  grid_cell_size: 1.5
+  height_above_ground: 0.3
+  method: "grid_local"  # grid_local, ransac, height
+
+# 动态点过滤
+dynamic_filter:
+  enabled: true
+  mean_k: 20
+  stddev_mul_thresh: 1.5
+  interval: 3  # 每 3 帧执行一次
+
+# 闭环检测
+loop_closure:
+  enabled: true
+  interval: 20
+  num_rings: 20
+  num_sectors: 60
+  max_range: 40.0
+  spatial_search_radius: 5.0
+  similarity_threshold: 0.85
+  translation_threshold: 1.0
+  rotation_threshold: 10.0
+
+# 图优化
+graph_optimization:
+  enabled: true
+  solver: "g2o"
+  max_iterations: 100
+  verbose: false
+
+# 导出配置
+export:
+  # PCD 导出
+  pcd:
+    binary: true
+    compressed: false
+
+  # 导航地图导出
+  navigation_map:
+    format: "pgm"  # pgm, png
+    resolution: 0.1
+    margin: 2.0
+
+  # 质量报告
+  quality_report:
+    enabled: true
+    format: "txt"  # txt, json

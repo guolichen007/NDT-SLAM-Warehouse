@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>ndt_slam</name>
+  <version>1.0.0</version>
+  <description>Lidar SLAM package with ICP frontend and ESKF backend</description>
+  <maintainer email="user@example.com">user</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>roscpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>pcl_ros</depend>
+  <depend>pcl_conversions</depend>
+  <depend>message_filters</depend>
+  <depend>message_generation</depend>
+  <depend>lidar_slam2_msgs</depend>
+  
+  <exec_depend>roslaunch</exec_depend>
+
+  <export>
+  </export>
+</package>

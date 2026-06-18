@@ -1,0 +1,33 @@
+<launch>
+    <!-- 仓库运行模式：加载已有地图，重定位 + 导航 -->
+
+    <!-- 参数 -->
+    <arg name="map_dir" default="/home/ydkj/NDT-slam-ws/maps/current"/>
+    <arg name="localization_only" default="true"/>
+    <arg name="use_sim_time" default="true"/>
+
+    <!-- 设置使用仿真时间 -->
+    <param name="/use_sim_time" value="$(arg use_sim_time)"/>
+
+    <!-- SLAM 节点（定位模式） -->
+    <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen">
+        <param name="config_file" value="$(find ndt_slam)/config/dual_lidar_slam_params.yaml"/>
+        <param name="localization_only" value="$(arg localization_only)"/>
+        <param name="map_file" value="$(arg map_dir)/registration_map.pcd"/>
+
+        <!-- 话题重映射 -->
+        <remap from="/points_raw" to="/merged_points"/>
+    </node>
+
+    <!-- 点云合并节点 -->
+    <node name="pointcloud_merger" pkg="ndt_slam" type="pointcloud_merger" output="screen">
+        <rosparam command="load" file="$(find ndt_slam)/config/merger_params.yaml"/>
+    </node>
+
+    <!-- RViz 可视化 -->
+    <node name="rviz" pkg="rviz" type="rviz"
+          args="-d $(find ndt_slam)/launch/rviz.rviz"/>
+
+    <!-- 输出信息 -->
+    <param name="map_dir" value="$(arg map_dir)"/>
+</launch>

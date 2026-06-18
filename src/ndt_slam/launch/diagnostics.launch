@@ -1,0 +1,10 @@
+<launch>
+  <!-- 点云诊断节点：分析 KISS-ICP 退化风险 -->
+  <arg name="topic" default="/merged_points"/>
+  <arg name="skip_frames" default="5"/>
+
+  <node name="cloud_diagnostics" pkg="ndt_slam" type="cloud_diagnostics" output="screen">
+    <param name="topic" value="$(arg topic)"/>
+    <param name="skip_frames" value="$(arg skip_frames)"/>
+  </node>
+</launch>

@@ -1,0 +1,111 @@
+# NDT SLAM 配置（优化版本 v2）
+
+use_sim_time: true
+
+# 话题名称
+pointcloud_topic: "/merged_points"
+odom_topic: "/odom"
+map_topic: "/map"
+mapping_pointcloud_topic: "/current_cloud"
+current_cloud_topic: "/mapping_current_cloud"
+pose_topic: "/current_pose"
+
+# 坐标系
+base_frame: "base_link"
+odom_frame: "odom"
+map_frame: "map"
+
+# 里程计模式
+odom_mode: 0
+
+# 建图参数
+map_voxel_size: 0.3              # 配准地图体素（粗，NDT匹配用）
+display_voxel_size: 0.1          # 全量显示地图体素
+ground_voxel_size: 0.15          # 地面点体素（较粗，控制点数）
+objects_voxel_size: 0.06         # 非地面/货物体素（很细，保留轮廓）
+max_map_size: 300.0
+
+# 网格局部地面模型参数
+grid_cell_size: 1.5              # 从2.0降到1.5，减少一个格子同时含地面和货物
+height_above_ground: 0.3         # 低矮货物也需保留，降低到0.3m
+
+# 传感器近场过滤（去除起重机抓臂、吊具等固定结构）
+near_field_radius: 4.0           # 水平距离小于此值的点被过滤（米）
+near_field_z_min: 3.0            # Z 高于此值才过滤（米，base_link 坐标系）
+use_voxel_filter: true
+map_update_interval: 1
+num_worker_threads: 0
+
+# 关闭 lidar2base 变换（merger 已经处理）
+use_lidar2base_transform: false
+
+# 发布配置
+publish_odom_tf: true
+loop_detection_interval: 20    # 每20个关键帧尝试一次闭环检测
+
+# 关键帧管理参数
+keyframe:
+  translation_threshold: 0.5   # 从0.3提高到0.5，减少关键帧密度
+  rotation_threshold: 5.0      # 从3.0提高到5.0
+  time_threshold: 1.5          # 从1.0提高到1.5
+  max_keyframes: 2000
+
+# 特征提取参数（关闭，简化流程）
+feature_extraction:
+  enabled: false
+
+# 动态点过滤参数
+dynamic_filter:
+  enabled: true
+  mean_k: 20                   # SOR 邻域点数
+  stddev_mul_thresh: 1.5       # SOR 标准差倍数阈值
+
+# 闭环检测参数
+scan_context:
+  num_rings: 20
+  num_sectors: 60
+  max_range: 40.0              # 减小搜索范围
+  spatial_search_radius: 5.0   # 从8.0减小到5.0，减少误匹配
+  similarity_threshold: 0.85   # 从0.8提高到0.85，更严格
+  translation_threshold: 1.0
+  rotation_threshold: 10.0
+
+# NDT_OMP 配准参数
+ndt_omp:
+  resolution: 1.0              # 从0.3提高到1.0，匹配更稳定
+  step_size: 0.1
+  max_iterations: 50           # 从30增加到50，允许更多迭代
+  transformation_epsilon: 0.01
+
+# BaseLink 中间通道吊货候选过滤
+base_payload_channel:
+  enabled: true
+  lateral_center: 0.0          # 通道横向中心（y 方向）
+  lateral_half_width: 3.0      # 通道横向半宽（y 方向 ±3m，扩大通道）
+  longitudinal_min: -10.0      # 通道纵向最小值（x 方向）
+  longitudinal_max: 10.0       # 通道纵向最大值（x 方向）
+  min_object_hag: 0.4          # 低于此高度的点不视为吊货候选（降低阈值）
+  cluster_bev_resolution: 0.25 # BEV 聚类网格大小
+  min_payload_points: 20       # 最少点数（降低阈值）
+  min_payload_area_m2: 0.2     # 最小面积（降低阈值）
+  max_payload_area_m2: 100.0   # 最大面积
+  expand_xy: 0.5               # 候选 bbox XY 膨胀（米）
+  expand_z: 0.4                # 候选 bbox Z 膨胀（米）
+  include_weak_points_in_bbox: true  # bbox 内弱候选也删除
+
+# PayloadTrackManager 双坐标系跟踪配置
+payload_tracker:
+  enabled: true
+  bev_resolution: 0.25
+  min_cluster_points: 20
+  min_cluster_area: 0.15
+  cluster_tolerance: 0.5
+  max_match_distance: 1.0
+  max_match_bbox_ratio: 0.6
+  window_sec: 3.0
+  motion_confirm_frames: 3
+  displacement_thresh: 0.25
+  velocity_thresh: 0.05
+  direction_consistency_thresh: 0.65
+  base_stability_std_thresh: 0.35  # base_link 下中心标准差阈值（低于此值认为稳定）
+  max_missed_frames: 5

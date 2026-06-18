@@ -1,0 +1,27 @@
+<launch>
+  <!-- NDT_OMP + 特征加权 SLAM 启动文件 -->
+  <arg name="config_file" default="$(find ndt_slam)/config/dual_lidar_slam_params.yaml"/>
+  <arg name="merger_config" default="$(find ndt_slam)/config/merger_params.yaml"/>
+  <arg name="use_sim_time" default="true"/>
+
+  <param name="use_sim_time" value="$(arg use_sim_time)"/>
+
+  <!-- 静态TF: base_link -> rslidar -->
+  <node pkg="tf" type="static_transform_publisher" name="base_link_to_rslidar"
+        args="0 0 0 0 0 0 base_link rslidar 100"/>
+
+  <!-- 双雷达点云拼接节点 -->
+  <node name="pointcloud_merger" pkg="ndt_slam" type="pointcloud_merger" output="screen">
+    <rosparam file="$(arg merger_config)" command="load"/>
+    <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  </node>
+
+  <!-- NDT_OMP SLAM 节点 -->
+  <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen" args="$(arg config_file)">
+    <param name="use_sim_time" value="$(arg use_sim_time)"/>
+    <param name="$(anon ndt_slam_node)/log_level" value="info"/>
+  </node>
+
+  <!-- RViz -->
+  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find ndt_slam)/launch/rviz.rviz" output="screen"/>
+</launch>

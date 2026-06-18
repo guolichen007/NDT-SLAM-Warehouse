@@ -1,0 +1,31 @@
+# 编译产物
+build/
+devel/
+logs/
+.catkin_workspace
+.catkin_tools/
+*.pyc
+__pycache__/
+
+# ROS 日志
+log/
+*.log
+
+# 地图和数据（太大不入 git）
+maps/
+output/
+*.pcd
+*.bag
+*.pgm
+
+# 调试输出
+payload_debug/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# 系统文件
+.DS_Store

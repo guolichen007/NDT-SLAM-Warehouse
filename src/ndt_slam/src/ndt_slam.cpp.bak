@@ -1,0 +1,1194 @@
+#include "ndt_slam/ndt_slam.hpp"
+#include "lidar_slam2/Utils.hpp"
+
+#include <chrono>
+#include <memory>
+#include <sophus/se3.hpp>
+#include <vector>
+#include <yaml-cpp/yaml.h>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+
+#include <tf2/convert.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/static_transform_broadcaster.h>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/transform_listener.h>
+
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/TransformStamped.h>
+#include <nav_msgs/Odometry.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <std_msgs/String.h>
+#include <std_srvs/Empty.h>
+#include <pcl_conversions/pcl_conversions.h>
+
+// KD-Tree 用于特征提取
+#include <pcl/kdtree/kdtree_flann.h>
+
+// NDT_OMP
+#include <pclomp/ndt_omp.h>
+// ICP（用于关键帧精配准）
+#include <pcl/registration/icp.h>
+
+namespace {
+Sophus::SE3d LookupTransform(const std::string &target_frame,
+                             const std::string &source_frame,
+                             tf2_ros::Buffer &tf2_buffer) {
+    std::string err_msg;
+    if (tf2_buffer.canTransform(target_frame, source_frame, ros::Time(0), &err_msg)) {
+        try {
+            auto tf = tf2_buffer.lookupTransform(target_frame, source_frame, ros::Time(0));
+            Sophus::SE3d transform;
+            transform.translation() = Eigen::Vector3d(
+                tf.transform.translation.x,
+                tf.transform.translation.y,
+                tf.transform.translation.z
+            );
+            Eigen::Quaterniond q(
+                tf.transform.rotation.w,
+                tf.transform.rotation.x,
+                tf.transform.rotation.y,
+                tf.transform.rotation.z
+            );
+            transform.so3() = Sophus::SO3d(q);
+            return transform;
+        } catch (tf2::TransformException &ex) {
+            ROS_DEBUG("%s", ex.what());
+        }
+    }
+    ROS_DEBUG("Failed to find tf. Reason=%s", err_msg.c_str());
+    return Sophus::SE3d();
+}
+}  // namespace
+
+namespace ndt_slam {
+
+NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
+    : nh_(nh) {
+    initializeParameters();
+    // ... 初始化代码（从 SlamNode.cpp 复制）
+    ROS_INFO("NdtSlamNode initialized");
+}
+
+NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHandle& nh)
+    : nh_(nh) {
+    initializeParameters(config_file_path);
+
+    pointcloud_sub_ = nh_.subscribe(pointcloud_topic_, 10, &NdtSlamNode::pointCloudCallback, this);
+
+    odom_pub_ = nh_.advertise<nav_msgs::Odometry>(odom_topic_, 10);
+    pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>(pose_topic_, 10);
+    map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(map_topic_, 10);
+    display_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map", 10);
+    ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 10);
+    objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 10);
+    objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 10);
+    near_field_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/near_field_removed", 10);
+    current_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(current_cloud_topic_, 10);
+    path_pub_ = nh_.advertise<nav_msgs::Path>("/path", 10);
+
+    path_msg_.header.frame_id = "map";
+
+    tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>();
+    tf2_buffer_ = std::make_unique<tf2_ros::Buffer>();
+    tf2_buffer_->setUsingDedicatedThread(true);
+    tf2_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf2_buffer_);
+
+    publishInitialTransform();
+
+    reset_srv_ = nh_.advertiseService("reset", &NdtSlamNode::resetService, this);
+    set_pose_srv_ = nh_.advertiseService("set_pose", &NdtSlamNode::setPoseService, this);
+    relocalize_srv_ = nh_.advertiseService("relocalize", &NdtSlamNode::relocalizeService, this);
+    save_map_srv_ = nh_.advertiseService("save_map", &NdtSlamNode::saveMapService, this);
+    load_map_srv_ = nh_.advertiseService("load_map", &NdtSlamNode::loadMapService, this);
+    rebuild_map_srv_ = nh_.advertiseService("rebuild_map", &NdtSlamNode::rebuildMapService, this);
+
+    current_pose_ = Sophus::SE3d();
+    global_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    display_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    ground_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    objects_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    objects_clean_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    local_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    current_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    current_cloud_transformed_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    last_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+
+    ndt_.reset(new pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>());
+    ndt_->setResolution(ndt_resolution_);
+    ndt_->setStepSize(ndt_step_size_);
+    ndt_->setTransformationEpsilon(ndt_transformation_epsilon_);
+    ndt_->setMaximumIterations(ndt_max_iterations_);
+    ROS_INFO("NDT_OMP initialized: resolution=%.2f, step_size=%.2f, max_iter=%d",
+             ndt_resolution_, ndt_step_size_, ndt_max_iterations_);
+
+    shutdown_ = false;
+    running_ = true;
+    process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
+
+    if (num_worker_threads_ > 0) {
+        for (int i = 0; i < num_worker_threads_; ++i) {
+            worker_threads_.emplace_back(&NdtSlamNode::processingWorker, this);
+        }
+    }
+
+    timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
+
+    ROS_INFO("NdtSlamNode initialized with NDT_OMP");
+    ROS_INFO("Config file: %s", config_file_path.c_str());
+    ROS_INFO("Services: reset, set_pose, relocalize, save_map, load_map, rebuild_map");
+}
+
+NdtSlamNode::~NdtSlamNode() {
+    shutdown_ = true;
+    queue_cv_.notify_all();
+    tracking_cv_.notify_all();
+    running_ = false;
+    task_cv_.notify_all();
+
+    if (process_thread_.joinable()) {
+        process_thread_.join();
+    }
+    for (auto& worker : worker_threads_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    if (rebuild_thread_.joinable()) {
+        rebuild_thread_.join();
+    }
+    if (clean_rebuild_thread_.joinable()) {
+        clean_rebuild_thread_.join();
+    }
+}
+
+void NdtSlamNode::run() {
+    ros::spin();
+}
+
+void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
+    try {
+        YAML::Node config = YAML::LoadFile(config_file_path);
+
+        // 话题配置
+        if (config["pointcloud_topic"]) pointcloud_topic_ = config["pointcloud_topic"].as<std::string>();
+        if (config["odom_topic"]) odom_topic_ = config["odom_topic"].as<std::string>();
+        if (config["pose_topic"]) pose_topic_ = config["pose_topic"].as<std::string>();
+        if (config["map_topic"]) map_topic_ = config["map_topic"].as<std::string>();
+        if (config["current_cloud_topic"]) current_cloud_topic_ = config["current_cloud_topic"].as<std::string>();
+
+        // 坐标系配置
+        if (config["odom_frame"]) odom_frame_ = config["odom_frame"].as<std::string>();
+        if (config["base_frame"]) base_frame_ = config["base_frame"].as<std::string>();
+        if (config["lidar_odom_frame"]) lidar_odom_frame_ = config["lidar_odom_frame"].as<std::string>();
+        if (config["map_frame"]) map_frame_ = config["map_frame"].as<std::string>();
+
+        // 地图参数
+        if (config["map_voxel_size"]) voxel_size_ = config["map_voxel_size"].as<double>();
+        if (config["display_voxel_size"]) display_voxel_size_ = config["display_voxel_size"].as<double>();
+        if (config["ground_voxel_size"]) ground_voxel_size_ = config["ground_voxel_size"].as<double>();
+        if (config["objects_voxel_size"]) objects_voxel_size_ = config["objects_voxel_size"].as<double>();
+        if (config["grid_cell_size"]) grid_cell_size_ = config["grid_cell_size"].as<double>();
+        if (config["height_above_ground"]) height_above_ground_ = config["height_above_ground"].as<double>();
+        if (config["max_map_size"]) max_map_size_ = config["max_map_size"].as<double>();
+
+        // NDT_OMP 配置
+        if (config["ndt_omp"]) {
+            auto ndt = config["ndt_omp"];
+            if (ndt["resolution"]) ndt_resolution_ = ndt["resolution"].as<double>();
+            if (ndt["step_size"]) ndt_step_size_ = ndt["step_size"].as<double>();
+            if (ndt["transformation_epsilon"]) ndt_transformation_epsilon_ = ndt["transformation_epsilon"].as<double>();
+            if (ndt["max_iterations"]) ndt_max_iterations_ = ndt["max_iterations"].as<int>();
+        }
+
+        // 闭环检测配置
+        if (config["loop_detection_interval"]) loop_detection_interval_ = config["loop_detection_interval"].as<int>();
+
+        loop_closure_detector_.configureFromYaml(config_file_path);
+
+        ROS_INFO("=== NdtSlamNode Parameters ===");
+        ROS_INFO("PointCloud topic: %s", pointcloud_topic_.c_str());
+        ROS_INFO("Map frame: %s", map_frame_.c_str());
+        ROS_INFO("Voxel size: %.3f m (registration), %.3f m (display)", voxel_size_, display_voxel_size_);
+        ROS_INFO("NDT_OMP: resolution=%.2f, step_size=%.2f, max_iter=%d", ndt_resolution_, ndt_step_size_, ndt_max_iterations_);
+        ROS_INFO("==============================");
+
+    } catch (const YAML::Exception& e) {
+        ROS_ERROR("YAML parse error: %s", e.what());
+    }
+}
+
+void NdtSlamNode::initializeParameters() {
+    kiss_icp_config_ = kiss_icp::pipeline::KISSConfig();
+}
+
+void NdtSlamNode::timerCallback(const ros::TimerEvent&) {
+    const auto& keyframes = loop_closure_detector_.getKeyFrames();
+    ROS_INFO("[Timer] keyframes=%zu, cloud=%zu, init=%d",
+             keyframes.size(), current_cloud_->size(), initialized_ ? 1 : 0);
+}
+
+void NdtSlamNode::pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg) {
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        cloud_queue_ = std::queue<sensor_msgs::PointCloud2::ConstPtr>();
+        cloud_queue_.push(msg);
+    }
+    queue_cv_.notify_one();
+}
+
+void NdtSlamNode::processCloudThread() {
+    ROS_INFO("Processing thread started");
+
+    int total_frames = 0;
+    int success_frames = 0;
+    ros::Time last_log_time = ros::Time::now();
+
+    while (ros::ok() && !shutdown_) {
+        sensor_msgs::PointCloud2::ConstPtr msg;
+
+        if (tracking_lost_) {
+            ROS_WARN("Tracking lost, waiting for relocalization...");
+            std::unique_lock<std::mutex> lock(cloud_mutex_);
+            tracking_cv_.wait(lock, [this]() { return !tracking_lost_ || shutdown_; });
+            if (shutdown_) break;
+            ROS_INFO("Relocalization completed, resuming processing");
+        }
+
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            queue_cv_.wait(lock, [this]() { return !cloud_queue_.empty() || shutdown_; });
+            if (shutdown_) break;
+            msg = cloud_queue_.front();
+            cloud_queue_.pop();
+        }
+
+        if (!msg) continue;
+
+        total_frames++;
+        auto start_time = std::chrono::steady_clock::now();
+
+        last_stamp_ = msg->header.stamp;
+
+        // 解析点云
+        pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::fromROSMsg(*msg, *input_cloud);
+
+        if (input_cloud->empty()) continue;
+
+        // 近场过滤
+        pcl::PointCloud<pcl::PointXYZ>::Ptr near_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+        for (const auto& p : input_cloud->points) {
+            if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
+            double xy_dist = std::sqrt(p.x * p.x + p.y * p.y);
+            if (xy_dist < near_field_radius_ && p.z > near_field_z_min_) {
+                // 被过滤的点
+            } else {
+                near_filtered->push_back(p);
+            }
+        }
+        input_cloud = near_filtered;
+
+        // 预处理（范围过滤 + 降采样）
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        for (const auto& p : input_cloud->points) {
+            if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) {
+                double range = std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
+                if (range > 0.5 && range < 30.0) {
+                    filtered_cloud->push_back(p);
+                }
+            }
+        }
+
+        if (filtered_cloud->size() > 5000) {
+            pcl::VoxelGrid<pcl::PointXYZ> vf;
+            vf.setInputCloud(filtered_cloud);
+            vf.setLeafSize(0.2, 0.2, 0.2);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled(new pcl::PointCloud<pcl::PointXYZ>);
+            vf.filter(*downsampled);
+            filtered_cloud = downsampled;
+        }
+
+        if (filtered_cloud->size() < 100) continue;
+
+        // 初始化
+        bool should_init = false;
+        {
+            std::lock_guard<std::mutex> lock(cloud_mutex_);
+            if (!initialized_) {
+                should_init = true;
+                initialized_ = true;
+            }
+        }
+
+        if (should_init) {
+            std::lock_guard<std::mutex> lock(cloud_mutex_);
+            current_pose_ = Sophus::SE3d();
+            ROS_INFO("SLAM initialized: %lu points", filtered_cloud->size());
+        }
+
+        // NDT_OMP 配准
+        Sophus::SE3d new_pose = current_pose_;
+        bool registration_success = false;
+
+        try {
+            if (local_map_->empty() || local_map_->size() < 500) {
+                *local_map_ += *filtered_cloud;
+                registration_success = true;
+            } else {
+                ndt_->setInputTarget(local_map_);
+                ndt_->setInputSource(filtered_cloud);
+
+                pcl::PointCloud<pcl::PointXYZ> aligned;
+                Eigen::Matrix4f initial_guess = current_pose_.matrix().cast<float>();
+                ndt_->align(aligned, initial_guess);
+
+                if (ndt_->hasConverged()) {
+                    Eigen::Matrix4f result = ndt_->getFinalTransformation();
+                    if (!result.isZero() && !result.hasNaN()) {
+                        // 正交化旋转矩阵
+                        Eigen::Matrix3d R = result.block<3,3>(0,0).cast<double>();
+                        Eigen::JacobiSVD<Eigen::Matrix3d> svd(R, Eigen::ComputeFullU | Eigen::ComputeFullV);
+                        Eigen::Matrix3d R_ortho = svd.matrixU() * svd.matrixV().transpose();
+                        if (R_ortho.determinant() < 0) R_ortho.col(0) *= -1;
+
+                        Eigen::Matrix4d result_ortho = Eigen::Matrix4d::Identity();
+                        result_ortho.block<3,3>(0,0) = R_ortho;
+                        result_ortho.block<3,1>(0,3) = result.block<3,1>(0,3).cast<double>();
+
+                        new_pose = Sophus::SE3d(result_ortho);
+                        registration_success = true;
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            ROS_ERROR("NDT_OMP exception: %s", e.what());
+        }
+
+        // 更新位姿
+        if (registration_success) {
+            std::lock_guard<std::mutex> lock(cloud_mutex_);
+            current_pose_ = new_pose;
+        }
+
+        // 发布结果
+        if (registration_success && !tracking_lost_) {
+            ros::Time publish_time = ros::Time::now();
+            publishOdometry(publish_time, msg->header.frame_id, new_pose);
+            addFrameToMap(filtered_cloud, new_pose, publish_time);
+            addKeyFrameToLoopClosure(filtered_cloud, new_pose, publish_time);
+            success_frames++;
+        }
+
+        // 统计日志
+        auto end_time = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(end_time - start_time).count();
+
+        if ((ros::Time::now() - last_log_time).toSec() > 10.0) {
+            Eigen::Vector3d pos = current_pose_.translation();
+            ROS_INFO("[Status] frames=%d/%d, pose=(%.2f, %.2f, %.2f), local_map=%lu, global_map=%lu",
+                     success_frames, total_frames, pos.x(), pos.y(), pos.z(),
+                     local_map_->size(), global_map_->size());
+            last_log_time = ros::Time::now();
+        }
+    }
+
+    ROS_INFO("Processing thread stopped");
+}
+
+void NdtSlamNode::publishOdometry(const ros::Time& stamp, const std::string& cloud_frame_id, const Sophus::SE3d& pose_override) {
+    const Sophus::SE3d final_pose = pose_override.matrix().isIdentity() ?
+        [this]() { std::lock_guard<std::mutex> lock(cloud_mutex_); return current_pose_; }() :
+        pose_override;
+
+    if (stamp == last_tf_stamp_) return;
+    last_tf_stamp_ = stamp;
+
+    if (publish_odom_tf_) {
+        geometry_msgs::TransformStamped odom_to_base;
+        odom_to_base.header.stamp = stamp;
+        odom_to_base.header.frame_id = odom_frame_;
+        odom_to_base.child_frame_id = base_frame_;
+        odom_to_base.transform = tf2::sophusToTransform(final_pose);
+        tf_broadcaster_->sendTransform(odom_to_base);
+
+        geometry_msgs::TransformStamped map_to_odom;
+        map_to_odom.header.stamp = stamp;
+        map_to_odom.header.frame_id = map_frame_;
+        map_to_odom.child_frame_id = odom_frame_;
+        map_to_odom.transform.translation.x = 0.0;
+        map_to_odom.transform.translation.y = 0.0;
+        map_to_odom.transform.translation.z = 0.0;
+        map_to_odom.transform.rotation.w = 1.0;
+        tf_broadcaster_->sendTransform(map_to_odom);
+    }
+
+    nav_msgs::Odometry odom_msg;
+    odom_msg.header.stamp = stamp;
+    odom_msg.header.frame_id = odom_frame_;
+    odom_msg.child_frame_id = base_frame_;
+    odom_msg.pose.pose = tf2::sophusToPose(final_pose);
+    odom_msg.pose.covariance.fill(0.0);
+    odom_msg.pose.covariance[0] = position_covariance_;
+    odom_msg.pose.covariance[7] = position_covariance_;
+    odom_msg.pose.covariance[14] = position_covariance_;
+    odom_msg.pose.covariance[21] = orientation_covariance_;
+    odom_msg.pose.covariance[28] = orientation_covariance_;
+    odom_msg.pose.covariance[35] = orientation_covariance_;
+    odom_pub_.publish(odom_msg);
+
+    geometry_msgs::PoseStamped pose_msg;
+    pose_msg.header.stamp = stamp;
+    pose_msg.header.frame_id = odom_frame_;
+    pose_msg.pose = tf2::sophusToPose(final_pose);
+    pose_pub_.publish(pose_msg);
+
+    geometry_msgs::PoseStamped path_pose;
+    path_pose.header.stamp = stamp;
+    path_pose.header.frame_id = "map";
+    path_pose.pose = tf2::sophusToPose(final_pose);
+    path_msg_.poses.push_back(path_pose);
+
+    if (path_msg_.poses.size() > path_max_size_) {
+        path_msg_.poses.erase(path_msg_.poses.begin());
+    }
+
+    path_msg_.header.stamp = stamp;
+    path_pub_.publish(path_msg_);
+}
+
+void NdtSlamNode::publishInitialTransform() {
+    geometry_msgs::TransformStamped transform;
+    transform.header.stamp = ros::Time::now();
+    transform.header.frame_id = odom_frame_;
+    transform.child_frame_id = base_frame_;
+    transform.transform.translation.x = 0.0;
+    transform.transform.translation.y = 0.0;
+    transform.transform.translation.z = 0.0;
+    transform.transform.rotation.x = 0.0;
+    transform.transform.rotation.y = 0.0;
+    transform.transform.rotation.z = 0.0;
+    transform.transform.rotation.w = 1.0;
+    tf_broadcaster_->sendTransform(transform);
+
+    geometry_msgs::TransformStamped map_to_odom;
+    map_to_odom.header.stamp = ros::Time::now();
+    map_to_odom.header.frame_id = "map";
+    map_to_odom.child_frame_id = odom_frame_;
+    map_to_odom.transform.translation.x = 0.0;
+    map_to_odom.transform.translation.y = 0.0;
+    map_to_odom.transform.translation.z = 0.0;
+    map_to_odom.transform.rotation.x = 0.0;
+    map_to_odom.transform.rotation.y = 0.0;
+    map_to_odom.transform.rotation.z = 0.0;
+    map_to_odom.transform.rotation.w = 1.0;
+    tf_broadcaster_->sendTransform(map_to_odom);
+
+    ROS_INFO("Published initial TF: map -> %s -> %s", odom_frame_.c_str(), base_frame_.c_str());
+}
+
+void NdtSlamNode::addFrameToMap(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+                                 const Sophus::SE3d& pose,
+                                 const ros::Time& stamp) {
+    Eigen::Matrix4d transform = Eigen::Matrix4d::Identity();
+    transform.block<3, 3>(0, 0) = pose.so3().matrix();
+    transform.block<3, 1>(0, 3) = pose.translation();
+
+    pcl::PointCloud<pcl::PointXYZ> transformed_cloud;
+    pcl::transformPointCloud(*cloud, transformed_cloud, transform.cast<float>());
+
+    std::lock_guard<std::mutex> lock(map_mutex_);
+    current_cloud_ = transformed_cloud.makeShared();
+
+    frame_count_++;
+    if (frame_count_ % map_update_interval_ == 0) {
+        publishCurrentCloud();
+    }
+}
+
+void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+                                            const Sophus::SE3d& pose,
+                                            const ros::Time& stamp) {
+    *last_cloud_ = *cloud;
+
+    size_t prev_keyframe_count = loop_closure_detector_.getKeyFrames().size();
+    loop_closure_detector_.addKeyFrame(pose, cloud, stamp);
+    size_t new_keyframe_count = loop_closure_detector_.getKeyFrames().size();
+
+    if (new_keyframe_count > prev_keyframe_count) {
+        keyframe_count_++;
+
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        Eigen::Matrix4d transform = pose.matrix();
+        pcl::PointCloud<pcl::PointXYZ> transformed;
+        pcl::transformPointCloud(*cloud, transformed, transform.cast<float>());
+
+        // 动态点过滤：每3个关键帧执行一次SOR
+        static int sor_counter = 0;
+        sor_counter++;
+        if (sor_counter % 3 == 1) {
+            auto filtered_for_map = filterDynamicPoints(transformed.makeShared());
+            transformed = *filtered_for_map;
+        }
+
+        // 使用网格局部地面模型分割当前关键帧
+        pcl::PointCloud<pcl::PointXYZ> kf_ground, kf_objects;
+        separateGroundByGrid(transformed, kf_ground, kf_objects);
+
+        // 范围裁剪并加入各层地图
+        auto addInRange = [&](const pcl::PointCloud<pcl::PointXYZ>& src,
+                              pcl::PointCloud<pcl::PointXYZ>::Ptr dst) {
+            for (const auto& p : src.points) {
+                if (std::abs(p.x) <= max_map_size_ &&
+                    std::abs(p.y) <= max_map_size_ &&
+                    std::abs(p.z) <= max_map_size_ &&
+                    std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) {
+                    dst->push_back(p);
+                }
+            }
+        };
+        addInRange(transformed, global_map_);
+        addInRange(transformed, display_map_);
+        addInRange(kf_ground, ground_map_);
+        addInRange(kf_objects, objects_map_);
+
+        // 粗地图体素滤波（配准用，较大体素）
+        if (use_voxel_filter_ && global_map_->size() > 10000) {
+            pcl::VoxelGrid<pcl::PointXYZ> vf;
+            vf.setInputCloud(global_map_);
+            vf.setLeafSize(voxel_size_, voxel_size_, voxel_size_);
+            pcl::PointCloud<pcl::PointXYZ> f;
+            vf.filter(f);
+            *global_map_ = f;
+        }
+
+        // 全量显示地图体素滤波
+        if (use_voxel_filter_ && display_map_->size() > 10000) {
+            pcl::VoxelGrid<pcl::PointXYZ> vf;
+            vf.setInputCloud(display_map_);
+            vf.setLeafSize(display_voxel_size_, display_voxel_size_, display_voxel_size_);
+            pcl::PointCloud<pcl::PointXYZ> f;
+            vf.filter(f);
+            *display_map_ = f;
+        }
+
+        // 地面地图体素滤波（较粗，控制点数）
+        if (use_voxel_filter_ && ground_map_->size() > 5000) {
+            pcl::VoxelGrid<pcl::PointXYZ> vf;
+            vf.setInputCloud(ground_map_);
+            vf.setLeafSize(ground_voxel_size_, ground_voxel_size_, ground_voxel_size_);
+            pcl::PointCloud<pcl::PointXYZ> f;
+            vf.filter(f);
+            *ground_map_ = f;
+        }
+
+        // 非地面/货物地图体素滤波（很细，保留轮廓）
+        if (use_voxel_filter_ && objects_map_->size() > 5000) {
+            pcl::VoxelGrid<pcl::PointXYZ> vf;
+            vf.setInputCloud(objects_map_);
+            vf.setLeafSize(objects_voxel_size_, objects_voxel_size_, objects_voxel_size_);
+            pcl::PointCloud<pcl::PointXYZ> f;
+            vf.filter(f);
+            *objects_map_ = f;
+        }
+
+        publishMap();
+
+        // 显示地图每3个关键帧更新一次
+        static int display_publish_counter = 0;
+        display_publish_counter++;
+        if (display_publish_counter >= 3) {
+            display_publish_counter = 0;
+            publishDisplayMap();
+            publishGroundMap();
+            publishObjectsMap();
+        }
+    }
+
+    if (keyframe_count_ % loop_detection_interval_ == 0) {
+        processLoopClosure();
+    }
+}
+
+void NdtSlamNode::publishMap() {
+    if (global_map_->empty()) return;
+
+    sensor_msgs::PointCloud2 map_msg;
+    pcl::toROSMsg(*global_map_, map_msg);
+    map_msg.header.stamp = ros::Time::now();
+    map_msg.header.frame_id = map_frame_;
+    map_pub_.publish(map_msg);
+}
+
+void NdtSlamNode::publishCurrentCloud() {
+    if (current_cloud_->empty()) return;
+
+    sensor_msgs::PointCloud2 cloud_msg;
+    pcl::toROSMsg(*current_cloud_, cloud_msg);
+    cloud_msg.header.stamp = last_stamp_;
+    cloud_msg.header.frame_id = map_frame_;
+    current_cloud_pub_.publish(cloud_msg);
+}
+
+void NdtSlamNode::processingWorker() {
+    ROS_INFO("Worker thread started");
+
+    while (ros::ok() && running_) {
+        MappingTask task;
+
+        {
+            std::unique_lock<std::mutex> lock(task_queue_mutex_);
+            task_cv_.wait(lock, [this] {
+                return !task_queue_.empty() || !running_;
+            });
+
+            if (!running_ && task_queue_.empty()) break;
+            if (task_queue_.empty()) continue;
+
+            task = task_queue_.front();
+            task_queue_.pop();
+        }
+
+        addFrameToMap(task.cloud, Sophus::SE3d(Eigen::Quaterniond(task.orientation.w(),
+                                                                   task.orientation.x(),
+                                                                   task.orientation.y(),
+                                                                   task.orientation.z()).toRotationMatrix(),
+                                               task.position), task.stamp);
+    }
+
+    ROS_INFO("Worker thread stopped");
+}
+
+void NdtSlamNode::processLoopClosure() {
+    LoopCandidate candidate = loop_closure_detector_.detectLoop();
+
+    if (candidate.current_keyframe_id != -1 && candidate.candidate_keyframe_id != -1) {
+        std::pair<int, int> loop_pair = {candidate.candidate_keyframe_id, candidate.current_keyframe_id};
+        if (processed_loops_.find(loop_pair) != processed_loops_.end()) return;
+
+        ROS_INFO("Loop found: %d <-> %d", loop_pair.first, loop_pair.second);
+
+        processed_loops_.insert(loop_pair);
+
+        const auto& keyframes = loop_closure_detector_.getKeyFrames();
+        for (const auto& keyframe : keyframes) {
+            pose_graph_optimizer_.addKeyFrame(keyframe);
+        }
+
+        for (size_t i = 0; i < keyframes.size() - 1; ++i) {
+            const KeyFrame& kf1 = keyframes[i];
+            const KeyFrame& kf2 = keyframes[i + 1];
+            Sophus::SE3d relative_pose = kf1.pose_.inverse() * kf2.pose_;
+            Eigen::Matrix<double, 6, 6> information = Eigen::Matrix<double, 6, 6>::Identity();
+            pose_graph_optimizer_.addOdometryEdge(kf1.id_, kf2.id_, relative_pose, information);
+        }
+
+        Eigen::Matrix<double, 6, 6> loop_information = Eigen::Matrix<double, 6, 6>::Identity();
+        pose_graph_optimizer_.addLoopEdge(candidate.candidate_keyframe_id, candidate.current_keyframe_id,
+                                          candidate.relative_pose, loop_information);
+
+        if (pose_graph_optimizer_.optimize(10)) {
+            ROS_INFO("Pose graph optimized successfully");
+            std::vector<KeyFrame> updated_keyframes(keyframes.begin(), keyframes.end());
+            pose_graph_optimizer_.updateKeyFramePoses(updated_keyframes);
+
+            if (!updated_keyframes.empty()) {
+                const auto& last_keyframe = updated_keyframes.back();
+                updatePoseFromLoopClosure(last_keyframe.pose_);
+            }
+
+            loop_closure_detector_.updateKeyFramePoses(updated_keyframes);
+        }
+    }
+}
+
+void NdtSlamNode::updatePoseFromLoopClosure(const Sophus::SE3d& new_pose) {
+    std::lock_guard<std::mutex> lock(cloud_mutex_);
+    current_pose_ = new_pose;
+    relocalized_pose_ = current_pose_;
+    tracking_lost_ = false;
+    tracking_cv_.notify_all();
+}
+
+bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
+    ROS_INFO("Resetting SLAM system...");
+
+    {
+        std::lock_guard<std::mutex> lock(cloud_mutex_);
+        current_pose_ = Sophus::SE3d();
+        initialized_ = false;
+        tracking_lost_ = false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        global_map_->clear();
+        display_map_->clear();
+        ground_map_->clear();
+        objects_map_->clear();
+        objects_clean_map_->clear();
+        current_cloud_->clear();
+        local_map_->clear();
+    }
+
+    ndt_.reset(new pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>());
+    ndt_->setResolution(ndt_resolution_);
+    ndt_->setStepSize(ndt_step_size_);
+    ndt_->setTransformationEpsilon(ndt_transformation_epsilon_);
+    ndt_->setMaximumIterations(ndt_max_iterations_);
+
+    frame_count_ = 0;
+    keyframe_count_ = 0;
+    processed_loops_.clear();
+
+    ROS_INFO("SLAM system reset complete");
+    return true;
+}
+
+bool NdtSlamNode::setPoseService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
+    ROS_INFO("Set pose service called");
+    return true;
+}
+
+bool NdtSlamNode::relocalizeService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
+    ROS_INFO("Relocalize service called");
+
+    {
+        std::lock_guard<std::mutex> lock(cloud_mutex_);
+        current_pose_ = Sophus::SE3d();
+        tracking_lost_ = false;
+    }
+
+    tracking_cv_.notify_all();
+    ROS_INFO("Relocalization complete");
+    return true;
+}
+
+bool NdtSlamNode::saveMapService(lidar_slam2_msgs::SaveMap::Request& request,
+                                  lidar_slam2_msgs::SaveMap::Response& response) {
+    std::lock_guard<std::mutex> lock(map_mutex_);
+
+    if (global_map_->empty()) {
+        response.success = false;
+        response.message = "Map is empty";
+        response.num_points = 0;
+        return true;
+    }
+
+    std::string file_path = request.file_path;
+    if (file_path.empty()) {
+        file_path = "map_" + std::to_string(ros::Time::now().toSec()) + ".pcd";
+    }
+    if (file_path.find(".pcd") == std::string::npos) {
+        file_path += ".pcd";
+    }
+
+    try {
+        pcl::PCDWriter writer;
+        int result = writer.writeBinary(file_path, *global_map_);
+        response.success = (result == 0);
+        response.message = response.success ? "Map saved" : "Failed to save";
+        response.num_points = global_map_->size();
+        response.saved_file_path = file_path;
+
+        if (response.success) {
+            ROS_INFO("Map saved: %s, points: %lu", file_path.c_str(), global_map_->size());
+        }
+    } catch (const std::exception& e) {
+        response.success = false;
+        response.message = std::string("Exception: ") + e.what();
+        response.num_points = 0;
+    }
+
+    return true;
+}
+
+bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
+                                  lidar_slam2_msgs::LoadMap::Response& response) {
+    std::string file_path = request.file_path;
+    if (file_path.empty()) {
+        response.success = false;
+        response.message = "File path is empty";
+        response.num_points = 0;
+        return true;
+    }
+
+    try {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr loaded_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        if (pcl::io::loadPCDFile<pcl::PointXYZ>(file_path, *loaded_cloud) == -1) {
+            response.success = false;
+            response.message = "Failed to load PCD file";
+            response.num_points = 0;
+            return true;
+        }
+
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        global_map_ = loaded_cloud;
+
+        response.success = true;
+        response.message = "Map loaded";
+        response.num_points = global_map_->size();
+
+        publishMap();
+        ROS_INFO("Map loaded: %s, points: %lu", file_path.c_str(), global_map_->size());
+    } catch (const std::exception& e) {
+        response.success = false;
+        response.message = std::string("Exception: ") + e.what();
+        response.num_points = 0;
+    }
+
+    return true;
+}
+
+bool NdtSlamNode::rebuildMapService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
+    ROS_INFO("Rebuilding map from keyframes...");
+
+    std::string session_dir = "/home/ydkj/NDT-slam-ws/output/rebuild_" + std::to_string(ros::Time::now().toSec());
+
+    rebuildMapFromKeyframes(session_dir);
+
+    ROS_INFO("Map rebuilt successfully. Output: %s", session_dir.c_str());
+    return true;
+}
+
+void NdtSlamNode::rebuildMapFromKeyframes(const std::string& session_dir) {
+    ROS_INFO("Rebuilding maps from keyframes...");
+
+    auto& keyframe_manager = loop_closure_detector_.getKeyFrameManager();
+    const auto& keyframes = keyframe_manager.getKeyFrames();
+
+    if (keyframes.empty()) {
+        ROS_WARN("No keyframes available for rebuilding");
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        global_map_->clear();
+        display_map_->clear();
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr all_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+
+    for (const auto& kf : keyframes) {
+        if (!kf.cloud_ || kf.cloud_->empty()) continue;
+
+        Sophus::SE3d pose = kf.has_refined_pose_ ? kf.pose_refined_ : kf.pose_;
+        Eigen::Matrix4d transform = pose.matrix();
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::transformPointCloud(*kf.cloud_, *transformed, transform.cast<float>());
+
+        for (const auto& p : transformed->points) {
+            if (std::abs(p.x) <= max_map_size_ &&
+                std::abs(p.y) <= max_map_size_ &&
+                std::abs(p.z) <= max_map_size_ &&
+                std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) {
+                all_cloud->push_back(p);
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        if (all_cloud->size() > 100) {
+            pcl::VoxelGrid<pcl::PointXYZ> vf;
+            vf.setInputCloud(all_cloud);
+            vf.setLeafSize(voxel_size_, voxel_size_, voxel_size_);
+            vf.filter(*global_map_);
+        }
+    }
+
+    ROS_INFO("Rebuilt maps from %zu keyframes, size: %zu", keyframes.size(), global_map_->size());
+}
+
+void NdtSlamNode::saveMultiLayerMaps(const std::string& session_dir) {
+    try {
+        std::filesystem::path session_path(session_dir);
+        std::filesystem::create_directories(session_path);
+
+        auto saveMap = [&](const pcl::PointCloud<pcl::PointXYZ>::Ptr& map, const std::string& filename) {
+            if (map && !map->empty()) {
+                std::string filepath = session_path / filename;
+                pcl::io::savePCDFileBinary(filepath, *map);
+                ROS_INFO("Saved %s: %zu points", filename.c_str(), map->size());
+            }
+        };
+
+        saveMap(global_map_, "map_registration.pcd");
+        saveMap(display_map_, "map_display.pcd");
+        saveMap(ground_map_, "map_ground.pcd");
+        saveMap(objects_map_, "map_objects_raw.pcd");
+        saveMap(objects_clean_map_, "map_objects_clean.pcd");
+
+        ROS_INFO("Saved multi-layer maps to %s", session_dir.c_str());
+    } catch (const std::exception& e) {
+        ROS_ERROR("Exception saving multi-layer maps: %s", e.what());
+    }
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::filterDynamicPoints(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
+    if (!use_dynamic_filter_ || cloud->size() < 100) {
+        return cloud;
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
+    sor.setInputCloud(cloud);
+    sor.setMeanK(sor_mean_k_);
+    sor.setStddevMulThresh(sor_stddev_mul_thresh_);
+    sor.filter(*filtered);
+
+    if (filtered->size() < cloud->size() * 0.3) {
+        return cloud;
+    }
+
+    return filtered;
+}
+
+void NdtSlamNode::separateGroundByGrid(const pcl::PointCloud<pcl::PointXYZ>& input,
+                                        pcl::PointCloud<pcl::PointXYZ>& ground_out,
+                                        pcl::PointCloud<pcl::PointXYZ>& objects_out) {
+    if (input.empty()) return;
+
+    // 第一步：按 XY 网格分组，每个格子收集 z 值
+    struct CellKey {
+        int x, y;
+        bool operator<(const CellKey& o) const { return x < o.x || (x == o.x && y < o.y); }
+    };
+    std::map<CellKey, std::vector<float>> cell_z_values;
+    std::map<CellKey, std::vector<int>> cell_indices;
+
+    for (int i = 0; i < (int)input.size(); ++i) {
+        const auto& p = input.points[i];
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
+        CellKey key{(int)std::floor(p.x / grid_cell_size_), (int)std::floor(p.y / grid_cell_size_)};
+        cell_z_values[key].push_back(p.z);
+        cell_indices[key].push_back(i);
+    }
+
+    // 第二步：每个格子计算局部地面高度（第 20 百分位）
+    std::map<CellKey, float> cell_ground_z;
+    for (auto& [key, z_vals] : cell_z_values) {
+        if (z_vals.size() < 3) {
+            cell_ground_z[key] = *std::min_element(z_vals.begin(), z_vals.end());
+        } else {
+            std::sort(z_vals.begin(), z_vals.end());
+            cell_ground_z[key] = z_vals[z_vals.size() / 5];  // 第20百分位
+        }
+    }
+
+    // 第三步：根据局部地面高度分类
+    for (auto& [key, indices] : cell_indices) {
+        float local_ground_z = cell_ground_z[key];
+        for (int idx : indices) {
+            const auto& p = input.points[idx];
+            float height_above_ground = p.z - local_ground_z;
+            if (height_above_ground < height_above_ground_) {
+                ground_out.push_back(p);
+            } else {
+                objects_out.push_back(p);
+            }
+        }
+    }
+}
+
+void NdtSlamNode::rebuildGroundAndObjectsMap() {
+    ground_map_->clear();
+    objects_map_->clear();
+
+    const auto& keyframes = loop_closure_detector_.getKeyFrames();
+
+    for (const auto& kf : keyframes) {
+        if (kf.cloud_->empty()) continue;
+
+        Eigen::Matrix4d transform = kf.pose_.matrix();
+        pcl::PointCloud<pcl::PointXYZ> transformed;
+        pcl::transformPointCloud(*kf.cloud_, transformed, transform.cast<float>());
+
+        // 使用网格局部地面模型分割
+        pcl::PointCloud<pcl::PointXYZ> kf_ground, kf_objects;
+        separateGroundByGrid(transformed, kf_ground, kf_objects);
+
+        // 范围裁剪并加入各层地图
+        auto addInRange = [&](const pcl::PointCloud<pcl::PointXYZ>& src,
+                              pcl::PointCloud<pcl::PointXYZ>::Ptr dst) {
+            for (const auto& p : src.points) {
+                if (std::abs(p.x) <= max_map_size_ &&
+                    std::abs(p.y) <= max_map_size_ &&
+                    std::abs(p.z) <= max_map_size_ &&
+                    std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) {
+                    dst->push_back(p);
+                }
+            }
+        };
+        addInRange(kf_ground, ground_map_);
+        addInRange(kf_objects, objects_map_);
+    }
+
+    // 地面地图体素滤波
+    if (use_voxel_filter_ && ground_map_->size() > 100) {
+        pcl::VoxelGrid<pcl::PointXYZ> vf;
+        vf.setInputCloud(ground_map_);
+        vf.setLeafSize(ground_voxel_size_, ground_voxel_size_, ground_voxel_size_);
+        pcl::PointCloud<pcl::PointXYZ> f;
+        vf.filter(f);
+        *ground_map_ = f;
+    }
+
+    // 非地面/货物地图体素滤波（很细）
+    if (use_voxel_filter_ && objects_map_->size() > 100) {
+        pcl::VoxelGrid<pcl::PointXYZ> vf;
+        vf.setInputCloud(objects_map_);
+        vf.setLeafSize(objects_voxel_size_, objects_voxel_size_, objects_voxel_size_);
+        pcl::PointCloud<pcl::PointXYZ> f;
+        vf.filter(f);
+        *objects_map_ = f;
+    }
+
+    publishGroundMap();
+    publishObjectsMap();
+    ROS_INFO("[GroundMap] rebuilt: ground=%zu, objects=%zu",
+             ground_map_->size(), objects_map_->size());
+}
+
+void NdtSlamNode::publishGroundMap() {
+    if (ground_map_->empty()) return;
+
+    sensor_msgs::PointCloud2 msg;
+    pcl::toROSMsg(*ground_map_, msg);
+    msg.header.stamp = ros::Time::now();
+    msg.header.frame_id = map_frame_;
+    ground_map_pub_.publish(msg);
+}
+
+void NdtSlamNode::publishObjectsMap() {
+    if (objects_map_->empty()) return;
+
+    sensor_msgs::PointCloud2 msg;
+    pcl::toROSMsg(*objects_map_, msg);
+    msg.header.stamp = ros::Time::now();
+    msg.header.frame_id = map_frame_;
+    objects_map_pub_.publish(msg);
+}
+
+void NdtSlamNode::publishDisplayMap() {
+    if (display_map_->empty()) return;
+
+    sensor_msgs::PointCloud2 msg;
+    pcl::toROSMsg(*display_map_, msg);
+    msg.header.stamp = ros::Time::now();
+    msg.header.frame_id = map_frame_;
+    display_map_pub_.publish(msg);
+}
+
+void NdtSlamNode::rebuildGlobalMap() {
+    std::lock_guard<std::mutex> lock(map_mutex_);
+
+    global_map_->clear();
+
+    const auto& keyframes = loop_closure_detector_.getKeyFrames();
+
+    for (const auto& kf : keyframes) {
+        if (kf.cloud_->empty()) continue;
+
+        Eigen::Matrix4d transform = kf.pose_.matrix();
+        pcl::PointCloud<pcl::PointXYZ> transformed;
+        pcl::transformPointCloud(*kf.cloud_, transformed, transform.cast<float>());
+
+        for (const auto& point : transformed.points) {
+            if (std::abs(point.x) > max_map_size_ ||
+                std::abs(point.y) > max_map_size_ ||
+                std::abs(point.z) > max_map_size_) {
+                continue;
+            }
+            if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
+                continue;
+            }
+            global_map_->push_back(point);
+        }
+    }
+
+    if (use_voxel_filter_ && global_map_->size() > 100) {
+        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+        voxel_filter.setInputCloud(global_map_);
+        voxel_filter.setLeafSize(voxel_size_, voxel_size_, voxel_size_);
+        pcl::PointCloud<pcl::PointXYZ> filtered;
+        voxel_filter.filter(filtered);
+        *global_map_ = filtered;
+    }
+
+    publishMap();
+    ROS_INFO("Global map rebuilt from %zu keyframes, size: %zu",
+             keyframes.size(), global_map_->size());
+}
+
+void NdtSlamNode::rebuildDisplayMap() {
+    display_map_->clear();
+
+    const auto& keyframes = loop_closure_detector_.getKeyFrames();
+
+    for (const auto& kf : keyframes) {
+        if (kf.cloud_->empty()) continue;
+
+        Eigen::Matrix4d transform = kf.pose_.matrix();
+        pcl::PointCloud<pcl::PointXYZ> transformed;
+        pcl::transformPointCloud(*kf.cloud_, transformed, transform.cast<float>());
+
+        for (const auto& point : transformed.points) {
+            if (std::abs(point.x) > max_map_size_ ||
+                std::abs(point.y) > max_map_size_ ||
+                std::abs(point.z) > max_map_size_) {
+                continue;
+            }
+            if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
+                continue;
+            }
+            display_map_->push_back(point);
+        }
+    }
+
+    if (use_voxel_filter_ && display_map_->size() > 100) {
+        pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+        voxel_filter.setInputCloud(display_map_);
+        voxel_filter.setLeafSize(display_voxel_size_, display_voxel_size_, display_voxel_size_);
+        pcl::PointCloud<pcl::PointXYZ> filtered;
+        voxel_filter.filter(filtered);
+        *display_map_ = filtered;
+    }
+
+    publishDisplayMap();
+    ROS_INFO("[DisplayMap] rebuilt from %zu keyframes, size: %zu (voxel=%.3fm)",
+             keyframes.size(), display_map_->size(), display_voxel_size_);
+}
+
+void NdtSlamNode::asyncRebuildGlobalMap() {
+    if (rebuild_running_.load()) {
+        rebuild_pending_.store(true);
+        return;
+    }
+
+    if (rebuild_thread_.joinable()) {
+        rebuild_thread_.join();
+    }
+
+    rebuild_running_.store(true);
+    rebuild_pending_.store(false);
+
+    rebuild_thread_ = std::thread([this]() {
+        rebuildGlobalMap();
+        rebuildDisplayMap();
+        rebuildGroundAndObjectsMap();
+        rebuild_running_.store(false);
+
+        if (rebuild_pending_.load()) {
+            rebuild_pending_.store(false);
+            asyncRebuildGlobalMap();
+        }
+    });
+}
+
+} // namespace ndt_slam

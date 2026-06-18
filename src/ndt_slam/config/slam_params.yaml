@@ -1,0 +1,98 @@
+
+use_sim_time: true
+
+# 话题名称（所有节点共享）
+pointcloud_topic: "/rs_201"   #/rs_150  /globalmap   # 激光点云话题
+odom_topic: "/odom"
+map_topic: "/map"         # 地图话题
+mapping_pointcloud_topic: "/current_cloud"   # 对应里程计的原始点云
+current_cloud_topic: "/mapping_current_cloud"   # 变换位姿后的当前点云话题
+pose_topic: "/current_pose" # 当前里程计坐标
+
+# 视觉里程计话题
+visual_odom_topic: "/visual_odom"
+image_topic: "/hikcamera/img_stream_150"
+flow_image_topic: "/visual_odometry/flow_image"
+
+# 坐标系
+base_frame: "base_link"   # 机器人本体坐标系，所有传感器数据最终转换到此坐标系
+odom_frame: "odom"        # SLAM里程计输出的参考坐标系，与base_frame通过TF连接
+map_frame: "map"      # 全局点云地图发布的frame_id
+lidar_odom_frame_: "odom_lidar"  # KISS-ICP计算的相对位姿的参考坐标系
+
+# 里程计模式：0=纯激光，1=纯视觉，2=松耦合
+odom_mode: 0
+lidar_weight: 0.3
+visual_weight: 0.7
+
+# 里程计参数 (OdometryNode 使用)
+odom_min_neighbors: 3
+odom_neighbor_search_radius: 0.3
+
+# 跟踪丢失判定阈值 (OdometryNode 使用)
+tracking:
+  inlier_ratio_threshold: 0.5    # 内点率阈值，低于此值计为失败
+  mean_distance_threshold: 0.1    # 平均距离阈值，高于此值计为失败
+  model_deviation_threshold: 0.2  # 模型偏差阈值，高于此值计为失败
+
+# KISS-ICP 核心参数
+data:
+  deskew: False  # 点云没有每个点的时间戳字段，需要设为 False
+  max_range: 16.0
+  min_range: 0.5
+
+mapping:
+  voxel_size: 0.3
+  max_points_per_voxel: 20
+
+adaptive_threshold:
+  initial_threshold: 2.0
+  min_motion_th: 0.1
+
+registration:
+  max_num_iterations: 500
+  convergence_criterion: 0.0001
+  max_num_threads: 0
+
+# 建图参数 (MappingNode 使用)
+map_voxel_size: 0.3
+max_map_size: 200.0
+use_voxel_filter: true
+map_update_interval: 1
+num_worker_threads: 0   # 异步处理的工作线程数，0为同步模式
+
+# 相机内参 (VisualOdometryNode 使用)
+fx: 869.6447266812565
+fy: 871.1326877415089
+cx: 757.865905902837
+cy: 551.4197039348937
+baseline: 0.11
+
+# 传感器参数
+cam_intrinsic: [869.6447266812565, 0.0, 757.865905902837, 0.0, 871.1326877415089, 551.4197039348937, 0.0, 0.0, 1.0]
+cam_distort: [-0.07490503320562705, 0.09059754117801942, -0.0010023626182264977, 0.0008400060675465715, -0.01282240714237274]
+lidar2cam_extrinsic: [0.00729343, -0.0160322, 0.999845, -0.0066698, -0.999973, 0.00102626, 0.00731082, 0.0132419, -0.0011433, -0.999871, -0.0160243, 0.04077809, 0.0, 0.0, 0.0, 1.0]
+lidar2base_extrinsic: [-0.0900393, 0.0221913, 0.995691, -1.4174, 0.0361579, 0.999165, -0.0189991, -1.06027, -0.995282, 0.0342914, -0.0907665, 10.66464, 0.0, 0.0, 0.0, 1.0]
+use_lidar2base_transform: true  # 是否将点云从雷达坐标系转换到base_link坐标系
+
+# 发布配置
+publish_odom_tf: true
+publish_debug_clouds: false
+loop_detection_interval: 20  # 闭环检测间隔（每N个关键帧检测一次），增大以减少检测频率
+
+# Scan Context 回环检测参数
+scan_context:
+  num_rings: 20           # 环的数量
+  num_sectors: 60         # 扇区的数量
+  max_range: 80.0         # 最大距离 (米)
+  spatial_search_radius: 5.0    # 空间搜索半径 (米)，减小以避免频繁检测
+  similarity_threshold: 0.85   # 相似度阈值，提高以减少误检测
+  translation_threshold: 0.5   # 一致性检查平移阈值 (米)，收紧以提高精度
+  rotation_threshold: 15.0     # 一致性检查旋转阈值 (度)
+
+# 关键帧管理参数
+keyframe:
+  translation_threshold: 3.0   # 关键帧平移阈值 (米)，增大以减少关键帧数量
+  rotation_threshold: 20.0      # 关键帧旋转阈值 (度)，增大以减少关键帧数量
+  time_threshold: 5.0         # 关键帧时间阈值 (秒)
+  max_keyframes: 500         # 最大关键帧数量

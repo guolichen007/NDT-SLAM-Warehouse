@@ -1,0 +1,8 @@
+# 保存地图请求
+string file_path  # 保存路径，为空则自动生成
+---
+# 保存地图响应
+bool success  # 是否成功
+string message  # 响应消息
+string saved_file_path  # 保存的文件路径
+int64 num_points  # 保存的点数

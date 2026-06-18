@@ -1,0 +1,8 @@
+# 加载地图请求
+string file_path  # 要加载的文件路径
+bool load_as_current  # 是否替换当前地图
+---
+# 加载地图响应
+bool success  # 是否成功
+string message  # 响应消息
+int64 num_points  # 加载的点数

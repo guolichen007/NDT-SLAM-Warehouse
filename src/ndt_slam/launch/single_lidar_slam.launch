@@ -1,0 +1,39 @@
+<launch>
+  <!-- 单雷达 SLAM 测试：只用 lidar160 (rs_203) -->
+  <!-- 用途：排除双雷达合并问题，单独测试 rs_203 的建图效果 -->
+
+  <arg name="config_file" default="$(find ndt_slam)/config/dual_lidar_slam_params.yaml"/>
+  <arg name="use_sim_time" default="true"/>
+
+  <param name="use_sim_time" value="$(arg use_sim_time)"/>
+
+  <!-- 静态TF: base_link -> rslidar -->
+  <node pkg="tf" type="static_transform_publisher" name="base_link_to_rslidar"
+        args="0 0 0 0 0 0 base_link rslidar 100"/>
+
+  <!-- 单雷达转换节点：订阅 /rs_203，变换到 base_link，发布 /merged_points -->
+  <node name="pointcloud_merger" pkg="ndt_slam" type="pointcloud_merger" output="screen">
+    <rosparam command="load">
+output_topic: "/merged_points"
+output_frame: "base_link"
+transform_to_base: true
+use_voxel_filter: true
+voxel_size: 0.15
+
+lidars:
+  - name: "lidar160"
+    topic: "/rs_203"
+    Lidar2BaseExtrinsic: [-0.00757349, -0.05798094, -0.99828896, -1.18970073, -0.02237139, -0.99805785, 0.05813725, 1.20057845, -0.99972101, 0.02277342, 0.00626166, 8.03784688, 0.0, 0.0, 0.0, 1.0]
+    </rosparam>
+    <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  </node>
+
+  <!-- SLAM 节点 -->
+  <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen" args="$(arg config_file)">
+    <param name="use_sim_time" value="$(arg use_sim_time)"/>
+    <param name="$(anon ndt_slam_node)/log_level" value="info"/>
+  </node>
+
+  <!-- RViz -->
+  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find ndt_slam)/launch/rviz.rviz" output="screen"/>
+</launch>

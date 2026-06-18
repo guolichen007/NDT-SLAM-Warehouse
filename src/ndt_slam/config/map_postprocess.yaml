@@ -1,0 +1,63 @@
+# 地图后处理配置文件
+# 面向起重机 10cm 定位/导航精度
+
+version: warehouse_v003
+
+input:
+  map_dir: maps/current
+  display_map: display_map.pcd
+  ground_map: ground_map.pcd
+  objects_raw: objects_raw.pcd
+  registration_map: registration_map.pcd
+
+output:
+  map_dir: maps/warehouse_v003
+  ground_clean: ground_map_clean.pcd
+  objects_clean: objects_clean.pcd
+  localization_map: localization_map_fine.pcd
+  navigation_grid: navigation_grid_0.05m
+
+analysis:
+  xy_cell_size: 0.10
+
+ground_clean:
+  source: display_map.pcd
+  grid_size: 0.5
+  ground_quantile: 0.10
+  keep_height_min: -0.08
+  keep_height_max: 0.12
+  max_cell_vertical_span: 0.25
+  voxel_size: 0.08
+  remove_isolated_points: true
+  radius_filter_radius: 0.25
+  radius_filter_min_neighbors: 4
+
+objects_clean:
+  source: display_map.pcd
+  ground_model: ground_model.csv
+  min_height_above_ground: 0.35
+  max_height_above_ground: 4.0
+  voxel_size: 0.08
+  radius_filter_radius: 0.25
+  radius_filter_min_neighbors: 3
+  cluster_tolerance: 0.35
+  min_cluster_size: 20
+  remove_small_clusters: true
+
+localization_map:
+  source: display_map.pcd
+  ground_model: ground_model.csv
+  min_height_above_ground: 0.35
+  max_height_above_ground: 4.0
+  voxel_size: 0.10
+  radius_filter_radius: 0.30
+  radius_filter_min_neighbors: 4
+  sor_mean_k: 15
+  sor_stddev_mul: 1.5
+
+navigation_grid:
+  resolution: 0.05
+  unknown_as_obstacle: true
+  obstacle_inflation_radius: 0.30
+  min_obstacle_area: 0.05
+  remove_small_obstacles: true

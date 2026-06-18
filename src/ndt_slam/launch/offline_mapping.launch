@@ -1,0 +1,30 @@
+<launch>
+    <!-- 离线建图工具启动文件 -->
+
+    <!-- 参数 -->
+    <arg name="bag_file" default="" doc="要处理的 bag 文件路径"/>
+    <arg name="session_dir" default="" doc="会话输出目录"/>
+    <arg name="config_file" default="$(find ndt_slam)/config/dual_lidar_slam_params.yaml"/>
+    <arg name="mode" default="coarse" doc="运行模式: coarse, refine, rebuild, export"/>
+
+    <!-- 设置使用仿真时间 -->
+    <param name="/use_sim_time" value="true"/>
+
+    <!-- SLAM 节点 -->
+    <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen">
+        <param name="config_file" value="$(arg config_file)"/>
+
+        <!-- 话题重映射 -->
+        <remap from="/points_raw" to="/merged_points"/>
+    </node>
+
+    <!-- 如果指定了 bag 文件，播放 bag -->
+    <node if="$(eval bag_file != '')"
+          name="rosbag_play" pkg="rosbag" type="play"
+          args="--clock --pause $(arg bag_file)"/>
+
+    <!-- 等待用户按键开始 -->
+    <node if="$(eval bag_file != '')"
+          name="wait_for_key" pkg="std_srvs" type="Empty"
+          args="wait_for_key"/>
+</launch>
