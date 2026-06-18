@@ -474,6 +474,30 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         // 初始化人体过滤模块
         human_filter_.initialize(human_filter_config_, human_tracking_config_, human_eraser_config_);
 
+        // DynamicEventManager 配置
+        if (config["dynamic_event_manager"]) {
+            auto dem = config["dynamic_event_manager"];
+            if (dem["enabled"]) dynamic_event_config_.enabled = dem["enabled"].as<bool>();
+            if (dem["payload_min_candidate_frames"]) dynamic_event_config_.payload_min_candidate_frames = dem["payload_min_candidate_frames"].as<int>();
+            if (dem["payload_pre_guard_sec"]) dynamic_event_config_.payload_pre_guard_sec = dem["payload_pre_guard_sec"].as<double>();
+            if (dem["payload_post_guard_sec"]) dynamic_event_config_.payload_post_guard_sec = dem["payload_post_guard_sec"].as<double>();
+            if (dem["human_pre_guard_sec"]) dynamic_event_config_.human_pre_guard_sec = dem["human_pre_guard_sec"].as<double>();
+            if (dem["human_post_guard_sec"]) dynamic_event_config_.human_post_guard_sec = dem["human_post_guard_sec"].as<double>();
+            if (dem["human_capsule_radius"]) dynamic_event_config_.human_capsule_radius = dem["human_capsule_radius"].as<double>();
+            if (dem["human_use_track_height"]) dynamic_event_config_.human_use_track_height = dem["human_use_track_height"].as<bool>();
+            if (dem["human_z_margin"]) dynamic_event_config_.human_z_margin = dem["human_z_margin"].as<double>();
+            if (dem["clean_deny_enabled"]) dynamic_event_config_.clean_deny_enabled = dem["clean_deny_enabled"].as<bool>();
+            if (dem["max_dynamic_ratio"]) dynamic_event_config_.max_dynamic_ratio = dem["max_dynamic_ratio"].as<double>();
+        }
+        dynamic_event_manager_.configure(dynamic_event_config_);
+
+        ROS_INFO("=== DynamicEventManager Config ===");
+        ROS_INFO("  enabled: %s", dynamic_event_config_.enabled ? "true" : "false");
+        ROS_INFO("  payload_pre_guard: %.1fs, post_guard: %.1fs",
+                 dynamic_event_config_.payload_pre_guard_sec, dynamic_event_config_.payload_post_guard_sec);
+        ROS_INFO("  human_pre_guard: %.1fs, post_guard: %.1fs",
+                 dynamic_event_config_.human_pre_guard_sec, dynamic_event_config_.human_post_guard_sec);
+
         loop_closure_detector_.configureFromYaml(config_file_path);
 
         ROS_INFO("=== NdtSlamNode Parameters ===");
@@ -1417,9 +1441,16 @@ void NdtSlamNode::asyncRebuildGlobalMap() {
 
     rebuild_thread_ = std::thread([this]() {
         auto start = std::chrono::steady_clock::now();
-        rebuildGlobalMap();
-        rebuildDisplayMap();
-        rebuildGroundAndObjectsMap();  // 同时重建地面/非地面分层地图
+
+        // 使用 filtered rebuild（从 filtered keyframes + optimized poses 重建）
+        if (dynamic_event_config_.enabled) {
+            rebuildGlobalMapFiltered();
+        } else {
+            rebuildGlobalMap();
+            rebuildDisplayMap();
+            rebuildGroundAndObjectsMap();
+        }
+
         auto end = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration<double>(end - start).count();
         ROS_INFO("[AsyncRebuild] all maps rebuilt in %.2fs", elapsed);
@@ -1519,6 +1550,147 @@ void NdtSlamNode::rebuildGlobalMap() {
     publishMap();
     ROS_INFO("Global map rebuilt from %zu keyframes, size: %zu",
              keyframes.size(), global_map_->size());
+}
+
+void NdtSlamNode::rebuildGlobalMapFiltered() {
+    std::lock_guard<std::mutex> lock(map_mutex_);
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    // 清空所有地图
+    global_map_->clear();
+    display_map_->clear();
+    ground_map_->clear();
+    objects_map_->clear();
+    objects_clean_map_->clear();
+    rebuild_objects_filtered_->clear();
+    rebuild_payload_candidate_->clear();
+    rebuild_payload_dynamic_->clear();
+    rebuild_human_candidate_->clear();
+    rebuild_human_dynamic_->clear();
+    rebuild_human_pending_->clear();
+    rebuild_ground_raw_->clear();
+
+    auto& keyframes = const_cast<std::deque<KeyFrame>&>(loop_closure_detector_.getKeyFrames());
+
+    int skipped_dynamic_points = 0;
+    int inserted_points = 0;
+    int reapplied_count = 0;
+
+    auto addInRange = [&](const pcl::PointCloud<pcl::PointXYZ>& src,
+                          pcl::PointCloud<pcl::PointXYZ>::Ptr dst) {
+        for (const auto& p : src.points) {
+            if (std::abs(p.x) <= max_map_size_ &&
+                std::abs(p.y) <= max_map_size_ &&
+                std::abs(p.z) <= max_map_size_ &&
+                std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) {
+                dst->push_back(p);
+            }
+        }
+    };
+
+    for (auto& kf : keyframes) {
+        if (!kf.cloud_ || kf.cloud_->empty()) continue;
+
+        Sophus::SE3d pose = kf.has_refined_pose_ ? kf.pose_refined_ : kf.pose_;
+        Eigen::Matrix4d transform = pose.matrix();
+
+        // 如果 keyframe 没有 filtered_objects，需要从原始点云重新过滤
+        if (!kf.objects_filtered || kf.objects_filtered->empty() || kf.dirty_dynamic) {
+            if (channel_filter_config_.enabled) {
+                // 从原始点云重新过滤
+                pcl::PointCloud<pcl::PointXYZ> base_ground, base_objects;
+                separateGroundByGrid(*kf.cloud_, base_ground, base_objects);
+
+                std::map<CellKey, float> empty_ground_model;
+                ChannelFilterResult ch_result = channel_filter_.filter(
+                    base_objects.makeShared(), empty_ground_model);
+
+                // 人体过滤
+                pcl::PointCloud<pcl::PointXYZ>::Ptr human_safe(new pcl::PointCloud<pcl::PointXYZ>);
+                if (human_filter_config_.enabled) {
+                    pcl::PointCloud<pcl::PointXYZ>::Ptr human_cand, human_dyn, human_pend;
+                    human_filter_.processFrame(ch_result.safe_objects, transform, kf.stamp_.toSec(),
+                                               human_safe, human_cand, human_dyn, human_pend);
+                } else {
+                    human_safe = ch_result.safe_objects;
+                }
+
+                kf.objects_raw = base_objects.makeShared();
+                kf.objects_filtered = human_safe;
+                kf.ground_points = base_ground.makeShared();
+                kf.dirty_dynamic = false;
+                reapplied_count++;
+            }
+        }
+
+        // 使用 filtered_objects 插入正式地图
+        if (kf.objects_filtered && !kf.objects_filtered->empty()) {
+            pcl::PointCloud<pcl::PointXYZ> filtered_transformed;
+            pcl::transformPointCloud(*kf.objects_filtered, filtered_transformed, transform.cast<float>());
+            addInRange(filtered_transformed, global_map_);
+            addInRange(filtered_transformed, objects_map_);
+            addInRange(filtered_transformed, rebuild_objects_filtered_);
+            inserted_points += filtered_transformed.size();
+        }
+
+        // 地面点
+        if (kf.ground_points && !kf.ground_points->empty()) {
+            pcl::PointCloud<pcl::PointXYZ> ground_transformed;
+            pcl::transformPointCloud(*kf.ground_points, ground_transformed, transform.cast<float>());
+            addInRange(ground_transformed, global_map_);
+            addInRange(ground_transformed, ground_map_);
+            addInRange(ground_transformed, rebuild_ground_raw_);
+        }
+
+        // 应用 dynamic mask（如果有已确认的事件）
+        if (dynamic_event_config_.enabled) {
+            double kf_time = kf.stamp_.toSec();
+            for (const auto& event : dynamic_event_manager_.getEvents()) {
+                if (!event.confirmed) continue;
+                if (kf_time < event.start_time || kf_time > event.end_time) continue;
+
+                // 标记受影响的 keyframe
+                if (std::find(event.affected_keyframe_ids.begin(),
+                              event.affected_keyframe_ids.end(),
+                              kf.id_) == event.affected_keyframe_ids.end()) {
+                    const_cast<DynamicEvent&>(event).affected_keyframe_ids.push_back(kf.id_);
+                }
+            }
+        }
+    }
+
+    // 体素滤波
+    auto voxelFilter = [](const pcl::PointCloud<pcl::PointXYZ>::Ptr& input, double size) {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr output(new pcl::PointCloud<pcl::PointXYZ>);
+        if (input->size() > 100) {
+            pcl::VoxelGrid<pcl::PointXYZ> vf;
+            vf.setInputCloud(input);
+            vf.setLeafSize(size, size, size);
+            vf.filter(*output);
+        } else {
+            *output = *input;
+        }
+        return output;
+    };
+
+    *global_map_ = *voxelFilter(global_map_, voxel_size_);
+    *display_map_ = *voxelFilter(display_map_, display_voxel_size_);
+    *ground_map_ = *voxelFilter(ground_map_, ground_voxel_size_);
+    *objects_map_ = *voxelFilter(objects_map_, objects_voxel_size_);
+
+    // 重建 clean map（带 dynamic deny gate）
+    rebuildCleanMap();
+
+    publishMap();
+
+    auto end_time = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(end_time - start_time).count();
+
+    ROS_INFO("[FilteredRebuild] keyframes=%zu reapplied=%d inserted=%d skipped_dynamic=%d time=%.2fs",
+             keyframes.size(), reapplied_count, inserted_points, skipped_dynamic_points, elapsed);
+    ROS_INFO("[FilteredRebuild] registration=%zu objects=%zu ground=%zu clean=%zu",
+             global_map_->size(), objects_map_->size(), ground_map_->size(), objects_clean_map_->size());
 }
 
 void NdtSlamNode::rebuildDisplayMap() {

@@ -102,6 +102,7 @@ private:
                        const ros::Time& stamp);
 
     void rebuildGlobalMap();
+    void rebuildGlobalMapFiltered();  // 使用 filtered keyframes + dynamic mask 重建地图
     void rebuildDisplayMap();     // 重建细体素显示地图
     void publishDisplayMap();     // 发布显示地图
     void rebuildGroundAndObjectsMap();  // 重建地面/非地面分层地图
