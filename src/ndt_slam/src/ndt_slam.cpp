@@ -196,6 +196,13 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     ground_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     objects_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     objects_clean_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    rebuild_objects_filtered_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    rebuild_payload_candidate_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    rebuild_payload_dynamic_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    rebuild_human_candidate_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    rebuild_human_dynamic_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    rebuild_human_pending_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    rebuild_ground_raw_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     local_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     current_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     current_cloud_transformed_.reset(new pcl::PointCloud<pcl::PointXYZ>);
@@ -2774,13 +2781,48 @@ void NdtSlamNode::saveMultiLayerMaps(const std::string& session_dir) {
             }
         };
 
+        // ========== 正式地图层 ==========
         saveMap(global_map_, "map_registration.pcd");
         saveMap(display_map_, "map_display.pcd");
         saveMap(ground_map_, "map_ground.pcd");
         saveMap(objects_map_, "map_objects_raw.pcd");
         saveMap(objects_clean_map_, "map_objects_clean.pcd");
 
-        ROS_INFO("Saved multi-layer maps to %s", session_dir.c_str());
+        // ========== 调试/检测用 PCD ==========
+        saveMap(rebuild_objects_filtered_, "map_objects_filtered.pcd");
+        saveMap(rebuild_payload_candidate_, "map_payload_candidate.pcd");
+        saveMap(rebuild_payload_dynamic_, "map_payload_dynamic.pcd");
+        saveMap(rebuild_human_candidate_, "map_human_candidate.pcd");
+        saveMap(rebuild_human_dynamic_, "map_human_dynamic.pcd");
+        saveMap(rebuild_human_pending_, "map_human_pending.pcd");
+        saveMap(rebuild_ground_raw_, "map_ground_raw.pcd");
+
+        // 全量显示地图（ground + filtered_objects）
+        pcl::PointCloud<pcl::PointXYZ>::Ptr display_full(new pcl::PointCloud<pcl::PointXYZ>);
+        if (rebuild_ground_raw_ && !rebuild_ground_raw_->empty()) {
+            *display_full += *rebuild_ground_raw_;
+        }
+        if (rebuild_objects_filtered_ && !rebuild_objects_filtered_->empty()) {
+            *display_full += *rebuild_objects_filtered_;
+        }
+        saveMap(display_full, "map_display_full.pcd");
+
+        int total_saved = 0;
+        if (global_map_ && !global_map_->empty()) total_saved++;
+        if (display_map_ && !display_map_->empty()) total_saved++;
+        if (ground_map_ && !ground_map_->empty()) total_saved++;
+        if (objects_map_ && !objects_map_->empty()) total_saved++;
+        if (objects_clean_map_ && !objects_clean_map_->empty()) total_saved++;
+        if (rebuild_objects_filtered_ && !rebuild_objects_filtered_->empty()) total_saved++;
+        if (rebuild_payload_candidate_ && !rebuild_payload_candidate_->empty()) total_saved++;
+        if (rebuild_payload_dynamic_ && !rebuild_payload_dynamic_->empty()) total_saved++;
+        if (rebuild_human_candidate_ && !rebuild_human_candidate_->empty()) total_saved++;
+        if (rebuild_human_dynamic_ && !rebuild_human_dynamic_->empty()) total_saved++;
+        if (rebuild_human_pending_ && !rebuild_human_pending_->empty()) total_saved++;
+        if (rebuild_ground_raw_ && !rebuild_ground_raw_->empty()) total_saved++;
+        if (display_full && !display_full->empty()) total_saved++;
+
+        ROS_INFO("Saved %d multi-layer maps to %s", total_saved, session_dir.c_str());
     } catch (const std::exception& e) {
         ROS_ERROR("Exception saving multi-layer maps: %s", e.what());
     }
@@ -2805,6 +2847,13 @@ void NdtSlamNode::rebuildMapFromKeyframes(const std::string& session_dir) {
         ground_map_->clear();
         objects_map_->clear();
         objects_clean_map_->clear();
+        rebuild_objects_filtered_->clear();
+        rebuild_payload_candidate_->clear();
+        rebuild_payload_dynamic_->clear();
+        rebuild_human_candidate_->clear();
+        rebuild_human_dynamic_->clear();
+        rebuild_human_pending_->clear();
+        rebuild_ground_raw_->clear();
     }
 
     // 逐步构建地图
@@ -2846,7 +2895,6 @@ void NdtSlamNode::rebuildMapFromKeyframes(const std::string& session_dir) {
             pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_pending(new pcl::PointCloud<pcl::PointXYZ>);
 
             if (human_filter_config_.enabled) {
-                // 使用 0 作为时间戳（rebuild 不需要精确时间）
                 human_filter_.processFrame(ch_result.safe_objects, transform, 0.0,
                                            rebuild_human_safe, rebuild_human_candidates,
                                            rebuild_human_dynamic, rebuild_human_pending);
@@ -2861,10 +2909,37 @@ void NdtSlamNode::rebuildMapFromKeyframes(const std::string& session_dir) {
             pcl::PointCloud<pcl::PointXYZ> ground_transformed;
             pcl::transformPointCloud(base_ground, ground_transformed, transform.cast<float>());
 
+            // 吊货候选变换到 map
+            pcl::PointCloud<pcl::PointXYZ> payload_cand_transformed;
+            if (ch_result.payload_candidates && !ch_result.payload_candidates->empty()) {
+                pcl::transformPointCloud(*ch_result.payload_candidates, payload_cand_transformed, transform.cast<float>());
+            }
+
+            // 人体候选/dynamic/pending 变换到 map
+            pcl::PointCloud<pcl::PointXYZ> human_cand_transformed, human_dyn_transformed, human_pend_transformed;
+            if (!rebuild_human_candidates->empty()) {
+                pcl::transformPointCloud(*rebuild_human_candidates, human_cand_transformed, transform.cast<float>());
+            }
+            if (!rebuild_human_dynamic->empty()) {
+                pcl::transformPointCloud(*rebuild_human_dynamic, human_dyn_transformed, transform.cast<float>());
+            }
+            if (!rebuild_human_pending->empty()) {
+                pcl::transformPointCloud(*rebuild_human_pending, human_pend_transformed, transform.cast<float>());
+            }
+
+            // 正式地图只用 filtered
             addInRange(safe_transformed, all_cloud);
             addInRange(ground_transformed, all_cloud);
             addInRange(ground_transformed, ground_temp);
             addInRange(safe_transformed, objects_temp);
+
+            // 收集调试数据
+            addInRange(safe_transformed, rebuild_objects_filtered_);
+            addInRange(ground_transformed, rebuild_ground_raw_);
+            addInRange(payload_cand_transformed, rebuild_payload_candidate_);
+            addInRange(human_cand_transformed, rebuild_human_candidate_);
+            addInRange(human_dyn_transformed, rebuild_human_dynamic_);
+            addInRange(human_pend_transformed, rebuild_human_pending_);
         } else {
             pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZ>);
             pcl::transformPointCloud(*kf.cloud_, *transformed, transform.cast<float>());
@@ -2887,6 +2962,10 @@ void NdtSlamNode::rebuildMapFromKeyframes(const std::string& session_dir) {
 
     ROS_INFO("Point collection done: all=%zu, ground=%zu, objects=%zu",
              all_cloud->size(), ground_temp->size(), objects_temp->size());
+    ROS_INFO("Debug clouds: filtered=%zu, payload_cand=%zu, human_cand=%zu, human_dynamic=%zu, human_pending=%zu",
+             rebuild_objects_filtered_->size(), rebuild_payload_candidate_->size(),
+             rebuild_human_candidate_->size(), rebuild_human_dynamic_->size(),
+             rebuild_human_pending_->size());
 
     // 体素滤波并保存
     auto voxelFilter = [](const pcl::PointCloud<pcl::PointXYZ>::Ptr& input, double size) {
