@@ -2338,6 +2338,26 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 // 跟踪器确认的 pending 点也不进地图（等待确认）
                 // 只有 safe_objects 进地图
 
+                // ========== DynamicEventManager：吊货动态事件 ==========
+                if (dynamic_event_config_.enabled && track_result.dynamic_tracks > 0) {
+                    for (const auto& t : payload_tracker_.getTracks()) {
+                        if (t.state == TrackState::DYNAMIC_PAYLOAD) {
+                            // 创建吊货会话事件
+                            Box3D bbox;
+                            bbox.min_pt = t.bbox_min_map.cast<double>();
+                            bbox.max_pt = t.bbox_max_map.cast<double>();
+                            Eigen::Vector3d centroid_d = t.centroid_map.cast<double>();
+                            int event_id = dynamic_event_manager_.createPayloadSession(
+                                t.first_seen_time, stamp.toSec());
+                            dynamic_event_manager_.confirmPayloadSession(event_id, stamp.toSec());
+                            dynamic_event_manager_.updatePayloadSession(
+                                event_id, stamp.toSec(), centroid_d, bbox);
+                            ROS_INFO("[DynamicEvent] PayloadSession created: id=%d, track_id=%d",
+                                     event_id, t.track_id);
+                        }
+                    }
+                }
+
                 // 发布动态和 pending 点云（调试用）
                 static int track_debug_count = 0;
                 track_debug_count++;
@@ -2384,6 +2404,34 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 human_filter_.processFrame(kf_safe_objects, transform, timestamp,
                                            kf_human_safe_objects, kf_human_candidates,
                                            kf_human_dynamic, kf_human_pending);
+
+                // ========== DynamicEventManager：人体动态事件 ==========
+                if (dynamic_event_config_.enabled && !kf_human_dynamic->empty()) {
+                    // 获取动态人体的跟踪信息
+                    auto active_tracks = human_filter_.getActiveTrackCount();
+                    auto dynamic_count = human_filter_.getDynamicHumanCount();
+                    if (dynamic_count > 0) {
+                        // 创建人体事件（简化版：使用当前帧的 centroid）
+                        Eigen::Vector4f centroid_4f;
+                        pcl::compute3DCentroid(*kf_human_dynamic, centroid_4f);
+                        Eigen::Vector3d centroid = centroid_4f.head<3>().cast<double>();
+
+                        std::deque<Eigen::Vector3d> history;
+                        history.push_back(centroid);
+
+                        // 手动计算 z 范围
+                        float z_min = 1e9, z_max = -1e9;
+                        for (const auto& pt : kf_human_dynamic->points) {
+                            if (pt.z < z_min) z_min = pt.z;
+                            if (pt.z > z_max) z_max = pt.z;
+                        }
+
+                        int event_id = dynamic_event_manager_.createHumanEvent(
+                            timestamp, timestamp, history, z_min, z_max);
+                        ROS_INFO("[DynamicEvent] HumanEvent created: id=%d, points=%zu",
+                                 event_id, kf_human_dynamic->size());
+                    }
+                }
 
                 // 发布人体过滤调试话题（每 5 个关键帧一次）
                 static int kf_hf_debug_count = 0;
