@@ -50,6 +50,18 @@ struct KeyFrameMetrics {
     bool accepted_for_clean_map = false;
 };
 
+// 动态 mask（标记哪些区域被动态物体覆盖）
+struct DynamicMask {
+    // 吊货 swept volume 的 BEV cell 集合
+    std::set<std::pair<int,int>> payload_deny_cells;
+    // 人体 capsule 的 BEV cell 集合
+    std::set<std::pair<int,int>> human_deny_cells;
+    // BEV 分辨率
+    double bev_resolution = 0.15;
+    // 是否已应用
+    bool applied = false;
+};
+
 // 关键帧类
 class KeyFrame {
 public:
@@ -60,11 +72,19 @@ public:
     uint64_t id_ = 0;
     ros::Time stamp_;
     Sophus::SE3d pose_;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_;           // 原始完整点云（用于闭环检测）
     Eigen::MatrixXd scan_context_;
     KeyFrameMetrics metrics_;
     Sophus::SE3d pose_refined_;
     bool has_refined_pose_ = false;
+
+    // ========== 动态过滤相关 ==========
+    pcl::PointCloud<pcl::PointXYZ>::Ptr objects_raw;       // 原始非地面点（调试/重新过滤用）
+    pcl::PointCloud<pcl::PointXYZ>::Ptr objects_filtered;  // 过滤后的非地面点（正式建图用）
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ground_points;     // 地面点
+    DynamicMask dynamic_mask;                              // 动态 mask
+    bool dirty_dynamic = true;                             // 是否需要重新过滤（默认需要）
+    bool dirty_pose = false;                               // 位姿是否已更新
 };
 
 // 关键帧管理器类

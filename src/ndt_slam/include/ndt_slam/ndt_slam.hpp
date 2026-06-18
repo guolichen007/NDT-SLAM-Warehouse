@@ -38,6 +38,7 @@
 #include "ndt_slam/base_payload_channel_filter.hpp"
 #include "ndt_slam/payload_tracker.hpp"
 #include "ndt_slam/human_object_filter.hpp"
+#include "ndt_slam/dynamic_event_manager.hpp"
 #include "lidar_slam2_msgs/SaveMap.h"
 #include "lidar_slam2_msgs/LoadMap.h"
 
@@ -335,6 +336,10 @@ private:
     ros::Publisher human_pending_pub_;        // /human_pending_cloud
     ros::Publisher human_trajectory_pub_;     // /human_trajectory_capsule
     ros::Publisher human_removed_pub_;        // /human_removed_history_cloud
+
+    // 动态事件管理器（统一管理吊货和人体的动态事件）
+    DynamicEventManager dynamic_event_manager_;
+    DynamicEventConfig dynamic_event_config_;
 
 
     // 边缘保留点云融合

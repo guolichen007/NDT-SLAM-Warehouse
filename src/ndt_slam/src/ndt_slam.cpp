@@ -2223,6 +2223,19 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 kf_human_safe_objects = kf_safe_objects;
             }
 
+            // ========== 保存 raw/filtered/ground 到关键帧 ==========
+            auto& kf_deque = const_cast<std::deque<KeyFrame>&>(loop_closure_detector_.getKeyFrames());
+            if (!kf_deque.empty()) {
+                auto& kf = kf_deque.back();
+                kf.objects_raw = base_objects.makeShared();
+                kf.objects_filtered = kf_human_safe_objects;
+                kf.ground_points = base_ground.makeShared();
+                kf.dirty_dynamic = false;  // 刚过滤完，不需要重新过滤
+                ROS_DEBUG("[KeyFrame] id=%lu raw=%zu filtered=%zu ground=%zu",
+                         kf.id_, kf.objects_raw->size(), kf.objects_filtered->size(),
+                         kf.ground_points->size());
+            }
+
             // 变换 safe_objects 到 map 坐标系
             pcl::PointCloud<pcl::PointXYZ> safe_transformed;
             pcl::transformPointCloud(*kf_human_safe_objects, safe_transformed, transform.cast<float>());

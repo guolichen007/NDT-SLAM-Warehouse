@@ -99,6 +99,8 @@ set(LIBRARY_SOURCES
   src/payload_tracker.cpp
   # 人体动态过滤
   src/human_object_filter.cpp
+  # 动态事件管理
+  src/dynamic_event_manager.cpp
   # 可视化
   src/visualizer.cpp
   # KISS-ICP（保留）
