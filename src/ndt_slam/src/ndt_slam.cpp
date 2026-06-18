@@ -163,6 +163,13 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     payload_channel_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_channel_cloud", 10);
     payload_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_candidate_cloud", 10);
     safe_objects_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/safe_objects_cloud", 10);
+    payload_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_dynamic_cloud", 10);
+    payload_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_pending_cloud", 10);
+    human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
+    human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
+    human_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_pending_cloud", 10);
+    human_trajectory_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_trajectory_capsule", 10);
+    human_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_removed_history_cloud", 10);
     current_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(current_cloud_topic_, 10);
     path_pub_ = nh_.advertise<nav_msgs::Path>("/path", 10);
 
@@ -463,6 +470,20 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         loop_closure_detector_.configureFromYaml(config_file_path);
 
         ROS_INFO("=== NdtSlamNode Parameters ===");
+        ROS_INFO("=== HumanObjectFilter Config ===");
+        ROS_INFO("  enabled: %s", human_filter_config_.enabled ? "true" : "false");
+        ROS_INFO("  min_hag: %.2f m", human_filter_config_.min_hag);
+        ROS_INFO("  max_hag: %.2f m", human_filter_config_.max_hag);
+        ROS_INFO("  min_cluster_height: %.2f m", human_filter_config_.min_cluster_height);
+        ROS_INFO("  max_cluster_height: %.2f m", human_filter_config_.max_cluster_height);
+        ROS_INFO("  min_points: %d", human_filter_config_.min_points);
+        ROS_INFO("  max_points: %d", human_filter_config_.max_points);
+        ROS_INFO("  min_area_m2: %.2f", human_filter_config_.min_area_m2);
+        ROS_INFO("  max_area_m2: %.2f", human_filter_config_.max_area_m2);
+        ROS_INFO("  max_width_m: %.2f", human_filter_config_.max_width_m);
+        ROS_INFO("  max_length_m: %.2f", human_filter_config_.max_length_m);
+        ROS_INFO("  bev_resolution: %.2f m", human_filter_config_.bev_resolution);
+        ROS_INFO("  merge_gap_m: %.2f m", human_filter_config_.merge_gap_m);
         ROS_INFO("PointCloud topic: %s", pointcloud_topic_.c_str());
         ROS_INFO("Odometry topic: %s", odom_topic_.c_str());
         ROS_INFO("Map topic: %s", map_topic_.c_str());
