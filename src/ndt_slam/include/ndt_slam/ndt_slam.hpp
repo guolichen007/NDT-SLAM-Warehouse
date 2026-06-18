@@ -37,6 +37,7 @@
 #include "ndt_slam/loop_closure.hpp"
 #include "ndt_slam/base_payload_channel_filter.hpp"
 #include "ndt_slam/payload_tracker.hpp"
+#include "ndt_slam/human_object_filter.hpp"
 #include "lidar_slam2_msgs/SaveMap.h"
 #include "lidar_slam2_msgs/LoadMap.h"
 
@@ -312,6 +313,19 @@ private:
     ros::Publisher safe_objects_pub_;         // /safe_objects_cloud
     ros::Publisher payload_dynamic_pub_;      // /payload_dynamic_cloud
     ros::Publisher payload_pending_pub_;      // /payload_pending_cloud
+
+    // 人体过滤模块
+    HumanObjectDynamicFilter human_filter_;
+    HumanObjectFilterConfig human_filter_config_;
+    HumanTrackingConfig human_tracking_config_;
+    HumanEraserConfig human_eraser_config_;
+
+    // 人体过滤 debug 话题
+    ros::Publisher human_candidate_pub_;      // /human_candidate_cloud
+    ros::Publisher human_dynamic_pub_;        // /human_dynamic_cloud
+    ros::Publisher human_pending_pub_;        // /human_pending_cloud
+    ros::Publisher human_trajectory_pub_;     // /human_trajectory_capsule
+    ros::Publisher human_removed_pub_;        // /human_removed_history_cloud
 
 
     // 边缘保留点云融合

@@ -88,6 +88,11 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     safe_objects_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/safe_objects_cloud", 10);
     payload_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_dynamic_cloud", 10);
     payload_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_pending_cloud", 10);
+    human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
+    human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
+    human_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_pending_cloud", 10);
+    human_trajectory_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_trajectory_capsule", 10);
+    human_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_removed_history_cloud", 10);
     current_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(current_cloud_topic_, 10);
     path_pub_ = nh_.advertise<nav_msgs::Path>("/path", 10);
 
@@ -408,6 +413,53 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         channel_filter_.configureFromYaml(config_file_path);
         channel_filter_config_ = channel_filter_.getConfig();
 
+        // HumanObjectDynamicFilter 配置
+        if (config["human_object_filter"]) {
+            auto hof = config["human_object_filter"];
+            if (hof["enabled"]) human_filter_config_.enabled = hof["enabled"].as<bool>();
+            if (hof["min_hag"]) human_filter_config_.min_hag = hof["min_hag"].as<double>();
+            if (hof["max_hag"]) human_filter_config_.max_hag = hof["max_hag"].as<double>();
+            if (hof["min_cluster_height"]) human_filter_config_.min_cluster_height = hof["min_cluster_height"].as<double>();
+            if (hof["max_cluster_height"]) human_filter_config_.max_cluster_height = hof["max_cluster_height"].as<double>();
+            if (hof["min_points"]) human_filter_config_.min_points = hof["min_points"].as<int>();
+            if (hof["max_points"]) human_filter_config_.max_points = hof["max_points"].as<int>();
+            if (hof["min_area_m2"]) human_filter_config_.min_area_m2 = hof["min_area_m2"].as<double>();
+            if (hof["max_area_m2"]) human_filter_config_.max_area_m2 = hof["max_area_m2"].as<double>();
+            if (hof["max_width_m"]) human_filter_config_.max_width_m = hof["max_width_m"].as<double>();
+            if (hof["max_length_m"]) human_filter_config_.max_length_m = hof["max_length_m"].as<double>();
+            if (hof["bev_resolution"]) human_filter_config_.bev_resolution = hof["bev_resolution"].as<double>();
+            if (hof["merge_gap_m"]) human_filter_config_.merge_gap_m = hof["merge_gap_m"].as<double>();
+        }
+
+        if (config["human_object_tracking"]) {
+            auto hot = config["human_object_tracking"];
+            if (hot["enabled"]) human_tracking_config_.enabled = hot["enabled"].as<bool>();
+            if (hot["window_sec"]) human_tracking_config_.window_sec = hot["window_sec"].as<double>();
+            if (hot["confirm_frames"]) human_tracking_config_.confirm_frames = hot["confirm_frames"].as<int>();
+            if (hot["map_displacement_thresh_m"]) human_tracking_config_.map_displacement_thresh_m = hot["map_displacement_thresh_m"].as<double>();
+            if (hot["velocity_thresh_mps"]) human_tracking_config_.velocity_thresh_mps = hot["velocity_thresh_mps"].as<double>();
+            if (hot["max_match_distance_m"]) human_tracking_config_.max_match_distance_m = hot["max_match_distance_m"].as<double>();
+            if (hot["max_missed_frames"]) human_tracking_config_.max_missed_frames = hot["max_missed_frames"].as<int>();
+        }
+
+        if (config["human_object_eraser"]) {
+            auto hoe = config["human_object_eraser"];
+            if (hoe["enabled"]) human_eraser_config_.enabled = hoe["enabled"].as<bool>();
+            if (hoe["history_sec"]) human_eraser_config_.history_sec = hoe["history_sec"].as<double>();
+            if (hoe["capsule_radius_m"]) human_eraser_config_.capsule_radius_m = hoe["capsule_radius_m"].as<double>();
+            if (hoe["use_track_height_range"]) human_eraser_config_.use_track_height_range = hoe["use_track_height_range"].as<bool>();
+            if (hoe["z_margin_m"]) human_eraser_config_.z_margin_m = hoe["z_margin_m"].as<double>();
+            if (hoe["hag_margin_m"]) human_eraser_config_.hag_margin_m = hoe["hag_margin_m"].as<double>();
+            if (hoe["pre_guard_sec"]) human_eraser_config_.pre_guard_sec = hoe["pre_guard_sec"].as<double>();
+            if (hoe["post_guard_sec"]) human_eraser_config_.post_guard_sec = hoe["post_guard_sec"].as<double>();
+            if (hoe["erase_objects_only"]) human_eraser_config_.erase_objects_only = hoe["erase_objects_only"].as<bool>();
+            if (hoe["erase_ground"]) human_eraser_config_.erase_ground = hoe["erase_ground"].as<bool>();
+            if (hoe["async_update"]) human_eraser_config_.async_update = hoe["async_update"].as<bool>();
+        }
+
+        // 初始化人体过滤模块
+        human_filter_.initialize(human_filter_config_, human_tracking_config_, human_eraser_config_);
+
         loop_closure_detector_.configureFromYaml(config_file_path);
 
         ROS_INFO("=== NdtSlamNode Parameters ===");
@@ -630,11 +682,66 @@ void NdtSlamNode::processCloudThread() {
             safe_objects = feature_cloud;
         }
 
-        // 构建配准用点云：safe_objects x4 + ground x1
-        // payload_candidate 不参与 NDT 配准，防止拉偏定位
+        // ========== 阶段 3.6：HumanObjectDynamicFilter（人体动态过滤）==========
+        pcl::PointCloud<pcl::PointXYZ>::Ptr human_safe_objects(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr human_candidates(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr human_dynamic(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr human_pending(new pcl::PointCloud<pcl::PointXYZ>);
+
+        if (human_filter_config_.enabled) {
+            // 获取 T_map_base（当前位姿）
+            Eigen::Matrix4d T_map_base = current_pose_.matrix();
+
+            // 获取时间戳
+            double timestamp = msg->header.stamp.toSec();
+
+            // 处理人体过滤
+            human_filter_.processFrame(safe_objects, T_map_base, timestamp,
+                                       human_safe_objects, human_candidates,
+                                       human_dynamic, human_pending);
+
+            // 发布调试话题（每 10 帧一次）
+            static int hf_debug_count = 0;
+            hf_debug_count++;
+            if (hf_debug_count % 10 == 1) {
+                ROS_INFO("[HumanFilter] input=%lu, safe=%lu, candidate=%lu, dynamic=%lu, pending=%lu",
+                         safe_objects->size(), human_safe_objects->size(),
+                         human_candidates->size(), human_dynamic->size(), human_pending->size());
+
+                if (!human_candidates->empty()) {
+                    sensor_msgs::PointCloud2 cand_msg;
+                    pcl::toROSMsg(*human_candidates, cand_msg);
+                    cand_msg.header.stamp = msg->header.stamp;
+                    cand_msg.header.frame_id = "base_link";
+                    human_candidate_pub_.publish(cand_msg);
+                }
+
+                if (!human_dynamic->empty()) {
+                    sensor_msgs::PointCloud2 dyn_msg;
+                    pcl::toROSMsg(*human_dynamic, dyn_msg);
+                    dyn_msg.header.stamp = msg->header.stamp;
+                    dyn_msg.header.frame_id = "map";
+                    human_dynamic_pub_.publish(dyn_msg);
+                }
+
+                if (!human_pending->empty()) {
+                    sensor_msgs::PointCloud2 pend_msg;
+                    pcl::toROSMsg(*human_pending, pend_msg);
+                    pend_msg.header.stamp = msg->header.stamp;
+                    pend_msg.header.frame_id = "map";
+                    human_pending_pub_.publish(pend_msg);
+                }
+            }
+        } else {
+            // 人体过滤未启用，所有 safe_objects 都是安全的
+            human_safe_objects = safe_objects;
+        }
+
+        // 构建配准用点云：human_safe_objects x4 + ground x1
+        // 人体候选不参与 NDT 配准，防止人体拖影污染定位
         pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud(new pcl::PointCloud<pcl::PointXYZ>);
         for (int i = 0; i < 4; i++) {
-            *registration_cloud += *safe_objects;
+            *registration_cloud += *human_safe_objects;
         }
         *registration_cloud += *ground_cloud;
 
@@ -1319,9 +1426,24 @@ void NdtSlamNode::rebuildGlobalMap() {
             std::map<CellKey, float> empty_ground_model;
             ChannelFilterResult ch_result = channel_filter_.filter(base_objects.makeShared(), empty_ground_model);
 
-            // 只把 safe_objects + ground 变换到 map 并加入 global_map
+            // ========== HumanObjectDynamicFilter（人体动态过滤）==========
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_safe(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_candidates(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_dynamic(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_pending(new pcl::PointCloud<pcl::PointXYZ>);
+
+            if (human_filter_config_.enabled) {
+                // 使用 0 作为时间戳（rebuild 不需要精确时间）
+                human_filter_.processFrame(ch_result.safe_objects, transform, 0.0,
+                                           rebuild_human_safe, rebuild_human_candidates,
+                                           rebuild_human_dynamic, rebuild_human_pending);
+            } else {
+                rebuild_human_safe = ch_result.safe_objects;
+            }
+
+            // 只把 human_safe_objects + ground 变换到 map 并加入 global_map
             pcl::PointCloud<pcl::PointXYZ> safe_transformed;
-            pcl::transformPointCloud(*ch_result.safe_objects, safe_transformed, transform.cast<float>());
+            pcl::transformPointCloud(*rebuild_human_safe, safe_transformed, transform.cast<float>());
 
             pcl::PointCloud<pcl::PointXYZ> ground_transformed;
             pcl::transformPointCloud(base_ground, ground_transformed, transform.cast<float>());
@@ -1474,12 +1596,27 @@ void NdtSlamNode::rebuildGroundAndObjectsMap() {
             std::map<CellKey, float> empty_ground_model;
             ChannelFilterResult ch_result = channel_filter_.filter(base_objects.makeShared(), empty_ground_model);
 
+            // ========== HumanObjectDynamicFilter（人体动态过滤）==========
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_safe(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_candidates(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_dynamic(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_pending(new pcl::PointCloud<pcl::PointXYZ>);
+
+            if (human_filter_config_.enabled) {
+                // 使用 0 作为时间戳（rebuild 不需要精确时间）
+                human_filter_.processFrame(ch_result.safe_objects, transform, 0.0,
+                                           rebuild_human_safe, rebuild_human_candidates,
+                                           rebuild_human_dynamic, rebuild_human_pending);
+            } else {
+                rebuild_human_safe = ch_result.safe_objects;
+            }
+
             // 变换到 map 坐标系
             pcl::PointCloud<pcl::PointXYZ> ground_transformed;
             pcl::transformPointCloud(base_ground, ground_transformed, transform.cast<float>());
 
             pcl::PointCloud<pcl::PointXYZ> safe_transformed;
-            pcl::transformPointCloud(*ch_result.safe_objects, safe_transformed, transform.cast<float>());
+            pcl::transformPointCloud(*rebuild_human_safe, safe_transformed, transform.cast<float>());
 
             addInRange(ground_transformed, ground_map_);
             addInRange(safe_transformed, objects_map_);
@@ -2009,9 +2146,58 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 }
             }
 
+            // ========== HumanObjectDynamicFilter（人体动态过滤）==========
+            pcl::PointCloud<pcl::PointXYZ>::Ptr kf_human_safe_objects(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr kf_human_candidates(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr kf_human_dynamic(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr kf_human_pending(new pcl::PointCloud<pcl::PointXYZ>);
+
+            if (human_filter_config_.enabled) {
+                // 在 base_link 下做人人体过滤（kf_safe_objects 是 base_link 下的）
+                double timestamp = stamp.toSec();
+                human_filter_.processFrame(kf_safe_objects, transform, timestamp,
+                                           kf_human_safe_objects, kf_human_candidates,
+                                           kf_human_dynamic, kf_human_pending);
+
+                // 发布人体过滤调试话题（每 5 个关键帧一次）
+                static int kf_hf_debug_count = 0;
+                kf_hf_debug_count++;
+                if (kf_hf_debug_count % 5 == 1) {
+                    ROS_INFO("[HumanFilter-KF] input=%lu, safe=%lu, candidate=%lu, dynamic=%lu, pending=%lu",
+                             kf_safe_objects->size(), kf_human_safe_objects->size(),
+                             kf_human_candidates->size(), kf_human_dynamic->size(), kf_human_pending->size());
+
+                    if (!kf_human_candidates->empty()) {
+                        sensor_msgs::PointCloud2 cand_msg;
+                        pcl::toROSMsg(*kf_human_candidates, cand_msg);
+                        cand_msg.header.stamp = stamp;
+                        cand_msg.header.frame_id = "base_link";
+                        human_candidate_pub_.publish(cand_msg);
+                    }
+
+                    if (!kf_human_dynamic->empty()) {
+                        sensor_msgs::PointCloud2 dyn_msg;
+                        pcl::toROSMsg(*kf_human_dynamic, dyn_msg);
+                        dyn_msg.header.stamp = stamp;
+                        dyn_msg.header.frame_id = "map";
+                        human_dynamic_pub_.publish(dyn_msg);
+                    }
+
+                    if (!kf_human_pending->empty()) {
+                        sensor_msgs::PointCloud2 pend_msg;
+                        pcl::toROSMsg(*kf_human_pending, pend_msg);
+                        pend_msg.header.stamp = stamp;
+                        pend_msg.header.frame_id = "map";
+                        human_pending_pub_.publish(pend_msg);
+                    }
+                }
+            } else {
+                kf_human_safe_objects = kf_safe_objects;
+            }
+
             // 变换 safe_objects 到 map 坐标系
             pcl::PointCloud<pcl::PointXYZ> safe_transformed;
-            pcl::transformPointCloud(*kf_safe_objects, safe_transformed, transform.cast<float>());
+            pcl::transformPointCloud(*kf_human_safe_objects, safe_transformed, transform.cast<float>());
 
             // 变换 payload_candidates 到 map 坐标系（用于调试发布）
             pcl::PointCloud<pcl::PointXYZ> candidates_transformed;
@@ -2632,9 +2818,24 @@ void NdtSlamNode::rebuildMapFromKeyframes(const std::string& session_dir) {
             std::map<CellKey, float> empty_ground_model;
             ChannelFilterResult ch_result = channel_filter_.filter(base_objects.makeShared(), empty_ground_model);
 
+            // ========== HumanObjectDynamicFilter（人体动态过滤）==========
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_safe(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_candidates(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_dynamic(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_human_pending(new pcl::PointCloud<pcl::PointXYZ>);
+
+            if (human_filter_config_.enabled) {
+                // 使用 0 作为时间戳（rebuild 不需要精确时间）
+                human_filter_.processFrame(ch_result.safe_objects, transform, 0.0,
+                                           rebuild_human_safe, rebuild_human_candidates,
+                                           rebuild_human_dynamic, rebuild_human_pending);
+            } else {
+                rebuild_human_safe = ch_result.safe_objects;
+            }
+
             // 变换到 map
             pcl::PointCloud<pcl::PointXYZ> safe_transformed;
-            pcl::transformPointCloud(*ch_result.safe_objects, safe_transformed, transform.cast<float>());
+            pcl::transformPointCloud(*rebuild_human_safe, safe_transformed, transform.cast<float>());
 
             pcl::PointCloud<pcl::PointXYZ> ground_transformed;
             pcl::transformPointCloud(base_ground, ground_transformed, transform.cast<float>());

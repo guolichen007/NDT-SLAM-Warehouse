@@ -109,3 +109,43 @@ payload_tracker:
   direction_consistency_thresh: 0.65
   base_stability_std_thresh: 0.35  # base_link 下中心标准差阈值（低于此值认为稳定）
   max_missed_frames: 5
+
+# HumanObjectDynamicFilter 人体动态过滤配置
+human_object_filter:
+  enabled: true
+  min_hag: 0.35
+  max_hag: 2.30
+  min_cluster_height: 0.45
+  max_cluster_height: 2.40
+  min_points: 10
+  max_points: 2500
+  min_area_m2: 0.02
+  max_area_m2: 1.80
+  max_width_m: 1.60
+  max_length_m: 2.00
+  bev_resolution: 0.15
+  merge_gap_m: 0.25
+
+# HumanObjectTracking 人体跟踪配置
+human_object_tracking:
+  enabled: true
+  window_sec: 2.0
+  confirm_frames: 2
+  map_displacement_thresh_m: 0.20
+  velocity_thresh_mps: 0.10
+  max_match_distance_m: 0.80
+  max_missed_frames: 5
+
+# HumanObjectEraser 人体历史反删配置
+human_object_eraser:
+  enabled: true
+  history_sec: 10.0
+  capsule_radius_m: 0.65
+  use_track_height_range: true
+  z_margin_m: 0.30
+  hag_margin_m: 0.30
+  pre_guard_sec: 2.0
+  post_guard_sec: 3.0
+  erase_objects_only: true
+  erase_ground: false
+  async_update: true

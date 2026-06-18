@@ -97,6 +97,8 @@ set(LIBRARY_SOURCES
   src/base_payload_channel_filter.cpp
   # 吊货跟踪管理
   src/payload_tracker.cpp
+  # 人体动态过滤
+  src/human_object_filter.cpp
   # 可视化
   src/visualizer.cpp
   # KISS-ICP（保留）
