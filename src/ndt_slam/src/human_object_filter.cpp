@@ -38,118 +38,138 @@ void HumanObjectDynamicFilter::processFrame(
     human_dynamic_out->clear();
     human_pending_out->clear();
 
-    // Step 1: 检测人体候选
-    pcl::PointCloud<pcl::PointXYZ>::Ptr candidates(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr safe_objects(new pcl::PointCloud<pcl::PointXYZ>);
-    detectHumanCandidates(objects_cloud_base, candidates, safe_objects);
+    // ============================================================
+    // 核心思路改变：
+    // 旧逻辑：HAG 筛选 → 所有 HAG 范围内的点都是候选 → safe 太少
+    // 新逻辑：BEV 聚类 → 判断每个聚类是否符合人体特征 → 只有人体聚类是候选
+    // ============================================================
 
-    // Step 2: 将候选转到 map 坐标系
-    pcl::PointCloud<pcl::PointXYZ>::Ptr candidates_map(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::transformPointCloud(*candidates, *candidates_map, T_map_base);
-
-    // Step 3: 聚类并生成跟踪检测
+    // Step 1: 对所有 objects 点做 BEV 聚类（在 base_link 下）
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusters;
-    clusterBEV(candidates_map, clusters);
+    clusterBEV(objects_cloud_base, clusters);
 
-    std::vector<HumanTrack> current_detections;
+    // Step 2: 判断每个聚类是否符合人体特征
+    std::vector<int> human_cluster_indices;
+    std::vector<Eigen::Vector3d> cluster_centroids;
+    std::vector<Eigen::Vector3d> cluster_bbox_mins;
+    std::vector<Eigen::Vector3d> cluster_bbox_maxs;
+
     for (size_t i = 0; i < clusters.size(); i++) {
         Eigen::Vector3d centroid, bbox_min, bbox_max;
         if (isHumanLikeCluster(clusters[i], centroid, bbox_min, bbox_max)) {
-            HumanTrack detection;
-            detection.centroid_map = centroid;
-            detection.centroid_base = Eigen::Vector3d(
-                (T_map_base.inverse() * centroid.homogeneous()).head<3>());
-            detection.bbox_min = bbox_min;
-            detection.bbox_max = bbox_max;
-            detection.point_count = clusters[i]->size();
-            detection.height = bbox_max.z() - bbox_min.z();
-            detection.area = (bbox_max.x() - bbox_min.x()) * (bbox_max.y() - bbox_min.y());
-            current_detections.push_back(detection);
+            human_cluster_indices.push_back(i);
+            cluster_centroids.push_back(centroid);
+            cluster_bbox_mins.push_back(bbox_min);
+            cluster_bbox_maxs.push_back(bbox_max);
         }
+    }
+
+    // Step 3: 将人体候选聚类转到 map 坐标系，用于跟踪
+    std::vector<HumanTrack> current_detections;
+    for (size_t j = 0; j < human_cluster_indices.size(); j++) {
+        int idx = human_cluster_indices[j];
+        Eigen::Vector3d centroid_base = cluster_centroids[j];
+        Eigen::Vector3d centroid_map = (T_map_base * centroid_base.homogeneous()).head<3>();
+
+        HumanTrack detection;
+        detection.centroid_base = centroid_base;
+        detection.centroid_map = centroid_map;
+        detection.bbox_min = cluster_bbox_mins[j];
+        detection.bbox_max = cluster_bbox_maxs[j];
+        detection.point_count = clusters[idx]->size();
+        detection.height = cluster_bbox_maxs[j].z() - cluster_bbox_mins[j].z();
+        detection.area = (cluster_bbox_maxs[j].x() - cluster_bbox_mins[j].x()) *
+                         (cluster_bbox_maxs[j].y() - cluster_bbox_mins[j].y());
+        current_detections.push_back(detection);
     }
 
     // Step 4: 更新跟踪
     updateTracks(current_detections, timestamp);
 
     // Step 5: 分类输出
-    // 将候选点分类到不同输出
-    for (const auto& point : candidates_map->points) {
-        bool assigned = false;
+    // 收集所有人体聚类的点索引
+    std::set<int> human_point_indices;
 
-        // 检查是否属于动态人体
+    // 人体候选点（当前帧检测到的人体聚类）
+    for (size_t j = 0; j < human_cluster_indices.size(); j++) {
+        int idx = human_cluster_indices[j];
+        for (const auto& point : clusters[idx]->points) {
+            human_candidate_out->push_back(point);
+        }
+    }
+
+    // 动态人体和待确认人体（从跟踪中获取，使用 map 坐标系下的 bbox）
+    for (const auto& point : objects_cloud_base->points) {
+        Eigen::Vector3d pt_map = (T_map_base * point.getVector4fMap().cast<double>()).head<3>();
+
+        bool is_dynamic = false;
+        bool is_pending = false;
+
         for (const auto& track_pair : active_tracks_) {
             const HumanTrack& track = track_pair.second;
             if (track.state == HumanTrackState::DYNAMIC_CONFIRMED) {
-                // 检查点是否在跟踪的 bbox 内
-                if (point.x >= track.bbox_min.x() - 0.3 &&
-                    point.x <= track.bbox_max.x() + 0.3 &&
-                    point.y >= track.bbox_min.y() - 0.3 &&
-                    point.y <= track.bbox_max.y() + 0.3 &&
-                    point.z >= track.bbox_min.z() - 0.3 &&
-                    point.z <= track.bbox_max.z() + 0.3) {
-                    human_dynamic_out->push_back(point);
-                    assigned = true;
+                if (pt_map.x() >= track.bbox_min.x() - 0.5 &&
+                    pt_map.x() <= track.bbox_max.x() + 0.5 &&
+                    pt_map.y() >= track.bbox_min.y() - 0.5 &&
+                    pt_map.y() <= track.bbox_max.y() + 0.5) {
+                    is_dynamic = true;
                     break;
                 }
             }
         }
 
-        if (!assigned) {
-            // 检查是否属于 pending 人体
+        if (!is_dynamic) {
             for (const auto& track_pair : active_tracks_) {
                 const HumanTrack& track = track_pair.second;
                 if (track.state == HumanTrackState::PENDING ||
                     track.state == HumanTrackState::NEW) {
-                    if (point.x >= track.bbox_min.x() - 0.3 &&
-                        point.x <= track.bbox_max.x() + 0.3 &&
-                        point.y >= track.bbox_min.y() - 0.3 &&
-                        point.y <= track.bbox_max.y() + 0.3 &&
-                        point.z >= track.bbox_min.z() - 0.3 &&
-                        point.z <= track.bbox_max.z() + 0.3) {
-                        human_pending_out->push_back(point);
-                        assigned = true;
+                    if (pt_map.x() >= track.bbox_min.x() - 0.5 &&
+                        pt_map.x() <= track.bbox_max.x() + 0.5 &&
+                        pt_map.y() >= track.bbox_min.y() - 0.5 &&
+                        pt_map.y() <= track.bbox_max.y() + 0.5) {
+                        is_pending = true;
                         break;
                     }
                 }
             }
         }
 
-        if (!assigned) {
-            human_candidate_out->push_back(point);
+        if (is_dynamic) {
+            human_dynamic_out->push_back(point);
+        } else if (is_pending) {
+            human_pending_out->push_back(point);
         }
     }
 
-    // safe_objects 已经在 detectHumanCandidates 中生成
-    *safe_objects_out = *safe_objects;
+    // safe_objects = 所有 objects - 人体候选聚类的点
+    // 收集人体聚类中的所有点
+    pcl::PointCloud<pcl::PointXYZ>::Ptr human_cluster_points(new pcl::PointCloud<pcl::PointXYZ>);
+    for (int idx : human_cluster_indices) {
+        *human_cluster_points += *clusters[idx];
+    }
+
+    // 从 objects 中移除人体聚类的点
+    // 使用简单的 bbox 匹配（因为聚类是在 base_link 下做的）
+    for (const auto& point : objects_cloud_base->points) {
+        bool in_human_cluster = false;
+        for (size_t j = 0; j < human_cluster_indices.size(); j++) {
+            int idx = human_cluster_indices[j];
+            const auto& bmin = cluster_bbox_mins[j];
+            const auto& bmax = cluster_bbox_maxs[j];
+            if (point.x >= bmin.x() - 0.1 && point.x <= bmax.x() + 0.1 &&
+                point.y >= bmin.y() - 0.1 && point.y <= bmax.y() + 0.1 &&
+                point.z >= bmin.z() - 0.1 && point.z <= bmax.z() + 0.1) {
+                in_human_cluster = true;
+                break;
+            }
+        }
+        if (!in_human_cluster) {
+            safe_objects_out->push_back(point);
+        }
+    }
 
     // 清理过期跟踪
     cleanupExpiredTracks(timestamp);
-}
-
-void HumanObjectDynamicFilter::detectHumanCandidates(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-    pcl::PointCloud<pcl::PointXYZ>::Ptr& candidates_out,
-    pcl::PointCloud<pcl::PointXYZ>::Ptr& safe_out) {
-
-    candidates_out->clear();
-    safe_out->clear();
-
-    // 按 HAG 高度筛选
-    // 假设地面高度为 0（base_link 坐标系下）
-    // 实际应用中可能需要更精确的地面高度估计
-    double ground_z = 0.0;
-
-    for (const auto& point : cloud->points) {
-        double hag = point.z - ground_z;
-
-        if (hag >= filter_config_.min_hag && hag <= filter_config_.max_hag) {
-            // 在人体高度范围内，可能是人体候选
-            candidates_out->push_back(point);
-        } else {
-            // 不在人体高度范围内，安全点
-            safe_out->push_back(point);
-        }
-    }
 }
 
 void HumanObjectDynamicFilter::clusterBEV(
@@ -168,14 +188,13 @@ void HumanObjectDynamicFilter::clusterBEV(
         bev_grid[key].push_back(i);
     }
 
-    // 连通分量标记（简单的 flood fill）
+    // 连通分量标记（flood fill）
     std::map<std::pair<int, int>, int> labels;
     int current_label = 0;
 
     for (const auto& cell : bev_grid) {
         if (labels.find(cell.first) != labels.end()) continue;
 
-        // 新的连通分量
         std::vector<std::pair<int, int>> stack;
         stack.push_back(cell.first);
         labels[cell.first] = current_label;
@@ -184,7 +203,6 @@ void HumanObjectDynamicFilter::clusterBEV(
             auto current = stack.back();
             stack.pop_back();
 
-            // 检查 8 邻域
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dy = -1; dy <= 1; dy++) {
                     if (dx == 0 && dy == 0) continue;
@@ -193,7 +211,6 @@ void HumanObjectDynamicFilter::clusterBEV(
 
                     if (bev_grid.find(neighbor) != bev_grid.end() &&
                         labels.find(neighbor) == labels.end()) {
-                        // 检查距离
                         double dist = std::sqrt(dx * dx + dy * dy) * filter_config_.bev_resolution;
                         if (dist <= filter_config_.merge_gap_m) {
                             labels[neighbor] = current_label;
@@ -246,17 +263,19 @@ bool HumanObjectDynamicFilter::isHumanLikeCluster(
     double height = bbox_max.z() - bbox_min.z();
     double area = width * length;
 
-    // 检查尺寸约束
+    // 检查高度约束（相对于聚类自身底部）
     if (height < filter_config_.min_cluster_height ||
         height > filter_config_.max_cluster_height) {
         return false;
     }
 
+    // 检查面积约束
     if (area < filter_config_.min_area_m2 ||
         area > filter_config_.max_area_m2) {
         return false;
     }
 
+    // 检查宽度和长度约束
     if (width > filter_config_.max_width_m ||
         length > filter_config_.max_length_m) {
         return false;
@@ -281,7 +300,6 @@ void HumanObjectDynamicFilter::updateTracks(
         int track_id = matchToExistingTrack(current_detections[i]);
 
         if (track_id >= 0) {
-            // 更新已有跟踪
             auto& track = active_tracks_[track_id];
             track.centroid_map = current_detections[i].centroid_map;
             track.centroid_base = current_detections[i].centroid_base;
@@ -294,14 +312,12 @@ void HumanObjectDynamicFilter::updateTracks(
             track.observed_frames++;
             track.last_seen_time = timestamp;
 
-            // 更新历史
             track.centroid_map_history.push_back(current_detections[i].centroid_map);
             track.timestamp_history.push_back(timestamp);
             track.bbox_min_history.push_back(current_detections[i].bbox_min);
             track.bbox_max_history.push_back(current_detections[i].bbox_max);
 
-            // 限制历史长度
-            size_t max_history = static_cast<size_t>(tracking_config_.window_sec * 10); // 假设 10Hz
+            size_t max_history = static_cast<size_t>(tracking_config_.window_sec * 10);
             while (track.centroid_map_history.size() > max_history) {
                 track.centroid_map_history.pop_front();
                 track.timestamp_history.pop_front();
@@ -309,11 +325,9 @@ void HumanObjectDynamicFilter::updateTracks(
                 track.bbox_max_history.pop_front();
             }
 
-            // 更新高度范围
             track.track_z_min = std::min(track.track_z_min, current_detections[i].bbox_min.z());
             track.track_z_max = std::max(track.track_z_max, current_detections[i].bbox_max.z());
 
-            // 计算速度和位移
             if (track.centroid_map_history.size() >= 2) {
                 Eigen::Vector3d first = track.centroid_map_history.front();
                 Eigen::Vector3d last = track.centroid_map_history.back();
@@ -325,7 +339,6 @@ void HumanObjectDynamicFilter::updateTracks(
                 }
             }
 
-            // 判断状态转换
             if (track.state == HumanTrackState::NEW ||
                 track.state == HumanTrackState::PENDING) {
                 if (isDynamicHuman(track)) {
@@ -360,7 +373,6 @@ void HumanObjectDynamicFilter::updateTracks(
             new_track.velocity = 0.0;
             new_track.map_displacement = 0.0;
 
-            // 初始化高度范围
             new_track.track_z_min = current_detections[i].bbox_min.z();
             new_track.track_z_max = current_detections[i].bbox_max.z();
             new_track.track_hag_min = filter_config_.min_hag;
@@ -400,13 +412,11 @@ bool HumanObjectDynamicFilter::isDynamicHuman(const HumanTrack& track) const {
         return false;
     }
 
-    // 检查时间窗口
     double time_window = track.last_seen_time - track.first_seen_time;
     if (time_window < tracking_config_.window_sec) {
         return false;
     }
 
-    // 检查位移和速度
     if (track.map_displacement > tracking_config_.map_displacement_thresh_m ||
         track.velocity > tracking_config_.velocity_thresh_mps) {
         return true;
@@ -476,17 +486,14 @@ bool HumanObjectDynamicFilter::isPointInCapsule(
     const TrajectoryCapsule& capsule,
     double current_time) const {
 
-    // 检查时间范围
     if (current_time < capsule.start_time || current_time > capsule.end_time) {
         return false;
     }
 
-    // 检查高度范围
     if (point.z < capsule.z_min || point.z > capsule.z_max) {
         return false;
     }
 
-    // 检查与轨迹中心线的距离
     double min_dist_sq = std::numeric_limits<double>::max();
 
     for (const auto& center : capsule.centerline) {
@@ -514,11 +521,10 @@ void HumanObjectDynamicFilter::cleanupExpiredTracks(double current_time) {
         active_tracks_.erase(id);
     }
 
-    // 清理过期的轨迹胶囊
     trajectory_capsules_.erase(
         std::remove_if(trajectory_capsules_.begin(), trajectory_capsules_.end(),
                        [current_time](const TrajectoryCapsule& c) {
-                           return current_time > c.end_time + 10.0; // 保留 10 秒后清理
+                           return current_time > c.end_time + 10.0;
                        }),
         trajectory_capsules_.end());
 }
@@ -553,7 +559,6 @@ bool HumanObjectDynamicFilter::isPointInPolygonPrism(
         return false;
     }
 
-    // 简单的射线法判断点是否在多边形内
     int n = polygon.size();
     if (n < 3) return false;
 

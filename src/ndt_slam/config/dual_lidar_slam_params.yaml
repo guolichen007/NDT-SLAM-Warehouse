@@ -111,20 +111,22 @@ payload_tracker:
   max_missed_frames: 5
 
 # HumanObjectDynamicFilter 人体动态过滤配置
+# 核心逻辑：先 BEV 聚类，再判断聚类是否符合人体特征
+# 只有人体聚类被过滤，其余点全部保留为 safe
 human_object_filter:
   enabled: true
   min_hag: 0.35
   max_hag: 2.30
-  min_cluster_height: 0.45
-  max_cluster_height: 2.40
-  min_points: 10
-  max_points: 2500
-  min_area_m2: 0.02
-  max_area_m2: 1.80
-  max_width_m: 1.60
-  max_length_m: 2.00
-  bev_resolution: 0.15
-  merge_gap_m: 0.25
+  min_cluster_height: 0.60        # 人体至少 0.6m 高（蹲下时）
+  max_cluster_height: 2.20        # 人体最高 2.2m
+  min_points: 20                  # 至少 20 个点才算人体（减少噪声误判）
+  max_points: 2000                # 超过 2000 点可能是货物或设备
+  min_area_m2: 0.04               # 人体占地面积至少 0.04m²（脚的面积）
+  max_area_m2: 1.20               # 人体最大占地面积 1.2m²
+  max_width_m: 1.00               # 人体最大宽度 1.0m
+  max_length_m: 1.00              # 人体最大长度 1.0m
+  bev_resolution: 0.10            # BEV 网格 0.10m（更精细，减少合并）
+  merge_gap_m: 0.15               # 合并间隙 0.15m（减少相邻物体合并）
 
 # HumanObjectTracking 人体跟踪配置
 human_object_tracking:
