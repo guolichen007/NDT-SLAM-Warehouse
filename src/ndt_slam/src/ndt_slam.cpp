@@ -480,7 +480,19 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             if (dem["enabled"]) dynamic_event_config_.enabled = dem["enabled"].as<bool>();
             if (dem["payload_min_candidate_frames"]) dynamic_event_config_.payload_min_candidate_frames = dem["payload_min_candidate_frames"].as<int>();
             if (dem["payload_pre_guard_sec"]) dynamic_event_config_.payload_pre_guard_sec = dem["payload_pre_guard_sec"].as<double>();
-            if (dem["payload_post_guard_sec"]) dynamic_event_config_.payload_post_guard_sec = dem["payload_post_guard_sec"].as<double>();
+            if (dem["moving_post_guard_sec"]) dynamic_event_config_.moving_post_guard_sec = dem["moving_post_guard_sec"].as<double>();
+            if (dem["unknown_post_guard_sec"]) dynamic_event_config_.unknown_post_guard_sec = dem["unknown_post_guard_sec"].as<double>();
+            if (dem["merge_same_track"]) dynamic_event_config_.merge_same_track = dem["merge_same_track"].as<bool>();
+            if (dem["merge_time_gap_sec"]) dynamic_event_config_.merge_time_gap_sec = dem["merge_time_gap_sec"].as<double>();
+            if (dem["merge_iou_thresh"]) dynamic_event_config_.merge_iou_thresh = dem["merge_iou_thresh"].as<double>();
+            if (dem["max_active_sessions"]) dynamic_event_config_.max_active_sessions = dem["max_active_sessions"].as<int>();
+            if (dem["placement_detection_enabled"]) dynamic_event_config_.placement_detection_enabled = dem["placement_detection_enabled"].as<bool>();
+            if (dem["stable_window_sec"]) dynamic_event_config_.stable_window_sec = dem["stable_window_sec"].as<double>();
+            if (dem["stable_frames_thresh"]) dynamic_event_config_.stable_frames_thresh = dem["stable_frames_thresh"].as<int>();
+            if (dem["stable_map_disp_thresh_m"]) dynamic_event_config_.stable_map_disp_thresh_m = dem["stable_map_disp_thresh_m"].as<double>();
+            if (dem["stable_velocity_thresh_mps"]) dynamic_event_config_.stable_velocity_thresh_mps = dem["stable_velocity_thresh_mps"].as<double>();
+            if (dem["placed_bbox_expand_xy"]) dynamic_event_config_.placed_bbox_expand_xy = dem["placed_bbox_expand_xy"].as<double>();
+            if (dem["placed_bbox_expand_z"]) dynamic_event_config_.placed_bbox_expand_z = dem["placed_bbox_expand_z"].as<double>();
             if (dem["human_pre_guard_sec"]) dynamic_event_config_.human_pre_guard_sec = dem["human_pre_guard_sec"].as<double>();
             if (dem["human_post_guard_sec"]) dynamic_event_config_.human_post_guard_sec = dem["human_post_guard_sec"].as<double>();
             if (dem["human_capsule_radius"]) dynamic_event_config_.human_capsule_radius = dem["human_capsule_radius"].as<double>();
@@ -488,13 +500,23 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             if (dem["human_z_margin"]) dynamic_event_config_.human_z_margin = dem["human_z_margin"].as<double>();
             if (dem["clean_deny_enabled"]) dynamic_event_config_.clean_deny_enabled = dem["clean_deny_enabled"].as<bool>();
             if (dem["max_dynamic_ratio"]) dynamic_event_config_.max_dynamic_ratio = dem["max_dynamic_ratio"].as<double>();
+            if (dem["placed_to_objects_clean"]) dynamic_event_config_.placed_to_objects_clean = dem["placed_to_objects_clean"].as<bool>();
+            if (dem["placed_to_display_map"]) dynamic_event_config_.placed_to_display_map = dem["placed_to_display_map"].as<bool>();
+            if (dem["placed_to_registration_map"]) dynamic_event_config_.placed_to_registration_map = dem["placed_to_registration_map"].as<bool>();
         }
         dynamic_event_manager_.configure(dynamic_event_config_);
 
         ROS_INFO("=== DynamicEventManager Config ===");
         ROS_INFO("  enabled: %s", dynamic_event_config_.enabled ? "true" : "false");
-        ROS_INFO("  payload_pre_guard: %.1fs, post_guard: %.1fs",
-                 dynamic_event_config_.payload_pre_guard_sec, dynamic_event_config_.payload_post_guard_sec);
+        ROS_INFO("  payload_pre_guard: %.1fs, moving_post_guard: %.1fs, unknown_post_guard: %.1fs",
+                 dynamic_event_config_.payload_pre_guard_sec,
+                 dynamic_event_config_.moving_post_guard_sec,
+                 dynamic_event_config_.unknown_post_guard_sec);
+        ROS_INFO("  placement: enabled=%s, stable_frames=%d, disp_thresh=%.2f, vel_thresh=%.2f",
+                 dynamic_event_config_.placement_detection_enabled ? "true" : "false",
+                 dynamic_event_config_.stable_frames_thresh,
+                 dynamic_event_config_.stable_map_disp_thresh_m,
+                 dynamic_event_config_.stable_velocity_thresh_mps);
         ROS_INFO("  human_pre_guard: %.1fs, post_guard: %.1fs",
                  dynamic_event_config_.human_pre_guard_sec, dynamic_event_config_.human_post_guard_sec);
 
@@ -1646,15 +1668,14 @@ void NdtSlamNode::rebuildGlobalMapFiltered() {
         // 应用 dynamic mask（如果有已确认的事件）
         if (dynamic_event_config_.enabled) {
             double kf_time = kf.stamp_.toSec();
-            for (const auto& event : dynamic_event_manager_.getEvents()) {
-                if (!event.confirmed) continue;
-                if (kf_time < event.start_time || kf_time > event.end_time) continue;
+            for (const auto& session : dynamic_event_manager_.getPayloadSessions()) {
+                if (!session.confirmed) continue;
+                if (kf_time < session.first_candidate_time || kf_time > session.end_time + 5.0) continue;
 
-                // 标记受影响的 keyframe
-                if (std::find(event.affected_keyframe_ids.begin(),
-                              event.affected_keyframe_ids.end(),
-                              kf.id_) == event.affected_keyframe_ids.end()) {
-                    const_cast<DynamicEvent&>(event).affected_keyframe_ids.push_back(kf.id_);
+                // 检查点是否在停放保护区域
+                if (session.state == PayloadSessionState::PLACED_STATIC && session.placed_protected) {
+                    // 停放货物不删除
+                    continue;
                 }
             }
         }
@@ -1950,12 +1971,18 @@ void NdtSlamNode::rebuildCleanMap() {
     ROS_INFO("[CleanMap] rebuilding: objects_map=%zu, bev_obs_count=%zu",
              objects_map_->size(), bev_observation_count_.size());
 
-    // ========== Dynamic Deny Gate：获取动态事件的 deny cells ==========
+    // ========== Dynamic Deny Gate + Static Protect ==========
     std::set<std::pair<int,int>> deny_cells;
+    std::set<std::pair<int,int>> protect_cells;
     if (dynamic_event_config_.enabled && dynamic_event_config_.clean_deny_enabled) {
-        deny_cells = dynamic_event_manager_.getDenyCells(0.15, ros::Time::now().toSec());
+        double current_time = ros::Time::now().toSec();
+        deny_cells = dynamic_event_manager_.getDynamicDenyCells(0.15, current_time);
+        protect_cells = dynamic_event_manager_.getStaticProtectCells(0.15, current_time);
         if (!deny_cells.empty()) {
             ROS_INFO("[CleanMapDynamicGate] deny_cells=%zu", deny_cells.size());
+        }
+        if (!protect_cells.empty()) {
+            ROS_INFO("[CleanMapStaticProtect] protect_cells=%zu", protect_cells.size());
         }
     }
 
@@ -2014,12 +2041,27 @@ void NdtSlamNode::rebuildCleanMap() {
 
     int deny_rejected_cells = 0;
     int deny_rejected_points = 0;
+    int protect_kept_cells = 0;
+    int protect_kept_points = 0;
 
     for (auto& [bk, indices] : bev_indices) {
         total_cells++;
 
-        // ========== Dynamic Deny Gate 检查 ==========
         std::pair<int,int> bk_pair = {bk.x, bk.y};
+
+        // ========== Static Protect 优先级最高 ==========
+        if (!protect_cells.empty() && protect_cells.find(bk_pair) != protect_cells.end()) {
+            // 停放保护区域：直接保留，不走 dynamic deny
+            for (int idx : indices) {
+                new_clean->push_back(objects_map_->points[idx]);
+            }
+            protect_kept_cells++;
+            protect_kept_points += indices.size();
+            passed_cells++;
+            continue;
+        }
+
+        // ========== Dynamic Deny Gate ==========
         if (!deny_cells.empty() && deny_cells.find(bk_pair) != deny_cells.end()) {
             deny_rejected_cells++;
             deny_rejected_points += indices.size();
@@ -2052,6 +2094,10 @@ void NdtSlamNode::rebuildCleanMap() {
         }
     }
 
+    if (protect_kept_cells > 0) {
+        ROS_INFO("[CleanMapStaticProtect] protect_cells=%d, protected_points=%d",
+                 protect_kept_cells, protect_kept_points);
+    }
     if (deny_rejected_cells > 0) {
         ROS_INFO("[CleanMapDynamicGate] rejected_cells=%d, rejected_points=%d",
                  deny_rejected_cells, deny_rejected_points);
@@ -2339,21 +2385,24 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 // 只有 safe_objects 进地图
 
                 // ========== DynamicEventManager：吊货动态事件 ==========
-                if (dynamic_event_config_.enabled && track_result.dynamic_tracks > 0) {
+                if (dynamic_event_config_.enabled) {
                     for (const auto& t : payload_tracker_.getTracks()) {
-                        if (t.state == TrackState::DYNAMIC_PAYLOAD) {
-                            // 创建吊货会话事件
+                        if (t.state == TrackState::DYNAMIC_PAYLOAD ||
+                            t.state == TrackState::PENDING_STATIC) {
                             Box3D bbox;
                             bbox.min_pt = t.bbox_min_map.cast<double>();
                             bbox.max_pt = t.bbox_max_map.cast<double>();
                             Eigen::Vector3d centroid_d = t.centroid_map.cast<double>();
-                            int event_id = dynamic_event_manager_.createPayloadSession(
-                                t.first_seen_time, stamp.toSec());
-                            dynamic_event_manager_.confirmPayloadSession(event_id, stamp.toSec());
-                            dynamic_event_manager_.updatePayloadSession(
-                                event_id, stamp.toSec(), centroid_d, bbox);
-                            ROS_INFO("[DynamicEvent] PayloadSession created: id=%d, track_id=%d",
-                                     event_id, t.track_id);
+
+                            int event_id = dynamic_event_manager_.findOrCreatePayloadSession(
+                                t.track_id, stamp.toSec(), centroid_d, bbox, t.velocity);
+
+                            if (event_id >= 0 && t.state == TrackState::DYNAMIC_PAYLOAD) {
+                                dynamic_event_manager_.updatePayloadSession(
+                                    event_id, stamp.toSec(), centroid_d, bbox,
+                                    t.velocity, t.map_displacement);
+                                dynamic_event_manager_.confirmPayloadSession(event_id, stamp.toSec());
+                            }
                         }
                     }
                 }

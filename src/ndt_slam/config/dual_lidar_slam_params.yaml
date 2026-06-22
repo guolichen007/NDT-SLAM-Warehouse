@@ -157,8 +157,22 @@ dynamic_event_manager:
   enabled: true
   # 吊货会话
   payload_min_candidate_frames: 3
-  payload_pre_guard_sec: 8.0
-  payload_post_guard_sec: 15.0
+  payload_pre_guard_sec: 3.0
+  moving_post_guard_sec: 2.0
+  unknown_post_guard_sec: 5.0
+  # 会话合并
+  merge_same_track: true
+  merge_time_gap_sec: 3.0
+  merge_iou_thresh: 0.2
+  max_active_sessions: 3
+  # 停放检测
+  placement_detection_enabled: true
+  stable_window_sec: 4.0
+  stable_frames_thresh: 5
+  stable_map_disp_thresh_m: 0.15
+  stable_velocity_thresh_mps: 0.04
+  placed_bbox_expand_xy: 0.3
+  placed_bbox_expand_z: 0.3
   # 人体事件
   human_pre_guard_sec: 2.0
   human_post_guard_sec: 3.0
@@ -168,3 +182,7 @@ dynamic_event_manager:
   # CleanMap deny gate
   clean_deny_enabled: true
   max_dynamic_ratio: 0.2
+  # 分层地图策略
+  placed_to_objects_clean: true
+  placed_to_display_map: true
+  placed_to_registration_map: false
