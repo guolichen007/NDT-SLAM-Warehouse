@@ -42,19 +42,70 @@
 #### 7. PlacedCargoSuppressor（停放货物抑制器）
 - PLACED_STATIC 后，protect bbox 不仅保护 CleanMap，还反向约束 PayloadTrackManager 和 PayloadSessionManager
 - 禁止在停放区域重新创建动态会话
+- 增强调试日志：输出 centroid、bbox 和 placed_sessions 数量
 
-### 当前进行中
+#### 8. 分层地图策略
+- moving payload 不进任何地图
+- placed cargo 可进 objects_clean 和 display_map
+- rebuildCleanMap：通过 protect_cells 保护停放货物点
+- rebuildDisplayMap：将 placed cargo 的 payload_candidate 点添加到 display_map
 
-#### 调试 PlacedCargoSuppressor
-- 问题：`findOrCreatePayloadSession` 返回 -1，需要检查 `max_active_sessions` 配置和 `findMatchingSession` 逻辑
-- 状态：代码已实现，正在调试中
+#### 9. save_map 确认日志
+- 保存地图时输出 placed sessions 信息
+- 检查 objects_clean_map 和 display_map 中的 placed cargo 点数
+- 输出 mask 使用确认日志
 
-### 待完成
+### 验证数据（使用调运长件.bag 测试）
 
-1. **调试 PlacedCargoSuppressor**：确保停放货物不会被重新识别为新的动态吊货
-2. **验证停放保护**：使用更长的 bag 包验证 PLACED_STATIC 触发和 protect mask 生效
-3. **分层地图策略**：moving payload 不进任何地图，placed cargo 可进 objects_clean/display_map
-4. **save_map 确认日志**：确保最终 PCD 使用了 mask
+#### 测试环境
+- Bag 文件：`/home/ydkj/AutoCraneSlam-ROS1/bag/调运长件.bag`
+- Bag 时长：119.85 秒
+- 关键帧数量：80
+
+#### 测试结果
+```
+[SaveMapMaskConfirm] dynamic_events enabled: placed=0, active=3
+[SaveMapMaskConfirm] display_map contains 0 placed cargo points out of 270680 total
+
+地图输出：
+- map_registration.pcd: 27135 points
+- map_display.pcd: 270680 points
+- map_ground.pcd: 94746 points
+- map_objects_raw.pcd: 146066 points
+- map_objects_filtered.pcd: 255184 points
+- map_payload_candidate.pcd: 55428 points
+- map_human_candidate.pcd: 13901 points
+- map_human_dynamic.pcd: 241 points
+- map_human_pending.pcd: 12705 points
+- map_ground_raw.pcd: 1086316 points
+- map_display_full.pcd: 1341500 points
+```
+
+#### PayloadSession 状态转换
+```
+[PayloadSession] create id=0, track=0
+[PayloadSession] id=0 -> CARRIED_MOVING
+[PayloadSession] id=0 -> CARRIED_STOPPING
+
+PlacementDebug:
+- vel=0.053, disp=0.080, stable=3 (未满足停放条件)
+- vel=0.143, disp=0.219, stable=2
+- vel=0.214, disp=0.333, stable=0
+```
+
+#### 测试结论
+- ✅ 代码编译成功
+- ✅ 系统正常运行
+- ✅ PayloadSession 正确创建和更新
+- ✅ 分层地图策略已实现（代码逻辑正确）
+- ✅ save_map 确认日志已添加
+- ⚠️ 测试 bag 中没有停放事件（货物一直在移动），无法完全验证 PlacedCargoSuppressor
+
+### 待验证
+
+1. **使用包含停放事件的 bag 验证**：需要货物被放下并静止的场景
+2. **验证 PlacedCargoSuppressor**：确保停放货物不会被重新识别为新的动态吊货
+3. **验证分层地图**：确认 placed cargo 点正确进入 objects_clean 和 display_map
 
 ---
 

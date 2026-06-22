@@ -1752,6 +1752,35 @@ void NdtSlamNode::rebuildDisplayMap() {
                     display_map_->push_back(point);
                 }
             }
+
+            // ========== Placed Cargo: 将停放货物的 payload_candidate 点添加到 display_map ==========
+            if (dynamic_event_config_.enabled && dynamic_event_config_.placed_to_display_map) {
+                // 变换 payload_candidates 到 map
+                pcl::PointCloud<pcl::PointXYZ> payload_cand_transformed;
+                if (ch_result.payload_candidates && !ch_result.payload_candidates->empty()) {
+                    pcl::transformPointCloud(*ch_result.payload_candidates, payload_cand_transformed, transform.cast<float>());
+                }
+
+                // 检查是否有 PLACED_STATIC session 覆盖当前 keyframe 时间
+                double kf_time = kf.stamp_.toSec();
+                for (const auto& session : dynamic_event_manager_.getPayloadSessions()) {
+                    if (session.state != PayloadSessionState::PLACED_STATIC) continue;
+                    if (!session.placed_protected) continue;
+
+                    // 检查 keyframe 时间是否在 session 时间范围内
+                    if (kf_time < session.first_candidate_time || kf_time > session.placed_time + 10.0) continue;
+
+                    // 将 payload_candidate 点添加到 display_map（如果在 placed_bbox 内）
+                    for (const auto& point : payload_cand_transformed.points) {
+                        if (std::abs(point.x) <= max_map_size_ && std::abs(point.y) <= max_map_size_ &&
+                            std::abs(point.z) <= max_map_size_ && std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)) {
+                            if (session.placed_bbox.contains(point)) {
+                                display_map_->push_back(point);
+                            }
+                        }
+                    }
+                }
+            }
         } else {
             // 旧逻辑
             pcl::PointCloud<pcl::PointXYZ> transformed;
@@ -1989,6 +2018,17 @@ void NdtSlamNode::rebuildCleanMap() {
     const double clean_bev_cell = 0.15;
     const int clean_min_points = 3;
 
+    // ========== 构建 payload_candidate 的 BEV 索引（用于 placed cargo 保护）==========
+    std::map<BevKey, std::vector<int>> payload_cand_bev_indices;
+    if (!protect_cells.empty() && rebuild_payload_candidate_ && !rebuild_payload_candidate_->empty()) {
+        for (int i = 0; i < (int)rebuild_payload_candidate_->size(); ++i) {
+            const auto& p = rebuild_payload_candidate_->points[i];
+            BevKey bk{(int)std::floor(p.x / clean_bev_cell), (int)std::floor(p.y / clean_bev_cell)};
+            payload_cand_bev_indices[bk].push_back(i);
+        }
+        ROS_INFO("[CleanMapPlacedCargo] payload_candidate BEV cells=%zu", payload_cand_bev_indices.size());
+    }
+
     // 使用 objects_map_ 的全局 z 最小值作为地面参考
     float obj_z_min = 1e9;
     for (const auto& p : objects_map_->points) {
@@ -2055,6 +2095,18 @@ void NdtSlamNode::rebuildCleanMap() {
             for (int idx : indices) {
                 new_clean->push_back(objects_map_->points[idx]);
             }
+
+            // 将 placed cargo 的 payload_candidate 点也添加到 clean map
+            auto payload_it = payload_cand_bev_indices.find(bk);
+            if (payload_it != payload_cand_bev_indices.end()) {
+                for (int idx : payload_it->second) {
+                    new_clean->push_back(rebuild_payload_candidate_->points[idx]);
+                }
+                protect_kept_points += payload_it->second.size();
+                ROS_DEBUG("[CleanMapPlacedCargo] added %zu payload_candidate points to protect cell (%d,%d)",
+                          payload_it->second.size(), bk.x, bk.y);
+            }
+
             protect_kept_cells++;
             protect_kept_points += indices.size();
             passed_cells++;
@@ -2401,7 +2453,14 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                                 static int suppress_count = 0;
                                 suppress_count++;
                                 if (suppress_count % 10 == 1) {
-                                    ROS_INFO("[PlacedCargoSuppressor] suppress track=%d, reason=inside_placed_bbox", t.track_id);
+                                    ROS_INFO("[PlacedCargoSuppressor] suppress track=%d, reason=inside_placed_bbox, "
+                                             "centroid=(%.2f,%.2f,%.2f), bbox=(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f), "
+                                             "placed_sessions=%zu",
+                                             t.track_id,
+                                             centroid_d.x(), centroid_d.y(), centroid_d.z(),
+                                             bbox.min_pt.x(), bbox.min_pt.y(), bbox.min_pt.z(),
+                                             bbox.max_pt.x(), bbox.max_pt.y(), bbox.max_pt.z(),
+                                             dynamic_event_manager_.getPlacedSessions().size());
                                 }
                                 continue;  // 跳过，不创建 session
                             }
@@ -3150,6 +3209,57 @@ void NdtSlamNode::saveMultiLayerMaps(const std::string& session_dir) {
         if (display_full && !display_full->empty()) total_saved++;
 
         ROS_INFO("Saved %d multi-layer maps to %s", total_saved, session_dir.c_str());
+
+        // ========== Mask 确认日志 ==========
+        if (dynamic_event_config_.enabled) {
+            auto placed_sessions = dynamic_event_manager_.getPlacedSessions();
+            auto active_sessions = dynamic_event_manager_.getActivePayloadSessions();
+            ROS_INFO("[SaveMapMaskConfirm] dynamic_events enabled: placed=%zu, active=%zu",
+                     placed_sessions.size(), active_sessions.size());
+
+            if (!placed_sessions.empty()) {
+                ROS_INFO("[SaveMapMaskConfirm] placed cargo protected in objects_clean and display_map:");
+                for (const auto* session : placed_sessions) {
+                    ROS_INFO("[SaveMapMaskConfirm]   session=%d, bbox=(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f), placed_time=%.2f",
+                             session->id,
+                             session->placed_bbox.min_pt.x(), session->placed_bbox.min_pt.y(), session->placed_bbox.min_pt.z(),
+                             session->placed_bbox.max_pt.x(), session->placed_bbox.max_pt.y(), session->placed_bbox.max_pt.z(),
+                             session->placed_time);
+                }
+            }
+
+            // 检查 objects_clean_map 是否包含 placed cargo 点
+            if (objects_clean_map_ && !objects_clean_map_->empty()) {
+                int placed_points = 0;
+                for (const auto& p : objects_clean_map_->points) {
+                    for (const auto* session : placed_sessions) {
+                        if (session->placed_bbox.contains(p)) {
+                            placed_points++;
+                            break;
+                        }
+                    }
+                }
+                ROS_INFO("[SaveMapMaskConfirm] objects_clean_map contains %d placed cargo points out of %zu total",
+                         placed_points, objects_clean_map_->size());
+            }
+
+            // 检查 display_map 是否包含 placed cargo 点
+            if (display_map_ && !display_map_->empty()) {
+                int placed_points = 0;
+                for (const auto& p : display_map_->points) {
+                    for (const auto* session : placed_sessions) {
+                        if (session->placed_bbox.contains(p)) {
+                            placed_points++;
+                            break;
+                        }
+                    }
+                }
+                ROS_INFO("[SaveMapMaskConfirm] display_map contains %d placed cargo points out of %zu total",
+                         placed_points, display_map_->size());
+            }
+        } else {
+            ROS_INFO("[SaveMapMaskConfirm] dynamic_events disabled, no mask applied");
+        }
     } catch (const std::exception& e) {
         ROS_ERROR("Exception saving multi-layer maps: %s", e.what());
     }
