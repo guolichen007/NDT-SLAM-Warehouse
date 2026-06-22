@@ -196,6 +196,15 @@ void DynamicEventManager::endPayloadSession(int event_id, double current_time) {
 void DynamicEventManager::updatePlacementDetection(PayloadSession& session, double current_time) {
     if (!config_.placement_detection_enabled) return;
 
+    // 调试日志
+    static int debug_count = 0;
+    debug_count++;
+    if (debug_count % 10 == 1) {
+        ROS_INFO("[PlacementDebug] id=%d vel=%.3f disp=%.3f stable=%d thresh_vel=%.3f thresh_disp=%.3f",
+                 session.id, session.velocity, session.map_displacement,
+                 session.stable_frames, config_.stable_velocity_thresh_mps, config_.stable_map_disp_thresh_m);
+    }
+
     // 检查稳定性
     if (session.velocity < config_.stable_velocity_thresh_mps &&
         session.map_displacement < config_.stable_map_disp_thresh_m) {

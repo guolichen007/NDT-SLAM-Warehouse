@@ -102,7 +102,7 @@ payload_tracker:
   cluster_tolerance: 0.5
   max_match_distance: 1.0
   max_match_bbox_ratio: 0.6
-  window_sec: 3.0
+  window_sec: 2.0
   motion_confirm_frames: 3
   displacement_thresh: 0.25
   velocity_thresh: 0.05

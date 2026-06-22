@@ -2,6 +2,62 @@
 
 基于 NDT_OMP 的激光雷达 SLAM 系统，面向起重机仓库场景，支持多次运行 bag 文件进行迭代优化，最终生成高质量的多层地图。
 
+## 当前开发状态（feature/placed-cargo-suppressor 分支）
+
+### 已完成功能
+
+#### 1. 人体动态过滤 (HumanObjectDynamicFilter)
+- 从 objects_cloud 中检测小型地面动态人体点云
+- 先 BEV 聚类，再判断聚类是否符合人体特征
+- 支持 map 坐标系下动态确认
+- 从 NDT 输入、地图插入、关键帧保存、rebuild 中统一剔除人体点
+
+#### 2. 吊货动态过滤 (BasePayloadChannelFilter + PayloadTrackManager)
+- BasePayloadChannelFilter：base_link 下中间通道吊货候选筛选
+- PayloadTrackManager：双坐标系吊货跟踪，确认 DYNAMIC_PAYLOAD
+- 支持 swept volume 生成
+
+#### 3. 动态事件管理器 (DynamicEventManager)
+- 统一管理吊货会话和人体轨迹事件
+- PayloadSession 状态机：CANDIDATE → CARRIED_MOVING → CARRIED_STOPPING → PLACED_STATIC → CLOSED
+- PayloadSession 去重合并：同 track_id 或 bbox IoU > 0.2 不重复创建
+- FinalPlacementProtector：连续稳定 5 帧、velocity < 0.04、map_disp < 0.15 判定为停放
+- CleanMap protect mask 优先于 deny mask：停放货物不被删除
+
+#### 4. 地图重建 (rebuildGlobalMapFiltered)
+- 从 filtered keyframes + optimized poses 重建所有地图层
+- dirty_dynamic 的 keyframe 会重新过滤
+- 应用 dynamic event mask
+- 输出详细的重建日志
+
+#### 5. CleanMap Dynamic Deny Gate
+- CleanMap 重建时跳过动态事件覆盖的 BEV cell
+- 支持 static_protect_mask 优先级
+- 输出拒绝统计日志
+
+#### 6. 扩展 rebuild_map 输出
+- rebuild_map 服务输出 11 个 PCD 文件
+- 包括：registration、display、ground、objects_raw、objects_filtered、payload_candidate、human_candidate、human_dynamic、human_pending、ground_raw、display_full
+
+#### 7. PlacedCargoSuppressor（停放货物抑制器）
+- PLACED_STATIC 后，protect bbox 不仅保护 CleanMap，还反向约束 PayloadTrackManager 和 PayloadSessionManager
+- 禁止在停放区域重新创建动态会话
+
+### 当前进行中
+
+#### 调试 PlacedCargoSuppressor
+- 问题：`findOrCreatePayloadSession` 返回 -1，需要检查 `max_active_sessions` 配置和 `findMatchingSession` 逻辑
+- 状态：代码已实现，正在调试中
+
+### 待完成
+
+1. **调试 PlacedCargoSuppressor**：确保停放货物不会被重新识别为新的动态吊货
+2. **验证停放保护**：使用更长的 bag 包验证 PLACED_STATIC 触发和 protect mask 生效
+3. **分层地图策略**：moving payload 不进任何地图，placed cargo 可进 objects_clean/display_map
+4. **save_map 确认日志**：确保最终 PCD 使用了 mask
+
+---
+
 ## 项目背景
 
 起重机仓库场景，传感器安装在约 8m 高度俯视金属物料堆场。该场景下 KISS-ICP 完全退化（地面点占比 80-88%，导致平面退化），因此采用 NDT_OMP + 特征点加权的混合策略，配合工程化的多轮迭代建图流程。

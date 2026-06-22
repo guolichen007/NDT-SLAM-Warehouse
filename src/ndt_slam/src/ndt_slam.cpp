@@ -2409,6 +2409,10 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                             int event_id = dynamic_event_manager_.findOrCreatePayloadSession(
                                 t.track_id, stamp.toSec(), centroid_d, bbox, t.velocity);
 
+                            // 调试日志（每次都打印）
+                            ROS_INFO("[PayloadSessionDebug] track=%d state=%d event_id=%d vel=%.3f disp=%.3f",
+                                     t.track_id, (int)t.state, event_id, t.velocity, t.map_displacement);
+
                             if (event_id >= 0 && t.state == TrackState::DYNAMIC_PAYLOAD) {
                                 dynamic_event_manager_.updatePayloadSession(
                                     event_id, stamp.toSec(), centroid_d, bbox,
