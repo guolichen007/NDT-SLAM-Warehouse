@@ -2110,6 +2110,8 @@ void NdtSlamNode::rebuildCleanMap() {
     }
 
     publishObjectsCleanMap();
+    ROS_INFO("[CleanMapMaskStatus] using_mask=true, deny_cells=%zu, protect_cells=%zu, deny_rejected=%d, protect_kept=%d",
+             deny_cells.size(), protect_cells.size(), deny_rejected_cells, protect_kept_cells);
     ROS_INFO("[CleanMap] rebuilt: %d/%d cells passed (near=%d/%d mid=%d/%d far=%d/%d), points=%zu",
              passed_cells, total_cells,
              near_passed, near_passed + near_failed,
@@ -2393,6 +2395,16 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                             bbox.min_pt = t.bbox_min_map.cast<double>();
                             bbox.max_pt = t.bbox_max_map.cast<double>();
                             Eigen::Vector3d centroid_d = t.centroid_map.cast<double>();
+
+                            // ========== PlacedCargoSuppressor ==========
+                            if (dynamic_event_manager_.shouldSuppressNewSession(centroid_d, bbox)) {
+                                static int suppress_count = 0;
+                                suppress_count++;
+                                if (suppress_count % 10 == 1) {
+                                    ROS_INFO("[PlacedCargoSuppressor] suppress track=%d, reason=inside_placed_bbox", t.track_id);
+                                }
+                                continue;  // 跳过，不创建 session
+                            }
 
                             int event_id = dynamic_event_manager_.findOrCreatePayloadSession(
                                 t.track_id, stamp.toSec(), centroid_d, bbox, t.velocity);
@@ -2927,6 +2939,9 @@ bool NdtSlamNode::saveMapService(lidar_slam2_msgs::SaveMap::Request& request,
         response.saved_file_path = file_path;
 
         if (response.success) {
+            ROS_INFO("[SaveMap] using_filtered_keyframes=true, placed_cargo_masks=%zu, dynamic_events=%zu",
+                     dynamic_event_manager_.getPlacedSessions().size(),
+                     dynamic_event_manager_.getActiveCount());
             ROS_INFO("Map saved: %s, points: %lu", file_path.c_str(), global_map_->size());
 
             // 同时保存关键帧数据库

@@ -220,6 +220,16 @@ public:
     std::vector<const PayloadSession*> getActivePayloadSessions() const;
     std::vector<const PayloadSession*> getPlacedSessions() const;
 
+    // ========== PlacedCargoSuppressor ==========
+
+    // 检查是否应该抑制新的 payload session 创建
+    bool shouldSuppressNewSession(const Eigen::Vector3d& centroid,
+                                   const Box3D& bbox) const;
+
+    // 检查 track 是否在停放区域内
+    bool isTrackInPlacedArea(const Eigen::Vector3d& centroid,
+                              const Box3D& bbox) const;
+
     // ========== Mask 生成 ==========
 
     // 获取 dynamic deny cells（只包含移动阶段）

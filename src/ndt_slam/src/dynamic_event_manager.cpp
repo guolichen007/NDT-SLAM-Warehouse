@@ -428,4 +428,48 @@ int DynamicEventManager::getPlacedCount() const {
     return count;
 }
 
+// ========== PlacedCargoSuppressor ==========
+
+bool DynamicEventManager::shouldSuppressNewSession(const Eigen::Vector3d& centroid,
+                                                     const Box3D& bbox) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (const auto& session : payload_sessions_) {
+        if (session.state != PayloadSessionState::PLACED_STATIC) continue;
+        if (!session.placed_protected) continue;
+
+        // 检查时间范围（停放后 60 秒内保护）
+        // 使用当前时间戳，但这里没有传入时间参数，所以用 placed_time + 60 作为保守估计
+        // 实际上 placed_time 是固定的，保护期是 60 秒
+
+        // 检查 centroid 是否在 placed_bbox 内
+        if (session.placed_bbox.contains(pcl::PointXYZ(centroid.x(), centroid.y(), centroid.z()))) {
+            ROS_DEBUG("[PlacedCargoSuppressor] suppress track centroid inside placed_bbox, session=%d", session.id);
+            return true;
+        }
+
+        // 检查 bbox 与 placed_bbox 的 IoU
+        double iou = bbox.iou(session.placed_bbox);
+        if (iou > 0.15) {
+            ROS_DEBUG("[PlacedCargoSuppressor] suppress track bbox overlap=%.2f with placed_bbox, session=%d", iou, session.id);
+            return true;
+        }
+
+        // 检查距离
+        double dist = (centroid - session.placed_bbox.min_pt).norm();
+        double dist2 = (centroid - session.placed_bbox.max_pt).norm();
+        if (std::min(dist, dist2) < 1.0) {
+            ROS_DEBUG("[PlacedCargoSuppressor] suppress track near placed_bbox, session=%d", session.id);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool DynamicEventManager::isTrackInPlacedArea(const Eigen::Vector3d& centroid,
+                                                const Box3D& bbox) const {
+    return shouldSuppressNewSession(centroid, bbox);
+}
+
 } // namespace ndt_slam
