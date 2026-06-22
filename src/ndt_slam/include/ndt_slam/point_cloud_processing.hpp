@@ -130,24 +130,6 @@ public:
     float getLocalGroundHeight(float x, float y) const;
 
     // ========== 动态货物过滤 ==========
-    // PLC 模式：使用吊钩 ROI 过滤（预留接口）
-    struct HookState {
-        bool valid = false;
-        Eigen::Vector3d position = Eigen::Vector3d::Zero();  // base_link 坐标系
-        bool is_carrying = false;
-        double payload_length = 3.0;  // 货物估计长度
-        double payload_width = 1.0;   // 货物估计宽度
-        double payload_height = 2.0;  // 货物估计高度范围
-    };
-
-    // 更新吊钩状态（PLC 接口）
-    void updateHookState(const HookState& hook_state);
-
-    // 过滤动态货物（PLC 模式）
-    pcl::PointCloud<pcl::PointXYZ>::Ptr filterPayloadByROI(
-        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-        pcl::PointCloud<pcl::PointXYZ>::Ptr payload_out = nullptr);
-
     // 过滤动态货物（点云自检测模式）
     // 检测并剔除在 base_link 坐标系中相对稳定、但在 map 坐标系中移动的大物体
     pcl::PointCloud<pcl::PointXYZ>::Ptr filterPayloadByTracking(

@@ -397,43 +397,6 @@ float PointCloudProcessing::computeDistance(const pcl::PointXYZ& point) const {
 
 // ========== 动态货物过滤实现 ==========
 
-static PointCloudProcessing::HookState g_hook_state;
-
-void PointCloudProcessing::updateHookState(const HookState& hook_state) {
-    g_hook_state = hook_state;
-}
-
-pcl::PointCloud<pcl::PointXYZ>::Ptr PointCloudProcessing::filterPayloadByROI(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-    pcl::PointCloud<pcl::PointXYZ>::Ptr payload_out) {
-
-    if (!cloud || cloud->empty()) return cloud;
-    if (!g_hook_state.valid || !g_hook_state.is_carrying) return cloud;
-
-    // PLC 模式：使用吊钩 ROI 过滤
-    Eigen::Vector3d hook = g_hook_state.position;
-    double half_l = g_hook_state.payload_length / 2.0 + 0.5;  // 安全余量
-    double half_w = g_hook_state.payload_width / 2.0 + 0.5;
-    double z_min = hook.z() - g_hook_state.payload_height;
-    double z_max = hook.z() + 1.0;
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZ>);
-    for (const auto& p : cloud->points) {
-        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
-
-        // 检查是否在 ROI 内
-        double dx = p.x - hook.x();
-        double dy = p.y - hook.y();
-        if (std::abs(dx) < half_l && std::abs(dy) < half_w && p.z > z_min && p.z < z_max) {
-            if (payload_out) payload_out->push_back(p);
-        } else {
-            filtered->push_back(p);
-        }
-    }
-
-    return filtered;
-}
-
 pcl::PointCloud<pcl::PointXYZ>::Ptr PointCloudProcessing::filterPayloadByTracking(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud,
     const Eigen::Matrix4d& current_pose,

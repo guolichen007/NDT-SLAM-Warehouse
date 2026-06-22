@@ -39,12 +39,8 @@ public:
     // 主接口：分流 objects 点云
     GatedObjects gate(const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud);
 
-    // PLC 扩展接口（预留）
-    void updateHookState(const PointCloudProcessing::HookState& hook_state);
-
 private:
     PayloadGateConfig config_;
-    PointCloudProcessing::HookState hook_state_;
 };
 
 } // namespace ndt_slam
