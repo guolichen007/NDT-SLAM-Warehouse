@@ -1,0 +1,159 @@
+# 长期建图配置文件
+# 用于 warehouse_live_longterm_mapping.launch
+
+# 点云话题
+pointcloud_topic: "/merged_points"
+odom_topic: "/odom"
+pose_topic: "/current_pose"
+map_topic: "/map"
+current_cloud_topic: "/mapping_current_cloud"
+
+# 坐标系
+odom_frame: "odom"
+base_frame: "base_link"
+map_frame: "map"
+
+# 发布 TF
+publish_tf: true
+
+# 地图参数
+map_voxel_size: 0.30
+display_voxel_size: 0.10
+ground_voxel_size: 0.15
+objects_voxel_size: 0.08
+max_map_size: 200.0
+use_voxel_filter: true
+map_update_interval: 1
+
+# 网格地面模型
+grid_cell_size: 2.0
+height_above_ground: 0.35
+
+# 近场过滤
+near_field_radius: 4.0
+near_field_z_min: 3.0
+
+# NDT_OMP 配置
+ndt_omp:
+  resolution: 1.0
+  step_size: 0.1
+  transformation_epsilon: 0.01
+  max_iterations: 50
+
+# 动态点过滤
+dynamic_filter:
+  enabled: true
+  mean_k: 20
+  stddev_mul_thresh: 1.5
+
+# 特征提取
+feature_extraction:
+  enabled: false
+  voxel_size: 0.20
+  height_diff_threshold: 0.10
+  feature_weight: 8
+
+# 闭环检测
+loop_closure:
+  enabled: true
+  detection_interval: 20
+
+# ========== 长期建图配置 ==========
+
+# 长期建图模式
+longterm_mapping:
+  enabled: true
+
+# MotionGate：静止检测和门控
+motion_gate:
+  enabled: true
+  min_translation_m: 0.30      # 最小位移（米）
+  min_rotation_deg: 3.0        # 最小旋转（度）
+  min_time_between_keyframes_sec: 2.0  # 最小时间间隔（秒）
+
+# 关键帧 active window
+online_cache:
+  max_active_keyframes: 80     # 最大活跃关键帧数
+  release_check_interval: 10   # 检查释放间隔（帧数）
+
+# 磁盘增量保存
+persistent_map:
+  enabled: true
+  root_dir: "/home/ydkj/NDT-slam-ws/maps/live/current"
+  tile_size_m: 20.0            # tile 大小（米）
+  flush_interval_sec: 60       # flush 间隔（秒）
+  max_dirty_tiles_in_memory: 20  # 最大 dirty tile 数量
+  write_tmp_then_rename: true  # 先写临时文件再重命名
+  tile_voxel_registration: 0.30
+  tile_voxel_display: 0.10
+  tile_voxel_ground: 0.15
+  tile_voxel_objects: 0.08
+
+# 磁盘保护
+disk_guard:
+  enabled: true
+  min_free_disk_gb: 50         # 最小空闲磁盘空间（GB）
+  pause_mapping_when_low: true # 磁盘空间不足时暂停写入
+
+# Active map 重建策略
+active_map:
+  max_active_keyframes: 80
+  rebuild_every_keyframes: 10
+  registration_voxel: 0.30
+  display_voxel: 0.10
+  objects_voxel: 0.08
+
+# ========== 吊货过滤配置 ==========
+
+# BasePayloadChannelFilter
+base_payload_channel:
+  enabled: true
+  lateral_center: 0.0
+  lateral_half_width: 3.0
+  longitudinal_min: -10.0
+  longitudinal_max: 10.0
+  min_object_hag: 0.40
+  min_payload_points: 20
+  expand_xy: 0.5
+
+# PayloadTrackManager
+payload_tracker:
+  enabled: true
+  base_stability_std_thresh: 0.35
+
+# DynamicEventManager
+dynamic_event_manager:
+  enabled: true
+  payload_min_candidate_frames: 3
+  payload_pre_guard_sec: 3.0
+  moving_post_guard_sec: 2.0
+  unknown_post_guard_sec: 5.0
+  merge_same_track: true
+  merge_time_gap_sec: 3.0
+  merge_iou_thresh: 0.2
+  max_active_sessions: 3
+  placement_detection_enabled: true
+  stable_window_sec: 4.0
+  stable_frames_thresh: 5
+  stable_map_disp_thresh_m: 0.15
+  stable_velocity_thresh_mps: 0.04
+  placed_bbox_expand_xy: 0.3
+  placed_bbox_expand_z: 0.3
+  clean_deny_enabled: true
+
+# ========== 人体过滤配置 ==========
+
+human_object_filter:
+  enabled: true
+  min_hag: 0.35
+  max_hag: 2.30
+  min_cluster_height: 0.60
+  max_cluster_height: 2.20
+  min_points: 20
+  max_points: 2000
+  min_area_m2: 0.04
+  max_area_m2: 1.20
+  max_width_m: 1.00
+  max_length_m: 1.00
+  bev_resolution: 0.10
+  merge_gap_m: 0.15

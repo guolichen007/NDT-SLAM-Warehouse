@@ -33,6 +33,7 @@ find_package(yaml-cpp REQUIRED)
 find_package(g2o REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(ndt_omp REQUIRED)
+find_package(Boost REQUIRED COMPONENTS filesystem)
 
 catkin_package(
   INCLUDE_DIRS include
@@ -130,6 +131,7 @@ target_link_libraries(ndt_slam_lib
   ${OPENGL_LIBRARIES}
   ${GLFW_LIBRARIES}
   ${ndt_omp_LIBRARIES}
+  Boost::filesystem
   pthread
   dl
   usb-1.0

@@ -1,0 +1,35 @@
+<launch>
+    <!-- 长期运行建图模式 -->
+    <!-- 用途：雷达常开，天车静止时不重复建图，天车移动时增量落盘 -->
+
+    <!-- 参数 -->
+    <arg name="use_sim_time" default="false"/>
+    <arg name="use_rviz" default="true"/>
+
+    <!-- 设置使用真实时间（现场必须） -->
+    <param name="/use_sim_time" value="$(arg use_sim_time)"/>
+
+    <!-- SLAM 节点 -->
+    <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen">
+        <param name="config_file" value="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
+    </node>
+
+    <!-- 点云合并节点 -->
+    <node name="pointcloud_merger" pkg="ndt_slam" type="pointcloud_merger" output="screen">
+        <rosparam command="load" file="$(find ndt_slam)/config/merger_params.yaml"/>
+    </node>
+
+    <!-- 雷达到 base_link 的 TF -->
+    <node name="base_link_to_rslidar" pkg="tf" type="static_transform_publisher"
+          args="0 0 0 0 0 0 base_link rslidar 100"/>
+
+    <!-- RViz 可视化（可选） -->
+    <group if="$(arg use_rviz)">
+        <node name="rviz" pkg="rviz" type="rviz"
+              args="-d $(find ndt_slam)/launch/rviz.rviz"/>
+    </group>
+
+    <!-- 输出信息 -->
+    <param name="mode" value="longterm_mapping"/>
+    <param name="config_file" value="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
+</launch>

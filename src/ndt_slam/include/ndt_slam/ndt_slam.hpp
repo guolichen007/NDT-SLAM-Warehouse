@@ -342,6 +342,50 @@ private:
     DynamicEventManager dynamic_event_manager_;
     DynamicEventConfig dynamic_event_config_;
 
+    // ========== 长期建图功能 ==========
+    // MotionGate：静止检测和门控
+    bool longterm_mapping_enabled_ = false;
+    bool motion_gate_enabled_ = false;
+    double motion_gate_min_translation_m_ = 0.30;
+    double motion_gate_min_rotation_deg_ = 3.0;
+    double motion_gate_min_time_sec_ = 2.0;
+    Sophus::SE3d last_keyframe_pose_for_gate_;
+    ros::Time last_keyframe_time_for_gate_;
+    bool is_stationary_ = false;
+    int stationary_frame_count_ = 0;
+    int moved_frame_count_ = 0;
+
+    // 关键帧 active window
+    int max_active_keyframes_ = 80;
+    int keyframes_since_last_release_ = 0;
+    int keyframe_release_interval_ = 10;
+
+    // MotionGate 判定函数
+    bool shouldCommitKeyframe(const Sophus::SE3d& current_pose, const ros::Time& current_time);
+    void releaseOldKeyframeClouds();
+
+    // 磁盘 tile 写入
+    bool persistent_map_enabled_ = false;
+    std::string persistent_map_root_dir_;
+    double tile_size_m_ = 20.0;
+    int flush_interval_sec_ = 60;
+    int max_dirty_tiles_ = 20;
+    std::map<std::string, pcl::PointCloud<pcl::PointXYZ>::Ptr> dirty_tiles_;
+    ros::Time last_flush_time_;
+
+    // runtime status
+    int total_frames_ = 0;
+    int total_keyframes_ = 0;
+    int active_keyframes_ = 0;
+    int dirty_tile_count_ = 0;
+    int flushed_tile_count_ = 0;
+    double delta_translation_ = 0.0;
+    double delta_yaw_ = 0.0;
+    double average_process_time_ms_ = 0.0;
+    double average_ndt_time_ms_ = 0.0;
+
+    void writeRuntimeStatus();
+    void flushDirtyTiles();
 
     // 边缘保留点云融合
     struct VoxelData {

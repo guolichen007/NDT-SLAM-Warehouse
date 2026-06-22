@@ -100,6 +100,7 @@ public:
     void addKeyFrame(const Sophus::SE3d& pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const ros::Time& stamp);
 
     const std::deque<KeyFrame>& getKeyFrames() const { return keyframes_; }
+    std::deque<KeyFrame>& getKeyFramesNonConst() { return keyframes_; }
     const KeyFrame* getLastKeyFrame() const {
         return keyframes_.empty() ? nullptr : &keyframes_.back();
     }
