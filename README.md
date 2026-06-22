@@ -109,6 +109,94 @@ PlacementDebug:
 
 ---
 
+## 长期建图功能（feature/longterm-mapping 分支）
+
+### 功能概述
+
+支持雷达常开、天车静止时不重复建图、天车移动时增量落盘、内存和硬盘都有上限保护。
+
+### 已完成功能
+
+#### 1. MotionGate（地图提交门控）
+- 静止检测：`min_translation_m: 0.30`，`min_rotation_deg: 3.0`
+- 时间间隔：`min_time_between_keyframes_sec: 2.0`
+- 静止时不添加关键帧，移动时才提交
+
+#### 2. 关键帧 active window
+- 最大活跃关键帧数：`max_active_keyframes: 80`
+- 定期释放旧关键帧的点云，保留 metadata
+
+#### 3. 磁盘增量保存（tile）
+- tile 大小：`tile_size_m: 20.0`
+- flush 间隔：`flush_interval_sec: 60`
+- 先写临时文件再重命名（防断电损坏）
+
+#### 4. runtime status
+- 每 5 秒写入 `runtime_status.json`
+- 包含帧数、关键帧、内存、磁盘等信息
+
+### 新增文件
+
+| 文件 | 说明 |
+|------|------|
+| `launch/warehouse_live_longterm_mapping.launch` | 长期运行 launch |
+| `config/live_longterm_mapping.yaml` | 长期运行全部参数 |
+| `scripts/monitor_longterm.sh` | 过夜监控脚本 |
+
+### 验证数据（使用调运长件.bag 测试）
+
+#### 测试环境
+- Bag 文件：`/home/ydkj/AutoCraneSlam-ROS1/bag/调运长件.bag`
+- Bag 时长：119.85 秒
+
+#### 测试结果
+```
+runtime_status.json:
+{
+  "total_frames": 759,
+  "total_keyframes": 27,
+  "active_keyframes": 27,
+  "is_stationary": false,
+  "delta_translation_m": 0.01,
+  "delta_yaw_deg": 0.04,
+  "active_map_points": 9147,
+  "dirty_tile_count": 1,
+  "flushed_tile_count": 2,
+  "disk_free_gb": 70.48,
+  "memory_mb": 123.93,
+  "average_process_time_ms": 150.77
+}
+
+tiles_registration 目录：
+- x0_y0.pcd (34KB)
+- x0_y-1.pcd (716KB)
+```
+
+#### 测试结论
+- ✅ MotionGate 生效（27 个关键帧，而非 80+）
+- ✅ tiles 写入正常（2 个 tile 文件）
+- ✅ runtime_status.json 正常更新
+- ✅ 内存稳定（124MB）
+- ✅ 磁盘增量保存正常
+
+### 使用方法
+
+```bash
+# 启动长期建图模式
+roslaunch ndt_slam warehouse_live_longterm_mapping.launch
+
+# 使用 bag 测试（use_sim_time=true）
+roslaunch ndt_slam warehouse_live_longterm_mapping.launch use_sim_time:=true
+
+# 监控运行状态
+bash src/ndt_slam/scripts/monitor_longterm.sh 60
+
+# 查看 runtime_status.json
+cat maps/live/current/runtime_status.json | python3 -m json.tool
+```
+
+---
+
 ## 项目背景
 
 起重机仓库场景，传感器安装在约 8m 高度俯视金属物料堆场。该场景下 KISS-ICP 完全退化（地面点占比 80-88%，导致平面退化），因此采用 NDT_OMP + 特征点加权的混合策略，配合工程化的多轮迭代建图流程。
