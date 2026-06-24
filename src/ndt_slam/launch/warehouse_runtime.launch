@@ -6,6 +6,10 @@
     <arg name="localization_only" default="true"/>
     <arg name="use_sim_time" default="true"/>
 
+    <!-- 重定位参数 -->
+    <arg name="auto_relocalize_on_start" default="true"/>
+    <arg name="scan_context_database_dir" default="$(arg map_dir)"/>
+
     <!-- 设置使用仿真时间 -->
     <param name="/use_sim_time" value="$(arg use_sim_time)"/>
 
@@ -13,7 +17,17 @@
     <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen">
         <param name="config_file" value="$(find ndt_slam)/config/slam_params.yaml"/>
         <param name="localization_only" value="$(arg localization_only)"/>
-        <param name="map_file" value="$(arg map_dir)/registration_map.pcd"/>
+        <param name="map_file" value="$(arg map_dir)/registration_map_fixed.pcd"/>
+        <param name="scan_context_database_dir" value="$(arg scan_context_database_dir)"/>
+        <param name="auto_relocalize_on_start" value="$(arg auto_relocalize_on_start)"/>
+        <param name="relocalization_enable" value="true"/>
+        <param name="reloc_top_k" value="5"/>
+        <param name="reloc_sc_score_threshold" value="0.72"/>
+        <param name="reloc_ndt_fitness_threshold" value="1.5"/>
+        <param name="constrain_crane_motion" value="true"/>
+        <param name="reloc_use_yaw_alignment" value="false"/>
+        <param name="reloc_yaw_search_sectors" value="0"/>
+        <param name="reloc_max_yaw_error_deg" value="3.0"/>
 
         <!-- 话题重映射 -->
         <remap from="/points_raw" to="/merged_points"/>

@@ -219,6 +219,33 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     ROS_INFO("NDT_OMP initialized: resolution=%.2f, step_size=%.2f, max_iter=%d",
              ndt_resolution_, ndt_step_size_, ndt_max_iterations_);
 
+    // ========== 定位模式：加载地图和 ScanContext 数据库 ==========
+    nh_.param<bool>("localization_only", localization_only_, false);
+    nh_.param<std::string>("map_file", map_file_, "");
+    nh_.param<std::string>("scan_context_database_dir", relocalization_database_dir_, "");
+
+    if (localization_only_) {
+        ROS_INFO("[Runtime] Localization mode enabled");
+
+        // 加载定位地图
+        if (!map_file_.empty()) {
+            if (pcl::io::loadPCDFile(map_file_, *global_map_) == 0) {
+                ndt_->setInputTarget(global_map_);
+                ROS_INFO("[Runtime] Loaded map_file: %s, points=%zu", map_file_.c_str(), global_map_->size());
+            } else {
+                ROS_ERROR("[Runtime] Failed to load map_file: %s", map_file_.c_str());
+            }
+        }
+
+        // 加载 ScanContext 数据库
+        if (!relocalization_database_dir_.empty()) {
+            loop_closure_detector_.loadOrBuildScanContextDatabase(relocalization_database_dir_);
+            ROS_INFO("[Runtime] Loaded ScanContext database from %s", relocalization_database_dir_.c_str());
+        }
+
+        initialized_ = false;  // 等待重定位成功
+    }
+
     // 初始化 PayloadTrackManager
     payload_tracker_.configureFromYaml(config_file_path);
     payload_tracker_config_ = payload_tracker_.getConfig();
@@ -646,6 +673,25 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         }
         ROS_INFO("  commit_enabled: %s", commit_enabled_ ? "true" : "false");
 
+        // 重定位参数（从 ROS 参数服务器读取）
+        nh_.param<bool>("relocalization_enable", relocalization_enable_, true);
+        nh_.param<bool>("auto_relocalize_on_start", auto_relocalize_on_start_, true);
+        nh_.param<bool>("constrain_crane_motion", constrain_crane_motion_, true);
+        nh_.param<int>("reloc_top_k", reloc_top_k_, 5);
+        nh_.param<double>("reloc_sc_score_threshold", reloc_sc_score_threshold_, 0.72);
+        nh_.param<double>("reloc_ndt_fitness_threshold", reloc_ndt_fitness_threshold_, 1.5);
+        nh_.param<double>("reloc_max_yaw_error_deg", reloc_max_yaw_error_deg_, 3.0);
+        nh_.param<bool>("reloc_use_yaw_alignment", reloc_use_yaw_alignment_, false);
+        nh_.param<int>("reloc_yaw_search_sectors", reloc_yaw_search_sectors_, 0);
+
+        ROS_INFO("=== Relocalization Config ===");
+        ROS_INFO("  relocalization_enable: %s", relocalization_enable_ ? "true" : "false");
+        ROS_INFO("  auto_relocalize_on_start: %s", auto_relocalize_on_start_ ? "true" : "false");
+        ROS_INFO("  constrain_crane_motion: %s", constrain_crane_motion_ ? "true" : "false");
+        ROS_INFO("  reloc_top_k: %d", reloc_top_k_);
+        ROS_INFO("  reloc_sc_score_threshold: %.2f", reloc_sc_score_threshold_);
+        ROS_INFO("  reloc_ndt_fitness_threshold: %.2f", reloc_ndt_fitness_threshold_);
+
         if (config["disk_guard"]) {
             auto dg = config["disk_guard"];
             disk_guard_enabled_ = dg["enabled"].as<bool>(false);
@@ -1041,6 +1087,30 @@ void NdtSlamNode::processCloudThread() {
             current_pose_ = Sophus::SE3d();
             ROS_INFO("SLAM initialized: total=%lu, feature=%lu, ground=%lu, reg=%lu",
                      filtered_cloud->size(), feature_cloud->size(), ground_cloud->size(), registration_cloud->size());
+        }
+
+        // ========== 定位模式：自动重定位 ==========
+        if (localization_only_ && relocalization_enable_ && auto_relocalize_on_start_ && !initialized_) {
+            ROS_INFO("[Reloc] Attempting auto relocalization...");
+
+            // 保存当前点云用于手动重定位
+            {
+                std::lock_guard<std::mutex> lock(cloud_mutex_);
+                last_registration_cloud_ = registration_cloud;
+            }
+
+            bool ok = tryRelocalizeOnce(registration_cloud);
+
+            if (ok) {
+                initialized_ = true;
+                tracking_lost_ = false;
+                ROS_INFO("[Reloc] Auto relocalization SUCCESS, enter localization mode");
+            } else {
+                ROS_WARN_THROTTLE(2.0, "[Reloc] Waiting for successful initial relocalization");
+            }
+
+            // 未重定位成功前，不建图、不插关键帧
+            continue;
         }
 
         // ========== 阶段 5：NDT_OMP 配准 ==========

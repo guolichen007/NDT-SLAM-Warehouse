@@ -428,6 +428,7 @@ private:
     void flushDirtyTiles();
 
     // ========== 统一提交检查 ==========
+    bool localization_only_ = false;          // 纯定位模式
     bool commit_enabled_ = true;              // observe_only 模式时为 false
     bool mapping_paused_by_memory_guard_ = false;
     bool ndt_health_bad_ = false;
