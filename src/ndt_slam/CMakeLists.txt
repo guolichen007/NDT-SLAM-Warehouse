@@ -89,7 +89,7 @@ set(LIBRARY_SOURCES
   # 里程计
   src/odometry.cpp
   # 建图
-  src/mapping.cpp
+  src/keyframe_manager.cpp
   # 闭环检测
   src/loop_closure.cpp
   # 点云处理

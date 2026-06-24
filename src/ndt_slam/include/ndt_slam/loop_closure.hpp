@@ -27,7 +27,7 @@
 #include <g2o/core/block_solver.h>
 #include <g2o/core/robust_kernel_impl.h>
 
-#include "ndt_slam/mapping.hpp"
+#include "ndt_slam/keyframe_manager.hpp"
 
 namespace ndt_slam {
 
