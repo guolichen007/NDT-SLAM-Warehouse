@@ -1,3 +1,4 @@
+#include <filesystem>
 #include "ndt_slam/keyframe_manager.hpp"
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/common/transforms.h>
@@ -267,18 +268,141 @@ void KeyFrameManager::updateKeyFramePose(uint64_t id, const Sophus::SE3d& new_po
     }
 }
 
-// ========== ScanContext 数据库（占位实现） ==========
+// ========== ScanContext 数据库持久化 ==========
 
 bool KeyFrameManager::saveScanContextDatabase(const std::string& session_dir, int num_rings, int num_sectors, double max_range) const {
-    // TODO: 实现 ScanContext 数据库保存
-    ROS_INFO("[ScanContextDB] saveScanContextDatabase called (placeholder)");
-    return true;
+    try {
+        std::filesystem::path session_path(session_dir);
+
+        // 保存 meta.yaml
+        std::string meta_file = session_path / "scan_context_meta.yaml";
+        std::ofstream ofs_meta(meta_file);
+        if (!ofs_meta.is_open()) {
+            ROS_ERROR("[ScanContextDB] Failed to open %s for writing", meta_file.c_str());
+            return false;
+        }
+        ofs_meta << "version: 1\n";
+        ofs_meta << "num_rings: " << num_rings << "\n";
+        ofs_meta << "num_sectors: " << num_sectors << "\n";
+        ofs_meta << "max_range: " << max_range << "\n";
+        ofs_meta << "count: " << keyframes_.size() << "\n";
+        ofs_meta.close();
+
+        // 保存 poses.txt
+        std::string poses_file = session_path / "scan_context_poses.txt";
+        std::ofstream ofs_poses(poses_file);
+        if (!ofs_poses.is_open()) {
+            ROS_ERROR("[ScanContextDB] Failed to open %s for writing", poses_file.c_str());
+            return false;
+        }
+        ofs_poses << std::fixed << std::setprecision(6);
+        for (const auto& kf : keyframes_) {
+            Eigen::Vector3d t = kf.pose_.translation();
+            Eigen::Quaterniond q(kf.pose_.unit_quaternion());
+            ofs_poses << kf.id_ << " "
+                      << kf.stamp_.sec << "." << std::setw(9) << std::setfill('0') << kf.stamp_.nsec << " "
+                      << t.x() << " " << t.y() << " " << t.z() << " "
+                      << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << "\n";
+        }
+        ofs_poses.close();
+
+        // 保存 scan_contexts.bin
+        std::string bin_file = session_path / "scan_contexts.bin";
+        std::ofstream ofs_bin(bin_file, std::ios::binary);
+        if (!ofs_bin.is_open()) {
+            ROS_ERROR("[ScanContextDB] Failed to open %s for writing", bin_file.c_str());
+            return false;
+        }
+
+        uint32_t magic = 0x53435458;  // "SCTX"
+        uint32_t version = 1;
+        uint32_t count = static_cast<uint32_t>(keyframes_.size());
+        uint32_t rows = static_cast<uint32_t>(num_rings);
+        uint32_t cols = static_cast<uint32_t>(num_sectors);
+
+        ofs_bin.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+        ofs_bin.write(reinterpret_cast<const char*>(&version), sizeof(version));
+        ofs_bin.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        ofs_bin.write(reinterpret_cast<const char*>(&rows), sizeof(rows));
+        ofs_bin.write(reinterpret_cast<const char*>(&cols), sizeof(cols));
+
+        for (const auto& kf : keyframes_) {
+            if (kf.scan_context_.rows() == rows && kf.scan_context_.cols() == cols) {
+                ofs_bin.write(reinterpret_cast<const char*>(kf.scan_context_.data()),
+                              rows * cols * sizeof(double));
+            } else {
+                // 写入全零
+                std::vector<double> zeros(rows * cols, 0.0);
+                ofs_bin.write(reinterpret_cast<const char*>(zeros.data()),
+                              rows * cols * sizeof(double));
+            }
+        }
+        ofs_bin.close();
+
+        ROS_INFO("[ScanContextDB] Saved %zu keyframes to %s", keyframes_.size(), session_dir.c_str());
+        return true;
+    } catch (const std::exception& e) {
+        ROS_ERROR("[ScanContextDB] Exception: %s", e.what());
+        return false;
+    }
 }
 
 bool KeyFrameManager::loadScanContextDatabase(const std::string& session_dir, int expected_rings, int expected_sectors) {
-    // TODO: 实现 ScanContext 数据库加载
-    ROS_INFO("[ScanContextDB] loadScanContextDatabase called (placeholder)");
-    return false;
+    try {
+        std::filesystem::path session_path(session_dir);
+
+        // 检查文件是否存在
+        std::string bin_file = session_path / "scan_contexts.bin";
+        if (!std::filesystem::exists(bin_file)) {
+            ROS_WARN("[ScanContextDB] scan_contexts.bin not found in %s", session_dir.c_str());
+            return false;
+        }
+
+        // 读取 bin 文件
+        std::ifstream ifs_bin(bin_file, std::ios::binary);
+        if (!ifs_bin.is_open()) {
+            ROS_ERROR("[ScanContextDB] Failed to open %s", bin_file.c_str());
+            return false;
+        }
+
+        uint32_t magic, version, count, rows, cols;
+        ifs_bin.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        ifs_bin.read(reinterpret_cast<char*>(&version), sizeof(version));
+        ifs_bin.read(reinterpret_cast<char*>(&count), sizeof(count));
+        ifs_bin.read(reinterpret_cast<char*>(&rows), sizeof(rows));
+        ifs_bin.read(reinterpret_cast<char*>(&cols), sizeof(cols));
+
+        if (magic != 0x53435458) {
+            ROS_ERROR("[ScanContextDB] Invalid magic number");
+            return false;
+        }
+
+        if (rows != static_cast<uint32_t>(expected_rings) || cols != static_cast<uint32_t>(expected_sectors)) {
+            ROS_ERROR("[ScanContextDB] Dimension mismatch: expected %dx%d, got %ux%u",
+                      expected_rings, expected_sectors, rows, cols);
+            return false;
+        }
+
+        if (count != static_cast<uint32_t>(keyframes_.size())) {
+            ROS_WARN("[ScanContextDB] Count mismatch: keyframes=%zu, scan_contexts=%u",
+                     keyframes_.size(), count);
+            // 继续，取较小值
+        }
+
+        size_t load_count = std::min(static_cast<size_t>(count), keyframes_.size());
+        for (size_t i = 0; i < load_count; ++i) {
+            keyframes_[i].scan_context_ = Eigen::MatrixXd(rows, cols);
+            ifs_bin.read(reinterpret_cast<char*>(keyframes_[i].scan_context_.data()),
+                         rows * cols * sizeof(double));
+        }
+        ifs_bin.close();
+
+        ROS_INFO("[ScanContextDB] Loaded %zu scan contexts from %s", load_count, session_dir.c_str());
+        return true;
+    } catch (const std::exception& e) {
+        ROS_ERROR("[ScanContextDB] Exception: %s", e.what());
+        return false;
+    }
 }
 
 } // namespace ndt_slam
