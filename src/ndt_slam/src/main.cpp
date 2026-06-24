@@ -6,10 +6,11 @@ int main(int argc, char** argv) {
 
     ros::init(argc, argv, "ndt_slam");
     ros::NodeHandle nh;
+    ros::NodeHandle pnh("~");  // 私有命名空间，读取节点参数
 
     // 从 ROS 参数服务器读取配置文件路径
     std::string config_file_path;
-    nh.param<std::string>("config_file", config_file_path,
+    pnh.param<std::string>("config_file", config_file_path,
                           "/home/ydkj/NDT-slam-ws/src/ndt_slam/config/slam_params.yaml");
 
     // 命令行参数覆盖

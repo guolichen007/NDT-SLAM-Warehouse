@@ -229,6 +229,7 @@ private:
 
     // NDT_OMP 配准器
     pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>::Ptr ndt_;
+    pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>::Ptr ndt_reloc_;  // 重定位专用
     pcl::PointCloud<pcl::PointXYZ>::Ptr local_map_;
 
     // NDT_OMP 配置参数
@@ -306,8 +307,8 @@ private:
     ros::Timer timer_;
 
     // 重定位参数
-    bool relocalization_enable_ = true;
-    bool auto_relocalize_on_start_ = true;
+    bool relocalization_enable_ = false;
+    bool auto_relocalize_on_start_ = false;
     bool constrain_crane_motion_ = true;
     std::string relocalization_database_dir_;
     std::string map_file_;

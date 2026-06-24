@@ -219,10 +219,20 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     ROS_INFO("NDT_OMP initialized: resolution=%.2f, step_size=%.2f, max_iter=%d",
              ndt_resolution_, ndt_step_size_, ndt_max_iterations_);
 
+    // 重定位专用 NDT 实例（线程安全）
+    ndt_reloc_.reset(new pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>());
+    ndt_reloc_->setResolution(ndt_resolution_);
+    ndt_reloc_->setStepSize(ndt_step_size_);
+    ndt_reloc_->setTransformationEpsilon(ndt_transformation_epsilon_);
+    ndt_reloc_->setMaximumIterations(ndt_max_iterations_);
+    ROS_INFO("NDT_OMP reloc instance initialized");
+
     // ========== 定位模式：加载地图和 ScanContext 数据库 ==========
-    nh_.param<bool>("localization_only", localization_only_, false);
-    nh_.param<std::string>("map_file", map_file_, "");
-    nh_.param<std::string>("scan_context_database_dir", relocalization_database_dir_, "");
+    // 使用私有 NodeHandle 读取节点参数
+    ros::NodeHandle pnh("~");
+    pnh.param<bool>("localization_only", localization_only_, false);
+    pnh.param<std::string>("map_file", map_file_, "");
+    pnh.param<std::string>("scan_context_database_dir", relocalization_database_dir_, "");
 
     if (localization_only_) {
         ROS_INFO("[Runtime] Localization mode enabled");
@@ -1074,7 +1084,41 @@ void NdtSlamNode::processCloudThread() {
 
         // ========== 阶段 4：初始化 ==========
         bool should_init = false;
+        // 保存当前点云用于手动重定位（每帧都保存）
         {
+            std::lock_guard<std::mutex> lock(cloud_mutex_);
+            last_registration_cloud_ = registration_cloud;
+        }
+
+        // ========== 定位模式：自动重定位 ==========
+        if (localization_only_ && !initialized_) {
+            if (relocalization_enable_ && auto_relocalize_on_start_) {
+                ROS_INFO("[Reloc] Attempting auto relocalization...");
+
+                bool ok = tryRelocalizeOnce(registration_cloud);
+
+                if (ok) {
+                    std::lock_guard<std::mutex> lock(cloud_mutex_);
+                    initialized_ = true;
+                    tracking_lost_ = false;
+                    ROS_INFO("[Reloc] Auto relocalization SUCCESS, enter localization mode");
+                } else {
+                    ROS_WARN_THROTTLE(2.0, "[Reloc] Waiting for successful initial relocalization");
+                }
+
+                // 未重定位成功前，不建图、不插关键帧
+                continue;
+            } else {
+                // 没有启用自动重定位，直接初始化
+                std::lock_guard<std::mutex> lock(cloud_mutex_);
+                initialized_ = true;
+                current_pose_ = Sophus::SE3d();
+                ROS_INFO("[Runtime] Localization mode: initialized at origin");
+            }
+        }
+
+        // ========== 建图模式：首次初始化 ==========
+        if (!localization_only_) {
             std::lock_guard<std::mutex> lock(cloud_mutex_);
             if (!initialized_) {
                 should_init = true;
@@ -1087,30 +1131,6 @@ void NdtSlamNode::processCloudThread() {
             current_pose_ = Sophus::SE3d();
             ROS_INFO("SLAM initialized: total=%lu, feature=%lu, ground=%lu, reg=%lu",
                      filtered_cloud->size(), feature_cloud->size(), ground_cloud->size(), registration_cloud->size());
-        }
-
-        // ========== 定位模式：自动重定位 ==========
-        if (localization_only_ && relocalization_enable_ && auto_relocalize_on_start_ && !initialized_) {
-            ROS_INFO("[Reloc] Attempting auto relocalization...");
-
-            // 保存当前点云用于手动重定位
-            {
-                std::lock_guard<std::mutex> lock(cloud_mutex_);
-                last_registration_cloud_ = registration_cloud;
-            }
-
-            bool ok = tryRelocalizeOnce(registration_cloud);
-
-            if (ok) {
-                initialized_ = true;
-                tracking_lost_ = false;
-                ROS_INFO("[Reloc] Auto relocalization SUCCESS, enter localization mode");
-            } else {
-                ROS_WARN_THROTTLE(2.0, "[Reloc] Waiting for successful initial relocalization");
-            }
-
-            // 未重定位成功前，不建图、不插关键帧
-            continue;
         }
 
         // ========== 阶段 5：NDT_OMP 配准 ==========
@@ -4672,13 +4692,19 @@ bool NdtSlamNode::refineRelocalizationWithNDT(
         return false;
     }
 
-    if (!global_map_ || global_map_->empty()) {
-        ROS_WARN("[Reloc] global_map empty, cannot run NDT");
-        return false;
+    // 使用独立的 NDT 实例，加锁读取 global_map_
+    pcl::PointCloud<pcl::PointXYZ>::Ptr map_copy;
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        if (!global_map_ || global_map_->empty()) {
+            ROS_WARN("[Reloc] global_map empty, cannot run NDT");
+            return false;
+        }
+        map_copy.reset(new pcl::PointCloud<pcl::PointXYZ>(*global_map_));
     }
 
-    ndt_->setInputTarget(global_map_);
-    ndt_->setInputSource(source_cloud);
+    ndt_reloc_->setInputTarget(map_copy);
+    ndt_reloc_->setInputSource(source_cloud);
 
     bool found = false;
     best_fitness = std::numeric_limits<double>::max();
@@ -4688,12 +4714,12 @@ bool NdtSlamNode::refineRelocalizationWithNDT(
 
         Eigen::Matrix4f init_guess = c.coarse_pose.matrix().cast<float>();
 
-        ndt_->align(aligned, init_guess);
+        ndt_reloc_->align(aligned, init_guess);
 
-        bool converged = ndt_->hasConverged();
-        double fitness = ndt_->getFitnessScore();
+        bool converged = ndt_reloc_->hasConverged();
+        double fitness = ndt_reloc_->getFitnessScore();
 
-        Eigen::Matrix4f final_tf = ndt_->getFinalTransformation();
+        Eigen::Matrix4f final_tf = ndt_reloc_->getFinalTransformation();
         Sophus::SE3d ndt_pose(final_tf.cast<double>());
 
         double yaw_error_deg = computeYawErrorDeg(ndt_pose, c.coarse_pose);

@@ -21,6 +21,7 @@
         <param name="scan_context_database_dir" value="$(arg scan_context_database_dir)"/>
         <param name="auto_relocalize_on_start" value="$(arg auto_relocalize_on_start)"/>
         <param name="relocalization_enable" value="true"/>
+        <param name="auto_relocalize_on_start" value="true"/>
         <param name="reloc_top_k" value="5"/>
         <param name="reloc_sc_score_threshold" value="0.72"/>
         <param name="reloc_ndt_fitness_threshold" value="1.5"/>
