@@ -57,6 +57,29 @@ double ScanContext::calculateSimilarity(const Eigen::MatrixXd& sc1, const Eigen:
     return similarity;
 }
 
+double ScanContext::calculateSimilarityWithShift(const Eigen::MatrixXd& sc1, const Eigen::MatrixXd& sc2, int sector_shift) const {
+    if (sc1.rows() != sc2.rows() || sc1.cols() != sc2.cols()) {
+        return 0.0;
+    }
+
+    int rows = sc1.rows();
+    int cols = sc1.cols();
+
+    // 将 sc2 的列向右循环移位 shift 个位置
+    double total_diff = 0.0;
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            int shifted_c = (c + sector_shift + cols) % cols;
+            double diff = sc1(r, c) - sc2(r, shifted_c);
+            total_diff += diff * diff;
+        }
+    }
+
+    double max_diff = rows * cols * 25.0;  // 假设最大值 5.0
+    double similarity = 1.0 - std::min(std::sqrt(total_diff) / std::sqrt(max_diff), 1.0);
+    return similarity;
+}
+
 int ScanContext::findBestMatch(const Eigen::MatrixXd& current_sc, const std::vector<Eigen::MatrixXd>& sc_list) {
     if (sc_list.empty()) return -1;
 
@@ -250,7 +273,8 @@ void LoopClosureDetector::addKeyFrame(const Sophus::SE3d& pose, const pcl::Point
                 return;
             }
             KeyFrame& last_keyframe = const_cast<KeyFrame&>(keyframes.back());
-            last_keyframe.scan_context_ = scan_context_.generate(cloud, pose.translation());
+            // 修正：统一使用 Zero() 作为原点，保持坐标基准一致
+            last_keyframe.scan_context_ = scan_context_.generate(cloud, Eigen::Vector3d::Zero());
 
             scan_context_list_.push_back(last_keyframe.scan_context_);
         }
@@ -613,6 +637,126 @@ bool LoopClosureNode::relocalizeService(std_srvs::Empty::Request& request,
     } else {
         ROS_WARN("Global relocalization failed");
     }
+    return true;
+}
+
+// ========== 重定位相关实现 ==========
+
+std::vector<RelocCandidate> LoopClosureDetector::findRelocalizationCandidates(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    int top_k,
+    double min_score,
+    bool use_yaw_alignment,
+    int yaw_search_sectors) {
+
+    std::vector<RelocCandidate> candidates;
+
+    const auto& keyframes = keyframe_manager_.getKeyFrames();
+    if (!cloud || cloud->empty() || keyframes.empty()) {
+        return candidates;
+    }
+
+    Eigen::MatrixXd current_sc = scan_context_.generate(cloud, Eigen::Vector3d::Zero());
+
+    for (size_t i = 0; i < keyframes.size(); ++i) {
+        const auto& kf = keyframes[i];
+
+        if (kf.scan_context_.rows() == 0 || kf.scan_context_.cols() == 0) {
+            continue;
+        }
+
+        double best_score = -1.0;
+        int best_shift = 0;
+
+        int min_shift = use_yaw_alignment ? -yaw_search_sectors : 0;
+        int max_shift = use_yaw_alignment ? yaw_search_sectors : 0;
+
+        for (int shift = min_shift; shift <= max_shift; ++shift) {
+            double score = scan_context_.calculateSimilarityWithShift(
+                current_sc, kf.scan_context_, shift);
+
+            if (score > best_score) {
+                best_score = score;
+                best_shift = shift;
+            }
+        }
+
+        if (best_score < min_score) {
+            continue;
+        }
+
+        RelocCandidate c;
+        c.keyframe_index = static_cast<int>(i);
+        c.keyframe_id = kf.id_;
+        c.score = best_score;
+        c.yaw_shift = best_shift;
+        c.yaw_rad = best_shift * 2.0 * M_PI / scan_context_.getNumSectors();
+
+        // 天车约束：粗位姿直接来自 keyframe
+        c.coarse_pose = kf.pose_;
+
+        // 默认不应用大 yaw 修正
+        if (use_yaw_alignment && yaw_search_sectors > 0) {
+            Sophus::SE3d yaw_correction(
+                Sophus::SO3d::rotZ(c.yaw_rad),
+                Eigen::Vector3d::Zero());
+            c.coarse_pose = kf.pose_ * yaw_correction;
+        }
+
+        candidates.push_back(c);
+    }
+
+    // 按 score 降序排序
+    std::sort(candidates.begin(), candidates.end(),
+              [](const RelocCandidate& a, const RelocCandidate& b) {
+                  return a.score > b.score;
+              });
+
+    // 截取 top_k
+    if (candidates.size() > static_cast<size_t>(top_k)) {
+        candidates.resize(top_k);
+    }
+
+    return candidates;
+}
+
+bool LoopClosureDetector::loadOrBuildScanContextDatabase(const std::string& database_dir) {
+    // 尝试加载已有的 ScanContext 数据库
+    bool loaded = keyframe_manager_.loadScanContextDatabase(
+        database_dir,
+        scan_context_.getNumRings(),
+        scan_context_.getNumSectors());
+
+    if (loaded) {
+        // 同步到 scan_context_list_
+        const auto& keyframes = keyframe_manager_.getKeyFrames();
+        scan_context_list_.clear();
+        for (const auto& kf : keyframes) {
+            scan_context_list_.push_back(kf.scan_context_);
+        }
+        return true;
+    }
+
+    ROS_WARN("[ScanContextDB] load failed, rebuild from keyframe clouds");
+
+    // 从 keyframe PCD 重新生成
+    auto& keyframes = keyframe_manager_.getKeyFramesNonConst();
+    scan_context_list_.clear();
+
+    for (auto& kf : keyframes) {
+        if (kf.cloud_ && !kf.cloud_->empty()) {
+            kf.scan_context_ = scan_context_.generate(kf.cloud_, Eigen::Vector3d::Zero());
+            scan_context_list_.push_back(kf.scan_context_);
+        }
+    }
+
+    // 保存到磁盘
+    keyframe_manager_.saveScanContextDatabase(
+        database_dir,
+        scan_context_.getNumRings(),
+        scan_context_.getNumSectors(),
+        scan_context_.getMaxRange());
+
     return true;
 }
 

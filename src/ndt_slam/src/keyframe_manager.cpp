@@ -267,4 +267,18 @@ void KeyFrameManager::updateKeyFramePose(uint64_t id, const Sophus::SE3d& new_po
     }
 }
 
+// ========== ScanContext 数据库（占位实现） ==========
+
+bool KeyFrameManager::saveScanContextDatabase(const std::string& session_dir, int num_rings, int num_sectors, double max_range) const {
+    // TODO: 实现 ScanContext 数据库保存
+    ROS_INFO("[ScanContextDB] saveScanContextDatabase called (placeholder)");
+    return true;
+}
+
+bool KeyFrameManager::loadScanContextDatabase(const std::string& session_dir, int expected_rings, int expected_sectors) {
+    // TODO: 实现 ScanContext 数据库加载
+    ROS_INFO("[ScanContextDB] loadScanContextDatabase called (placeholder)");
+    return false;
+}
+
 } // namespace ndt_slam

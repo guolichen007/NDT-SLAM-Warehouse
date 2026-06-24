@@ -52,6 +52,7 @@ public:
 
     Eigen::MatrixXd generate(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const Eigen::Vector3d& origin);
     double calculateSimilarity(const Eigen::MatrixXd& sc1, const Eigen::MatrixXd& sc2);
+    double calculateSimilarityWithShift(const Eigen::MatrixXd& sc1, const Eigen::MatrixXd& sc2, int sector_shift) const;
     int findBestMatch(const Eigen::MatrixXd& current_sc, const std::vector<Eigen::MatrixXd>& sc_list);
 
 private:
@@ -68,6 +69,16 @@ struct LoopCandidate {
     double similarity;
 };
 
+// 重定位候选
+struct RelocCandidate {
+    int keyframe_index = -1;
+    uint64_t keyframe_id = 0;
+    double score = 0.0;
+    int yaw_shift = 0;
+    double yaw_rad = 0.0;
+    Sophus::SE3d coarse_pose;
+};
+
 // 闭环检测器类
 class LoopClosureDetector {
 public:
@@ -82,6 +93,16 @@ public:
     LoopCandidate detectLoop();
     bool checkConsistency(const Sophus::SE3d& loop_pose, const Sophus::SE3d& odometry_pose);
     Sophus::SE3d globalRelocalization(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
+
+    // 重定位相关
+    std::vector<RelocCandidate> findRelocalizationCandidates(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        int top_k,
+        double min_score,
+        bool use_yaw_alignment = false,
+        int yaw_search_sectors = 0);
+
+    bool loadOrBuildScanContextDatabase(const std::string& database_dir);
 
     const std::deque<KeyFrame>& getKeyFrames() const { return keyframe_manager_.getKeyFrames(); }
     KeyFrameManager& getKeyFrameManager() { return keyframe_manager_; }

@@ -100,6 +100,10 @@ public:
     void updateKeyFramePose(uint64_t id, const Sophus::SE3d& new_pose);
     size_t getKeyFrameCount() const { return keyframes_.size(); }
 
+    // ScanContext 数据库
+    bool saveScanContextDatabase(const std::string& session_dir, int num_rings, int num_sectors, double max_range) const;
+    bool loadScanContextDatabase(const std::string& session_dir, int expected_rings, int expected_sectors);
+
 private:
     std::deque<KeyFrame> keyframes_;
     uint64_t last_keyframe_id_;
