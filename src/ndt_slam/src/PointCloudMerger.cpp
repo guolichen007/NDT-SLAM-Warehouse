@@ -157,14 +157,14 @@ private:
             pcl::PointCloud<pcl::PointXYZ>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZ>);
             voxel_filter.filter(*filtered);
             if (should_log) {
-                ROS_INFO("[Merger] lidars=%d {%s}, raw=%lu -> %lu (dup=%lu)",
+                ROS_DEBUG("[Merger] lidars=%d {%s}, raw=%lu -> %lu (dup=%lu)",
                          lidar_count, lidar_detail.c_str(),
                          merged->size(), filtered->size(),
                          merged->size() - filtered->size());
             }
             merged = filtered;
         } else if (should_log) {
-            ROS_INFO("[Merger] lidars=%d {%s}, points=%lu",
+            ROS_DEBUG("[Merger] lidars=%d {%s}, points=%lu",
                      lidar_count, lidar_detail.c_str(), merged->size());
         }
 

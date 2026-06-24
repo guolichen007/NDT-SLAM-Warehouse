@@ -277,7 +277,7 @@ void NdtSlamNode::timerCallback(const ros::TimerEvent&) {
     timer_count++;
 
     const auto& keyframes = loop_closure_detector_.getKeyFrames();
-    ROS_INFO("[Timer] keyframes=%zu, cloud=%zu, init=%d",
+    ROS_DEBUG("[Timer] keyframes=%zu, cloud=%zu, init=%d",
              keyframes.size(), current_cloud_->size(), initialized_ ? 1 : 0);
 
     // 不在这里发布 TF，避免与 publishOdometry 冲突导致 TF_REPEATED_DATA
@@ -772,7 +772,7 @@ void NdtSlamNode::processCloudThread() {
             near_field_removed_pub_.publish(removed_msg);
 
             float removed_ratio = 100.0f * near_removed->size() / (near_removed->size() + near_filtered->size());
-            ROS_INFO("[NearFieldFilter] input=%lu removed=%lu kept=%lu ratio=%.1f%%",
+            ROS_DEBUG("[NearFieldFilter] input=%lu removed=%lu kept=%lu ratio=%.1f%%",
                      near_removed->size() + near_filtered->size(),
                      near_removed->size(), near_filtered->size(), removed_ratio);
         }
@@ -831,7 +831,7 @@ void NdtSlamNode::processCloudThread() {
             static int ch_debug_count = 0;
             ch_debug_count++;
             if (ch_debug_count % 10 == 1) {
-                ROS_INFO("[PayloadChannel] channel_points=%d, candidate_clusters=%d, "
+                ROS_DEBUG("[PayloadChannel] channel_points=%d, candidate_clusters=%d, "
                          "candidate_points=%d, safe_points=%d",
                          ch_result.channel_points, ch_result.candidate_clusters,
                          ch_result.candidate_points, ch_result.safe_points);
@@ -890,7 +890,7 @@ void NdtSlamNode::processCloudThread() {
             static int hf_debug_count = 0;
             hf_debug_count++;
             if (hf_debug_count % 10 == 1) {
-                ROS_INFO("[HumanFilter] input=%lu, safe=%lu, candidate=%lu, dynamic=%lu, pending=%lu",
+                ROS_DEBUG("[HumanFilter] input=%lu, safe=%lu, candidate=%lu, dynamic=%lu, pending=%lu",
                          safe_objects->size(), human_safe_objects->size(),
                          human_candidates->size(), human_dynamic->size(), human_pending->size());
 
@@ -1004,7 +1004,7 @@ void NdtSlamNode::processCloudThread() {
             float pct_mid = obj_total > 0 ? 100.0f * obj_mid / obj_total : 0;
             float pct_high = obj_total > 0 ? 100.0f * obj_high / obj_total : 0;
 
-            ROS_INFO("[GroundDiag] roll=%.2f° pitch=%.2f° | "
+            ROS_DEBUG("[GroundDiag] roll=%.2f° pitch=%.2f° | "
                      "local_thickness: avg=%.3fm max=%.3fm | "
                      "obj_ratio=%.1f%% | obj_height: low=%.0f%% mid=%.0f%% high=%.0f%% | "
                      "grid=%.1fm hag=%.2fm | ground=%lu obj=%lu cells=%d",
@@ -1251,7 +1251,7 @@ void NdtSlamNode::processCloudThread() {
                                         static int icp_refined_count = 0;
                                         icp_refined_count++;
                                         if (icp_refined_count % 50 == 1) {
-                                            ROS_INFO("[ICP-async] refined(%d): fitness=%.4f, pos_diff=%.4fm, rot_diff=%.2f°, high_quality=%d",
+                                            ROS_DEBUG("[ICP-async] refined(%d): fitness=%.4f, pos_diff=%.4fm, rot_diff=%.2f°, high_quality=%d",
                                                      icp_refined_count, icp_fitness, pos_diff, rot_diff, refined_pose_high_quality_.load() ? 1 : 0);
                                         }
                                     } else {
@@ -2571,7 +2571,7 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
             ROS_DEBUG("[MotionGate] Stationary, skipping keyframe commit");
             return;
         }
-        ROS_INFO("[MotionGate] Moved enough, committing keyframe (trans=%.2fm, rot=%.1fdeg)",
+        ROS_DEBUG("[MotionGate] Moved enough, committing keyframe (trans=%.2fm, rot=%.1fdeg)",
                  delta_translation_, delta_yaw_);
     }
 
@@ -2680,13 +2680,13 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 static int track_debug_count = 0;
                 track_debug_count++;
                 if (track_debug_count % 5 == 1) {
-                    ROS_INFO("[PayloadTrack] tracks=%d, dynamic=%d, pending=%d",
+                    ROS_DEBUG("[PayloadTrack] tracks=%d, dynamic=%d, pending=%d",
                              track_result.active_tracks, track_result.dynamic_tracks, track_result.pending_tracks);
 
                     // 输出每个活跃轨迹的状态
                     for (const auto& t : payload_tracker_.getTracks()) {
                         if (t.state != TrackState::EXPIRED) {
-                            ROS_INFO("[PayloadTrack]   id=%d state=%d base_std=%.2f map_disp=%.2f vel=%.2f",
+                            ROS_DEBUG("[PayloadTrack]   id=%d state=%d base_std=%.2f map_disp=%.2f vel=%.2f",
                                      t.track_id, (int)t.state, t.base_center_std,
                                      t.map_displacement, t.velocity);
                         }
@@ -2755,7 +2755,7 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 static int kf_hf_debug_count = 0;
                 kf_hf_debug_count++;
                 if (kf_hf_debug_count % 5 == 1) {
-                    ROS_INFO("[HumanFilter-KF] input=%lu, safe=%lu, candidate=%lu, dynamic=%lu, pending=%lu",
+                    ROS_DEBUG("[HumanFilter-KF] input=%lu, safe=%lu, candidate=%lu, dynamic=%lu, pending=%lu",
                              kf_safe_objects->size(), kf_human_safe_objects->size(),
                              kf_human_candidates->size(), kf_human_dynamic->size(), kf_human_pending->size());
 
@@ -2867,7 +2867,7 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
             static int kf_ch_debug_count = 0;
             kf_ch_debug_count++;
             if (kf_ch_debug_count % 5 == 1) {
-                ROS_INFO("[PayloadChannel-KF] channel=%d, candidate=%d, safe=%d, clusters=%d",
+                ROS_DEBUG("[PayloadChannel-KF] channel=%d, candidate=%d, safe=%d, clusters=%d",
                          ch_result.channel_points, ch_result.candidate_points,
                          ch_result.safe_points, ch_result.candidate_clusters);
 
@@ -4215,7 +4215,7 @@ void NdtSlamNode::flushDirtyTiles() {
     last_flush_time_ = ros::Time::now();
     last_flush_time_local_ = ros::Time::now();
 
-    ROS_INFO("[PersistentMap] Flushed %d tiles to disk (4 layers each), total flushed: %d",
+    ROS_DEBUG("[PersistentMap] Flushed %d tiles to disk (4 layers each), total flushed: %d",
              flushed, flushed_tile_count_);
 }
 
