@@ -27,7 +27,7 @@ source $NDT_WS/devel/setup.bash
 # 检查当前地图
 if [ ! -L "$MAPS_DIR/current" ]; then
     echo "错误: 没有当前地图 ($MAPS_DIR/current)"
-    echo "请先运行: python3 $NDT_WS/src/ndt_slam/scripts/build_map_pipeline.py --bag <bag>"
+    echo "请先运行: python3 $NDT_WS/src/ndt_slam/scripts/postprocess/build_map_pipeline.py --bag <bag>"
     exit 1
 fi
 
@@ -93,13 +93,13 @@ sleep 2
 echo ""
 echo "创建新版本: warehouse_v$(printf '%03d' $NEW_VERSION)..."
 cd $NDT_WS
-python3 src/ndt_slam/scripts/map_version_manager.py create \
+python3 src/ndt_slam/scripts/postprocess/map_version_manager.py create \
     --version $NEW_VERSION \
     --source "$LATEST_REBUILD" \
     --session "$LATEST_SESSION"
 
 # 更新current软链接
-python3 src/ndt_slam/scripts/map_version_manager.py promote $NEW_VERSION
+python3 src/ndt_slam/scripts/postprocess/map_version_manager.py promote $NEW_VERSION
 
 # 删除旧版本备份（只保留最新）
 OLD_BACKUP="$MAPS_DIR/warehouse_v$(printf '%03d' $CURRENT_VERSION).bak"
