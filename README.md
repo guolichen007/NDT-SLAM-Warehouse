@@ -356,6 +356,20 @@ longterm_mapping:
 
 确认 10-30 分钟稳定后改为 `commit_enabled: true`。
 
+### 复查修复（9 个问题）
+
+| 序号 | 问题 | 严重程度 | 修复状态 |
+|------|------|----------|----------|
+| 1 | canCommit() 死代码 | 关键 | ✅ 已修复 |
+| 2 | rebuild 清空 ground_map_ 但没重新填充 | 关键 | ✅ 已修复 |
+| 3 | ndt_health_bad_ 从未被设为 true | 关键 | ✅ 已修复 |
+| 4 | releaseMemoryCache() 空操作 | 重要 | ✅ 已修复 |
+| 5 | HARD→SOFT 不清除暂停标志 | 重要 | ✅ 已修复 |
+| 6 | rebuild_every_keyframes_ 硬编码 | 小 | ✅ 已修复 |
+| 7 | active_map_rebuild_running_ 未使用 | 小 | ✅ 已修复 |
+| 8 | flushDirtyTiles 体素硬编码 | 小 | ✅ 已修复 |
+| 9 | writeRuntimeStatus 频率过高 | 小 | ✅ 已修复 |
+
 ---
 
 ## 项目背景
