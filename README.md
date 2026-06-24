@@ -149,7 +149,7 @@ PlacementDebug:
 - Bag 文件：`/home/ydkj/AutoCraneSlam-ROS1/bag/调运长件.bag`
 - Bag 时长：119.85 秒
 
-#### 测试结果
+#### 测试结果（短时间测试）
 ```
 runtime_status.json:
 {
@@ -166,6 +166,43 @@ runtime_status.json:
   "memory_mb": 123.93,
   "average_process_time_ms": 150.77
 }
+```
+
+#### 长时间测试结果（20 分钟循环播放）
+
+**测试环境**
+- 测试时长：20 分钟（循环播放 bag 约 10 次）
+- 测试目的：验证内存稳定性和 MotionGate 效果
+
+**测试结果**
+```
+runtime_status.json:
+{
+  "total_frames": 749,
+  "total_keyframes": 26,
+  "active_keyframes": 26,
+  "is_stationary": true,
+  "delta_translation_m": 0.29,
+  "delta_yaw_deg": 0.30,
+  "active_map_points": 8808,
+  "dirty_tile_count": 1,
+  "flushed_tile_count": 2,
+  "disk_free_gb": 70.47,
+  "memory_mb": 121.12,
+  "average_process_time_ms": 247.19
+}
+
+tiles_registration 目录：
+- x0_y0.pcd (34KB)
+- x0_y-1.pcd (712KB)
+```
+
+**测试结论**
+- ✅ **内存稳定**: 121 MB（20 分钟无增长）
+- ✅ **MotionGate 生效**: 静止时关键帧不增长（保持 26 个）
+- ✅ **tiles 写入正常**: 2 个 tile 文件，共 746KB
+- ✅ **磁盘空间充足**: 70.47 GB
+- ✅ **runtime_status 正常更新**: 每 5 秒更新一次
 
 tiles_registration 目录：
 - x0_y0.pcd (34KB)
