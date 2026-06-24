@@ -1073,11 +1073,12 @@ void NdtSlamNode::processCloudThread() {
                 double ndt_time_ms = std::chrono::duration<double, std::milli>(ndt_end - ndt_start).count();
 
                 // NDT 时间预算：超过 100ms 输出警告（起重机场景 NDT 正常需要 70-120ms）
-                static const double NDT_TIME_BUDGET_MS = 100.0;
+                static const double NDT_TIME_BUDGET_MS = 300.0;
                 static int ndt_warn_count = 0;
                 if (ndt_time_ms > NDT_TIME_BUDGET_MS) {
                     ndt_warn_count++;
-                    if (ndt_warn_count <= 10 || ndt_warn_count % 50 == 0) {
+                    // 静止时不输出，运动时每 100 次输出一次
+                    if (!is_stationary_ && (ndt_warn_count <= 3 || ndt_warn_count % 100 == 0)) {
                         ROS_WARN("[NDT-guard] time=%.1fms (count=%d)", ndt_time_ms, ndt_warn_count);
                     }
                 }
@@ -1295,15 +1296,15 @@ void NdtSlamNode::processCloudThread() {
         total_frames_ = total_frames;
         average_process_time_ms_ = elapsed * 1000.0;
 
-        if ((ros::Time::now() - last_log_time).toSec() > 10.0) {
+        // Status 只在运动时报告，每 30 秒一次
+        if (!is_stationary_ && (ros::Time::now() - last_log_time).toSec() > 30.0) {
             Eigen::Vector3d pos = current_pose_.translation();
             ROS_INFO("[Status] frames=%d/%d, pose=(%.2f, %.2f, %.2f), "
-                     "feature=%lu, ground=%lu, local_map=%lu, global_map=%lu, "
-                     "process=%.2fs, stationary=%s",
+                     "keyframes=%d, tiles_flushed=%d, "
+                     "local_map=%zu, active_map=%zu, process=%.2fs",
                      success_frames, total_frames, pos.x(), pos.y(), pos.z(),
-                     feature_cloud->size(), ground_cloud->size(),
-                     local_map_->size(), global_map_->size(), elapsed,
-                     is_stationary_ ? "true" : "false");
+                     keyframe_count_, flushed_tile_count_,
+                     local_map_->size(), global_map_->size(), elapsed);
             last_log_time = ros::Time::now();
 
             // ========== 长期建图维护 ==========
@@ -2586,8 +2587,9 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
 
     if (new_keyframe_count > prev_keyframe_count) {
         keyframe_count_++;
-        ROS_DEBUG("Keyframe added: id=%d, total keyframes=%zu",
-                  keyframe_count_, new_keyframe_count);
+        Eigen::Vector3d pos = pose.translation();
+        ROS_INFO("[MapCommit] keyframe #%d added | pos=(%.1f, %.1f, %.1f) | tiles=%d",
+                 keyframe_count_, pos.x(), pos.y(), pos.z(), flushed_tile_count_);
 
         std::lock_guard<std::mutex> lock(map_mutex_);
         Eigen::Matrix4d transform = pose.matrix();
@@ -4081,6 +4083,11 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
     bool time_elapsed_enough = (time_elapsed >= motion_gate_min_time_sec_);
 
     if (moved_enough && time_elapsed_enough) {
+        // 从静止变为运动时通知
+        if (is_stationary_) {
+            ROS_INFO("[MotionGate] Crane moving | delta=%.2fm %.1f° | resuming map commit",
+                     translation, rotation);
+        }
         // 更新上次关键帧位姿和时间
         last_keyframe_pose_for_gate_ = current_pose;
         last_keyframe_time_for_gate_ = current_time;
@@ -4093,8 +4100,10 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
     // 静止检测
     if (!moved_enough) {
         stationary_frame_count_++;
-        if (stationary_frame_count_ > 30) {  // 连续 30 帧不动认为静止
+        if (stationary_frame_count_ > 30 && !is_stationary_) {  // 连续 30 帧不动认为静止
             is_stationary_ = true;
+            ROS_INFO("[MotionGate] Crane stopped | keyframes=%d | pausing map commit",
+                     keyframe_count_);
         }
     }
 
@@ -4218,7 +4227,7 @@ void NdtSlamNode::flushDirtyTiles() {
     last_flush_time_ = ros::Time::now();
     last_flush_time_local_ = ros::Time::now();
 
-    ROS_DEBUG("[PersistentMap] Flushed %d tiles to disk (4 layers each), total flushed: %d",
+    ROS_INFO("[TileFlush] %d tiles flushed to disk | total_flushed=%d",
              flushed, flushed_tile_count_);
 }
 
