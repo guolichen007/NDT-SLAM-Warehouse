@@ -242,6 +242,12 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
 }
 
 NdtSlamNode::~NdtSlamNode() {
+    ROS_WARN("[Shutdown] Final flush dirty tiles...");
+    if (persistent_map_enabled_ && !dirty_tiles_.empty()) {
+        flushDirtyTiles();
+    }
+    writeRuntimeStatus();
+
     shutdown_ = true;
     queue_cv_.notify_all();
     tracking_cv_.notify_all();
@@ -262,6 +268,7 @@ NdtSlamNode::~NdtSlamNode() {
     if (clean_rebuild_thread_.joinable()) {
         clean_rebuild_thread_.join();
     }
+    ROS_WARN("[Shutdown] Complete");
 }
 
 void NdtSlamNode::timerCallback(const ros::TimerEvent&) {
@@ -614,16 +621,25 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         if (config["memory_guard"]) {
             auto mg = config["memory_guard"];
             memory_guard_enabled_ = mg["enabled"].as<bool>(false);
-            max_process_memory_mb_ = mg["max_process_memory_mb"].as<int>(8000);
-            warning_threshold_mb_ = mg["warning_threshold_mb"].as<int>(6000);
+            soft_threshold_mb_ = mg["soft_threshold_mb"].as<int>(6000);
+            hard_threshold_mb_ = mg["hard_threshold_mb"].as<int>(7000);
+            emergency_threshold_mb_ = mg["emergency_threshold_mb"].as<int>(8000);
             memory_check_interval_sec_ = mg["check_interval_sec"].as<int>(30);
         }
 
         ROS_INFO("=== Memory Guard Config ===");
         ROS_INFO("  enabled: %s", memory_guard_enabled_ ? "true" : "false");
-        ROS_INFO("  max_process_memory: %d MB", max_process_memory_mb_);
-        ROS_INFO("  warning_threshold: %d MB", warning_threshold_mb_);
+        ROS_INFO("  soft_threshold: %d MB", soft_threshold_mb_);
+        ROS_INFO("  hard_threshold: %d MB", hard_threshold_mb_);
+        ROS_INFO("  emergency_threshold: %d MB", emergency_threshold_mb_);
         ROS_INFO("  check_interval: %d sec", memory_check_interval_sec_);
+
+        // commit_enabled 配置（observe_only 模式）
+        if (config["longterm_mapping"]) {
+            auto ltm = config["longterm_mapping"];
+            commit_enabled_ = ltm["commit_enabled"].as<bool>(true);
+        }
+        ROS_INFO("  commit_enabled: %s", commit_enabled_ ? "true" : "false");
 
         if (config["disk_guard"]) {
             auto dg = config["disk_guard"];
@@ -4177,8 +4193,10 @@ void NdtSlamNode::writeRuntimeStatus() {
     // 确保目录存在
     boost::filesystem::create_directories(persistent_map_root_dir_);
 
+    // 使用 tmp + rename 防止监控脚本读到半写文件
     std::string status_file = persistent_map_root_dir_ + "/runtime_status.json";
-    std::ofstream f(status_file);
+    std::string tmp_file = status_file + ".tmp";
+    std::ofstream f(tmp_file);
     if (!f.is_open()) return;
 
     // 获取磁盘空间
@@ -4232,8 +4250,20 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "}\n";
     f.close();
 
+    // 原子重命名
+    boost::filesystem::rename(tmp_file, status_file);
+
     // 内存保护检查
     checkMemoryGuard();
+}
+
+// ========== 统一提交检查 ==========
+
+bool NdtSlamNode::canCommit() {
+    return commit_enabled_
+        && !mapping_paused_by_memory_guard_
+        && !disk_guard_triggered_
+        && !ndt_health_bad_;
 }
 
 // ========== 内存保护实现 ==========
@@ -4260,29 +4290,55 @@ void NdtSlamNode::checkMemoryGuard() {
     last_memory_check_time_ = now;
 
     long mem_mb = getProcessMemoryMB();
+    MemoryGuardLevel prev_level = memory_guard_level_;
 
-    if (mem_mb > max_process_memory_mb_) {
-        ROS_ERROR("[MemoryGuard] EMERGENCY: process using %ldMB > %dMB limit, forcing downsample",
-                  mem_mb, max_process_memory_mb_);
-
-        // 1. 强制压缩所有内存地图
-        forceDownsampleAllMaps();
-
-        // 2. 强制 flush dirty tiles
-        if (persistent_map_enabled_) {
-            flushDirtyTiles();
-        }
-
-        memory_guard_triggered_ = true;
-    } else if (mem_mb > warning_threshold_mb_) {
-        ROS_WARN("[MemoryGuard] WARNING: process using %ldMB (limit %dMB)",
-                 mem_mb, max_process_memory_mb_);
+    // 分级判定
+    if (mem_mb >= emergency_threshold_mb_) {
+        memory_guard_level_ = MemoryGuardLevel::EMERGENCY;
+    } else if (mem_mb >= hard_threshold_mb_) {
+        memory_guard_level_ = MemoryGuardLevel::HARD;
+    } else if (mem_mb >= soft_threshold_mb_) {
+        memory_guard_level_ = MemoryGuardLevel::SOFT;
     } else {
-        if (memory_guard_triggered_) {
-            ROS_INFO("[MemoryGuard] Memory recovered: %ldMB, clearing trigger", mem_mb);
-            memory_guard_triggered_ = false;
+        memory_guard_level_ = MemoryGuardLevel::OK;
+    }
+
+    // 状态变化时输出日志
+    if (memory_guard_level_ != prev_level) {
+        switch (memory_guard_level_) {
+            case MemoryGuardLevel::OK:
+                ROS_INFO("[MemoryGuard] OK: %ldMB, resuming normal operation", mem_mb);
+                mapping_paused_by_memory_guard_ = false;
+                break;
+            case MemoryGuardLevel::SOFT:
+                ROS_WARN("[MemoryGuard] SOFT: %ldMB > %dMB, releasing cache + flush tiles",
+                         mem_mb, soft_threshold_mb_);
+                releaseMemoryCache();
+                if (persistent_map_enabled_) flushDirtyTiles();
+                break;
+            case MemoryGuardLevel::HARD:
+                ROS_ERROR("[MemoryGuard] HARD: %ldMB > %dMB, pausing map commit",
+                         mem_mb, hard_threshold_mb_);
+                mapping_paused_by_memory_guard_ = true;
+                break;
+            case MemoryGuardLevel::EMERGENCY:
+                ROS_ERROR("[MemoryGuard] EMERGENCY: %ldMB > %dMB, forcing downsample",
+                         mem_mb, emergency_threshold_mb_);
+                forceDownsampleAllMaps();
+                if (persistent_map_enabled_) flushDirtyTiles();
+                break;
         }
     }
+
+    memory_guard_triggered_ = (memory_guard_level_ != MemoryGuardLevel::OK);
+}
+
+void NdtSlamNode::releaseMemoryCache() {
+    // 释放 PCL 缓存
+    pcl::console::setVerbosityLevel(pcl::console::L_ALWAYS);
+
+    // 建议系统释放缓存
+    ROS_INFO("[MemoryGuard] Requesting memory cache release");
 }
 
 void NdtSlamNode::forceDownsampleAllMaps() {

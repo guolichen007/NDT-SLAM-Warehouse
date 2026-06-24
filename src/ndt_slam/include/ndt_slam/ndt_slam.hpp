@@ -399,15 +399,25 @@ private:
     void writeRuntimeStatus();
     void flushDirtyTiles();
 
-    // ========== 内存保护 ==========
+    // ========== 统一提交检查 ==========
+    bool commit_enabled_ = true;              // observe_only 模式时为 false
+    bool mapping_paused_by_memory_guard_ = false;
+    bool ndt_health_bad_ = false;
+    bool canCommit();                         // 统一检查是否可以提交
+
+    // ========== 内存保护（分级） ==========
+    enum class MemoryGuardLevel { OK, SOFT, HARD, EMERGENCY };
     bool memory_guard_enabled_ = false;
-    int max_process_memory_mb_ = 8000;      // 进程内存上限 8GB
-    int warning_threshold_mb_ = 6000;        // 6GB 时开始警告
-    int memory_check_interval_sec_ = 30;     // 每 30 秒检查一次
+    int soft_threshold_mb_ = 6000;            // 6GB: 释放缓存 + flush
+    int hard_threshold_mb_ = 7000;            // 7GB: 暂停地图 commit
+    int emergency_threshold_mb_ = 8000;       // 8GB: 降采样 active map
+    int memory_check_interval_sec_ = 30;
     ros::Time last_memory_check_time_;
+    MemoryGuardLevel memory_guard_level_ = MemoryGuardLevel::OK;
 
     void checkMemoryGuard();
     void forceDownsampleAllMaps();
+    void releaseMemoryCache();
     long getProcessMemoryMB();
     void rebuildActiveMapFromRecentKeyframes();
 
@@ -430,8 +440,9 @@ private:
     double fitness_warning_threshold_ = 2.0;
     int fitness_warning_count_ = 50;
 
-    // ========== Active Map 重建 ==========
+    // ========== Active Map 重建（非阻塞） ==========
     int rebuild_every_keyframes_ = 10;
+    std::atomic<bool> active_map_rebuild_running_{false};
 
     // 边缘保留点云融合
     struct VoxelData {

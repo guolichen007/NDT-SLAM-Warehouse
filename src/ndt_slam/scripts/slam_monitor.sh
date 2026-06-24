@@ -3,13 +3,18 @@
 # 用法: bash slam_monitor.sh [监控间隔秒数]
 
 INTERVAL=${1:-60}
-DATA_DIR="/home/ydkj/NDT-slam-ws/maps/live/current"
+DATA_DIR="/home/ydkj/slam_data/maps/live/current"
 STATUS_FILE="$DATA_DIR/runtime_status.json"
 TREND_FILE="$DATA_DIR/memory_trend.csv"
 ALERTS_FILE="$DATA_DIR/alerts.log"
 
-# 初始化 CSV 头
-echo "timestamp,memory_mb,global_pts,display_pts,obj_pts,ground_pts,active_kf,is_stationary,dirty_tiles,disk_free_gb,ndt_fitness,pc_stale,mem_guard,disk_guard" > $TREND_FILE
+# 确保目录存在
+mkdir -p "$DATA_DIR"
+
+# 初始化 CSV 头（只在文件不存在时创建）
+if [ ! -f "$TREND_FILE" ]; then
+    echo "timestamp,memory_mb,global_pts,display_pts,obj_pts,ground_pts,active_kf,is_stationary,dirty_tiles,disk_free_gb,ndt_fitness,pc_stale,mem_guard,disk_guard" > "$TREND_FILE"
+fi
 
 echo "$(date): SLAM monitor started (interval=${INTERVAL}s)" >> "$DATA_DIR/monitor.log"
 
@@ -18,7 +23,7 @@ while true; do
 
     if [ -f "$STATUS_FILE" ]; then
         DATA=$(python3 -c "
-import json
+import json, sys
 try:
     d = json.load(open('$STATUS_FILE'))
     print(','.join([
@@ -36,10 +41,11 @@ try:
         str(d.get('memory_guard_triggered', False)),
         str(d.get('disk_guard_triggered', False))
     ]))
-except:
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr)
     '0,0,0,0,0,0,False,0,0,0,False,False,False'
 " 2>/dev/null)
-        echo "$TS,$DATA" >> $TREND_FILE
+        echo "$TS,$DATA" >> "$TREND_FILE"
 
         # 检查告警条件
         MEM=$(echo "$DATA" | cut -d',' -f1)

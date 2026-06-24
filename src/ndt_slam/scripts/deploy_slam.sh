@@ -7,6 +7,7 @@ echo "========== NDT-SLAM 长期建图部署 =========="
 echo "[1/7] 创建数据目录..."
 mkdir -p /home/ydkj/slam_data/maps/live/current
 mkdir -p /home/ydkj/slam_data/maps/live/archive
+mkdir -p /home/ydkj/slam_data/logs
 
 # 2. 检查磁盘空间
 echo "[2/7] 检查磁盘空间..."
@@ -38,17 +39,20 @@ echo "  编译完成 ✓"
 
 # 6. 安装 systemd 服务
 echo "[6/7] 安装 systemd 服务..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ ! -f /etc/systemd/system/ndt-slam.service ]; then
-    echo "  请先按文档创建 /etc/systemd/system/ndt-slam.service"
-    echo "  然后执行: sudo systemctl daemon-reload && sudo systemctl enable ndt-slam"
+    sudo cp "$SCRIPT_DIR/ndt-slam.service" /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable ndt-slam
+    echo "  systemd 服务已安装 ✓"
 else
+    sudo cp "$SCRIPT_DIR/ndt-slam.service" /etc/systemd/system/
     sudo systemctl daemon-reload
     echo "  systemd 服务已更新 ✓"
 fi
 
 # 7. 启动监控
 echo "[7/7] 启动监控..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if ! pgrep -f slam_monitor.sh > /dev/null; then
     nohup "$SCRIPT_DIR/slam_monitor.sh" > /dev/null 2>&1 &
     echo "  监控已启动 (PID: $!) ✓"

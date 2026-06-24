@@ -6,7 +6,8 @@ After=network.target
 Type=simple
 User=ydkj
 WorkingDirectory=/home/ydkj/NDT-slam-ws
-ExecStartPre=/bin/bash -c "mkdir -p /home/ydkj/slam_data/maps/live/current"
+Environment="ROS_LOG_DIR=/home/ydkj/slam_data/logs"
+ExecStartPre=/bin/bash -c "mkdir -p /home/ydkj/slam_data/maps/live/current /home/ydkj/slam_data/logs"
 ExecStart=/bin/bash -c "source /home/ydkj/NDT-slam-ws/devel/setup.bash && roslaunch ndt_slam warehouse_live_longterm_mapping.launch"
 Restart=on-failure
 RestartSec=15
@@ -14,7 +15,10 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 # 防止子进程残留
 KillMode=mixed
-TimeoutStopSec=10
+# 退出时需要 time flush dirty tiles
+TimeoutStopSec=60
+# 防止多实例运行
+ExecStartPre=/bin/bash -c "! /usr/bin/flock -n /tmp/ndt-slam.lock true"
 
 [Install]
 WantedBy=multi-user.target
