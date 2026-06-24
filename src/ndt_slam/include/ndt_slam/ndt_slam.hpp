@@ -381,6 +381,12 @@ private:
     std::map<std::string, TileLayers> dirty_tiles_;
     ros::Time last_flush_time_;
 
+    // tile 体素大小配置
+    double tile_voxel_registration_ = 0.30;
+    double tile_voxel_display_ = 0.10;
+    double tile_voxel_ground_ = 0.15;
+    double tile_voxel_objects_ = 0.08;
+
     // runtime status
     int total_frames_ = 0;
     int total_keyframes_ = 0;

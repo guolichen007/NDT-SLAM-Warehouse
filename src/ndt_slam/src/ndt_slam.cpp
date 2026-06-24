@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <boost/filesystem.hpp>
+#include <malloc.h>
 
 #include <tf2/convert.h>
 #include <tf2_ros/buffer.h>
@@ -606,6 +607,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             tile_size_m_ = pm["tile_size_m"].as<double>(20.0);
             flush_interval_sec_ = pm["flush_interval_sec"].as<int>(60);
             max_dirty_tiles_ = pm["max_dirty_tiles_in_memory"].as<int>(20);
+            tile_voxel_registration_ = pm["tile_voxel_registration"].as<double>(0.30);
+            tile_voxel_display_ = pm["tile_voxel_display"].as<double>(0.10);
+            tile_voxel_ground_ = pm["tile_voxel_ground"].as<double>(0.15);
+            tile_voxel_objects_ = pm["tile_voxel_objects"].as<double>(0.08);
         }
 
         ROS_INFO("=== Long-Term Mapping Config ===");
@@ -1085,6 +1090,20 @@ void NdtSlamNode::processCloudThread() {
                     if (fitness_score > 5.0) {
                         ROS_WARN("NDT: high fitness score=%.4f, matching quality may be poor", fitness_score);
                     }
+
+                    // NDT 健康监控
+                    last_ndt_fitness_ = fitness_score;
+                    if (fitness_score > fitness_warning_threshold_) {
+                        consecutive_high_fitness_++;
+                        if (consecutive_high_fitness_ >= fitness_warning_count_) {
+                            ndt_health_bad_ = true;
+                            ROS_WARN_THROTTLE(30, "[NDT-Health] BAD: fitness=%.4f for %d frames",
+                                              fitness_score, consecutive_high_fitness_);
+                        }
+                    } else {
+                        consecutive_high_fitness_ = 0;
+                        ndt_health_bad_ = false;
+                    }
                     if (!result.isZero() && !result.hasNaN()) {
                         // 正交化旋转矩阵
                         Eigen::Matrix3d R = result.block<3,3>(0,0).cast<double>();
@@ -1305,8 +1324,13 @@ void NdtSlamNode::processCloudThread() {
                         flushDirtyTiles();
                     }
 
-                    // 写入 runtime status
-                    writeRuntimeStatus();
+                    // 定期写入 runtime status（每 5 秒）
+                    static ros::Time last_status_write_time;
+                    double time_since_status = (ros::Time::now() - last_status_write_time).toSec();
+                    if (time_since_status >= 5.0) {
+                        writeRuntimeStatus();
+                        last_status_write_time = ros::Time::now();
+                    }
                 }
 
                 // 内存保护检查
@@ -1319,7 +1343,7 @@ void NdtSlamNode::processCloudThread() {
                 }
 
                 // 定期重建 active map（每 10 个关键帧）
-                if (longterm_mapping_enabled_ && keyframe_count_ > 0 && keyframe_count_ % 10 == 0) {
+                if (longterm_mapping_enabled_ && keyframe_count_ > 0 && keyframe_count_ % rebuild_every_keyframes_ == 0) {
                     rebuildActiveMapFromRecentKeyframes();
                 }
             }
@@ -2533,6 +2557,14 @@ void NdtSlamNode::separateGroundByGrid(const pcl::PointCloud<pcl::PointXYZ>& inp
 void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                                         const Sophus::SE3d& pose,
                                         const ros::Time& stamp) {
+    // ========== 统一门控：observe_only / 内存保护 / 磁盘保护 / NDT 健康 ==========
+    if (longterm_mapping_enabled_ && !canCommit()) {
+        ROS_DEBUG_THROTTLE(10.0, "[CommitGate] blocked: commit=%d mem_pause=%d disk=%d ndt=%d",
+                           commit_enabled_ ? 1 : 0, mapping_paused_by_memory_guard_ ? 1 : 0,
+                           disk_guard_triggered_ ? 1 : 0, ndt_health_bad_ ? 1 : 0);
+        return;
+    }
+
     // ========== MotionGate：静止时不添加关键帧 ==========
     if (longterm_mapping_enabled_ && motion_gate_enabled_) {
         if (!shouldCommitKeyframe(pose, stamp)) {
@@ -2803,7 +2835,7 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
             addInRange(safe_transformed, objects_map_);      // objects map: safe_objects only
 
             // ========== 长期建图：写入 tiles ==========
-            if (longterm_mapping_enabled_ && persistent_map_enabled_) {
+            if (longterm_mapping_enabled_ && persistent_map_enabled_ && canCommit()) {
                 // 计算 tile 索引
                 Eigen::Vector3d kf_pos = pose.translation();
                 int tile_x = std::floor(kf_pos.x() / tile_size_m_);
@@ -4153,25 +4185,25 @@ void NdtSlamNode::flushDirtyTiles() {
         // 写入 registration layer
         if (tile_layers.registration && !tile_layers.registration->empty()) {
             std::string filepath = reg_dir + "/" + tile_key + ".pcd";
-            mergeAndWrite(tile_layers.registration, filepath, 0.30);
+            mergeAndWrite(tile_layers.registration, filepath, tile_voxel_registration_);
         }
 
         // 写入 display layer
         if (tile_layers.display && !tile_layers.display->empty()) {
             std::string filepath = disp_dir + "/" + tile_key + ".pcd";
-            mergeAndWrite(tile_layers.display, filepath, 0.10);
+            mergeAndWrite(tile_layers.display, filepath, tile_voxel_display_);
         }
 
         // 写入 ground layer
         if (tile_layers.ground && !tile_layers.ground->empty()) {
             std::string filepath = gnd_dir + "/" + tile_key + ".pcd";
-            mergeAndWrite(tile_layers.ground, filepath, 0.15);
+            mergeAndWrite(tile_layers.ground, filepath, tile_voxel_ground_);
         }
 
         // 写入 objects layer
         if (tile_layers.objects && !tile_layers.objects->empty()) {
             std::string filepath = obj_dir + "/" + tile_key + ".pcd";
-            mergeAndWrite(tile_layers.objects, filepath, 0.08);
+            mergeAndWrite(tile_layers.objects, filepath, tile_voxel_objects_);
         }
 
         flushed++;
@@ -4315,6 +4347,7 @@ void NdtSlamNode::checkMemoryGuard() {
                          mem_mb, soft_threshold_mb_);
                 releaseMemoryCache();
                 if (persistent_map_enabled_) flushDirtyTiles();
+                mapping_paused_by_memory_guard_ = false;  // SOFT 级别恢复提交
                 break;
             case MemoryGuardLevel::HARD:
                 ROS_ERROR("[MemoryGuard] HARD: %ldMB > %dMB, pausing map commit",
@@ -4334,11 +4367,25 @@ void NdtSlamNode::checkMemoryGuard() {
 }
 
 void NdtSlamNode::releaseMemoryCache() {
-    // 释放 PCL 缓存
-    pcl::console::setVerbosityLevel(pcl::console::L_ALWAYS);
+    // 1. flush dirty tiles
+    if (persistent_map_enabled_ && !dirty_tiles_.empty()) {
+        flushDirtyTiles();
+    }
 
-    // 建议系统释放缓存
-    ROS_INFO("[MemoryGuard] Requesting memory cache release");
+    // 2. 释放超出窗口的 keyframe cloud
+    releaseOldKeyframeClouds();
+
+    // 3. 清空 path 历史（如果很长）
+    if (path_msg_.poses.size() > 1000) {
+        size_t half = path_msg_.poses.size() / 2;
+        path_msg_.poses.erase(path_msg_.poses.begin(), path_msg_.poses.begin() + half);
+        ROS_INFO("[MemoryGuard] Trimmed path history: %zu -> %zu", half * 2, path_msg_.poses.size());
+    }
+
+    // 4. 建议 glibc 归还内存给操作系统
+    malloc_trim(0);
+
+    ROS_INFO("[MemoryGuard] SOFT: released caches");
 }
 
 void NdtSlamNode::forceDownsampleAllMaps() {
@@ -4400,8 +4447,17 @@ bool NdtSlamNode::checkDiskGuard() {
 void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
     if (!longterm_mapping_enabled_) return;
 
+    // 防止重入
+    if (active_map_rebuild_running_.exchange(true)) {
+        ROS_WARN_THROTTLE(10, "[ActiveMap] rebuild already running, skip");
+        return;
+    }
+
     auto& keyframes = loop_closure_detector_.getKeyFrameManager().getKeyFramesNonConst();
-    if (keyframes.empty()) return;
+    if (keyframes.empty()) {
+        active_map_rebuild_running_ = false;
+        return;
+    }
 
     // 收集最近 80 个有 cloud 的关键帧
     std::vector<const KeyFrame*> recent_kfs;
@@ -4411,18 +4467,19 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
         }
     }
 
-    if (recent_kfs.empty()) return;
+    if (recent_kfs.empty()) {
+        active_map_rebuild_running_ = false;
+        return;
+    }
 
     ROS_INFO("[ActiveMap] Rebuilding from %zu recent keyframes", recent_kfs.size());
 
-    // 清空现有地图
-    std::lock_guard<std::mutex> lock(map_mutex_);
-    global_map_->clear();
-    display_map_->clear();
-    ground_map_->clear();
-    objects_map_->clear();
+    // 构建新地图（不加锁）
+    pcl::PointCloud<pcl::PointXYZ>::Ptr new_global(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr new_display(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr new_ground(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr new_objects(new pcl::PointCloud<pcl::PointXYZ>);
 
-    // 从关键帧重建
     for (const auto* kf : recent_kfs) {
         Eigen::Matrix4d transform = kf->pose_.matrix();
 
@@ -4430,14 +4487,23 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
         pcl::PointCloud<pcl::PointXYZ> transformed;
         pcl::transformPointCloud(*kf->cloud_, transformed, transform.cast<float>());
 
+        // ground/object 分离
+        pcl::PointCloud<pcl::PointXYZ> kf_ground, kf_objects;
+        separateGroundByGrid(transformed, kf_ground, kf_objects);
+
         // 添加到各层地图
         for (const auto& p : transformed.points) {
             if (std::abs(p.x) <= max_map_size_ && std::abs(p.y) <= max_map_size_ &&
                 std::abs(p.z) <= max_map_size_ && std::isfinite(p.x)) {
-                global_map_->push_back(p);
-                display_map_->push_back(p);
-                objects_map_->push_back(p);
+                new_global->push_back(p);
+                new_display->push_back(p);
             }
+        }
+        for (const auto& p : kf_ground.points) {
+            if (std::isfinite(p.x)) new_ground->push_back(p);
+        }
+        for (const auto& p : kf_objects.points) {
+            if (std::isfinite(p.x)) new_objects->push_back(p);
         }
     }
 
@@ -4455,14 +4521,26 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
         return output;
     };
 
-    global_map_ = voxelFilter(global_map_, voxel_size_);
-    display_map_ = voxelFilter(display_map_, display_voxel_size_);
-    objects_map_ = voxelFilter(objects_map_, objects_voxel_size_);
+    new_global = voxelFilter(new_global, voxel_size_);
+    new_display = voxelFilter(new_display, display_voxel_size_);
+    new_ground = voxelFilter(new_ground, ground_voxel_size_);
+    new_objects = voxelFilter(new_objects, objects_voxel_size_);
+
+    // swap 指针（持锁时间最短）
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        global_map_ = new_global;
+        display_map_ = new_display;
+        ground_map_ = new_ground;
+        objects_map_ = new_objects;
+    }
 
     last_active_map_rebuild_time_ = ros::Time::now();
 
-    ROS_INFO("[ActiveMap] Rebuilt: global=%zu, display=%zu, objects=%zu",
-             global_map_->size(), display_map_->size(), objects_map_->size());
+    ROS_INFO("[ActiveMap] Rebuilt: global=%zu, display=%zu, ground=%zu, objects=%zu",
+             global_map_->size(), display_map_->size(), ground_map_->size(), objects_map_->size());
+
+    active_map_rebuild_running_ = false;
 }
 
 } // namespace ndt_slam
