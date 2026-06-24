@@ -335,6 +335,27 @@ journalctl -u ndt-slam -f
 }
 ```
 
+### MemoryGuard 分级策略
+
+| 级别 | 阈值 | 行为 |
+|------|------|------|
+| OK | < 6GB | 正常运行 |
+| SOFT | 6-7GB | 释放缓存 + flush dirty tiles |
+| HARD | 7-8GB | 暂停地图 commit（NDT/TF 继续） |
+| EMERGENCY | > 8GB | 降采样 active map |
+
+### observe_only 模式
+
+首次上服务器接真实 topic 时，使用观察模式避免污染地图目录：
+
+```yaml
+longterm_mapping:
+  enabled: true
+  commit_enabled: false    # 观察模式：不写 tile、不插关键帧
+```
+
+确认 10-30 分钟稳定后改为 `commit_enabled: true`。
+
 ---
 
 ## 项目背景
