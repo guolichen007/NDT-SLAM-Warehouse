@@ -140,6 +140,43 @@ roslaunch ndt_slam offline_mapping.launch
 - 导航栅格需要进一步降低 unknown 区域比例
 - objects 层边缘锐度仍需通过后处理和局部精配准优化
 
+## 重定位功能（feature/relocalization 分支）
+
+### 功能说明
+
+- ScanContext Top-K 粗定位 + NDT 精配准
+- 天车约束：只取 x/y，姿态保持固定
+- 开机自动重定位：等待第一帧 → ScanContext + NDT → 成功后进入定位模式
+- 手动重定位：`/relocalize` 服务
+
+### 测试结果
+
+**测试环境**：
+- 建图 bag：调运长件.bag
+- 定位测试：从 60 秒开始播放
+
+**测试结果**：
+```
+[Runtime] Localization mode enabled
+[Runtime] Loaded map_file: .../registration_map_fixed.pcd, points=24872
+[Runtime] Loaded ScanContext database from .../maps/test_mapping
+[Reloc] Attempting auto relocalization...
+[Reloc] auto relocalization triggered
+[Reloc] Top-5 candidates: 0 found
+[Reloc] No candidates found
+```
+
+**问题分析**：
+- 重定位链路已打通
+- ScanContext 数据库为空（建图时未保存）
+- 需要在建图时保存 ScanContext 数据库
+
+### 待完成
+
+1. 建图时保存 ScanContext 数据库
+2. 使用保存的数据库进行重定位测试
+3. 从不同时间点（30s、60s、90s）测试重定位
+
 ## 许可证
 
 MIT License
