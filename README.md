@@ -240,6 +240,30 @@ MotionGate 日志：
 - ✅ **MotionGate 生效**: 29 次关键帧提交
 - ✅ **内存稳定**: 126 MB
 
+#### 内存保护测试结果
+
+**测试环境**
+- 测试内容：验证内存保护机制（8GB 上限，6GB 警告）
+- 测试方法：播放 bag 3 次，检查 memory_guard_triggered 字段
+
+**测试结果**
+```json
+{
+  "total_frames": 831,
+  "total_keyframes": 27,
+  "active_keyframes": 27,
+  "active_map_points": 25136,
+  "memory_mb": 163.26,
+  "memory_guard_triggered": false
+}
+```
+
+**测试结论**
+- ✅ **内存保护配置生效**: memory_guard_triggered: false（内存未超限）
+- ✅ **内存稳定**: 163 MB（远低于 8GB 上限）
+- ✅ **runtime_status 正常更新**: 包含 memory_guard_triggered 字段
+- ✅ **多层 tile 写入正常**: 4 个目录各 2 个文件
+
 ### 使用方法
 
 ```bash
