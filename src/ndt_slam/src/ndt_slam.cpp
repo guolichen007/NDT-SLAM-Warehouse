@@ -2729,15 +2729,25 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 int tile_y = std::floor(kf_pos.y() / tile_size_m_);
                 std::string tile_key = "x" + std::to_string(tile_x) + "_y" + std::to_string(tile_y);
 
-                // 将 safe_transformed 添加到对应的 tile
+                // 初始化 tile layers（如果不存在）
                 if (dirty_tiles_.find(tile_key) == dirty_tiles_.end()) {
-                    dirty_tiles_[tile_key].reset(new pcl::PointCloud<pcl::PointXYZ>);
+                    dirty_tiles_[tile_key].registration.reset(new pcl::PointCloud<pcl::PointXYZ>);
+                    dirty_tiles_[tile_key].display.reset(new pcl::PointCloud<pcl::PointXYZ>);
+                    dirty_tiles_[tile_key].ground.reset(new pcl::PointCloud<pcl::PointXYZ>);
+                    dirty_tiles_[tile_key].objects.reset(new pcl::PointCloud<pcl::PointXYZ>);
                 }
-                *dirty_tiles_[tile_key] += safe_transformed;
+
+                // 添加到各层
+                *dirty_tiles_[tile_key].registration += safe_transformed;
+                *dirty_tiles_[tile_key].display += safe_transformed;
+                *dirty_tiles_[tile_key].display += ground_transformed;
+                *dirty_tiles_[tile_key].ground += ground_transformed;
+                *dirty_tiles_[tile_key].objects += safe_transformed;
+
                 dirty_tile_count_ = dirty_tiles_.size();
 
-                ROS_DEBUG("[PersistentMap] Added %zu points to tile %s, dirty_tiles=%d",
-                          safe_transformed.size(), tile_key.c_str(), dirty_tile_count_);
+                ROS_DEBUG("[PersistentMap] Added points to tile %s layers, dirty_tiles=%d",
+                          tile_key.c_str(), dirty_tile_count_);
             }
 
             // 发布 debug 话题
@@ -4015,18 +4025,80 @@ void NdtSlamNode::flushDirtyTiles() {
 
     // 创建目录
     std::string reg_dir = persistent_map_root_dir_ + "/tiles_registration";
+    std::string disp_dir = persistent_map_root_dir_ + "/tiles_display";
+    std::string gnd_dir = persistent_map_root_dir_ + "/tiles_ground";
+    std::string obj_dir = persistent_map_root_dir_ + "/tiles_objects";
     boost::filesystem::create_directories(reg_dir);
+    boost::filesystem::create_directories(disp_dir);
+    boost::filesystem::create_directories(gnd_dir);
+    boost::filesystem::create_directories(obj_dir);
 
-    int flushed = 0;
-    for (auto& [tile_key, tile_cloud] : dirty_tiles_) {
-        if (!tile_cloud || tile_cloud->empty()) continue;
+    // 体素滤波函数
+    auto voxelFilter = [](const pcl::PointCloud<pcl::PointXYZ>::Ptr& input, double voxel_size) {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr output(new pcl::PointCloud<pcl::PointXYZ>);
+        if (input->size() > 100) {
+            pcl::VoxelGrid<pcl::PointXYZ> vf;
+            vf.setInputCloud(input);
+            vf.setLeafSize(voxel_size, voxel_size, voxel_size);
+            vf.filter(*output);
+        } else {
+            *output = *input;
+        }
+        return output;
+    };
 
-        std::string filepath = reg_dir + "/" + tile_key + ".pcd";
-        std::string tmp_path = filepath + ".tmp";
+    // 增量合并函数：读取已有 tile，合并后再写入
+    auto mergeAndWrite = [&](const pcl::PointCloud<pcl::PointXYZ>::Ptr& new_cloud,
+                             const std::string& filepath, double voxel_size) {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr merged(new pcl::PointCloud<pcl::PointXYZ>);
+
+        // 如果已有 tile，读取并合并
+        if (boost::filesystem::exists(filepath)) {
+            pcl::PointCloud<pcl::PointXYZ>::Ptr existing(new pcl::PointCloud<pcl::PointXYZ>);
+            if (pcl::io::loadPCDFile<pcl::PointXYZ>(filepath, *existing) == 0) {
+                *merged = *existing;
+            }
+        }
+
+        // 合并新点云
+        *merged += *new_cloud;
+
+        // 体素滤波
+        auto filtered = voxelFilter(merged, voxel_size);
 
         // 写入临时文件然后重命名（防断电损坏）
-        pcl::io::savePCDFileBinary(tmp_path, *tile_cloud);
+        std::string tmp_path = filepath + ".tmp";
+        pcl::io::savePCDFileBinary(tmp_path, *filtered);
         boost::filesystem::rename(tmp_path, filepath);
+
+        return filtered->size();
+    };
+
+    int flushed = 0;
+    for (auto& [tile_key, tile_layers] : dirty_tiles_) {
+        // 写入 registration layer
+        if (tile_layers.registration && !tile_layers.registration->empty()) {
+            std::string filepath = reg_dir + "/" + tile_key + ".pcd";
+            mergeAndWrite(tile_layers.registration, filepath, 0.30);
+        }
+
+        // 写入 display layer
+        if (tile_layers.display && !tile_layers.display->empty()) {
+            std::string filepath = disp_dir + "/" + tile_key + ".pcd";
+            mergeAndWrite(tile_layers.display, filepath, 0.10);
+        }
+
+        // 写入 ground layer
+        if (tile_layers.ground && !tile_layers.ground->empty()) {
+            std::string filepath = gnd_dir + "/" + tile_key + ".pcd";
+            mergeAndWrite(tile_layers.ground, filepath, 0.15);
+        }
+
+        // 写入 objects layer
+        if (tile_layers.objects && !tile_layers.objects->empty()) {
+            std::string filepath = obj_dir + "/" + tile_key + ".pcd";
+            mergeAndWrite(tile_layers.objects, filepath, 0.08);
+        }
 
         flushed++;
     }
@@ -4036,7 +4108,8 @@ void NdtSlamNode::flushDirtyTiles() {
     dirty_tile_count_ = 0;
     last_flush_time_ = ros::Time::now();
 
-    ROS_INFO("[PersistentMap] Flushed %d tiles to disk, total flushed: %d", flushed, flushed_tile_count_);
+    ROS_INFO("[PersistentMap] Flushed %d tiles to disk (4 layers each), total flushed: %d",
+             flushed, flushed_tile_count_);
 }
 
 void NdtSlamNode::writeRuntimeStatus() {

@@ -370,7 +370,15 @@ private:
     double tile_size_m_ = 20.0;
     int flush_interval_sec_ = 60;
     int max_dirty_tiles_ = 20;
-    std::map<std::string, pcl::PointCloud<pcl::PointXYZ>::Ptr> dirty_tiles_;
+
+    // 多层 tile 支持
+    struct TileLayers {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr registration;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr display;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr ground;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr objects;
+    };
+    std::map<std::string, TileLayers> dirty_tiles_;
     ros::Time last_flush_time_;
 
     // runtime status

@@ -102,7 +102,11 @@ bool KeyFrameManager::saveKeyFrameDatabase(const std::string& session_dir) const
 
         for (const auto& kf : keyframes_) {
             std::string pcd_filename = keyframes_dir / (std::to_string(kf.id_) + ".pcd");
-            pcl::io::savePCDFileBinary(pcd_filename, *kf.cloud_);
+            if (kf.cloud_ && !kf.cloud_->empty()) {
+                pcl::io::savePCDFileBinary(pcd_filename, *kf.cloud_);
+            } else {
+                ROS_DEBUG("[KeyFrame] Skip saving released keyframe cloud: id=%lu", kf.id_);
+            }
         }
 
         std::string poses_raw_file = session_path / "poses_raw.txt";
