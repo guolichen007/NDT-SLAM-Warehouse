@@ -624,6 +624,40 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         ROS_INFO("  max_process_memory: %d MB", max_process_memory_mb_);
         ROS_INFO("  warning_threshold: %d MB", warning_threshold_mb_);
         ROS_INFO("  check_interval: %d sec", memory_check_interval_sec_);
+
+        if (config["disk_guard"]) {
+            auto dg = config["disk_guard"];
+            disk_guard_enabled_ = dg["enabled"].as<bool>(false);
+            min_free_disk_gb_ = dg["min_free_disk_gb"].as<double>(30.0);
+            pause_mapping_when_disk_low_ = dg["pause_mapping_when_low"].as<bool>(true);
+        }
+
+        ROS_INFO("=== Disk Guard Config ===");
+        ROS_INFO("  enabled: %s", disk_guard_enabled_ ? "true" : "false");
+        ROS_INFO("  min_free_disk: %.1f GB", min_free_disk_gb_);
+
+        if (config["pointcloud_watchdog"]) {
+            auto pw = config["pointcloud_watchdog"];
+            pointcloud_stale_timeout_sec_ = pw["stale_timeout_sec"].as<double>(10.0);
+        }
+
+        ROS_INFO("=== Pointcloud Watchdog Config ===");
+        ROS_INFO("  stale_timeout: %.1f sec", pointcloud_stale_timeout_sec_);
+
+        if (config["ndt_health"]) {
+            auto nh = config["ndt_health"];
+            fitness_warning_threshold_ = nh["fitness_warning_threshold"].as<double>(2.0);
+            fitness_warning_count_ = nh["fitness_warning_count"].as<int>(50);
+        }
+
+        if (config["active_map"]) {
+            auto am = config["active_map"];
+            rebuild_every_keyframes_ = am["rebuild_every_keyframes"].as<int>(10);
+        }
+
+        ROS_INFO("=== NDT Health Config ===");
+        ROS_INFO("  fitness_warning_threshold: %.2f", fitness_warning_threshold_);
+        ROS_INFO("  rebuild_every_keyframes: %d", rebuild_every_keyframes_);
         ROS_INFO("===========================");
 
     } catch (const YAML::Exception& e) {
@@ -636,6 +670,9 @@ void NdtSlamNode::initializeParameters() {
 }
 
 void NdtSlamNode::pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg) {
+    last_pointcloud_time_ = ros::Time::now();
+    pointcloud_stale_ = false;
+
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         // 只保留最新帧，丢弃旧帧，避免处理积压
@@ -4038,17 +4075,10 @@ void NdtSlamNode::releaseOldKeyframeClouds() {
 void NdtSlamNode::flushDirtyTiles() {
     if (!persistent_map_enabled_ || dirty_tiles_.empty()) return;
 
-    // 检查磁盘空间
-    boost::filesystem::space_info si;
-    try {
-        si = boost::filesystem::space(persistent_map_root_dir_);
-        if (si.available < 50ULL * 1024 * 1024 * 1024) {  // 50GB
-            ROS_WARN("[DiskGuard] Low disk space: %.1f GB free, pausing tile flush",
-                     si.available / (1024.0 * 1024 * 1024));
-            return;
-        }
-    } catch (...) {
-        // 目录可能不存在，继续
+    // 检查磁盘保护
+    if (!checkDiskGuard()) {
+        ROS_WARN_THROTTLE(60, "[DiskGuard] Skipping flush, disk low");
+        return;
     }
 
     // 创建目录
@@ -4135,6 +4165,7 @@ void NdtSlamNode::flushDirtyTiles() {
     dirty_tiles_.clear();
     dirty_tile_count_ = 0;
     last_flush_time_ = ros::Time::now();
+    last_flush_time_local_ = ros::Time::now();
 
     ROS_INFO("[PersistentMap] Flushed %d tiles to disk (4 layers each), total flushed: %d",
              flushed, flushed_tile_count_);
@@ -4151,64 +4182,88 @@ void NdtSlamNode::writeRuntimeStatus() {
     if (!f.is_open()) return;
 
     // 获取磁盘空间
-    double disk_free_gb = 0;
-    try {
-        auto si = boost::filesystem::space(persistent_map_root_dir_);
-        disk_free_gb = si.available / (1024.0 * 1024 * 1024);
-    } catch (...) {}
+    double disk_free_gb = getDiskFreeGB();
 
     // 获取内存使用
-    long mem_kb = 0;
-    std::ifstream status("/proc/self/status");
-    std::string line;
-    while (std::getline(status, line)) {
-        if (line.substr(0, 6) == "VmRSS:") {
-            mem_kb = std::stol(line.substr(6));
-            break;
-        }
-    }
+    long mem_mb = getProcessMemoryMB();
+
+    // 检查点云超时
+    double pc_elapsed = (ros::Time::now() - last_pointcloud_time_).toSec();
+    pointcloud_stale_ = (pc_elapsed > pointcloud_stale_timeout_sec_);
+
+    // 获取各地图点数
+    size_t global_pts = global_map_ ? global_map_->size() : 0;
+    size_t display_pts = display_map_ ? display_map_->size() : 0;
+    size_t ground_pts = ground_map_ ? ground_map_->size() : 0;
+    size_t objects_pts = objects_map_ ? objects_map_->size() : 0;
+    size_t local_pts = local_map_ ? local_map_->size() : 0;
 
     f << std::fixed << std::setprecision(2);
     f << "{\n";
+    f << "  \"timestamp\": \"" << ros::Time::now() << "\",\n";
     f << "  \"total_frames\": " << total_frames_ << ",\n";
     f << "  \"total_keyframes\": " << total_keyframes_ << ",\n";
     f << "  \"active_keyframes\": " << active_keyframes_ << ",\n";
     f << "  \"is_stationary\": " << (is_stationary_ ? "true" : "false") << ",\n";
+    f << "  \"stationary_frame_count\": " << stationary_frame_count_ << ",\n";
     f << "  \"delta_translation_m\": " << delta_translation_ << ",\n";
     f << "  \"delta_yaw_deg\": " << delta_yaw_ << ",\n";
-    f << "  \"active_map_points\": " << (global_map_ ? global_map_->size() : 0) << ",\n";
+    f << "  \"global_map_points\": " << global_pts << ",\n";
+    f << "  \"display_map_points\": " << display_pts << ",\n";
+    f << "  \"ground_map_points\": " << ground_pts << ",\n";
+    f << "  \"objects_map_points\": " << objects_pts << ",\n";
+    f << "  \"local_map_points\": " << local_pts << ",\n";
     f << "  \"dirty_tile_count\": " << dirty_tile_count_ << ",\n";
     f << "  \"flushed_tile_count\": " << flushed_tile_count_ << ",\n";
-    f << "  \"disk_free_gb\": " << disk_free_gb << ",\n";
-    f << "  \"memory_mb\": " << mem_kb / 1024.0 << ",\n";
+    f << "  \"memory_mb\": " << mem_mb << ",\n";
     f << "  \"memory_guard_triggered\": " << (memory_guard_triggered_ ? "true" : "false") << ",\n";
+    f << "  \"disk_free_gb\": " << disk_free_gb << ",\n";
+    f << "  \"disk_guard_triggered\": " << (disk_guard_triggered_ ? "true" : "false") << ",\n";
+    f << "  \"pointcloud_timeout_sec\": " << pc_elapsed << ",\n";
+    f << "  \"pointcloud_stale\": " << (pointcloud_stale_ ? "true" : "false") << ",\n";
+    f << "  \"last_ndt_fitness\": " << last_ndt_fitness_ << ",\n";
+    f << "  \"ndt_fitness_warning\": " << (consecutive_high_fitness_ > fitness_warning_count_ ? "true" : "false") << ",\n";
+    f << "  \"consecutive_high_fitness\": " << consecutive_high_fitness_ << ",\n";
     f << "  \"average_process_time_ms\": " << average_process_time_ms_ << ",\n";
     f << "  \"average_ndt_time_ms\": " << average_ndt_time_ms_ << ",\n";
+    f << "  \"last_flush_time\": \"" << last_flush_time_local_ << "\",\n";
+    f << "  \"last_active_map_rebuild\": \"" << last_active_map_rebuild_time_ << "\",\n";
     f << "  \"last_update\": \"" << ros::Time::now() << "\"\n";
     f << "}\n";
     f.close();
+
+    // 内存保护检查
+    checkMemoryGuard();
 }
 
 // ========== 内存保护实现 ==========
 
-void NdtSlamNode::checkMemoryGuard() {
-    if (!memory_guard_enabled_) return;
-
-    // 读取进程 VmRSS
+long NdtSlamNode::getProcessMemoryMB() {
     long mem_kb = 0;
     std::ifstream ifs("/proc/self/status");
     std::string line;
     while (std::getline(ifs, line)) {
         if (line.substr(0, 6) == "VmRSS:") {
-            mem_kb = std::stol(line.substr(6));
+            std::istringstream iss(line.substr(6));
+            iss >> mem_kb;
             break;
         }
     }
-    long mem_mb = mem_kb / 1024;
+    return mem_kb / 1024;
+}
+
+void NdtSlamNode::checkMemoryGuard() {
+    if (!memory_guard_enabled_) return;
+
+    ros::Time now = ros::Time::now();
+    if ((now - last_memory_check_time_).toSec() < memory_check_interval_sec_) return;
+    last_memory_check_time_ = now;
+
+    long mem_mb = getProcessMemoryMB();
 
     if (mem_mb > max_process_memory_mb_) {
-        ROS_WARN("[MemoryGuard] EMERGENCY: process using %ldMB > %dMB limit",
-                 mem_mb, max_process_memory_mb_);
+        ROS_ERROR("[MemoryGuard] EMERGENCY: process using %ldMB > %dMB limit, forcing downsample",
+                  mem_mb, max_process_memory_mb_);
 
         // 1. 强制压缩所有内存地图
         forceDownsampleAllMaps();
@@ -4223,7 +4278,10 @@ void NdtSlamNode::checkMemoryGuard() {
         ROS_WARN("[MemoryGuard] WARNING: process using %ldMB (limit %dMB)",
                  mem_mb, max_process_memory_mb_);
     } else {
-        memory_guard_triggered_ = false;
+        if (memory_guard_triggered_) {
+            ROS_INFO("[MemoryGuard] Memory recovered: %ldMB, clearing trigger", mem_mb);
+            memory_guard_triggered_ = false;
+        }
     }
 }
 
@@ -4248,6 +4306,39 @@ void NdtSlamNode::forceDownsampleAllMaps() {
     forceVoxel(display_map_, 0.5, "display_map_");
     forceVoxel(ground_map_, 0.3, "ground_map_");
     forceVoxel(objects_map_, 0.3, "objects_map_");
+}
+
+// ========== 磁盘保护实现 ==========
+
+double NdtSlamNode::getDiskFreeGB() {
+    try {
+        boost::filesystem::space_info si = boost::filesystem::space(persistent_map_root_dir_);
+        return static_cast<double>(si.available) / (1024.0 * 1024.0 * 1024.0);
+    } catch (...) {
+        return -1.0;
+    }
+}
+
+bool NdtSlamNode::checkDiskGuard() {
+    if (!disk_guard_enabled_) return true;
+
+    double free_gb = getDiskFreeGB();
+    if (free_gb < 0) return true;  // 获取失败，不阻止
+
+    if (free_gb < min_free_disk_gb_) {
+        if (!disk_guard_triggered_) {
+            ROS_ERROR("[DiskGuard] CRITICAL: only %.1fGB free (limit %.1fGB), pausing tile writes",
+                      free_gb, min_free_disk_gb_);
+            disk_guard_triggered_ = true;
+        }
+        return false;
+    } else {
+        if (disk_guard_triggered_) {
+            ROS_INFO("[DiskGuard] Disk recovered: %.1fGB free, resuming tile writes", free_gb);
+            disk_guard_triggered_ = false;
+        }
+        return true;
+    }
 }
 
 void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
@@ -4311,6 +4402,8 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
     global_map_ = voxelFilter(global_map_, voxel_size_);
     display_map_ = voxelFilter(display_map_, display_voxel_size_);
     objects_map_ = voxelFilter(objects_map_, objects_voxel_size_);
+
+    last_active_map_rebuild_time_ = ros::Time::now();
 
     ROS_INFO("[ActiveMap] Rebuilt: global=%zu, display=%zu, objects=%zu",
              global_map_->size(), display_map_->size(), objects_map_->size());

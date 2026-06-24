@@ -110,6 +110,15 @@ active_map:
   display_voxel: 0.10
   objects_voxel: 0.08
 
+# 雷达断流检测
+pointcloud_watchdog:
+  stale_timeout_sec: 10.0
+
+# NDT 健康监控
+ndt_health:
+  fitness_warning_threshold: 2.0
+  fitness_warning_count: 50
+
 # ========== 吊货过滤配置 ==========
 
 # BasePayloadChannelFilter

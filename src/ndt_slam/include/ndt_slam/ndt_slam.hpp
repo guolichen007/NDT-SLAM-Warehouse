@@ -392,6 +392,9 @@ private:
     double average_process_time_ms_ = 0.0;
     double average_ndt_time_ms_ = 0.0;
     bool memory_guard_triggered_ = false;
+    bool disk_guard_triggered_ = false;
+    ros::Time last_flush_time_local_;
+    ros::Time last_active_map_rebuild_time_;
 
     void writeRuntimeStatus();
     void flushDirtyTiles();
@@ -405,7 +408,30 @@ private:
 
     void checkMemoryGuard();
     void forceDownsampleAllMaps();
+    long getProcessMemoryMB();
     void rebuildActiveMapFromRecentKeyframes();
+
+    // ========== 磁盘保护 ==========
+    bool disk_guard_enabled_ = false;
+    double min_free_disk_gb_ = 30.0;
+    bool pause_mapping_when_disk_low_ = true;
+
+    bool checkDiskGuard();
+    double getDiskFreeGB();
+
+    // ========== 点云看门狗 ==========
+    ros::Time last_pointcloud_time_;
+    double pointcloud_stale_timeout_sec_ = 10.0;
+    bool pointcloud_stale_ = false;
+
+    // ========== NDT 健康监控 ==========
+    double last_ndt_fitness_ = 0.0;
+    int consecutive_high_fitness_ = 0;
+    double fitness_warning_threshold_ = 2.0;
+    int fitness_warning_count_ = 50;
+
+    // ========== Active Map 重建 ==========
+    int rebuild_every_keyframes_ = 10;
 
     // 边缘保留点云融合
     struct VoxelData {
