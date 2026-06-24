@@ -274,10 +274,65 @@ roslaunch ndt_slam warehouse_live_longterm_mapping.launch
 roslaunch ndt_slam warehouse_live_longterm_mapping.launch use_sim_time:=true
 
 # 监控运行状态
-bash src/ndt_slam/scripts/monitor_longterm.sh 60
+bash src/ndt_slam/scripts/slam_monitor.sh 60
 
 # 查看 runtime_status.json
 cat maps/live/current/runtime_status.json | python3 -m json.tool
+```
+
+### 部署到实际服务器
+
+```bash
+# 1. 一键部署
+bash src/ndt_slam/scripts/deploy_slam.sh
+
+# 2. 安装 systemd 服务
+sudo cp src/ndt_slam/scripts/ndt-slam.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable ndt-slam
+
+# 3. 启动服务
+sudo systemctl start ndt-slam
+
+# 4. 查看状态
+sudo systemctl status ndt-slam
+journalctl -u ndt-slam -f
+```
+
+### runtime_status.json 完整字段
+
+```json
+{
+  "timestamp": "时间戳",
+  "total_frames": "总帧数",
+  "total_keyframes": "总关键帧数",
+  "active_keyframes": "活跃关键帧数",
+  "is_stationary": "是否静止",
+  "stationary_frame_count": "静止帧数",
+  "delta_translation_m": "位移增量（米）",
+  "delta_yaw_deg": "旋转增量（度）",
+  "global_map_points": "全局地图点数",
+  "display_map_points": "显示地图点数",
+  "ground_map_points": "地面地图点数",
+  "objects_map_points": "物体地图点数",
+  "local_map_points": "局部地图点数",
+  "dirty_tile_count": "脏 tile 数量",
+  "flushed_tile_count": "已 flush tile 数量",
+  "memory_mb": "内存使用（MB）",
+  "memory_guard_triggered": "内存保护是否触发",
+  "disk_free_gb": "磁盘可用空间（GB）",
+  "disk_guard_triggered": "磁盘保护是否触发",
+  "pointcloud_timeout_sec": "点云超时（秒）",
+  "pointcloud_stale": "点云是否过期",
+  "last_ndt_fitness": "NDT fitness 分数",
+  "ndt_fitness_warning": "NDT fitness 是否告警",
+  "consecutive_high_fitness": "连续高 fitness 帧数",
+  "average_process_time_ms": "平均处理时间（ms）",
+  "average_ndt_time_ms": "平均 NDT 时间（ms）",
+  "last_flush_time": "上次 flush 时间",
+  "last_active_map_rebuild": "上次 active map 重建时间",
+  "last_update": "上次更新时间"
+}
 ```
 
 ---
