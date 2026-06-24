@@ -15,6 +15,7 @@
 - **长期在线建图**：MotionGate 静止不建图、关键帧 active window、20m 磁盘 tile 增量落盘、四级内存保护
 - **多层地图输出**：registration / display / ground / objects / navigation grid
 - **闭环检测**：ScanContext + g2o 位姿图优化
+- **自动重定位**：ScanContext Top-K 粗定位 + NDT 精配准，天车约束（只取 x/y）
 
 ## 系统架构
 
