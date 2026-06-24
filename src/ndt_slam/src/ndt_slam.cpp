@@ -3188,17 +3188,30 @@ bool NdtSlamNode::setPoseService(std_srvs::Empty::Request& request, std_srvs::Em
 }
 
 bool NdtSlamNode::relocalizeService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
-    ROS_INFO("Relocalize service called");
+    ROS_INFO("[Reloc] Manual relocalization requested");
 
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
     {
         std::lock_guard<std::mutex> lock(cloud_mutex_);
-        current_pose_ = Sophus::SE3d();
-        tracking_lost_ = false;
+        cloud = last_registration_cloud_;
     }
 
-    tracking_cv_.notify_all();
+    if (!cloud || cloud->empty()) {
+        ROS_WARN("[Reloc] No last cloud for manual relocalization");
+        return true;
+    }
 
-    ROS_INFO("Relocalization complete");
+    bool ok = tryRelocalizeOnce(cloud);
+
+    if (ok) {
+        initialized_ = true;
+        tracking_lost_ = false;
+        tracking_cv_.notify_all();
+        ROS_INFO("[Reloc] Manual relocalization SUCCESS");
+    } else {
+        ROS_WARN("[Reloc] Manual relocalization FAILED");
+    }
+
     return true;
 }
 
@@ -4553,6 +4566,156 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
              global_map_->size(), display_map_->size(), ground_map_->size(), objects_map_->size());
 
     active_map_rebuild_running_ = false;
+}
+
+
+// ========== 重定位实现 ==========
+
+double NdtSlamNode::computeYawErrorDeg(const Sophus::SE3d& pose1, const Sophus::SE3d& pose2) {
+    Eigen::Vector3d euler1 = pose1.so3().matrix().eulerAngles(2, 1, 0);
+    Eigen::Vector3d euler2 = pose2.so3().matrix().eulerAngles(2, 1, 0);
+    double yaw_diff = euler1[0] - euler2[0];
+    // 归一化到 [-pi, pi]
+    while (yaw_diff > M_PI) yaw_diff -= 2 * M_PI;
+    while (yaw_diff < -M_PI) yaw_diff += 2 * M_PI;
+    return yaw_diff * 180.0 / M_PI;
+}
+
+Sophus::SE3d NdtSlamNode::projectToCraneMotion(const Sophus::SE3d& ndt_pose, const Sophus::SE3d& coarse_pose) {
+    // 天车约束：只取 NDT 的 x/y，姿态保持 keyframe 的固定姿态
+    Eigen::Vector3d t = coarse_pose.translation();
+    t.x() = ndt_pose.translation().x();
+    t.y() = ndt_pose.translation().y();
+    // z、roll、pitch、yaw 保持 keyframe/安装姿态
+    Sophus::SO3d R = coarse_pose.so3();
+    return Sophus::SE3d(R, t);
+}
+
+bool NdtSlamNode::refineRelocalizationWithNDT(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& source_cloud,
+    const std::vector<RelocCandidate>& candidates,
+    Sophus::SE3d& best_pose,
+    double& best_fitness) {
+
+    if (!source_cloud || source_cloud->empty()) {
+        ROS_WARN("[Reloc] source cloud empty");
+        return false;
+    }
+
+    if (!global_map_ || global_map_->empty()) {
+        ROS_WARN("[Reloc] global_map empty, cannot run NDT");
+        return false;
+    }
+
+    ndt_->setInputTarget(global_map_);
+    ndt_->setInputSource(source_cloud);
+
+    bool found = false;
+    best_fitness = std::numeric_limits<double>::max();
+
+    for (const auto& c : candidates) {
+        pcl::PointCloud<pcl::PointXYZ> aligned;
+
+        Eigen::Matrix4f init_guess = c.coarse_pose.matrix().cast<float>();
+
+        ndt_->align(aligned, init_guess);
+
+        bool converged = ndt_->hasConverged();
+        double fitness = ndt_->getFitnessScore();
+
+        Eigen::Matrix4f final_tf = ndt_->getFinalTransformation();
+        Sophus::SE3d ndt_pose(final_tf.cast<double>());
+
+        double yaw_error_deg = computeYawErrorDeg(ndt_pose, c.coarse_pose);
+
+        ROS_INFO("[Reloc] candidate id=%lu score=%.3f fitness=%.3f converged=%d yaw_error=%.2f",
+                 c.keyframe_id, c.score, fitness, converged ? 1 : 0, yaw_error_deg);
+
+        if (!converged) {
+            continue;
+        }
+
+        if (fitness > reloc_ndt_fitness_threshold_) {
+            continue;
+        }
+
+        if (std::abs(yaw_error_deg) > reloc_max_yaw_error_deg_) {
+            continue;
+        }
+
+        if (fitness < best_fitness) {
+            best_fitness = fitness;
+
+            if (constrain_crane_motion_) {
+                best_pose = projectToCraneMotion(ndt_pose, c.coarse_pose);
+            } else {
+                best_pose = ndt_pose;
+            }
+
+            found = true;
+        }
+    }
+
+    return found;
+}
+
+bool NdtSlamNode::tryRelocalizeOnce(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
+    if (!cloud || cloud->empty()) {
+        ROS_WARN("[Reloc] cloud empty");
+        return false;
+    }
+
+    ROS_INFO("[Reloc] auto relocalization triggered");
+
+    // Step 1: ScanContext Top-K 匹配
+    auto candidates = loop_closure_detector_.findRelocalizationCandidates(
+        cloud,
+        reloc_top_k_,
+        reloc_sc_score_threshold_,
+        reloc_use_yaw_alignment_,
+        reloc_yaw_search_sectors_);
+
+    ROS_INFO("[Reloc] Top-%d candidates: %zu found", reloc_top_k_, candidates.size());
+
+    if (candidates.empty()) {
+        ROS_WARN("[Reloc] No candidates found");
+        return false;
+    }
+
+    // 打印候选
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        const auto& c = candidates[i];
+        ROS_INFO("[Reloc]   [%zu] id=%lu score=%.3f pos=(%.1f, %.1f, %.1f)",
+                 i, c.keyframe_id, c.score,
+                 c.coarse_pose.translation().x(),
+                 c.coarse_pose.translation().y(),
+                 c.coarse_pose.translation().z());
+    }
+
+    // Step 2: NDT 精配准
+    Sophus::SE3d best_pose;
+    double best_fitness;
+    bool ok = refineRelocalizationWithNDT(cloud, candidates, best_pose, best_fitness);
+
+    if (ok) {
+        {
+            std::lock_guard<std::mutex> lock(cloud_mutex_);
+            current_pose_ = best_pose;
+            initialized_ = true;
+            tracking_lost_ = false;
+        }
+
+        ROS_INFO("[Reloc] SUCCESS pose=(%.2f, %.2f, %.2f) fitness=%.3f",
+                 best_pose.translation().x(),
+                 best_pose.translation().y(),
+                 best_pose.translation().z(),
+                 best_fitness);
+
+        return true;
+    }
+
+    ROS_WARN("[Reloc] NDT refinement failed for all candidates");
+    return false;
 }
 
 } // namespace ndt_slam

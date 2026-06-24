@@ -135,6 +135,15 @@ private:
                         lidar_slam2_msgs::LoadMap::Response& response);
     bool rebuildMapService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response);
 
+    // 重定位相关
+    bool tryRelocalizeOnce(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
+    bool refineRelocalizationWithNDT(const pcl::PointCloud<pcl::PointXYZ>::Ptr& source_cloud,
+                                      const std::vector<RelocCandidate>& candidates,
+                                      Sophus::SE3d& best_pose,
+                                      double& best_fitness);
+    Sophus::SE3d projectToCraneMotion(const Sophus::SE3d& ndt_pose, const Sophus::SE3d& coarse_pose);
+    double computeYawErrorDeg(const Sophus::SE3d& pose1, const Sophus::SE3d& pose2);
+
     void initializeParameters();
     void initializeParameters(const std::string& config_file_path);
 
@@ -292,8 +301,22 @@ private:
     int loop_detection_interval_ = 10;
     int keyframe_count_ = 0;
     pcl::PointCloud<pcl::PointXYZ>::Ptr last_cloud_;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr last_registration_cloud_;  // 用于手动重定位
     Sophus::SE3d relocalized_pose_;
     ros::Timer timer_;
+
+    // 重定位参数
+    bool relocalization_enable_ = true;
+    bool auto_relocalize_on_start_ = true;
+    bool constrain_crane_motion_ = true;
+    std::string relocalization_database_dir_;
+    std::string map_file_;
+    int reloc_top_k_ = 5;
+    double reloc_sc_score_threshold_ = 0.72;
+    double reloc_ndt_fitness_threshold_ = 1.5;
+    double reloc_max_yaw_error_deg_ = 3.0;
+    bool reloc_use_yaw_alignment_ = false;
+    int reloc_yaw_search_sectors_ = 0;
 
     // Loop closure deduplication
     std::set<std::pair<int, int>> processed_loops_;
