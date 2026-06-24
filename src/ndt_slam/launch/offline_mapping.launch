@@ -4,7 +4,7 @@
     <!-- 参数 -->
     <arg name="bag_file" default="" doc="要处理的 bag 文件路径"/>
     <arg name="session_dir" default="" doc="会话输出目录"/>
-    <arg name="config_file" default="$(find ndt_slam)/config/dual_lidar_slam_params.yaml"/>
+    <arg name="config_file" default="$(find ndt_slam)/config/slam_params.yaml"/>
     <arg name="mode" default="coarse" doc="运行模式: coarse, refine, rebuild, export"/>
 
     <!-- 设置使用仿真时间 -->

@@ -11,7 +11,7 @@
 
     <!-- SLAM 节点（定位模式） -->
     <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen">
-        <param name="config_file" value="$(find ndt_slam)/config/dual_lidar_slam_params.yaml"/>
+        <param name="config_file" value="$(find ndt_slam)/config/slam_params.yaml"/>
         <param name="localization_only" value="$(arg localization_only)"/>
         <param name="map_file" value="$(arg map_dir)/registration_map.pcd"/>
 
