@@ -1126,8 +1126,11 @@ void NdtSlamNode::processCloudThread() {
                         double move_dist = delta.translation().norm();
                         double move_rot = delta.so3().log().norm();
 
-                        // 增大阈值，减少局部地图更新频率，避免边缘厚化
-                        if (move_dist > 0.5 || move_rot > 0.08 || frames_since_last_update > 15) {
+                        // 长期模式下，静止时不更新 local_map，保持 NDT target 不变
+                        if (longterm_mapping_enabled_ && is_stationary_) {
+                            // 静止：不更新 local_map
+                            ROS_DEBUG("[LocalMap] Stationary, skipping local_map update");
+                        } else if (move_dist > 0.5 || move_rot > 0.08 || frames_since_last_update > 15) {
                             // 用配准点云更新局部地图
                             pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZ>);
                             pcl::transformPointCloud(*registration_cloud, *transformed, result_ortho.cast<float>());
