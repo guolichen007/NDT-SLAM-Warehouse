@@ -34,7 +34,6 @@
 #include <pclomp/ndt_omp.h>
 
 #include "ndt_slam/loop_closure.hpp"
-#include "ndt_slam/loop_closure.hpp"
 #include "ndt_slam/base_payload_channel_filter.hpp"
 #include "ndt_slam/payload_tracker.hpp"
 #include "ndt_slam/human_object_filter.hpp"
