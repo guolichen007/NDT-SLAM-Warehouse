@@ -6,31 +6,31 @@
 
 ## 配置文件位置
 
-- **源文件**: `lidar_slam2/config/slam_params.yaml`
-- **安装位置**: `/tmp/lidar_slam2_install/share/lidar_slam2/config/slam_params.yaml`
+- **源文件**: `ndt_slam/config/slam_params.yaml`
+- **安装位置**: `/tmp/ndt_slam_install/share/ndt_slam/config/slam_params.yaml`
 
 ## 使用方法
 
 ### 方法 1：使用 launch 文件（推荐）
 
 ```bash
-source /tmp/lidar_slam2_install/setup.bash
-ros2 launch lidar_slam2 slam_launch.py
+source /tmp/ndt_slam_install/setup.bash
+ros2 launch ndt_slam mapping.launch
 ```
 
 ### 方法 2：直接运行节点
 
 ```bash
-source /tmp/lidar_slam2_install/setup.bash
-ros2 run lidar_slam2 lidar_slam2_node --ros-args --params-file /tmp/lidar_slam2_install/share/lidar_slam2/config/slam_params.yaml
+source /tmp/ndt_slam_install/setup.bash
+ros2 run ndt_slam ndt_slam_node --ros-args --params-file /tmp/ndt_slam_install/share/ndt_slam/config/slam_params.yaml
 ```
 
 ### 方法 3：命令行覆盖参数
 
 ```bash
-source /tmp/lidar_slam2_install/setup.bash
-ros2 run lidar_slam2 lidar_slam2_node --ros-args \
-  --params-file /tmp/lidar_slam2_install/share/lidar_slam2/config/slam_params.yaml \
+source /tmp/ndt_slam_install/setup.bash
+ros2 run ndt_slam ndt_slam_node --ros-args \
+  --params-file /tmp/ndt_slam_install/share/ndt_slam/config/slam_params.yaml \
   -p odom_voxel_size:=0.2 \
   -p odom_max_iterations:=100
 ```
@@ -161,18 +161,18 @@ ros2 run lidar_slam2 lidar_slam2_node --ros-args \
 
 ```bash
 # 列出所有参数
-ros2 param dump /lidar_slam2_node
+ros2 param dump /ndt_slam_node
 
 # 查看特定参数
-ros2 param get /lidar_slam2_node odom_voxel_size
+ros2 param get /ndt_slam_node odom_voxel_size
 ```
 
 ### 2. 动态调整参数
 
 ```bash
 # 运行时调整参数
-ros2 param set /lidar_slam2_node odom_voxel_size 0.2
-ros2 param set /lidar_slam2_node odom_max_iterations 100
+ros2 param set /ndt_slam_node odom_voxel_size 0.2
+ros2 param set /ndt_slam_node odom_max_iterations 100
 ```
 
 ### 3. 监控日志
@@ -182,7 +182,7 @@ ros2 param set /lidar_slam2_node odom_max_iterations 100
 tail -f /tmp/ros_log/*.log
 
 # 或实时查看节点输出
-ros2 launch lidar_slam2 slam_launch.py 2>&1 | grep -E "ICP|预处理|角点"
+ros2 launch ndt_slam mapping.launch 2>&1 | grep -E "ICP|预处理|角点"
 ```
 
 ### 4. 性能分析
@@ -222,11 +222,11 @@ ros2 launch lidar_slam2 slam_launch.py 2>&1 | grep -E "ICP|预处理|角点"
 修改 `config/slam_params.yaml` 后，需要重新编译安装：
 
 ```bash
-cd /tmp/lidar_slam2_src/build
+cd /tmp/ndt_slam_src/build
 make install
 ```
 
 或者直接修改已安装的文件：
 ```bash
-sudo nano /tmp/lidar_slam2_install/share/lidar_slam2/config/slam_params.yaml
+sudo nano /tmp/ndt_slam_install/share/ndt_slam/config/slam_params.yaml
 ```
