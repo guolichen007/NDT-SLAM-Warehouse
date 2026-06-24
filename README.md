@@ -204,17 +204,41 @@ tiles_registration 目录：
 - ✅ **磁盘空间充足**: 70.47 GB
 - ✅ **runtime_status 正常更新**: 每 5 秒更新一次
 
-tiles_registration 目录：
+#### 多层 tile 测试结果（P0 修复后）
+
+**测试环境**
+- 测试内容：验证多层 tile 写入、体素融合、增量合并
+- 测试方法：播放 bag 两次，检查 4 层 tile 目录
+
+**测试结果**
+```
+tiles_registration/ (0.30m 体素):
+- x0_y0.pcd (20KB)
+- x0_y-1.pcd (87KB)
+
+tiles_display/ (0.10m 体素):
+- x0_y0.pcd (175KB)
+- x0_y-1.pcd (1.7MB)
+
+tiles_ground/ (0.15m 体素):
+- x0_y0.pcd (141KB)
+- x0_y-1.pcd (745KB)
+
+tiles_objects/ (0.08m 体素):
 - x0_y0.pcd (34KB)
-- x0_y-1.pcd (716KB)
+- x0_y-1.pcd (524KB)
+
+MotionGate 日志：
+- Moved enough: 29 次（移动时提交关键帧）
+- Stationary: 0 次（bag 一直在移动）
 ```
 
-#### 测试结论
-- ✅ MotionGate 生效（27 个关键帧，而非 80+）
-- ✅ tiles 写入正常（2 个 tile 文件）
-- ✅ runtime_status.json 正常更新
-- ✅ 内存稳定（124MB）
-- ✅ 磁盘增量保存正常
+**测试结论**
+- ✅ **多层 tile 写入成功**: 4 个目录各 2 个文件
+- ✅ **体素融合正常**: display (0.10m) > registration (0.30m)
+- ✅ **增量合并正常**: tile 文件大小合理
+- ✅ **MotionGate 生效**: 29 次关键帧提交
+- ✅ **内存稳定**: 126 MB
 
 ### 使用方法
 
