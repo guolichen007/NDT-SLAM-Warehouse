@@ -44,24 +44,6 @@ catkin_package(
 include(3rdparty/tbb/tbb.cmake)
 include(3rdparty/tsl_robin/tsl_robin.cmake)
 
-find_package(OpenGL REQUIRED)
-find_package(glfw3 REQUIRED)
-
-set(GLFW_LIBRARY "/usr/lib/x86_64-linux-gnu/libglfw.so")
-set(GLFW_LIBRARIES ${GLFW_LIBRARY})
-
-set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/imgui)
-set(IMGUI_BACKENDS_DIR ${IMGUI_DIR}/backends)
-set(IMGUI_SOURCES
-  ${IMGUI_DIR}/imgui.cpp
-  ${IMGUI_DIR}/imgui_demo.cpp
-  ${IMGUI_DIR}/imgui_draw.cpp
-  ${IMGUI_DIR}/imgui_tables.cpp
-  ${IMGUI_DIR}/imgui_widgets.cpp
-  ${IMGUI_BACKENDS_DIR}/imgui_impl_glfw.cpp
-  ${IMGUI_BACKENDS_DIR}/imgui_impl_opengl3.cpp
-)
-
 include_directories(
   include
   ${catkin_INCLUDE_DIRS}
@@ -71,24 +53,14 @@ include_directories(
   ${SOPHUS_INCLUDE_DIR}
   /home/ydkj/.local/include
   ${OpenCV_INCLUDE_DIRS}
-  ${OPENGL_INCLUDE_DIRS}
-  ${GLFW_INCLUDE_DIRS}
-  ${IMGUI_DIR}
-  ${IMGUI_BACKENDS_DIR}
   ${ndt_omp_INCLUDE_DIRS}
-  include/kiss_icp
-  include/kiss_icp/core
-  include/kiss_icp/metrics
-  include/kiss_icp/pipeline
 )
 
-# ========== 新的源文件结构（7 cpp + 6 hpp） ==========
+# ========== 源文件 ==========
 set(LIBRARY_SOURCES
   # 主节点
   src/ndt_slam.cpp
-  # 里程计
-  src/odometry.cpp
-  # 建图
+  # 关键帧管理
   src/keyframe_manager.cpp
   # 闭环检测
   src/loop_closure.cpp
@@ -102,21 +74,10 @@ set(LIBRARY_SOURCES
   src/human_object_filter.cpp
   # 动态事件管理
   src/dynamic_event_manager.cpp
-  # 可视化
-  src/visualizer.cpp
-  # KISS-ICP（保留）
-  src/kiss_icp/core/Preprocessing.cpp
-  src/kiss_icp/core/Registration.cpp
-  src/kiss_icp/core/Threshold.cpp
-  src/kiss_icp/core/VoxelHashMap.cpp
-  src/kiss_icp/core/VoxelUtils.cpp
-  src/kiss_icp/metrics/Metrics.cpp
-  src/kiss_icp/pipeline/KissICP.cpp
 )
 
 add_library(ndt_slam_lib SHARED
   ${LIBRARY_SOURCES}
-  ${IMGUI_SOURCES}
 )
 
 target_link_libraries(ndt_slam_lib
@@ -128,8 +89,6 @@ target_link_libraries(ndt_slam_lib
   TBB::tbb
   robin_map
   ${OpenCV_LIBRARIES}
-  ${OPENGL_LIBRARIES}
-  ${GLFW_LIBRARIES}
   ${ndt_omp_LIBRARIES}
   Boost::filesystem
   pthread
