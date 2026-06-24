@@ -72,7 +72,7 @@ ros2 run lidar_slam2 lidar_slam2_node --ros-args \
 | `odom_use_corner_extraction`⭐ | bool | true | 启用角点特征提取 |
 | `odom_corner_curvature_threshold`⭐ | float | 0.12 | 角点曲率阈值 |
 
-### 建图参数 (MappingNode)
+### 建图参数
 
 | 参数名 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|

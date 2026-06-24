@@ -2,7 +2,7 @@
   <!-- 单雷达 SLAM 测试：只用 lidar160 (rs_203) -->
   <!-- 用途：排除双雷达合并问题，单独测试 rs_203 的建图效果 -->
 
-  <arg name="config_file" default="$(find ndt_slam)/config/dual_lidar_slam_params.yaml"/>
+  <arg name="config_file" default="$(find ndt_slam)/config/slam_params.yaml"/>
   <arg name="use_sim_time" default="true"/>
 
   <param name="use_sim_time" value="$(arg use_sim_time)"/>
