@@ -610,6 +610,20 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         ROS_INFO("  max_active_keyframes: %d", max_active_keyframes_);
         ROS_INFO("  persistent_map: %s", persistent_map_enabled_ ? "true" : "false");
         ROS_INFO("  persistent_map_dir: %s", persistent_map_root_dir_.c_str());
+
+        if (config["memory_guard"]) {
+            auto mg = config["memory_guard"];
+            memory_guard_enabled_ = mg["enabled"].as<bool>(false);
+            max_process_memory_mb_ = mg["max_process_memory_mb"].as<int>(8000);
+            warning_threshold_mb_ = mg["warning_threshold_mb"].as<int>(6000);
+            memory_check_interval_sec_ = mg["check_interval_sec"].as<int>(30);
+        }
+
+        ROS_INFO("=== Memory Guard Config ===");
+        ROS_INFO("  enabled: %s", memory_guard_enabled_ ? "true" : "false");
+        ROS_INFO("  max_process_memory: %d MB", max_process_memory_mb_);
+        ROS_INFO("  warning_threshold: %d MB", warning_threshold_mb_);
+        ROS_INFO("  check_interval: %d sec", memory_check_interval_sec_);
         ROS_INFO("===========================");
 
     } catch (const YAML::Exception& e) {
@@ -1240,6 +1254,20 @@ void NdtSlamNode::processCloudThread() {
 
                     // 写入 runtime status
                     writeRuntimeStatus();
+                }
+
+                // 内存保护检查
+                if (memory_guard_enabled_) {
+                    double time_since_check = (ros::Time::now() - last_memory_check_time_).toSec();
+                    if (time_since_check >= memory_check_interval_sec_) {
+                        checkMemoryGuard();
+                        last_memory_check_time_ = ros::Time::now();
+                    }
+                }
+
+                // 定期重建 active map（每 10 个关键帧）
+                if (longterm_mapping_enabled_ && keyframe_count_ > 0 && keyframe_count_ % 10 == 0) {
+                    rebuildActiveMapFromRecentKeyframes();
                 }
             }
         }
@@ -4153,11 +4181,139 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"flushed_tile_count\": " << flushed_tile_count_ << ",\n";
     f << "  \"disk_free_gb\": " << disk_free_gb << ",\n";
     f << "  \"memory_mb\": " << mem_kb / 1024.0 << ",\n";
+    f << "  \"memory_guard_triggered\": " << (memory_guard_triggered_ ? "true" : "false") << ",\n";
     f << "  \"average_process_time_ms\": " << average_process_time_ms_ << ",\n";
     f << "  \"average_ndt_time_ms\": " << average_ndt_time_ms_ << ",\n";
     f << "  \"last_update\": \"" << ros::Time::now() << "\"\n";
     f << "}\n";
     f.close();
+}
+
+// ========== 内存保护实现 ==========
+
+void NdtSlamNode::checkMemoryGuard() {
+    if (!memory_guard_enabled_) return;
+
+    // 读取进程 VmRSS
+    long mem_kb = 0;
+    std::ifstream ifs("/proc/self/status");
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.substr(0, 6) == "VmRSS:") {
+            mem_kb = std::stol(line.substr(6));
+            break;
+        }
+    }
+    long mem_mb = mem_kb / 1024;
+
+    if (mem_mb > max_process_memory_mb_) {
+        ROS_WARN("[MemoryGuard] EMERGENCY: process using %ldMB > %dMB limit",
+                 mem_mb, max_process_memory_mb_);
+
+        // 1. 强制压缩所有内存地图
+        forceDownsampleAllMaps();
+
+        // 2. 强制 flush dirty tiles
+        if (persistent_map_enabled_) {
+            flushDirtyTiles();
+        }
+
+        memory_guard_triggered_ = true;
+    } else if (mem_mb > warning_threshold_mb_) {
+        ROS_WARN("[MemoryGuard] WARNING: process using %ldMB (limit %dMB)",
+                 mem_mb, max_process_memory_mb_);
+    } else {
+        memory_guard_triggered_ = false;
+    }
+}
+
+void NdtSlamNode::forceDownsampleAllMaps() {
+    std::lock_guard<std::mutex> lock(map_mutex_);
+
+    auto forceVoxel = [](pcl::PointCloud<pcl::PointXYZ>::Ptr& map, double voxel, const char* name) {
+        if (map && map->size() > 1000) {
+            size_t before = map->size();
+            pcl::VoxelGrid<pcl::PointXYZ> vf;
+            vf.setInputCloud(map);
+            vf.setLeafSize(voxel, voxel, voxel);
+            pcl::PointCloud<pcl::PointXYZ> f;
+            vf.filter(f);
+            *map = f;
+            ROS_WARN("[MemoryGuard] %s: %zu -> %zu points (voxel=%.2f)",
+                     name, before, map->size(), voxel);
+        }
+    };
+
+    forceVoxel(global_map_, 0.5, "global_map_");
+    forceVoxel(display_map_, 0.5, "display_map_");
+    forceVoxel(ground_map_, 0.3, "ground_map_");
+    forceVoxel(objects_map_, 0.3, "objects_map_");
+}
+
+void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
+    if (!longterm_mapping_enabled_) return;
+
+    auto& keyframes = loop_closure_detector_.getKeyFrameManager().getKeyFramesNonConst();
+    if (keyframes.empty()) return;
+
+    // 收集最近 80 个有 cloud 的关键帧
+    std::vector<const KeyFrame*> recent_kfs;
+    for (auto it = keyframes.rbegin(); it != keyframes.rend() && recent_kfs.size() < max_active_keyframes_; ++it) {
+        if (it->cloud_ && !it->cloud_->empty()) {
+            recent_kfs.push_back(&(*it));
+        }
+    }
+
+    if (recent_kfs.empty()) return;
+
+    ROS_INFO("[ActiveMap] Rebuilding from %zu recent keyframes", recent_kfs.size());
+
+    // 清空现有地图
+    std::lock_guard<std::mutex> lock(map_mutex_);
+    global_map_->clear();
+    display_map_->clear();
+    ground_map_->clear();
+    objects_map_->clear();
+
+    // 从关键帧重建
+    for (const auto* kf : recent_kfs) {
+        Eigen::Matrix4d transform = kf->pose_.matrix();
+
+        // 变换到 map 坐标系
+        pcl::PointCloud<pcl::PointXYZ> transformed;
+        pcl::transformPointCloud(*kf->cloud_, transformed, transform.cast<float>());
+
+        // 添加到各层地图
+        for (const auto& p : transformed.points) {
+            if (std::abs(p.x) <= max_map_size_ && std::abs(p.y) <= max_map_size_ &&
+                std::abs(p.z) <= max_map_size_ && std::isfinite(p.x)) {
+                global_map_->push_back(p);
+                display_map_->push_back(p);
+                objects_map_->push_back(p);
+            }
+        }
+    }
+
+    // 体素滤波
+    auto voxelFilter = [](const pcl::PointCloud<pcl::PointXYZ>::Ptr& input, double voxel_size) {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr output(new pcl::PointCloud<pcl::PointXYZ>);
+        if (input->size() > 100) {
+            pcl::VoxelGrid<pcl::PointXYZ> vf;
+            vf.setInputCloud(input);
+            vf.setLeafSize(voxel_size, voxel_size, voxel_size);
+            vf.filter(*output);
+        } else {
+            *output = *input;
+        }
+        return output;
+    };
+
+    global_map_ = voxelFilter(global_map_, voxel_size_);
+    display_map_ = voxelFilter(display_map_, display_voxel_size_);
+    objects_map_ = voxelFilter(objects_map_, objects_voxel_size_);
+
+    ROS_INFO("[ActiveMap] Rebuilt: global=%zu, display=%zu, objects=%zu",
+             global_map_->size(), display_map_->size(), objects_map_->size());
 }
 
 } // namespace ndt_slam

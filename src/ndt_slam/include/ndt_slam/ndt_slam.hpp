@@ -391,9 +391,21 @@ private:
     double delta_yaw_ = 0.0;
     double average_process_time_ms_ = 0.0;
     double average_ndt_time_ms_ = 0.0;
+    bool memory_guard_triggered_ = false;
 
     void writeRuntimeStatus();
     void flushDirtyTiles();
+
+    // ========== 内存保护 ==========
+    bool memory_guard_enabled_ = false;
+    int max_process_memory_mb_ = 8000;      // 进程内存上限 8GB
+    int warning_threshold_mb_ = 6000;        // 6GB 时开始警告
+    int memory_check_interval_sec_ = 30;     // 每 30 秒检查一次
+    ros::Time last_memory_check_time_;
+
+    void checkMemoryGuard();
+    void forceDownsampleAllMaps();
+    void rebuildActiveMapFromRecentKeyframes();
 
     // 边缘保留点云融合
     struct VoxelData {

@@ -95,6 +95,13 @@ disk_guard:
   min_free_disk_gb: 50         # 最小空闲磁盘空间（GB）
   pause_mapping_when_low: true # 磁盘空间不足时暂停写入
 
+# 内存保护
+memory_guard:
+  enabled: true
+  max_process_memory_mb: 8000  # 进程内存上限 8GB
+  warning_threshold_mb: 6000   # 6GB 时开始警告
+  check_interval_sec: 30       # 每 30 秒检查一次
+
 # Active map 重建策略
 active_map:
   max_active_keyframes: 80
