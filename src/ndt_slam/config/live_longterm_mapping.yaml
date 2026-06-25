@@ -127,11 +127,12 @@ crane_motion_constraint:
   lock_z: true
   lock_roll: true
   lock_pitch: true
-  lock_yaw: false             # yaw 不锁死，只限幅（避免干扰 NDT 横向匹配）
+  lock_yaw: false             # yaw 不锁死
+  constrain_yaw: false        # yaw 完全放开，不限制（验证后再调整）
   max_abs_z_drift: 0.05      # z 最大允许漂移（米）
   max_roll_deg: 0.3          # roll 最大允许漂移（度）
   max_pitch_deg: 0.3         # pitch 最大允许漂移（度）
-  max_yaw_deg: 1.0           # yaw 最大允许漂移（度）
+  max_yaw_deg: 10.0          # yaw 限幅（暂时放大，验证后再调整）
 
 # ========== 吊货过滤配置 ==========
 

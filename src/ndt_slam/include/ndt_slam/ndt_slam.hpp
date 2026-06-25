@@ -213,7 +213,8 @@ private:
     bool lock_z_ = true;
     bool lock_roll_ = true;
     bool lock_pitch_ = true;
-    bool lock_yaw_ = true;
+    bool lock_yaw_ = false;
+    bool constrain_yaw_ = false;
     double fixed_z_ = 0.0;
     double fixed_roll_ = 0.0;
     double fixed_pitch_ = 0.0;
