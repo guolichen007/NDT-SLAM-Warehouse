@@ -210,7 +210,8 @@ private:
 
     // ========== Crane Motion Constraint（天车运动约束）==========
     bool crane_constraint_enabled_ = false;
-    bool lock_z_ = true;
+    bool lock_z_ = false;
+    bool constrain_z_ = false;       // 是否限制 z 漂移范围
     bool lock_roll_ = true;
     bool lock_pitch_ = true;
     bool lock_yaw_ = false;

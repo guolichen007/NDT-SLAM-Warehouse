@@ -639,12 +639,13 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         if (config["crane_motion_constraint"]) {
             auto cmc = config["crane_motion_constraint"];
             crane_constraint_enabled_ = cmc["enabled"].as<bool>(false);
-            lock_z_ = cmc["lock_z"].as<bool>(true);
+            lock_z_ = cmc["lock_z"].as<bool>(false);
+            constrain_z_ = cmc["constrain_z"].as<bool>(false);
             lock_roll_ = cmc["lock_roll"].as<bool>(true);
             lock_pitch_ = cmc["lock_pitch"].as<bool>(true);
             lock_yaw_ = cmc["lock_yaw"].as<bool>(false);
             constrain_yaw_ = cmc["constrain_yaw"].as<bool>(false);
-            max_abs_z_drift_ = cmc["max_abs_z_drift"].as<double>(0.10);
+            max_abs_z_drift_ = cmc["max_abs_z_drift"].as<double>(0.50);
             max_roll_deg_ = cmc["max_roll_deg"].as<double>(0.3);
             max_pitch_deg_ = cmc["max_pitch_deg"].as<double>(0.3);
             max_yaw_deg_ = cmc["max_yaw_deg"].as<double>(10.0);
@@ -652,13 +653,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
         ROS_INFO("=== Crane Motion Constraint ===");
         ROS_INFO("  enabled: %s", crane_constraint_enabled_ ? "true" : "false");
-        ROS_INFO("  lock_z: %s, lock_roll: %s, lock_pitch: %s",
-                 lock_z_ ? "true" : "false", lock_roll_ ? "true" : "false",
-                 lock_pitch_ ? "true" : "false");
-        ROS_INFO("  lock_yaw: %s, constrain_yaw: %s, max_yaw_deg: %.1f",
-                 lock_yaw_ ? "true" : "false", constrain_yaw_ ? "true" : "false",
-                 max_yaw_deg_);
-        ROS_INFO("  max_abs_z_drift: %.2f m", max_abs_z_drift_);
+        ROS_INFO("  lock_z: %s, constrain_z: %s", lock_z_ ? "true" : "false", constrain_z_ ? "true" : "false");
+        ROS_INFO("  lock_roll: %s, lock_pitch: %s", lock_roll_ ? "true" : "false", lock_pitch_ ? "true" : "false");
+        ROS_INFO("  lock_yaw: %s, constrain_yaw: %s", lock_yaw_ ? "true" : "false", constrain_yaw_ ? "true" : "false");
 
         ROS_INFO("=== Memory Guard Config ===");
         ROS_INFO("  enabled: %s", memory_guard_enabled_ ? "true" : "false");
@@ -1162,8 +1159,10 @@ void NdtSlamNode::processCloudThread() {
                                               raw_yaw * 180.0 / M_PI);
                         }
 
-                        // 应用天车运动约束（z/roll/pitch/yaw 锁定）
-                        new_pose = applyCraneMotionConstraint(new_pose, "ndt_output");
+                        // 注意：约束不应用到 new_pose，因为 new_pose 用于：
+                        // - local_map 更新
+                        // - 下一帧 NDT initial guess
+                        // 约束只在发布和 keyframe 存储时应用
 
                         registration_success = true;
 
@@ -1224,16 +1223,22 @@ void NdtSlamNode::processCloudThread() {
         }
 
         // ========== 阶段 6：更新位姿 ==========
+        // 约束后的 pose 用于发布和存储，原始 pose 用于 NDT 内部
+        Sophus::SE3d constrained_pose = new_pose;
+        if (registration_success && crane_constraint_enabled_) {
+            constrained_pose = applyCraneMotionConstraint(new_pose, "ndt_output");
+        }
+
         if (registration_success) {
             std::lock_guard<std::mutex> lock(cloud_mutex_);
-            current_pose_ = new_pose;
+            current_pose_ = constrained_pose;  // 发布约束后的 pose
         }
 
         // ========== 阶段 7：发布结果（用完整点云建图）==========
         if (registration_success && !tracking_lost_) {
             // TF 用 ros::Time::now() 避免重复
             ros::Time publish_time = ros::Time::now();
-            publishOdometry(publish_time, msg->header.frame_id, new_pose);
+            publishOdometry(publish_time, msg->header.frame_id, constrained_pose);
 
             // ICP 精配准移到后台线程，不阻塞主处理
             // NDT 结果直接用于地图插入，ICP 完成后更新位姿
@@ -1320,13 +1325,13 @@ void NdtSlamNode::processCloudThread() {
 
             }
 
-            // 建图使用精炼位姿（如果有 ICP 修正），否则用 NDT 位姿
-            // 实时 odom/TF 始终用 NDT 位姿，保证低延迟
-            Sophus::SE3d map_pose = new_pose;
+            // 建图使用约束后的 pose（和 current_pose_ 一致）
+            // 这样 local_map、keyframe、publish 都使用同一个约束 pose
+            Sophus::SE3d map_pose = constrained_pose;
             {
                 std::lock_guard<std::mutex> lock(cloud_mutex_);
                 if (has_refined_pose_.load()) {
-                    map_pose = refined_pose_;
+                    map_pose = applyCraneMotionConstraint(refined_pose_, "refined");
                 }
             }
             addFrameToMap(filtered_cloud, map_pose, publish_time);
@@ -2617,12 +2622,11 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
         return;
     }
 
-    // 应用天车运动约束到 keyframe pose
-    Sophus::SE3d constrained_pose = applyCraneMotionConstraint(pose, "keyframe");
+    // pose 已经在调用前被约束过了，直接使用
 
     // ========== MotionGate：静止时不添加关键帧 ==========
     if (longterm_mapping_enabled_ && motion_gate_enabled_) {
-        if (!shouldCommitKeyframe(constrained_pose, stamp)) {
+        if (!shouldCommitKeyframe(pose, stamp)) {
             ROS_DEBUG("[MotionGate] Stationary, skipping keyframe commit");
             return;
         }
@@ -2633,7 +2637,7 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
     *last_cloud_ = *cloud;
 
     size_t prev_keyframe_count = loop_closure_detector_.getKeyFrames().size();
-    loop_closure_detector_.addKeyFrame(constrained_pose, cloud, stamp);
+    loop_closure_detector_.addKeyFrame(pose, cloud, stamp);
     size_t new_keyframe_count = loop_closure_detector_.getKeyFrames().size();
 
     if (new_keyframe_count > prev_keyframe_count) {
@@ -4719,10 +4723,12 @@ Sophus::SE3d NdtSlamNode::applyCraneMotionConstraint(const Sophus::SE3d& raw_pos
     // 约束 z
     if (lock_z_) {
         t.z() = fixed_z_;
-    } else {
+    } else if (constrain_z_) {
+        // 限幅模式：相对 fixed_z 限幅
         t.z() = std::max(fixed_z_ - max_abs_z_drift_,
                          std::min(fixed_z_ + max_abs_z_drift_, t.z()));
     }
+    // else: z 完全使用 NDT 输出，不限制
 
     // 约束 roll
     if (lock_roll_) {
