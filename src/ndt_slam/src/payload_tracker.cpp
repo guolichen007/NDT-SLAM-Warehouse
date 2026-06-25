@@ -514,7 +514,8 @@ bool PayloadTrackManager::getBestDynamicPayloadTrack(PayloadTrackInfo& out) cons
     out.centroid_map = best->centroid_map;
     out.bbox_min_map = best->bbox_min_map;
     out.bbox_max_map = best->bbox_max_map;
-    out.point_count = best->observed_frames;  // 近似
+    // 使用最近一帧的实际点数，而不是 observed_frames
+    out.point_count = best->cloud_history.empty() ? 0 : best->cloud_history.back()->size();
     out.direction_consistency = best->direction_consistency;
     out.map_displacement = best->map_displacement;
 

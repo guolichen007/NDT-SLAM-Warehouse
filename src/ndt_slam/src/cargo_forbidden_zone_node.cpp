@@ -566,6 +566,9 @@ private:
         risk_msg.data = static_cast<int>(risk_level_);
         risk_level_pub_.publish(risk_msg);
 
+        // 发布 OccupancyGrid（禁行区栅格）
+        publishOccupancyGrid(now);
+
         // 发布预测轨迹
         if (cargo_.valid && !is_idle_) {
             nav_msgs::Path path_msg;
@@ -649,6 +652,37 @@ private:
         markers.markers.push_back(text_marker);
 
         markers_pub_.publish(markers);
+    }
+
+    void publishOccupancyGrid(const ros::Time& stamp) {
+        nav_msgs::OccupancyGrid grid_msg;
+        grid_msg.header.stamp = stamp;
+        grid_msg.header.frame_id = map_frame_;
+
+        grid_msg.info.resolution = resolution_;
+        grid_msg.info.width = grid_width_;
+        grid_msg.info.height = grid_height_;
+        grid_msg.info.origin.position.x = origin_x_;
+        grid_msg.info.origin.position.y = origin_y_;
+        grid_msg.info.origin.position.z = 0.0;
+        grid_msg.info.origin.orientation.w = 1.0;
+
+        grid_msg.data.resize(grid_width_ * grid_height_, 0);
+
+        for (int iy = 0; iy < grid_height_; ++iy) {
+            for (int ix = 0; ix < grid_width_; ++ix) {
+                int idx = iy * grid_width_ + ix;
+                if (forbidden_grid_[idx]) {
+                    grid_msg.data[idx] = 100;  // 禁行区
+                } else if (base_obstacle_grid_[idx].occupied) {
+                    grid_msg.data[idx] = 50;   // 障碍物但不在禁行区
+                } else {
+                    grid_msg.data[idx] = 0;    // 空闲
+                }
+            }
+        }
+
+        forbidden_grid_pub_.publish(grid_msg);
     }
 };
 
