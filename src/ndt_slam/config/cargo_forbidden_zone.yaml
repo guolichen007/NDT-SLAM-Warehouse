@@ -19,17 +19,20 @@ cargo_forbidden_zone:
   # 货物定位状态机
   cargo_localization:
     enabled: true
-    max_lost_frames: 5
+    max_lost_frames: 8
     min_bbox_point_count: 50
     min_map_displacement: 0.25
     min_direction_consistency: 0.65
+    centroid_filter_alpha: 0.60
+    size_filter_alpha: 0.25
 
   # bbox 滤波
   bbox_filter:
     use_quantile_bbox: false
-    centroid_filter_alpha: 0.35
-    size_filter_alpha: 0.25
-    max_size_change_per_frame: 0.50
+    max_size_change_per_frame: 0.40
+    max_position_jump: 0.80
+    use_velocity_compensation: true
+    max_compensation_dt: 0.30
     max_valid_length_x: 8.0
     max_valid_width_y: 3.0
     max_valid_height_z: 3.0

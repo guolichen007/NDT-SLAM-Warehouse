@@ -149,6 +149,13 @@ private:
     double safety_margin_x_ = 0.25;
     double safety_margin_y_ = 0.25;
 
+    // bbox 滤波参数
+    double max_position_jump_ = 0.80;
+    bool use_velocity_compensation_ = true;
+    double max_compensation_dt_ = 0.30;
+    Eigen::Vector3f stable_velocity_ = Eigen::Vector3f::Zero();
+    ros::Time last_track_time_;
+
     // 功能开关
     bool prediction_enabled_ = false;
     bool collision_warning_enabled_ = false;
@@ -235,15 +242,16 @@ private:
 
             if (root["bbox_filter"]) {
                 auto bf = root["bbox_filter"];
-                centroid_filter_alpha_ = bf["centroid_filter_alpha"].as<double>(0.35);
-                size_filter_alpha_ = bf["size_filter_alpha"].as<double>(0.25);
-                max_size_change_per_frame_ = bf["max_size_change_per_frame"].as<double>(0.50);
+                max_size_change_per_frame_ = bf["max_size_change_per_frame"].as<double>(0.40);
                 max_valid_length_x_ = bf["max_valid_length_x"].as<double>(8.0);
                 max_valid_width_y_ = bf["max_valid_width_y"].as<double>(3.0);
                 max_valid_height_z_ = bf["max_valid_height_z"].as<double>(3.0);
                 min_valid_length_x_ = bf["min_valid_length_x"].as<double>(0.5);
                 min_valid_width_y_ = bf["min_valid_width_y"].as<double>(0.3);
                 min_valid_height_z_ = bf["min_valid_height_z"].as<double>(0.2);
+                max_position_jump_ = bf["max_position_jump"].as<double>(0.80);
+                use_velocity_compensation_ = bf["use_velocity_compensation"].as<bool>(true);
+                max_compensation_dt_ = bf["max_compensation_dt"].as<double>(0.30);
             }
 
             if (root["cargo_size"]) {
@@ -492,9 +500,36 @@ private:
     }
 
     void updateStableCargoFromRaw(const CargoRawInfo& raw) {
+        // 速度补偿：预测 centroid 位置
+        Eigen::Vector3f predicted_centroid = raw.centroid;
+        if (use_velocity_compensation_ && stable_cargo_.valid) {
+            ros::Time now = ros::Time::now();
+            double dt = (now - last_track_time_).toSec();
+            dt = std::min(dt, max_compensation_dt_);
+
+            // 使用稳定速度补偿
+            predicted_centroid = stable_cargo_.centroid + stable_velocity_ * dt;
+
+            // 检查跳变
+            float position_jump = (raw.centroid - stable_cargo_.centroid).norm();
+            if (position_jump > max_position_jump_) {
+                // 跳变过大，使用原始值
+                predicted_centroid = raw.centroid;
+                ROS_WARN_THROTTLE(2.0, "[CargoLocalization] Large position jump: %.2f > %.2f, using raw",
+                                  position_jump, max_position_jump_);
+            }
+        }
+        last_track_time_ = ros::Time::now();
+
         // 低通滤波 centroid
-        stable_cargo_.centroid = centroid_filter_alpha_ * raw.centroid +
+        stable_cargo_.centroid = centroid_filter_alpha_ * predicted_centroid +
                                  (1.0f - centroid_filter_alpha_) * stable_cargo_.centroid;
+
+        // 更新速度估计
+        if (stable_cargo_.valid) {
+            Eigen::Vector3f velocity = (stable_cargo_.centroid - predicted_centroid) / 0.1f;  // 假设 10Hz
+            stable_velocity_ = 0.7f * stable_velocity_ + 0.3f * velocity;
+        }
 
         // 计算 raw size
         Eigen::Vector3f raw_size = raw.bbox_max - raw.bbox_min;
