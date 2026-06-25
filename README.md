@@ -165,12 +165,29 @@ rostopic echo /cargo_predicted_path
 |------|------|------|
 | `/payload_track_info` | Float32MultiArray | 吊货跟踪信息（19 个 float） |
 | `/cargo_forbidden_grid` | OccupancyGrid | 禁行区栅格 |
+| `/cargo_forbidden_overlay_markers` | MarkerArray | 红色半透明禁行区 overlay |
+| `/cargo_forbidden_markers` | MarkerArray | 吊货 bbox + 风险文字 |
 | `/cargo_collision_warning` | Int32 | 风险等级（0-5） |
 | `/cargo_predicted_path` | Path | 预测轨迹 |
 
 ### 配置文件
 
 - `config/cargo_forbidden_zone.yaml`：避障参数配置
+- `rviz/cargo_safety.rviz`：RViz 可视化配置
+
+### RViz 可视化
+
+```bash
+rviz -d src/ndt_slam/rviz/cargo_safety.rviz
+```
+
+显示内容：
+- 黄色点云：objects_map（障碍物）
+- 红色半透明：禁行区 overlay
+- 紫色线框：原始检测 bbox
+- 红色半透明框：安全计算 bbox
+- 绿色线：预测轨迹
+- 文字：风险等级 + size_source
 
 ## 地图数据目录
 
