@@ -19,6 +19,8 @@ enum class TrackState {
     NEW,               // 刚出现，状态未知
     PENDING_STATIC,    // 在 ROI 内但暂时没动，可能是堆货
     DYNAMIC_PAYLOAD,   // 已确认是移动吊货，触发过滤
+    SUSPENDED_STATIC,  // 吊着但悬停（HAG 高，velocity 低）
+    SUSPENDED_MOVING,  // 吊着并移动（HAG 高，velocity 高）
     EXPIRED            // 轨迹消失，等待清理
 };
 
@@ -106,6 +108,15 @@ struct PayloadTrackerConfig {
 
     // 轨迹管理
     int max_missed_frames = 5;
+
+    // 悬浮识别参数
+    bool suspended_detection_enabled = true;
+    double min_floating_gap = 0.30;         // 最小悬浮高度（米）
+    double strong_floating_gap = 0.60;      // 强悬浮高度（米）
+    double max_support_ratio = 0.20;        // 最大支撑比例
+    int min_suspended_observed_frames = 3;  // 最小观察帧数
+    bool keep_suspended_when_stopped = true; // 悬停时保持 SUSPENDED_STATIC
+    double suspended_timeout_sec = 5.0;     // 悬浮超时（秒）
 };
 
 // 跟踪结果
@@ -192,6 +203,9 @@ private:
 
     // 检查状态转换（双坐标系判断）
     void checkStateTransition(ObjectTrack& track);
+
+    // 检查货物尺寸是否有效
+    bool isCargoSizeValid(const ObjectTrack& track) const;
 
     // 计算 base_link 下稳定性
     float computeBaseStability(const std::deque<TrackPoint>& trajectory_base);

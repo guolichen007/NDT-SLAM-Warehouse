@@ -268,6 +268,20 @@ void PayloadTrackManager::updateMotionStats(ObjectTrack& track) {
 //   - 在 map 下，吊货随天车移动（map_displacement 大）
 //   - 这正好与仓库固定结构相反
 
+bool PayloadTrackManager::isCargoSizeValid(const ObjectTrack& track) const {
+    // 检查 bbox 尺寸是否在合理范围内
+    float length = track.bbox_max_map.x() - track.bbox_min_map.x();
+    float width = track.bbox_max_map.y() - track.bbox_min_map.y();
+    float height = track.bbox_max_map.z() - track.bbox_min_map.z();
+
+    // 合理范围：长 0.6-8m，宽 0.3-3.5m，高 0.2-3m
+    bool valid = (length >= 0.6f && length <= 8.0f &&
+                  width >= 0.3f && width <= 3.5f &&
+                  height >= 0.2f && height <= 3.0f);
+
+    return valid;
+}
+
 void PayloadTrackManager::checkStateTransition(ObjectTrack& track) {
     switch (track.state) {
     case TrackState::NEW:
@@ -285,22 +299,64 @@ void PayloadTrackManager::checkStateTransition(ObjectTrack& track) {
                            track.velocity > config_.velocity_thresh &&
                            track.direction_consistency > config_.direction_consistency_thresh);
 
-        if (base_stable && map_moving) {
-            // base_link 稳定 + map 移动 = 吊货
-            track.state = TrackState::DYNAMIC_PAYLOAD;
-            ROS_WARN("[PayloadTracker] track %d → DYNAMIC_PAYLOAD! "
-                     "base_std=%.2f, map_disp=%.2f vel=%.2f dir=%.2f frames=%d",
-                     track.track_id, track.base_center_std,
-                     track.map_displacement, track.velocity,
-                     track.direction_consistency, track.observed_frames);
+        // HAG 判断（悬浮识别）
+        bool has_ground_gap = (track.hag_min > config_.min_floating_gap);
+        bool size_valid = isCargoSizeValid(track);
+
+        if (base_stable && size_valid) {
+            if (has_ground_gap && map_moving) {
+                // 悬浮 + 移动 = SUSPENDED_MOVING
+                track.state = TrackState::SUSPENDED_MOVING;
+                ROS_WARN("[PayloadTracker] track %d → SUSPENDED_MOVING! "
+                         "hag_min=%.2f, base_std=%.2f, map_disp=%.2f vel=%.2f",
+                         track.track_id, track.hag_min, track.base_center_std,
+                         track.map_displacement, track.velocity);
+            } else if (has_ground_gap && track.observed_frames >= config_.min_suspended_observed_frames) {
+                // 悬浮 + 静止 = SUSPENDED_STATIC
+                track.state = TrackState::SUSPENDED_STATIC;
+                ROS_WARN("[PayloadTracker] track %d → SUSPENDED_STATIC! "
+                         "hag_min=%.2f, base_std=%.2f, frames=%d",
+                         track.track_id, track.hag_min, track.base_center_std,
+                         track.observed_frames);
+            } else if (map_moving) {
+                // 地面 + 移动 = DYNAMIC_PAYLOAD
+                track.state = TrackState::DYNAMIC_PAYLOAD;
+                ROS_WARN("[PayloadTracker] track %d → DYNAMIC_PAYLOAD! "
+                         "hag_min=%.2f, base_std=%.2f, map_disp=%.2f vel=%.2f",
+                         track.track_id, track.hag_min, track.base_center_std,
+                         track.map_displacement, track.velocity);
+            }
         }
-        // 注意：如果 base_link 不稳定但 map 稳定，说明是仓库静态结构
-        // 这种情况保持 PENDING_STATIC，最终会变成 EXPIRED 或保持 pending
         break;
     }
 
     case TrackState::DYNAMIC_PAYLOAD:
-        // 已确认动态，保持状态直到消失
+        // 已确认动态，检查是否应该升级为悬浮
+        if (config_.suspended_detection_enabled && track.hag_min > config_.strong_floating_gap) {
+            track.state = TrackState::SUSPENDED_MOVING;
+            ROS_WARN("[PayloadTracker] track %d upgraded to SUSPENDED_MOVING (hag_min=%.2f)",
+                     track.track_id, track.hag_min);
+        }
+        break;
+
+    case TrackState::SUSPENDED_STATIC:
+        // 悬浮静止，检查是否开始移动
+        if (track.velocity > config_.velocity_thresh * 2) {
+            track.state = TrackState::SUSPENDED_MOVING;
+            ROS_WARN("[PayloadTracker] track %d → SUSPENDED_MOVING (started moving)",
+                     track.track_id);
+        }
+        break;
+
+    case TrackState::SUSPENDED_MOVING:
+        // 悬浮移动，检查是否停止
+        if (config_.keep_suspended_when_stopped &&
+            track.velocity < config_.velocity_thresh &&
+            track.map_displacement < config_.displacement_thresh) {
+            track.state = TrackState::SUSPENDED_STATIC;
+            ROS_WARN("[PayloadTracker] track %d → SUSPENDED_STATIC (stopped)",
+                     track.track_id);
+        }
         break;
 
     case TrackState::EXPIRED:
