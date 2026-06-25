@@ -71,7 +71,12 @@ cargo_forbidden_zone:
   # 可视化
   visualization:
     publish_forbidden_overlay_markers: true
+    forbidden_overlay_mode: "height_binned_volume"  # height_binned_volume / cube_per_cell / height_slice
+    overlay_stride: 1
+    height_bin_size: 0.25
+    max_overlay_cells: 30000
     forbidden_overlay_alpha: 0.35
+    publish_height_slice_debug: false
     show_raw_bbox: true
     show_stable_bbox: true
     show_status_text: true

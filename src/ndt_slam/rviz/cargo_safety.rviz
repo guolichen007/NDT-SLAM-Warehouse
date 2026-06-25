@@ -84,16 +84,27 @@ Visualization Manager:
       Use rainbow: false
       Value: true
 
-    # Forbidden Overlay Markers（红色半透明）
+    # Forbidden Volume Markers（红色高度柱）
     - Alpha: 1
       Class: rviz/MarkerArray
       Enabled: true
       Marker Topic: /cargo_forbidden_overlay_markers
-      Name: Forbidden Overlay
+      Name: Forbidden Volume
       Namespaces:
         "": true
       Queue Size: 10
       Value: true
+
+    # Height Slice Markers（薄片 debug，默认关闭）
+    - Alpha: 1
+      Class: rviz/MarkerArray
+      Enabled: false
+      Marker Topic: /cargo_forbidden_height_slice_markers
+      Name: Height Slice (debug)
+      Namespaces:
+        "": true
+      Queue Size: 10
+      Value: false
 
     # Cargo Forbidden Grid（黑白栅格，默认关闭）
     - Alpha: 0.25

@@ -156,10 +156,18 @@ private:
 
     // 可视化配置
     bool publish_forbidden_overlay_markers_ = true;
+    std::string forbidden_overlay_mode_ = "height_binned_volume";
+    int overlay_stride_ = 1;
+    double height_bin_size_ = 0.25;
+    int max_overlay_cells_ = 30000;
     double forbidden_overlay_alpha_ = 0.35;
+    bool publish_height_slice_debug_ = false;
     bool show_raw_bbox_ = true;
     bool show_stable_bbox_ = true;
     bool show_status_text_ = true;
+
+    // 发布者（新增）
+    ros::Publisher height_slice_marker_pub_;
 
     // 2.5D 栅格
     int grid_width_ = 0;
@@ -264,7 +272,12 @@ private:
             if (root["visualization"]) {
                 auto vis = root["visualization"];
                 publish_forbidden_overlay_markers_ = vis["publish_forbidden_overlay_markers"].as<bool>(true);
+                forbidden_overlay_mode_ = vis["forbidden_overlay_mode"].as<std::string>("height_binned_volume");
+                overlay_stride_ = vis["overlay_stride"].as<int>(1);
+                height_bin_size_ = vis["height_bin_size"].as<double>(0.25);
+                max_overlay_cells_ = vis["max_overlay_cells"].as<int>(30000);
                 forbidden_overlay_alpha_ = vis["forbidden_overlay_alpha"].as<double>(0.35);
+                publish_height_slice_debug_ = vis["publish_height_slice_debug"].as<bool>(false);
                 show_raw_bbox_ = vis["show_raw_bbox"].as<bool>(true);
                 show_stable_bbox_ = vis["show_stable_bbox"].as<bool>(true);
                 show_status_text_ = vis["show_status_text"].as<bool>(true);
@@ -371,6 +384,7 @@ private:
         forbidden_grid_pub_ = nh_.advertise<nav_msgs::OccupancyGrid>("/cargo_forbidden_grid", 1, true);
         risk_level_pub_ = nh_.advertise<std_msgs::Int32>("/cargo_collision_warning", 10);
         forbidden_overlay_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_forbidden_overlay_markers", 10, true);
+        height_slice_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_forbidden_height_slice_markers", 10, true);
         cargo_markers_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_forbidden_markers", 10);
     }
 
@@ -595,13 +609,136 @@ private:
     }
 
     void publishForbiddenOverlayMarkers(const ros::Time& stamp) {
+        if (!publish_forbidden_overlay_markers_) return;
+
+        // 确定 cargo_z_min
+        float cargo_z_min = stable_cargo_.valid ? stable_cargo_.cargo_z_min : 0.0f;
+
+        // 按模式分发
+        if (forbidden_overlay_mode_ == "height_binned_volume") {
+            publishHeightBinnedVolumeMarkers(stamp, cargo_z_min);
+        } else if (forbidden_overlay_mode_ == "height_slice") {
+            publishHeightSliceMarkers(stamp, cargo_z_min);
+        } else {
+            // 默认使用 height_binned_volume
+            publishHeightBinnedVolumeMarkers(stamp, cargo_z_min);
+        }
+
+        // 发布 debug 薄片（如果启用）
+        if (publish_height_slice_debug_) {
+            publishHeightSliceMarkers(stamp, cargo_z_min);
+        }
+    }
+
+    void publishHeightBinnedVolumeMarkers(const ros::Time& stamp, float cargo_z_min) {
         visualization_msgs::MarkerArray markers;
 
-        // 使用 CUBE_LIST 批量发布禁行区
+        // 按高度分 bin
+        struct HeightBin {
+            float z_bottom;
+            float z_top;
+            float height;
+            std::vector<geometry_msgs::Point> points;
+        };
+        std::map<int, HeightBin> bins;
+
+        int occupied_count = 0;
+        int forbidden_count = 0;
+        int passable_count = 0;
+        float obs_z_min = std::numeric_limits<float>::max();
+        float obs_z_max = -std::numeric_limits<float>::max();
+
+        // 遍历所有 cell
+        for (int iy = 0; iy < grid_height_; iy += overlay_stride_) {
+            for (int ix = 0; ix < grid_width_; ix += overlay_stride_) {
+                int idx = iy * grid_width_ + ix;
+                const auto& cell = obstacle_grid_[idx];
+
+                if (!cell.occupied) continue;
+                occupied_count++;
+
+                // 记录 z 范围
+                obs_z_min = std::min(obs_z_min, cell.z_min);
+                obs_z_max = std::max(obs_z_max, cell.z_max);
+
+                // 高度过滤
+                if (!isForbiddenForCargo(cell, cargo_z_min)) {
+                    passable_count++;
+                    continue;
+                }
+                forbidden_count++;
+
+                // 计算高度
+                float z_bottom = cell.z_min;
+                float z_top = cell.z_max + z_clearance_;
+                float height = z_top - z_bottom;
+
+                // 按高度分 bin
+                int bin_id = static_cast<int>(std::ceil(height / height_bin_size_));
+                if (bins.find(bin_id) == bins.end()) {
+                    bins[bin_id] = {z_bottom, z_top, height, {}};
+                }
+
+                // 添加点
+                geometry_msgs::Point p;
+                p.x = origin_x_ + (ix + 0.5) * resolution_;
+                p.y = origin_y_ + (iy + 0.5) * resolution_;
+                p.z = z_bottom + height / 2.0f;
+                bins[bin_id].points.push_back(p);
+            }
+        }
+
+        // 每个 bin 发一个 CUBE_LIST
+        int marker_id = 0;
+        for (const auto& [bin_id, bin] : bins) {
+            if (bin.points.empty()) continue;
+
+            visualization_msgs::Marker cube_list;
+            cube_list.header.stamp = stamp;
+            cube_list.header.frame_id = map_frame_;
+            cube_list.ns = "forbidden_volume";
+            cube_list.id = marker_id++;
+            cube_list.type = visualization_msgs::Marker::CUBE_LIST;
+            cube_list.action = visualization_msgs::Marker::ADD;
+            cube_list.pose.orientation.w = 1.0;
+            cube_list.scale.x = resolution_ * overlay_stride_;
+            cube_list.scale.y = resolution_ * overlay_stride_;
+            cube_list.scale.z = std::max(0.05f, bin.height);
+            cube_list.color.r = 1.0;
+            cube_list.color.g = 0.0;
+            cube_list.color.b = 0.0;
+            cube_list.color.a = forbidden_overlay_alpha_;
+            cube_list.points = bin.points;
+            markers.markers.push_back(cube_list);
+        }
+
+        // 清除多余的 marker
+        visualization_msgs::Marker clear_marker;
+        clear_marker.header.stamp = stamp;
+        clear_marker.header.frame_id = map_frame_;
+        clear_marker.ns = "forbidden_volume";
+        clear_marker.id = marker_id;
+        clear_marker.action = visualization_msgs::Marker::DELETE;
+        markers.markers.push_back(clear_marker);
+
+        forbidden_overlay_marker_pub_.publish(markers);
+
+        // 统计日志
+        ROS_INFO_THROTTLE(2.0, "[ForbiddenOverlay] mode=height_binned_volume cargo_z_min=%.2f "
+                          "occupied=%d forbidden=%d passable=%d bins=%zu "
+                          "obs_z_range=(%.1f, %.1f)",
+                          cargo_z_min, occupied_count, forbidden_count, passable_count,
+                          bins.size(), obs_z_min, obs_z_max);
+    }
+
+    void publishHeightSliceMarkers(const ros::Time& stamp, float cargo_z_min) {
+        visualization_msgs::MarkerArray markers;
+
+        // 使用 CUBE_LIST 批量发布禁行区（薄片模式）
         visualization_msgs::Marker cube_list;
         cube_list.header.stamp = stamp;
         cube_list.header.frame_id = map_frame_;
-        cube_list.ns = "forbidden_overlay";
+        cube_list.ns = "height_slice";
         cube_list.id = 0;
         cube_list.type = visualization_msgs::Marker::CUBE_LIST;
         cube_list.action = visualization_msgs::Marker::ADD;
@@ -614,10 +751,6 @@ private:
         cube_list.color.b = 0.0;
         cube_list.color.a = forbidden_overlay_alpha_;
 
-        // 确定 cargo_z_min
-        float cargo_z_min = stable_cargo_.valid ? stable_cargo_.cargo_z_min : 0.0f;
-
-        // 遍历所有 cell，使用 2.5D 高度判断
         for (int iy = 0; iy < grid_height_; ++iy) {
             for (int ix = 0; ix < grid_width_; ++ix) {
                 int idx = iy * grid_width_ + ix;
@@ -627,8 +760,7 @@ private:
                     geometry_msgs::Point p;
                     p.x = origin_x_ + (ix + 0.5) * resolution_;
                     p.y = origin_y_ + (iy + 0.5) * resolution_;
-                    // 显示在当前吊货高度层
-                    p.z = stable_cargo_.valid ? stable_cargo_.cargo_z_min : 0.05;
+                    p.z = cargo_z_min;
                     cube_list.points.push_back(p);
                 }
             }
@@ -638,7 +770,7 @@ private:
             markers.markers.push_back(cube_list);
         }
 
-        forbidden_overlay_marker_pub_.publish(markers);
+        height_slice_marker_pub_.publish(markers);
     }
 
     void publishCargoMarkers(const ros::Time& stamp) {
