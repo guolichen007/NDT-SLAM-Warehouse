@@ -2,70 +2,76 @@
 
 cargo_forbidden_zone:
   map_frame: "map"
+  enabled: true
 
   input:
     use_tiles_objects: true
     objects_tiles_dir: "/home/ydkj/NDT-slam-ws/maps/live/current/tiles_objects"
     payload_track_topic: "/payload_track_info"
 
+  # 2.5D 栅格参数
   grid:
     resolution: 0.10
     min_points_per_cell: 2
-    unknown_value: -1
-    free_value: 0
-    buffer_value: 50
-    forbidden_value: 100
+    min_obstacle_height: 0.15
+    z_clearance: 0.30
 
+  # 货物定位状态机
+  cargo_localization:
+    enabled: true
+    max_lost_frames: 5
+    min_bbox_point_count: 50
+    min_map_displacement: 0.25
+    min_direction_consistency: 0.65
+
+  # bbox 滤波
+  bbox_filter:
+    use_quantile_bbox: false
+    centroid_filter_alpha: 0.35
+    size_filter_alpha: 0.25
+    max_size_change_per_frame: 0.50
+    max_valid_length_x: 8.0
+    max_valid_width_y: 3.0
+    max_valid_height_z: 3.0
+    min_valid_length_x: 0.5
+    min_valid_width_y: 0.3
+    min_valid_height_z: 0.2
+
+  # 默认货物尺寸（当 bbox 不可用时）
   cargo_size:
-    use_detected_bbox: true
     default_length_x: 3.0
     default_width_y: 1.0
     default_height_z: 1.0
-    min_valid_length_x: 0.8
-    min_valid_width_y: 0.4
-    max_valid_length_x: 12.0
-    max_valid_width_y: 4.0
-    min_safety_length_x: 1.2
-    min_safety_width_y: 0.7
-    min_bbox_point_count: 50
-    size_change_threshold: 0.30
-    shrink_confirm_frames: 10
 
-  height_filter:
-    enabled: true
-    z_clearance: 0.30
-    height_rebuild_threshold: 0.20
-
+  # 安全边距
   inflation:
-    method: "fixed_axis_rect"
     safety_margin_x: 0.25
     safety_margin_y: 0.25
-    buffer_margin_extra: 0.25
 
-  motion_gate:
-    only_warn_when_xy_moving: true
-    moving_speed_threshold: 0.03
-    idle_confirm_frames: 3
-    moving_confirm_frames: 2
-
-  velocity:
-    velocity_filter_alpha: 0.3
-    min_predict_speed: 0.3
-    max_predict_speed: 1.5
-    max_reasonable_speed: 2.0
-    min_direction_consistency: 0.5
-
+  # 预测（暂时禁用）
   prediction:
+    enabled: false
     horizon_sec: 3.0
     dt: 0.2
 
+  # 碰撞预警（暂时禁用）
+  collision_warning:
+    enabled: false
+
+  # 决策（暂时禁用）
+  decision:
+    enabled: false
+
+  # 风险阈值（保留，后续启用时使用）
   risk:
     stop_ttc: 1.0
     slow_ttc: 2.0
     warn_ttc: 3.0
 
+  # 可视化
   visualization:
     publish_forbidden_overlay_markers: true
-    forbidden_overlay_stride: 2
-    forbidden_overlay_alpha: 0.30
-    forbidden_overlay_z: 0.05
+    forbidden_overlay_alpha: 0.35
+    show_raw_bbox: true
+    show_stable_bbox: true
+    show_status_text: true
