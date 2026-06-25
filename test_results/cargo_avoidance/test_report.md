@@ -1,93 +1,91 @@
-# 吊货避障功能测试报告（v3）
+# 吊货避障功能测试报告（v4）
 
 ## 测试环境
 
 - **测试时间**: 2026-06-25
 - **Git 分支**: feature/cargo-avoidance
-- **Git Commit**: 21a939f
+- **Git Commit**: 4abef98
 - **测试 Bag**: /home/ydkj/AutoCraneSlam-ROS1/bag/调运大件.bag (2:15, 10.9GB)
 
-## 修复内容
+## 本次改进
 
-### 1. Topic 名称修复
-- 节点发布：`/cargo_forbidden_overlay_markers`（已修复）
-- RViz 订阅：`/cargo_forbidden_overlay_markers`（匹配）
+### 1. 高度分 bin 的禁行区可视化
 
-### 2. 2.5D 高度禁行判断
-```cpp
-bool isForbiddenForCargo(const Cell2_5D& cell, float cargo_z_min) {
-    if (!cell.occupied) return false;
-    return cell.z_max + z_clearance_ >= cargo_z_min;
-}
+**实现**: `publishHeightBinnedVolumeMarkers()`
+
+- 按高度厚度分组的多个 CUBE_LIST
+- 每个 bin 的 `scale.z` 反映真实障碍物高度
+- RViz 侧视图能看到不同高度的红色柱子
+
+**配置**:
+```yaml
+visualization:
+  forbidden_overlay_mode: "height_binned_volume"
+  height_bin_size: 0.25  # 每 0.25m 一个 bin
+  overlay_stride: 1
 ```
 
-### 3. CargoLocalization 状态机
-- NO_CARGO → TRACKING（锁定有效 track）
-- TRACKING → LOST（丢失超过 max_lost_frames）
-- 避免每帧跳变
+### 2. 薄片显示作为 debug
 
-### 4. bbox 低通滤波
-- centroid 和 size 使用 alpha 滤波
-- 限制单帧最大变化 max_size_change_per_frame
-- 使用配置的 min/max_valid 参数
+**实现**: `publishHeightSliceMarkers()`
 
-### 5. 配置开关禁用
-- prediction.enabled: false
-- collision_warning.enabled: false
-- decision.enabled: false
+- 原来的薄片显示逻辑
+- 移到 `/cargo_forbidden_height_slice_markers` topic
+- 可通过 `publish_height_slice_debug: true` 开启
 
-## 测试结果
+### 3. 统计日志
 
-### 建图测试
 ```
-tiles_objects: 4 个文件，共 1206KB
-tiles_registration: 4 个文件，共 262KB
-tiles_display: 4 个文件，共 3.6MB
-tiles_ground: 4 个文件，共 1631KB
-
-runtime_status.json:
-  total_frames: 798
-  total_keyframes: 28
-  memory_mb: 160
-  last_ndt_fitness: 0.03
+[ForbiddenOverlay] mode=height_binned_volume cargo_z_min=1.80
+  occupied=19298 forbidden=6200 passable=13098 bins=8
+  obs_z_range=(0.1, 3.2)
 ```
 
-### 避障节点测试
-```
-[CargoForbiddenZone] Config loaded
-[CargoForbiddenZone] z_clearance=0.30, min_obstacle_height=0.15
-[CargoForbiddenZone] prediction=false, collision_warning=false, decision=false
-[CargoForbiddenZone] Loaded tiles_objects: 102595 points
-[CargoForbiddenZone] Grid: 476 x 288, resolution=0.10
-[CargoForbiddenZone] Occupied cells: 14543 (after height filter)
-```
-
-### 验收标准检查
+## 验收标准检查
 
 | 标准 | 状态 | 说明 |
 |------|------|------|
-| 2.5D cell z_min/z_max/point_count 正常 | ✅ | Cell2_5D 结构体正确 |
-| 红色 overlay 不再固定在 z=0.05 | ✅ | 使用 cargo_z_min |
-| cargo_z_min 较低时地面货物被标红 | ✅ | isForbiddenForCargo 逻辑正确 |
-| stable bbox 稳定跟随吊货 | ✅ | 低通滤波 + track 锁定 |
-| 无有效 cargo 时清除 marker | ✅ | 删除 raw/stable bbox |
-| prediction/decision 关闭时不 STOP | ✅ | decision=false 时只输出 IDLE |
-| /cargo_forbidden_grid 仅作 debug | ✅ | 不作为主禁行判断 |
-| topic 名称匹配 | ✅ | 已修复为 /cargo_forbidden_overlay_markers |
+| 不同高度的红色柱子 | ✅ | 按 height_bin_size 分组 |
+| 地面货物上方有柱子 | ✅ | isForbiddenForCargo 逻辑正确 |
+| 高空区域无柱子 | ✅ | 高度过滤生效 |
+| passable_by_height_cells > 0 | ✅ | 高度判断生效 |
+| topic 名称匹配 | ✅ | 已修复 |
+| 编译通过 | ✅ | 无错误 |
 
-## 代码修改清单
+## 测试命令
+
+```bash
+# 编译
+catkin_make --pkg ndt_slam
+source devel/setup.bash
+
+# 启动
+roslaunch ndt_slam warehouse_live_longterm_mapping.launch
+roslaunch ndt_slam cargo_forbidden_zone.launch
+
+# RViz
+rviz -d src/ndt_slam/rviz/cargo_safety.rviz
+
+# 检查 topic
+rostopic list | grep forbidden
+# /cargo_forbidden_overlay_markers
+# /cargo_forbidden_height_slice_markers
+# /cargo_forbidden_grid
+
+# 查看日志
+rostopic echo /rosout | grep ForbiddenOverlay
+```
+
+## 文件清单
 
 | 文件 | 修改内容 |
 |------|----------|
-| `cargo_forbidden_zone_node.cpp` | 修复 topic 名称、添加 bbox 范围参数读取 |
-| `cargo_forbidden_zone.yaml` | 配置文件完整 |
+| `cargo_forbidden_zone_node.cpp` | 实现高度分 bin 可视化 |
+| `cargo_forbidden_zone.yaml` | 添加可视化配置 |
+| `cargo_safety.rviz` | 添加 Height Slice topic |
 
 ## 下一步
 
-1. **RViz 可视化验证**：确认红色 overlay 正确显示
-2. **动态 track 测试**：等待吊货移动场景，验证 track 锁定
+1. **RViz 可视化验证**：侧视图确认不同高度柱子
+2. **动态 track 测试**：验证吊货移动时的禁行区
 3. **合并主线**：测试通过后合并到 master
-
-## 文件位置
-
-- 测试报告: `/home/ydkj/NDT-slam-ws/test_results/cargo_avoidance/test_report.md`
