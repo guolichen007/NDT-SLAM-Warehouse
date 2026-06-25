@@ -103,17 +103,28 @@ private:
 
     // 货物尺寸
     bool use_detected_bbox_ = true;
-    double default_length_x_ = 4.0;
-    double default_width_y_ = 1.5;
+    double default_length_x_ = 3.0;
+    double default_width_y_ = 1.0;
     double default_height_z_ = 1.0;
-    double min_valid_length_x_ = 1.0;
-    double min_valid_width_y_ = 0.5;
+    double min_valid_length_x_ = 0.8;
+    double min_valid_width_y_ = 0.4;
     double max_valid_length_x_ = 12.0;
     double max_valid_width_y_ = 4.0;
-    double min_safety_length_x_ = 1.5;
-    double min_safety_width_y_ = 0.8;
+    double min_safety_length_x_ = 1.2;
+    double min_safety_width_y_ = 0.7;
+    int min_bbox_point_count_ = 50;  // 使用检测 bbox 的最小点数
     double size_change_threshold_ = 0.30;
     int shrink_confirm_frames_ = 10;
+
+    // 可视化配置
+    bool publish_forbidden_overlay_markers_ = true;
+    int forbidden_overlay_stride_ = 2;
+    double forbidden_overlay_alpha_ = 0.30;
+    double forbidden_overlay_z_ = 0.05;
+
+    // bbox 跟踪状态
+    bool bbox_valid_ = false;
+    std::string size_source_ = "NONE";  // "DETECTED_BBOX" 或 "DEFAULT_SIZE"
 
     // 高度过滤
     bool height_filter_enabled_ = true;
@@ -176,6 +187,7 @@ private:
     ros::Publisher risk_level_pub_;
     ros::Publisher predicted_path_pub_;
     ros::Publisher markers_pub_;
+    ros::Publisher forbidden_overlay_marker_pub_;
 
     // 订阅者
     ros::Subscriber payload_track_sub_;
@@ -206,17 +218,27 @@ private:
 
             auto cs = cfz["cargo_size"];
             use_detected_bbox_ = cs["use_detected_bbox"].as<bool>(true);
-            default_length_x_ = cs["default_length_x"].as<double>(4.0);
-            default_width_y_ = cs["default_width_y"].as<double>(1.5);
+            default_length_x_ = cs["default_length_x"].as<double>(3.0);
+            default_width_y_ = cs["default_width_y"].as<double>(1.0);
             default_height_z_ = cs["default_height_z"].as<double>(1.0);
-            min_valid_length_x_ = cs["min_valid_length_x"].as<double>(1.0);
-            min_valid_width_y_ = cs["min_valid_width_y"].as<double>(0.5);
+            min_valid_length_x_ = cs["min_valid_length_x"].as<double>(0.8);
+            min_valid_width_y_ = cs["min_valid_width_y"].as<double>(0.4);
             max_valid_length_x_ = cs["max_valid_length_x"].as<double>(12.0);
             max_valid_width_y_ = cs["max_valid_width_y"].as<double>(4.0);
-            min_safety_length_x_ = cs["min_safety_length_x"].as<double>(1.5);
-            min_safety_width_y_ = cs["min_safety_width_y"].as<double>(0.8);
+            min_safety_length_x_ = cs["min_safety_length_x"].as<double>(1.2);
+            min_safety_width_y_ = cs["min_safety_width_y"].as<double>(0.7);
+            min_bbox_point_count_ = cs["min_bbox_point_count"].as<int>(50);
             size_change_threshold_ = cs["size_change_threshold"].as<double>(0.30);
             shrink_confirm_frames_ = cs["shrink_confirm_frames"].as<int>(10);
+
+            // 可视化配置
+            if (cfz["visualization"]) {
+                auto vis = cfz["visualization"];
+                publish_forbidden_overlay_markers_ = vis["publish_forbidden_overlay_markers"].as<bool>(true);
+                forbidden_overlay_stride_ = vis["forbidden_overlay_stride"].as<int>(2);
+                forbidden_overlay_alpha_ = vis["forbidden_overlay_alpha"].as<double>(0.30);
+                forbidden_overlay_z_ = vis["forbidden_overlay_z"].as<double>(0.05);
+            }
 
             auto hf = cfz["height_filter"];
             height_filter_enabled_ = hf["enabled"].as<bool>(true);
@@ -341,6 +363,7 @@ private:
         risk_level_pub_ = nh_.advertise<std_msgs::Int32>("/cargo_collision_warning", 10);
         predicted_path_pub_ = nh_.advertise<nav_msgs::Path>("/cargo_predicted_path", 10);
         markers_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_forbidden_markers", 10);
+        forbidden_overlay_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_forbidden_overlay_markers", 10, true);
     }
 
     void setupSubscribers() {
@@ -376,23 +399,26 @@ private:
     void updateCargoSize() {
         double new_length = default_length_x_;
         double new_width = default_width_y_;
+        bbox_valid_ = false;
+        size_source_ = "DEFAULT_SIZE";
 
         if (cargo_.valid && use_detected_bbox_) {
             double bbox_length = cargo_.bbox_max.x() - cargo_.bbox_min.x();
             double bbox_width = cargo_.bbox_max.y() - cargo_.bbox_min.y();
 
-            bool bbox_valid =
+            bbox_valid_ =
                 cargo_.state == 2 &&  // DYNAMIC
-                cargo_.point_count >= 80 &&
+                cargo_.point_count >= min_bbox_point_count_ &&
                 cargo_.track_duration >= 0.5 &&
                 bbox_length >= min_valid_length_x_ &&
                 bbox_width >= min_valid_width_y_ &&
                 bbox_length <= max_valid_length_x_ &&
                 bbox_width <= max_valid_width_y_;
 
-            if (bbox_valid) {
+            if (bbox_valid_) {
                 new_length = std::max(bbox_length, min_safety_length_x_);
                 new_width = std::max(bbox_width, min_safety_width_y_);
+                size_source_ = "DETECTED_BBOX";
             }
         }
 
@@ -603,53 +629,143 @@ private:
     void publishMarkers(const ros::Time& stamp) {
         visualization_msgs::MarkerArray markers;
 
-        // 吊货 BBox
-        if (cargo_.valid) {
-            visualization_msgs::Marker bbox_marker;
-            bbox_marker.header.stamp = stamp;
-            bbox_marker.header.frame_id = map_frame_;
-            bbox_marker.ns = "cargo_bbox";
-            bbox_marker.id = 0;
-            bbox_marker.type = visualization_msgs::Marker::CUBE;
-            bbox_marker.action = visualization_msgs::Marker::ADD;
-            bbox_marker.pose.position.x = (cargo_.bbox_min.x() + cargo_.bbox_max.x()) / 2.0;
-            bbox_marker.pose.position.y = (cargo_.bbox_min.y() + cargo_.bbox_max.y()) / 2.0;
-            bbox_marker.pose.position.z = (cargo_.bbox_min.z() + cargo_.bbox_max.z()) / 2.0;
-            bbox_marker.pose.orientation.w = 1.0;
-            bbox_marker.scale.x = cargo_.bbox_max.x() - cargo_.bbox_min.x();
-            bbox_marker.scale.y = cargo_.bbox_max.y() - cargo_.bbox_min.y();
-            bbox_marker.scale.z = cargo_.bbox_max.z() - cargo_.bbox_min.z();
-            bbox_marker.color.r = 0.6;
-            bbox_marker.color.g = 0.2;
-            bbox_marker.color.b = 0.8;
-            bbox_marker.color.a = 0.5;
-            markers.markers.push_back(bbox_marker);
+        // 如果没有有效 track，清除所有 bbox marker
+        if (!cargo_.valid || cargo_.state != 2) {
+            // 删除 raw bbox
+            visualization_msgs::Marker delete_raw;
+            delete_raw.header.stamp = stamp;
+            delete_raw.header.frame_id = map_frame_;
+            delete_raw.ns = "cargo_raw_bbox";
+            delete_raw.id = 0;
+            delete_raw.action = visualization_msgs::Marker::DELETE;
+            markers.markers.push_back(delete_raw);
+
+            // 删除 safety bbox
+            visualization_msgs::Marker delete_safety;
+            delete_safety.header.stamp = stamp;
+            delete_safety.header.frame_id = map_frame_;
+            delete_safety.ns = "cargo_safety_bbox";
+            delete_safety.id = 0;
+            delete_safety.action = visualization_msgs::Marker::DELETE;
+            markers.markers.push_back(delete_safety);
+
+            // 风险文字显示 UNKNOWN
+            visualization_msgs::Marker text_marker;
+            text_marker.header.stamp = stamp;
+            text_marker.header.frame_id = map_frame_;
+            text_marker.ns = "cargo_risk_text";
+            text_marker.id = 0;
+            text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+            text_marker.action = visualization_msgs::Marker::ADD;
+            text_marker.pose.position.z = 1.0;
+            text_marker.pose.orientation.w = 1.0;
+            text_marker.scale.z = 0.5;
+            text_marker.text = "UNKNOWN\nno track";
+            text_marker.color.r = 0.5;
+            text_marker.color.g = 0.5;
+            text_marker.color.b = 0.5;
+            text_marker.color.a = 1.0;
+            text_marker.lifetime = ros::Duration(0.5);
+            markers.markers.push_back(text_marker);
+
+            markers_pub_.publish(markers);
+            return;
         }
 
-        // 风险等级文字
+        // 有有效 track，使用 centroid_map 作为中心
+        Eigen::Vector3f center = cargo_.centroid;
+
+        // 1. 原始检测 bbox（紫色线框）
+        if (bbox_valid_) {
+            visualization_msgs::Marker raw_marker;
+            raw_marker.header.stamp = stamp;
+            raw_marker.header.frame_id = map_frame_;
+            raw_marker.ns = "cargo_raw_bbox";
+            raw_marker.id = 0;
+            raw_marker.type = visualization_msgs::Marker::CUBE;
+            raw_marker.action = visualization_msgs::Marker::ADD;
+            raw_marker.pose.position.x = (cargo_.bbox_min.x() + cargo_.bbox_max.x()) / 2.0;
+            raw_marker.pose.position.y = (cargo_.bbox_min.y() + cargo_.bbox_max.y()) / 2.0;
+            raw_marker.pose.position.z = (cargo_.bbox_min.z() + cargo_.bbox_max.z()) / 2.0;
+            raw_marker.pose.orientation.w = 1.0;
+            raw_marker.scale.x = cargo_.bbox_max.x() - cargo_.bbox_min.x();
+            raw_marker.scale.y = cargo_.bbox_max.y() - cargo_.bbox_min.y();
+            raw_marker.scale.z = cargo_.bbox_max.z() - cargo_.bbox_min.z();
+            raw_marker.color.r = 0.6;
+            raw_marker.color.g = 0.2;
+            raw_marker.color.b = 0.8;
+            raw_marker.color.a = 0.3;
+            raw_marker.lifetime = ros::Duration(0.5);
+            markers.markers.push_back(raw_marker);
+        } else {
+            // 删除 raw bbox
+            visualization_msgs::Marker delete_raw;
+            delete_raw.header.stamp = stamp;
+            delete_raw.header.frame_id = map_frame_;
+            delete_raw.ns = "cargo_raw_bbox";
+            delete_raw.id = 0;
+            delete_raw.action = visualization_msgs::Marker::DELETE;
+            markers.markers.push_back(delete_raw);
+        }
+
+        // 2. 安全计算 bbox（红色半透明，跟随 centroid）
+        visualization_msgs::Marker safety_marker;
+        safety_marker.header.stamp = stamp;
+        safety_marker.header.frame_id = map_frame_;
+        safety_marker.ns = "cargo_safety_bbox";
+        safety_marker.id = 0;
+        safety_marker.type = visualization_msgs::Marker::CUBE;
+        safety_marker.action = visualization_msgs::Marker::ADD;
+        safety_marker.pose.position.x = center.x();
+        safety_marker.pose.position.y = center.y();
+        safety_marker.pose.position.z = center.z();
+        safety_marker.pose.orientation.w = 1.0;
+        safety_marker.scale.x = used_length_x_;
+        safety_marker.scale.y = used_width_y_;
+        safety_marker.scale.z = default_height_z_;
+        safety_marker.color.r = 1.0;
+        safety_marker.color.g = 0.0;
+        safety_marker.color.b = 0.0;
+        safety_marker.color.a = 0.25;
+        safety_marker.lifetime = ros::Duration(0.5);
+        markers.markers.push_back(safety_marker);
+
+        // 3. 风险文字（显示 risk 和 size_source）
         visualization_msgs::Marker text_marker;
         text_marker.header.stamp = stamp;
         text_marker.header.frame_id = map_frame_;
-        text_marker.ns = "risk_text";
+        text_marker.ns = "cargo_risk_text";
         text_marker.id = 0;
         text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
         text_marker.action = visualization_msgs::Marker::ADD;
-        text_marker.pose.position.x = cargo_.valid ? cargo_.centroid.x() : 0.0;
-        text_marker.pose.position.y = cargo_.valid ? cargo_.centroid.y() : 0.0;
-        text_marker.pose.position.z = cargo_.valid ? cargo_.centroid.z() + 1.0 : 1.0;
+        text_marker.pose.position.x = center.x();
+        text_marker.pose.position.y = center.y();
+        text_marker.pose.position.z = center.z() + 0.8;
         text_marker.pose.orientation.w = 1.0;
         text_marker.scale.z = 0.5;
 
+        std::string risk_str;
         switch (risk_level_) {
-            case RiskLevel::IDLE: text_marker.text = "IDLE"; text_marker.color.g = 1.0; break;
-            case RiskLevel::NORMAL: text_marker.text = "NORMAL"; text_marker.color.g = 1.0; break;
-            case RiskLevel::WARNING: text_marker.text = "WARNING"; text_marker.color.r = 1.0; text_marker.color.g = 1.0; break;
-            case RiskLevel::SLOW_DOWN: text_marker.text = "SLOW_DOWN"; text_marker.color.r = 1.0; text_marker.color.g = 0.5; break;
-            case RiskLevel::STOP: text_marker.text = "STOP"; text_marker.color.r = 1.0; break;
-            case RiskLevel::UNKNOWN: text_marker.text = "UNKNOWN"; text_marker.color.r = 0.5; text_marker.color.g = 0.5; text_marker.color.b = 0.5; break;
+            case RiskLevel::IDLE: risk_str = "IDLE"; text_marker.color.g = 1.0; break;
+            case RiskLevel::NORMAL: risk_str = "NORMAL"; text_marker.color.g = 1.0; break;
+            case RiskLevel::WARNING: risk_str = "WARNING"; text_marker.color.r = 1.0; text_marker.color.g = 1.0; break;
+            case RiskLevel::SLOW_DOWN: risk_str = "SLOW_DOWN"; text_marker.color.r = 1.0; text_marker.color.g = 0.5; break;
+            case RiskLevel::STOP: risk_str = "STOP"; text_marker.color.r = 1.0; break;
+            case RiskLevel::UNKNOWN: risk_str = "UNKNOWN"; text_marker.color.r = 0.5; text_marker.color.g = 0.5; break;
         }
+
+        text_marker.text = risk_str + "\n" + size_source_ + "\npts=" + std::to_string(cargo_.point_count);
         text_marker.color.a = 1.0;
+        text_marker.lifetime = ros::Duration(0.5);
         markers.markers.push_back(text_marker);
+
+        // 4. 日志输出（每秒一次）
+        ROS_INFO_THROTTLE(1.0, "[CargoForbiddenZone] track=%d state=%d point_count=%d bbox_valid=%s size_source=%s used_size=(%.1f,%.1f) center=(%.1f,%.1f,%.1f) risk=%s",
+                          cargo_.track_id, cargo_.state, cargo_.point_count,
+                          bbox_valid_ ? "true" : "false", size_source_.c_str(),
+                          used_length_x_, used_width_y_,
+                          center.x(), center.y(), center.z(),
+                          risk_str.c_str());
 
         markers_pub_.publish(markers);
     }
@@ -683,6 +799,54 @@ private:
         }
 
         forbidden_grid_pub_.publish(grid_msg);
+
+        // 发布红色禁行区 overlay markers
+        if (publish_forbidden_overlay_markers_) {
+            publishForbiddenOverlayMarkers(stamp);
+        }
+    }
+
+    void publishForbiddenOverlayMarkers(const ros::Time& stamp) {
+        if (!publish_forbidden_overlay_markers_) return;
+
+        visualization_msgs::MarkerArray markers;
+
+        // 使用 CUBE_LIST 批量发布 forbidden cell
+        visualization_msgs::Marker cube_list;
+        cube_list.header.stamp = stamp;
+        cube_list.header.frame_id = map_frame_;
+        cube_list.ns = "forbidden_overlay";
+        cube_list.id = 0;
+        cube_list.type = visualization_msgs::Marker::CUBE_LIST;
+        cube_list.action = visualization_msgs::Marker::ADD;
+        cube_list.pose.orientation.w = 1.0;
+        cube_list.scale.x = resolution_ * forbidden_overlay_stride_;
+        cube_list.scale.y = resolution_ * forbidden_overlay_stride_;
+        cube_list.scale.z = 0.02;
+        cube_list.color.r = 1.0;
+        cube_list.color.g = 0.0;
+        cube_list.color.b = 0.0;
+        cube_list.color.a = forbidden_overlay_alpha_;
+
+        // 收集 forbidden cell 中心点（带 stride 采样）
+        for (int iy = 0; iy < grid_height_; iy += forbidden_overlay_stride_) {
+            for (int ix = 0; ix < grid_width_; ix += forbidden_overlay_stride_) {
+                int idx = iy * grid_width_ + ix;
+                if (forbidden_grid_[idx]) {
+                    geometry_msgs::Point p;
+                    p.x = origin_x_ + (ix + 0.5) * resolution_;
+                    p.y = origin_y_ + (iy + 0.5) * resolution_;
+                    p.z = forbidden_overlay_z_;
+                    cube_list.points.push_back(p);
+                }
+            }
+        }
+
+        if (!cube_list.points.empty()) {
+            markers.markers.push_back(cube_list);
+        }
+
+        forbidden_overlay_marker_pub_.publish(markers);
     }
 };
 
