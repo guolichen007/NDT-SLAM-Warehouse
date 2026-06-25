@@ -2591,15 +2591,20 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                                         const ros::Time& stamp) {
     // ========== 统一门控：observe_only / 内存保护 / 磁盘保护 / NDT 健康 ==========
     if (longterm_mapping_enabled_ && !canCommit()) {
-        ROS_DEBUG_THROTTLE(10.0, "[CommitGate] blocked: commit=%d mem_pause=%d disk=%d ndt=%d",
-                           commit_enabled_ ? 1 : 0, mapping_paused_by_memory_guard_ ? 1 : 0,
-                           disk_guard_triggered_ ? 1 : 0, ndt_health_bad_ ? 1 : 0);
+        ROS_WARN_THROTTLE(5.0, "[CommitGate] BLOCKED: commit_enabled=%s mem_pause=%s disk_guard=%s ndt_bad=%s",
+                          commit_enabled_ ? "true" : "false",
+                          mapping_paused_by_memory_guard_ ? "true" : "false",
+                          disk_guard_triggered_ ? "true" : "false",
+                          ndt_health_bad_ ? "true" : "false");
         return;
     }
 
+    // 应用天车运动约束到 keyframe pose
+    Sophus::SE3d constrained_pose = applyCraneMotionConstraint(pose, "keyframe");
+
     // ========== MotionGate：静止时不添加关键帧 ==========
     if (longterm_mapping_enabled_ && motion_gate_enabled_) {
-        if (!shouldCommitKeyframe(pose, stamp)) {
+        if (!shouldCommitKeyframe(constrained_pose, stamp)) {
             ROS_DEBUG("[MotionGate] Stationary, skipping keyframe commit");
             return;
         }
@@ -2610,7 +2615,7 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
     *last_cloud_ = *cloud;
 
     size_t prev_keyframe_count = loop_closure_detector_.getKeyFrames().size();
-    loop_closure_detector_.addKeyFrame(pose, cloud, stamp);
+    loop_closure_detector_.addKeyFrame(constrained_pose, cloud, stamp);
     size_t new_keyframe_count = loop_closure_detector_.getKeyFrames().size();
 
     if (new_keyframe_count > prev_keyframe_count) {
@@ -4524,7 +4529,9 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
     pcl::PointCloud<pcl::PointXYZ>::Ptr new_objects(new pcl::PointCloud<pcl::PointXYZ>);
 
     for (const auto* kf : recent_kfs) {
-        Eigen::Matrix4d transform = kf->pose_.matrix();
+        // 应用天车运动约束到 keyframe pose
+        Sophus::SE3d constrained_kf_pose = applyCraneMotionConstraint(kf->pose_, "active_rebuild");
+        Eigen::Matrix4d transform = constrained_kf_pose.matrix();
 
         // 变换到 map 坐标系
         pcl::PointCloud<pcl::PointXYZ> transformed;
