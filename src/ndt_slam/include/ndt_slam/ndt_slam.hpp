@@ -341,6 +341,10 @@ private:
     DynamicEventManager dynamic_event_manager_;
     DynamicEventConfig dynamic_event_config_;
 
+    // 吊货跟踪信息发布（用于避障节点）
+    ros::Publisher payload_track_info_pub_;
+    void publishPayloadTrackInfo(const ros::Time& stamp);
+
     // ========== 长期建图功能 ==========
     // MotionGate：静止检测和门控
     bool longterm_mapping_enabled_ = false;

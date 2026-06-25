@@ -125,6 +125,23 @@ struct MatchResult {
     std::vector<int> unmatched_clusters;
 };
 
+// 轻量只读结构，用于 /payload_track_info 发布
+struct PayloadTrackInfo {
+    int track_id = -1;
+    int state = 0;  // 0=NONE, 1=PENDING, 2=DYNAMIC
+
+    Eigen::Vector3f centroid_map = Eigen::Vector3f::Zero();
+    Eigen::Vector3f velocity_map = Eigen::Vector3f::Zero();
+
+    Eigen::Vector3f bbox_min_map = Eigen::Vector3f::Zero();
+    Eigen::Vector3f bbox_max_map = Eigen::Vector3f::Zero();
+
+    int point_count = 0;
+    float track_duration = 0.0f;
+    float direction_consistency = 0.0f;
+    float map_displacement = 0.0f;
+};
+
 // 轨迹跟踪管理器
 class PayloadTrackManager {
 public:
@@ -147,6 +164,9 @@ public:
 
     // 获取确认为动态的轨迹
     std::vector<ObjectTrack> getDynamicTracks() const;
+
+    // 获取当前最可信的动态吊货 track
+    bool getBestDynamicPayloadTrack(PayloadTrackInfo& out) const;
 
     // 获取配置
     const PayloadTrackerConfig& getConfig() const { return config_; }

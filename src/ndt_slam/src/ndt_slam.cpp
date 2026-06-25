@@ -23,6 +23,7 @@
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <std_msgs/String.h>
+#include <std_msgs/Float32MultiArray.h>
 #include <std_srvs/Empty.h>
 #include <pcl_conversions/pcl_conversions.h>
 
@@ -90,6 +91,7 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     safe_objects_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/safe_objects_cloud", 10);
     payload_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_dynamic_cloud", 10);
     payload_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_pending_cloud", 10);
+    payload_track_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_track_info", 10);
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
     human_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_pending_cloud", 10);
@@ -167,6 +169,7 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     safe_objects_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/safe_objects_cloud", 10);
     payload_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_dynamic_cloud", 10);
     payload_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_pending_cloud", 10);
+    payload_track_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_track_info", 10);
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
     human_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_pending_cloud", 10);
@@ -2713,6 +2716,9 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                         payload_pending_pub_.publish(pend_msg);
                     }
                 }
+
+                // 发布吊货跟踪信息（用于避障节点）
+                publishPayloadTrackInfo(stamp);
             }
 
             // ========== HumanObjectDynamicFilter（人体动态过滤）==========
@@ -4553,6 +4559,47 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
              global_map_->size(), display_map_->size(), ground_map_->size(), objects_map_->size());
 
     active_map_rebuild_running_ = false;
+}
+
+// ========== 吊货跟踪信息发布 ==========
+
+void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
+    PayloadTrackInfo track;
+    std_msgs::Float32MultiArray msg;
+
+    if (payload_tracker_.getBestDynamicPayloadTrack(track)) {
+        // 有有效 track
+        msg.data = {
+            static_cast<float>(stamp.toSec()),
+            static_cast<float>(track.track_id),
+            static_cast<float>(track.state),
+            track.centroid_map.x(), track.centroid_map.y(), track.centroid_map.z(),
+            track.velocity_map.x(), track.velocity_map.y(), track.velocity_map.z(),
+            track.bbox_min_map.x(), track.bbox_min_map.y(), track.bbox_min_map.z(),
+            track.bbox_max_map.x(), track.bbox_max_map.y(), track.bbox_max_map.z(),
+            static_cast<float>(track.point_count),
+            track.track_duration,
+            track.direction_consistency,
+            track.map_displacement
+        };
+    } else {
+        // 没有有效 track
+        msg.data = {
+            static_cast<float>(stamp.toSec()),
+            -1.0f,   // track_id
+            0.0f,    // state = NONE
+            0.0f, 0.0f, 0.0f,  // centroid
+            0.0f, 0.0f, 0.0f,  // velocity
+            0.0f, 0.0f, 0.0f,  // bbox_min
+            0.0f, 0.0f, 0.0f,  // bbox_max
+            0.0f,              // point_count
+            0.0f,              // track_duration
+            0.0f,              // direction_consistency
+            0.0f               // map_displacement
+        };
+    }
+
+    payload_track_info_pub_.publish(msg);
 }
 
 } // namespace ndt_slam

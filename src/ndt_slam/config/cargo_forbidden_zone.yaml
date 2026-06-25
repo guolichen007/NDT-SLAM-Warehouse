@@ -1,0 +1,64 @@
+# 吊货禁行区配置
+
+cargo_forbidden_zone:
+  map_frame: "map"
+
+  input:
+    use_tiles_objects: true
+    objects_tiles_dir: "/home/ydkj/slam_data/maps/live/current/tiles_objects"
+    payload_track_topic: "/payload_track_info"
+
+  grid:
+    resolution: 0.10
+    min_points_per_cell: 2
+    unknown_value: -1
+    free_value: 0
+    buffer_value: 50
+    forbidden_value: 100
+
+  cargo_size:
+    use_detected_bbox: true
+    default_length_x: 4.0
+    default_width_y: 1.5
+    default_height_z: 1.0
+    min_valid_length_x: 1.0
+    min_valid_width_y: 0.5
+    max_valid_length_x: 12.0
+    max_valid_width_y: 4.0
+    min_safety_length_x: 1.5
+    min_safety_width_y: 0.8
+    size_change_threshold: 0.30
+    shrink_confirm_frames: 10
+
+  height_filter:
+    enabled: true
+    z_clearance: 0.30
+    height_rebuild_threshold: 0.20
+
+  inflation:
+    method: "fixed_axis_rect"
+    safety_margin_x: 0.50
+    safety_margin_y: 0.50
+    buffer_margin_extra: 0.50
+
+  motion_gate:
+    only_warn_when_xy_moving: true
+    moving_speed_threshold: 0.03
+    idle_confirm_frames: 3
+    moving_confirm_frames: 2
+
+  velocity:
+    velocity_filter_alpha: 0.3
+    min_predict_speed: 0.3
+    max_predict_speed: 1.5
+    max_reasonable_speed: 2.0
+    min_direction_consistency: 0.5
+
+  prediction:
+    horizon_sec: 3.0
+    dt: 0.2
+
+  risk:
+    stop_ttc: 1.0
+    slow_ttc: 2.0
+    warn_ttc: 3.0

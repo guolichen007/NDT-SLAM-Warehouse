@@ -120,6 +120,14 @@ target_link_libraries(cloud_diagnostics
   ${PCL_LIBRARIES}
 )
 
+# 吊货禁行区节点
+add_executable(cargo_forbidden_zone_node src/cargo_forbidden_zone_node.cpp)
+target_link_libraries(cargo_forbidden_zone_node
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  yaml-cpp
+)
+
 install(TARGETS ndt_slam_lib ndt_slam_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib

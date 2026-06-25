@@ -492,4 +492,48 @@ std::vector<ObjectTrack> PayloadTrackManager::getDynamicTracks() const {
     return dynamic;
 }
 
+bool PayloadTrackManager::getBestDynamicPayloadTrack(PayloadTrackInfo& out) const {
+    const ObjectTrack* best = nullptr;
+    int best_score = -1;
+
+    for (const auto& t : tracks_) {
+        if (t.state != TrackState::DYNAMIC_PAYLOAD) continue;
+
+        // 评分：observed_frames * direction_consistency
+        int score = static_cast<int>(t.observed_frames * t.direction_consistency * 100);
+        if (score > best_score) {
+            best_score = score;
+            best = &t;
+        }
+    }
+
+    if (!best) return false;
+
+    out.track_id = best->track_id;
+    out.state = 2;  // DYNAMIC
+    out.centroid_map = best->centroid_map;
+    out.bbox_min_map = best->bbox_min_map;
+    out.bbox_max_map = best->bbox_max_map;
+    out.point_count = best->observed_frames;  // 近似
+    out.direction_consistency = best->direction_consistency;
+    out.map_displacement = best->map_displacement;
+
+    // 计算 track_duration
+    out.track_duration = static_cast<float>(best->last_seen_time - best->first_seen_time);
+
+    // 从轨迹计算速度向量
+    if (best->trajectory_map.size() >= 2) {
+        const auto& last = best->trajectory_map.back();
+        const auto& prev = best->trajectory_map[best->trajectory_map.size() - 2];
+        Eigen::Vector3f dir = (last.position - prev.position);
+        float dist = dir.norm();
+        if (dist > 0.001f) {
+            dir /= dist;
+            out.velocity_map = dir * best->velocity;
+        }
+    }
+
+    return true;
+}
+
 } // namespace ndt_slam
