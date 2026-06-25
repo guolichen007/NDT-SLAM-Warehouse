@@ -20,6 +20,7 @@ cargo_forbidden_zone:
   cargo_localization:
     enabled: true
     max_lost_frames: 8
+    moving_confirm_frames: 2
     min_bbox_point_count: 50
     min_map_displacement: 0.25
     min_direction_consistency: 0.65

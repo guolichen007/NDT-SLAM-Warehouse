@@ -124,13 +124,14 @@ private:
 
     // 货物定位
     bool cargo_localization_enabled_ = true;
-    int max_lost_frames_ = 5;
+    int max_lost_frames_ = 8;
+    int moving_confirm_frames_ = 2;
     int min_bbox_point_count_ = 50;
     double min_map_displacement_ = 0.25;
     double min_direction_consistency_ = 0.65;
 
     // bbox 滤波
-    double centroid_filter_alpha_ = 0.35;
+    double centroid_filter_alpha_ = 0.60;
     double size_filter_alpha_ = 0.25;
     double max_size_change_per_frame_ = 0.50;
     double max_valid_length_x_ = 8.0;
@@ -234,10 +235,13 @@ private:
             if (root["cargo_localization"]) {
                 auto cl = root["cargo_localization"];
                 cargo_localization_enabled_ = cl["enabled"].as<bool>(true);
-                max_lost_frames_ = cl["max_lost_frames"].as<int>(5);
+                max_lost_frames_ = cl["max_lost_frames"].as<int>(8);
+                moving_confirm_frames_ = cl["moving_confirm_frames"].as<int>(2);
                 min_bbox_point_count_ = cl["min_bbox_point_count"].as<int>(50);
                 min_map_displacement_ = cl["min_map_displacement"].as<double>(0.25);
                 min_direction_consistency_ = cl["min_direction_consistency"].as<double>(0.65);
+                centroid_filter_alpha_ = cl["centroid_filter_alpha"].as<double>(0.60);
+                size_filter_alpha_ = cl["size_filter_alpha"].as<double>(0.25);
             }
 
             if (root["bbox_filter"]) {
