@@ -207,6 +207,27 @@ private:
     std::atomic<bool> has_refined_pose_{false};  // 是否有可用的精炼位姿
     std::atomic<bool> refined_pose_high_quality_{false};  // 精炼位姿是否满足高质量入图条件
     bool initialized_ = false;
+
+    // ========== Crane Motion Constraint（天车运动约束）==========
+    bool crane_constraint_enabled_ = false;
+    bool lock_z_ = true;
+    bool lock_roll_ = true;
+    bool lock_pitch_ = true;
+    bool lock_yaw_ = true;
+    double fixed_z_ = 0.0;
+    double fixed_roll_ = 0.0;
+    double fixed_pitch_ = 0.0;
+    double fixed_yaw_ = 0.0;
+    double max_abs_z_drift_ = 0.10;
+    double max_roll_deg_ = 0.3;
+    double max_pitch_deg_ = 0.3;
+    double max_yaw_deg_ = 1.0;
+    bool first_pose_initialized_ = false;
+
+    // 约束函数
+    Sophus::SE3d applyCraneMotionConstraint(const Sophus::SE3d& raw_pose, const std::string& stage);
+    void so3ToRpy(const Sophus::SO3d& r, double& roll, double& pitch, double& yaw);
+    Sophus::SO3d rpyToSO3(double roll, double pitch, double yaw);
     ros::Time last_stamp_;
     std::atomic<bool> tracking_lost_{false};
 

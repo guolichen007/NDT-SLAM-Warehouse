@@ -635,6 +635,27 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             memory_check_interval_sec_ = mg["check_interval_sec"].as<int>(30);
         }
 
+        // Crane Motion Constraint 配置
+        if (config["crane_motion_constraint"]) {
+            auto cmc = config["crane_motion_constraint"];
+            crane_constraint_enabled_ = cmc["enabled"].as<bool>(false);
+            lock_z_ = cmc["lock_z"].as<bool>(true);
+            lock_roll_ = cmc["lock_roll"].as<bool>(true);
+            lock_pitch_ = cmc["lock_pitch"].as<bool>(true);
+            lock_yaw_ = cmc["lock_yaw"].as<bool>(true);
+            max_abs_z_drift_ = cmc["max_abs_z_drift"].as<double>(0.10);
+            max_roll_deg_ = cmc["max_roll_deg"].as<double>(0.3);
+            max_pitch_deg_ = cmc["max_pitch_deg"].as<double>(0.3);
+            max_yaw_deg_ = cmc["max_yaw_deg"].as<double>(1.0);
+        }
+
+        ROS_INFO("=== Crane Motion Constraint ===");
+        ROS_INFO("  enabled: %s", crane_constraint_enabled_ ? "true" : "false");
+        ROS_INFO("  lock_z: %s, lock_roll: %s, lock_pitch: %s, lock_yaw: %s",
+                 lock_z_ ? "true" : "false", lock_roll_ ? "true" : "false",
+                 lock_pitch_ ? "true" : "false", lock_yaw_ ? "true" : "false");
+        ROS_INFO("  max_abs_z_drift: %.2f m", max_abs_z_drift_);
+
         ROS_INFO("=== Memory Guard Config ===");
         ROS_INFO("  enabled: %s", memory_guard_enabled_ ? "true" : "false");
         ROS_INFO("  soft_threshold: %d MB", soft_threshold_mb_);
@@ -1122,6 +1143,10 @@ void NdtSlamNode::processCloudThread() {
                         result_ortho.block<3,1>(0,3) = result.block<3,1>(0,3).cast<double>();
 
                         new_pose = Sophus::SE3d(result_ortho);
+
+                        // 应用天车运动约束（z/roll/pitch/yaw 锁定）
+                        new_pose = applyCraneMotionConstraint(new_pose, "ndt_output");
+
                         registration_success = true;
 
                         // 关键帧策略：需要足够的运动才更新局部地图
@@ -4600,6 +4625,102 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
     }
 
     payload_track_info_pub_.publish(msg);
+}
+
+// ========== Crane Motion Constraint 实现 ==========
+
+void NdtSlamNode::so3ToRpy(const Sophus::SO3d& r, double& roll, double& pitch, double& yaw) {
+    Eigen::Matrix3d R = r.matrix();
+    // ZYX 顺序
+    pitch = std::asin(-R(2, 0));
+    if (std::cos(pitch) > 1e-6) {
+        roll = std::atan2(R(2, 1), R(2, 2));
+        yaw = std::atan2(R(1, 0), R(0, 0));
+    } else {
+        roll = std::atan2(-R(0, 1), R(1, 1));
+        yaw = 0.0;
+    }
+}
+
+Sophus::SO3d NdtSlamNode::rpyToSO3(double roll, double pitch, double yaw) {
+    Eigen::Matrix3d R;
+    R = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
+        Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
+        Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
+    return Sophus::SO3d(R);
+}
+
+Sophus::SE3d NdtSlamNode::applyCraneMotionConstraint(const Sophus::SE3d& raw_pose, const std::string& stage) {
+    if (!crane_constraint_enabled_) {
+        return raw_pose;
+    }
+
+    Eigen::Vector3d t = raw_pose.translation();
+    Sophus::SO3d r = raw_pose.so3();
+
+    double roll, pitch, yaw;
+    so3ToRpy(r, roll, pitch, yaw);
+
+    const double raw_z = t.z();
+    const double raw_roll = roll * 180.0 / M_PI;
+    const double raw_pitch = pitch * 180.0 / M_PI;
+    const double raw_yaw = yaw * 180.0 / M_PI;
+
+    // 初始化固定值（从第一帧）
+    if (!first_pose_initialized_) {
+        fixed_z_ = raw_z;
+        fixed_roll_ = raw_roll;
+        fixed_pitch_ = raw_pitch;
+        fixed_yaw_ = raw_yaw;
+        first_pose_initialized_ = true;
+        ROS_INFO("[CraneConstraint] Initialized from first pose: z=%.3f, rpy=(%.2f, %.2f, %.2f)deg",
+                 fixed_z_, fixed_roll_, fixed_pitch_, fixed_yaw_);
+    }
+
+    // 约束 z
+    if (lock_z_) {
+        t.z() = fixed_z_;
+    } else {
+        t.z() = std::max(fixed_z_ - max_abs_z_drift_,
+                         std::min(fixed_z_ + max_abs_z_drift_, t.z()));
+    }
+
+    // 约束 roll
+    if (lock_roll_) {
+        roll = fixed_roll_ * M_PI / 180.0;
+    } else {
+        double max_roll_rad = max_roll_deg_ * M_PI / 180.0;
+        roll = std::max(-max_roll_rad, std::min(max_roll_rad, roll));
+    }
+
+    // 约束 pitch
+    if (lock_pitch_) {
+        pitch = fixed_pitch_ * M_PI / 180.0;
+    } else {
+        double max_pitch_rad = max_pitch_deg_ * M_PI / 180.0;
+        pitch = std::max(-max_pitch_rad, std::min(max_pitch_rad, pitch));
+    }
+
+    // 约束 yaw
+    if (lock_yaw_) {
+        yaw = fixed_yaw_ * M_PI / 180.0;
+    } else {
+        double max_yaw_rad = max_yaw_deg_ * M_PI / 180.0;
+        yaw = std::max(-max_yaw_rad, std::min(max_yaw_rad, yaw));
+    }
+
+    Sophus::SE3d constrained_pose(rpyToSO3(roll, pitch, yaw), t);
+
+    // 日志（每秒一次）
+    ROS_INFO_THROTTLE(1.0,
+                      "[CraneConstraint:%s] raw_z=%.3f -> z=%.3f, "
+                      "raw_rpy=(%.2f, %.2f, %.2f)deg -> rpy=(%.2f, %.2f, %.2f)deg",
+                      stage.c_str(),
+                      raw_z, t.z(),
+                      raw_roll, raw_pitch, raw_yaw,
+                      roll * 180.0 / M_PI, pitch * 180.0 / M_PI, yaw * 180.0 / M_PI);
+
+    return constrained_pose;
 }
 
 } // namespace ndt_slam

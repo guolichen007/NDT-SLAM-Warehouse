@@ -121,6 +121,18 @@ ndt_health:
   fitness_warning_threshold: 2.0
   fitness_warning_count: 50
 
+# 天车运动约束（防止 z/roll/pitch/yaw 漂移）
+crane_motion_constraint:
+  enabled: true
+  lock_z: true
+  lock_roll: true
+  lock_pitch: true
+  lock_yaw: true
+  max_abs_z_drift: 0.10     # z 最大允许漂移（米）
+  max_roll_deg: 0.3         # roll 最大允许漂移（度）
+  max_pitch_deg: 0.3        # pitch 最大允许漂移（度）
+  max_yaw_deg: 1.0          # yaw 最大允许漂移（度）
+
 # ========== 吊货过滤配置 ==========
 
 # BasePayloadChannelFilter
