@@ -132,6 +132,46 @@ roslaunch ndt_slam offline_mapping.launch
 | [doc/localization_runtime.md](src/ndt_slam/doc/localization_runtime.md) | 定位模式说明 |
 | [doc/roadmap.md](src/ndt_slam/doc/roadmap.md) | 后续开发路线 |
 
+## 吊货避障功能（feature/cargo-avoidance 分支）
+
+### 功能说明
+
+- 从 tiles_objects 生成 2.5D 障碍物栅格
+- 三档尺寸策略（bbox/默认/未知）
+- 高度过滤（吊货从障碍物上方掠过）
+- 矩形膨胀生成禁行区
+- 速度滤波和轨迹预测
+- 风险等级：IDLE/NORMAL/WARNING/SLOW_DOWN/STOP/UNKNOWN
+
+### 使用方法
+
+```bash
+# 启动 SLAM
+roslaunch ndt_slam warehouse_live_longterm_mapping.launch
+
+# 启动避障节点
+roslaunch ndt_slam cargo_forbidden_zone.launch
+
+# 查看风险等级
+rostopic echo /cargo_collision_warning
+
+# 查看预测轨迹
+rostopic echo /cargo_predicted_path
+```
+
+### 发布话题
+
+| 话题 | 类型 | 说明 |
+|------|------|------|
+| `/payload_track_info` | Float32MultiArray | 吊货跟踪信息（19 个 float） |
+| `/cargo_forbidden_grid` | OccupancyGrid | 禁行区栅格 |
+| `/cargo_collision_warning` | Int32 | 风险等级（0-5） |
+| `/cargo_predicted_path` | Path | 预测轨迹 |
+
+### 配置文件
+
+- `config/cargo_forbidden_zone.yaml`：避障参数配置
+
 ## 当前限制
 
 - 长期在线建图仍需要真实双雷达长时间现场验证
