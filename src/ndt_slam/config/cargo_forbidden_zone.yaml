@@ -5,7 +5,7 @@ cargo_forbidden_zone:
 
   input:
     use_tiles_objects: true
-    objects_tiles_dir: "/home/ydkj/slam_data/maps/live/current/tiles_objects"
+    objects_tiles_dir: "/home/ydkj/NDT-slam-ws/maps/live/current/tiles_objects"
     payload_track_topic: "/payload_track_info"
 
   grid:

@@ -172,6 +172,25 @@ rostopic echo /cargo_predicted_path
 
 - `config/cargo_forbidden_zone.yaml`：避障参数配置
 
+## 地图数据目录
+
+运行时地图数据统一存放在 workspace 根目录：
+
+```
+/home/ydkj/NDT-slam-ws/maps/live/current/
+├── tiles_registration/    # registration 层 tile
+├── tiles_display/         # display 层 tile
+├── tiles_ground/          # ground 层 tile
+├── tiles_objects/         # objects 层 tile（避障节点读取）
+├── runtime_status.json    # 运行状态
+├── memory_trend.csv       # 内存趋势
+└── alerts.log             # 告警日志
+```
+
+**注意**：
+- `maps/` 目录已在 `.gitignore` 中，不会进入 Git 仓库
+- 旧备份路径 `/home/ydkj/slam_data/maps/live/current` 仅作参考，不再作为默认运行路径
+
 ## 当前限制
 
 - 长期在线建图仍需要真实双雷达长时间现场验证

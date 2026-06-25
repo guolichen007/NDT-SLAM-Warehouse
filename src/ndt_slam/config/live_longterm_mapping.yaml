@@ -80,7 +80,7 @@ online_cache:
 # 磁盘增量保存
 persistent_map:
   enabled: true
-  root_dir: "/home/ydkj/slam_data/maps/live/current"
+  root_dir: "/home/ydkj/NDT-slam-ws/maps/live/current"
   tile_size_m: 20.0            # tile 大小（米）
   flush_interval_sec: 60       # flush 间隔（秒）
   max_dirty_tiles_in_memory: 20  # 最大 dirty tile 数量

@@ -6,8 +6,8 @@ After=network.target
 Type=simple
 User=ydkj
 WorkingDirectory=/home/ydkj/NDT-slam-ws
-Environment="ROS_LOG_DIR=/home/ydkj/slam_data/logs"
-ExecStartPre=/bin/bash -c "mkdir -p /home/ydkj/slam_data/maps/live/current /home/ydkj/slam_data/logs"
+Environment="ROS_LOG_DIR=/home/ydkj/NDT-slam-ws/logs"
+ExecStartPre=/bin/bash -c "mkdir -p /home/ydkj/NDT-slam-ws/maps/live/current /home/ydkj/NDT-slam-ws/logs"
 ExecStart=/bin/bash -c "source /home/ydkj/NDT-slam-ws/devel/setup.bash && roslaunch ndt_slam warehouse_live_longterm_mapping.launch"
 Restart=on-failure
 RestartSec=15
