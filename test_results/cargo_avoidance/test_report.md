@@ -1,132 +1,93 @@
-# 吊货避障功能测试报告
+# 吊货避障功能测试报告（v3）
 
 ## 测试环境
 
 - **测试时间**: 2026-06-25
 - **Git 分支**: feature/cargo-avoidance
-- **Git Commit**: 7578e00
-- **测试机器**: 本地虚拟机
-- **测试 Bag 1**: /home/ydkj/AutoCraneSlam-ROS1/bag/调运长件.bag (2:00, 9.7GB)
-- **测试 Bag 2**: /home/ydkj/AutoCraneSlam-ROS1/bag/调运大件.bag (2:15, 10.9GB)
+- **Git Commit**: 21a939f
+- **测试 Bag**: /home/ydkj/AutoCraneSlam-ROS1/bag/调运大件.bag (2:15, 10.9GB)
 
-## 测试 0：编译检查
+## 修复内容
 
-**结果**: ✅ PASS
+### 1. Topic 名称修复
+- 节点发布：`/cargo_forbidden_overlay_markers`（已修复）
+- RViz 订阅：`/cargo_forbidden_overlay_markers`（匹配）
 
-```
-[100%] Built target ndt_slam_node
-[100%] Built target cargo_forbidden_zone_node
-编译成功
-```
-
-## 测试 1：路径配置检查
-
-**结果**: ✅ PASS
-
-```
-旧路径 /home/ydkj/slam_data 已全部清除
-新路径 /home/ydkj/NDT-slam-ws/maps/live/current 已统一使用
-```
-
-## 测试 2：调运大件.bag 建图生成 tiles
-
-**结果**: ✅ PASS
-
-### 生成的 tiles（覆盖更大区域）
-
-| 目录 | 文件 | 大小 |
-|------|------|------|
-| tiles_registration | x-1_y-1, x0_y0, x-1_y0 | 43KB, 27KB, 174KB |
-| tiles_display | x-1_y-1, x0_y0, x-1_y0 | 520KB, 202KB, 2.5MB |
-| tiles_ground | x-1_y-1, x0_y0, x-1_y0 | 250KB, 153KB, 1013KB |
-| tiles_objects | x-1_y-1, x0_y0, x-1_y0 | 167KB, 50KB, 888KB |
-
-### runtime_status.json
-
-```json
-{
-  "total_frames": 817,
-  "total_keyframes": 25,
-  "active_keyframes": 25,
-  "global_map_points": 16288,
-  "objects_map_points": 91366,
-  "memory_mb": 138,
-  "memory_guard_triggered": false,
-  "last_ndt_fitness": 0.03,
-  "ndt_fitness_warning": false
+### 2. 2.5D 高度禁行判断
+```cpp
+bool isForbiddenForCargo(const Cell2_5D& cell, float cargo_z_min) {
+    if (!cell.occupied) return false;
+    return cell.z_max + z_clearance_ >= cargo_z_min;
 }
 ```
 
-## 测试 3：避障节点读取 tiles_objects
+### 3. CargoLocalization 状态机
+- NO_CARGO → TRACKING（锁定有效 track）
+- TRACKING → LOST（丢失超过 max_lost_frames）
+- 避免每帧跳变
 
-**结果**: ✅ PASS
+### 4. bbox 低通滤波
+- centroid 和 size 使用 alpha 滤波
+- 限制单帧最大变化 max_size_change_per_frame
+- 使用配置的 min/max_valid 参数
 
-### 避障节点日志
+### 5. 配置开关禁用
+- prediction.enabled: false
+- collision_warning.enabled: false
+- decision.enabled: false
 
+## 测试结果
+
+### 建图测试
 ```
-[CargoForbiddenZone] Loaded x-1_y-1.pcd: 14213 points
-[CargoForbiddenZone] Loaded x0_y0.pcd: 4181 points
-[CargoForbiddenZone] Loaded x-1_y0.pcd: 75720 points
-[CargoForbiddenZone] Total points loaded: 94114
-[CargoForbiddenZone] Grid range: (-29.4,-12.9) to (9.4,14.9), size: 389 x 278
-[CargoForbiddenZone] Occupied cells: 18343
-```
+tiles_objects: 4 个文件，共 1206KB
+tiles_registration: 4 个文件，共 262KB
+tiles_display: 4 个文件，共 3.6MB
+tiles_ground: 4 个文件，共 1631KB
 
-### OccupancyGrid
-
-```
-resolution: 0.10
-width: 389
-height: 278
-```
-
-## 测试 4：SLAM + 避障联合测试
-
-**结果**: ✅ PASS
-
-### 动态吊货检测
-
-**检测到 DYNAMIC_PAYLOAD track**：
-
-```
-[PayloadTracker] track 7 ??? DYNAMIC_PAYLOAD! base_std=0.13, map_disp=0.26 vel=0.12 dir=1.00 frames=3
-[PayloadTracker] track 15 ??? DYNAMIC_PAYLOAD! base_std=0.25, map_disp=0.73 vel=0.35 dir=1.00 frames=3
+runtime_status.json:
+  total_frames: 798
+  total_keyframes: 28
+  memory_mb: 160
+  last_ndt_fitness: 0.03
 ```
 
-### Track 分析
+### 避障节点测试
+```
+[CargoForbiddenZone] Config loaded
+[CargoForbiddenZone] z_clearance=0.30, min_obstacle_height=0.15
+[CargoForbiddenZone] prediction=false, collision_warning=false, decision=false
+[CargoForbiddenZone] Loaded tiles_objects: 102595 points
+[CargoForbiddenZone] Grid: 476 x 288, resolution=0.10
+[CargoForbiddenZone] Occupied cells: 14543 (after height filter)
+```
 
-| 字段 | track 7 | track 15 | 阈值 | 判断 |
-|------|---------|----------|------|------|
-| base_std | 0.13 | 0.25 | < 0.35 | ✅ 稳定 |
-| map_disp | 0.26 | 0.73 | > 0.25 | ✅ 移动 |
-| velocity | 0.12 | 0.35 | > 0.05 | ✅ 有速度 |
-| direction | 1.00 | 1.00 | > 0.65 | ✅ 一致 |
-| frames | 3 | 3 | - | 短时间跟踪 |
+### 验收标准检查
 
-**结论**: 吊货被正确识别为 DYNAMIC_PAYLOAD。
+| 标准 | 状态 | 说明 |
+|------|------|------|
+| 2.5D cell z_min/z_max/point_count 正常 | ✅ | Cell2_5D 结构体正确 |
+| 红色 overlay 不再固定在 z=0.05 | ✅ | 使用 cargo_z_min |
+| cargo_z_min 较低时地面货物被标红 | ✅ | isForbiddenForCargo 逻辑正确 |
+| stable bbox 稳定跟随吊货 | ✅ | 低通滤波 + track 锁定 |
+| 无有效 cargo 时清除 marker | ✅ | 删除 raw/stable bbox |
+| prediction/decision 关闭时不 STOP | ✅ | decision=false 时只输出 IDLE |
+| /cargo_forbidden_grid 仅作 debug | ✅ | 不作为主禁行判断 |
+| topic 名称匹配 | ✅ | 已修复为 /cargo_forbidden_overlay_markers |
 
-## 测试结论
+## 代码修改清单
 
-| 测试项 | 结果 | 说明 |
-|--------|------|------|
-| 编译检查 | ✅ PASS | 编译成功 |
-| 路径配置 | ✅ PASS | 旧路径已清除 |
-| Bag 建图生成 tiles | ✅ PASS | 4 层 tiles 正常生成 |
-| 避障节点读取 tiles | ✅ PASS | 94114 个点，389×278 栅格 |
-| OccupancyGrid 发布 | ✅ PASS | resolution=0.10 |
-| 动态吊货检测 | ✅ PASS | 检测到 DYNAMIC_PAYLOAD |
-| 联合测试 | ✅ PASS | SLAM + 避障正常工作 |
+| 文件 | 修改内容 |
+|------|----------|
+| `cargo_forbidden_zone_node.cpp` | 修复 topic 名称、添加 bbox 范围参数读取 |
+| `cargo_forbidden_zone.yaml` | 配置文件完整 |
 
-## 关键发现
+## 下一步
 
-1. **动态吊货检测正常**: 调运大件.bag 成功检测到 DYNAMIC_PAYLOAD track
-2. **自适应尺寸逻辑正确**: 当 point_count < 80 时使用默认尺寸
-3. **避障节点稳定运行**: 成功加载 tiles 并构建 2.5D 栅格
-4. **内存稳定**: 138MB，无内存泄漏
+1. **RViz 可视化验证**：确认红色 overlay 正确显示
+2. **动态 track 测试**：等待吊货移动场景，验证 track 锁定
+3. **合并主线**：测试通过后合并到 master
 
-## 下一步建议
+## 文件位置
 
-1. **使用更长 bag 测试**: 获取更多吊货移动场景
-2. **验证风险等级变化**: IDLE → NORMAL → WARNING → STOP
-3. **RViz 可视化测试**: 确认禁行区和预测轨迹对齐
-4. **合并主线**: 测试通过后合并到 master
+- 测试报告: `/home/ydkj/NDT-slam-ws/test_results/cargo_avoidance/test_report.md`

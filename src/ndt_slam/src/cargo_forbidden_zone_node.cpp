@@ -370,7 +370,7 @@ private:
     void setupPublishers() {
         forbidden_grid_pub_ = nh_.advertise<nav_msgs::OccupancyGrid>("/cargo_forbidden_grid", 1, true);
         risk_level_pub_ = nh_.advertise<std_msgs::Int32>("/cargo_collision_warning", 10);
-        forbidden_overlay_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/current_height_forbidden_markers", 10, true);
+        forbidden_overlay_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_forbidden_overlay_markers", 10, true);
         cargo_markers_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_forbidden_markers", 10);
     }
 
