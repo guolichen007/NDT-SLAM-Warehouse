@@ -164,10 +164,11 @@ rostopic echo /cargo_predicted_path
 | 话题 | 类型 | 说明 |
 |------|------|------|
 | `/payload_track_info` | Float32MultiArray | 吊货跟踪信息（19 个 float） |
-| `/cargo_forbidden_grid` | OccupancyGrid | 2D 障碍物栅格（debug 用） |
-| `/current_height_forbidden_markers` | MarkerArray | 红色禁行区 overlay（当前高度层） |
+| `/cargo_forbidden_overlay_markers` | MarkerArray | 红色禁行区 overlay（高度分 bin） |
+| `/cargo_forbidden_height_slice_markers` | MarkerArray | 薄片 debug（可配置开启） |
 | `/cargo_forbidden_markers` | MarkerArray | 吊货 bbox + 状态文字 |
 | `/cargo_collision_warning` | Int32 | 风险等级（0-5） |
+| `/cargo_forbidden_grid` | OccupancyGrid | 2D 障碍物栅格（**仅 debug**，不作为主禁行判断） |
 
 ### 配置文件
 
