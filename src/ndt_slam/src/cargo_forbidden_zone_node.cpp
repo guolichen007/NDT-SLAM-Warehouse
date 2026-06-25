@@ -133,6 +133,12 @@ private:
     double centroid_filter_alpha_ = 0.35;
     double size_filter_alpha_ = 0.25;
     double max_size_change_per_frame_ = 0.50;
+    double max_valid_length_x_ = 8.0;
+    double max_valid_width_y_ = 3.0;
+    double max_valid_height_z_ = 3.0;
+    double min_valid_length_x_ = 0.5;
+    double min_valid_width_y_ = 0.3;
+    double min_valid_height_z_ = 0.2;
 
     // 默认尺寸
     double default_length_x_ = 3.0;
@@ -224,6 +230,12 @@ private:
                 centroid_filter_alpha_ = bf["centroid_filter_alpha"].as<double>(0.35);
                 size_filter_alpha_ = bf["size_filter_alpha"].as<double>(0.25);
                 max_size_change_per_frame_ = bf["max_size_change_per_frame"].as<double>(0.50);
+                max_valid_length_x_ = bf["max_valid_length_x"].as<double>(8.0);
+                max_valid_width_y_ = bf["max_valid_width_y"].as<double>(3.0);
+                max_valid_height_z_ = bf["max_valid_height_z"].as<double>(3.0);
+                min_valid_length_x_ = bf["min_valid_length_x"].as<double>(0.5);
+                min_valid_width_y_ = bf["min_valid_width_y"].as<double>(0.3);
+                min_valid_height_z_ = bf["min_valid_height_z"].as<double>(0.2);
             }
 
             if (root["cargo_size"]) {
@@ -473,9 +485,12 @@ private:
         // 计算 raw size
         Eigen::Vector3f raw_size = raw.bbox_max - raw.bbox_min;
 
-        // 检查 size 合理性
-        if (raw_size.x() < 0.5f || raw_size.x() > 8.0f ||
-            raw_size.y() < 0.3f || raw_size.y() > 3.0f) {
+        // 检查 size 合理性（使用配置的 min/max）
+        bool size_valid = (raw_size.x() >= min_valid_length_x_ && raw_size.x() <= max_valid_length_x_ &&
+                          raw_size.y() >= min_valid_width_y_ && raw_size.y() <= max_valid_width_y_ &&
+                          raw_size.z() >= min_valid_height_z_ && raw_size.z() <= max_valid_height_z_);
+
+        if (!size_valid) {
             // size 不合理，使用默认值
             raw_size = Eigen::Vector3f(default_length_x_, default_width_y_, default_height_z_);
         }
