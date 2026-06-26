@@ -399,6 +399,51 @@ private:
     // 清理过期的 cargo deny cells
     void cleanupExpiredCargoDenyCells(double current_time);
 
+    // ========== P0-3: 3D Dynamic Deny Volume（替代 2D BEV deny）==========
+    struct DynamicDenyVolume3D {
+        int ix;
+        int iy;
+        float z_min;
+        float z_max;
+        double stamp;
+        int source;      // 0=cargo, 1=human
+        int track_id;
+    };
+
+    // 3D deny volume 存储（key = (ix, iy)）
+    std::map<std::pair<int,int>, std::vector<DynamicDenyVolume3D>> dynamic_deny_volume_map_;
+    double dynamic_deny_resolution_ = 0.15;  // 与 BEV 分辨率一致
+    double dynamic_deny_ttl_ = 8.0;          // 3D deny volume 保留时间
+
+    // 添加 3D deny volume
+    void addCargoDenyVolume3D(const CargoBox& remove_box, double current_time, int track_id);
+
+    // 清理过期的 3D deny volumes
+    void cleanupExpiredCargoDenyVolumes3D(double current_time);
+
+    // 检查点是否被 3D deny volume 拒绝
+    bool isPointDeniedBy3DHistory(float x, float y, float z) const;
+
+    // ========== P0-1: 新的关键帧提交流程 ==========
+    // 重写的关键帧提交函数，确保正确的处理顺序：
+    // 1. ground/objects 分割
+    // 2. CargoBoxV2 + PayloadTracker
+    // 3. 吊货点删除
+    // 4. HumanFilter
+    // 5. MapCommit（最后）
+    void commitKeyFrameWithDynamicFiltering(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const Sophus::SE3d& pose,
+        const ros::Time& stamp);
+
+    // 从 objects 中删除吊货 remove_box 内的点（3D 检查）
+    void removePointsInsideCargoRemoveBoxes3D(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& input_base,
+        const std::vector<Box3D>& remove_boxes_map,
+        const Eigen::Matrix4d& T_map_base,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& output_base,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& removed_base);
+
     // 吊货跟踪信息发布（用于避障节点）
     ros::Publisher payload_track_info_pub_;
     void publishPayloadTrackInfo(const ros::Time& stamp);

@@ -108,6 +108,9 @@ struct ObjectTrack {
     // P0-7: 上一帧的 core_box 信息（用于 track 一致性评分）
     CargoBox last_core_box;
     bool has_last_core_box = false;
+
+    // P0-2: size jump 计数（用于软拒绝和 reinit）
+    int size_jump_count = 0;
 };
 
 // 跟踪配置

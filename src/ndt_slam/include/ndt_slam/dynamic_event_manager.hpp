@@ -170,6 +170,10 @@ struct DynamicEventConfig {
 
     // CleanMap deny gate
     bool clean_deny_enabled = true;
+    bool enable_cargo_history_clean = false;   // P0-4: 临时关闭，等 3D deny 验证后再开
+    bool enable_human_history_clean = false;   // P0-4: 临时关闭，等 3D deny 验证后再开
+    bool enable_active_cargo_remove = true;    // 保留当前帧删除
+    bool enable_active_human_remove = true;    // 保留当前帧删除
     double max_dynamic_ratio = 0.2;
 
     // 分层地图策略
