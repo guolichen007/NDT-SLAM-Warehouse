@@ -2261,14 +2261,12 @@ void NdtSlamNode::rebuildCleanMap() {
     if (dynamic_event_config_.enabled && dynamic_event_config_.clean_deny_enabled) {
         double current_time = ros::Time::now().toSec();
 
-        // 吊货 deny cells
+        // 吊货 deny cells（从 DynamicEventManager 获取）
         auto cargo_deny = dynamic_event_manager_.getDynamicDenyCells(0.15, current_time);
         cargo_deny_count = cargo_deny.size();
         deny_cells.insert(cargo_deny.begin(), cargo_deny.end());
 
         // P2: 人员 deny cells（从 HumanFilter 获取）
-        // 注意：HumanFilter 的 deny cells 是在 base_link 下计算的，需要转换到 map
-        // 但这里我们直接使用 HumanFilter 的 isCellDenied 方法
         // 在下面的过滤逻辑中检查
 
         protect_cells = dynamic_event_manager_.getStaticProtectCells(0.15, current_time);
@@ -2350,6 +2348,21 @@ void NdtSlamNode::rebuildCleanMap() {
     int deny_rejected_points = 0;
     int protect_kept_cells = 0;
     int protect_kept_points = 0;
+
+    // P1: 将 cargo_deny_history_ 中的 cells 添加到 deny_cells
+    if (dynamic_event_config_.enabled && dynamic_event_config_.clean_deny_enabled) {
+        double current_time = ros::Time::now().toSec();
+        for (const auto& [bk, indices] : bev_indices) {
+            float cell_center_x = bk.x * clean_bev_cell + clean_bev_cell / 2;
+            float cell_center_y = bk.y * clean_bev_cell + clean_bev_cell / 2;
+            if (isCargoDenied(cell_center_x, cell_center_y, current_time)) {
+                deny_cells.insert({bk.x, bk.y});
+            }
+        }
+        if (!cargo_deny_history_.empty()) {
+            ROS_INFO("[CleanMapCargoHistory] cargo_deny_history_cells=%zu", cargo_deny_history_.size());
+        }
+    }
 
     for (auto& [bk, indices] : bev_indices) {
         total_cells++;
@@ -2433,8 +2446,8 @@ void NdtSlamNode::rebuildCleanMap() {
                  protect_kept_cells, protect_kept_points);
     }
     if (deny_rejected_cells > 0) {
-        ROS_INFO("[CleanMapDynamicGate] rejected_cells=%d, rejected_points=%d, cargo_deny=%d, human_deny=%d",
-                 deny_rejected_cells, deny_rejected_points, cargo_deny_count, human_deny_count);
+        ROS_INFO("[CleanMapDynamicGate] rejected_cells=%d, rejected_points=%d, cargo_deny=%d, human_deny=%d, cargo_history=%zu",
+                 deny_rejected_cells, deny_rejected_points, cargo_deny_count, human_deny_count, cargo_deny_history_.size());
     }
 
     // 更新 clean map（线程安全）
@@ -2808,6 +2821,29 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                         }
                     }
                 }
+
+                // P1: 将动态吊货的 remove_box 写入 cargo deny history
+                for (const auto& t : payload_tracker_.getTracks()) {
+                    if (t.state == TrackState::DYNAMIC_PAYLOAD ||
+                        t.state == TrackState::SUSPENDED_MOVING) {
+                        // 使用 track 的 bbox 作为 deny 区域
+                        Eigen::Vector3d bbox_min = t.bbox_min_map.cast<double>();
+                        Eigen::Vector3d bbox_max = t.bbox_max_map.cast<double>();
+
+                        // 扩展一点（与 remove_expand_xy 一致）
+                        bbox_min.x() -= 0.25;
+                        bbox_min.y() -= 0.25;
+                        bbox_min.z() -= 0.05;
+                        bbox_max.x() += 0.25;
+                        bbox_max.y() += 0.25;
+                        bbox_max.z() += 0.20;
+
+                        addCargoDenyCells(bbox_min, bbox_max, stamp.toSec());
+                    }
+                }
+
+                // 清理过期的 cargo deny cells
+                cleanupExpiredCargoDenyCells(stamp.toSec());
 
                 // 跟踪器确认的动态点不进地图
                 // 跟踪器确认的 pending 点也不进地图（等待确认）
@@ -4864,6 +4900,64 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
     }
 
     payload_track_info_pub_.publish(msg);
+}
+
+// ========== P1: Cargo Deny History ==========
+
+void NdtSlamNode::addCargoDenyCells(const Eigen::Vector3d& bbox_min, const Eigen::Vector3d& bbox_max,
+                                     double current_time) {
+    double bev_res = 0.15;  // 与 CleanMap 一致
+    int x_min = std::floor(bbox_min.x() / bev_res);
+    int x_max = std::floor(bbox_max.x() / bev_res);
+    int y_min = std::floor(bbox_min.y() / bev_res);
+    int y_max = std::floor(bbox_max.y() / bev_res);
+
+    for (int x = x_min; x <= x_max; x++) {
+        for (int y = y_min; y <= y_max; y++) {
+            auto key = std::make_pair(x, y);
+            auto it = cargo_deny_history_.find(key);
+            if (it != cargo_deny_history_.end()) {
+                it->second.last_seen_time = current_time;
+                it->second.hit_count++;
+            } else {
+                DenyCellEntry entry;
+                entry.first_seen_time = current_time;
+                entry.last_seen_time = current_time;
+                entry.hit_count = 1;
+                cargo_deny_history_[key] = entry;
+            }
+        }
+    }
+}
+
+bool NdtSlamNode::isCargoDenied(double x, double y, double current_time) const {
+    double bev_res = 0.15;
+    int bev_x = std::floor(x / bev_res);
+    int bev_y = std::floor(y / bev_res);
+    auto key = std::make_pair(bev_x, bev_y);
+
+    auto it = cargo_deny_history_.find(key);
+    if (it == cargo_deny_history_.end()) {
+        return false;
+    }
+
+    double age = current_time - it->second.last_seen_time;
+    return age < cargo_deny_ttl_;
+}
+
+void NdtSlamNode::cleanupExpiredCargoDenyCells(double current_time) {
+    std::vector<std::pair<int,int>> expired_keys;
+
+    for (const auto& entry : cargo_deny_history_) {
+        double age = current_time - entry.second.last_seen_time;
+        if (age >= cargo_deny_ttl_) {
+            expired_keys.push_back(entry.first);
+        }
+    }
+
+    for (const auto& key : expired_keys) {
+        cargo_deny_history_.erase(key);
+    }
 }
 
 // ========== Crane Motion Constraint 实现 ==========

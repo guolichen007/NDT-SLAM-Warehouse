@@ -380,6 +380,25 @@ private:
     DynamicEventManager dynamic_event_manager_;
     DynamicEventConfig dynamic_event_config_;
 
+    // P1: Cargo deny history（持久化）
+    struct DenyCellEntry {
+        double first_seen_time;
+        double last_seen_time;
+        int hit_count;
+    };
+    std::map<std::pair<int,int>, DenyCellEntry> cargo_deny_history_;
+    double cargo_deny_ttl_ = 120.0;  // cargo deny cells 保留 120 秒
+
+    // 添加 cargo deny cells
+    void addCargoDenyCells(const Eigen::Vector3d& bbox_min, const Eigen::Vector3d& bbox_max,
+                           double current_time);
+
+    // 检查 cell 是否被 cargo deny
+    bool isCargoDenied(double x, double y, double current_time) const;
+
+    // 清理过期的 cargo deny cells
+    void cleanupExpiredCargoDenyCells(double current_time);
+
     // 吊货跟踪信息发布（用于避障节点）
     ros::Publisher payload_track_info_pub_;
     void publishPayloadTrackInfo(const ros::Time& stamp);
