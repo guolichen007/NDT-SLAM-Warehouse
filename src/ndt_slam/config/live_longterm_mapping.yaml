@@ -296,4 +296,4 @@ cargo_box_estimator:
   init_max_area: 30.0
   init_max_aspect_ratio: 8.0
   init_min_bottom_hag: 0.45
-  init_min_core_points: 40
+  init_min_core_points: 10
