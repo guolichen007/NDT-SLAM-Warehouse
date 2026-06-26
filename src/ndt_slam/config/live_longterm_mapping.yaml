@@ -282,7 +282,7 @@ cargo_box_estimator:
   min_suspended_hag: 0.35
 
   # 最小 core points
-  min_core_points: 30
+  min_core_points: 10
 
   # 绝对尺寸约束
   max_core_length: 12.0
