@@ -247,6 +247,8 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
     }
 
     if (hag_values.size() < static_cast<size_t>(config_.min_z_band_points)) {
+        ROS_DEBUG("[CargoBoxV2] hag_values.size()=%zu < min_z_band_points=%d",
+                  hag_values.size(), config_.min_z_band_points);
         return false;
     }
 
@@ -295,6 +297,7 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
     }
 
     if (best_count < config_.min_z_band_points) {
+        ROS_DEBUG("[CargoBoxV2] best_count=%d < min_z_band_points=%d", best_count, config_.min_z_band_points);
         return false;
     }
 
@@ -306,6 +309,8 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
     float band_height = band_max_hag - band_min_hag;
     if (band_height < config_.min_dense_band_height ||
         band_height > config_.max_dense_band_height) {
+        ROS_DEBUG("[CargoBoxV2] band_height=%.2f not in [%.2f, %.2f]",
+                  band_height, config_.min_dense_band_height, config_.max_dense_band_height);
         return false;
     }
 
@@ -318,7 +323,12 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
         }
     }
 
-    return core_points_out->size() >= static_cast<size_t>(config_.min_core_points);
+    if (core_points_out->size() < static_cast<size_t>(config_.min_core_points)) {
+        ROS_DEBUG("[CargoBoxV2] core_points_out->size()=%zu < min_core_points=%d",
+                  core_points_out->size(), config_.min_core_points);
+        return false;
+    }
+    return true;
 }
 
 // ========== 框验证 ==========
