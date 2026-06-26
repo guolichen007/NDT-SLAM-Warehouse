@@ -2648,6 +2648,11 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
 
     *last_cloud_ = *cloud;
 
+    // ========== P0.5: 日志说明顺序 ==========
+    // 注意：PayloadTracker 和 HumanFilter 已经在 processCloudThread() 中完成
+    // 这里的 channel filter 和 payload tracker update 是为了保存 raw/filtered/ground 到关键帧
+    ROS_DEBUG("[CommitOrder] PayloadTracker and HumanFilter already done in processCloudThread");
+
     size_t prev_keyframe_count = loop_closure_detector_.getKeyFrames().size();
     loop_closure_detector_.addKeyFrame(pose, cloud, stamp);
     size_t new_keyframe_count = loop_closure_detector_.getKeyFrames().size();
