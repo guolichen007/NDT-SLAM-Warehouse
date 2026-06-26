@@ -357,6 +357,12 @@ private:
     ros::Publisher payload_pending_pub_;      // /payload_pending_cloud
     ros::Publisher cargo_dynamic_removed_pub_; // /cargo_dynamic_removed_cloud
 
+    // CargoBoxEstimator V2 调试 topic
+    ros::Publisher cargo_core_points_pub_;     // /cargo_core_points_cloud
+    ros::Publisher cargo_hag_filtered_pub_;    // /cargo_hag_filtered_cloud
+    ros::Publisher cargo_components_pub_;      // /cargo_bev_components_cloud
+    ros::Publisher cargo_rejected_low_pub_;    // /cargo_rejected_low_points_cloud
+
     // 人体过滤模块
     HumanObjectDynamicFilter human_filter_;
     HumanObjectFilterConfig human_filter_config_;

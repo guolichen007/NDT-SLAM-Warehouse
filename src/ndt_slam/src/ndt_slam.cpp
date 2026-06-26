@@ -2762,9 +2762,49 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                         CargoBox core_box, remove_box, forbidden_box;
                         if (cargo_box_estimator_.estimateCargoBox(cluster, ground_model,
                                                                    core_box, remove_box, forbidden_box)) {
-                            ROS_INFO("[CargoBox] track=%d core_pts=%d bottom_hag=%.2f size=(%.2f,%.2f,%.2f)",
+                            ROS_INFO("[CargoBoxV2] track=%d core_pts=%d bottom_hag=%.2f size=(%.2f,%.2f,%.2f) "
+                                     "components=%d selected=%d",
                                      t.track_id, core_box.suspended_points, core_box.bottom_hag,
-                                     core_box.size.x(), core_box.size.y(), core_box.size.z());
+                                     core_box.size.x(), core_box.size.y(), core_box.size.z(),
+                                     core_box.component_count, core_box.component_id);
+
+                            // 发布调试点云
+                            static int cargo_debug_count = 0;
+                            cargo_debug_count++;
+                            if (cargo_debug_count % 5 == 1) {
+                                // 发布 core points
+                                auto core_pts = cargo_box_estimator_.getCorePointsCloud();
+                                if (core_pts && !core_pts->empty()) {
+                                    sensor_msgs::PointCloud2 msg;
+                                    pcl::toROSMsg(*core_pts, msg);
+                                    msg.header.stamp = stamp;
+                                    msg.header.frame_id = "base_link";
+                                    cargo_core_points_pub_.publish(msg);
+                                }
+
+                                // 发布 HAG filtered cloud
+                                auto hag_cloud = cargo_box_estimator_.getHagFilteredCloud();
+                                if (hag_cloud && !hag_cloud->empty()) {
+                                    sensor_msgs::PointCloud2 msg;
+                                    pcl::toROSMsg(*hag_cloud, msg);
+                                    msg.header.stamp = stamp;
+                                    msg.header.frame_id = "base_link";
+                                    cargo_hag_filtered_pub_.publish(msg);
+                                }
+
+                                // 发布 components cloud
+                                auto comp_cloud = cargo_box_estimator_.getComponentsCloud();
+                                if (comp_cloud && !comp_cloud->empty()) {
+                                    sensor_msgs::PointCloud2 msg;
+                                    pcl::toROSMsg(*comp_cloud, msg);
+                                    msg.header.stamp = stamp;
+                                    msg.header.frame_id = "base_link";
+                                    cargo_components_pub_.publish(msg);
+                                }
+                            }
+                        } else {
+                            ROS_DEBUG("[CargoBoxV2] track=%d rejected: reason=%d",
+                                      t.track_id, (int)core_box.reject_reason);
                         }
                     }
                 }
