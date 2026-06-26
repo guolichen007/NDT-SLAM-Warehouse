@@ -17,6 +17,7 @@
 #include <visualization_msgs/MarkerArray.h>
 #include <nav_msgs/OccupancyGrid.h>
 #include <nav_msgs/Path.h>
+#include <nav_msgs/Odometry.h>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -218,6 +219,13 @@ private:
 
     // 订阅者
     ros::Subscriber payload_track_sub_;
+    ros::Subscriber odom_sub_;  // P0.5: 订阅 odom 用于预测
+
+    // P0.5 新增：odom 状态
+    Eigen::Vector3f last_odom_position_ = Eigen::Vector3f::Zero();
+    Eigen::Quaternionf last_odom_orientation_ = Eigen::Quaternionf::Identity();
+    bool has_odom_ = false;
+    int suspect_jump_count_ = 0;
 
     void loadConfig() {
         std::string config_file;
@@ -328,6 +336,31 @@ private:
     void setupSubscribers() {
         payload_track_sub_ = nh_.subscribe("/payload_track_info", 10,
                                            &CargoForbiddenZoneNode::payloadTrackCallback, this);
+        // P0.5: 订阅 odom 用于预测
+        odom_sub_ = nh_.subscribe("/odom", 10,
+                                  &CargoForbiddenZoneNode::odomCallback, this);
+    }
+
+    // P0.5 新增：odom 回调
+    void odomCallback(const nav_msgs::Odometry::ConstPtr& msg) {
+        Eigen::Vector3f new_pos(msg->pose.pose.position.x,
+                                msg->pose.pose.position.y,
+                                msg->pose.pose.position.z);
+        Eigen::Quaternionf new_ori(msg->pose.pose.orientation.w,
+                                   msg->pose.pose.orientation.x,
+                                   msg->pose.pose.orientation.y,
+                                   msg->pose.pose.orientation.z);
+
+        if (has_odom_) {
+            // 计算 odom delta
+            Eigen::Vector3f odom_delta = new_pos - last_odom_position_;
+            // 更新 stable_centroid_ 的预测
+            stable_centroid_ += odom_delta;
+        }
+
+        last_odom_position_ = new_pos;
+        last_odom_orientation_ = new_ori;
+        has_odom_ = true;
     }
 
     void payloadTrackCallback(const std_msgs::Float32MultiArray::ConstPtr& msg) {
@@ -429,19 +462,39 @@ private:
             return;
         }
 
-        // 速度补偿
-        Eigen::Vector3f predicted_centroid = cargo_.centroid;
+        // P0.5: 使用 odom 预测残差判断 large jump
+        // 先用 odom delta 预测 stable_centroid_ 应该在哪里
+        Eigen::Vector3f predicted_centroid = stable_centroid_;
+
         if (use_velocity_compensation_ && stable_centroid_.norm() > 0.01f) {
             ros::Time now = ros::Time::now();
             double dt = (now - last_track_time_).toSec();
             dt = std::min(dt, max_compensation_dt_);
             predicted_centroid = stable_centroid_ + stable_velocity_ * dt;
 
-            // 检查跳变
-            float jump = (cargo_.centroid - stable_centroid_).norm();
-            if (jump > max_position_jump_) {
+            // P0.5: 用 odom 预测残差判断跳变
+            // predicted_centroid 是用速度预测的位置
+            // cargo_.centroid 是当前测量值
+            // 如果两者差异大，说明测量值可能异常
+            float residual = (cargo_.centroid - predicted_centroid).norm();
+
+            if (residual > max_position_jump_) {
+                // 不要直接跳到 cargo_.centroid
+                // 保持预测位置，等待下一帧确认
+                suspect_jump_count_++;
+                ROS_WARN_THROTTLE(2.0, "[SuspendedCargo] Large residual: %.2f > %.2f (count=%d)",
+                                  residual, max_position_jump_, suspect_jump_count_);
+
+                // 连续 3 帧异常才切换到测量值
+                if (suspect_jump_count_ < 3) {
+                    predicted_centroid = predicted_centroid;  // 保持预测
+                } else {
+                    predicted_centroid = cargo_.centroid;  // 确认切换
+                    suspect_jump_count_ = 0;
+                }
+            } else {
                 predicted_centroid = cargo_.centroid;
-                ROS_WARN_THROTTLE(2.0, "[SuspendedCargo] Large jump: %.2f > %.2f", jump, max_position_jump_);
+                suspect_jump_count_ = 0;
             }
         }
         last_track_time_ = ros::Time::now();
