@@ -639,21 +639,31 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         if (config["crane_motion_constraint"]) {
             auto cmc = config["crane_motion_constraint"];
             crane_constraint_enabled_ = cmc["enabled"].as<bool>(false);
-            lock_z_ = cmc["lock_z"].as<bool>(false);
+            lock_z_ = cmc["lock_z"].as<bool>(true);
+            fixed_z_source_ = cmc["fixed_z_source"].as<std::string>("config");
+            fixed_z_value_ = cmc["fixed_z"].as<double>(0.0);
             constrain_z_ = cmc["constrain_z"].as<bool>(false);
             lock_roll_ = cmc["lock_roll"].as<bool>(true);
             lock_pitch_ = cmc["lock_pitch"].as<bool>(true);
             lock_yaw_ = cmc["lock_yaw"].as<bool>(false);
             constrain_yaw_ = cmc["constrain_yaw"].as<bool>(false);
-            max_abs_z_drift_ = cmc["max_abs_z_drift"].as<double>(0.50);
+            max_abs_z_drift_ = cmc["max_abs_z_drift"].as<double>(0.05);
             max_roll_deg_ = cmc["max_roll_deg"].as<double>(0.3);
             max_pitch_deg_ = cmc["max_pitch_deg"].as<double>(0.3);
             max_yaw_deg_ = cmc["max_yaw_deg"].as<double>(10.0);
         }
 
+        // 如果 fixed_z_source=config，直接设置 fixed_z
+        if (fixed_z_source_ == "config") {
+            fixed_z_ = fixed_z_value_;
+            first_pose_initialized_ = true;  // 不需要从第一帧初始化
+            ROS_INFO("[CraneConstraint] fixed_z_source=config, fixed_z=%.3f", fixed_z_);
+        }
+
         ROS_INFO("=== Crane Motion Constraint ===");
         ROS_INFO("  enabled: %s", crane_constraint_enabled_ ? "true" : "false");
-        ROS_INFO("  lock_z: %s, constrain_z: %s", lock_z_ ? "true" : "false", constrain_z_ ? "true" : "false");
+        ROS_INFO("  lock_z: %s, fixed_z_source: %s, fixed_z: %.3f",
+                 lock_z_ ? "true" : "false", fixed_z_source_.c_str(), fixed_z_);
         ROS_INFO("  lock_roll: %s, lock_pitch: %s", lock_roll_ ? "true" : "false", lock_pitch_ ? "true" : "false");
         ROS_INFO("  lock_yaw: %s, constrain_yaw: %s", lock_yaw_ ? "true" : "false", constrain_yaw_ ? "true" : "false");
 
@@ -4709,15 +4719,19 @@ Sophus::SE3d NdtSlamNode::applyCraneMotionConstraint(const Sophus::SE3d& raw_pos
     const double raw_pitch = pitch * 180.0 / M_PI;
     const double raw_yaw = yaw * 180.0 / M_PI;
 
-    // 初始化固定值（从第一帧）
+    // 初始化固定值
     if (!first_pose_initialized_) {
-        fixed_z_ = raw_z;
+        if (fixed_z_source_ == "first_frame") {
+            // 从第一帧初始化
+            fixed_z_ = raw_z;
+        }
+        // fixed_z_source=config 时，fixed_z_ 已经在配置读取时设置
         fixed_roll_ = raw_roll;
         fixed_pitch_ = raw_pitch;
         fixed_yaw_ = raw_yaw;
         first_pose_initialized_ = true;
-        ROS_INFO("[CraneConstraint] Initialized from first pose: z=%.3f, rpy=(%.2f, %.2f, %.2f)deg",
-                 fixed_z_, fixed_roll_, fixed_pitch_, fixed_yaw_);
+        ROS_INFO("[CraneConstraint] Initialized: z=%.3f (source=%s), rpy=(%.2f, %.2f, %.2f)deg",
+                 fixed_z_, fixed_z_source_.c_str(), fixed_roll_, fixed_pitch_, fixed_yaw_);
     }
 
     // 约束 z

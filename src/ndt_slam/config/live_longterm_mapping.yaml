@@ -121,16 +121,18 @@ ndt_health:
   fitness_warning_threshold: 2.0
   fitness_warning_count: 50
 
-# 天车运动约束（只约束 roll/pitch，z/yaw 由 NDT 自由调整）
+# 天车运动约束（三自由度建图：x/y/yaw 自由，z/roll/pitch 锁定）
 crane_motion_constraint:
   enabled: true
-  lock_z: false               # z 不锁定
-  constrain_z: false          # z 完全放开，不限制范围
+  lock_z: true                # z 锁定（天车雷达高度固定）
+  fixed_z_source: "config"    # config: 使用 fixed_z 值; first_frame: 使用第一帧值
+  fixed_z: 0.0                # 固定 z 值（map 坐标系下 base_link 高度）
+  constrain_z: false          # 不使用限幅模式
   lock_roll: true             # roll 锁定（天车不翻转）
   lock_pitch: true            # pitch 锁定（天车不俯仰）
-  lock_yaw: false             # yaw 不锁定
+  lock_yaw: false             # yaw 不锁定（NDT 需要横向自由度）
   constrain_yaw: false        # yaw 完全放开
-  max_abs_z_drift: 0.50       # z 最大允许漂移（仅 constrain_z=true 时生效）
+  max_abs_z_drift: 0.05       # z 最大允许漂移（仅 constrain_z=true 时生效）
   max_roll_deg: 0.3           # roll 最大允许漂移（度）
   max_pitch_deg: 0.3          # pitch 最大允许漂移（度）
   max_yaw_deg: 10.0           # yaw 限幅（仅 constrain_yaw=true 时生效）
