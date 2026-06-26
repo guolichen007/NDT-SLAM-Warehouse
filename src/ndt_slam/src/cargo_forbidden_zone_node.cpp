@@ -503,6 +503,17 @@ private:
         // 发布 raw bbox
         if (publish_raw_bbox_ && cargo_.valid && cargo_.point_count >= min_bbox_point_count_) {
             publishRawBbox(now);
+        } else if (publish_raw_bbox_) {
+            // 无有效 cargo，发布 DELETE 清理旧 marker
+            visualization_msgs::MarkerArray markers;
+            visualization_msgs::Marker marker;
+            marker.header.stamp = ros::Time(0);
+            marker.header.frame_id = map_frame_;
+            marker.ns = "cargo_raw_bbox";
+            marker.id = 0;
+            marker.action = visualization_msgs::Marker::DELETE;
+            markers.markers.push_back(marker);
+            raw_bbox_marker_pub_.publish(markers);
         }
 
         // 发布 stable bbox
@@ -510,6 +521,17 @@ private:
             (cargo_state_ == PayloadSemanticState::SUSPENDED_MOVING ||
              cargo_state_ == PayloadSemanticState::SUSPENDED_STATIC)) {
             publishStableBbox(now);
+        } else if (publish_stable_bbox_) {
+            // 无有效 cargo，发布 DELETE 清理旧 marker
+            visualization_msgs::MarkerArray markers;
+            visualization_msgs::Marker marker;
+            marker.header.stamp = ros::Time(0);
+            marker.header.frame_id = map_frame_;
+            marker.ns = "cargo_stable_bbox";
+            marker.id = 0;
+            marker.action = visualization_msgs::Marker::DELETE;
+            markers.markers.push_back(marker);
+            stable_bbox_marker_pub_.publish(markers);
         }
 
         // 发布状态文字
@@ -532,7 +554,7 @@ private:
         visualization_msgs::MarkerArray markers;
 
         visualization_msgs::Marker marker;
-        marker.header.stamp = stamp;
+        marker.header.stamp = ros::Time(0);  // 调试阶段避免 TF 时间问题
         marker.header.frame_id = map_frame_;
         marker.ns = "cargo_raw_bbox";
         marker.id = 0;
@@ -549,11 +571,16 @@ private:
         marker.scale.y = cargo_.bbox_max.y() - cargo_.bbox_min.y();
         marker.scale.z = cargo_.bbox_max.z() - cargo_.bbox_min.z();
 
-        // 紫色线框
+        // 最小尺寸保护：不小于 0.30m
+        marker.scale.x = std::max(marker.scale.x, 0.30);
+        marker.scale.y = std::max(marker.scale.y, 0.30);
+        marker.scale.z = std::max(marker.scale.z, 0.30);
+
+        // 紫色线框，alpha 改成 0.75 以上
         marker.color.r = 0.6;
         marker.color.g = 0.2;
         marker.color.b = 0.8;
-        marker.color.a = 0.4;
+        marker.color.a = 0.75;
         marker.lifetime = ros::Duration(0.5);
 
         markers.markers.push_back(marker);
@@ -564,7 +591,7 @@ private:
         visualization_msgs::MarkerArray markers;
 
         visualization_msgs::Marker marker;
-        marker.header.stamp = stamp;
+        marker.header.stamp = ros::Time(0);  // 调试阶段避免 TF 时间问题
         marker.header.frame_id = map_frame_;
         marker.ns = "cargo_stable_bbox";
         marker.id = 0;
@@ -581,11 +608,16 @@ private:
         marker.scale.y = stable_size_.y();
         marker.scale.z = stable_size_.z();
 
-        // 绿色半透明
+        // 最小尺寸保护：不小于 0.30m
+        marker.scale.x = std::max(marker.scale.x, 0.30);
+        marker.scale.y = std::max(marker.scale.y, 0.30);
+        marker.scale.z = std::max(marker.scale.z, 0.30);
+
+        // 绿色半透明，alpha 改成 0.45 以上
         marker.color.r = 0.0;
         marker.color.g = 1.0;
         marker.color.b = 0.0;
-        marker.color.a = 0.3;
+        marker.color.a = 0.45;
         marker.lifetime = ros::Duration(0.5);
 
         markers.markers.push_back(marker);
@@ -596,7 +628,7 @@ private:
         visualization_msgs::MarkerArray markers;
 
         visualization_msgs::Marker marker;
-        marker.header.stamp = stamp;
+        marker.header.stamp = ros::Time(0);  // 调试阶段避免 TF 时间问题
         marker.header.frame_id = map_frame_;
         marker.ns = "cargo_status_text";
         marker.id = 0;

@@ -461,11 +461,16 @@ TrackResult PayloadTrackManager::update(
         case TrackState::PENDING_STATIC:
             *result.pending += *cluster_base.cloud;
             break;
+        case TrackState::SUSPENDED_STATIC:
+            // 悬挂静止不等于地图静态，吊着不动的货物仍不能进入 permanent static map
+            *result.pending += *cluster_base.cloud;
+            break;
         case TrackState::DYNAMIC_PAYLOAD:
+        case TrackState::SUSPENDED_MOVING:
             *result.dynamic_payload += *cluster_base.cloud;
             break;
         case TrackState::EXPIRED:
-            *result.static_confirmed += *cluster_base.cloud;
+            // 第一版不要直接塞进 static_confirmed，避免动态货物丢失后被写入静态地图
             break;
         }
     }
@@ -541,7 +546,9 @@ TrackResult PayloadTrackManager::update(
 std::vector<ObjectTrack> PayloadTrackManager::getDynamicTracks() const {
     std::vector<ObjectTrack> dynamic;
     for (const auto& t : tracks_) {
-        if (t.state == TrackState::DYNAMIC_PAYLOAD) {
+        if (t.state == TrackState::DYNAMIC_PAYLOAD ||
+            t.state == TrackState::SUSPENDED_MOVING ||
+            t.state == TrackState::SUSPENDED_STATIC) {
             dynamic.push_back(t);
         }
     }
@@ -553,7 +560,10 @@ bool PayloadTrackManager::getBestDynamicPayloadTrack(PayloadTrackInfo& out) cons
     int best_score = -1;
 
     for (const auto& t : tracks_) {
-        if (t.state != TrackState::DYNAMIC_PAYLOAD) continue;
+        // 包含 DYNAMIC_PAYLOAD、SUSPENDED_MOVING、SUSPENDED_STATIC
+        if (t.state != TrackState::DYNAMIC_PAYLOAD &&
+            t.state != TrackState::SUSPENDED_MOVING &&
+            t.state != TrackState::SUSPENDED_STATIC) continue;
 
         // 评分：observed_frames * direction_consistency
         int score = static_cast<int>(t.observed_frames * t.direction_consistency * 100);
@@ -566,7 +576,32 @@ bool PayloadTrackManager::getBestDynamicPayloadTrack(PayloadTrackInfo& out) cons
     if (!best) return false;
 
     out.track_id = best->track_id;
-    out.state = 2;  // DYNAMIC
+
+    // 统一状态编码：TrackState -> PayloadSemanticState
+    // NEW/PENDING_STATIC -> SUSPENDED_CANDIDATE (2)
+    // DYNAMIC_PAYLOAD/SUSPENDED_MOVING -> SUSPENDED_MOVING (3)
+    // SUSPENDED_STATIC -> SUSPENDED_STATIC (4)
+    // EXPIRED -> LOST (7)
+    switch (best->state) {
+        case TrackState::NEW:
+        case TrackState::PENDING_STATIC:
+            out.state = 2;  // SUSPENDED_CANDIDATE
+            break;
+        case TrackState::DYNAMIC_PAYLOAD:
+        case TrackState::SUSPENDED_MOVING:
+            out.state = 3;  // SUSPENDED_MOVING
+            break;
+        case TrackState::SUSPENDED_STATIC:
+            out.state = 4;  // SUSPENDED_STATIC
+            break;
+        case TrackState::EXPIRED:
+            out.state = 7;  // LOST
+            break;
+        default:
+            out.state = 0;  // UNKNOWN
+            break;
+    }
+
     out.centroid_map = best->centroid_map;
     out.bbox_min_map = best->bbox_min_map;
     out.bbox_max_map = best->bbox_max_map;

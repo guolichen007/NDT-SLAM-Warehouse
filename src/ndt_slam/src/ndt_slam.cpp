@@ -91,6 +91,7 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     safe_objects_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/safe_objects_cloud", 10);
     payload_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_dynamic_cloud", 10);
     payload_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_pending_cloud", 10);
+    cargo_dynamic_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/cargo_dynamic_removed_cloud", 10);
     payload_track_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_track_info", 10);
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
@@ -169,6 +170,7 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     safe_objects_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/safe_objects_cloud", 10);
     payload_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_dynamic_cloud", 10);
     payload_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_pending_cloud", 10);
+    cargo_dynamic_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/cargo_dynamic_removed_cloud", 10);
     payload_track_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_track_info", 10);
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
@@ -2776,6 +2778,38 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                         pend_msg.header.stamp = stamp;
                         pend_msg.header.frame_id = "base_link";
                         payload_pending_pub_.publish(pend_msg);
+                    }
+
+                    // 发布吊货候选点云（/suspended_payload_candidate_cloud）
+                    if (!kf_payload_candidates->empty()) {
+                        sensor_msgs::PointCloud2 cand_msg;
+                        pcl::toROSMsg(*kf_payload_candidates, cand_msg);
+                        cand_msg.header.stamp = stamp;
+                        cand_msg.header.frame_id = "base_link";
+                        payload_candidate_pub_.publish(cand_msg);
+                    }
+
+                    // 发布吊货点云（/suspended_payload_cloud）= dynamic_payload + suspended_moving
+                    pcl::PointCloud<pcl::PointXYZ>::Ptr suspended_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+                    *suspended_cloud += *track_result.dynamic_payload;
+                    // 注意：suspended_moving 点已经在 dynamic_payload 中（P0-1 修改）
+                    if (!suspended_cloud->empty()) {
+                        sensor_msgs::PointCloud2 suspended_msg;
+                        pcl::toROSMsg(*suspended_cloud, suspended_msg);
+                        suspended_msg.header.stamp = stamp;
+                        suspended_msg.header.frame_id = "base_link";
+                        payload_dynamic_pub_.publish(suspended_msg);  // 复用 payload_dynamic_pub_
+                    }
+
+                    // 发布被拒绝进入地图的吊货点（/cargo_dynamic_removed_cloud）
+                    // 这些点是吊货跟踪器确认的动态点，不应该进入 permanent map
+                    if (!track_result.dynamic_payload->empty()) {
+                        sensor_msgs::PointCloud2 removed_msg;
+                        pcl::toROSMsg(*track_result.dynamic_payload, removed_msg);
+                        removed_msg.header.stamp = stamp;
+                        removed_msg.header.frame_id = "base_link";
+                        cargo_dynamic_removed_pub_.publish(removed_msg);
+                        ROS_DEBUG("[CargoRemoved] dynamic_payload points=%zu", track_result.dynamic_payload->size());
                     }
                 }
 

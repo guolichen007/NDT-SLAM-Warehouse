@@ -348,6 +348,7 @@ private:
     ros::Publisher safe_objects_pub_;         // /safe_objects_cloud
     ros::Publisher payload_dynamic_pub_;      // /payload_dynamic_cloud
     ros::Publisher payload_pending_pub_;      // /payload_pending_cloud
+    ros::Publisher cargo_dynamic_removed_pub_; // /cargo_dynamic_removed_cloud
 
     // 人体过滤模块
     HumanObjectDynamicFilter human_filter_;
