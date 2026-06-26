@@ -179,15 +179,88 @@ dynamic_event_manager:
 
 human_object_filter:
   enabled: true
-  min_hag: 0.35
+  min_hag: 0.15           # P1: 降低到 0.15m
   max_hag: 2.30
-  min_cluster_height: 0.60
+  min_cluster_height: 0.40  # P1: 降低到 0.40m
   max_cluster_height: 2.20
-  min_points: 20
-  max_points: 2000
+  min_points: 5             # P1: 降低到 5，捕获弱小簇
+  max_points: 500           # P1: 降低到 500
   min_area_m2: 0.04
   max_area_m2: 1.20
-  max_width_m: 1.00
-  max_length_m: 1.00
+  max_width_m: 1.20         # P1: 降低到 1.20
+  max_length_m: 1.20        # P1: 降低到 1.20
   bev_resolution: 0.10
   merge_gap_m: 0.15
+
+  # P1: 区分 strong/weak 的阈值
+  min_points_strong: 30     # >= 30 points: strong human/dynamic，直接删除
+  min_points_weak: 5        # 5-30 points: weak transient，禁止进入地图
+
+  # P1: deny history 配置
+  human_deny_ttl: 15.0      # 人员 deny cells 保留 15 秒
+
+# HumanObjectTracking（人体跟踪）
+human_object_tracking:
+  enabled: true
+  window_sec: 2.0
+  confirm_frames: 2
+  map_displacement_thresh_m: 0.20
+  velocity_thresh_mps: 0.10
+  max_match_distance_m: 0.80
+  max_missed_frames: 5
+
+# HumanObjectEraser（人体历史反删）
+human_object_eraser:
+  enabled: true
+  history_sec: 10.0
+  capsule_radius_m: 0.65
+  use_track_height_range: true
+  z_margin_m: 0.30
+  hag_margin_m: 0.30
+  pre_guard_sec: 2.0
+  post_guard_sec: 3.0
+  erase_objects_only: true
+  erase_ground: false
+  async_update: true
+
+# ========== CargoBoxEstimator 配置 ==========
+cargo_box_estimator:
+  enabled: true
+
+  # 聚类参数
+  min_cluster_points: 40
+  max_cluster_points: 20000
+
+  # 悬空主体层检测
+  min_hag_for_candidate: 0.25
+  min_payload_bottom_hag: 0.45
+  z_hist_bin: 0.10
+  min_z_band_points: 20
+
+  # 分位数参数
+  xy_percentile_low: 2.0
+  xy_percentile_high: 98.0
+  z_percentile_low: 5.0
+  z_percentile_high: 98.0
+
+  # 轴向约束 OBB
+  use_crane_axis_obb: true
+
+  # 尺寸限制
+  max_width: 6.0
+  max_length: 16.0
+  max_height: 5.0
+
+  # 显示框扩展（core box）
+  core_expand_xy: 0.05
+  core_expand_z_down: 0.03
+  core_expand_z_up: 0.10
+
+  # 删除框扩展（remove box）
+  remove_expand_xy: 0.25
+  remove_expand_z_down: 0.05
+  remove_expand_z_up: 0.20
+
+  # 禁行区扩展
+  forbidden_expand_xy: 0.50
+  forbidden_height: 3.0

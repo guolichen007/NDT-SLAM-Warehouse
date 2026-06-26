@@ -463,6 +463,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             if (hof["max_length_m"]) human_filter_config_.max_length_m = hof["max_length_m"].as<double>();
             if (hof["bev_resolution"]) human_filter_config_.bev_resolution = hof["bev_resolution"].as<double>();
             if (hof["merge_gap_m"]) human_filter_config_.merge_gap_m = hof["merge_gap_m"].as<double>();
+            // P1: 区分 strong/weak 的阈值
+            if (hof["min_points_strong"]) human_filter_config_.min_points_strong = hof["min_points_strong"].as<int>();
+            if (hof["min_points_weak"]) human_filter_config_.min_points_weak = hof["min_points_weak"].as<int>();
         }
 
         if (config["human_object_tracking"]) {
@@ -2252,12 +2255,27 @@ void NdtSlamNode::rebuildCleanMap() {
     // ========== Dynamic Deny Gate + Static Protect ==========
     std::set<std::pair<int,int>> deny_cells;
     std::set<std::pair<int,int>> protect_cells;
+    int cargo_deny_count = 0;
+    int human_deny_count = 0;
+
     if (dynamic_event_config_.enabled && dynamic_event_config_.clean_deny_enabled) {
         double current_time = ros::Time::now().toSec();
-        deny_cells = dynamic_event_manager_.getDynamicDenyCells(0.15, current_time);
+
+        // 吊货 deny cells
+        auto cargo_deny = dynamic_event_manager_.getDynamicDenyCells(0.15, current_time);
+        cargo_deny_count = cargo_deny.size();
+        deny_cells.insert(cargo_deny.begin(), cargo_deny.end());
+
+        // P2: 人员 deny cells（从 HumanFilter 获取）
+        // 注意：HumanFilter 的 deny cells 是在 base_link 下计算的，需要转换到 map
+        // 但这里我们直接使用 HumanFilter 的 isCellDenied 方法
+        // 在下面的过滤逻辑中检查
+
         protect_cells = dynamic_event_manager_.getStaticProtectCells(0.15, current_time);
+
         if (!deny_cells.empty()) {
-            ROS_INFO("[CleanMapDynamicGate] deny_cells=%zu", deny_cells.size());
+            ROS_INFO("[CleanMapDynamicGate] cargo_deny_cells=%d, total_deny_cells=%zu",
+                     cargo_deny_count, deny_cells.size());
         }
         if (!protect_cells.empty()) {
             ROS_INFO("[CleanMapStaticProtect] protect_cells=%zu", protect_cells.size());
@@ -2369,6 +2387,21 @@ void NdtSlamNode::rebuildCleanMap() {
             continue;  // 跳过被动态事件覆盖的 cell
         }
 
+        // P2: Human Deny Gate（从 HumanFilter 的 deny history 检查）
+        if (human_filter_config_.enabled) {
+            // 检查该 cell 的中心点是否被 deny
+            float cell_center_x = bk.x * clean_bev_cell + clean_bev_cell / 2;
+            float cell_center_y = bk.y * clean_bev_cell + clean_bev_cell / 2;
+            double current_time = ros::Time::now().toSec();
+
+            if (human_filter_.isCellDenied(cell_center_x, cell_center_y, current_time)) {
+                human_deny_count++;
+                deny_rejected_cells++;
+                deny_rejected_points += indices.size();
+                continue;  // 跳过被人员动态覆盖的 cell
+            }
+        }
+
         int obs_count = 0;
         auto it = bev_observation_count_.find(bk);
         if (it != bev_observation_count_.end()) obs_count = it->second;
@@ -2400,8 +2433,8 @@ void NdtSlamNode::rebuildCleanMap() {
                  protect_kept_cells, protect_kept_points);
     }
     if (deny_rejected_cells > 0) {
-        ROS_INFO("[CleanMapDynamicGate] rejected_cells=%d, rejected_points=%d",
-                 deny_rejected_cells, deny_rejected_points);
+        ROS_INFO("[CleanMapDynamicGate] rejected_cells=%d, rejected_points=%d, cargo_deny=%d, human_deny=%d",
+                 deny_rejected_cells, deny_rejected_points, cargo_deny_count, human_deny_count);
     }
 
     // 更新 clean map（线程安全）

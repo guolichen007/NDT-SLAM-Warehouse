@@ -170,7 +170,9 @@ private:
     double quantile_z_high_ = 0.90;
     double centroid_filter_alpha_ = 0.60;
     double size_filter_alpha_ = 0.25;
-    double max_position_jump_ = 0.80;
+    double max_position_jump_ = 1.50;  // P0: 增大到 1.5m（soft gate）
+    double residual_hard_gate_ = 3.00;  // P0: hard gate 阈值
+    int switch_confirm_frames_ = 3;     // P0: 连续 N 帧异常才切换
     double max_size_change_per_frame_ = 0.40;
     bool use_velocity_compensation_ = true;
     double max_compensation_dt_ = 0.30;
@@ -300,7 +302,9 @@ private:
                 quantile_z_high_ = bf["quantile_z_high"].as<double>(0.90);
                 centroid_filter_alpha_ = bf["centroid_filter_alpha"].as<double>(0.60);
                 size_filter_alpha_ = bf["size_filter_alpha"].as<double>(0.25);
-                max_position_jump_ = bf["max_position_jump"].as<double>(0.80);
+                max_position_jump_ = bf["max_position_jump"].as<double>(1.50);
+                residual_hard_gate_ = bf["residual_hard_gate"].as<double>(3.00);
+                switch_confirm_frames_ = bf["switch_confirm_frames"].as<int>(3);
                 max_size_change_per_frame_ = bf["max_size_change_per_frame"].as<double>(0.40);
                 use_velocity_compensation_ = bf["use_velocity_compensation"].as<bool>(true);
                 max_compensation_dt_ = bf["max_compensation_dt"].as<double>(0.30);
@@ -487,39 +491,62 @@ private:
             return;
         }
 
-        // P0.5: 使用 odom 预测残差判断 large jump
-        // 先用 odom delta 预测 stable_centroid_ 应该在哪里
+        // P0: 使用 odom 预测残差判断 large jump
+        // 核心思想：检测可以低频，但显示和删除 mask 必须跟 odom 高频走
+        // residual 判断基于 odom 预测位置，而不是直接比较 map 坐标
         Eigen::Vector3f predicted_centroid = stable_centroid_;
 
         if (use_velocity_compensation_ && stable_centroid_.norm() > 0.01f) {
             ros::Time now = ros::Time::now();
             double dt = (now - last_track_time_).toSec();
             dt = std::min(dt, max_compensation_dt_);
+
+            // 使用 odom delta 预测 stable_centroid_ 应该在哪里
+            // 这样即使天车移动，predicted_centroid 也会跟随 odom 更新
             predicted_centroid = stable_centroid_ + stable_velocity_ * dt;
 
-            // P0.5: 用 odom 预测残差判断跳变
-            // predicted_centroid 是用速度预测的位置
-            // cargo_.centroid 是当前测量值
-            // 如果两者差异大，说明测量值可能异常
+            // 计算残差：测量值 vs 预测值
             float residual = (cargo_.centroid - predicted_centroid).norm();
 
-            if (residual > max_position_jump_) {
-                // 不要直接跳到 cargo_.centroid
-                // 保持预测位置，等待下一帧确认
-                suspect_jump_count_++;
-                ROS_WARN_THROTTLE(2.0, "[SuspendedCargo] Large residual: %.2f > %.2f (count=%d)",
-                                  residual, max_position_jump_, suspect_jump_count_);
-
-                // 连续 3 帧异常才切换到测量值
-                if (suspect_jump_count_ < 3) {
-                    predicted_centroid = predicted_centroid;  // 保持预测
-                } else {
-                    predicted_centroid = cargo_.centroid;  // 确认切换
-                    suspect_jump_count_ = 0;
-                }
-            } else {
+            // P0: 三级残差判断
+            // 1. residual < soft_gate: 正常，使用测量值
+            // 2. soft_gate < residual < hard_gate: 可疑，小幅校正
+            // 3. residual > hard_gate: 异常，仅报警，不切换
+            if (residual < max_position_jump_) {
+                // 正常范围，使用测量值
                 predicted_centroid = cargo_.centroid;
                 suspect_jump_count_ = 0;
+            } else if (residual < residual_hard_gate_) {
+                // 可疑范围：小幅校正，不完全跳转
+                suspect_jump_count_++;
+                ROS_WARN_THROTTLE(2.0, "[SuspendedCargo] Suspicious residual: %.2f (soft=%.2f, count=%d)",
+                                  residual, max_position_jump_, suspect_jump_count_);
+
+                // 连续 N 帧异常才切换到测量值
+                if (suspect_jump_count_ >= switch_confirm_frames_) {
+                    // 确认切换：使用测量值，但做平滑过渡
+                    predicted_centroid = 0.5f * cargo_.centroid + 0.5f * predicted_centroid;
+                    suspect_jump_count_ = 0;
+                    ROS_INFO("[SuspendedCargo] Confirmed switch after %d frames", switch_confirm_frames_);
+                }
+                // 否则保持预测位置
+            } else {
+                // 异常范围：仅报警，保持预测位置
+                suspect_jump_count_++;
+                ROS_WARN_THROTTLE(1.0, "[SuspendedCargo] Large residual: %.2f > %.2f (count=%d) - keeping prediction",
+                                  residual, residual_hard_gate_, suspect_jump_count_);
+
+                // 连续 N 帧 hard gate 异常才重置
+                if (suspect_jump_count_ >= switch_confirm_frames_ * 2) {
+                    ROS_WARN("[SuspendedCargo] Too many hard gate violations, resetting track");
+                    suspect_jump_count_ = 0;
+                    // 不切换到测量值，保持预测
+                }
+            }
+        } else {
+            // 没有速度补偿或初始状态，直接使用测量值
+            if (cargo_.valid) {
+                predicted_centroid = cargo_.centroid;
             }
         }
         last_track_time_ = ros::Time::now();

@@ -15,18 +15,22 @@ struct HumanObjectFilterConfig {
     bool enabled = true;
 
     // HAG 高度筛选
-    double min_hag = 0.35;
+    double min_hag = 0.15;   // P1: 降低到 0.15m
     double max_hag = 2.30;
 
     // cluster 尺寸筛选
-    double min_cluster_height = 0.45;
-    double max_cluster_height = 2.40;
-    int min_points = 10;
-    int max_points = 2500;
+    double min_cluster_height = 0.40;  // P1: 降低到 0.40m
+    double max_cluster_height = 2.20;
+    int min_points = 5;       // P1: 降低到 5，捕获弱小簇
+    int max_points = 500;     // P1: 降低到 500
     double min_area_m2 = 0.02;
-    double max_area_m2 = 1.80;
-    double max_width_m = 1.60;
-    double max_length_m = 2.00;
+    double max_area_m2 = 1.20;  // P1: 降低到 1.20
+    double max_width_m = 1.20;   // P1: 降低到 1.20
+    double max_length_m = 1.20;  // P1: 降低到 1.20
+
+    // P1: 区分 strong/weak 的阈值
+    int min_points_strong = 30;  // >= 30 points: strong human/dynamic，直接删除
+    int min_points_weak = 5;     // 5-30 points: weak transient，禁止进入地图
 
     // BEV 聚类参数
     double bev_resolution = 0.15;
@@ -148,6 +152,12 @@ public:
     // 获取确认的动态人体数
     int getDynamicHumanCount() const;
 
+    // P1: 检查 cell 是否被 deny
+    bool isCellDenied(double x, double y, double current_time) const;
+
+    // P1: 获取当前 deny cells 数量
+    int getDenyCellCount() const;
+
 private:
     // 候选检测
     void detectHumanCandidates(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
@@ -190,6 +200,20 @@ private:
     // 计算 BEV 网格键
     std::pair<int, int> bevKey(double x, double y) const;
 
+    // P1: deny history 管理
+    struct DenyCellEntry {
+        double first_seen_time;
+        double last_seen_time;
+        int hit_count;
+    };
+
+    // 添加 deny cells
+    void addDenyCells(const Eigen::Vector3d& bbox_min, const Eigen::Vector3d& bbox_max,
+                      double current_time, double ttl_sec);
+
+    // 清理过期的 deny cells
+    void cleanupExpiredDenyCells(double current_time);
+
     HumanObjectFilterConfig filter_config_;
     HumanTrackingConfig tracking_config_;
     HumanEraserConfig eraser_config_;
@@ -197,6 +221,10 @@ private:
     std::map<int, HumanTrack> active_tracks_;
     std::vector<TrajectoryCapsule> trajectory_capsules_;
     int next_track_id_ = 0;
+
+    // P1: deny history（持久化）
+    std::map<std::pair<int,int>, DenyCellEntry> human_deny_cells_;
+    double human_deny_ttl_ = 15.0;  // 默认 15 秒
 
     mutable std::mutex mutex_;
 };

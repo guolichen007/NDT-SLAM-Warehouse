@@ -60,7 +60,9 @@ cargo_forbidden_zone:
     quantile_z_high: 0.90
     centroid_filter_alpha: 0.60
     size_filter_alpha: 0.25
-    max_position_jump: 0.80
+    max_position_jump: 1.50       # soft gate: 1.5m
+    residual_hard_gate: 3.00      # hard gate: 3.0m
+    switch_confirm_frames: 3      # 连续 3 帧异常才切换
     max_size_change_per_frame: 0.40
     use_velocity_compensation: true
     max_compensation_dt: 0.30
