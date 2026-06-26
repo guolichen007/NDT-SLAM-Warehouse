@@ -525,10 +525,11 @@ bool CargoBoxEstimator::estimateCargoBox(
     }
 
     // ========== Step 2: 选择最像吊货的 component ==========
-    int selected_component_id = -1;
+    int selected_index = -1;  // 在 components 数组中的索引
     float best_score = -1.0f;
 
-    for (const auto& comp : components) {
+    for (size_t i = 0; i < components.size(); i++) {
+        const auto& comp = components[i];
         // 计算 component 的质量分数
         float score = 0.0f;
 
@@ -560,18 +561,18 @@ bool CargoBoxEstimator::estimateCargoBox(
 
         if (score > best_score) {
             best_score = score;
-            selected_component_id = comp.id;
+            selected_index = i;
         }
     }
 
-    if (selected_component_id < 0) {
+    if (selected_index < 0) {
         ROS_DEBUG("[CargoBoxV2] No suitable component selected");
         return false;
     }
 
-    const auto& selected_component = components[selected_component_id];
+    const auto& selected_component = components[selected_index];
     ROS_INFO("[CargoBoxV2] selected_component=%d, pts=%d, max_hag=%.2f, score=%.2f",
-             selected_component_id, selected_component.point_count,
+             selected_component.id, selected_component.point_count,
              selected_component.max_hag, best_score);
 
     // ========== Step 3: HAG z-density slicing ==========
@@ -666,7 +667,7 @@ bool CargoBoxEstimator::estimateCargoBox(
     core_box.bottom_hag = bottom_hag;
     core_box.z_band_min = band_min_hag + ground_z;
     core_box.z_band_max = band_max_hag + ground_z;
-    core_box.component_id = selected_component_id;
+    core_box.component_id = selected_component.id;
     core_box.component_count = components.size();
 
     // ========== Step 8: 生成 remove box ==========
