@@ -2711,6 +2711,31 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 track_result = payload_tracker_.update(
                     kf_payload_candidates, transform, stamp.toSec(), empty_ground_model);
 
+                // P0.5: 使用 CargoBoxEstimator 计算货物框
+                if (cargo_box_estimator_config_.enabled) {
+                    // 构建简单地面模型
+                    SimpleGroundModel ground_model;
+                    ground_model.global_z_min = 0.0f;  // 使用默认值
+                    ground_model.resolution = 1.5f;
+
+                    // 对每个活跃的吊货 track 计算货物框
+                    for (const auto& t : payload_tracker_.getTracks()) {
+                        if (t.state == TrackState::EXPIRED) continue;
+                        if (t.cloud_history.empty()) continue;
+
+                        // 使用最新的点云
+                        auto cluster = t.cloud_history.back();
+
+                        CargoBox core_box, remove_box, forbidden_box;
+                        if (cargo_box_estimator_.estimateCargoBox(cluster, ground_model,
+                                                                   core_box, remove_box, forbidden_box)) {
+                            ROS_INFO("[CargoBox] track=%d core_pts=%d bottom_hag=%.2f size=(%.2f,%.2f,%.2f)",
+                                     t.track_id, core_box.suspended_points, core_box.bottom_hag,
+                                     core_box.size.x(), core_box.size.y(), core_box.size.z());
+                        }
+                    }
+                }
+
                 // 跟踪器确认的动态点不进地图
                 // 跟踪器确认的 pending 点也不进地图（等待确认）
                 // 只有 safe_objects 进地图
