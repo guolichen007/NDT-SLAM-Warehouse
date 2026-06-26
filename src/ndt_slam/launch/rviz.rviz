@@ -376,6 +376,33 @@ Visualization Manager:
         {}
       Queue Size: 100
       Value: true
+    - Alpha: 1
+      Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /cargo_core_bbox_marker
+      Name: cargo_core_bbox
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
+    - Alpha: 0.5
+      Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /cargo_remove_bbox_marker
+      Name: cargo_remove_bbox
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
+    - Alpha: 0.3
+      Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /cargo_forbidden_zone_marker
+      Name: cargo_forbidden_zone
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

@@ -101,6 +101,10 @@ public:
         setupPublishers();
         setupSubscribers();
 
+        // P0.5 新增：timer 高频发布 marker
+        marker_timer_ = nh_.createTimer(ros::Duration(1.0 / marker_publish_rate_),
+                                        &CargoForbiddenZoneNode::markerTimerCallback, this);
+
         ROS_INFO("[CargoForbiddenZone] Node initialized");
         ROS_INFO("[CargoForbiddenZone] ROI: x[%.1f,%.1f] y[%.1f,%.1f] z[%.1f,%.1f]",
                  roi_x_min_, roi_x_max_, roi_y_min_, roi_y_max_, roi_z_min_, roi_z_max_);
@@ -217,6 +221,11 @@ private:
     ros::Publisher suspended_cloud_pub_;
     ros::Publisher cargo_markers_pub_;
 
+    // P0.5 新增：三层 marker 发布
+    ros::Publisher core_bbox_marker_pub_;      // /cargo_core_bbox_marker
+    ros::Publisher remove_bbox_marker_pub_;    // /cargo_remove_bbox_marker
+    ros::Publisher forbidden_zone_marker_pub_; // /cargo_forbidden_zone_marker
+
     // 订阅者
     ros::Subscriber payload_track_sub_;
     ros::Subscriber odom_sub_;  // P0.5: 订阅 odom 用于预测
@@ -226,6 +235,10 @@ private:
     Eigen::Quaternionf last_odom_orientation_ = Eigen::Quaternionf::Identity();
     bool has_odom_ = false;
     int suspect_jump_count_ = 0;
+
+    // P0.5 新增：timer 高频发布
+    ros::Timer marker_timer_;
+    double marker_publish_rate_ = 15.0;  // 15Hz
 
     void loadConfig() {
         std::string config_file;
@@ -331,6 +344,11 @@ private:
         candidate_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/suspended_payload_candidate_cloud", 10);
         suspended_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/suspended_payload_cloud", 10);
         cargo_markers_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_forbidden_markers", 10);
+
+        // P0.5 新增：三层 marker 发布
+        core_bbox_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_core_bbox_marker", 10);
+        remove_bbox_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_remove_bbox_marker", 10);
+        forbidden_zone_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_forbidden_zone_marker", 10);
     }
 
     void setupSubscribers() {
@@ -361,6 +379,13 @@ private:
         last_odom_position_ = new_pos;
         last_odom_orientation_ = new_ori;
         has_odom_ = true;
+    }
+
+    // P0.5 新增：timer 高频发布 marker
+    void markerTimerCallback(const ros::TimerEvent& event) {
+        // 高频发布三层 marker，使用当前 odom 位置
+        // 这样即使检测低频更新，marker 也会跟随 odom 平滑移动
+        publishThreeLayerMarkers(ros::Time::now());
     }
 
     void payloadTrackCallback(const std_msgs::Float32MultiArray::ConstPtr& msg) {
@@ -587,6 +612,9 @@ private:
             stable_bbox_marker_pub_.publish(markers);
         }
 
+        // P0.5 新增：发布三层 marker
+        publishThreeLayerMarkers(now);
+
         // 发布状态文字
         if (publish_status_text_) {
             publishStatusText(now);
@@ -736,6 +764,134 @@ private:
 
     void publishSuspendedCloud(const ros::Time& stamp) {
         // TODO: 从当前帧点云中提取吊货点云并发布
+    }
+
+    // P0.5 新增：发布三层 marker
+    void publishThreeLayerMarkers(const ros::Time& stamp) {
+        if (!cargo_.valid || cargo_state_ == PayloadSemanticState::UNKNOWN ||
+            cargo_state_ == PayloadSemanticState::LOST) {
+            // 无有效 cargo，发布 DELETE 清理旧 marker
+            visualization_msgs::MarkerArray markers;
+            visualization_msgs::Marker marker;
+            marker.header.stamp = ros::Time(0);
+            marker.header.frame_id = map_frame_;
+            marker.action = visualization_msgs::Marker::DELETEALL;
+            markers.markers.push_back(marker);
+            core_bbox_marker_pub_.publish(markers);
+            remove_bbox_marker_pub_.publish(markers);
+            forbidden_zone_marker_pub_.publish(markers);
+            return;
+        }
+
+        // 1. Core Box：真实货物框，绿色线框
+        {
+            visualization_msgs::MarkerArray markers;
+            visualization_msgs::Marker marker;
+            marker.header.stamp = ros::Time(0);
+            marker.header.frame_id = map_frame_;
+            marker.ns = "cargo_core_bbox";
+            marker.id = 0;
+            marker.type = visualization_msgs::Marker::CUBE;
+            marker.action = visualization_msgs::Marker::ADD;
+
+            marker.pose.position.x = stable_centroid_.x();
+            marker.pose.position.y = stable_centroid_.y();
+            marker.pose.position.z = stable_centroid_.z();
+            marker.pose.orientation.w = 1.0;
+
+            // 使用 stable_size_，但 z 不向下扩展
+            marker.scale.x = stable_size_.x();
+            marker.scale.y = stable_size_.y();
+            marker.scale.z = stable_size_.z();
+
+            // 最小尺寸保护
+            marker.scale.x = std::max(marker.scale.x, 0.30);
+            marker.scale.y = std::max(marker.scale.y, 0.30);
+            marker.scale.z = std::max(marker.scale.z, 0.30);
+
+            // 绿色线框
+            marker.color.r = 0.0;
+            marker.color.g = 1.0;
+            marker.color.b = 0.0;
+            marker.color.a = 0.8;
+            marker.lifetime = ros::Duration(0.5);
+
+            markers.markers.push_back(marker);
+            core_bbox_marker_pub_.publish(markers);
+        }
+
+        // 2. Remove Box：删除用框，橙色半透明
+        {
+            visualization_msgs::MarkerArray markers;
+            visualization_msgs::Marker marker;
+            marker.header.stamp = ros::Time(0);
+            marker.header.frame_id = map_frame_;
+            marker.ns = "cargo_remove_bbox";
+            marker.id = 0;
+            marker.type = visualization_msgs::Marker::CUBE;
+            marker.action = visualization_msgs::Marker::ADD;
+
+            marker.pose.position.x = stable_centroid_.x();
+            marker.pose.position.y = stable_centroid_.y();
+            marker.pose.position.z = stable_centroid_.z();
+            marker.pose.orientation.w = 1.0;
+
+            // 扩展框
+            marker.scale.x = stable_size_.x() + 2 * 0.25;  // remove_expand_xy
+            marker.scale.y = stable_size_.y() + 2 * 0.25;
+            marker.scale.z = stable_size_.z() + 0.05 + 0.20;  // z_down + z_up
+
+            // 最小尺寸保护
+            marker.scale.x = std::max(marker.scale.x, 0.50);
+            marker.scale.y = std::max(marker.scale.y, 0.50);
+            marker.scale.z = std::max(marker.scale.z, 0.50);
+
+            // 橙色半透明
+            marker.color.r = 1.0;
+            marker.color.g = 0.5;
+            marker.color.b = 0.0;
+            marker.color.a = 0.3;
+            marker.lifetime = ros::Duration(0.5);
+
+            markers.markers.push_back(marker);
+            remove_bbox_marker_pub_.publish(markers);
+        }
+
+        // 3. Forbidden Zone：禁行区，红色地面投影
+        {
+            visualization_msgs::MarkerArray markers;
+            visualization_msgs::Marker marker;
+            marker.header.stamp = ros::Time(0);
+            marker.header.frame_id = map_frame_;
+            marker.ns = "cargo_forbidden_zone";
+            marker.id = 0;
+            marker.type = visualization_msgs::Marker::CUBE;
+            marker.action = visualization_msgs::Marker::ADD;
+
+            marker.pose.position.x = stable_centroid_.x();
+            marker.pose.position.y = stable_centroid_.y();
+            marker.pose.position.z = 0.0;  // 地面
+            marker.pose.orientation.w = 1.0;
+
+            // 扩展框，投影到地面
+            marker.scale.x = stable_size_.x() + 2 * 0.50;  // forbidden_expand_xy
+            marker.scale.y = stable_size_.y() + 2 * 0.50;
+            marker.scale.z = 0.1;  // 薄片
+
+            // 最小尺寸保护
+            marker.scale.x = std::max(marker.scale.x, 1.0);
+            marker.scale.y = std::max(marker.scale.y, 1.0);
+
+            // 红色半透明
+            marker.color.r = 1.0;
+            marker.color.g = 0.0;
+            marker.color.b = 0.0;
+            marker.color.a = 0.2;
+            marker.lifetime = ros::Duration(0.5);
+
+            markers.markers.push_back(marker);
+            forbidden_zone_marker_pub_.publish(markers);
+        }
     }
 };
 

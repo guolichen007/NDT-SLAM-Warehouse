@@ -74,6 +74,8 @@ set(LIBRARY_SOURCES
   src/human_object_filter.cpp
   # 动态事件管理
   src/dynamic_event_manager.cpp
+  # P0.5: 货物框估计器
+  src/cargo_box_estimator.cpp
 )
 
 add_library(ndt_slam_lib SHARED
