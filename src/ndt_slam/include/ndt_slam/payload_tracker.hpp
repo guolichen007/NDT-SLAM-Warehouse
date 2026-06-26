@@ -80,6 +80,25 @@ struct ObjectTrack {
 
     // 关联的点云（用于后续反删）
     std::deque<pcl::PointCloud<pcl::PointXYZ>::Ptr> cloud_history;
+
+    // ========== P0.5 新增：base_link 坐标系下的 EMA 平滑 ==========
+    Eigen::Vector3f centroid_base_ema = Eigen::Vector3f::Zero();
+    Eigen::Vector3f size_ema = Eigen::Vector3f::Zero();
+    Eigen::Vector3f bbox_min_base_ema = Eigen::Vector3f::Zero();
+    Eigen::Vector3f bbox_max_base_ema = Eigen::Vector3f::Zero();
+
+    // map 坐标系下的显示用 bbox（由 base EMA 转换而来）
+    Eigen::Vector3f centroid_map_display = Eigen::Vector3f::Zero();
+    Eigen::Vector3f bbox_min_map_display = Eigen::Vector3f::Zero();
+    Eigen::Vector3f bbox_max_map_display = Eigen::Vector3f::Zero();
+
+    // 上一帧的 T_map_base，用于 odom 预测
+    Eigen::Matrix4d last_T_map_base = Eigen::Matrix4d::Identity();
+    double last_bbox_time = 0.0;
+
+    // track 锁定相关
+    int lock_confirm_count = 0;
+    bool locked = false;
 };
 
 // 跟踪配置
@@ -96,6 +115,11 @@ struct PayloadTrackerConfig {
     double max_match_distance = 0.8;
     double max_match_bbox_ratio = 0.5;
 
+    // P0.5 新增：base_link 优先匹配参数
+    double max_match_distance_base = 0.80;   // base_link 下最大匹配距离
+    double max_match_residual_map = 1.20;    // map 下 odom 预测残差阈值
+    double max_match_bbox_ratio_base = 0.70; // base_link 下 bbox 尺寸差异比例
+
     // 运动判断参数（map 坐标系）
     double window_sec = 3.0;
     int motion_confirm_frames = 3;
@@ -105,6 +129,11 @@ struct PayloadTrackerConfig {
 
     // base_link 稳定性参数
     double base_stability_std_thresh = 0.35;  // base_link 下中心标准差阈值（低于此值认为稳定）
+
+    // P0.5 新增：EMA 平滑参数
+    double centroid_base_alpha = 0.60;   // base_link 下中心点 EMA 系数
+    double size_base_alpha = 0.25;       // base_link 下尺寸 EMA 系数
+    int lock_switch_confirm_frames = 3;  // 切换 track 前需要确认的帧数
 
     // 轨迹管理
     int max_missed_frames = 5;
@@ -195,8 +224,10 @@ private:
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
         const std::map<CellKey, float>& ground_model);
 
-    // 匹配当前帧 cluster 到已有 track（使用 map 坐标系）
-    MatchResult matchClusters(const std::vector<ClusterInfo>& clusters_map);
+    // 匹配当前帧 cluster 到已有 track（P0.5: base_link 优先匹配）
+    MatchResult matchClusters(const std::vector<ClusterInfo>& clusters_map,
+                              const std::vector<ClusterInfo>& clusters_base,
+                              const Eigen::Matrix4d& T_map_base);
 
     // 更新运动统计（双坐标系）
     void updateMotionStats(ObjectTrack& track);
@@ -209,6 +240,26 @@ private:
 
     // 计算 base_link 下稳定性
     float computeBaseStability(const std::deque<TrackPoint>& trajectory_base);
+
+    // P0.5 新增：状态判断辅助函数
+    bool isDynamicLike(TrackState s) const {
+        return s == TrackState::DYNAMIC_PAYLOAD ||
+               s == TrackState::SUSPENDED_MOVING ||
+               s == TrackState::SUSPENDED_STATIC;
+    }
+
+    bool isHardRemove(TrackState s) const {
+        return s == TrackState::DYNAMIC_PAYLOAD ||
+               s == TrackState::SUSPENDED_MOVING ||
+               s == TrackState::SUSPENDED_STATIC ||
+               s == TrackState::PENDING_STATIC;
+    }
+
+    // P0.5 新增：更新 base_link 下的 EMA 平滑
+    void updateBaseEma(ObjectTrack& track, const ClusterInfo& cluster_base);
+
+    // P0.5 新增：用 T_map_base 把 base bbox 转成 map bbox
+    void transformBaseBboxToMap(ObjectTrack& track, const Eigen::Matrix4d& T_map_base);
 };
 
 } // namespace ndt_slam
