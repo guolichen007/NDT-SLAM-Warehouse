@@ -1,4 +1,4 @@
-# 吊货禁行区配置
+# 吊货避障配置
 
 cargo_forbidden_zone:
   map_frame: "map"
@@ -9,39 +9,63 @@ cargo_forbidden_zone:
     objects_tiles_dir: "/home/ydkj/NDT-slam-ws/maps/live/current/tiles_objects"
     payload_track_topic: "/payload_track_info"
 
-  # 2.5D 栅格参数
-  grid:
-    resolution: 0.10
-    min_points_per_cell: 2
-    min_obstacle_height: 0.15
-    z_clearance: 0.30
+  # 吊货识别参数
+  suspended_payload:
+    enabled: true
+
+    # ROI（base_link 坐标系）
+    roi_x_min: -5.0
+    roi_x_max: 5.0
+    roi_y_min: -4.0
+    roi_y_max: 4.0
+    roi_z_min: -2.0
+    roi_z_max: 6.0
+
+    # 聚类参数
+    cluster_tolerance: 0.35
+    min_cluster_points: 60
+    max_cluster_points: 20000
+
+    # HAG 判断
+    min_floating_gap: 0.30
+    strong_floating_gap: 0.60
+    max_support_ratio: 0.20
+
+    # 评分权重
+    min_score_to_lock: 0.70
+    w_base_stability: 0.30
+    w_map_motion: 0.20
+    w_floating_gap: 0.20
+    w_support: 0.15
+    w_roi: 0.10
+    w_size: 0.05
 
   # 货物定位状态机
   cargo_localization:
     enabled: true
     max_lost_frames: 8
+    min_confirm_frames: 2
+    keep_suspended_timeout_sec: 5.0
     moving_confirm_frames: 2
     min_bbox_point_count: 50
     min_map_displacement: 0.25
     min_direction_consistency: 0.65
-    centroid_filter_alpha: 0.60
-    size_filter_alpha: 0.25
 
   # bbox 滤波
   bbox_filter:
-    use_quantile_bbox: false
-    max_size_change_per_frame: 0.40
+    use_quantile_bbox: true
+    quantile_xy_low: 0.05
+    quantile_xy_high: 0.95
+    quantile_z_low: 0.10
+    quantile_z_high: 0.90
+    centroid_filter_alpha: 0.60
+    size_filter_alpha: 0.25
     max_position_jump: 0.80
+    max_size_change_per_frame: 0.40
     use_velocity_compensation: true
     max_compensation_dt: 0.30
-    max_valid_length_x: 8.0
-    max_valid_width_y: 3.0
-    max_valid_height_z: 3.0
-    min_valid_length_x: 0.5
-    min_valid_width_y: 0.3
-    min_valid_height_z: 0.2
 
-  # 默认货物尺寸（当 bbox 不可用时）
+  # 默认货物尺寸
   cargo_size:
     default_length_x: 3.0
     default_width_y: 1.0
@@ -52,35 +76,18 @@ cargo_forbidden_zone:
     safety_margin_x: 0.25
     safety_margin_y: 0.25
 
-  # 预测（暂时禁用）
+  # 功能开关（暂时禁用）
   prediction:
     enabled: false
-    horizon_sec: 3.0
-    dt: 0.2
-
-  # 碰撞预警（暂时禁用）
   collision_warning:
     enabled: false
-
-  # 决策（暂时禁用）
   decision:
     enabled: false
 
-  # 风险阈值（保留，后续启用时使用）
-  risk:
-    stop_ttc: 1.0
-    slow_ttc: 2.0
-    warn_ttc: 3.0
-
   # 可视化
   visualization:
-    publish_forbidden_overlay_markers: true
-    forbidden_overlay_mode: "height_binned_volume"  # height_binned_volume / cube_per_cell / height_slice
-    overlay_stride: 1
-    height_bin_size: 0.25
-    max_overlay_cells: 30000
-    forbidden_overlay_alpha: 0.35
-    publish_height_slice_debug: false
-    show_raw_bbox: true
-    show_stable_bbox: true
-    show_status_text: true
+    publish_raw_bbox: true
+    publish_stable_bbox: true
+    publish_status_text: true
+    publish_candidate_cloud: true
+    publish_suspended_cloud: true

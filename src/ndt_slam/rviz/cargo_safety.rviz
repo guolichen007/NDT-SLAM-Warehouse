@@ -54,8 +54,38 @@ Visualization Manager:
       Reference Frame: <Fixed Frame>
       Value: true
 
-    # Objects Map（黄色/橙色）
+    # Current Cloud（当前点云）
     - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: AxisColor
+      Decay Time: 0.1
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Min Color: 0; 0; 0
+      Name: Current Cloud
+      Position Transformer: XYZ
+      Queue Size: 10
+      Selectable: true
+      Size (Pixels): 2
+      Size (m): 0.009999999776482582
+      Style: Points
+      Topic: /mapping_current_cloud
+      Unreliable: false
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+
+    # Suspended Payload Candidate Cloud（候选吊货点云）
+    - Alpha: 0.6
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
         Max Value: 10
@@ -66,60 +96,25 @@ Visualization Manager:
       Class: rviz/PointCloud2
       Color: 255; 200; 0
       Color Transformer: FlatColor
-      Decay Time: 0
+      Decay Time: 0.1
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
-      Name: Objects Map
+      Name: Suspended Candidate
       Position Transformer: XYZ
-      Queue Size: 1
+      Queue Size: 10
       Selectable: true
-      Size (Pixels): 2
+      Size (Pixels): 3
       Size (m): 0.009999999776482582
       Style: Points
-      Topic: /display_map_objects
+      Topic: /suspended_payload_candidate_cloud
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: false
       Value: true
 
-    # Forbidden Volume Markers（红色高度柱）
-    - Alpha: 1
-      Class: rviz/MarkerArray
-      Enabled: true
-      Marker Topic: /cargo_forbidden_overlay_markers
-      Name: Forbidden Volume
-      Namespaces:
-        "": true
-      Queue Size: 10
-      Value: true
-
-    # Height Slice Markers（薄片 debug，默认关闭）
-    - Alpha: 1
-      Class: rviz/MarkerArray
-      Enabled: false
-      Marker Topic: /cargo_forbidden_height_slice_markers
-      Name: Height Slice (debug)
-      Namespaces:
-        "": true
-      Queue Size: 10
-      Value: false
-
-    # Cargo Forbidden Grid（黑白栅格，默认关闭）
-    - Alpha: 0.25
-      Class: rviz/Map
-      Color Scheme: map-color-cb
-      Draw Behind: false
-      Enabled: false
-      Map Topic: /cargo_forbidden_grid
-      Name: Forbidden Grid
-      Queue Size: 1
-      Update Topic: /cargo_forbidden_grid
-      Use Timestamp: false
-      Value: false
-
-    # Payload Dynamic Cloud（青色）
+    # Suspended Payload Cloud（吊货点云）
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -129,61 +124,69 @@ Visualization Manager:
       Axis: Z
       Channel Name: intensity
       Class: rviz/PointCloud2
-      Color: 0; 200; 255
+      Color: 0; 255; 0
       Color Transformer: FlatColor
-      Decay Time: 0
+      Decay Time: 0.1
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
-      Name: Payload Dynamic
+      Name: Suspended Cloud
       Position Transformer: XYZ
       Queue Size: 10
       Selectable: true
       Size (Pixels): 3
       Size (m): 0.009999999776482582
       Style: Points
-      Topic: /payload_dynamic_cloud
+      Topic: /suspended_payload_cloud
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: false
       Value: true
 
-    # Cargo Forbidden Markers（bbox、风险文字）
+    # Raw BBox（紫色线框）
     - Alpha: 1
       Class: rviz/MarkerArray
       Enabled: true
-      Marker Topic: /cargo_forbidden_markers
-      Name: Cargo Markers
+      Marker Topic: /cargo_raw_bbox_marker
+      Name: Raw BBox
       Namespaces:
         "": true
       Queue Size: 10
       Value: true
 
-    # Cargo Predicted Path（绿色）
+    # Stable BBox（绿色半透明）
     - Alpha: 1
-      Buffer Length: 1
-      Class: rviz/Path
-      Color: 0; 255; 0
+      Class: rviz/MarkerArray
       Enabled: true
-      Head Diameter: 0.30000001192092896
-      Head Length: 0.20000000298023224
-      Length: 0.30000001192092896
-      Line Style: Lines
-      Line Width: 0.029999999329447746
-      Name: Predicted Path
-      Offset:
-        X: 0
-        Y: 0
-        Z: 0
-      Pose Color: 255; 85; 255
-      Pose Style: None
-      Radius: 0.029999999329447746
-      Shaft Diameter: 0.10000000149011612
-      Shaft Length: 0.10000000149011612
-      Topic: /cargo_predicted_path
-      Unreliable: false
+      Marker Topic: /cargo_stable_bbox_marker
+      Name: Stable BBox
+      Namespaces:
+        "": true
+      Queue Size: 10
       Value: true
+
+    # Status Text（白色文字）
+    - Alpha: 1
+      Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /cargo_track_status_marker
+      Name: Status Text
+      Namespaces:
+        "": true
+      Queue Size: 10
+      Value: true
+
+    # Cargo Markers（其他标记）
+    - Alpha: 1
+      Class: rviz/MarkerArray
+      Enabled: false
+      Marker Topic: /cargo_forbidden_markers
+      Name: Cargo Markers
+      Namespaces:
+        "": true
+      Queue Size: 10
+      Value: false
 
   Enabled: true
   Global Options:
