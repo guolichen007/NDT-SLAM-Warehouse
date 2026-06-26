@@ -46,6 +46,12 @@ void CargoBoxEstimator::configureFromYaml(const std::string& config_file) {
 
             config_.forbidden_expand_xy = cb["forbidden_expand_xy"].as<double>(0.50);
             config_.forbidden_height = cb["forbidden_height"].as<double>(3.0);
+
+            // 尺寸增长率限制
+            config_.max_size_growth_ratio = cb["max_size_growth_ratio"].as<double>(1.35);
+
+            // 最小悬空高度
+            config_.min_suspended_hag = cb["min_suspended_hag"].as<double>(0.35);
         }
     } catch (const std::exception& e) {
         ROS_WARN("[CargoBoxEstimator] Failed to load config: %s, using defaults", e.what());
@@ -177,39 +183,43 @@ void CargoBoxEstimator::computeCraneAxisOBB(
     Eigen::Vector3f& size) {
 
     // 天车轴向约束 OBB：只允许沿 0° 和 90° 方向
-    // 计算两个方向的投影，选择面积更小的
+    // 使用分位数而不是 min/max，避免离群点撑大框体
 
     if (points->empty()) return;
 
-    // 计算质心
+    // 提取 x, y 坐标
+    std::vector<float> xs, ys;
+    for (const auto& p : points->points) {
+        xs.push_back(p.x);
+        ys.push_back(p.y);
+    }
+
+    // 方向 1: 0° (X 轴) - 使用分位数
+    float x_min_0 = percentile(xs, config_.xy_percentile_low);
+    float x_max_0 = percentile(xs, config_.xy_percentile_high);
+    float y_min_0 = percentile(ys, config_.xy_percentile_low);
+    float y_max_0 = percentile(ys, config_.xy_percentile_high);
+    float area_0 = (x_max_0 - x_min_0) * (y_max_0 - y_min_0);
+
+    // 方向 2: 90° (Y 轴) - 交换 X 和 Y
+    std::vector<float> rotated_xs, rotated_ys;
+    for (const auto& p : points->points) {
+        // 旋转 90°: (x,y) -> (-y,x)
+        rotated_xs.push_back(-p.y);
+        rotated_ys.push_back(p.x);
+    }
+    float x_min_90 = percentile(rotated_xs, config_.xy_percentile_low);
+    float x_max_90 = percentile(rotated_xs, config_.xy_percentile_high);
+    float y_min_90 = percentile(rotated_ys, config_.xy_percentile_low);
+    float y_max_90 = percentile(rotated_ys, config_.xy_percentile_high);
+    float area_90 = (x_max_90 - x_min_90) * (y_max_90 - y_min_90);
+
+    // 计算质心（用于 z）
     Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
     for (const auto& p : points->points) {
         centroid += Eigen::Vector3f(p.x, p.y, p.z);
     }
     centroid /= points->size();
-
-    // 方向 1: 0° (X 轴)
-    float x_min_0 = 1e9, x_max_0 = -1e9, y_min_0 = 1e9, y_max_0 = -1e9;
-    for (const auto& p : points->points) {
-        x_min_0 = std::min(x_min_0, p.x);
-        x_max_0 = std::max(x_max_0, p.x);
-        y_min_0 = std::min(y_min_0, p.y);
-        y_max_0 = std::max(y_max_0, p.y);
-    }
-    float area_0 = (x_max_0 - x_min_0) * (y_max_0 - y_min_0);
-
-    // 方向 2: 90° (Y 轴) - 交换 X 和 Y
-    float x_min_90 = 1e9, x_max_90 = -1e9, y_min_90 = 1e9, y_max_90 = -1e9;
-    for (const auto& p : points->points) {
-        // 旋转 90°: (x,y) -> (-y,x)
-        float new_x = -p.y;
-        float new_y = p.x;
-        x_min_90 = std::min(x_min_90, new_x);
-        x_max_90 = std::max(x_max_90, new_x);
-        y_min_90 = std::min(y_min_90, new_y);
-        y_max_90 = std::max(y_max_90, new_y);
-    }
-    float area_90 = (x_max_90 - x_min_90) * (y_max_90 - y_min_90);
 
     // 选择面积更小的方向
     if (area_0 <= area_90) {
@@ -339,10 +349,40 @@ bool CargoBoxEstimator::estimateCargoBox(
         return false;
     }
 
+    // 计算 bottom_hag
+    float bottom_hag = core_box.bbox_min.z() - ground_z;
+
+    // 悬空高度检查：bottom_hag 必须 >= min_suspended_hag
+    if (bottom_hag < config_.min_suspended_hag) {
+        ROS_DEBUG("[CargoBoxEstimator] Rejected by ground contact: bottom_hag=%.2f < %.2f",
+                  bottom_hag, config_.min_suspended_hag);
+        return false;
+    }
+
+    // 尺寸增长率检查：防止框体突然变大（可能是合并到旁边货物）
+    if (has_last_size_) {
+        float growth_x = core_box.size.x() / std::max(last_core_size_.x(), 0.1f);
+        float growth_y = core_box.size.y() / std::max(last_core_size_.y(), 0.1f);
+        float growth_z = core_box.size.z() / std::max(last_core_size_.z(), 0.1f);
+        float max_growth = std::max({growth_x, growth_y, growth_z});
+
+        if (max_growth > config_.max_size_growth_ratio) {
+            ROS_WARN("[CargoBoxEstimator] Rejected by size jump: growth=%.2f > %.2f (last_size=(%.2f,%.2f,%.2f), new_size=(%.2f,%.2f,%.2f))",
+                     max_growth, config_.max_size_growth_ratio,
+                     last_core_size_.x(), last_core_size_.y(), last_core_size_.z(),
+                     core_box.size.x(), core_box.size.y(), core_box.size.z());
+            return false;
+        }
+    }
+
+    // 更新上一帧 size
+    last_core_size_ = core_box.size;
+    has_last_size_ = true;
+
     core_box.valid = true;
     core_box.type = CargoBoxType::CORE;
     core_box.suspended_points = core_points->size();
-    core_box.bottom_hag = core_box.bbox_min.z() - ground_z;
+    core_box.bottom_hag = bottom_hag;
     core_box.z_band_min = band_min;
     core_box.z_band_max = band_max;
 
@@ -358,11 +398,11 @@ bool CargoBoxEstimator::estimateCargoBox(
     forbidden_box.bbox_max.z() = ground_z + config_.forbidden_height;
     expandBox(forbidden_box, config_.forbidden_expand_xy, 0, 0);
 
-    ROS_DEBUG("[CargoBoxEstimator] core pts=%zu, bottom_hag=%.2f, size=(%.2f,%.2f,%.2f), "
-              "z_band=(%.2f,%.2f), removed_low=%d",
-              core_points->size(), core_box.bottom_hag,
-              core_box.size.x(), core_box.size.y(), core_box.size.z(),
-              band_min, band_max, core_box.removed_low_points);
+    ROS_INFO("[CargoBoxEstimator] core pts=%zu, bottom_hag=%.2f, size=(%.2f,%.2f,%.2f), "
+             "z_band=(%.2f,%.2f), removed_low=%d, ground_z=%.2f",
+             core_points->size(), core_box.bottom_hag,
+             core_box.size.x(), core_box.size.y(), core_box.size.z(),
+             band_min, band_max, core_box.removed_low_points, ground_z);
 
     return true;
 }

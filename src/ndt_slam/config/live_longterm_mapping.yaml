@@ -264,3 +264,9 @@ cargo_box_estimator:
   # 禁行区扩展
   forbidden_expand_xy: 0.50
   forbidden_height: 3.0
+
+  # 尺寸增长率限制（防止框体突然变大）
+  max_size_growth_ratio: 1.35
+
+  # 最小悬空高度（不能作为吊货的最低 HAG）
+  min_suspended_hag: 0.35

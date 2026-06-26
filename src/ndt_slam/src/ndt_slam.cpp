@@ -4748,10 +4748,40 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
     PayloadTrackInfo track;
     std_msgs::Float32MultiArray msg;
 
+    // 定义统一索引常量，禁止手写魔法数字
+    constexpr int IDX_VALID = 0;
+    constexpr int IDX_TRACK_ID = 1;
+    constexpr int IDX_STATE = 2;
+    constexpr int IDX_CENTER_X = 3;
+    constexpr int IDX_CENTER_Y = 4;
+    constexpr int IDX_CENTER_Z = 5;
+    constexpr int IDX_VEL_X = 6;
+    constexpr int IDX_VEL_Y = 7;
+    constexpr int IDX_VEL_Z = 8;
+    constexpr int IDX_BBOX_MIN_X = 9;
+    constexpr int IDX_BBOX_MIN_Y = 10;
+    constexpr int IDX_BBOX_MIN_Z = 11;
+    constexpr int IDX_BBOX_MAX_X = 12;
+    constexpr int IDX_BBOX_MAX_Y = 13;
+    constexpr int IDX_BBOX_MAX_Z = 14;
+    constexpr int IDX_POINT_COUNT = 15;
+    constexpr int IDX_SCORE = 16;
+    constexpr int IDX_BOTTOM_HAG = 17;
+    constexpr int IDX_SUPPORT_RATIO = 18;
+
     if (payload_tracker_.getBestDynamicPayloadTrack(track)) {
         // 有有效 track
+        // 计算 score（综合评分）
+        float score = track.track_duration * 0.3f + track.direction_consistency * 0.7f;
+
+        // 计算 bottom_hag（悬空高度）
+        float bottom_hag = track.bbox_min_map.z();  // 暂时用 bbox_min.z，后面会用地面模型修正
+
+        // 计算 support_ratio（静态支持率）
+        float support_ratio = 0.0f;  // 暂时设为 0，后面会从 CargoBoxEstimator 获取
+
         msg.data = {
-            static_cast<float>(stamp.toSec()),
+            1.0f,  // IDX_VALID: 有效
             static_cast<float>(track.track_id),
             static_cast<float>(track.state),
             track.centroid_map.x(), track.centroid_map.y(), track.centroid_map.z(),
@@ -4759,24 +4789,37 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
             track.bbox_min_map.x(), track.bbox_min_map.y(), track.bbox_min_map.z(),
             track.bbox_max_map.x(), track.bbox_max_map.y(), track.bbox_max_map.z(),
             static_cast<float>(track.point_count),
-            track.track_duration,
-            track.direction_consistency,
-            track.map_displacement
+            score,
+            bottom_hag,
+            support_ratio
         };
+
+        // 发布端日志
+        ROS_DEBUG("[PayloadTrackInfoPub] id=%d state=%d center=(%.2f,%.2f,%.2f) "
+                  "bbox_min=(%.2f,%.2f,%.2f) bbox_max=(%.2f,%.2f,%.2f) "
+                  "size=(%.2f,%.2f,%.2f) pts=%d score=%.2f hag=%.2f support=%.2f",
+                  track.track_id, (int)track.state,
+                  track.centroid_map.x(), track.centroid_map.y(), track.centroid_map.z(),
+                  track.bbox_min_map.x(), track.bbox_min_map.y(), track.bbox_min_map.z(),
+                  track.bbox_max_map.x(), track.bbox_max_map.y(), track.bbox_max_map.z(),
+                  track.bbox_max_map.x() - track.bbox_min_map.x(),
+                  track.bbox_max_map.y() - track.bbox_min_map.y(),
+                  track.bbox_max_map.z() - track.bbox_min_map.z(),
+                  track.point_count, score, bottom_hag, support_ratio);
     } else {
         // 没有有效 track
         msg.data = {
-            static_cast<float>(stamp.toSec()),
-            -1.0f,   // track_id
-            0.0f,    // state = NONE
+            -1.0f,   // IDX_VALID: 无效
+            -1.0f,   // IDX_TRACK_ID
+            0.0f,    // IDX_STATE = NONE
             0.0f, 0.0f, 0.0f,  // centroid
             0.0f, 0.0f, 0.0f,  // velocity
             0.0f, 0.0f, 0.0f,  // bbox_min
             0.0f, 0.0f, 0.0f,  // bbox_max
             0.0f,              // point_count
-            0.0f,              // track_duration
-            0.0f,              // direction_consistency
-            0.0f               // map_displacement
+            0.0f,              // score
+            0.0f,              // bottom_hag
+            0.0f               // support_ratio
         };
     }
 

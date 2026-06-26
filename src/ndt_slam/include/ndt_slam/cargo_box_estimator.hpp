@@ -62,6 +62,12 @@ struct CargoBoxEstimatorConfig {
     float max_length = 16.0f;
     float max_height = 5.0f;
 
+    // 尺寸增长率限制（防止框体突然变大）
+    float max_size_growth_ratio = 1.35f;  // 新框比旧框大 1.35 倍则拒绝
+
+    // 最小悬空高度（不能作为吊货的最低 HAG）
+    float min_suspended_hag = 0.35f;
+
     // 显示框扩展
     float core_expand_xy = 0.05f;
     float core_expand_z_down = 0.03f;
@@ -115,6 +121,10 @@ public:
 
 private:
     CargoBoxEstimatorConfig config_;
+
+    // 上一帧的 size（用于尺寸增长率检查）
+    Eigen::Vector3f last_core_size_ = Eigen::Vector3f::Zero();
+    bool has_last_size_ = false;
 
     // 计算分位数
     float percentile(std::vector<float>& values, float p);

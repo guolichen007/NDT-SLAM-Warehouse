@@ -393,21 +393,68 @@ private:
     }
 
     void payloadTrackCallback(const std_msgs::Float32MultiArray::ConstPtr& msg) {
-        if (msg->data.size() < 19) return;
+        if (msg->data.size() < 19) {
+            ROS_WARN("[PayloadTrackInfoSub] Invalid message size: %zu (expected >= 19)", msg->data.size());
+            return;
+        }
 
-        cargo_.valid = (msg->data[1] >= 0);
+        // 定义统一索引常量，与发布端一致
+        constexpr int IDX_VALID = 0;
+        constexpr int IDX_TRACK_ID = 1;
+        constexpr int IDX_STATE = 2;
+        constexpr int IDX_CENTER_X = 3;
+        constexpr int IDX_CENTER_Y = 4;
+        constexpr int IDX_CENTER_Z = 5;
+        constexpr int IDX_VEL_X = 6;
+        constexpr int IDX_VEL_Y = 7;
+        constexpr int IDX_VEL_Z = 8;
+        constexpr int IDX_BBOX_MIN_X = 9;
+        constexpr int IDX_BBOX_MIN_Y = 10;
+        constexpr int IDX_BBOX_MIN_Z = 11;
+        constexpr int IDX_BBOX_MAX_X = 12;
+        constexpr int IDX_BBOX_MAX_Y = 13;
+        constexpr int IDX_BBOX_MAX_Z = 14;
+        constexpr int IDX_POINT_COUNT = 15;
+        constexpr int IDX_SCORE = 16;
+        constexpr int IDX_BOTTOM_HAG = 17;
+        constexpr int IDX_SUPPORT_RATIO = 18;
+
+        cargo_.valid = (msg->data[IDX_VALID] >= 0);
         if (!cargo_.valid) return;
 
-        cargo_.track_id = static_cast<int>(msg->data[1]);
-        cargo_.state = static_cast<PayloadSemanticState>(static_cast<int>(msg->data[2]));
-        cargo_.centroid = Eigen::Vector3f(msg->data[3], msg->data[4], msg->data[5]);
-        cargo_.velocity = Eigen::Vector3f(msg->data[6], msg->data[7], msg->data[8]);
-        cargo_.bbox_min = Eigen::Vector3f(msg->data[9], msg->data[10], msg->data[11]);
-        cargo_.bbox_max = Eigen::Vector3f(msg->data[12], msg->data[13], msg->data[14]);
-        cargo_.point_count = static_cast<int>(msg->data[15]);
-        cargo_.score = msg->data[16];
-        cargo_.bottom_hag = msg->data[17];
-        cargo_.support_ratio = msg->data[18];
+        cargo_.track_id = static_cast<int>(msg->data[IDX_TRACK_ID]);
+        cargo_.state = static_cast<PayloadSemanticState>(static_cast<int>(msg->data[IDX_STATE]));
+        cargo_.centroid = Eigen::Vector3f(msg->data[IDX_CENTER_X], msg->data[IDX_CENTER_Y], msg->data[IDX_CENTER_Z]);
+        cargo_.velocity = Eigen::Vector3f(msg->data[IDX_VEL_X], msg->data[IDX_VEL_Y], msg->data[IDX_VEL_Z]);
+        cargo_.bbox_min = Eigen::Vector3f(msg->data[IDX_BBOX_MIN_X], msg->data[IDX_BBOX_MIN_Y], msg->data[IDX_BBOX_MIN_Z]);
+        cargo_.bbox_max = Eigen::Vector3f(msg->data[IDX_BBOX_MAX_X], msg->data[IDX_BBOX_MAX_Y], msg->data[IDX_BBOX_MAX_Z]);
+        cargo_.point_count = static_cast<int>(msg->data[IDX_POINT_COUNT]);
+        cargo_.score = msg->data[IDX_SCORE];
+        cargo_.bottom_hag = msg->data[IDX_BOTTOM_HAG];
+        cargo_.support_ratio = msg->data[IDX_SUPPORT_RATIO];
+
+        // 接收端日志
+        Eigen::Vector3f size = cargo_.bbox_max - cargo_.bbox_min;
+        ROS_DEBUG("[PayloadTrackInfoSub] id=%d state=%d center=(%.2f,%.2f,%.2f) "
+                  "bbox_min=(%.2f,%.2f,%.2f) bbox_max=(%.2f,%.2f,%.2f) "
+                  "size=(%.2f,%.2f,%.2f) pts=%d score=%.2f hag=%.2f support=%.2f",
+                  cargo_.track_id, (int)cargo_.state,
+                  cargo_.centroid.x(), cargo_.centroid.y(), cargo_.centroid.z(),
+                  cargo_.bbox_min.x(), cargo_.bbox_min.y(), cargo_.bbox_min.z(),
+                  cargo_.bbox_max.x(), cargo_.bbox_max.y(), cargo_.bbox_max.z(),
+                  size.x(), size.y(), size.z(),
+                  cargo_.point_count, cargo_.score, cargo_.bottom_hag, cargo_.support_ratio);
+
+        // 检查字段合理性
+        if (cargo_.support_ratio < 0 || cargo_.support_ratio > 1) {
+            ROS_WARN("[PayloadTrackInfoSub] Invalid support_ratio=%.2f (expected 0~1)", cargo_.support_ratio);
+        }
+        if (cargo_.bottom_hag < 0) {
+            ROS_WARN("[PayloadTrackInfoSub] Invalid bottom_hag=%.2f (expected > 0)", cargo_.bottom_hag);
+        }
+        if (size.x() <= 0 || size.y() <= 0 || size.z() <= 0) {
+            ROS_WARN("[PayloadTrackInfoSub] Invalid bbox size=(%.2f,%.2f,%.2f)", size.x(), size.y(), size.z());
+        }
 
         // 更新状态机
         updateCargoStateMachine();
