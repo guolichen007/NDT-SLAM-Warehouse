@@ -233,17 +233,17 @@ cargo_box_estimator:
 
   # BEV 连通域参数
   bev_resolution: 0.10
-  bev_min_points_per_cell: 2
-  bev_min_component_cells: 4
+  bev_min_points_per_cell: 1
+  bev_min_component_cells: 2
   bev_connectivity: 8
 
   # 悬空主体层检测
-  min_hag_for_candidate: 0.25
+  min_hag_for_candidate: 0.20
   min_payload_bottom_hag: 0.45
   z_hist_bin: 0.10
-  min_z_band_points: 10
+  min_z_band_points: 5
   dense_bin_ratio: 0.15
-  dense_bin_min_points: 5
+  dense_bin_min_points: 2
   min_dense_band_height: 0.10
   max_dense_band_height: 3.50
 
@@ -282,7 +282,7 @@ cargo_box_estimator:
   min_suspended_hag: 0.35
 
   # 最小 core points
-  min_core_points: 10
+  min_core_points: 5
 
   # 绝对尺寸约束
   max_core_length: 12.0
@@ -296,4 +296,4 @@ cargo_box_estimator:
   init_max_area: 30.0
   init_max_aspect_ratio: 8.0
   init_min_bottom_hag: 0.45
-  init_min_core_points: 10
+  init_min_core_points: 5

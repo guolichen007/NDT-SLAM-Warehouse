@@ -247,8 +247,8 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
     }
 
     if (hag_values.size() < static_cast<size_t>(config_.min_z_band_points)) {
-        ROS_DEBUG("[CargoBoxV2] hag_values.size()=%zu < min_z_band_points=%d",
-                  hag_values.size(), config_.min_z_band_points);
+        ROS_WARN("[CargoBoxV2] FAIL: hag_values.size()=%zu < min_z_band_points=%d (input=%zu)",
+                  hag_values.size(), config_.min_z_band_points, points->size());
         return false;
     }
 
@@ -297,7 +297,8 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
     }
 
     if (best_count < config_.min_z_band_points) {
-        ROS_DEBUG("[CargoBoxV2] best_count=%d < min_z_band_points=%d", best_count, config_.min_z_band_points);
+        ROS_WARN("[CargoBoxV2] FAIL: best_count=%d < min_z_band_points=%d (hag_vals=%zu, bins=%d, dense_thresh=%d)",
+                  best_count, config_.min_z_band_points, hag_values.size(), num_bins, dense_thresh);
         return false;
     }
 
@@ -309,8 +310,9 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
     float band_height = band_max_hag - band_min_hag;
     if (band_height < config_.min_dense_band_height ||
         band_height > config_.max_dense_band_height) {
-        ROS_DEBUG("[CargoBoxV2] band_height=%.2f not in [%.2f, %.2f]",
-                  band_height, config_.min_dense_band_height, config_.max_dense_band_height);
+        ROS_WARN("[CargoBoxV2] FAIL: band_height=%.2f not in [%.2f, %.2f], band=[%.2f, %.2f]",
+                  band_height, config_.min_dense_band_height, config_.max_dense_band_height,
+                  band_min_hag, band_max_hag);
         return false;
     }
 
@@ -324,8 +326,8 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
     }
 
     if (core_points_out->size() < static_cast<size_t>(config_.min_core_points)) {
-        ROS_DEBUG("[CargoBoxV2] core_points_out->size()=%zu < min_core_points=%d",
-                  core_points_out->size(), config_.min_core_points);
+        ROS_WARN("[CargoBoxV2] FAIL: core_points_out.size()=%zu < min_core_points=%d (band=[%.2f,%.2f])",
+                  core_points_out->size(), config_.min_core_points, band_min_hag, band_max_hag);
         return false;
     }
     return true;
@@ -520,7 +522,7 @@ bool CargoBoxEstimator::estimateCargoBox(
     ROS_INFO("[CargoBoxV2] input_pts=%d, bev_components=%zu", input_pts, components.size());
 
     if (components.empty()) {
-        ROS_DEBUG("[CargoBoxV2] No valid BEV components found");
+        ROS_WARN("[CargoBoxV2] FAIL: No valid BEV components (input=%d)", input_pts);
         return false;
     }
 
@@ -576,7 +578,7 @@ bool CargoBoxEstimator::estimateCargoBox(
     }
 
     if (selected_index < 0) {
-        ROS_DEBUG("[CargoBoxV2] No suitable component selected");
+        ROS_WARN("[CargoBoxV2] FAIL: No suitable component selected (comps=%zu)", components.size());
         return false;
     }
 
