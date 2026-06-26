@@ -73,6 +73,12 @@ void CargoBoxEstimator::configureFromYaml(const std::string& config_file) {
             // 最小 core points
             config_.min_core_points = cb["min_core_points"].as<int>(30);
 
+            // P0-6: 候选/确认两级阈值
+            config_.min_candidate_core_points = cb["min_candidate_core_points"].as<int>(5);
+            config_.min_confirm_core_points = cb["min_confirm_core_points"].as<int>(25);
+            config_.min_update_core_points = cb["min_update_core_points"].as<int>(8);
+            config_.min_confirm_observed_frames = cb["min_confirm_observed_frames"].as<int>(3);
+
             // 显示框扩展
             config_.core_expand_xy = cb["core_expand_xy"].as<double>(0.05);
             config_.core_expand_z_down = cb["core_expand_z_down"].as<double>(0.03);
@@ -502,7 +508,8 @@ bool CargoBoxEstimator::estimateCargoBox(
     const SimpleGroundModel& ground_model,
     CargoBox& core_box,
     CargoBox& remove_box,
-    CargoBox& forbidden_box) {
+    CargoBox& forbidden_box,
+    const CargoBox* prev_core_box) {
 
     if (!config_.enabled || !cluster || cluster->size() < static_cast<size_t>(config_.min_cluster_points)) {
         return false;
@@ -519,7 +526,7 @@ bool CargoBoxEstimator::estimateCargoBox(
     // ========== Step 1: BEV 连通域拆分 ==========
     auto components = buildBevComponents(cluster, ground_model);
 
-    ROS_INFO("[CargoBoxV2] input_pts=%d, bev_components=%zu", input_pts, components.size());
+    ROS_DEBUG("[CargoBoxV2] input_pts=%d, bev_components=%zu", input_pts, components.size());
 
     if (components.empty()) {
         ROS_WARN("[CargoBoxV2] FAIL: No valid BEV components (input=%d)", input_pts);
@@ -571,6 +578,15 @@ bool CargoBoxEstimator::estimateCargoBox(
             score += std::min(density * 0.1f, 3.0f);
         }
 
+        // P0-7: track 一致性分数
+        if (prev_core_box && prev_core_box->valid) {
+            // 计算 component centroid 与上一帧 core_box 的距离
+            float dist = (comp.centroid - prev_core_box->center).norm();
+            // 距离越近，分数越高（最多加 5 分）
+            float consistency_score = std::max(0.0f, 5.0f - dist * 2.0f);
+            score += consistency_score;
+        }
+
         if (score > best_score) {
             best_score = score;
             selected_index = i;
@@ -583,7 +599,7 @@ bool CargoBoxEstimator::estimateCargoBox(
     }
 
     const auto& selected_component = components[selected_index];
-    ROS_INFO("[CargoBoxV2] selected_component=%d, pts=%d, max_hag=%.2f, score=%.2f",
+    ROS_DEBUG("[CargoBoxV2] selected_component=%d, pts=%d, max_hag=%.2f, score=%.2f",
              selected_component.id, selected_component.point_count,
              selected_component.max_hag, best_score);
 
@@ -607,7 +623,7 @@ bool CargoBoxEstimator::estimateCargoBox(
     *core_points_cloud_ = *core_points;
 
     int core_pts = core_points->size();
-    ROS_INFO("[CargoBoxV2] core_pts=%d, band_hag=[%.2f, %.2f], ground_z=%.2f",
+    ROS_DEBUG("[CargoBoxV2] core_pts=%d, band_hag=[%.2f, %.2f], ground_z=%.2f",
              core_pts, band_min_hag, band_max_hag, ground_z);
 
     // ========== Step 4: 计算 core box ==========
@@ -653,23 +669,9 @@ bool CargoBoxEstimator::estimateCargoBox(
         return false;
     }
 
-    // ========== Step 6: 尺寸增长率检查 ==========
-    if (has_last_size_) {
-        float growth_x = core_box.size.x() / std::max(last_core_size_.x(), 0.1f);
-        float growth_y = core_box.size.y() / std::max(last_core_size_.y(), 0.1f);
-        float growth_z = core_box.size.z() / std::max(last_core_size_.z(), 0.1f);
-        float max_growth = std::max({growth_x, growth_y, growth_z});
-
-        if (max_growth > config_.max_size_growth_ratio) {
-            ROS_WARN("[CargoBoxV2] Rejected by size jump: growth=%.2f > %.2f", max_growth, config_.max_size_growth_ratio);
-            core_box.reject_reason = RejectReason::SIZE_JUMP;
-            return false;
-        }
-    }
-
-    // 更新上一帧 size
-    last_core_size_ = core_box.size;
-    has_last_size_ = true;
+    // ========== Step 6: 尺寸增长率检查（已移到调用方 per-track 检查） ==========
+    // P0-1: size jump 检查现在由调用方在 per-track 基础上执行
+    // CargoBoxEstimator 不再维护任何帧间状态
 
     // ========== Step 7: 设置 core box 属性 ==========
     core_box.valid = true;
@@ -694,7 +696,7 @@ bool CargoBoxEstimator::estimateCargoBox(
     forbidden_box.bbox_max.z() = ground_z + config_.forbidden_height;
     expandBox(forbidden_box, config_.forbidden_expand_xy, 0, 0);
 
-    ROS_INFO("[CargoBoxV2] core_box: size=(%.2f,%.2f,%.2f), bottom_hag=%.2f, "
+    ROS_DEBUG("[CargoBoxV2] core_box: size=(%.2f,%.2f,%.2f), bottom_hag=%.2f, "
              "remove_box: size=(%.2f,%.2f,%.2f), forbidden_zone: size=(%.2f,%.2f,%.2f)",
              core_box.size.x(), core_box.size.y(), core_box.size.z(), bottom_hag,
              remove_box.size.x(), remove_box.size.y(), remove_box.size.z(),

@@ -2700,10 +2700,9 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
 
     *last_cloud_ = *cloud;
 
-    // ========== P0.5: 日志说明顺序 ==========
-    // 注意：PayloadTracker 和 HumanFilter 已经在 processCloudThread() 中完成
-    // 这里的 channel filter 和 payload tracker update 是为了保存 raw/filtered/ground 到关键帧
-    ROS_DEBUG("[CommitOrder] PayloadTracker and HumanFilter already done in processCloudThread");
+    // ========== P0-5: 修正主链路顺序 ==========
+    // PayloadTracker 和 CargoBoxV2 必须在 MapCommit 前运行
+    // 这样可以确保货物框计算结果在地图更新前可用
 
     size_t prev_keyframe_count = loop_closure_detector_.getKeyFrames().size();
     loop_closure_detector_.addKeyFrame(pose, cloud, stamp);
@@ -2765,54 +2764,85 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                     ground_model.resolution = 1.5f;
 
                     // 对每个活跃的吊货 track 计算货物框
-                    for (const auto& t : payload_tracker_.getTracks()) {
+                    // P0-2: 使用可修改的 tracks 列表，支持 per-track size jump 检查
+                    auto& tracks = payload_tracker_.getMutableTracks();
+                    for (auto& t : tracks) {
                         if (t.state == TrackState::EXPIRED) continue;
                         if (t.cloud_history.empty()) continue;
 
                         // 使用最新的点云
                         auto cluster = t.cloud_history.back();
 
+                        // P0-7: 传递上一帧的 core_box 信息（用于 track 一致性评分）
+                        const CargoBox* prev_core_box = t.has_last_core_box ? &t.last_core_box : nullptr;
+
                         CargoBox core_box, remove_box, forbidden_box;
                         if (cargo_box_estimator_.estimateCargoBox(cluster, ground_model,
-                                                                   core_box, remove_box, forbidden_box)) {
-                            ROS_INFO("[CargoBoxV2] track=%d core_pts=%d bottom_hag=%.2f size=(%.2f,%.2f,%.2f) "
-                                     "components=%d selected=%d",
-                                     t.track_id, core_box.suspended_points, core_box.bottom_hag,
-                                     core_box.size.x(), core_box.size.y(), core_box.size.z(),
-                                     core_box.component_count, core_box.component_id);
+                                                                   core_box, remove_box, forbidden_box,
+                                                                   prev_core_box)) {
+                            // P0-2: per-track size jump 检查
+                            bool size_jump_rejected = false;
+                            if (t.has_last_size) {
+                                float growth_x = core_box.size.x() / std::max(t.last_core_size.x(), 0.1f);
+                                float growth_y = core_box.size.y() / std::max(t.last_core_size.y(), 0.1f);
+                                float growth_z = core_box.size.z() / std::max(t.last_core_size.z(), 0.1f);
+                                float max_growth = std::max({growth_x, growth_y, growth_z});
 
-                            // 发布调试点云
-                            static int cargo_debug_count = 0;
-                            cargo_debug_count++;
-                            if (cargo_debug_count % 5 == 1) {
-                                // 发布 core points
-                                auto core_pts = cargo_box_estimator_.getCorePointsCloud();
-                                if (core_pts && !core_pts->empty()) {
-                                    sensor_msgs::PointCloud2 msg;
-                                    pcl::toROSMsg(*core_pts, msg);
-                                    msg.header.stamp = stamp;
-                                    msg.header.frame_id = "base_link";
-                                    cargo_core_points_pub_.publish(msg);
+                                if (max_growth > cargo_box_estimator_config_.max_size_growth_ratio) {
+                                    ROS_WARN("[CargoBoxV2] track=%d rejected by size jump: growth=%.2f > %.2f",
+                                             t.track_id, max_growth, cargo_box_estimator_config_.max_size_growth_ratio);
+                                    size_jump_rejected = true;
                                 }
+                            }
 
-                                // 发布 HAG filtered cloud
-                                auto hag_cloud = cargo_box_estimator_.getHagFilteredCloud();
-                                if (hag_cloud && !hag_cloud->empty()) {
-                                    sensor_msgs::PointCloud2 msg;
-                                    pcl::toROSMsg(*hag_cloud, msg);
-                                    msg.header.stamp = stamp;
-                                    msg.header.frame_id = "base_link";
-                                    cargo_hag_filtered_pub_.publish(msg);
-                                }
+                            if (!size_jump_rejected) {
+                                // P0-2: 更新 per-track size 历史
+                                t.last_core_size = core_box.size;
+                                t.has_last_size = true;
 
-                                // 发布 components cloud
-                                auto comp_cloud = cargo_box_estimator_.getComponentsCloud();
-                                if (comp_cloud && !comp_cloud->empty()) {
-                                    sensor_msgs::PointCloud2 msg;
-                                    pcl::toROSMsg(*comp_cloud, msg);
-                                    msg.header.stamp = stamp;
-                                    msg.header.frame_id = "base_link";
-                                    cargo_components_pub_.publish(msg);
+                                // P0-7: 更新上一帧的 core_box 信息
+                                t.last_core_box = core_box;
+                                t.has_last_core_box = true;
+
+                                ROS_DEBUG("[CargoBoxV2] track=%d core_pts=%d bottom_hag=%.2f size=(%.2f,%.2f,%.2f) "
+                                         "components=%d selected=%d",
+                                         t.track_id, core_box.suspended_points, core_box.bottom_hag,
+                                         core_box.size.x(), core_box.size.y(), core_box.size.z(),
+                                         core_box.component_count, core_box.component_id);
+
+                                // 发布调试点云
+                                static int cargo_debug_count = 0;
+                                cargo_debug_count++;
+                                if (cargo_debug_count % 20 == 1) {
+                                    // 发布 core points
+                                    auto core_pts = cargo_box_estimator_.getCorePointsCloud();
+                                    if (core_pts && !core_pts->empty()) {
+                                        sensor_msgs::PointCloud2 msg;
+                                        pcl::toROSMsg(*core_pts, msg);
+                                        msg.header.stamp = stamp;
+                                        msg.header.frame_id = "base_link";
+                                        cargo_core_points_pub_.publish(msg);
+                                    }
+
+                                    // 发布 HAG filtered cloud
+                                    auto hag_cloud = cargo_box_estimator_.getHagFilteredCloud();
+                                    if (hag_cloud && !hag_cloud->empty()) {
+                                        sensor_msgs::PointCloud2 msg;
+                                        pcl::toROSMsg(*hag_cloud, msg);
+                                        msg.header.stamp = stamp;
+                                        msg.header.frame_id = "base_link";
+                                        cargo_hag_filtered_pub_.publish(msg);
+                                    }
+
+                                    // 发布 components cloud
+                                    auto comp_cloud = cargo_box_estimator_.getComponentsCloud();
+                                    if (comp_cloud && !comp_cloud->empty()) {
+                                        sensor_msgs::PointCloud2 msg;
+                                        pcl::toROSMsg(*comp_cloud, msg);
+                                        msg.header.stamp = stamp;
+                                        msg.header.frame_id = "base_link";
+                                        cargo_components_pub_.publish(msg);
+                                    }
                                 }
                             }
                         } else {

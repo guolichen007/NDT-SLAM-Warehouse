@@ -138,6 +138,12 @@ struct CargoBoxEstimatorConfig {
     // 最小 core points
     int min_core_points = 30;
 
+    // P0-6: 候选/确认两级阈值
+    int min_candidate_core_points = 5;    // 候选阶段最小点数
+    int min_confirm_core_points = 25;     // 确认阶段最小点数
+    int min_update_core_points = 8;       // 已锁定 track 更新最小点数
+    int min_confirm_observed_frames = 3;  // 确认所需观察帧数
+
     // 显示框扩展
     float core_expand_xy = 0.05f;
     float core_expand_z_down = 0.03f;
@@ -177,14 +183,15 @@ public:
     void configureFromYaml(const std::string& config_file);
 
     // 主接口：估计货物框
-    // 输入：cluster 点云（base_link 坐标系）、地面模型
+    // 输入：cluster 点云（base_link 坐标系）、地面模型、上一帧 core_box（可选）
     // 输出：core_box、remove_box、forbidden_box
     bool estimateCargoBox(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cluster,
         const SimpleGroundModel& ground_model,
         CargoBox& core_box,
         CargoBox& remove_box,
-        CargoBox& forbidden_box);
+        CargoBox& forbidden_box,
+        const CargoBox* prev_core_box = nullptr);
 
     // 获取调试点云
     pcl::PointCloud<pcl::PointXYZ>::Ptr getHagFilteredCloud() const { return hag_filtered_cloud_; }
@@ -197,10 +204,6 @@ public:
 
 private:
     CargoBoxEstimatorConfig config_;
-
-    // 上一帧的 size（用于尺寸增长率检查）
-    Eigen::Vector3f last_core_size_ = Eigen::Vector3f::Zero();
-    bool has_last_size_ = false;
 
     // 调试点云
     pcl::PointCloud<pcl::PointXYZ>::Ptr hag_filtered_cloud_;

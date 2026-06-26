@@ -11,6 +11,7 @@
 #include <string>
 
 #include <ndt_slam/point_cloud_processing.hpp>
+#include <ndt_slam/cargo_box_estimator.hpp>
 
 namespace ndt_slam {
 
@@ -99,6 +100,14 @@ struct ObjectTrack {
     // track 锁定相关
     int lock_confirm_count = 0;
     bool locked = false;
+
+    // P0-2: per-track size jump 检查（替代 CargoBoxEstimator 的全局状态）
+    Eigen::Vector3f last_core_size = Eigen::Vector3f::Zero();
+    bool has_last_size = false;
+
+    // P0-7: 上一帧的 core_box 信息（用于 track 一致性评分）
+    CargoBox last_core_box;
+    bool has_last_core_box = false;
 };
 
 // 跟踪配置
@@ -201,6 +210,9 @@ public:
 
     // 获取所有活跃轨迹
     const std::vector<ObjectTrack>& getTracks() const { return tracks_; }
+
+    // P0-2: 获取可修改的轨迹列表（用于 per-track size jump 检查）
+    std::vector<ObjectTrack>& getMutableTracks() { return tracks_; }
 
     // 获取确认为动态的轨迹
     std::vector<ObjectTrack> getDynamicTracks() const;

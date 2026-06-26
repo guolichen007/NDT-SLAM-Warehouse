@@ -284,6 +284,12 @@ cargo_box_estimator:
   # 最小 core points
   min_core_points: 5
 
+  # P0-6: 候选/确认两级阈值
+  min_candidate_core_points: 5
+  min_confirm_core_points: 25
+  min_update_core_points: 8
+  min_confirm_observed_frames: 3
+
   # 绝对尺寸约束
   max_core_length: 12.0
   max_core_width: 4.0

@@ -538,75 +538,11 @@ private:
             return;
         }
 
-        // P0: 使用 odom 预测残差判断 large jump
-        // 核心思想：检测可以低频，但显示和删除 mask 必须跟 odom 高频走
-        // residual 判断基于 odom 预测位置，而不是直接比较 map 坐标
-        Eigen::Vector3f predicted_centroid = stable_centroid_;
+        // P0-4: 直接使用从 payload_track_info 接收的 bbox，不做低通滤波
+        // 这样可以确保 cargo_forbidden_zone_node 显示的框与 CargoBoxV2 计算的框一致
 
-        if (use_velocity_compensation_ && stable_centroid_.norm() > 0.01f) {
-            ros::Time now = ros::Time::now();
-            double dt = (now - last_track_time_).toSec();
-            dt = std::min(dt, max_compensation_dt_);
-
-            // 使用 odom delta 预测 stable_centroid_ 应该在哪里
-            // 这样即使天车移动，predicted_centroid 也会跟随 odom 更新
-            predicted_centroid = stable_centroid_ + stable_velocity_ * dt;
-
-            // 计算残差：测量值 vs 预测值
-            float residual = (cargo_.centroid - predicted_centroid).norm();
-
-            // P0: 三级残差判断
-            // 1. residual < soft_gate: 正常，使用测量值
-            // 2. soft_gate < residual < hard_gate: 可疑，小幅校正
-            // 3. residual > hard_gate: 异常，仅报警，不切换
-            if (residual < max_position_jump_) {
-                // 正常范围，使用测量值
-                predicted_centroid = cargo_.centroid;
-                suspect_jump_count_ = 0;
-            } else if (residual < residual_hard_gate_) {
-                // 可疑范围：小幅校正，不完全跳转
-                suspect_jump_count_++;
-                ROS_WARN_THROTTLE(2.0, "[SuspendedCargo] Suspicious residual: %.2f (soft=%.2f, count=%d)",
-                                  residual, max_position_jump_, suspect_jump_count_);
-
-                // 连续 N 帧异常才切换到测量值
-                if (suspect_jump_count_ >= switch_confirm_frames_) {
-                    // 确认切换：使用测量值，但做平滑过渡
-                    predicted_centroid = 0.5f * cargo_.centroid + 0.5f * predicted_centroid;
-                    suspect_jump_count_ = 0;
-                    ROS_INFO("[SuspendedCargo] Confirmed switch after %d frames", switch_confirm_frames_);
-                }
-                // 否则保持预测位置
-            } else {
-                // 异常范围：仅报警，保持预测位置
-                suspect_jump_count_++;
-                ROS_WARN_THROTTLE(1.0, "[SuspendedCargo] Large residual: %.2f > %.2f (count=%d) - keeping prediction",
-                                  residual, residual_hard_gate_, suspect_jump_count_);
-
-                // 连续 N 帧 hard gate 异常才重置
-                if (suspect_jump_count_ >= switch_confirm_frames_ * 2) {
-                    ROS_WARN("[SuspendedCargo] Too many hard gate violations, resetting track");
-                    suspect_jump_count_ = 0;
-                    // 不切换到测量值，保持预测
-                }
-            }
-        } else {
-            // 没有速度补偿或初始状态，直接使用测量值
-            if (cargo_.valid) {
-                predicted_centroid = cargo_.centroid;
-            }
-        }
-        last_track_time_ = ros::Time::now();
-
-        // 低通滤波 centroid
-        stable_centroid_ = centroid_filter_alpha_ * predicted_centroid +
-                           (1.0f - centroid_filter_alpha_) * stable_centroid_;
-
-        // 更新速度估计
-        if (stable_centroid_.norm() > 0.01f) {
-            Eigen::Vector3f vel = (stable_centroid_ - predicted_centroid) / 0.1f;
-            stable_velocity_ = 0.7f * stable_velocity_ + 0.3f * vel;
-        }
+        // 直接使用测量值
+        stable_centroid_ = cargo_.centroid;
 
         // 计算 size
         Eigen::Vector3f raw_size = cargo_.bbox_max - cargo_.bbox_min;
@@ -615,17 +551,8 @@ private:
             raw_size = Eigen::Vector3f(default_length_x_, default_width_y_, default_height_z_);
         }
 
-        // 低通滤波 size
-        stable_size_ = size_filter_alpha_ * raw_size +
-                       (1.0f - size_filter_alpha_) * stable_size_;
-
-        // 限制单帧变化
-        Eigen::Vector3f size_change = stable_size_ - raw_size;
-        for (int i = 0; i < 3; i++) {
-            if (std::abs(size_change[i]) > max_size_change_per_frame_) {
-                stable_size_[i] = raw_size[i] + std::copysign(max_size_change_per_frame_, size_change[i]);
-            }
-        }
+        // 直接使用 raw_size，不做低通滤波
+        stable_size_ = raw_size;
 
         // 更新 bbox
         float half_l = stable_size_.x() / 2.0f + safety_margin_x_;
@@ -633,6 +560,8 @@ private:
         stable_bbox_min_ = stable_centroid_ - Eigen::Vector3f(half_l, half_w, 0);
         stable_bbox_max_ = stable_centroid_ + Eigen::Vector3f(half_l, half_w, stable_size_.z());
         stable_cargo_z_min_ = stable_centroid_.z() - stable_size_.z() / 2.0f;
+
+        last_track_time_ = ros::Time::now();
     }
 
     void updateRiskLevel() {
