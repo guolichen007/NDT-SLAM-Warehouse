@@ -28,6 +28,9 @@
 #include <condition_variable>
 #include <atomic>
 #include <memory>
+
+// P0.5: 货物框估计器
+#include <ndt_slam/cargo_box_estimator.hpp>
 #include <set>
 
 // NDT_OMP
@@ -341,6 +344,10 @@ private:
     // PayloadTrackManager: 双坐标系吊货跟踪
     PayloadTrackManager payload_tracker_;
     PayloadTrackerConfig payload_tracker_config_;
+
+    // P0.5: CargoBoxEstimator 货物框估计器
+    CargoBoxEstimator cargo_box_estimator_;
+    CargoBoxEstimatorConfig cargo_box_estimator_config_;
 
     // 通道过滤 debug 话题
     ros::Publisher payload_channel_pub_;      // /payload_channel_cloud

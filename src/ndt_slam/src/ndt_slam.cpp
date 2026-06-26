@@ -230,6 +230,12 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     ROS_INFO("[PayloadTracker] initialized: enabled=%d, base_stability_std_thresh=%.2f",
              payload_tracker_config_.enabled ? 1 : 0, payload_tracker_config_.base_stability_std_thresh);
 
+    // P0.5: 初始化 CargoBoxEstimator
+    cargo_box_estimator_.configureFromYaml(config_file_path);
+    cargo_box_estimator_config_ = cargo_box_estimator_.getConfig();
+    ROS_INFO("[CargoBoxEstimator] initialized: enabled=%d, use_crane_axis_obb=%d",
+             cargo_box_estimator_config_.enabled ? 1 : 0, cargo_box_estimator_config_.use_crane_axis_obb);
+
     shutdown_ = false;
     running_ = true;
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
