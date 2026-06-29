@@ -749,4 +749,57 @@ void PayloadTrackManager::transformBaseBboxToMap(ObjectTrack& track, const Eigen
     track.last_T_map_base = T_map_base;
 }
 
+// ============================================================================
+// P1: 清理过期的 SUSPENDED_STATIC track
+// ============================================================================
+
+void PayloadTrackManager::cleanupStaleSuspendedStaticTracks(double current_time)
+{
+    const double suspended_static_ttl = 20.0;
+    const int suspended_static_max_reinit_reject = 6;
+    const int suspended_static_min_core_points = 25;
+
+    int expired_count = 0;
+
+    for (auto& track : tracks_) {
+        if (track.state != TrackState::SUSPENDED_STATIC) {
+            continue;
+        }
+
+        double age_since_seen = current_time - track.last_seen_time;
+
+        bool timeout = age_since_seen > suspended_static_ttl;
+        bool too_many_reject = track.size_jump_count > suspended_static_max_reinit_reject;
+        bool weak_core = track.has_last_core_box &&
+                         track.last_core_box.suspended_points < suspended_static_min_core_points;
+
+        if (timeout || too_many_reject || weak_core) {
+            ROS_INFO("[TrackCleanup] expire suspended_static track=%d age=%.1f reject_count=%d core_pts=%d reason=%s",
+                     track.track_id,
+                     age_since_seen,
+                     track.size_jump_count,
+                     track.has_last_core_box ? track.last_core_box.suspended_points : 0,
+                     timeout ? "timeout" : (too_many_reject ? "too_many_reject" : "weak_core"));
+
+            track.state = TrackState::EXPIRED;
+            expired_count++;
+        }
+    }
+
+    // 压缩已过期的 track
+    tracks_.erase(
+        std::remove_if(
+            tracks_.begin(),
+            tracks_.end(),
+            [&](const ObjectTrack& t) {
+                return t.state == TrackState::EXPIRED &&
+                       current_time - t.last_seen_time > 2.0;
+            }),
+        tracks_.end());
+
+    if (expired_count > 0) {
+        ROS_INFO("[TrackCleanup] expired=%d active_tracks=%zu", expired_count, tracks_.size());
+    }
+}
+
 } // namespace ndt_slam

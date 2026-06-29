@@ -19,8 +19,8 @@
         <rosparam command="load" file="$(find ndt_slam)/config/merger_params.yaml"/>
     </node>
 
-    <!-- 雷达到 base_link 的 TF -->
-    <node name="base_link_to_rslidar" pkg="tf" type="static_transform_publisher"
+    <!-- 雷达到 base_link 的 TF（唯一名字避免冲突） -->
+    <node name="base_link_to_rslidar_tf" pkg="tf" type="static_transform_publisher"
           args="0 0 0 0 0 0 base_link rslidar 100"/>
 
     <!-- RViz 可视化（可选） -->

@@ -230,6 +230,9 @@ public:
     // 获取配置
     const PayloadTrackerConfig& getConfig() const { return config_; }
 
+    // P1: 清理过期的 SUSPENDED_STATIC track
+    void cleanupStaleSuspendedStaticTracks(double current_time);
+
     // 重置
     void reset();
 

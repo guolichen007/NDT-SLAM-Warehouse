@@ -4377,14 +4377,23 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
     if (last_keyframe_pose_for_gate_.translation().norm() < 0.001) {
         last_keyframe_pose_for_gate_ = current_pose;
         last_keyframe_time_for_gate_ = current_time;
+        last_frame_pos_for_gate_ = current_pose.translation();
+        last_frame_stamp_for_gate_ = current_time.toSec();
         return true;
     }
 
     // 计算位移和旋转
     Sophus::SE3d delta = last_keyframe_pose_for_gate_.inverse() * current_pose;
     double translation = delta.translation().norm();
-    double rotation = delta.so3().log().norm() * 180.0 / M_PI;  // 转换为度
+    double rotation = delta.so3().log().norm() * 180.0 / M_PI;
     double time_elapsed = (current_time - last_keyframe_time_for_gate_).toSec();
+
+    // P1: 计算帧间速度（用于静止检测）
+    double frame_dt = current_time.toSec() - last_frame_stamp_for_gate_;
+    double frame_dx = (current_pose.translation() - last_frame_pos_for_gate_).norm();
+    double frame_vel = frame_dt > 1e-3 ? frame_dx / frame_dt : 0.0;
+    last_frame_pos_for_gate_ = current_pose.translation();
+    last_frame_stamp_for_gate_ = current_time.toSec();
 
     delta_translation_ = translation;
     delta_yaw_ = rotation;
@@ -4394,43 +4403,68 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
                          rotation >= motion_gate_min_rotation_deg_);
     bool time_elapsed_enough = (time_elapsed >= motion_gate_min_time_sec_);
 
-    // 诊断日志（每秒一次）
-    Eigen::Vector3d pos = current_pose.translation();
-    Eigen::Vector3d last_pos = last_keyframe_pose_for_gate_.translation();
-    ROS_INFO_THROTTLE(1.0,
-                      "[MotionGateDebug] moving=%s, delta_xy=%.3f, delta_yaw=%.2fdeg, "
-                      "trans_thresh=%.3f, rot_thresh=%.2fdeg, time_elapsed=%.2f, "
-                      "pose=(%.2f, %.2f, %.2f), last_commit=(%.2f, %.2f, %.2f)",
-                      moved_enough ? "true" : "false",
-                      translation, rotation,
-                      motion_gate_min_translation_m_, motion_gate_min_rotation_deg_,
-                      time_elapsed,
-                      pos.x(), pos.y(), pos.z(),
-                      last_pos.x(), last_pos.y(), last_pos.z());
+    // P1: 静止检测（基于帧间速度）
+    bool detected_stationary = (frame_vel < motion_gate_moving_min_velocity_ &&
+                                rotation < motion_gate_min_rotation_deg_);
 
-    if (moved_enough && time_elapsed_enough) {
-        // 从静止变为运动时通知
-        if (is_stationary_) {
-            ROS_INFO("[MotionGate] Crane moving | delta=%.2fm %.1f° | resuming map commit",
-                     translation, rotation);
+    // 进入静止状态
+    if (!is_stationary_ && detected_stationary) {
+        stationary_frame_count_++;
+        if (stationary_frame_count_ > 30) {
+            is_stationary_ = true;
+            stationary_anchor_pose_ = current_pose;
+            stationary_anchor_valid_ = true;
+            stationary_start_time_ = current_time.toSec();
+            moving_confirm_frames_ = 0;
+
+            ROS_INFO("[MotionGate] Crane stopped | keyframes=%d | anchor=(%.2f,%.2f,%.2f) | pausing map commit",
+                     keyframe_count_,
+                     current_pose.translation().x(),
+                     current_pose.translation().y(),
+                     current_pose.translation().z());
         }
-        // 更新上次关键帧位姿和时间
-        last_keyframe_pose_for_gate_ = current_pose;
-        last_keyframe_time_for_gate_ = current_time;
-        is_stationary_ = false;
+    } else if (!detected_stationary) {
         stationary_frame_count_ = 0;
-        moved_frame_count_++;
-        return true;
     }
 
-    // 静止检测
-    if (!moved_enough) {
-        stationary_frame_count_++;
-        if (stationary_frame_count_ > 30 && !is_stationary_) {  // 连续 30 帧不动认为静止
-            is_stationary_ = true;
-            ROS_INFO("[MotionGate] Crane stopped | keyframes=%d | pausing map commit",
-                     keyframe_count_);
+    // P1: 静止期间检查漂移（从 anchor 开始的漂移）
+    if (is_stationary_ && stationary_anchor_valid_) {
+        double drift_from_anchor =
+            (current_pose.translation() - stationary_anchor_pose_.translation()).norm();
+        double elapsed = current_time.toSec() - stationary_start_time_;
+
+        // 漂移在 ignore_radius 内，认为是 NDT 静止漂移，不提交
+        if (drift_from_anchor < motion_gate_stationary_drift_ignore_radius_) {
+            ROS_INFO_THROTTLE(2.0,
+                "[MotionGate] stationary_freeze drift=%.3f elapsed=%.1f action=SKIP_COMMIT",
+                drift_from_anchor, elapsed);
+            return false;
         }
+
+        // 超过 ignore_radius，需要连续确认才能认为真的在移动
+        moving_confirm_frames_++;
+        if (moving_confirm_frames_ < motion_gate_moving_confirm_frames_) {
+            ROS_INFO_THROTTLE(1.0,
+                "[MotionGate] possible_move drift=%.3f confirm=%d/%d action=WAIT",
+                drift_from_anchor, moving_confirm_frames_, motion_gate_moving_confirm_frames_);
+            return false;
+        }
+
+        // 确认移动，恢复提交
+        is_stationary_ = false;
+        stationary_anchor_valid_ = false;
+        moving_confirm_frames_ = 0;
+
+        ROS_INFO("[MotionGate] Crane moving | drift=%.3f confirmed=%d | resuming map commit",
+                 drift_from_anchor, motion_gate_moving_confirm_frames_);
+    }
+
+    // 正常移动检测
+    if (moved_enough && time_elapsed_enough && !is_stationary_) {
+        last_keyframe_pose_for_gate_ = current_pose;
+        last_keyframe_time_for_gate_ = current_time;
+        moved_frame_count_++;
+        return true;
     }
 
     return false;
@@ -5197,6 +5231,102 @@ static SimpleGroundModel buildGroundModelFromGroundBase(
 }
 
 // ============================================================================
+// P0: DuplicateFrameGuard 内容指纹
+// ============================================================================
+
+NdtSlamNode::FrameSignature NdtSlamNode::computeFrameSignature(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    const ros::Time& stamp,
+    const Sophus::SE3d& pose)
+{
+    FrameSignature sig;
+    sig.cloud_size = cloud ? cloud->size() : 0;
+    sig.stamp = stamp.toSec();
+    sig.pose_xyz = pose.translation();
+
+    if (!cloud || cloud->empty()) {
+        return sig;
+    }
+
+    const size_t n = cloud->size();
+
+    auto toVec = [](const pcl::PointXYZ& p) {
+        return Eigen::Vector3f(p.x, p.y, p.z);
+    };
+
+    sig.first_pt = toVec(cloud->points.front());
+    sig.mid_pt = toVec(cloud->points[n / 2]);
+    sig.last_pt = toVec(cloud->points.back());
+
+    // 采样计算 centroid
+    Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+    int cnt = 0;
+    const size_t step = std::max<size_t>(1, n / 64);
+
+    for (size_t i = 0; i < n; i += step) {
+        const auto& p = cloud->points[i];
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+            continue;
+        }
+        sum += Eigen::Vector3f(p.x, p.y, p.z);
+        cnt++;
+    }
+
+    if (cnt > 0) {
+        sig.centroid_sample = sum / static_cast<float>(cnt);
+    }
+
+    // 计算轻量 hash
+    auto quant = [](float v) -> int64_t {
+        return static_cast<int64_t>(std::round(v * 1000.0f));  // 1mm quant
+    };
+
+    uint64_t h = 1469598103934665603ULL;  // FNV-1a offset basis
+    auto mix = [&](int64_t x) {
+        h ^= static_cast<uint64_t>(x + 0x9e3779b97f4a7c15ULL);
+        h *= 1099511628211ULL;  // FNV-1a prime
+    };
+
+    mix(static_cast<int64_t>(sig.cloud_size));
+    for (const auto& v : {sig.first_pt, sig.mid_pt, sig.last_pt, sig.centroid_sample}) {
+        mix(quant(v.x()));
+        mix(quant(v.y()));
+        mix(quant(v.z()));
+    }
+
+    sig.hash = h;
+    return sig;
+}
+
+bool NdtSlamNode::isDuplicateFrameBySignature(const FrameSignature& cur) const
+{
+    if (last_frame_signature_.cloud_size == 0) {
+        return false;
+    }
+
+    const bool same_stamp = cur.stamp <= last_processed_stamp_ + 1e-6;
+
+    const bool same_cloud =
+        cur.cloud_size == last_frame_signature_.cloud_size &&
+        cur.hash == last_frame_signature_.hash;
+
+    const bool same_pose =
+        (cur.pose_xyz - last_frame_signature_.pose_xyz).norm() < 1e-4;
+
+    // 情况 A：时间戳重复
+    if (same_stamp) {
+        return true;
+    }
+
+    // 情况 B：时间戳变化，但点云内容和 pose 基本相同
+    if (same_cloud && same_pose) {
+        return true;
+    }
+
+    return false;
+}
+
+// ============================================================================
 // P0-1: 新的关键帧提交流程
 // 正确顺序：ground/objects 分割 → CargoBoxV2 → 吊货删除 → HumanFilter → MapCommit
 // ============================================================================
@@ -5207,13 +5337,26 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     const ros::Time& stamp)
 {
     // ------------------------------------------------------------------------
-    // 0. 基础准备 + DuplicateFrameGuard + MotionGate
+    // 0. 基础准备 + DuplicateFrameGuard（内容指纹）+ MotionGate
     // ------------------------------------------------------------------------
     if (!cloud || cloud->empty()) {
         ROS_WARN_THROTTLE(1.0, "[KeyFrameCommit] empty cloud, skip");
         return;
     }
 
+    // P0: DuplicateFrameGuard 使用内容指纹（在 NDT 之前拦截）
+    auto sig = computeFrameSignature(cloud, stamp, pose);
+
+    if (isDuplicateFrameBySignature(sig)) {
+        skipped_duplicate_frames_++;
+        ROS_WARN_THROTTLE(2.0,
+            "[DuplicateFrameGuard] skip duplicate frame stamp=%.3f cloud_size=%zu hash=%lu skipped=%lu",
+            sig.stamp, sig.cloud_size, sig.hash, skipped_duplicate_frames_);
+        return;
+    }
+
+    last_frame_signature_ = sig;
+    last_processed_stamp_ = stamp.toSec();
     frame_seq_++;
 
     // [FrameStart] 日志（THROTTLE 避免刷屏）
@@ -5221,14 +5364,6 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         "[FrameStart] frame=%lu stamp=%.3f raw=%zu pose=(%.2f,%.2f,%.2f)",
         frame_seq_, stamp.toSec(), cloud->size(),
         pose.translation().x(), pose.translation().y(), pose.translation().z());
-
-    // DuplicateFrameGuard：防止重复帧
-    if (stamp.toSec() <= last_processed_stamp_) {
-        ROS_WARN_THROTTLE(1.0,
-            "[DuplicateFrameGuard] duplicate_or_old_stamp stamp=%.3f last=%.3f action=SKIP_COMMIT",
-            stamp.toSec(), last_processed_stamp_);
-        return;
-    }
 
     // MotionGate：静止时不跑完整 pipeline
     bool should_commit = true;
@@ -5240,8 +5375,6 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         ROS_DEBUG("[MotionGate] frame=%lu stationary, skip commit pipeline", frame_seq_);
         return;
     }
-
-    last_processed_stamp_ = stamp.toSec();
 
     const Eigen::Matrix4d T_map_base = pose.matrix();
 
@@ -5530,6 +5663,9 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         }
 
         publishPayloadTrackInfo(stamp);
+
+        // P1: 清理过期的 SUSPENDED_STATIC track
+        payload_tracker_.cleanupStaleSuspendedStaticTracks(stamp.toSec());
     }
 
     // ------------------------------------------------------------------------

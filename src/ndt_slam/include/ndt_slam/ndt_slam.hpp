@@ -319,9 +319,31 @@ private:
     PoseGraphOptimizer pose_graph_optimizer_;
     int loop_detection_interval_ = 10;
     int keyframe_count_ = 0;
-    uint64_t frame_seq_ = 0;  // 帧序号（每帧递增，不管是否提交）
-    double last_processed_stamp_ = 0.0;  // 上次处理的时间戳（防重复）
-    size_t last_clean_points_ = 0;  // 上次 CleanMap 点数
+
+    // P0: DuplicateFrameGuard 内容指纹
+    struct FrameSignature {
+        size_t cloud_size = 0;
+        double stamp = 0.0;
+        Eigen::Vector3d pose_xyz = Eigen::Vector3d::Zero();
+        Eigen::Vector3f first_pt = Eigen::Vector3f::Zero();
+        Eigen::Vector3f mid_pt = Eigen::Vector3f::Zero();
+        Eigen::Vector3f last_pt = Eigen::Vector3f::Zero();
+        Eigen::Vector3f centroid_sample = Eigen::Vector3f::Zero();
+        uint64_t hash = 0;
+    };
+
+    FrameSignature last_frame_signature_;
+    uint64_t frame_seq_ = 0;
+    double last_processed_stamp_ = -1.0;
+    uint64_t skipped_duplicate_frames_ = 0;
+    size_t last_clean_points_ = 0;
+
+    FrameSignature computeFrameSignature(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const ros::Time& stamp,
+        const Sophus::SE3d& pose);
+    bool isDuplicateFrameBySignature(const FrameSignature& cur) const;
+
     pcl::PointCloud<pcl::PointXYZ>::Ptr last_cloud_;
     Sophus::SE3d relocalized_pose_;
     ros::Timer timer_;
@@ -470,6 +492,17 @@ private:
     bool is_stationary_ = false;
     int stationary_frame_count_ = 0;
     int moved_frame_count_ = 0;
+
+    // P1: MotionGate stationary anchor（防止静止漂移误触发）
+    bool stationary_anchor_valid_ = false;
+    Sophus::SE3d stationary_anchor_pose_;
+    double stationary_start_time_ = 0.0;
+    int moving_confirm_frames_ = 0;
+    double motion_gate_stationary_drift_ignore_radius_ = 0.60;
+    int motion_gate_moving_confirm_frames_ = 2;
+    double motion_gate_moving_min_velocity_ = 0.08;
+    double last_frame_stamp_for_gate_ = 0.0;
+    Eigen::Vector3d last_frame_pos_for_gate_ = Eigen::Vector3d::Zero();
 
     // 关键帧 active window
     int max_active_keyframes_ = 80;
