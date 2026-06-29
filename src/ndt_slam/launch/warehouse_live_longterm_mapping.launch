@@ -5,6 +5,7 @@
     <!-- 参数 -->
     <arg name="use_sim_time" default="false"/>
     <arg name="use_rviz" default="true"/>
+    <arg name="enable_cargo_core_box" default="true"/>
 
     <!-- 设置使用真实时间（现场必须） -->
     <param name="/use_sim_time" value="$(arg use_sim_time)"/>
@@ -19,9 +20,19 @@
         <rosparam command="load" file="$(find ndt_slam)/config/merger_params.yaml"/>
     </node>
 
-    <!-- 雷达到 base_link 的 TF（唯一名字避免冲突） -->
+    <!-- 雷达到 base_link 的 TF -->
     <node name="base_link_to_rslidar_tf" pkg="tf" type="static_transform_publisher"
           args="0 0 0 0 0 0 base_link rslidar 100"/>
+
+    <!-- Cargo core box visualizer: 只显示实际物体 core box -->
+    <node if="$(arg enable_cargo_core_box)"
+          pkg="ndt_slam"
+          type="cargo_forbidden_zone_node"
+          name="cargo_core_box_visualizer"
+          output="screen">
+        <param name="config_file" value="$(find ndt_slam)/config/cargo_core_box.yaml"/>
+        <param name="core_box_only" value="true"/>
+    </node>
 
     <!-- RViz 可视化（可选） -->
     <group if="$(arg use_rviz)">

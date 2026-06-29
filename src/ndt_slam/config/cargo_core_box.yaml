@@ -1,0 +1,60 @@
+# Cargo visualizer in core-box-only mode.
+# Only actual detected cargo core box is published.
+# Normal建图不需要单独启动 cargo_forbidden_zone.launch
+
+frame:
+  fixed_frame: "map"
+  marker_frame: "base_link"
+
+input:
+  payload_track_info_topic: "/payload_track_info"
+
+output:
+  core_bbox_topic: "/cargo_core_bbox_marker"
+
+mode:
+  core_box_only: true
+
+publish:
+  core_bbox: true
+  status_text: false
+
+  raw_bbox: false
+  stable_bbox: false
+  remove_bbox: false
+  forbidden_zone: false
+  forbidden_overlay: false
+  unknown_bbox: false
+  candidate_cloud: false
+  payload_cloud: false
+
+display_gate:
+  require_confirmed_state: true
+  require_core_box_source: true
+  require_active_remove_recent: true
+  require_locked_track: true
+
+  allow_states:
+    - "SUSPENDED_MOVING"
+    - "SUSPENDED_STATIC"
+    - "DYNAMIC_PAYLOAD"
+
+  min_observed_frames: 5
+  min_core_points: 30
+  max_lost_time: 0.5
+
+display_filter:
+  enabled: true
+  center_alpha_moving: 0.25
+  center_alpha_static: 0.12
+  size_alpha: 0.08
+
+  max_center_jump_per_update: 0.35
+  max_size_change_ratio_per_update: 0.20
+
+marker:
+  type: "LINE_LIST"
+  color: "orange"
+  line_width: 0.05
+  lifetime: 0.30
+  delete_when_invalid: true

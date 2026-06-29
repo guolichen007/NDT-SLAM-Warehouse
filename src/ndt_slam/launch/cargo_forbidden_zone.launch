@@ -1,12 +1,14 @@
 <launch>
-  <!-- 吊货禁行区节点 -->
+  <!-- 调试入口：单独启动 cargo core box visualizer -->
+  <!-- 正常建图不需要启动本 launch，warehouse_live_longterm_mapping.launch 已自动启动 -->
   <arg name="config_file"
-       default="$(find ndt_slam)/config/cargo_forbidden_zone.yaml" />
+       default="$(find ndt_slam)/config/cargo_core_box.yaml"/>
 
   <node pkg="ndt_slam"
         type="cargo_forbidden_zone_node"
-        name="cargo_forbidden_zone_node"
+        name="cargo_core_box_visualizer_standalone"
         output="screen">
-    <param name="config_file" value="$(arg config_file)" />
+    <param name="config_file" value="$(arg config_file)"/>
+    <param name="core_box_only" value="true"/>
   </node>
 </launch>

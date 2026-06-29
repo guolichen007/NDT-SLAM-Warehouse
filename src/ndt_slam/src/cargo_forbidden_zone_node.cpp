@@ -201,6 +201,30 @@ private:
     int observed_frames_ = 0;  // v8: 用于 marker gate
     ros::Time last_suspended_time_;
 
+    // v11: core_box_only 模式
+    bool core_box_only_ = true;
+    bool publish_core_bbox_ = true;
+    bool publish_remove_bbox_ = false;
+    bool publish_forbidden_zone_ = false;
+    std::string marker_frame_ = "base_link";
+    int min_display_observed_frames_ = 5;
+    int min_display_core_points_ = 30;
+
+    // v11: 显示框平滑
+    struct DisplayBoxState {
+        bool valid = false;
+        int track_id = -1;
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f size = Eigen::Vector3f::Zero();
+        ros::Time last_update;
+    };
+    DisplayBoxState display_box_;
+    double display_center_alpha_moving_ = 0.25;
+    double display_center_alpha_static_ = 0.12;
+    double display_size_alpha_ = 0.08;
+    double max_center_jump_per_update_ = 0.35;
+    double max_size_change_ratio_per_update_ = 0.20;
+
     // 当前货物信息
     CargoInfo cargo_;
 
@@ -336,6 +360,50 @@ private:
                 publish_suspended_cloud_ = vis["publish_suspended_cloud"].as<bool>(true);
             }
 
+            // v11: core_box_only 模式配置
+            pnh_.param<bool>("core_box_only", core_box_only_, true);
+            if (root["mode"]) {
+                core_box_only_ = root["mode"]["core_box_only"].as<bool>(core_box_only_);
+            }
+            if (root["frame"]) {
+                marker_frame_ = root["frame"]["marker_frame"].as<std::string>("base_link");
+            }
+            if (root["display_gate"]) {
+                auto dg = root["display_gate"];
+                min_display_observed_frames_ = dg["min_observed_frames"].as<int>(5);
+                min_display_core_points_ = dg["min_core_points"].as<int>(30);
+            }
+            if (root["display_filter"]) {
+                auto df = root["display_filter"];
+                display_center_alpha_moving_ = df["center_alpha_moving"].as<double>(0.25);
+                display_center_alpha_static_ = df["center_alpha_static"].as<double>(0.12);
+                display_size_alpha_ = df["size_alpha"].as<double>(0.08);
+                max_center_jump_per_update_ = df["max_center_jump_per_update"].as<double>(0.35);
+                max_size_change_ratio_per_update_ = df["max_size_change_ratio_per_update"].as<double>(0.20);
+            }
+
+            // v11: core_box_only 模式强制覆盖
+            if (core_box_only_) {
+                publish_core_bbox_ = true;
+                publish_raw_bbox_ = false;
+                publish_stable_bbox_ = false;
+                publish_remove_bbox_ = false;
+                publish_forbidden_zone_ = false;
+                publish_status_text_ = false;
+                publish_candidate_cloud_ = false;
+                publish_suspended_cloud_ = false;
+            }
+
+            ROS_INFO("[CargoCoreBox] mode=%s marker_frame=%s",
+                     core_box_only_ ? "core_box_only" : "full",
+                     marker_frame_.c_str());
+            ROS_INFO("[CargoMarkerConfig] core=%d raw=%d stable=%d remove=%d forbidden=%d text=%d",
+                     publish_core_bbox_ ? 1 : 0,
+                     publish_raw_bbox_ ? 1 : 0,
+                     publish_stable_bbox_ ? 1 : 0,
+                     publish_remove_bbox_ ? 1 : 0,
+                     publish_forbidden_zone_ ? 1 : 0,
+                     publish_status_text_ ? 1 : 0);
             ROS_INFO("[CargoForbiddenZone] Config loaded from %s", config_file.c_str());
         } catch (const std::exception& e) {
             ROS_ERROR("[CargoForbiddenZone] Config error: %s", e.what());
@@ -808,47 +876,95 @@ private:
         // TODO: 从当前帧点云中提取吊货点云并发布
     }
 
-    // P0.5 新增：发布三层 marker
+    // v11: 发布 core box marker（core_box_only 模式）
     void publishThreeLayerMarkers(const ros::Time& stamp) {
-        // v8: Marker gate - 只有 confirmed 状态才显示
-        bool can_publish = cargo_.valid &&
-                           cargo_state_ != PayloadSemanticState::UNKNOWN &&
-                           cargo_state_ != PayloadSemanticState::LOST &&
-                           observed_frames_ >= 3;  // 至少 3 帧才显示
+        // v11: Marker gate - 严格条件才显示
+        bool state_ok = cargo_.valid &&
+                        (cargo_state_ == PayloadSemanticState::SUSPENDED_MOVING ||
+                         cargo_state_ == PayloadSemanticState::SUSPENDED_STATIC);
+
+        bool can_publish = state_ok &&
+                           observed_frames_ >= min_display_observed_frames_ &&
+                           cargo_.point_count >= min_display_core_points_;
+
+        std::string reason = "OK";
+        if (!cargo_.valid) reason = "INVALID";
+        else if (!state_ok) reason = "STATE_NOT_CONFIRMED";
+        else if (observed_frames_ < min_display_observed_frames_) reason = "LOW_OBSERVED_FRAMES";
+        else if (cargo_.point_count < min_display_core_points_) reason = "LOW_CORE_POINTS";
 
         if (!can_publish) {
             // 发布 DELETE 清理旧 marker
             visualization_msgs::MarkerArray markers;
             visualization_msgs::Marker marker;
             marker.header.stamp = ros::Time(0);
-            marker.header.frame_id = map_frame_;
+            marker.header.frame_id = marker_frame_;
             marker.action = visualization_msgs::Marker::DELETEALL;
             markers.markers.push_back(marker);
             core_bbox_marker_pub_.publish(markers);
-            remove_bbox_marker_pub_.publish(markers);
-            forbidden_zone_marker_pub_.publish(markers);
 
             ROS_INFO_THROTTLE(1.0,
-                "[CargoMarkerGate] publish=0 state=%d observed=%d valid=%d reason=%s",
+                "[CargoCoreDisplayGate] publish=0 track=%d state=%d observed=%d core_pts=%d reason=%s",
+                current_track_id_,
                 static_cast<int>(cargo_state_),
                 observed_frames_,
-                cargo_.valid ? 1 : 0,
-                !cargo_.valid ? "INVALID" : (cargo_state_ == PayloadSemanticState::UNKNOWN ? "UNKNOWN" : "LOST"));
+                cargo_.point_count,
+                reason.c_str());
+
+            display_box_.valid = false;
             return;
         }
 
-        ROS_INFO_THROTTLE(1.0,
-            "[CargoMarkerGate] publish=1 state=%d observed=%d",
-            static_cast<int>(cargo_state_),
-            observed_frames_);
+        // v11: 使用 display_box_ 平滑显示
+        Eigen::Vector3f new_center = cargo_.centroid;
+        Eigen::Vector3f new_size = stable_size_;
 
-        // 1. Core Box：真实货物框，绿色线框（LINE_LIST）
-        {
+        if (!display_box_.valid || display_box_.track_id != current_track_id_) {
+            display_box_.valid = true;
+            display_box_.track_id = current_track_id_;
+            display_box_.center_base = new_center;
+            display_box_.size = new_size;
+            display_box_.last_update = stamp;
+        } else {
+            // 检查跳变
+            float center_jump = (new_center - display_box_.center_base).norm();
+            float size_ratio = std::max({
+                new_size.x() / std::max(display_box_.size.x(), 0.1f),
+                new_size.y() / std::max(display_box_.size.y(), 0.1f),
+                new_size.z() / std::max(display_box_.size.z(), 0.1f)});
+
+            if (center_jump > max_center_jump_per_update_) {
+                ROS_WARN_THROTTLE(1.0,
+                    "[CargoDisplayReject] reason=CENTER_JUMP track=%d jump=%.2f limit=%.2f",
+                    current_track_id_, center_jump, max_center_jump_per_update_);
+            } else if (size_ratio > 1.0 + max_size_change_ratio_per_update_) {
+                ROS_WARN_THROTTLE(1.0,
+                    "[CargoDisplayReject] reason=SIZE_JUMP track=%d ratio=%.2f limit=%.2f",
+                    current_track_id_, size_ratio, 1.0 + max_size_change_ratio_per_update_);
+            } else {
+                // 平滑更新
+                bool crane_stopped = false;  // TODO: 从 MotionGate 获取
+                float alpha_center = crane_stopped ? display_center_alpha_static_ : display_center_alpha_moving_;
+                display_box_.center_base = alpha_center * new_center + (1.0f - alpha_center) * display_box_.center_base;
+                display_box_.size = display_size_alpha_ * new_size + (1.0f - display_size_alpha_) * display_box_.size;
+            }
+            display_box_.last_update = stamp;
+        }
+
+        ROS_INFO_THROTTLE(1.0,
+            "[CargoCoreDisplayGate] publish=1 track=%d state=%d observed=%d core_pts=%d",
+            current_track_id_,
+            static_cast<int>(cargo_state_),
+            observed_frames_,
+            cargo_.point_count);
+
+        // v11: Core Box - base_link 橙色线框（LINE_LIST）
+        if (publish_core_bbox_ && display_box_.valid) {
             visualization_msgs::MarkerArray markers;
             visualization_msgs::Marker marker;
             marker.header.stamp = ros::Time(0);
-            marker.header.frame_id = map_frame_;
-            marker.ns = "cargo_core_bbox";
+            marker.header.frame_id = marker_frame_;  // v11: base_link
+            marker.ns = "cargo_core_bbox_only_v11";
             marker.id = 0;
             marker.type = visualization_msgs::Marker::LINE_LIST;
             marker.action = visualization_msgs::Marker::ADD;
@@ -858,20 +974,20 @@ private:
             // 线宽
             marker.scale.x = 0.05;
 
-            // 绿色线框
-            marker.color.r = 0.0;
-            marker.color.g = 1.0;
+            // v11: 橙色线框
+            marker.color.r = 1.0;
+            marker.color.g = 0.55;
             marker.color.b = 0.0;
             marker.color.a = 1.0;
-            marker.lifetime = ros::Duration(0.5);
+            marker.lifetime = ros::Duration(0.30);
 
-            // 计算 box 的 8 个角点
-            float cx = stable_centroid_.x();
-            float cy = stable_centroid_.y();
-            float cz = stable_centroid_.z();
-            float hx = stable_size_.x() / 2.0f;
-            float hy = stable_size_.y() / 2.0f;
-            float hz = stable_size_.z() / 2.0f;
+            // 使用 display_box_ 平滑后的值
+            float cx = display_box_.center_base.x();
+            float cy = display_box_.center_base.y();
+            float cz = display_box_.center_base.z();
+            float hx = display_box_.size.x() / 2.0f;
+            float hy = display_box_.size.y() / 2.0f;
+            float hz = display_box_.size.z() / 2.0f;
 
             // 最小尺寸保护
             hx = std::max(hx, 0.15f);
@@ -910,78 +1026,7 @@ private:
             core_bbox_marker_pub_.publish(markers);
         }
 
-        // 2. Remove Box：删除用框，橙色半透明
-        {
-            visualization_msgs::MarkerArray markers;
-            visualization_msgs::Marker marker;
-            marker.header.stamp = ros::Time(0);
-            marker.header.frame_id = map_frame_;
-            marker.ns = "cargo_remove_bbox";
-            marker.id = 0;
-            marker.type = visualization_msgs::Marker::CUBE;
-            marker.action = visualization_msgs::Marker::ADD;
-
-            marker.pose.position.x = stable_centroid_.x();
-            marker.pose.position.y = stable_centroid_.y();
-            marker.pose.position.z = stable_centroid_.z();
-            marker.pose.orientation.w = 1.0;
-
-            // 扩展框
-            marker.scale.x = stable_size_.x() + 2 * 0.25;  // remove_expand_xy
-            marker.scale.y = stable_size_.y() + 2 * 0.25;
-            marker.scale.z = stable_size_.z() + 0.05 + 0.20;  // z_down + z_up
-
-            // 最小尺寸保护
-            marker.scale.x = std::max(marker.scale.x, 0.50);
-            marker.scale.y = std::max(marker.scale.y, 0.50);
-            marker.scale.z = std::max(marker.scale.z, 0.50);
-
-            // 橙色半透明
-            marker.color.r = 1.0;
-            marker.color.g = 0.5;
-            marker.color.b = 0.0;
-            marker.color.a = 0.3;
-            marker.lifetime = ros::Duration(0.5);
-
-            markers.markers.push_back(marker);
-            remove_bbox_marker_pub_.publish(markers);
-        }
-
-        // 3. Forbidden Zone：禁行区，红色地面投影
-        {
-            visualization_msgs::MarkerArray markers;
-            visualization_msgs::Marker marker;
-            marker.header.stamp = ros::Time(0);
-            marker.header.frame_id = map_frame_;
-            marker.ns = "cargo_forbidden_zone";
-            marker.id = 0;
-            marker.type = visualization_msgs::Marker::CUBE;
-            marker.action = visualization_msgs::Marker::ADD;
-
-            marker.pose.position.x = stable_centroid_.x();
-            marker.pose.position.y = stable_centroid_.y();
-            marker.pose.position.z = 0.0;  // 地面
-            marker.pose.orientation.w = 1.0;
-
-            // 扩展框，投影到地面
-            marker.scale.x = stable_size_.x() + 2 * 0.50;  // forbidden_expand_xy
-            marker.scale.y = stable_size_.y() + 2 * 0.50;
-            marker.scale.z = 0.1;  // 薄片
-
-            // 最小尺寸保护
-            marker.scale.x = std::max(marker.scale.x, 1.0);
-            marker.scale.y = std::max(marker.scale.y, 1.0);
-
-            // 红色半透明
-            marker.color.r = 1.0;
-            marker.color.g = 0.0;
-            marker.color.b = 0.0;
-            marker.color.a = 0.2;
-            marker.lifetime = ros::Duration(0.5);
-
-            markers.markers.push_back(marker);
-            forbidden_zone_marker_pub_.publish(markers);
-        }
+        // v11: core_box_only 模式下不发布 remove/forbidden zone
     }
 };
 
