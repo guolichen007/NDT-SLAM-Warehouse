@@ -5207,26 +5207,46 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     const ros::Time& stamp)
 {
     // ------------------------------------------------------------------------
-    // 0. 基础准备
+    // 0. 基础准备 + DuplicateFrameGuard + MotionGate
     // ------------------------------------------------------------------------
     if (!cloud || cloud->empty()) {
         ROS_WARN_THROTTLE(1.0, "[KeyFrameCommit] empty cloud, skip");
         return;
     }
 
+    frame_seq_++;
+
+    // [FrameStart] 日志（THROTTLE 避免刷屏）
+    ROS_INFO_THROTTLE(1.0,
+        "[FrameStart] frame=%lu stamp=%.3f raw=%zu pose=(%.2f,%.2f,%.2f)",
+        frame_seq_, stamp.toSec(), cloud->size(),
+        pose.translation().x(), pose.translation().y(), pose.translation().z());
+
+    // DuplicateFrameGuard：防止重复帧
+    if (stamp.toSec() <= last_processed_stamp_) {
+        ROS_WARN_THROTTLE(1.0,
+            "[DuplicateFrameGuard] duplicate_or_old_stamp stamp=%.3f last=%.3f action=SKIP_COMMIT",
+            stamp.toSec(), last_processed_stamp_);
+        return;
+    }
+
+    // MotionGate：静止时不跑完整 pipeline
+    bool should_commit = true;
+    if (motion_gate_enabled_) {
+        should_commit = shouldCommitKeyframe(pose, stamp);
+    }
+
+    if (!should_commit) {
+        ROS_DEBUG("[MotionGate] frame=%lu stationary, skip commit pipeline", frame_seq_);
+        return;
+    }
+
+    last_processed_stamp_ = stamp.toSec();
+
     const Eigen::Matrix4d T_map_base = pose.matrix();
 
     // 保存 last_cloud
     *last_cloud_ = *cloud;
-
-    // [CommitStart] 日志
-    ROS_INFO("[CommitStart] seq=%d stamp=%.3f raw=%zu pose=(%.2f,%.2f,%.2f)",
-             keyframe_count_ + 1,
-             stamp.toSec(),
-             cloud->size(),
-             pose.translation().x(),
-             pose.translation().y(),
-             pose.translation().z());
 
     // ------------------------------------------------------------------------
     // 1. base_link 坐标系下做 ground / objects 分割
@@ -5241,12 +5261,12 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         *objects_base = tmp_objects;
     }
 
-    // [GroundSplit] 日志
-    ROS_INFO("[GroundSplit] seq=%d ground=%zu objects=%zu total=%zu",
-             keyframe_count_ + 1,
-             ground_base->size(),
-             objects_base->size(),
-             ground_base->size() + objects_base->size());
+    // [GroundSplit] 日志（DEBUG）
+    ROS_DEBUG("[GroundSplit] seq=%d ground=%zu objects=%zu total=%zu",
+              keyframe_count_ + 1,
+              ground_base->size(),
+              objects_base->size(),
+              ground_base->size() + objects_base->size());
 
     // ------------------------------------------------------------------------
     // 2. BasePayloadChannelFilter：提取吊货候选
@@ -5266,13 +5286,13 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         objects_channel_safe = objects_base;
     }
 
-    // [ChannelFilter] 日志
-    ROS_INFO("[ChannelFilter] seq=%d enabled=%d safe=%zu payload_candidates=%zu raw_objects=%zu",
-             keyframe_count_ + 1,
-             channel_filter_config_.enabled ? 1 : 0,
-             objects_channel_safe->size(),
-             payload_candidates->size(),
-             objects_base->size());
+    // [ChannelFilter] 日志（DEBUG）
+    ROS_DEBUG("[ChannelFilter] seq=%d enabled=%d safe=%zu payload_candidates=%zu raw_objects=%zu",
+              keyframe_count_ + 1,
+              channel_filter_config_.enabled ? 1 : 0,
+              objects_channel_safe->size(),
+              payload_candidates->size(),
+              objects_base->size());
 
     // ------------------------------------------------------------------------
     // 3. CargoBoxV2 + PayloadTracker（必须在 MapCommit 前）
@@ -5313,15 +5333,12 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                     prev_core_box);
 
                 if (!box_valid) {
-                    // [CargoBoxReject] 日志
-                    ROS_WARN("[CargoBoxReject] seq=%d track=%d reason=%d action=%s "
-                             "old_box_used_for_marker=%d old_box_used_for_remove=%d",
-                             keyframe_count_ + 1,
-                             track.track_id,
-                             static_cast<int>(core_box.reject_reason),
-                             "DELETE_OR_PREDICT_ONLY",
-                             0,
-                             0);
+                    // [CargoBoxReject] 日志（DEBUG）
+                    ROS_DEBUG("[CargoBoxReject] seq=%d track=%d reason=%d action=%s",
+                              keyframe_count_ + 1,
+                              track.track_id,
+                              static_cast<int>(core_box.reject_reason),
+                              "DELETE_OR_PREDICT_ONLY");
                     continue;
                 }
 
@@ -5341,26 +5358,58 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                         size_jump = true;
                         track.size_jump_count++;
 
-                        // [CargoBoxV2SizeGate] 日志
-                        ROS_WARN("[CargoBoxV2SizeGate] seq=%d track=%d growth=%.2f threshold=%.2f count=%d action=%s",
-                                 keyframe_count_ + 1,
-                                 track.track_id,
-                                 max_growth,
-                                 cargo_box_estimator_config_.max_size_growth_ratio,
-                                 track.size_jump_count,
-                                 "CENTER_ONLY_NO_REMOVE");
+                        // [CargoBoxV2SizeGate] 日志（DEBUG）
+                        ROS_DEBUG("[CargoBoxV2SizeGate] seq=%d track=%d growth=%.2f threshold=%.2f count=%d action=%s",
+                                  keyframe_count_ + 1,
+                                  track.track_id,
+                                  max_growth,
+                                  cargo_box_estimator_config_.max_size_growth_ratio,
+                                  track.size_jump_count,
+                                  "CENTER_ONLY_NO_REMOVE");
 
                         // 软拒绝：更新 center，不更新 size，不用于删除
                         if (track.has_last_core_box) {
                             track.last_core_box.center = core_box.center;
                         }
 
-                        // 连续 3 帧一致后允许 reinit size
-                        if (track.size_jump_count >= 3) {
-                            ROS_INFO("[CargoBoxV2] track=%d reinit size after %d frames, size=(%.2f,%.2f,%.2f)",
-                                     track.track_id, track.size_jump_count,
-                                     core_box.size.x(), core_box.size.y(), core_box.size.z());
+                        // P4: 严格 reinit 条件（禁止无条件 reinit）
+                        bool can_reinit = false;
+                        std::string reinit_reason = "conditions_not_met";
 
+                        if (track.size_jump_count >= 3 &&
+                            core_box.suspended_points >= cargo_box_estimator_config_.min_confirm_core_points &&
+                            (track.state == TrackState::SUSPENDED_MOVING ||
+                             track.state == TrackState::DYNAMIC_PAYLOAD)) {
+                            // 检查 size 是否在合理范围内
+                            if (track.has_last_core_box) {
+                                float max_ratio = std::max({
+                                    core_box.size.x() / std::max(track.last_core_box.size.x(), 0.1f),
+                                    core_box.size.y() / std::max(track.last_core_box.size.y(), 0.1f),
+                                    core_box.size.z() / std::max(track.last_core_box.size.z(), 0.1f)});
+                                if (max_ratio <= 1.5f) {
+                                    can_reinit = true;
+                                    reinit_reason = "accepted";
+                                } else {
+                                    reinit_reason = "size_too_large";
+                                }
+                            } else {
+                                reinit_reason = "no_previous_box";
+                            }
+                        } else if (track.state == TrackState::SUSPENDED_STATIC) {
+                            reinit_reason = "suspended_static_no_reinit";
+                        }
+
+                        // [CargoBoxReinitCheck] 日志（INFO，关键决策）
+                        ROS_INFO("[CargoBoxReinitCheck] kf=%d track=%d count=%d core_pts=%d state=%d accepted=%d reason=%s",
+                                 keyframe_count_ + 1,
+                                 track.track_id,
+                                 track.size_jump_count,
+                                 core_box.suspended_points,
+                                 static_cast<int>(track.state),
+                                 can_reinit ? 1 : 0,
+                                 reinit_reason.c_str());
+
+                        if (can_reinit) {
                             track.last_core_box = core_box;
                             track.last_core_size = core_box.size;
                             track.has_last_core_box = true;
@@ -5369,7 +5418,8 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
 
                             // reinit 后允许用于删除（base_link 坐标系）
                             if (track.state == TrackState::DYNAMIC_PAYLOAD ||
-                                track.state == TrackState::SUSPENDED_MOVING) {
+                                track.state == TrackState::SUSPENDED_MOVING ||
+                                track.state == TrackState::SUSPENDED_STATIC) {
                                 active_cargo_remove_boxes_base.push_back(remove_box);
                             }
                         }
@@ -5384,51 +5434,33 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                     track.has_last_size = true;
                     track.size_jump_count = 0;
 
-                    // [CargoBoxV2] 日志（要求的格式）
-                    ROS_INFO("[CargoBoxV2] seq=%d track=%d valid=%d core_pts=%d bottom_hag=%.2f "
-                             "size=(%.2f,%.2f,%.2f) remove_size=(%.2f,%.2f,%.2f) reject=%d",
-                             keyframe_count_ + 1,
-                             track.track_id,
-                             1,  // valid
-                             core_box.suspended_points,
-                             core_box.bottom_hag,
-                             core_box.size.x(), core_box.size.y(), core_box.size.z(),
-                             remove_box.size.x(), remove_box.size.y(), remove_box.size.z(),
-                             static_cast<int>(core_box.reject_reason));
+                    // [CargoBoxV2] 日志（DEBUG）
+                    ROS_DEBUG("[CargoBoxV2] seq=%d track=%d valid=%d core_pts=%d bottom_hag=%.2f "
+                              "size=(%.2f,%.2f,%.2f) remove_size=(%.2f,%.2f,%.2f)",
+                              keyframe_count_ + 1,
+                              track.track_id,
+                              1,
+                              core_box.suspended_points,
+                              core_box.bottom_hag,
+                              core_box.size.x(), core_box.size.y(), core_box.size.z(),
+                              remove_box.size.x(), remove_box.size.y(), remove_box.size.z());
 
-                    // [CargoBoxFix] 日志
-                    ROS_INFO("[CargoBoxFix] seq=%d track=%d valid=%d source=%s state=%d "
-                             "core_size=(%.2f,%.2f,%.2f) remove_size=(%.2f,%.2f,%.2f) "
-                             "bottom_hag=%.2f core_pts=%d marker_topic=%s",
+                    // P3: 当前帧删除条件（包含 SUSPENDED_STATIC）
+                    bool should_use_for_remove =
+                        track.has_last_core_box &&
+                        (track.state == TrackState::DYNAMIC_PAYLOAD ||
+                         track.state == TrackState::SUSPENDED_MOVING ||
+                         track.state == TrackState::SUSPENDED_STATIC);
+
+                    // [CargoActiveBox] 日志（INFO，关键决策）
+                    ROS_INFO("[CargoActiveBox] kf=%d track=%d state=%d has_core=%d active_remove=%d",
                              keyframe_count_ + 1,
                              track.track_id,
-                             track.has_last_core_box ? 1 : 0,
-                             "CORE_BOX",
                              static_cast<int>(track.state),
-                             track.last_core_box.size.x(),
-                             track.last_core_box.size.y(),
-                             track.last_core_box.size.z(),
-                             remove_box.size.x(),
-                             remove_box.size.y(),
-                             remove_box.size.z(),
-                             track.last_core_box.bottom_hag,
-                             track.last_core_box.suspended_points,
-                             "/cargo_core_bbox_marker");
+                             track.has_last_core_box ? 1 : 0,
+                             should_use_for_remove ? 1 : 0);
 
-                    // [CargoRemoveBoxCheck] 日志
-                    ROS_INFO("[CargoRemoveBoxCheck] seq=%d track=%d "
-                             "core_z=[%.2f,%.2f] remove_z=[%.2f,%.2f] "
-                             "z_down_expand=%.2f z_up_expand=%.2f",
-                             keyframe_count_ + 1,
-                             track.track_id,
-                             core_box.bbox_min.z(), core_box.bbox_max.z(),
-                             remove_box.bbox_min.z(), remove_box.bbox_max.z(),
-                             core_box.bbox_min.z() - remove_box.bbox_min.z(),
-                             remove_box.bbox_max.z() - core_box.bbox_max.z());
-
-                    // 只有动态吊货才用于删除（base_link 坐标系）
-                    if (track.state == TrackState::DYNAMIC_PAYLOAD ||
-                        track.state == TrackState::SUSPENDED_MOVING) {
+                    if (should_use_for_remove) {
                         active_cargo_remove_boxes_base.push_back(remove_box);
                     }
 
@@ -5467,13 +5499,14 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
             else if (t.state == TrackState::PENDING_STATIC) pending_count++;
         }
 
-        ROS_INFO("[PayloadTrack] seq=%d tracks=%d dynamic=%d suspended_moving=%d suspended_static=%d pending=%d",
-                 keyframe_count_ + 1,
-                 (int)payload_tracker_.getTracks().size(),
-                 dynamic_count,
-                 suspended_moving_count,
-                 suspended_static_count,
-                 pending_count);
+        // [PayloadTrack] 日志（DEBUG）
+        ROS_DEBUG("[PayloadTrack] seq=%d tracks=%d dynamic=%d suspended_moving=%d suspended_static=%d pending=%d",
+                  keyframe_count_ + 1,
+                  (int)payload_tracker_.getTracks().size(),
+                  dynamic_count,
+                  suspended_moving_count,
+                  suspended_static_count,
+                  pending_count);
 
         // 发布 payload track 调试信息
         static int track_debug_count = 0;
@@ -5587,21 +5620,21 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                     ROS_DEBUG("[DynamicEvent] HumanEvent created: id=%d, points=%zu",
                              event_id, points);
                 } else {
-                    ROS_WARN("[HumanFilter] rejected human event: points=%zu "
-                             "bbox=(%.2f,%.2f,%.2f) - exceeds human geometry limits",
-                             points, length, width, height);
+                    ROS_DEBUG("[HumanFilter] rejected human event: points=%zu "
+                              "bbox=(%.2f,%.2f,%.2f) - exceeds human geometry limits",
+                              points, length, width, height);
                 }
             }
         }
 
-        // [HumanFilter] 日志（要求的格式）
-        ROS_INFO("[HumanFilter] seq=%d input=%zu safe=%zu human_dynamic=%zu human_pending=%zu rejected_as_human=%zu",
-                 keyframe_count_ + 1,
-                 objects_after_cargo_base->size(),
-                 objects_after_human_base->size(),
-                 human_dynamic_base->size(),
-                 human_pending_base->size(),
-                 rejected_as_human_count);
+        // [HumanFilter] 日志（DEBUG）
+        ROS_DEBUG("[HumanFilter] seq=%d input=%zu safe=%zu human_dynamic=%zu human_pending=%zu rejected_as_human=%zu",
+                  keyframe_count_ + 1,
+                  objects_after_cargo_base->size(),
+                  objects_after_human_base->size(),
+                  human_dynamic_base->size(),
+                  human_pending_base->size(),
+                  rejected_as_human_count);
 
         // 发布人体过滤调试话题
         static int hf_debug_count = 0;
@@ -5748,11 +5781,11 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
             bev_observation_count_[bk]++;
         }
 
-        ROS_INFO("[BevObsUpdate] seq=%d object_points=%zu unique_cells=%zu total_obs_cells=%zu",
-                 keyframe_count_,
-                 objects_transformed.size(),
-                 seen_cells.size(),
-                 bev_observation_count_.size());
+        ROS_DEBUG("[BevObsUpdate] seq=%d object_points=%zu unique_cells=%zu total_obs_cells=%zu",
+                  keyframe_count_,
+                  objects_transformed.size(),
+                  seen_cells.size(),
+                  bev_observation_count_.size());
     }
 
     // 长期建图：写入 tiles
@@ -5833,18 +5866,52 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     }
 
     // ------------------------------------------------------------------------
-    // 10. 触发 CleanMap 重建（可选）
+    // 10. 触发 CleanMap 重建
     // ------------------------------------------------------------------------
     static int commit_count = 0;
     commit_count++;
-    if (commit_count % 10 == 0) {
+    // 每 3 次 commit 重建一次 CleanMap（确保测试时能触发）
+    if (commit_count % 3 == 0) {
         rebuildCleanMap();
     }
+    // 始终更新 clean_points
+    last_clean_points_ = objects_clean_map_ ? objects_clean_map_->size() : 0;
 
     // 闭环检测
     if (keyframe_count_ % loop_detection_interval_ == 0) {
         ROS_DEBUG("Performing loop closure detection...");
         processLoopClosure();
+    }
+
+    // [PipelineSummary] 单行摘要（INFO，关键验收点）
+    {
+        int moving = 0, statik = 0, pend = 0;
+        for (const auto& t : payload_tracker_.getTracks()) {
+            if (t.state == TrackState::SUSPENDED_MOVING || t.state == TrackState::DYNAMIC_PAYLOAD) moving++;
+            else if (t.state == TrackState::SUSPENDED_STATIC) statik++;
+            else if (t.state == TrackState::PENDING_STATIC) pend++;
+        }
+
+        ROS_INFO("[PipelineSummary] "
+                 "frame=%lu kf=%d stamp=%.3f "
+                 "raw=%zu ground=%zu raw_obj=%zu candidates=%zu "
+                 "tracks=%zu moving=%d static=%d pending=%d "
+                 "active_boxes=%zu cargo_removed=%zu human_removed=%zu "
+                 "commit_obj=%zu clean_points=%zu",
+                 frame_seq_,
+                 keyframe_count_,
+                 stamp.toSec(),
+                 cloud->size(),
+                 ground_base->size(),
+                 objects_base->size(),
+                 payload_candidates->size(),
+                 payload_tracker_.getTracks().size(),
+                 moving, statik, pend,
+                 active_cargo_remove_boxes_base.size(),
+                 cargo_removed_base->size(),
+                 human_dynamic_base->size(),
+                 objects_after_human_base->size(),
+                 last_clean_points_);
     }
 }
 

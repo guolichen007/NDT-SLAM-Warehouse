@@ -319,6 +319,9 @@ private:
     PoseGraphOptimizer pose_graph_optimizer_;
     int loop_detection_interval_ = 10;
     int keyframe_count_ = 0;
+    uint64_t frame_seq_ = 0;  // 帧序号（每帧递增，不管是否提交）
+    double last_processed_stamp_ = 0.0;  // 上次处理的时间戳（防重复）
+    size_t last_clean_points_ = 0;  // 上次 CleanMap 点数
     pcl::PointCloud<pcl::PointXYZ>::Ptr last_cloud_;
     Sophus::SE3d relocalized_pose_;
     ros::Timer timer_;
