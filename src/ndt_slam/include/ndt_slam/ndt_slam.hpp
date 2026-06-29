@@ -20,6 +20,7 @@
 #include <pcl/io/pcd_io.h>
 
 #include <Eigen/Core>
+#include <visualization_msgs/MarkerArray.h>
 #include <Eigen/Geometry>
 #include <sophus/se3.hpp>
 #include <queue>
@@ -162,6 +163,50 @@ private:
     ros::Publisher objects_clean_map_pub_; // 非地面/货物地图（clean，BEV过滤后）
     ros::Publisher current_cloud_pub_;
     ros::Publisher path_pub_;
+
+    // v12: cargo core box marker 由 ndt_slam_node 直接发布
+    ros::Publisher cargo_core_bbox_marker_pub_;
+    bool publish_cargo_core_box_marker_ = true;
+
+    struct CargoDisplayBoxState {
+        bool valid = false;
+        int track_id = -1;
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f size = Eigen::Vector3f::Zero();
+        int reject_count = 0;
+        int stable_candidate_count = 0;
+        Eigen::Vector3f candidate_center_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f candidate_size = Eigen::Vector3f::Zero();
+        double last_update_time = 0.0;
+    };
+
+    CargoDisplayBoxState cargo_display_box_;
+    double cargo_display_center_alpha_moving_ = 0.25;
+    double cargo_display_center_alpha_static_ = 0.12;
+    double cargo_display_size_alpha_ = 0.08;
+    double cargo_display_max_center_jump_ = 0.80;
+    double cargo_display_max_size_ratio_ = 1.35;
+    int cargo_display_reinit_after_rejects_ = 3;
+    int cargo_display_min_core_points_ = 30;
+    int cargo_display_min_observed_frames_ = 5;
+    double cargo_display_marker_lifetime_ = 0.30;
+
+    struct CargoDisplayCandidate {
+        bool valid = false;
+        int track_id = -1;
+        int state = 0;
+        int observed_frames = 0;
+        int core_points = 0;
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f size = Eigen::Vector3f::Zero();
+        double overlap = 0.0;
+        double score = 0.0;
+    };
+
+    void publishCargoCoreBoxMarker(const CargoDisplayBoxState& box);
+    void publishDeleteCargoCoreBoxMarker();
+    void updateAndPublishCargoCoreDisplayBox(const CargoDisplayCandidate& c, bool crane_stopped);
+    void appendBoxLineList(visualization_msgs::Marker& m, const Eigen::Vector3f& center, const Eigen::Vector3f& size);
 
     // 轨迹历史
     nav_msgs::Path path_msg_;
@@ -555,10 +600,24 @@ private:
     bool stationary_freeze_tf_odom_ = true;
     bool stationary_freeze_xy_ = true;
     bool stationary_freeze_yaw_ = true;
-    double stationary_pose_freeze_release_m_ = 0.80;
-    int stationary_move_confirm_frames_ = 3;
+    double stationary_pose_freeze_release_m_ = 1.50;  // v12: 增大释放阈值
+    int stationary_move_confirm_frames_ = 5;  // v12: 增加确认帧数
+
+    // v12: PoseFreeze 状态机
+    enum class PoseFreezeState {
+        MOVING = 0,
+        STATIONARY_FROZEN = 1,
+        RELEASE_BLEND = 2
+    };
+    PoseFreezeState pose_freeze_state_ = PoseFreezeState::MOVING;
+    Sophus::SE3d release_start_pose_;
+    Sophus::SE3d release_target_pose_;
+    int pose_release_frame_ = 0;
+    int pose_release_total_frames_ = 10;
 
     Sophus::SE3d selectPublishedPose(const Sophus::SE3d& constrained_pose, const ros::Time& stamp);
+    bool shouldReleasePoseFreeze(double drift, int confirm, double frame_velocity, double fitness, std::string& reason);
+    Sophus::SE3d computeReleaseBlendPose(const Sophus::SE3d& current_target_pose);
 
     // 关键帧 active window
     int max_active_keyframes_ = 80;

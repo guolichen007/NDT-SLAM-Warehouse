@@ -17,6 +17,7 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
+#include <visualization_msgs/MarkerArray.h>
 
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TransformStamped.h>
@@ -100,6 +101,14 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     human_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_removed_history_cloud", 10);
     current_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(current_cloud_topic_, 10);
     path_pub_ = nh_.advertise<nav_msgs::Path>("/path", 10);
+
+    // v12: cargo core box marker 由 ndt_slam_node 直接发布
+    nh_.param("publish_cargo_core_box_marker", publish_cargo_core_box_marker_, true);
+    if (publish_cargo_core_box_marker_) {
+        cargo_core_bbox_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_core_bbox_marker", 1, true);
+        publishDeleteCargoCoreBoxMarker();
+        ROS_INFO("[CargoCoreBoxMarker] publisher=ndt_slam_node mode=direct_core_box_only frame=base_link");
+    }
 
     // 初始化轨迹
     path_msg_.header.frame_id = "map";
@@ -4373,64 +4382,122 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::edgePreservingMerge(
 // ========== 长期建图功能实现 ==========
 
 // v8: PoseFreeze - 静止时冻结发布姿态
+bool NdtSlamNode::shouldReleasePoseFreeze(
+    double drift, int confirm, double frame_velocity, double fitness, std::string& reason)
+{
+    if (drift < 1.50) {
+        reason = "DRIFT_TOO_SMALL";
+        return false;
+    }
+    if (confirm < 5) {
+        reason = "CONFIRM_NOT_ENOUGH";
+        return false;
+    }
+    if (frame_velocity < 0.08) {
+        reason = "VELOCITY_TOO_SMALL";
+        return false;
+    }
+    if (fitness > 0.06) {
+        reason = "FITNESS_TOO_BAD";
+        return false;
+    }
+    reason = "OK";
+    return true;
+}
+
+Sophus::SE3d NdtSlamNode::computeReleaseBlendPose(const Sophus::SE3d& current_target_pose)
+{
+    pose_release_frame_++;
+    double t = std::min(1.0, static_cast<double>(pose_release_frame_) / static_cast<double>(pose_release_total_frames_));
+
+    Eigen::Vector3d start_t = release_start_pose_.translation();
+    Eigen::Vector3d target_t = current_target_pose.translation();
+    Eigen::Vector3d smooth_t = start_t + t * (target_t - start_t);
+
+    Eigen::Quaterniond start_q(release_start_pose_.so3().unit_quaternion());
+    Eigen::Quaterniond target_q(current_target_pose.so3().unit_quaternion());
+    Eigen::Quaterniond smooth_q = start_q.slerp(t, target_q);
+
+    Sophus::SE3d smooth_pose(Sophus::SO3d(smooth_q), smooth_t);
+
+    if (pose_release_frame_ >= pose_release_total_frames_) {
+        pose_freeze_state_ = PoseFreezeState::MOVING;
+        pose_release_frame_ = 0;
+        ROS_INFO("[PoseFreeze] mode=END_RELEASE_BLEND action=RESUME_NORMAL");
+    } else {
+        ROS_INFO_THROTTLE(0.5,
+            "[PoseFreeze] mode=RELEASE_BLEND frame=%d/%d",
+            pose_release_frame_, pose_release_total_frames_);
+    }
+
+    return smooth_pose;
+}
+
 Sophus::SE3d NdtSlamNode::selectPublishedPose(
     const Sophus::SE3d& constrained_pose,
     const ros::Time& stamp)
 {
+    // v12: RELEASE_BLEND 状态 - 平滑过渡
+    if (pose_freeze_state_ == PoseFreezeState::RELEASE_BLEND) {
+        published_pose_ = computeReleaseBlendPose(constrained_pose);
+        return published_pose_;
+    }
+
+    // MOVING 状态 - 正常发布
     if (!motion_gate_stationary_) {
+        pose_freeze_state_ = PoseFreezeState::MOVING;
         published_pose_ = constrained_pose;
         return published_pose_;
     }
 
+    // STATIONARY_FROZEN 状态
     const Eigen::Vector3d cur = constrained_pose.translation();
     const Eigen::Vector3d anchor = stationary_anchor_pose_.translation();
-
     double drift_xy = (cur.head<2>() - anchor.head<2>()).norm();
 
-    if (stationary_freeze_tf_odom_ &&
-        drift_xy < stationary_pose_freeze_release_m_) {
+    // 检查是否应该释放
+    std::string release_reason;
+    double frame_velocity = 0.0;  // TODO: 从 MotionGate 获取
+    double fitness = 0.0;  // TODO: 从 NDT 获取
+    bool should_release = shouldReleasePoseFreeze(drift_xy, moving_confirm_count_, frame_velocity, fitness, release_reason);
 
-        // 冻结 pose：使用 anchor 的 xyzyaw
-        Sophus::SE3d frozen = constrained_pose;
-        Eigen::Vector3d t = anchor;
-        frozen.translation() = t;
+    ROS_INFO_THROTTLE(1.0,
+        "[PoseFreezeCheck] drift=%.2f confirm=%d/%d frame_vel=%.2f fitness=%.3f release=%d reason=%s",
+        drift_xy, moving_confirm_count_, stationary_move_confirm_frames_,
+        frame_velocity, fitness,
+        should_release ? 1 : 0, release_reason.c_str());
 
-        if (stationary_freeze_yaw_) {
-            frozen.so3() = stationary_anchor_pose_.so3();
-        }
+    if (should_release) {
+        // 开始平滑释放
+        pose_freeze_state_ = PoseFreezeState::RELEASE_BLEND;
+        release_start_pose_ = published_pose_;
+        release_target_pose_ = constrained_pose;
+        pose_release_frame_ = 0;
 
-        published_pose_ = frozen;
+        ROS_INFO("[PoseFreeze] mode=START_RELEASE_BLEND drift=%.2f frames=%d",
+                 drift_xy, pose_release_total_frames_);
 
-        ROS_INFO_THROTTLE(1.0,
-            "[PoseFreeze] mode=STATIONARY_ANCHOR raw_xy=(%.3f,%.3f) pub_xy=(%.3f,%.3f) drift=%.3f action=FREEZE_TF_ODOM",
-            cur.x(), cur.y(),
-            published_pose_.translation().x(),
-            published_pose_.translation().y(),
-            drift_xy);
-
+        published_pose_ = computeReleaseBlendPose(constrained_pose);
         return published_pose_;
     }
 
-    // 可能移动，需要连续确认
+    // 继续冻结
+    Sophus::SE3d frozen = constrained_pose;
+    frozen.translation() = anchor;
+    if (stationary_freeze_yaw_) {
+        frozen.so3() = stationary_anchor_pose_.so3();
+    }
+    published_pose_ = frozen;
+
+    pose_freeze_state_ = PoseFreezeState::STATIONARY_FROZEN;
     moving_confirm_count_++;
-    if (moving_confirm_count_ < stationary_move_confirm_frames_) {
-        published_pose_ = stationary_anchor_pose_;
 
-        ROS_INFO_THROTTLE(1.0,
-            "[PoseFreeze] mode=POSSIBLE_MOVE drift=%.3f confirm=%d/%d action=KEEP_FROZEN",
-            drift_xy,
-            moving_confirm_count_,
-            stationary_move_confirm_frames_);
-
-        return published_pose_;
-    }
-
-    // 确认移动，恢复发布
-    motion_gate_stationary_ = false;
-    moving_confirm_count_ = 0;
-    published_pose_ = constrained_pose;
-
-    ROS_INFO("[PoseFreeze] mode=RELEASE drift=%.3f action=RESUME_TF_ODOM", drift_xy);
+    ROS_INFO_THROTTLE(1.0,
+        "[PoseFreeze] mode=STATIONARY_ANCHOR raw_xy=(%.3f,%.3f) pub_xy=(%.3f,%.3f) drift=%.3f action=FREEZE_TF_ODOM",
+        cur.x(), cur.y(),
+        published_pose_.translation().x(),
+        published_pose_.translation().y(),
+        drift_xy);
 
     return published_pose_;
 }
@@ -5823,6 +5890,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     // v8: 统一 active remove box 生成（从 CargoBoxV2 循环抽出）
     // ------------------------------------------------------------------------
     std::vector<CargoBox> active_cargo_remove_boxes_base;
+    std::vector<CargoDisplayCandidate> display_candidates;  // v12: 显示候选
     int moving_tracks = 0, static_tracks = 0;
     int current_valid_count = 0, last_good_count = 0, core_fallback_count = 0;
     int skipped_no_box = 0, skipped_no_overlap = 0, skipped_state = 0;
@@ -5846,6 +5914,23 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
             if (decision.source == "CURRENT_VALID") current_valid_count++;
             else if (decision.source == "LAST_GOOD") last_good_count++;
             else if (decision.source == "CORE_FALLBACK") core_fallback_count++;
+
+            // v12: 生成显示候选（只有 CURRENT_VALID 用于显示）
+            if (decision.source == "CURRENT_VALID" && track.has_last_core_box) {
+                CargoDisplayCandidate c;
+                c.valid = true;
+                c.track_id = track.track_id;
+                c.state = static_cast<int>(track.state);
+                c.observed_frames = track.observed_frames;
+                c.core_points = track.last_core_box.suspended_points;
+                c.center_base = track.last_core_box.center;
+                c.size = track.last_core_box.size;
+                c.overlap = decision.overlap;
+                c.score = 0.5 * std::min(1.0, c.core_points / 100.0) +
+                           0.3 * std::min(1.0, c.overlap / 100.0) +
+                           0.2 * track.direction_consistency;
+                display_candidates.push_back(c);
+            }
         } else {
             if (decision.reason == "NO_BOX") skipped_no_box++;
             else if (decision.reason == "NO_OVERLAP") skipped_no_overlap++;
@@ -5862,6 +5947,29 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
              overlap_total,
              current_valid_count, last_good_count, core_fallback_count,
              skipped_no_box, skipped_no_overlap, skipped_state);
+
+    // v12: 选择最佳显示候选并发布 core box marker
+    if (publish_cargo_core_box_marker_) {
+        CargoDisplayCandidate best;
+        for (const auto& c : display_candidates) {
+            if (!c.valid) continue;
+            if (c.observed_frames < cargo_display_min_observed_frames_) continue;
+            if (c.core_points < cargo_display_min_core_points_) continue;
+            if (!best.valid || c.score > best.score) {
+                best = c;
+            }
+        }
+
+        if (best.valid) {
+            updateAndPublishCargoCoreDisplayBox(best, is_stationary_);
+        } else {
+            publishDeleteCargoCoreBoxMarker();
+            cargo_display_box_.valid = false;
+            ROS_INFO_THROTTLE(1.0,
+                "[CargoCoreMarkerGate] publish=0 reason=NO_VALID_DISPLAY_CANDIDATE candidates=%zu",
+                display_candidates.size());
+        }
+    }
 
     // ------------------------------------------------------------------------
     // 4. CargoCommit：当前帧吊货点删除（必须在 MapCommit 前）
@@ -6615,6 +6723,202 @@ bool NdtSlamNode::isPointDeniedBy3DHistory(float x, float y, float z) const
     }
 
     return false;
+}
+
+// ============================================================================
+// v12: Cargo Core Box Marker 由 ndt_slam_node 直接发布
+// ============================================================================
+
+void NdtSlamNode::appendBoxLineList(
+    visualization_msgs::Marker& m,
+    const Eigen::Vector3f& center,
+    const Eigen::Vector3f& size)
+{
+    float cx = center.x(), cy = center.y(), cz = center.z();
+    float hx = size.x() / 2.0f, hy = size.y() / 2.0f, hz = size.z() / 2.0f;
+    hx = std::max(hx, 0.15f);
+    hy = std::max(hy, 0.15f);
+    hz = std::max(hz, 0.15f);
+
+    geometry_msgs::Point p[8];
+    p[0].x = cx-hx; p[0].y = cy-hy; p[0].z = cz-hz;
+    p[1].x = cx+hx; p[1].y = cy-hy; p[1].z = cz-hz;
+    p[2].x = cx+hx; p[2].y = cy+hy; p[2].z = cz-hz;
+    p[3].x = cx-hx; p[3].y = cy+hy; p[3].z = cz-hz;
+    p[4].x = cx-hx; p[4].y = cy-hy; p[4].z = cz+hz;
+    p[5].x = cx+hx; p[5].y = cy-hy; p[5].z = cz+hz;
+    p[6].x = cx+hx; p[6].y = cy+hy; p[6].z = cz+hz;
+    p[7].x = cx-hx; p[7].y = cy+hy; p[7].z = cz+hz;
+
+    // 12 条边
+    m.points.push_back(p[0]); m.points.push_back(p[1]);
+    m.points.push_back(p[1]); m.points.push_back(p[2]);
+    m.points.push_back(p[2]); m.points.push_back(p[3]);
+    m.points.push_back(p[3]); m.points.push_back(p[0]);
+    m.points.push_back(p[4]); m.points.push_back(p[5]);
+    m.points.push_back(p[5]); m.points.push_back(p[6]);
+    m.points.push_back(p[6]); m.points.push_back(p[7]);
+    m.points.push_back(p[7]); m.points.push_back(p[4]);
+    m.points.push_back(p[0]); m.points.push_back(p[4]);
+    m.points.push_back(p[1]); m.points.push_back(p[5]);
+    m.points.push_back(p[2]); m.points.push_back(p[6]);
+    m.points.push_back(p[3]); m.points.push_back(p[7]);
+}
+
+void NdtSlamNode::publishCargoCoreBoxMarker(const CargoDisplayBoxState& box)
+{
+    if (!publish_cargo_core_box_marker_) return;
+
+    visualization_msgs::MarkerArray arr;
+    visualization_msgs::Marker m;
+
+    m.header.frame_id = "base_link";
+    m.header.stamp = ros::Time(0);
+    m.ns = "cargo_core_bbox_only_v12";
+    m.id = 0;
+    m.type = visualization_msgs::Marker::LINE_LIST;
+    m.action = visualization_msgs::Marker::ADD;
+
+    m.pose.orientation.w = 1.0;
+    m.scale.x = 0.05;
+
+    // 橙色线框
+    m.color.r = 1.0;
+    m.color.g = 0.55;
+    m.color.b = 0.0;
+    m.color.a = 1.0;
+    m.lifetime = ros::Duration(cargo_display_marker_lifetime_);
+
+    appendBoxLineList(m, box.center_base, box.size);
+
+    arr.markers.push_back(m);
+    cargo_core_bbox_marker_pub_.publish(arr);
+}
+
+void NdtSlamNode::publishDeleteCargoCoreBoxMarker()
+{
+    if (!publish_cargo_core_box_marker_) return;
+
+    visualization_msgs::MarkerArray arr;
+    visualization_msgs::Marker m;
+
+    m.header.frame_id = "base_link";
+    m.header.stamp = ros::Time(0);
+    m.ns = "cargo_core_bbox_only_v12";
+    m.id = 0;
+    m.action = visualization_msgs::Marker::DELETE;
+
+    arr.markers.push_back(m);
+    cargo_core_bbox_marker_pub_.publish(arr);
+}
+
+void NdtSlamNode::updateAndPublishCargoCoreDisplayBox(
+    const CargoDisplayCandidate& c,
+    bool crane_stopped)
+{
+    const double now = ros::Time::now().toSec();
+
+    // 新 track 或首次初始化
+    if (!cargo_display_box_.valid ||
+        cargo_display_box_.track_id != c.track_id) {
+
+        cargo_display_box_.valid = true;
+        cargo_display_box_.track_id = c.track_id;
+        cargo_display_box_.center_base = c.center_base;
+        cargo_display_box_.size = c.size;
+        cargo_display_box_.reject_count = 0;
+        cargo_display_box_.stable_candidate_count = 0;
+        cargo_display_box_.last_update_time = now;
+
+        publishCargoCoreBoxMarker(cargo_display_box_);
+
+        ROS_INFO("[CargoCoreMarker] action=INIT track=%d center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f)",
+                 c.track_id,
+                 c.center_base.x(), c.center_base.y(), c.center_base.z(),
+                 c.size.x(), c.size.y(), c.size.z());
+        return;
+    }
+
+    // 检查跳变
+    const double center_jump = (c.center_base - cargo_display_box_.center_base).norm();
+    const double size_ratio = std::max({
+        c.size.x() / std::max(cargo_display_box_.size.x(), 0.1f),
+        c.size.y() / std::max(cargo_display_box_.size.y(), 0.1f),
+        c.size.z() / std::max(cargo_display_box_.size.z(), 0.1f)});
+
+    const bool jump_bad = center_jump > cargo_display_max_center_jump_;
+    const bool size_bad = size_ratio > cargo_display_max_size_ratio_;
+
+    if (jump_bad || size_bad) {
+        cargo_display_box_.reject_count++;
+
+        // 检查候选是否稳定
+        const double candidate_dist = (c.center_base - cargo_display_box_.candidate_center_base).norm();
+        if (candidate_dist < 0.30) {
+            cargo_display_box_.stable_candidate_count++;
+        } else {
+            cargo_display_box_.candidate_center_base = c.center_base;
+            cargo_display_box_.candidate_size = c.size;
+            cargo_display_box_.stable_candidate_count = 1;
+        }
+
+        ROS_WARN_THROTTLE(1.0,
+            "[CargoCoreMarkerReject] track=%d center_jump=%.2f size_ratio=%.2f reject=%d stable_candidate=%d",
+            c.track_id, center_jump, size_ratio,
+            cargo_display_box_.reject_count,
+            cargo_display_box_.stable_candidate_count);
+
+        // 连续稳定候选 -> 重初始化
+        if (cargo_display_box_.stable_candidate_count >= cargo_display_reinit_after_rejects_) {
+            cargo_display_box_.center_base = c.center_base;
+            cargo_display_box_.size = c.size;
+            cargo_display_box_.reject_count = 0;
+            cargo_display_box_.stable_candidate_count = 0;
+            cargo_display_box_.last_update_time = now;
+
+            publishCargoCoreBoxMarker(cargo_display_box_);
+
+            ROS_INFO("[CargoCoreMarker] action=REINIT_STABLE_CANDIDATE track=%d center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f)",
+                     c.track_id,
+                     c.center_base.x(), c.center_base.y(), c.center_base.z(),
+                     c.size.x(), c.size.y(), c.size.z());
+            return;
+        }
+
+        // 连续拒绝 -> 删除旧框
+        if (cargo_display_box_.reject_count >= 2) {
+            publishDeleteCargoCoreBoxMarker();
+            cargo_display_box_.valid = false;
+
+            ROS_WARN("[CargoCoreMarker] action=DELETE_STALE_BOX reason=REPEATED_REJECT track=%d", c.track_id);
+            return;
+        }
+
+        // 短暂保持旧框
+        publishCargoCoreBoxMarker(cargo_display_box_);
+        return;
+    }
+
+    // 正常平滑更新
+    const double alpha_center = crane_stopped ? cargo_display_center_alpha_static_ : cargo_display_center_alpha_moving_;
+
+    cargo_display_box_.center_base = alpha_center * c.center_base + (1.0 - alpha_center) * cargo_display_box_.center_base;
+    cargo_display_box_.size = cargo_display_size_alpha_ * c.size + (1.0 - cargo_display_size_alpha_) * cargo_display_box_.size;
+    cargo_display_box_.reject_count = 0;
+    cargo_display_box_.stable_candidate_count = 0;
+    cargo_display_box_.last_update_time = now;
+
+    publishCargoCoreBoxMarker(cargo_display_box_);
+
+    ROS_INFO_THROTTLE(1.0,
+        "[CargoCoreMarker] action=UPDATE track=%d center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f)",
+        c.track_id,
+        cargo_display_box_.center_base.x(),
+        cargo_display_box_.center_base.y(),
+        cargo_display_box_.center_base.z(),
+        cargo_display_box_.size.x(),
+        cargo_display_box_.size.y(),
+        cargo_display_box_.size.z());
 }
 
 } // namespace ndt_slam

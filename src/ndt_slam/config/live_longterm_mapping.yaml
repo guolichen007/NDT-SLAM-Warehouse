@@ -130,12 +130,13 @@ crane_motion_constraint:
   constrain_z: false          # 不使用限幅模式
   lock_roll: true             # roll 锁定（天车不翻转）
   lock_pitch: true            # pitch 锁定（天车不俯仰）
-  lock_yaw: false             # yaw 不锁定（NDT 需要横向自由度）
-  constrain_yaw: true         # v6: 启用 yaw 约束
+  lock_yaw: true              # v12: yaw 锁定（天车不旋转）
+  constrain_yaw: false        # v12: 不需要 constrain，直接 lock
+  fixed_yaw_source: initial   # v12: 使用初始 yaw
   max_abs_z_drift: 0.05       # z 最大允许漂移（仅 constrain_z=true 时生效）
   max_roll_deg: 0.3           # roll 最大允许漂移（度）
   max_pitch_deg: 0.3          # pitch 最大允许漂移（度）
-  max_yaw_deg: 1.0            # v6: yaw 限幅 1 度
+  max_yaw_deg: 1.0            # yaw 限幅（仅 constrain_yaw=true 时生效）
 
 # ========== 吊货过滤配置 ==========
 
