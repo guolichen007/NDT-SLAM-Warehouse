@@ -28,7 +28,17 @@ enum class RejectReason {
     ASPECT_RATIO,
     GROUND_CONTACT,
     NO_DENSE_BAND,
-    TOO_FEW_COMPONENTS
+    TOO_FEW_COMPONENTS,
+    // v14: 新增详细拒绝原因
+    TOO_SMALL_X,
+    TOO_SMALL_Y,
+    TOO_SMALL_Z,
+    TOO_LARGE_X,
+    TOO_LARGE_Y,
+    TOO_LARGE_Z,
+    LOW_Z_BAND_POINTS,
+    INVALID_DENSE_BAND,
+    GROUND_TOUCH
 };
 
 // 货物框输出

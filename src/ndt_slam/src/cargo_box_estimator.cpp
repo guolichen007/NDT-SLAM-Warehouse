@@ -347,18 +347,26 @@ RejectReason CargoBoxEstimator::validateBox(
     int core_points_count,
     float bottom_hag) {
 
-    // 检查绝对尺寸
-    if (box.size.x() > config_.max_core_length ||
-        box.size.y() > config_.max_core_width ||
-        box.size.z() > config_.max_core_height) {
-        return RejectReason::TOO_LARGE;
+    // v14: 检查绝对尺寸 - 拆分具体原因
+    if (box.size.x() > config_.max_core_length) {
+        return RejectReason::TOO_LARGE_X;
+    }
+    if (box.size.y() > config_.max_core_width) {
+        return RejectReason::TOO_LARGE_Y;
+    }
+    if (box.size.z() > config_.max_core_height) {
+        return RejectReason::TOO_LARGE_Z;
     }
 
-    // 检查最小尺寸
-    if (box.size.x() < config_.min_core_length ||
-        box.size.y() < config_.min_core_width ||
-        box.size.z() < config_.min_core_height) {
-        return RejectReason::TOO_LARGE;
+    // v14: 检查最小尺寸 - 拆分具体原因
+    if (box.size.x() < config_.min_core_length) {
+        return RejectReason::TOO_SMALL_X;
+    }
+    if (box.size.y() < config_.min_core_width) {
+        return RejectReason::TOO_SMALL_Y;
+    }
+    if (box.size.z() < config_.min_core_height) {
+        return RejectReason::TOO_SMALL_Z;
     }
 
     // 检查面积
@@ -374,9 +382,9 @@ RejectReason CargoBoxEstimator::validateBox(
         return RejectReason::ASPECT_RATIO;
     }
 
-    // 检查悬空高度
+    // v14: 检查悬空高度 - 改为 GROUND_TOUCH
     if (bottom_hag < config_.init_min_bottom_hag) {
-        return RejectReason::GROUND_CONTACT;
+        return RejectReason::GROUND_TOUCH;
     }
 
     // 检查 core points 数量

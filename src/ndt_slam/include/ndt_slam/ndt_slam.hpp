@@ -528,7 +528,8 @@ private:
     void commitKeyFrameWithDynamicFiltering(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
         const Sophus::SE3d& pose,
-        const ros::Time& stamp);
+        const ros::Time& stamp,
+        const Sophus::SE3d& constrained_pose_for_motion = Sophus::SE3d());
 
     // 从 objects 中删除吊货 remove_box 内的点（3D 检查）
     void removePointsInsideCargoRemoveBoxes3D(
