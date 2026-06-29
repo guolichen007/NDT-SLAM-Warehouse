@@ -198,6 +198,7 @@ private:
     int current_track_id_ = -1;
     int lost_count_ = 0;
     int confirm_count_ = 0;
+    int observed_frames_ = 0;  // v8: 用于 marker gate
     ros::Time last_suspended_time_;
 
     // 当前货物信息
@@ -424,6 +425,14 @@ private:
 
         cargo_.track_id = static_cast<int>(msg->data[IDX_TRACK_ID]);
         cargo_.state = static_cast<PayloadSemanticState>(static_cast<int>(msg->data[IDX_STATE]));
+
+        // v8: 更新 observed_frames_
+        if (cargo_.track_id == current_track_id_) {
+            observed_frames_++;
+        } else {
+            observed_frames_ = 1;
+            current_track_id_ = cargo_.track_id;
+        }
         cargo_.centroid = Eigen::Vector3f(msg->data[IDX_CENTER_X], msg->data[IDX_CENTER_Y], msg->data[IDX_CENTER_Z]);
         cargo_.velocity = Eigen::Vector3f(msg->data[IDX_VEL_X], msg->data[IDX_VEL_Y], msg->data[IDX_VEL_Z]);
         cargo_.bbox_min = Eigen::Vector3f(msg->data[IDX_BBOX_MIN_X], msg->data[IDX_BBOX_MIN_Y], msg->data[IDX_BBOX_MIN_Z]);
@@ -801,9 +810,14 @@ private:
 
     // P0.5 新增：发布三层 marker
     void publishThreeLayerMarkers(const ros::Time& stamp) {
-        if (!cargo_.valid || cargo_state_ == PayloadSemanticState::UNKNOWN ||
-            cargo_state_ == PayloadSemanticState::LOST) {
-            // 无有效 cargo，发布 DELETE 清理旧 marker
+        // v8: Marker gate - 只有 confirmed 状态才显示
+        bool can_publish = cargo_.valid &&
+                           cargo_state_ != PayloadSemanticState::UNKNOWN &&
+                           cargo_state_ != PayloadSemanticState::LOST &&
+                           observed_frames_ >= 3;  // 至少 3 帧才显示
+
+        if (!can_publish) {
+            // 发布 DELETE 清理旧 marker
             visualization_msgs::MarkerArray markers;
             visualization_msgs::Marker marker;
             marker.header.stamp = ros::Time(0);
@@ -813,8 +827,20 @@ private:
             core_bbox_marker_pub_.publish(markers);
             remove_bbox_marker_pub_.publish(markers);
             forbidden_zone_marker_pub_.publish(markers);
+
+            ROS_INFO_THROTTLE(1.0,
+                "[CargoMarkerGate] publish=0 state=%d observed=%d valid=%d reason=%s",
+                static_cast<int>(cargo_state_),
+                observed_frames_,
+                cargo_.valid ? 1 : 0,
+                !cargo_.valid ? "INVALID" : (cargo_state_ == PayloadSemanticState::UNKNOWN ? "UNKNOWN" : "LOST"));
             return;
         }
+
+        ROS_INFO_THROTTLE(1.0,
+            "[CargoMarkerGate] publish=1 state=%d observed=%d",
+            static_cast<int>(cargo_state_),
+            observed_frames_);
 
         // 1. Core Box：真实货物框，绿色线框（LINE_LIST）
         {

@@ -500,6 +500,26 @@ private:
         pcl::PointCloud<pcl::PointXYZ>::Ptr& output_base,
         pcl::PointCloud<pcl::PointXYZ>::Ptr& removed_base);
 
+    // v8: 统一 active remove box 生成
+    struct ActiveRemoveDecision {
+        bool active = false;
+        CargoBox box;
+        std::string source;
+        int overlap = 0;
+        std::string reason;
+    };
+
+    ActiveRemoveDecision buildActiveRemoveBoxForTrack(
+        const ObjectTrack& track,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_base,
+        double stamp);
+
+    int countPointsInsideBoxBase(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const CargoBox& box);
+
+    CargoBox expandCoreToRemoveBox(const CargoBox& core_box);
+
     // 吊货跟踪信息发布（用于避障节点）
     ros::Publisher payload_track_info_pub_;
     void publishPayloadTrackInfo(const ros::Time& stamp);
@@ -527,6 +547,18 @@ private:
     double motion_gate_moving_min_velocity_ = 0.08;
     double last_frame_stamp_for_gate_ = 0.0;
     Eigen::Vector3d last_frame_pos_for_gate_ = Eigen::Vector3d::Zero();
+
+    // v8: PoseFreeze - 静止时冻结发布姿态
+    Sophus::SE3d published_pose_;
+    bool motion_gate_stationary_ = false;
+    int moving_confirm_count_ = 0;
+    bool stationary_freeze_tf_odom_ = true;
+    bool stationary_freeze_xy_ = true;
+    bool stationary_freeze_yaw_ = true;
+    double stationary_pose_freeze_release_m_ = 0.80;
+    int stationary_move_confirm_frames_ = 3;
+
+    Sophus::SE3d selectPublishedPose(const Sophus::SE3d& constrained_pose, const ros::Time& stamp);
 
     // 关键帧 active window
     int max_active_keyframes_ = 80;

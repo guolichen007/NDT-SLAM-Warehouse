@@ -1259,7 +1259,10 @@ void NdtSlamNode::processCloudThread() {
         if (registration_success && !tracking_lost_) {
             // TF 用 ros::Time::now() 避免重复
             ros::Time publish_time = ros::Time::now();
-            publishOdometry(publish_time, msg->header.frame_id, constrained_pose);
+
+            // v8: PoseFreeze - 静止时冻结发布姿态
+            Sophus::SE3d pub_pose = selectPublishedPose(constrained_pose, publish_time);
+            publishOdometry(publish_time, msg->header.frame_id, pub_pose);
 
             // ICP 精配准移到后台线程，不阻塞主处理
             // NDT 结果直接用于地图插入，ICP 完成后更新位姿
@@ -1356,7 +1359,8 @@ void NdtSlamNode::processCloudThread() {
                 }
             }
             addFrameToMap(filtered_cloud, map_pose, publish_time);
-            commitKeyFrameWithDynamicFiltering(filtered_cloud, map_pose, publish_time);
+            // v8: 使用 pub_pose（PoseFreeze 后的姿态）进行 MapCommit
+            commitKeyFrameWithDynamicFiltering(filtered_cloud, pub_pose, publish_time);
             success_frames++;
         }
 
@@ -4368,6 +4372,69 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::edgePreservingMerge(
 
 // ========== 长期建图功能实现 ==========
 
+// v8: PoseFreeze - 静止时冻结发布姿态
+Sophus::SE3d NdtSlamNode::selectPublishedPose(
+    const Sophus::SE3d& constrained_pose,
+    const ros::Time& stamp)
+{
+    if (!motion_gate_stationary_) {
+        published_pose_ = constrained_pose;
+        return published_pose_;
+    }
+
+    const Eigen::Vector3d cur = constrained_pose.translation();
+    const Eigen::Vector3d anchor = stationary_anchor_pose_.translation();
+
+    double drift_xy = (cur.head<2>() - anchor.head<2>()).norm();
+
+    if (stationary_freeze_tf_odom_ &&
+        drift_xy < stationary_pose_freeze_release_m_) {
+
+        // 冻结 pose：使用 anchor 的 xyzyaw
+        Sophus::SE3d frozen = constrained_pose;
+        Eigen::Vector3d t = anchor;
+        frozen.translation() = t;
+
+        if (stationary_freeze_yaw_) {
+            frozen.so3() = stationary_anchor_pose_.so3();
+        }
+
+        published_pose_ = frozen;
+
+        ROS_INFO_THROTTLE(1.0,
+            "[PoseFreeze] mode=STATIONARY_ANCHOR raw_xy=(%.3f,%.3f) pub_xy=(%.3f,%.3f) drift=%.3f action=FREEZE_TF_ODOM",
+            cur.x(), cur.y(),
+            published_pose_.translation().x(),
+            published_pose_.translation().y(),
+            drift_xy);
+
+        return published_pose_;
+    }
+
+    // 可能移动，需要连续确认
+    moving_confirm_count_++;
+    if (moving_confirm_count_ < stationary_move_confirm_frames_) {
+        published_pose_ = stationary_anchor_pose_;
+
+        ROS_INFO_THROTTLE(1.0,
+            "[PoseFreeze] mode=POSSIBLE_MOVE drift=%.3f confirm=%d/%d action=KEEP_FROZEN",
+            drift_xy,
+            moving_confirm_count_,
+            stationary_move_confirm_frames_);
+
+        return published_pose_;
+    }
+
+    // 确认移动，恢复发布
+    motion_gate_stationary_ = false;
+    moving_confirm_count_ = 0;
+    published_pose_ = constrained_pose;
+
+    ROS_INFO("[PoseFreeze] mode=RELEASE drift=%.3f action=RESUME_TF_ODOM", drift_xy);
+
+    return published_pose_;
+}
+
 bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const ros::Time& current_time) {
     if (!motion_gate_enabled_) {
         return true;  // 未启用 MotionGate，始终允许
@@ -4412,10 +4479,12 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
         stationary_frame_count_++;
         if (stationary_frame_count_ > 30) {
             is_stationary_ = true;
+            motion_gate_stationary_ = true;  // v8: 设置 PoseFreeze 标志
             stationary_anchor_pose_ = current_pose;
             stationary_anchor_valid_ = true;
             stationary_start_time_ = current_time.toSec();
             moving_confirm_frames_ = 0;
+            moving_confirm_count_ = 0;
 
             ROS_INFO("[MotionGate] Crane stopped | keyframes=%d | anchor=(%.2f,%.2f,%.2f) | pausing map commit",
                      keyframe_count_,
@@ -5431,7 +5500,6 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     // 3. CargoBoxV2 + PayloadTracker（必须在 MapCommit 前）
     // ------------------------------------------------------------------------
     TrackResult payload_track_result;
-    std::vector<CargoBox> active_cargo_remove_boxes_base;  // P2: 改用 base_link 坐标系
     pcl::PointCloud<pcl::PointXYZ>::Ptr cargo_removed_base(new pcl::PointCloud<pcl::PointXYZ>);
 
     if (payload_tracker_config_.enabled &&
@@ -5556,12 +5624,8 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                             track.has_last_good_box = true;
                             track.last_good_box_time = stamp.toSec();
 
-                            // reinit 后允许用于删除
-                            if (track.state == TrackState::DYNAMIC_PAYLOAD ||
-                                track.state == TrackState::SUSPENDED_MOVING ||
-                                track.state == TrackState::SUSPENDED_STATIC) {
-                                active_cargo_remove_boxes_base.push_back(remove_box);
-                            }
+                            // reinit 后允许用于删除（v8: 移到统一后处理）
+                            // active_cargo_remove_boxes_base.push_back(remove_box);
                         }
 
                         // v6: size_too_large 时使用 last_good_box fallback
@@ -5569,19 +5633,14 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                             track.has_last_good_box) {
                             double age = stamp.toSec() - track.last_good_box_time;
                             if (age < 2.0) {  // hold_time = 2.0s
-                                // 使用 last_good_remove_box 做当前帧删除
-                                if (track.state == TrackState::DYNAMIC_PAYLOAD ||
-                                    track.state == TrackState::SUSPENDED_MOVING ||
-                                    track.state == TrackState::SUSPENDED_STATIC) {
-                                    active_cargo_remove_boxes_base.push_back(track.last_good_remove_box);
-                                    track.using_last_good_box = true;
+                                // 使用 last_good_remove_box 做当前帧删除（v8: 移到统一后处理）
+                                track.using_last_good_box = true;
 
-                                    ROS_INFO("[CargoFallbackActive] kf=%d track=%d reason=USE_LAST_GOOD_BOX age=%.2f reject_count=%d",
-                                             keyframe_count_ + 1,
-                                             track.track_id,
-                                             age,
-                                             track.consecutive_box_rejects);
-                                }
+                                ROS_INFO("[CargoFallbackActive] kf=%d track=%d reason=USE_LAST_GOOD_BOX age=%.2f reject_count=%d",
+                                         keyframe_count_ + 1,
+                                         track.track_id,
+                                         age,
+                                         track.consecutive_box_rejects);
                             }
                         }
 
@@ -5637,9 +5696,10 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                               track.has_last_core_box ? 1 : 0,
                               should_use_for_remove ? 1 : 0);
 
-                    if (should_use_for_remove) {
-                        active_cargo_remove_boxes_base.push_back(remove_box);
-                    }
+                    // v8: 移到统一后处理
+                    // if (should_use_for_remove) {
+                    //     active_cargo_remove_boxes_base.push_back(remove_box);
+                    // }
 
                     // v6: SWING_FOLLOW - 吊物摆动跟随
                     {
@@ -5760,19 +5820,61 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     }
 
     // ------------------------------------------------------------------------
+    // v8: 统一 active remove box 生成（从 CargoBoxV2 循环抽出）
+    // ------------------------------------------------------------------------
+    std::vector<CargoBox> active_cargo_remove_boxes_base;
+    int moving_tracks = 0, static_tracks = 0;
+    int current_valid_count = 0, last_good_count = 0, core_fallback_count = 0;
+    int skipped_no_box = 0, skipped_no_overlap = 0, skipped_state = 0;
+    int overlap_total = 0;
+
+    for (const auto& track : payload_tracker_.getTracks()) {
+        if (track.state == TrackState::SUSPENDED_MOVING ||
+            track.state == TrackState::DYNAMIC_PAYLOAD) {
+            moving_tracks++;
+        }
+        if (track.state == TrackState::SUSPENDED_STATIC) {
+            static_tracks++;
+        }
+
+        auto decision = buildActiveRemoveBoxForTrack(track, objects_base, stamp.toSec());
+
+        if (decision.active) {
+            active_cargo_remove_boxes_base.push_back(decision.box);
+            overlap_total += decision.overlap;
+
+            if (decision.source == "CURRENT_VALID") current_valid_count++;
+            else if (decision.source == "LAST_GOOD") last_good_count++;
+            else if (decision.source == "CORE_FALLBACK") core_fallback_count++;
+        } else {
+            if (decision.reason == "NO_BOX") skipped_no_box++;
+            else if (decision.reason == "NO_OVERLAP") skipped_no_overlap++;
+            else if (decision.reason == "STATE_NOT_ACTIVE") skipped_state++;
+        }
+    }
+
+    // [CargoActiveSummary] 日志（INFO）
+    ROS_INFO("[CargoActiveSummary] kf=%d moving=%d static=%d active_boxes=%zu overlap_total=%d "
+             "current_valid=%d last_good=%d core_fallback=%d skipped_no_box=%d skipped_no_overlap=%d skipped_state=%d",
+             keyframe_count_ + 1,
+             moving_tracks, static_tracks,
+             active_cargo_remove_boxes_base.size(),
+             overlap_total,
+             current_valid_count, last_good_count, core_fallback_count,
+             skipped_no_box, skipped_no_overlap, skipped_state);
+
+    // ------------------------------------------------------------------------
     // 4. CargoCommit：当前帧吊货点删除（必须在 MapCommit 前）
-    // P2: 改用 objects_base 在 base_link 下删除
     // ------------------------------------------------------------------------
     pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_cargo_base(new pcl::PointCloud<pcl::PointXYZ>);
 
-    // P2: 在 base_link 下直接删除，不用变换到 map
     removePointsInsideCargoRemoveBoxesBase(
         objects_base,
         active_cargo_remove_boxes_base,
         objects_after_cargo_base,
         cargo_removed_base);
 
-    // [CargoCommit] 日志（要求的格式）
+    // [CargoCommit] 日志
     ROS_INFO("[CargoCommit] seq=%d source=objects_base before=%zu active_boxes=%zu removed=%zu after=%zu",
              keyframe_count_ + 1,
              objects_base->size(),
@@ -6295,6 +6397,97 @@ void NdtSlamNode::removePointsInsideCargoRemoveBoxesBase(
     removed_base->width = removed_base->size();
     removed_base->height = 1;
     removed_base->is_dense = false;
+}
+
+// ============================================================================
+// v8: 统一 active remove box 生成
+// ============================================================================
+
+int NdtSlamNode::countPointsInsideBoxBase(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    const CargoBox& box)
+{
+    if (!cloud || cloud->empty()) return 0;
+
+    int count = 0;
+    for (const auto& p : cloud->points) {
+        if (p.x >= box.bbox_min.x() && p.x <= box.bbox_max.x() &&
+            p.y >= box.bbox_min.y() && p.y <= box.bbox_max.y() &&
+            p.z >= box.bbox_min.z() && p.z <= box.bbox_max.z()) {
+            count++;
+        }
+    }
+    return count;
+}
+
+CargoBox NdtSlamNode::expandCoreToRemoveBox(const CargoBox& core_box)
+{
+    CargoBox remove_box = core_box;
+    remove_box.bbox_min.x() -= 0.25f;
+    remove_box.bbox_min.y() -= 0.25f;
+    remove_box.bbox_min.z() -= 0.05f;
+    remove_box.bbox_max.x() += 0.25f;
+    remove_box.bbox_max.y() += 0.25f;
+    remove_box.bbox_max.z() += 0.15f;
+    return remove_box;
+}
+
+NdtSlamNode::ActiveRemoveDecision NdtSlamNode::buildActiveRemoveBoxForTrack(
+    const ObjectTrack& track,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_base,
+    double stamp)
+{
+    ActiveRemoveDecision d;
+
+    // 检查状态
+    const bool state_ok =
+        track.state == TrackState::DYNAMIC_PAYLOAD ||
+        track.state == TrackState::SUSPENDED_MOVING ||
+        track.state == TrackState::SUSPENDED_STATIC;
+
+    if (!state_ok) {
+        d.reason = "STATE_NOT_ACTIVE";
+        return d;
+    }
+
+    // 选择候选 box
+    CargoBox candidate;
+    bool has_candidate = false;
+
+    if (track.has_last_good_box && !track.using_last_good_box) {
+        // 当前帧有效测量（不是 fallback）
+        candidate = track.last_good_remove_box;
+        d.source = "CURRENT_VALID";
+        has_candidate = true;
+    } else if (track.has_last_good_box &&
+               stamp - track.last_good_box_time < 2.0) {
+        // last_good fallback
+        candidate = track.last_good_remove_box;
+        d.source = "LAST_GOOD";
+        has_candidate = true;
+    } else if (track.has_last_core_box) {
+        // core fallback
+        candidate = expandCoreToRemoveBox(track.last_core_box);
+        d.source = "CORE_FALLBACK";
+        has_candidate = true;
+    }
+
+    if (!has_candidate) {
+        d.reason = "NO_BOX";
+        return d;
+    }
+
+    // 检查 overlap
+    d.overlap = countPointsInsideBoxBase(objects_base, candidate);
+    if (d.overlap < 5) {  // min_remove_overlap_points
+        d.reason = "NO_OVERLAP";
+        return d;
+    }
+
+    d.active = true;
+    d.box = candidate;
+    d.reason = "OK";
+    return d;
 }
 
 // ============================================================================
