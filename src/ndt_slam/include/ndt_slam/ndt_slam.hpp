@@ -33,6 +33,9 @@
 #include <ndt_slam/cargo_box_estimator.hpp>
 #include <set>
 
+// v8-stable-r3: CraneMotionEKF
+#include <ndt_slam/crane_motion_ekf.hpp>
+
 // NDT_OMP
 #include <pclomp/ndt_omp.h>
 
@@ -237,6 +240,51 @@ private:
     Sophus::SO3d rpyToSO3(double roll, double pitch, double yaw);
     ros::Time last_stamp_;
     std::atomic<bool> tracking_lost_{false};
+
+    // ========== v8-stable-r3: CraneMotionEKF ==========
+    CraneMotionEKF crane_motion_ekf_;
+    CraneMotionEKFConfig crane_motion_ekf_cfg_;
+    bool crane_motion_ekf_enabled_ = true;
+
+    // ========== v8-stable-r3: SoftYawFilter ==========
+    bool soft_yaw_enabled_ = true;
+    bool filtered_yaw_initialized_ = false;
+    double filtered_yaw_rad_ = 0.0;
+
+    double yaw_filter_alpha_stationary_ = 0.04;
+    double yaw_filter_alpha_moving_ = 0.18;
+    double yaw_filter_alpha_speed_extra_ = 0.05;
+
+    double yaw_max_step_stationary_rad_ = 0.08 * M_PI / 180.0;
+    double yaw_max_step_moving_rad_ = 0.35 * M_PI / 180.0;
+    double yaw_warn_raw_filtered_diff_rad_ = 3.0 * M_PI / 180.0;
+
+    double updateSoftYaw(double raw_yaw, double speed_xy, bool is_stationary);
+    Sophus::SE3d applyCraneOutputConstraint(const Sophus::SE3d& pose_in,
+                                            bool is_stationary,
+                                            double speed_xy);
+
+    // ========== v8-stable-r3: Registration Input ==========
+    double ndt_input_voxel_size_ = 0.30;
+    int object_weight_repeat_ = 2;
+    double ground_sample_ratio_ = 0.20;
+    int max_ndt_points_ = 8000;
+    int min_objects_for_weighting_ = 500;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr sampleCloudByRatio(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double ratio);
+    void voxelDownsampleInPlace(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double leaf);
+    void limitCloudUniformInPlace(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, int max_points);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr buildRegistrationCloud(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& human_safe_objects,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_cloud);
+
+    // ========== v8-stable-r3: Adaptive NDT ==========
+    bool adaptive_ndt_enabled_ = true;
+    double adaptive_target_total_ms_ = 80.0;
+    double adaptive_emergency_total_ms_ = 120.0;
+    double last_total_ms_ = 0.0;
+    int consecutive_good_perf_frames_ = 0;
 
     std::mutex cloud_mutex_;
     std::queue<sensor_msgs::PointCloud2::ConstPtr> cloud_queue_;

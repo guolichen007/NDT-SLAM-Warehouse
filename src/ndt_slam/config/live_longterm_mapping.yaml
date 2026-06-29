@@ -303,3 +303,113 @@ cargo_box_estimator:
   init_max_aspect_ratio: 8.0
   init_min_bottom_hag: 0.45
   init_min_core_points: 5
+
+# ========== v8-stable-r3-final: CraneMotionEKF ==========
+crane_motion_ekf:
+  enabled: true
+  source: "estimated"          # estimated / plc
+
+  q_pos: 0.05
+  q_vel: 0.30
+
+  r_ndt_base: 0.02
+  r_ndt_max: 2.0
+  fitness_to_r_scale: 5.0
+
+  innovation_gate_m: 0.50
+  innovation_reject_m: 1.50
+
+  max_speed_x: 2.0
+  max_speed_y: 2.0
+  max_accel_x: 1.0
+  max_accel_y: 1.0
+
+  commit_requires_ndt_accept: true
+  max_rejected_frames_for_commit: 0
+
+  diagonal_mode:
+    enabled: true
+    min_vx: 0.05
+    min_vy: 0.05
+    min_speed: 0.10
+    lateral_gate_m: 0.20
+    tangential_gate_m: 0.40
+    lateral_damping: 0.70
+    tangential_damping: 0.40
+
+  recovery:
+    max_frames_since_good_ndt: 30
+    max_high_fitness_frames: 10
+    max_reject_innovation_frames: 5
+    high_fitness_threshold: 0.15
+
+# ========== v8-stable-r3-final: SoftYawFilter ==========
+soft_yaw_filter:
+  enabled: true
+  mode: "soft_filter"
+
+  alpha_stationary: 0.04
+  alpha_moving: 0.18
+  alpha_speed_extra: 0.05
+
+  max_step_deg_stationary: 0.08
+  max_step_deg_moving: 0.35
+
+  warn_raw_filtered_diff_deg: 3.0
+
+# ========== v8-stable-r3-final: Registration Input ==========
+registration_input:
+  ndt_input_voxel_size: 0.30
+  object_weight_repeat: 2
+  ground_sample_ratio: 0.20
+  max_ndt_points: 8000
+  min_objects_for_weighting: 500
+
+# ========== v8-stable-r3-final: Adaptive NDT ==========
+adaptive_ndt:
+  enabled: true
+  target_total_ms: 80.0
+  emergency_total_ms: 120.0
+
+  normal:
+    max_iterations: 30
+    ndt_input_voxel_size: 0.30
+    ground_sample_ratio: 0.20
+    object_weight_repeat: 2
+    max_ndt_points: 8000
+
+  overload:
+    max_iterations: 20
+    ndt_input_voxel_size: 0.35
+    ground_sample_ratio: 0.10
+    object_weight_repeat: 1
+    max_ndt_points: 6000
+
+  emergency:
+    max_iterations: 15
+    ndt_input_voxel_size: 0.40
+    ground_sample_ratio: 0.05
+    object_weight_repeat: 1
+    max_ndt_points: 4000
+
+# ========== v8-stable-r3-final: ICP Refine ==========
+icp_refine:
+  enabled: false
+  run_after_ndt: true
+  use_objects_only: true
+  max_iterations: 8
+  max_correspondence_distance: 0.20
+  transformation_epsilon: 0.002
+  min_object_points: 800
+  max_icp_ms: 15.0
+
+# ========== v8-stable-r3-final: Debug Publish ==========
+debug_publish:
+  enabled: false
+  publish_every_n_frames: 10
+
+# ========== v8-stable-r3-final: RViz Publish ==========
+rviz_publish:
+  display_map_rate_hz: 1.0
+  objects_clean_rate_hz: 1.0
+  current_cloud_rate_hz: 3.0

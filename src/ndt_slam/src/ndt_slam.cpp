@@ -727,6 +727,103 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         ROS_INFO("  rebuild_every_keyframes: %d", rebuild_every_keyframes_);
         ROS_INFO("===========================");
 
+        // v8-stable-r3: CraneMotionEKF 参数
+        if (config["crane_motion_ekf"]) {
+            const auto n = config["crane_motion_ekf"];
+            crane_motion_ekf_enabled_ = n["enabled"].as<bool>(true);
+
+            crane_motion_ekf_cfg_.q_pos = n["q_pos"].as<double>(0.05);
+            crane_motion_ekf_cfg_.q_vel = n["q_vel"].as<double>(0.30);
+
+            crane_motion_ekf_cfg_.r_ndt_base = n["r_ndt_base"].as<double>(0.02);
+            crane_motion_ekf_cfg_.r_ndt_max = n["r_ndt_max"].as<double>(2.0);
+            crane_motion_ekf_cfg_.fitness_to_r_scale = n["fitness_to_r_scale"].as<double>(5.0);
+
+            crane_motion_ekf_cfg_.innovation_gate_m = n["innovation_gate_m"].as<double>(0.50);
+            crane_motion_ekf_cfg_.innovation_reject_m = n["innovation_reject_m"].as<double>(1.50);
+
+            crane_motion_ekf_cfg_.max_speed_x = n["max_speed_x"].as<double>(2.0);
+            crane_motion_ekf_cfg_.max_speed_y = n["max_speed_y"].as<double>(2.0);
+
+            if (n["diagonal_mode"]) {
+                const auto d = n["diagonal_mode"];
+                crane_motion_ekf_cfg_.diagonal_enabled = d["enabled"].as<bool>(true);
+                crane_motion_ekf_cfg_.diagonal_min_vx = d["min_vx"].as<double>(0.05);
+                crane_motion_ekf_cfg_.diagonal_min_vy = d["min_vy"].as<double>(0.05);
+                crane_motion_ekf_cfg_.diagonal_min_speed = d["min_speed"].as<double>(0.10);
+                crane_motion_ekf_cfg_.lateral_gate_m = d["lateral_gate_m"].as<double>(0.20);
+                crane_motion_ekf_cfg_.tangential_gate_m = d["tangential_gate_m"].as<double>(0.40);
+                crane_motion_ekf_cfg_.lateral_damping = d["lateral_damping"].as<double>(0.70);
+                crane_motion_ekf_cfg_.tangential_damping = d["tangential_damping"].as<double>(0.40);
+            }
+
+            if (n["recovery"]) {
+                const auto r = n["recovery"];
+                crane_motion_ekf_cfg_.max_frames_since_good_ndt = r["max_frames_since_good_ndt"].as<int>(30);
+                crane_motion_ekf_cfg_.max_high_fitness_frames = r["max_high_fitness_frames"].as<int>(10);
+                crane_motion_ekf_cfg_.max_reject_innovation_frames = r["max_reject_innovation_frames"].as<int>(5);
+                crane_motion_ekf_cfg_.high_fitness_threshold = r["high_fitness_threshold"].as<double>(0.15);
+            }
+
+            crane_motion_ekf_.setConfig(crane_motion_ekf_cfg_);
+
+            ROS_INFO("[CraneMotionEKF] enabled=%d q_pos=%.3f q_vel=%.3f gate=%.2f reject=%.2f",
+                     crane_motion_ekf_enabled_ ? 1 : 0,
+                     crane_motion_ekf_cfg_.q_pos,
+                     crane_motion_ekf_cfg_.q_vel,
+                     crane_motion_ekf_cfg_.innovation_gate_m,
+                     crane_motion_ekf_cfg_.innovation_reject_m);
+        }
+
+        // v8-stable-r3: SoftYawFilter 参数
+        if (config["soft_yaw_filter"]) {
+            const auto n = config["soft_yaw_filter"];
+            soft_yaw_enabled_ = n["enabled"].as<bool>(true);
+
+            yaw_filter_alpha_stationary_ = n["alpha_stationary"].as<double>(0.04);
+            yaw_filter_alpha_moving_ = n["alpha_moving"].as<double>(0.18);
+            yaw_filter_alpha_speed_extra_ = n["alpha_speed_extra"].as<double>(0.05);
+
+            yaw_max_step_stationary_rad_ = n["max_step_deg_stationary"].as<double>(0.08) * M_PI / 180.0;
+            yaw_max_step_moving_rad_ = n["max_step_deg_moving"].as<double>(0.35) * M_PI / 180.0;
+
+            yaw_warn_raw_filtered_diff_rad_ = n["warn_raw_filtered_diff_deg"].as<double>(3.0) * M_PI / 180.0;
+
+            ROS_INFO("[SoftYaw] enabled=%d alpha_static=%.3f alpha_moving=%.3f",
+                     soft_yaw_enabled_ ? 1 : 0,
+                     yaw_filter_alpha_stationary_,
+                     yaw_filter_alpha_moving_);
+        }
+
+        // v8-stable-r3: Registration Input 参数
+        if (config["registration_input"]) {
+            const auto n = config["registration_input"];
+            ndt_input_voxel_size_ = n["ndt_input_voxel_size"].as<double>(0.30);
+            object_weight_repeat_ = n["object_weight_repeat"].as<int>(2);
+            ground_sample_ratio_ = n["ground_sample_ratio"].as<double>(0.20);
+            max_ndt_points_ = n["max_ndt_points"].as<int>(8000);
+            min_objects_for_weighting_ = n["min_objects_for_weighting"].as<int>(500);
+
+            ROS_INFO("[RegistrationInput] voxel=%.2f repeat=%d ground_ratio=%.2f max_points=%d",
+                     ndt_input_voxel_size_,
+                     object_weight_repeat_,
+                     ground_sample_ratio_,
+                     max_ndt_points_);
+        }
+
+        // v8-stable-r3: Adaptive NDT 参数
+        if (config["adaptive_ndt"]) {
+            const auto n = config["adaptive_ndt"];
+            adaptive_ndt_enabled_ = n["enabled"].as<bool>(true);
+            adaptive_target_total_ms_ = n["target_total_ms"].as<double>(80.0);
+            adaptive_emergency_total_ms_ = n["emergency_total_ms"].as<double>(120.0);
+
+            ROS_INFO("[AdaptiveNDT] enabled=%d target_ms=%.1f emergency_ms=%.1f",
+                     adaptive_ndt_enabled_ ? 1 : 0,
+                     adaptive_target_total_ms_,
+                     adaptive_emergency_total_ms_);
+        }
+
     } catch (const YAML::Exception& e) {
         ROS_ERROR("YAML parse error: %s", e.what());
     }
@@ -969,13 +1066,10 @@ void NdtSlamNode::processCloudThread() {
             human_safe_objects = safe_objects;
         }
 
-        // 构建配准用点云：human_safe_objects x4 + ground x1
-        // 人体候选不参与 NDT 配准，防止人体拖影污染定位
-        pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-        for (int i = 0; i < 4; i++) {
-            *registration_cloud += *human_safe_objects;
-        }
-        *registration_cloud += *ground_cloud;
+        // v8-stable-r3: 构建配准用点云（NDT 输入减负）
+        // 使用 buildRegistrationCloud 替代原来的 objects x4 + ground full
+        pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud =
+            buildRegistrationCloud(human_safe_objects, ground_cloud);
 
         // ========== 地面法向量诊断 ==========
         // 初始化时和每 100 帧输出一次，用于检测外参 roll/pitch 误差
@@ -1166,6 +1260,46 @@ void NdtSlamNode::processCloudThread() {
 
                         new_pose = Sophus::SE3d(result_ortho);
 
+                        // v8-stable-r3: CraneMotionEKF update
+                        Sophus::SE3d ekf_pose = new_pose;
+                        bool ndt_accepted = true;
+
+                        if (crane_motion_ekf_enabled_) {
+                            if (!crane_motion_ekf_.initialized()) {
+                                crane_motion_ekf_.initialize(new_pose, msg->header.stamp);
+                                ekf_pose = new_pose;
+                            } else {
+                                ekf_pose = crane_motion_ekf_.updateWithNDT(
+                                    new_pose,
+                                    fitness_score,
+                                    new_pose,
+                                    msg->header.stamp);
+                            }
+
+                            ndt_accepted = crane_motion_ekf_.status().ndt_accepted;
+
+                            // EKF 日志（每秒一次）
+                            const auto& ekf_status = crane_motion_ekf_.status();
+                            ROS_INFO_THROTTLE(1.0,
+                                "[EKF] pred=(%.2f,%.2f) ndt=(%.2f,%.2f) out=(%.2f,%.2f) "
+                                "vel=(%.2f,%.2f) innov=%.3f lat=%.3f tan=%.3f R=%.4f P=%.4f mode=%s accept=%d reject=%s",
+                                ekf_status.predicted_pos.x(), ekf_status.predicted_pos.y(),
+                                ekf_status.ndt_pos.x(), ekf_status.ndt_pos.y(),
+                                ekf_status.output_pos.x(), ekf_status.output_pos.y(),
+                                ekf_status.velocity.x(), ekf_status.velocity.y(),
+                                ekf_status.innovation_norm,
+                                ekf_status.lateral_error,
+                                ekf_status.tangential_error,
+                                ekf_status.measurement_r,
+                                ekf_status.p_trace,
+                                ekf_status.diagonal_mode ? "DIAG" : "NORMAL",
+                                ekf_status.ndt_accepted ? 1 : 0,
+                                ekf_status.reject_reason.c_str());
+                        }
+
+                        // v8-stable-r3: 使用 EKF 输出作为 new_pose
+                        new_pose = ekf_pose;
+
                         // NDT 健康日志（每秒一次）
                         {
                             Eigen::Vector3d raw_pos = new_pose.translation();
@@ -1244,10 +1378,13 @@ void NdtSlamNode::processCloudThread() {
         }
 
         // ========== 阶段 6：更新位姿 ==========
-        // 约束后的 pose 用于发布和存储，原始 pose 用于 NDT 内部
+        // v8-stable-r3: 使用 SoftYawFilter 替代 hard yaw lock
+        // NDT yaw 自由，只对输出 yaw 做滤波
         Sophus::SE3d constrained_pose = new_pose;
         if (registration_success && crane_constraint_enabled_) {
-            constrained_pose = applyCraneMotionConstraint(new_pose, "ndt_output");
+            const auto& ekf_status = crane_motion_ekf_.status();
+            double speed_xy = ekf_status.velocity.norm();
+            constrained_pose = applyCraneOutputConstraint(new_pose, is_stationary_, speed_xy);
         }
 
         if (registration_success) {
@@ -1359,8 +1496,23 @@ void NdtSlamNode::processCloudThread() {
                 }
             }
             addFrameToMap(filtered_cloud, map_pose, publish_time);
-            // v8: 使用 pub_pose（PoseFreeze 后的姿态）进行 MapCommit
-            commitKeyFrameWithDynamicFiltering(filtered_cloud, pub_pose, publish_time);
+
+            // v8-stable-r3: MapCommit 只允许在 ndt_accepted=true 且 fitness 合格时执行
+            // EKF prediction-only 帧可以发布 TF/odom，但不能写地图
+            bool ndt_accepted_for_commit = true;
+            if (crane_motion_ekf_enabled_) {
+                ndt_accepted_for_commit = crane_motion_ekf_.status().ndt_accepted;
+            }
+
+            bool allow_map_commit = ndt_accepted_for_commit &&
+                                    last_ndt_fitness_ < 0.15;
+
+            if (allow_map_commit) {
+                commitKeyFrameWithDynamicFiltering(filtered_cloud, pub_pose, publish_time);
+            } else {
+                ROS_DEBUG("[MapCommit] skipped: ndt_accepted=%d fitness=%.3f",
+                         ndt_accepted_for_commit ? 1 : 0, last_ndt_fitness_);
+            }
             success_frames++;
         }
 
@@ -1371,6 +1523,15 @@ void NdtSlamNode::processCloudThread() {
         // 更新统计
         total_frames_ = total_frames;
         average_process_time_ms_ = elapsed * 1000.0;
+        last_total_ms_ = average_process_time_ms_;
+
+        // v8-stable-r3: [Perf] 日志（每秒一次）
+        ROS_INFO_THROTTLE(1.0,
+            "[Perf] total=%.1fms fitness=%.3f kf=%d frame=%d",
+            average_process_time_ms_,
+            last_ndt_fitness_,
+            keyframe_count_,
+            total_frames);
 
         // Status 只在运动时报告，每 30 秒一次
         if (!is_stationary_ && (ros::Time::now() - last_log_time).toSec() > 30.0) {
@@ -5031,7 +5192,8 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
             core_pts = track.core_box_base.suspended_points;
 
             // [PayloadTrackInfoCore] 日志
-            ROS_INFO("[PayloadTrackInfoCore] id=%d state=%d source=CORE_BOX "
+            // v8-stable-r3: 降为 DEBUG
+            ROS_DEBUG("[PayloadTrackInfoCore] id=%d state=%d source=CORE_BOX "
                      "core_size=(%.2f,%.2f,%.2f) bottom_hag=%.2f core_pts=%d",
                      track.track_id, track.state,
                      track.core_box_base.size.x(),
@@ -5259,6 +5421,193 @@ Sophus::SE3d NdtSlamNode::applyCraneMotionConstraint(const Sophus::SE3d& raw_pos
                       roll * 180.0 / M_PI, pitch * 180.0 / M_PI, yaw * 180.0 / M_PI);
 
     return constrained_pose;
+}
+
+// ============================================================================
+// v8-stable-r3: SoftYawFilter
+// ============================================================================
+
+static inline double normalizeAngle(double a) {
+    while (a > M_PI) a -= 2.0 * M_PI;
+    while (a < -M_PI) a += 2.0 * M_PI;
+    return a;
+}
+
+static inline double clampDouble(double v, double lo, double hi) {
+    return std::max(lo, std::min(v, hi));
+}
+
+double NdtSlamNode::updateSoftYaw(double raw_yaw,
+                                  double speed_xy,
+                                  bool is_stationary) {
+    if (!soft_yaw_enabled_) {
+        return raw_yaw;
+    }
+
+    if (!filtered_yaw_initialized_) {
+        filtered_yaw_rad_ = raw_yaw;
+        filtered_yaw_initialized_ = true;
+        return filtered_yaw_rad_;
+    }
+
+    double alpha = is_stationary
+        ? yaw_filter_alpha_stationary_
+        : yaw_filter_alpha_moving_ +
+          yaw_filter_alpha_speed_extra_ * std::min(speed_xy / 1.0, 1.0);
+
+    alpha = clampDouble(alpha, 0.01, 0.80);
+
+    const double max_step = is_stationary
+        ? yaw_max_step_stationary_rad_
+        : yaw_max_step_moving_rad_;
+
+    double dyaw = normalizeAngle(raw_yaw - filtered_yaw_rad_);
+
+    if (std::abs(dyaw) > yaw_warn_raw_filtered_diff_rad_) {
+        ROS_WARN_THROTTLE(
+            2.0,
+            "[SoftYaw] raw-filter diff large: raw=%.2fdeg filtered=%.2fdeg diff=%.2fdeg",
+            raw_yaw * 180.0 / M_PI,
+            filtered_yaw_rad_ * 180.0 / M_PI,
+            dyaw * 180.0 / M_PI);
+    }
+
+    dyaw = clampDouble(dyaw, -max_step, max_step);
+
+    filtered_yaw_rad_ = normalizeAngle(filtered_yaw_rad_ + alpha * dyaw);
+
+    return filtered_yaw_rad_;
+}
+
+Sophus::SE3d NdtSlamNode::applyCraneOutputConstraint(
+    const Sophus::SE3d& pose_in,
+    bool is_stationary,
+    double speed_xy) {
+    Sophus::SE3d out = pose_in;
+
+    Eigen::Vector3d t = out.translation();
+    t.z() = fixed_z_;   // z lock
+    out.translation() = t;
+
+    const Eigen::Matrix3d R = out.so3().matrix();
+
+    double roll, pitch, yaw;
+    so3ToRpy(out.so3(), roll, pitch, yaw);
+
+    roll = 0.0;
+    pitch = 0.0;
+
+    const double filtered_yaw = updateSoftYaw(yaw, speed_xy, is_stationary);
+
+    out.so3() = rpyToSO3(roll, pitch, filtered_yaw);
+
+    return out;
+}
+
+// ============================================================================
+// v8-stable-r3: NDT 输入减负函数
+// ============================================================================
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::sampleCloudByRatio(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    double ratio) {
+    auto out = boost::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+
+    if (!cloud || cloud->empty() || ratio <= 0.0) {
+        return out;
+    }
+
+    if (ratio >= 1.0) {
+        *out = *cloud;
+        return out;
+    }
+
+    const int step = std::max(1, static_cast<int>(std::round(1.0 / ratio)));
+    out->reserve(cloud->size() / step + 1);
+
+    for (size_t i = 0; i < cloud->size(); i += step) {
+        out->push_back((*cloud)[i]);
+    }
+
+    out->width = out->size();
+    out->height = 1;
+    out->is_dense = false;
+
+    return out;
+}
+
+void NdtSlamNode::voxelDownsampleInPlace(
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    double leaf) {
+    if (!cloud || cloud->empty() || leaf <= 0.0) {
+        return;
+    }
+
+    pcl::VoxelGrid<pcl::PointXYZ> vf;
+    vf.setLeafSize(leaf, leaf, leaf);
+    vf.setInputCloud(cloud);
+
+    auto filtered = boost::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    vf.filter(*filtered);
+
+    cloud.swap(filtered);
+}
+
+void NdtSlamNode::limitCloudUniformInPlace(
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    int max_points) {
+    if (!cloud || max_points <= 0 ||
+        static_cast<int>(cloud->size()) <= max_points) {
+        return;
+    }
+
+    auto limited = boost::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    limited->reserve(max_points);
+
+    const double step =
+        static_cast<double>(cloud->size()) / static_cast<double>(max_points);
+
+    for (int i = 0; i < max_points; ++i) {
+        const size_t idx =
+            std::min(static_cast<size_t>(std::floor(i * step)),
+                     cloud->size() - 1);
+        limited->push_back((*cloud)[idx]);
+    }
+
+    limited->width = limited->size();
+    limited->height = 1;
+    limited->is_dense = false;
+
+    cloud.swap(limited);
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::buildRegistrationCloud(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& human_safe_objects,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_cloud) {
+    auto registration_cloud =
+        boost::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+
+    int repeat = object_weight_repeat_;
+    if (static_cast<int>(human_safe_objects->size()) <
+        min_objects_for_weighting_) {
+        repeat = 1;
+    }
+
+    for (int i = 0; i < repeat; ++i) {
+        *registration_cloud += *human_safe_objects;
+    }
+
+    auto ground_sampled = sampleCloudByRatio(
+        ground_cloud,
+        ground_sample_ratio_);
+
+    *registration_cloud += *ground_sampled;
+
+    voxelDownsampleInPlace(registration_cloud, ndt_input_voxel_size_);
+
+    limitCloudUniformInPlace(registration_cloud, max_ndt_points_);
+
+    return registration_cloud;
 }
 
 // ============================================================================
@@ -5853,15 +6202,15 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         }
     }
 
-    // [CargoActiveSummary] 日志（INFO）
-    ROS_INFO("[CargoActiveSummary] kf=%d moving=%d static=%d active_boxes=%zu overlap_total=%d "
-             "current_valid=%d last_good=%d core_fallback=%d skipped_no_box=%d skipped_no_overlap=%d skipped_state=%d",
-             keyframe_count_ + 1,
+    // v8-stable-r3: [Cargo] 日志（每 2 秒一次）
+    ROS_INFO_THROTTLE(2.0,
+             "[Cargo] tracks=%zu moving=%d static=%d active=%zu removed=%zu weak_skip=%d fallback=%d",
+             payload_tracker_.getTracks().size(),
              moving_tracks, static_tracks,
              active_cargo_remove_boxes_base.size(),
-             overlap_total,
-             current_valid_count, last_good_count, core_fallback_count,
-             skipped_no_box, skipped_no_overlap, skipped_state);
+             cargo_removed_base->size(),
+             skipped_no_box + skipped_no_overlap + skipped_state,
+             last_good_count + core_fallback_count);
 
     // ------------------------------------------------------------------------
     // 4. CargoCommit：当前帧吊货点删除（必须在 MapCommit 前）
@@ -5875,7 +6224,8 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         cargo_removed_base);
 
     // [CargoCommit] 日志
-    ROS_INFO("[CargoCommit] seq=%d source=objects_base before=%zu active_boxes=%zu removed=%zu after=%zu",
+    // v8-stable-r3: 降为 DEBUG
+    ROS_DEBUG("[CargoCommit] seq=%d source=objects_base before=%zu active_boxes=%zu removed=%zu after=%zu",
              keyframe_count_ + 1,
              objects_base->size(),
              active_cargo_remove_boxes_base.size(),
@@ -5917,7 +6267,8 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         new_cargo_volumes_this_frame_.push_back(vol);
         cargo_swept_history_.push_back(vol);
 
-        ROS_INFO("[CargoHistoryAdd] kf=%d volume=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f) fallback=%d history_size=%zu",
+        // v8-stable-r3: 降为 DEBUG
+        ROS_DEBUG("[CargoHistoryAdd] kf=%d volume=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f) fallback=%d history_size=%zu",
                  keyframe_count_ + 1,
                  vol.min_map.x(), vol.min_map.y(), vol.min_map.z(),
                  vol.max_map.x(), vol.max_map.y(), vol.max_map.z(),
@@ -6034,7 +6385,8 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     *commit_cloud_base += *objects_after_human_base;
 
     // [MapCommitInput] 日志（要求的格式）
-    ROS_INFO("[MapCommitInput] seq=%d raw=%zu ground=%zu raw_objects=%zu commit_objects=%zu commit_total=%zu cargo_removed=%zu human_removed=%zu",
+    // v8-stable-r3: 降为 DEBUG
+    ROS_DEBUG("[MapCommitInput] seq=%d raw=%zu ground=%zu raw_objects=%zu commit_objects=%zu commit_total=%zu cargo_removed=%zu human_removed=%zu",
              keyframe_count_ + 1,
              cloud->size(),
              ground_base->size(),
