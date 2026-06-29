@@ -672,37 +672,67 @@ private:
     }
 
     void publishStableBbox(const ros::Time& stamp) {
+        // P5: stable_bbox 改为和 core_box 一致的线框显示
+        // 使用和 publishThreeLayerMarkers 相同的 LINE_LIST 方式
         visualization_msgs::MarkerArray markers;
 
         visualization_msgs::Marker marker;
-        marker.header.stamp = ros::Time(0);  // 调试阶段避免 TF 时间问题
+        marker.header.stamp = ros::Time(0);
         marker.header.frame_id = map_frame_;
         marker.ns = "cargo_stable_bbox";
         marker.id = 0;
-        marker.type = visualization_msgs::Marker::CUBE;
+        marker.type = visualization_msgs::Marker::LINE_LIST;
         marker.action = visualization_msgs::Marker::ADD;
 
-        // 使用 stable centroid 作为中心
-        marker.pose.position.x = stable_centroid_.x();
-        marker.pose.position.y = stable_centroid_.y();
-        marker.pose.position.z = stable_centroid_.z();
         marker.pose.orientation.w = 1.0;
 
-        marker.scale.x = stable_size_.x();
-        marker.scale.y = stable_size_.y();
-        marker.scale.z = stable_size_.z();
+        // 线宽
+        marker.scale.x = 0.05;
 
-        // 最小尺寸保护：不小于 0.30m
-        marker.scale.x = std::max(marker.scale.x, 0.30);
-        marker.scale.y = std::max(marker.scale.y, 0.30);
-        marker.scale.z = std::max(marker.scale.z, 0.30);
-
-        // 绿色半透明，alpha 改成 0.45 以上
-        marker.color.r = 0.0;
+        // 黄色线框（区别于 core_box 的绿色）
+        marker.color.r = 1.0;
         marker.color.g = 1.0;
         marker.color.b = 0.0;
-        marker.color.a = 0.45;
+        marker.color.a = 1.0;
         marker.lifetime = ros::Duration(0.5);
+
+        // 计算 box 的 8 个角点
+        float cx = stable_centroid_.x();
+        float cy = stable_centroid_.y();
+        float cz = stable_centroid_.z();
+        float hx = stable_size_.x() / 2.0f;
+        float hy = stable_size_.y() / 2.0f;
+        float hz = stable_size_.z() / 2.0f;
+
+        // 最小尺寸保护
+        hx = std::max(hx, 0.15f);
+        hy = std::max(hy, 0.15f);
+        hz = std::max(hz, 0.15f);
+
+        // 8 个角点
+        geometry_msgs::Point p[8];
+        p[0].x = cx - hx; p[0].y = cy - hy; p[0].z = cz - hz;
+        p[1].x = cx + hx; p[1].y = cy - hy; p[1].z = cz - hz;
+        p[2].x = cx + hx; p[2].y = cy + hy; p[2].z = cz - hz;
+        p[3].x = cx - hx; p[3].y = cy + hy; p[3].z = cz - hz;
+        p[4].x = cx - hx; p[4].y = cy - hy; p[4].z = cz + hz;
+        p[5].x = cx + hx; p[5].y = cy - hy; p[5].z = cz + hz;
+        p[6].x = cx + hx; p[6].y = cy + hy; p[6].z = cz + hz;
+        p[7].x = cx - hx; p[7].y = cy + hy; p[7].z = cz + hz;
+
+        // 12 条边
+        marker.points.push_back(p[0]); marker.points.push_back(p[1]);
+        marker.points.push_back(p[1]); marker.points.push_back(p[2]);
+        marker.points.push_back(p[2]); marker.points.push_back(p[3]);
+        marker.points.push_back(p[3]); marker.points.push_back(p[0]);
+        marker.points.push_back(p[4]); marker.points.push_back(p[5]);
+        marker.points.push_back(p[5]); marker.points.push_back(p[6]);
+        marker.points.push_back(p[6]); marker.points.push_back(p[7]);
+        marker.points.push_back(p[7]); marker.points.push_back(p[4]);
+        marker.points.push_back(p[0]); marker.points.push_back(p[4]);
+        marker.points.push_back(p[1]); marker.points.push_back(p[5]);
+        marker.points.push_back(p[2]); marker.points.push_back(p[6]);
+        marker.points.push_back(p[3]); marker.points.push_back(p[7]);
 
         markers.markers.push_back(marker);
         stable_bbox_marker_pub_.publish(markers);
@@ -786,7 +816,7 @@ private:
             return;
         }
 
-        // 1. Core Box：真实货物框，绿色线框
+        // 1. Core Box：真实货物框，绿色线框（LINE_LIST）
         {
             visualization_msgs::MarkerArray markers;
             visualization_msgs::Marker marker;
@@ -794,30 +824,61 @@ private:
             marker.header.frame_id = map_frame_;
             marker.ns = "cargo_core_bbox";
             marker.id = 0;
-            marker.type = visualization_msgs::Marker::CUBE;
+            marker.type = visualization_msgs::Marker::LINE_LIST;
             marker.action = visualization_msgs::Marker::ADD;
 
-            marker.pose.position.x = stable_centroid_.x();
-            marker.pose.position.y = stable_centroid_.y();
-            marker.pose.position.z = stable_centroid_.z();
             marker.pose.orientation.w = 1.0;
 
-            // 使用 stable_size_，但 z 不向下扩展
-            marker.scale.x = stable_size_.x();
-            marker.scale.y = stable_size_.y();
-            marker.scale.z = stable_size_.z();
-
-            // 最小尺寸保护
-            marker.scale.x = std::max(marker.scale.x, 0.30);
-            marker.scale.y = std::max(marker.scale.y, 0.30);
-            marker.scale.z = std::max(marker.scale.z, 0.30);
+            // 线宽
+            marker.scale.x = 0.05;
 
             // 绿色线框
             marker.color.r = 0.0;
             marker.color.g = 1.0;
             marker.color.b = 0.0;
-            marker.color.a = 0.8;
+            marker.color.a = 1.0;
             marker.lifetime = ros::Duration(0.5);
+
+            // 计算 box 的 8 个角点
+            float cx = stable_centroid_.x();
+            float cy = stable_centroid_.y();
+            float cz = stable_centroid_.z();
+            float hx = stable_size_.x() / 2.0f;
+            float hy = stable_size_.y() / 2.0f;
+            float hz = stable_size_.z() / 2.0f;
+
+            // 最小尺寸保护
+            hx = std::max(hx, 0.15f);
+            hy = std::max(hy, 0.15f);
+            hz = std::max(hz, 0.15f);
+
+            // 8 个角点
+            geometry_msgs::Point p[8];
+            p[0].x = cx - hx; p[0].y = cy - hy; p[0].z = cz - hz;
+            p[1].x = cx + hx; p[1].y = cy - hy; p[1].z = cz - hz;
+            p[2].x = cx + hx; p[2].y = cy + hy; p[2].z = cz - hz;
+            p[3].x = cx - hx; p[3].y = cy + hy; p[3].z = cz - hz;
+            p[4].x = cx - hx; p[4].y = cy - hy; p[4].z = cz + hz;
+            p[5].x = cx + hx; p[5].y = cy - hy; p[5].z = cz + hz;
+            p[6].x = cx + hx; p[6].y = cy + hy; p[6].z = cz + hz;
+            p[7].x = cx - hx; p[7].y = cy + hy; p[7].z = cz + hz;
+
+            // 12 条边（每条边由两个点组成）
+            // 底面
+            marker.points.push_back(p[0]); marker.points.push_back(p[1]);
+            marker.points.push_back(p[1]); marker.points.push_back(p[2]);
+            marker.points.push_back(p[2]); marker.points.push_back(p[3]);
+            marker.points.push_back(p[3]); marker.points.push_back(p[0]);
+            // 顶面
+            marker.points.push_back(p[4]); marker.points.push_back(p[5]);
+            marker.points.push_back(p[5]); marker.points.push_back(p[6]);
+            marker.points.push_back(p[6]); marker.points.push_back(p[7]);
+            marker.points.push_back(p[7]); marker.points.push_back(p[4]);
+            // 竖直边
+            marker.points.push_back(p[0]); marker.points.push_back(p[4]);
+            marker.points.push_back(p[1]); marker.points.push_back(p[5]);
+            marker.points.push_back(p[2]); marker.points.push_back(p[6]);
+            marker.points.push_back(p[3]); marker.points.push_back(p[7]);
 
             markers.markers.push_back(marker);
             core_bbox_marker_pub_.publish(markers);
