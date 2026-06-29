@@ -677,6 +677,14 @@ bool PayloadTrackManager::getBestDynamicPayloadTrack(PayloadTrackInfo& out) cons
         }
     }
 
+    // P3: 复制 CargoBoxV2 的 core_box 信息
+    if (best->has_last_core_box) {
+        out.has_core_box = true;
+        out.core_box_base = best->last_core_box;
+    } else {
+        out.has_core_box = false;
+    }
+
     return true;
 }
 

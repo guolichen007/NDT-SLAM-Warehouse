@@ -444,6 +444,13 @@ private:
         pcl::PointCloud<pcl::PointXYZ>::Ptr& output_base,
         pcl::PointCloud<pcl::PointXYZ>::Ptr& removed_base);
 
+    // P2: 在 base_link 坐标系下删除吊货点（不用变换到 map）
+    void removePointsInsideCargoRemoveBoxesBase(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& input_base,
+        const std::vector<CargoBox>& remove_boxes_base,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& output_base,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& removed_base);
+
     // 吊货跟踪信息发布（用于避障节点）
     ros::Publisher payload_track_info_pub_;
     void publishPayloadTrackInfo(const ros::Time& stamp);

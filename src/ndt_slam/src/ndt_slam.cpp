@@ -2249,6 +2249,13 @@ void NdtSlamNode::rebuildCleanMap() {
         return;
     }
 
+    // P1: 保护检查 - 如果 objects_map 有点但 bev_observation_count_ 为空，跳过
+    if (objects_map_->size() > 1000 && bev_observation_count_.empty()) {
+        ROS_ERROR("[CleanMap] FAIL: objects_map has %zu points but bev_observation_count_ is empty, skip clean rebuild",
+                  objects_map_->size());
+        return;
+    }
+
     ROS_INFO("[CleanMap] rebuilding: objects_map=%zu, bev_obs_count=%zu",
              objects_map_->size(), bev_observation_count_.size());
 
@@ -4908,8 +4915,35 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
         // 计算 score（综合评分）
         float score = track.track_duration * 0.3f + track.direction_consistency * 0.7f;
 
-        // 计算 bottom_hag（悬空高度）
-        float bottom_hag = track.bbox_min_map.z();  // 暂时用 bbox_min.z，后面会用地面模型修正
+        // P3: 使用 core_box 如果可用，否则使用旧 bbox
+        Eigen::Vector3f bbox_min, bbox_max;
+        float bottom_hag = 0.0f;
+        int core_pts = 0;
+
+        if (track.has_core_box) {
+            // 使用 CargoBoxV2 的 core_box
+            bbox_min = track.core_box_base.bbox_min;
+            bbox_max = track.core_box_base.bbox_max;
+            bottom_hag = track.core_box_base.bottom_hag;
+            core_pts = track.core_box_base.suspended_points;
+
+            // [PayloadTrackInfoCore] 日志
+            ROS_INFO("[PayloadTrackInfoCore] id=%d state=%d source=CORE_BOX "
+                     "core_size=(%.2f,%.2f,%.2f) bottom_hag=%.2f core_pts=%d",
+                     track.track_id, track.state,
+                     track.core_box_base.size.x(),
+                     track.core_box_base.size.y(),
+                     track.core_box_base.size.z(),
+                     bottom_hag, core_pts);
+        } else {
+            // 回退到旧 bbox
+            bbox_min = track.bbox_min_map;
+            bbox_max = track.bbox_max_map;
+            bottom_hag = track.bbox_min_map.z();
+
+            ROS_WARN("[PayloadTrackInfoCore] id=%d state=%d source=OLD_BBOX (no core_box available)",
+                     track.track_id, track.state);
+        }
 
         // 计算 support_ratio（静态支持率）
         float support_ratio = 0.0f;  // 暂时设为 0，后面会从 CargoBoxEstimator 获取
@@ -4920,8 +4954,8 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
             static_cast<float>(track.state),
             track.centroid_map.x(), track.centroid_map.y(), track.centroid_map.z(),
             track.velocity_map.x(), track.velocity_map.y(), track.velocity_map.z(),
-            track.bbox_min_map.x(), track.bbox_min_map.y(), track.bbox_min_map.z(),
-            track.bbox_max_map.x(), track.bbox_max_map.y(), track.bbox_max_map.z(),
+            bbox_min.x(), bbox_min.y(), bbox_min.z(),
+            bbox_max.x(), bbox_max.y(), bbox_max.z(),
             static_cast<float>(track.point_count),
             score,
             bottom_hag,
@@ -4934,11 +4968,11 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
                   "size=(%.2f,%.2f,%.2f) pts=%d score=%.2f hag=%.2f support=%.2f",
                   track.track_id, (int)track.state,
                   track.centroid_map.x(), track.centroid_map.y(), track.centroid_map.z(),
-                  track.bbox_min_map.x(), track.bbox_min_map.y(), track.bbox_min_map.z(),
-                  track.bbox_max_map.x(), track.bbox_max_map.y(), track.bbox_max_map.z(),
-                  track.bbox_max_map.x() - track.bbox_min_map.x(),
-                  track.bbox_max_map.y() - track.bbox_min_map.y(),
-                  track.bbox_max_map.z() - track.bbox_min_map.z(),
+                  bbox_min.x(), bbox_min.y(), bbox_min.z(),
+                  bbox_max.x(), bbox_max.y(), bbox_max.z(),
+                  bbox_max.x() - bbox_min.x(),
+                  bbox_max.y() - bbox_min.y(),
+                  bbox_max.z() - bbox_min.z(),
                   track.point_count, score, bottom_hag, support_ratio);
     } else {
         // 没有有效 track
@@ -5125,6 +5159,44 @@ Sophus::SE3d NdtSlamNode::applyCraneMotionConstraint(const Sophus::SE3d& raw_pos
 }
 
 // ============================================================================
+// P4: 从 ground_base 构建局部地面模型
+// ============================================================================
+
+static SimpleGroundModel buildGroundModelFromGroundBase(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_base,
+    float resolution = 1.0f)
+{
+    SimpleGroundModel model;
+    model.resolution = resolution;
+    model.global_z_min = 0.0f;
+
+    if (!ground_base || ground_base->empty()) {
+        return model;
+    }
+
+    // 按 cell 收集 z 值
+    std::map<std::pair<int,int>, std::vector<float>> cell_zs;
+
+    for (const auto& p : ground_base->points) {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y)) continue;
+
+        int cx = static_cast<int>(std::floor(p.x / resolution));
+        int cy = static_cast<int>(std::floor(p.y / resolution));
+        cell_zs[{cx, cy}].push_back(p.z);
+    }
+
+    // 对每个 cell 取 20% 分位数作为地面高度
+    for (auto& kv : cell_zs) {
+        auto& v = kv.second;
+        std::sort(v.begin(), v.end());
+        size_t idx = std::min<size_t>(v.size() * 0.2, v.size() - 1);
+        model.cell_z[kv.first] = v[idx];
+    }
+
+    return model;
+}
+
+// ============================================================================
 // P0-1: 新的关键帧提交流程
 // 正确顺序：ground/objects 分割 → CargoBoxV2 → 吊货删除 → HumanFilter → MapCommit
 // ============================================================================
@@ -5206,7 +5278,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     // 3. CargoBoxV2 + PayloadTracker（必须在 MapCommit 前）
     // ------------------------------------------------------------------------
     TrackResult payload_track_result;
-    std::vector<Box3D> active_cargo_remove_boxes_map;
+    std::vector<CargoBox> active_cargo_remove_boxes_base;  // P2: 改用 base_link 坐标系
     pcl::PointCloud<pcl::PointXYZ>::Ptr cargo_removed_base(new pcl::PointCloud<pcl::PointXYZ>);
 
     if (payload_tracker_config_.enabled &&
@@ -5220,9 +5292,8 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
 
         // 3.2 再对每个 track 估计 CargoBoxV2
         if (cargo_box_estimator_config_.enabled) {
-            SimpleGroundModel ground_model;
-            ground_model.global_z_min = 0.0f;
-            ground_model.resolution = 1.5f;
+            // P4: 从 ground_base 构建局部地面模型
+            SimpleGroundModel ground_model = buildGroundModelFromGroundBase(ground_base, 1.0f);
 
             auto& tracks = payload_tracker_.getMutableTracks();
 
@@ -5296,13 +5367,10 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                             track.has_last_size = true;
                             track.size_jump_count = 0;
 
-                            // reinit 后允许用于删除
+                            // reinit 后允许用于删除（base_link 坐标系）
                             if (track.state == TrackState::DYNAMIC_PAYLOAD ||
                                 track.state == TrackState::SUSPENDED_MOVING) {
-                                Box3D remove_box_map;
-                                remove_box_map.min_pt = remove_box.bbox_min.cast<double>();
-                                remove_box_map.max_pt = remove_box.bbox_max.cast<double>();
-                                active_cargo_remove_boxes_map.push_back(remove_box_map);
+                                active_cargo_remove_boxes_base.push_back(remove_box);
                             }
                         }
                     }
@@ -5358,13 +5426,10 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                              core_box.bbox_min.z() - remove_box.bbox_min.z(),
                              remove_box.bbox_max.z() - core_box.bbox_max.z());
 
-                    // 只有动态吊货才用于删除
+                    // 只有动态吊货才用于删除（base_link 坐标系）
                     if (track.state == TrackState::DYNAMIC_PAYLOAD ||
                         track.state == TrackState::SUSPENDED_MOVING) {
-                        Box3D remove_box_map;
-                        remove_box_map.min_pt = remove_box.bbox_min.cast<double>();
-                        remove_box_map.max_pt = remove_box.bbox_max.cast<double>();
-                        active_cargo_remove_boxes_map.push_back(remove_box_map);
+                        active_cargo_remove_boxes_base.push_back(remove_box);
                     }
 
                     // 发布调试点云（每 20 帧一次）
@@ -5436,21 +5501,22 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
 
     // ------------------------------------------------------------------------
     // 4. CargoCommit：当前帧吊货点删除（必须在 MapCommit 前）
+    // P2: 改用 objects_base 在 base_link 下删除
     // ------------------------------------------------------------------------
     pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_cargo_base(new pcl::PointCloud<pcl::PointXYZ>);
 
-    removePointsInsideCargoRemoveBoxes3D(
-        objects_channel_safe,
-        active_cargo_remove_boxes_map,
-        T_map_base,
+    // P2: 在 base_link 下直接删除，不用变换到 map
+    removePointsInsideCargoRemoveBoxesBase(
+        objects_base,
+        active_cargo_remove_boxes_base,
         objects_after_cargo_base,
         cargo_removed_base);
 
     // [CargoCommit] 日志（要求的格式）
-    ROS_INFO("[CargoCommit] seq=%d before=%zu active_boxes=%zu removed=%zu after=%zu",
+    ROS_INFO("[CargoCommit] seq=%d source=objects_base before=%zu active_boxes=%zu removed=%zu after=%zu",
              keyframe_count_ + 1,
-             objects_channel_safe->size(),
-             active_cargo_remove_boxes_map.size(),
+             objects_base->size(),
+             active_cargo_remove_boxes_base.size(),
              cargo_removed_base->size(),
              objects_after_cargo_base->size());
 
@@ -5663,6 +5729,32 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
              objects_added,
              display_added);
 
+    // P1: 更新 BEV 观测计数（CleanMap 依赖此数据）
+    // 只用过滤后的 objects_commit_map，每个 BEV cell 只加一次
+    {
+        const double clean_bev_cell = 0.15;
+        std::set<BevKey> seen_cells;
+
+        for (const auto& p : objects_transformed.points) {
+            if (!std::isfinite(p.x) || !std::isfinite(p.y)) continue;
+
+            BevKey bk;
+            bk.x = static_cast<int>(std::floor(p.x / clean_bev_cell));
+            bk.y = static_cast<int>(std::floor(p.y / clean_bev_cell));
+            seen_cells.insert(bk);
+        }
+
+        for (const auto& bk : seen_cells) {
+            bev_observation_count_[bk]++;
+        }
+
+        ROS_INFO("[BevObsUpdate] seq=%d object_points=%zu unique_cells=%zu total_obs_cells=%zu",
+                 keyframe_count_,
+                 objects_transformed.size(),
+                 seen_cells.size(),
+                 bev_observation_count_.size());
+    }
+
     // 长期建图：写入 tiles
     if (longterm_mapping_enabled_ && persistent_map_enabled_ && canCommit()) {
         Eigen::Vector3d kf_pos = pose.translation();
@@ -5798,6 +5890,56 @@ void NdtSlamNode::removePointsInsideCargoRemoveBoxes3D(
             removed_base->push_back(p_base);
         } else {
             output_base->push_back(p_base);
+        }
+    }
+
+    output_base->width = output_base->size();
+    output_base->height = 1;
+    output_base->is_dense = false;
+
+    removed_base->width = removed_base->size();
+    removed_base->height = 1;
+    removed_base->is_dense = false;
+}
+
+// ============================================================================
+// P2: 在 base_link 坐标系下删除吊货点（不用变换到 map）
+// ============================================================================
+
+void NdtSlamNode::removePointsInsideCargoRemoveBoxesBase(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& input_base,
+    const std::vector<CargoBox>& remove_boxes_base,
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& output_base,
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& removed_base)
+{
+    output_base->clear();
+    removed_base->clear();
+
+    if (!input_base || input_base->empty()) {
+        return;
+    }
+
+    if (remove_boxes_base.empty()) {
+        *output_base = *input_base;
+        return;
+    }
+
+    for (const auto& p : input_base->points) {
+        bool inside = false;
+
+        for (const auto& box : remove_boxes_base) {
+            if (p.x >= box.bbox_min.x() && p.x <= box.bbox_max.x() &&
+                p.y >= box.bbox_min.y() && p.y <= box.bbox_max.y() &&
+                p.z >= box.bbox_min.z() && p.z <= box.bbox_max.z()) {
+                inside = true;
+                break;
+            }
+        }
+
+        if (inside) {
+            removed_base->push_back(p);
+        } else {
+            output_base->push_back(p);
         }
     }
 

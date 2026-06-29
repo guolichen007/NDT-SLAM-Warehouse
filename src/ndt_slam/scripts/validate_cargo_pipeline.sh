@@ -216,4 +216,46 @@ if grep -q "addKeyFrame(pose, cloud" "${LOG_FILE}"; then
   fail "direct addKeyFrame(pose, cloud) call detected - should use commitKeyFrameWithDynamicFiltering"
 fi
 
+# 15. 检查 BevObsUpdate（CleanMap 依赖此数据）
+if grep -q "\[BevObsUpdate\]" "${LOG_FILE}"; then
+  BEV_CELLS=$(grep "\[BevObsUpdate\]" "${LOG_FILE}" | tail -1 | grep -oP 'unique_cells=\K\d+' || echo "0")
+  if [ "${BEV_CELLS}" -gt 0 ]; then
+    pass_msg "BevObsUpdate unique_cells=${BEV_CELLS} > 0"
+  else
+    fail "BevObsUpdate unique_cells=0; CleanMap will be empty"
+  fi
+else
+  fail "missing [BevObsUpdate]; CleanMap cannot work"
+fi
+
+# 16. 检查 CleanMap 是否有实际点数
+CLEAN_POINTS=$(grep "\[CleanMap\].*rebuilt" "${LOG_FILE}" | tail -1 | grep -oP 'points=\K\d+' || echo "0")
+if [ "${CLEAN_POINTS}" -gt 0 ]; then
+  pass_msg "CleanMap rebuilt points=${CLEAN_POINTS} > 0"
+else
+  fail "CleanMap rebuilt points=0; clean map is empty"
+fi
+
+# 17. 检查 PayloadTrackInfoCore source=CORE_BOX
+if grep -q "\[PayloadTrackInfoCore\].*source=CORE_BOX" "${LOG_FILE}"; then
+  pass_msg "PayloadTrackInfoCore source=CORE_BOX exists"
+else
+  fail "missing [PayloadTrackInfoCore] source=CORE_BOX; old bbox may still be used"
+fi
+
+# 18. 检查 CargoCommit 删除是否生效
+REMOVED_GT0=$(grep "\[CargoCommit\].*source=objects_base" "${LOG_FILE}" | grep -c "removed=[1-9]" || true)
+if [ "${REMOVED_GT0}" -gt 0 ]; then
+  pass_msg "CargoCommit removal working: ${REMOVED_GT0} frames with removed>0"
+else
+  fail "CargoCommit never removed any points; active_boxes may not work"
+fi
+
+# 19. 检查 source=objects_base
+if grep -q "\[CargoCommit\].*source=objects_base" "${LOG_FILE}"; then
+  pass_msg "CargoCommit source=objects_base (correct coordinate system)"
+else
+  fail "CargoCommit missing source=objects_base"
+fi
+
 echo "========== [VALIDATION] PASS: cargo pipeline basic checks passed =========="

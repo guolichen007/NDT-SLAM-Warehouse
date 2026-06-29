@@ -192,6 +192,10 @@ struct PayloadTrackInfo {
     float track_duration = 0.0f;
     float direction_consistency = 0.0f;
     float map_displacement = 0.0f;
+
+    // P3: CargoBoxV2 的 core_box 信息（base_link 坐标系）
+    bool has_core_box = false;
+    CargoBox core_box_base;
 };
 
 // 轨迹跟踪管理器
