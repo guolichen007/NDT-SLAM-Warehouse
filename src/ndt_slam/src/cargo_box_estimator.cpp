@@ -312,11 +312,12 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
     band_min_hag = hag_min + best_start * config_.z_hist_bin;
     band_max_hag = hag_min + (best_end + 1) * config_.z_hist_bin;
 
-    // 检查 dense band 高度范围
+    // 检查 dense band 高度范围（带 epsilon 的闭区间）
     float band_height = band_max_hag - band_min_hag;
-    if (band_height < config_.min_dense_band_height ||
-        band_height > config_.max_dense_band_height) {
-        ROS_WARN("[CargoBoxV2] FAIL: band_height=%.2f not in [%.2f, %.2f], band=[%.2f, %.2f]",
+    const float eps = 1e-3f;
+    if (band_height + eps < config_.min_dense_band_height ||
+        band_height - eps > config_.max_dense_band_height) {
+        ROS_DEBUG("[CargoBoxV2] band_height=%.3f range=[%.3f, %.3f] band=[%.2f, %.2f] accepted=0",
                   band_height, config_.min_dense_band_height, config_.max_dense_band_height,
                   band_min_hag, band_max_hag);
         return false;

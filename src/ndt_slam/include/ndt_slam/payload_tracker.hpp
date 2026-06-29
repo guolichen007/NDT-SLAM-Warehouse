@@ -111,6 +111,24 @@ struct ObjectTrack {
 
     // P0-2: size jump 计数（用于软拒绝和 reinit）
     int size_jump_count = 0;
+
+    // v6: 吊物摆动跟随 + fallback
+    int consecutive_box_rejects = 0;
+    int consecutive_no_overlap = 0;
+    int consecutive_active_zero = 0;
+
+    // last_good_box：最后一次有效测量，用于 fallback
+    bool has_last_good_box = false;
+    CargoBox last_good_core_box;
+    CargoBox last_good_remove_box;
+    double last_good_box_time = 0.0;
+    bool using_last_good_box = false;
+
+    // 摆动跟随显示
+    Eigen::Vector3f display_center_base = Eigen::Vector3f::Zero();
+    Eigen::Vector3f display_size = Eigen::Vector3f::Zero();
+    bool has_swing_anchor = false;
+    Eigen::Vector3f swing_anchor_base = Eigen::Vector3f::Zero();
 };
 
 // 跟踪配置

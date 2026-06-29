@@ -5513,7 +5513,6 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                             core_box.suspended_points >= cargo_box_estimator_config_.min_confirm_core_points &&
                             (track.state == TrackState::SUSPENDED_MOVING ||
                              track.state == TrackState::DYNAMIC_PAYLOAD)) {
-                            // 检查 size 是否在合理范围内
                             if (track.has_last_core_box) {
                                 float max_ratio = std::max({
                                     core_box.size.x() / std::max(track.last_core_box.size.x(), 0.1f),
@@ -5524,6 +5523,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                                     reinit_reason = "accepted";
                                 } else {
                                     reinit_reason = "size_too_large";
+                                    track.consecutive_box_rejects++;
                                 }
                             } else {
                                 reinit_reason = "no_previous_box";
@@ -5532,15 +5532,15 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                             reinit_reason = "suspended_static_no_reinit";
                         }
 
-                        // [CargoBoxReinitCheck] 日志（INFO，关键决策）
-                        ROS_INFO("[CargoBoxReinitCheck] kf=%d track=%d count=%d core_pts=%d state=%d accepted=%d reason=%s",
-                                 keyframe_count_ + 1,
-                                 track.track_id,
-                                 track.size_jump_count,
-                                 core_box.suspended_points,
-                                 static_cast<int>(track.state),
-                                 can_reinit ? 1 : 0,
-                                 reinit_reason.c_str());
+                        // [CargoBoxReinitCheck] 日志（DEBUG，减少刷屏）
+                        ROS_DEBUG("[CargoBoxReinitCheck] kf=%d track=%d count=%d core_pts=%d state=%d accepted=%d reason=%s",
+                                  keyframe_count_ + 1,
+                                  track.track_id,
+                                  track.size_jump_count,
+                                  core_box.suspended_points,
+                                  static_cast<int>(track.state),
+                                  can_reinit ? 1 : 0,
+                                  reinit_reason.c_str());
 
                         if (can_reinit) {
                             track.last_core_box = core_box;
@@ -5548,13 +5548,49 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                             track.has_last_core_box = true;
                             track.has_last_size = true;
                             track.size_jump_count = 0;
+                            track.consecutive_box_rejects = 0;
 
-                            // reinit 后允许用于删除（base_link 坐标系）
+                            // 更新 last_good_box
+                            track.last_good_core_box = core_box;
+                            track.last_good_remove_box = remove_box;
+                            track.has_last_good_box = true;
+                            track.last_good_box_time = stamp.toSec();
+
+                            // reinit 后允许用于删除
                             if (track.state == TrackState::DYNAMIC_PAYLOAD ||
                                 track.state == TrackState::SUSPENDED_MOVING ||
                                 track.state == TrackState::SUSPENDED_STATIC) {
                                 active_cargo_remove_boxes_base.push_back(remove_box);
                             }
+                        }
+
+                        // v6: size_too_large 时使用 last_good_box fallback
+                        if (!can_reinit && reinit_reason == "size_too_large" &&
+                            track.has_last_good_box) {
+                            double age = stamp.toSec() - track.last_good_box_time;
+                            if (age < 2.0) {  // hold_time = 2.0s
+                                // 使用 last_good_remove_box 做当前帧删除
+                                if (track.state == TrackState::DYNAMIC_PAYLOAD ||
+                                    track.state == TrackState::SUSPENDED_MOVING ||
+                                    track.state == TrackState::SUSPENDED_STATIC) {
+                                    active_cargo_remove_boxes_base.push_back(track.last_good_remove_box);
+                                    track.using_last_good_box = true;
+
+                                    ROS_INFO("[CargoFallbackActive] kf=%d track=%d reason=USE_LAST_GOOD_BOX age=%.2f reject_count=%d",
+                                             keyframe_count_ + 1,
+                                             track.track_id,
+                                             age,
+                                             track.consecutive_box_rejects);
+                                }
+                            }
+                        }
+
+                        // v6: 僵尸 track 清理
+                        if (track.consecutive_box_rejects > 8) {
+                            ROS_WARN("[TrackCleanup] expire zombie cargo track=%d reject_count=%d reason=SIZE_TOO_LARGE_ZOMBIE",
+                                     track.track_id,
+                                     track.consecutive_box_rejects);
+                            track.state = TrackState::EXPIRED;
                         }
                     }
                 }
@@ -5566,6 +5602,14 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                     track.has_last_core_box = true;
                     track.has_last_size = true;
                     track.size_jump_count = 0;
+                    track.consecutive_box_rejects = 0;
+
+                    // v6: 更新 last_good_box
+                    track.last_good_core_box = core_box;
+                    track.last_good_remove_box = remove_box;
+                    track.has_last_good_box = true;
+                    track.last_good_box_time = stamp.toSec();
+                    track.using_last_good_box = false;
 
                     // [CargoBoxV2] 日志（DEBUG）
                     ROS_DEBUG("[CargoBoxV2] seq=%d track=%d valid=%d core_pts=%d bottom_hag=%.2f "
@@ -5585,16 +5629,63 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                          track.state == TrackState::SUSPENDED_MOVING ||
                          track.state == TrackState::SUSPENDED_STATIC);
 
-                    // [CargoActiveBox] 日志（INFO，关键决策）
-                    ROS_INFO("[CargoActiveBox] kf=%d track=%d state=%d has_core=%d active_remove=%d",
-                             keyframe_count_ + 1,
-                             track.track_id,
-                             static_cast<int>(track.state),
-                             track.has_last_core_box ? 1 : 0,
-                             should_use_for_remove ? 1 : 0);
+                    // [CargoActiveBox] 日志（DEBUG，减少刷屏）
+                    ROS_DEBUG("[CargoActiveBox] kf=%d track=%d state=%d has_core=%d active_remove=%d",
+                              keyframe_count_ + 1,
+                              track.track_id,
+                              static_cast<int>(track.state),
+                              track.has_last_core_box ? 1 : 0,
+                              should_use_for_remove ? 1 : 0);
 
                     if (should_use_for_remove) {
                         active_cargo_remove_boxes_base.push_back(remove_box);
+                    }
+
+                    // v6: SWING_FOLLOW - 吊物摆动跟随
+                    {
+                        float alpha_center = is_stationary_ ? 0.18f : 0.35f;
+                        float alpha_size = 0.10f;
+
+                        if (!track.has_swing_anchor) {
+                            track.swing_anchor_base = core_box.center;
+                            track.has_swing_anchor = true;
+                            track.display_center_base = core_box.center;
+                            track.display_size = core_box.size;
+                        } else {
+                            // 检查摆动范围
+                            float swing_radius = (core_box.center.head<2>() -
+                                                  track.swing_anchor_base.head<2>()).norm();
+                            float dz = std::abs(core_box.center.z() - track.swing_anchor_base.z());
+
+                            if (is_stationary_ &&
+                                (swing_radius > 0.80f || dz > 0.30f)) {
+                                // 摆动过大，可能是 track 跳变，不跟随
+                                ROS_WARN_THROTTLE(1.0,
+                                    "[BoxFollowReject] track=%d reason=SWING_TOO_LARGE swing=%.2f dz=%.2f",
+                                    track.track_id, swing_radius, dz);
+                            } else {
+                                // 正常跟随摆动
+                                track.display_center_base =
+                                    alpha_center * core_box.center +
+                                    (1.0f - alpha_center) * track.display_center_base;
+                                track.display_size =
+                                    alpha_size * core_box.size +
+                                    (1.0f - alpha_size) * track.display_size;
+                            }
+                        }
+
+                        // [BoxFollow] 日志（INFO_THROTTLE）
+                        ROS_INFO_THROTTLE(1.0,
+                            "[BoxFollow] mode=%s stopped=%d track=%d center_base=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f)",
+                            is_stationary_ ? "SWING_FOLLOW" : "MOVING_TRACK",
+                            is_stationary_ ? 1 : 0,
+                            track.track_id,
+                            track.display_center_base.x(),
+                            track.display_center_base.y(),
+                            track.display_center_base.z(),
+                            track.display_size.x(),
+                            track.display_size.y(),
+                            track.display_size.z());
                     }
 
                     // 发布调试点云（每 20 帧一次）
@@ -5697,6 +5788,43 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         removed_msg.header.frame_id = "base_link";
         cargo_dynamic_removed_pub_.publish(removed_msg);
     }
+
+    // v6: 构建 swept volumes 用于历史反删
+    new_cargo_volumes_this_frame_.clear();
+    for (const auto& box_base : active_cargo_remove_boxes_base) {
+        SweptVolumeMap vol;
+        // 将 base_link 坐标系的 box 转换到 map 坐标系
+        Eigen::Vector4d min_base(box_base.bbox_min.x(), box_base.bbox_min.y(), box_base.bbox_min.z(), 1.0);
+        Eigen::Vector4d max_base(box_base.bbox_max.x(), box_base.bbox_max.y(), box_base.bbox_max.z(), 1.0);
+        Eigen::Vector4d min_map = T_map_base * min_base;
+        Eigen::Vector4d max_map = T_map_base * max_base;
+
+        // z_down_expand <= 0.03，禁止向下吃掉下方静态货物
+        vol.min_map = Eigen::Vector3f(
+            std::min(min_map.x(), max_map.x()) - 0.15f,
+            std::min(min_map.y(), max_map.y()) - 0.15f,
+            std::min(min_map.z(), max_map.z()) - 0.03f);
+        vol.max_map = Eigen::Vector3f(
+            std::max(min_map.x(), max_map.x()) + 0.15f,
+            std::max(min_map.y(), max_map.y()) + 0.15f,
+            std::max(min_map.z(), max_map.z()) + 0.10f);
+        vol.stamp = stamp.toSec();
+        vol.track_id = -1;  // 当前帧不关联特定 track
+        vol.from_fallback = false;
+
+        new_cargo_volumes_this_frame_.push_back(vol);
+        cargo_swept_history_.push_back(vol);
+
+        ROS_INFO("[CargoHistoryAdd] kf=%d volume=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f) fallback=%d history_size=%zu",
+                 keyframe_count_ + 1,
+                 vol.min_map.x(), vol.min_map.y(), vol.min_map.z(),
+                 vol.max_map.x(), vol.max_map.y(), vol.max_map.z(),
+                 vol.from_fallback ? 1 : 0,
+                 cargo_swept_history_.size());
+    }
+
+    // 清理过期的 swept volume
+    cleanupExpiredSweptVolumes(stamp.toSec());
 
     // ------------------------------------------------------------------------
     // 5. HumanFilter（必须在 MapCommit 前）
@@ -5897,6 +6025,20 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
              ground_added,
              objects_added,
              display_added);
+
+    // v6: DynamicHistoryEraser - 用 swept volume 反删 objects_map/display_map
+    if (!new_cargo_volumes_this_frame_.empty()) {
+        size_t erased_objects = eraseDynamicPointsFromCloud(objects_map_, new_cargo_volumes_this_frame_);
+        size_t erased_display = eraseDynamicPointsFromCloud(display_map_, new_cargo_volumes_this_frame_);
+
+        ROS_INFO("[DynamicHistoryEraser] kf=%d new_volumes=%zu erased_objects=%zu erased_display=%zu objects_left=%zu display_left=%zu",
+                 keyframe_count_,
+                 new_cargo_volumes_this_frame_.size(),
+                 erased_objects,
+                 erased_display,
+                 objects_map_->size(),
+                 display_map_->size());
+    }
 
     // P1: 更新 BEV 观测计数（CleanMap 依赖此数据）
     // 只用过滤后的 objects_commit_map，每个 BEV cell 只加一次
@@ -6153,6 +6295,62 @@ void NdtSlamNode::removePointsInsideCargoRemoveBoxesBase(
     removed_base->width = removed_base->size();
     removed_base->height = 1;
     removed_base->is_dense = false;
+}
+
+// ============================================================================
+// v6: DynamicHistoryEraser 增量反删
+// ============================================================================
+
+size_t NdtSlamNode::eraseDynamicPointsFromCloud(
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    const std::vector<SweptVolumeMap>& volumes)
+{
+    if (!cloud || cloud->empty() || volumes.empty()) {
+        return 0;
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr kept(new pcl::PointCloud<pcl::PointXYZ>);
+    kept->reserve(cloud->size());
+
+    size_t removed = 0;
+
+    for (const auto& p : cloud->points) {
+        bool inside = false;
+
+        for (const auto& v : volumes) {
+            if (p.x >= v.min_map.x() && p.x <= v.max_map.x() &&
+                p.y >= v.min_map.y() && p.y <= v.max_map.y() &&
+                p.z >= v.min_map.z() && p.z <= v.max_map.z()) {
+                inside = true;
+                break;
+            }
+        }
+
+        if (inside) {
+            removed++;
+        } else {
+            kept->push_back(p);
+        }
+    }
+
+    kept->width = kept->size();
+    kept->height = 1;
+    kept->is_dense = false;
+
+    cloud.swap(kept);
+    return removed;
+}
+
+void NdtSlamNode::cleanupExpiredSweptVolumes(double current_time)
+{
+    cargo_swept_history_.erase(
+        std::remove_if(
+            cargo_swept_history_.begin(),
+            cargo_swept_history_.end(),
+            [current_time, this](const SweptVolumeMap& v) {
+                return (current_time - v.stamp) >= cargo_swept_ttl_;
+            }),
+        cargo_swept_history_.end());
 }
 
 // ============================================================================

@@ -449,6 +449,30 @@ private:
     // 检查点是否被 3D deny volume 拒绝
     bool isPointDeniedBy3DHistory(float x, float y, float z) const;
 
+    // ========== v6: DynamicHistoryEraser 增量反删 ==========
+    struct SweptVolumeMap {
+        Eigen::Vector3f min_map;
+        Eigen::Vector3f max_map;
+        double stamp;
+        int track_id;
+        bool from_fallback;
+    };
+
+    // 当前帧新增的 swept volume（用于立即反删）
+    std::vector<SweptVolumeMap> new_cargo_volumes_this_frame_;
+
+    // 历史 swept volume（用于 CleanMap rebuild）
+    std::vector<SweptVolumeMap> cargo_swept_history_;
+    double cargo_swept_ttl_ = 15.0;  // 历史 volume 保留时间
+
+    // 从 cloud 中删除被 swept volume 覆盖的点
+    size_t eraseDynamicPointsFromCloud(
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const std::vector<SweptVolumeMap>& volumes);
+
+    // 清理过期的 swept volume
+    void cleanupExpiredSweptVolumes(double current_time);
+
     // ========== P0-1: 新的关键帧提交流程 ==========
     // 重写的关键帧提交函数，确保正确的处理顺序：
     // 1. ground/objects 分割
