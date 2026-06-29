@@ -600,23 +600,34 @@ private:
     bool stationary_freeze_tf_odom_ = true;
     bool stationary_freeze_xy_ = true;
     bool stationary_freeze_yaw_ = true;
-    double stationary_pose_freeze_release_m_ = 1.50;  // v12: 增大释放阈值
-    int stationary_move_confirm_frames_ = 5;  // v12: 增加确认帧数
+    double stationary_pose_freeze_release_m_ = 1.50;
+    int stationary_move_confirm_frames_ = 5;
+
+    // v13: raw motion 状态（必须用 raw/constrained pose，不能用 published pose）
+    Sophus::SE3d last_raw_pose_for_motion_;
+    ros::Time last_raw_pose_stamp_;
+    bool has_last_raw_pose_for_motion_ = false;
+    double raw_frame_velocity_ = 0.0;
+    double last_map_commit_wall_time_ = 0.0;
+
+    void updateRawMotionState(const Sophus::SE3d& constrained_pose, const ros::Time& stamp, double ndt_fitness);
 
     // v12: PoseFreeze 状态机
     enum class PoseFreezeState {
         MOVING = 0,
         STATIONARY_FROZEN = 1,
-        RELEASE_BLEND = 2
+        SUSPECTED_MOVING = 2,
+        RELEASE_BLEND = 3
     };
     PoseFreezeState pose_freeze_state_ = PoseFreezeState::MOVING;
     Sophus::SE3d release_start_pose_;
     Sophus::SE3d release_target_pose_;
     int pose_release_frame_ = 0;
     int pose_release_total_frames_ = 10;
+    int suspected_moving_frames_ = 0;
 
     Sophus::SE3d selectPublishedPose(const Sophus::SE3d& constrained_pose, const ros::Time& stamp);
-    bool shouldReleasePoseFreeze(double drift, int confirm, double frame_velocity, double fitness, std::string& reason);
+    bool shouldReleasePoseFreeze(double drift, int confirm, std::string& reason);
     Sophus::SE3d computeReleaseBlendPose(const Sophus::SE3d& current_target_pose);
 
     // 关键帧 active window

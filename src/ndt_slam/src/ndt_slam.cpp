@@ -1269,6 +1269,9 @@ void NdtSlamNode::processCloudThread() {
             // TF 用 ros::Time::now() 避免重复
             ros::Time publish_time = ros::Time::now();
 
+            // v13: 更新 raw motion 状态（必须在 PoseFreeze 之前）
+            updateRawMotionState(constrained_pose, publish_time, last_ndt_fitness_);
+
             // v8: PoseFreeze - 静止时冻结发布姿态
             Sophus::SE3d pub_pose = selectPublishedPose(constrained_pose, publish_time);
             publishOdometry(publish_time, msg->header.frame_id, pub_pose);
@@ -4381,10 +4384,41 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::edgePreservingMerge(
 
 // ========== 长期建图功能实现 ==========
 
+// v13: 更新 raw motion 状态（必须用 raw/constrained pose，不能用 published pose）
+void NdtSlamNode::updateRawMotionState(
+    const Sophus::SE3d& constrained_pose,
+    const ros::Time& stamp,
+    double ndt_fitness)
+{
+    last_ndt_fitness_ = ndt_fitness;
+
+    if (!has_last_raw_pose_for_motion_) {
+        last_raw_pose_for_motion_ = constrained_pose;
+        last_raw_pose_stamp_ = stamp;
+        has_last_raw_pose_for_motion_ = true;
+        raw_frame_velocity_ = 0.0;
+        return;
+    }
+
+    double dt = (stamp - last_raw_pose_stamp_).toSec();
+    if (dt <= 1e-3) {
+        return;
+    }
+
+    Eigen::Vector2d cur_xy(constrained_pose.translation().x(), constrained_pose.translation().y());
+    Eigen::Vector2d last_xy(last_raw_pose_for_motion_.translation().x(), last_raw_pose_for_motion_.translation().y());
+    double raw_delta = (cur_xy - last_xy).norm();
+    raw_frame_velocity_ = raw_delta / dt;
+
+    last_raw_pose_for_motion_ = constrained_pose;
+    last_raw_pose_stamp_ = stamp;
+}
+
 // v8: PoseFreeze - 静止时冻结发布姿态
 bool NdtSlamNode::shouldReleasePoseFreeze(
-    double drift, int confirm, double frame_velocity, double fitness, std::string& reason)
+    double drift, int confirm, std::string& reason)
 {
+    // v13: 使用 raw_frame_velocity_ 和 last_ndt_fitness_，不用 frozen published pose
     if (drift < 1.50) {
         reason = "DRIFT_TOO_SMALL";
         return false;
@@ -4393,14 +4427,11 @@ bool NdtSlamNode::shouldReleasePoseFreeze(
         reason = "CONFIRM_NOT_ENOUGH";
         return false;
     }
-    if (frame_velocity < 0.08) {
+    if (raw_frame_velocity_ < 0.08) {
         reason = "VELOCITY_TOO_SMALL";
         return false;
     }
-    if (fitness > 0.06) {
-        reason = "FITNESS_TOO_BAD";
-        return false;
-    }
+    // v13: 不再要求 fitness < 0.06，否则真实移动时永远释放不了
     reason = "OK";
     return true;
 }
@@ -4437,7 +4468,7 @@ Sophus::SE3d NdtSlamNode::selectPublishedPose(
     const Sophus::SE3d& constrained_pose,
     const ros::Time& stamp)
 {
-    // v12: RELEASE_BLEND 状态 - 平滑过渡
+    // v13: RELEASE_BLEND 状态 - 平滑过渡
     if (pose_freeze_state_ == PoseFreezeState::RELEASE_BLEND) {
         published_pose_ = computeReleaseBlendPose(constrained_pose);
         return published_pose_;
@@ -4450,35 +4481,50 @@ Sophus::SE3d NdtSlamNode::selectPublishedPose(
         return published_pose_;
     }
 
-    // STATIONARY_FROZEN 状态
+    // STATIONARY_FROZEN 或 SUSPECTED_MOVING 状态
     const Eigen::Vector3d cur = constrained_pose.translation();
     const Eigen::Vector3d anchor = stationary_anchor_pose_.translation();
     double drift_xy = (cur.head<2>() - anchor.head<2>()).norm();
 
-    // 检查是否应该释放
+    // v13: 检查是否应该释放（使用 raw_frame_velocity_ 和 last_ndt_fitness_）
     std::string release_reason;
-    double frame_velocity = 0.0;  // TODO: 从 MotionGate 获取
-    double fitness = 0.0;  // TODO: 从 NDT 获取
-    bool should_release = shouldReleasePoseFreeze(drift_xy, moving_confirm_count_, frame_velocity, fitness, release_reason);
+    bool should_release = shouldReleasePoseFreeze(drift_xy, moving_confirm_count_, release_reason);
 
-    ROS_INFO_THROTTLE(1.0,
-        "[PoseFreezeCheck] drift=%.2f confirm=%d/%d frame_vel=%.2f fitness=%.3f release=%d reason=%s",
+    ROS_INFO_THROTTLE(2.0,
+        "[PoseFreezeCheck] drift=%.2f confirm=%d/%d raw_vel=%.3f ndt_fitness=%.3f release=%d reason=%s state=%d",
         drift_xy, moving_confirm_count_, stationary_move_confirm_frames_,
-        frame_velocity, fitness,
-        should_release ? 1 : 0, release_reason.c_str());
+        raw_frame_velocity_, last_ndt_fitness_,
+        should_release ? 1 : 0, release_reason.c_str(),
+        static_cast<int>(pose_freeze_state_));
 
     if (should_release) {
-        // 开始平滑释放
-        pose_freeze_state_ = PoseFreezeState::RELEASE_BLEND;
-        release_start_pose_ = published_pose_;
-        release_target_pose_ = constrained_pose;
-        pose_release_frame_ = 0;
+        // v13: 进入 SUSPECTED_MOVING，继续观察
+        if (pose_freeze_state_ == PoseFreezeState::STATIONARY_FROZEN) {
+            pose_freeze_state_ = PoseFreezeState::SUSPECTED_MOVING;
+            suspected_moving_frames_ = 0;
+            ROS_INFO("[PoseFreeze] mode=SUSPECTED_MOVING drift=%.2f raw_vel=%.3f",
+                     drift_xy, raw_frame_velocity_);
+        }
 
-        ROS_INFO("[PoseFreeze] mode=START_RELEASE_BLEND drift=%.2f frames=%d",
-                 drift_xy, pose_release_total_frames_);
+        suspected_moving_frames_++;
 
-        published_pose_ = computeReleaseBlendPose(constrained_pose);
-        return published_pose_;
+        // 连续确认后开始平滑释放
+        if (suspected_moving_frames_ >= 3) {
+            pose_freeze_state_ = PoseFreezeState::RELEASE_BLEND;
+            release_start_pose_ = published_pose_;
+            release_target_pose_ = constrained_pose;
+            pose_release_frame_ = 0;
+
+            ROS_INFO("[PoseFreeze] mode=START_RELEASE_BLEND drift=%.2f frames=%d raw_vel=%.3f",
+                     drift_xy, pose_release_total_frames_, raw_frame_velocity_);
+
+            published_pose_ = computeReleaseBlendPose(constrained_pose);
+            return published_pose_;
+        }
+    } else {
+        // 回退到 STATIONARY_FROZEN
+        pose_freeze_state_ = PoseFreezeState::STATIONARY_FROZEN;
+        suspected_moving_frames_ = 0;
     }
 
     // 继续冻结
@@ -4489,10 +4535,9 @@ Sophus::SE3d NdtSlamNode::selectPublishedPose(
     }
     published_pose_ = frozen;
 
-    pose_freeze_state_ = PoseFreezeState::STATIONARY_FROZEN;
     moving_confirm_count_++;
 
-    ROS_INFO_THROTTLE(1.0,
+    ROS_INFO_THROTTLE(2.0,
         "[PoseFreeze] mode=STATIONARY_ANCHOR raw_xy=(%.3f,%.3f) pub_xy=(%.3f,%.3f) drift=%.3f action=FREEZE_TF_ODOM",
         cur.x(), cur.y(),
         published_pose_.translation().x(),
@@ -4563,36 +4608,38 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
         stationary_frame_count_ = 0;
     }
 
-    // P1: 静止期间检查漂移（从 anchor 开始的漂移）
+    // v13: 静止期间检查漂移（使用 raw pose，不用 published pose）
     if (is_stationary_ && stationary_anchor_valid_) {
         double drift_from_anchor =
             (current_pose.translation() - stationary_anchor_pose_.translation()).norm();
         double elapsed = current_time.toSec() - stationary_start_time_;
 
-        // 漂移在 ignore_radius 内，认为是 NDT 静止漂移，不提交
-        if (drift_from_anchor < motion_gate_stationary_drift_ignore_radius_) {
-            ROS_INFO_THROTTLE(2.0,
-                "[MotionGate] stationary_freeze drift=%.3f elapsed=%.1f action=SKIP_COMMIT",
-                drift_from_anchor, elapsed);
+        // v13: 使用 raw_frame_velocity_ 判断是否真的在移动
+        if (raw_frame_velocity_ < 0.08 && drift_from_anchor < motion_gate_stationary_drift_ignore_radius_) {
+            ROS_INFO_THROTTLE(5.0,
+                "[MotionGate] stationary_freeze drift=%.3f elapsed=%.1f raw_vel=%.3f action=SKIP_COMMIT",
+                drift_from_anchor, elapsed, raw_frame_velocity_);
             return false;
         }
 
-        // 超过 ignore_radius，需要连续确认才能认为真的在移动
+        // 超过 ignore_radius 或 raw_vel 较高，需要连续确认
         moving_confirm_frames_++;
         if (moving_confirm_frames_ < motion_gate_moving_confirm_frames_) {
-            ROS_INFO_THROTTLE(1.0,
-                "[MotionGate] possible_move drift=%.3f confirm=%d/%d action=WAIT",
-                drift_from_anchor, moving_confirm_frames_, motion_gate_moving_confirm_frames_);
+            ROS_INFO_THROTTLE(2.0,
+                "[MotionGate] possible_move drift=%.3f raw_vel=%.3f confirm=%d/%d action=WAIT",
+                drift_from_anchor, raw_frame_velocity_, moving_confirm_frames_, motion_gate_moving_confirm_frames_);
             return false;
         }
 
-        // 确认移动，恢复提交
-        is_stationary_ = false;
-        stationary_anchor_valid_ = false;
-        moving_confirm_frames_ = 0;
+        // v13: 确认移动，恢复提交（需要更多确认帧防止振荡）
+        if (moving_confirm_frames_ >= 5) {  // 增加到 5 帧确认
+            is_stationary_ = false;
+            stationary_anchor_valid_ = false;
+            moving_confirm_frames_ = 0;
 
-        ROS_INFO("[MotionGate] Crane moving | drift=%.3f confirmed=%d | resuming map commit",
-                 drift_from_anchor, motion_gate_moving_confirm_frames_);
+            ROS_INFO("[MotionGate] Crane moving | drift=%.3f confirmed=%d | resuming map commit",
+                     drift_from_anchor, moving_confirm_frames_);
+        }
     }
 
     // 正常移动检测
@@ -4600,6 +4647,15 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
         last_keyframe_pose_for_gate_ = current_pose;
         last_keyframe_time_for_gate_ = current_time;
         moved_frame_count_++;
+        return true;
+    }
+
+    // v13: 静止时也允许每隔 30 秒添加一个关键帧（用于更新地图）
+    if (is_stationary_ && time_elapsed >= 30.0) {
+        last_keyframe_pose_for_gate_ = current_pose;
+        last_keyframe_time_for_gate_ = current_time;
+        ROS_INFO_THROTTLE(10.0,
+            "[MotionGate] force_commit stationary keyframe, elapsed=%.1f", time_elapsed);
         return true;
     }
 
@@ -5501,15 +5557,11 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         frame_seq_, stamp.toSec(), cloud->size(),
         pose.translation().x(), pose.translation().y(), pose.translation().z());
 
-    // MotionGate：静止时不跑完整 pipeline
-    bool should_commit = true;
+    // v13: MotionGate 只控制 MapCommit，不阻止整个 pipeline
+    // pipeline 始终运行（更新 track、display、marker），但 MapCommit 可能被跳过
+    bool should_map_commit = true;
     if (motion_gate_enabled_) {
-        should_commit = shouldCommitKeyframe(pose, stamp);
-    }
-
-    if (!should_commit) {
-        ROS_DEBUG("[MotionGate] frame=%lu stationary, skip commit pipeline", frame_seq_);
-        return;
+        should_map_commit = shouldCommitKeyframe(pose, stamp);
     }
 
     const Eigen::Matrix4d T_map_base = pose.matrix();
@@ -6154,7 +6206,15 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
 
     // ------------------------------------------------------------------------
     // 7. 最后才 addKeyFrame（MapCommit）
+    // v13: 只有 should_map_commit=true 时才写入地图
     // ------------------------------------------------------------------------
+    if (!should_map_commit) {
+        ROS_DEBUG("[MotionGate] frame=%lu stationary, skip MapCommit but pipeline runs", frame_seq_);
+        // 不写地图，但仍然更新 display 和 marker
+        last_map_commit_wall_time_ = ros::Time::now().toSec();
+        return;
+    }
+
     const size_t prev_keyframe_count = loop_closure_detector_.getKeyFrames().size();
     loop_closure_detector_.addKeyFrame(pose, commit_cloud_base, stamp);
     const size_t new_keyframe_count = loop_closure_detector_.getKeyFrames().size();
@@ -6164,6 +6224,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     }
 
     keyframe_count_++;
+    last_map_commit_wall_time_ = ros::Time::now().toSec();
 
     // [MapCommit] 日志（要求的格式）
     ROS_INFO("[MapCommit] seq=%d keyframe=%d commit_total=%zu commit_objects=%zu cargo_removed=%zu human_removed=%zu",
@@ -6173,6 +6234,16 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
              objects_after_human_base->size(),
              cargo_removed_base->size(),
              human_dynamic_base->size());
+
+    // v13: MapStall 警告（超过 10 秒没有 MapCommit）
+    double map_stall_age = ros::Time::now().toSec() - last_map_commit_wall_time_;
+    if (map_stall_age > 10.0) {
+        ROS_WARN_THROTTLE(5.0,
+            "[MapStall] no MapCommit for %.1fs, kf=%d, state=%d, raw_vel=%.3f, ndt_fitness=%.3f",
+            map_stall_age, keyframe_count_,
+            static_cast<int>(pose_freeze_state_),
+            raw_frame_velocity_, last_ndt_fitness_);
+    }
 
     // ------------------------------------------------------------------------
     // 8. Map / Tile / Display 更新（只允许使用过滤后的点云）
