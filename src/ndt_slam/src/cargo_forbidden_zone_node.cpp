@@ -808,7 +808,13 @@ private:
         // TODO: 从当前帧点云中提取吊货点云并发布
     }
 
-    // v8-stable-r3-hotfix-minimal: 只发布 core box，base_link 坐标系
+    // base_link → map 坐标转换 helper
+    Eigen::Vector3f transformToMap(const Eigen::Vector3f& pt_base) {
+        Eigen::Vector3f rotated = last_odom_orientation_ * pt_base;
+        return last_odom_position_ + rotated;
+    }
+
+    // v8-stable-r3: LINE_LIST 线框 + map 坐标系 + odom 转换
     void publishThreeLayerMarkers(const ros::Time& stamp) {
         // 从 velocity 判断是否静止（速度 < 0.1 m/s 认为静止）
         float speed = cargo_.velocity.norm();
@@ -822,15 +828,15 @@ private:
                            observed_frames_ >= 3 &&
                            is_moving;  // 移动时才显示
 
-        if (!should_show) {
-            // 静止、无效、lost、static 时，发布 DELETEALL
+        if (!should_show || !has_odom_) {
             publishDeleteAllCoreBox();
 
-            ROS_DEBUG("[CargoMarkerGate] publish=0 state=%d observed=%d valid=%d speed=%.2f",
+            ROS_DEBUG("[CargoMarkerGate] publish=0 state=%d observed=%d valid=%d speed=%.2f has_odom=%d",
                 static_cast<int>(cargo_state_),
                 observed_frames_,
                 cargo_.valid ? 1 : 0,
-                speed);
+                speed,
+                has_odom_ ? 1 : 0);
             return;
         }
 
@@ -839,41 +845,60 @@ private:
             observed_frames_,
             speed);
 
-        // 发布有效框：base_link 坐标系，跟随 odom
-        visualization_msgs::Marker marker;
+        // base_link → map 转换
+        Eigen::Vector3f center_map = transformToMap(stable_centroid_);
 
-        marker.header.frame_id = "base_link";
-        marker.header.stamp = ros::Time(0);   // 跟最新 TF
+        // 计算 8 个角点（map 坐标系）
+        float hx = std::max(stable_size_.x() / 2.0f, 0.15f);
+        float hy = std::max(stable_size_.y() / 2.0f, 0.15f);
+        float hz = std::max(stable_size_.z() / 2.0f, 0.15f);
+
+        Eigen::Vector3f corners_base[8] = {
+            {-hx, -hy, -hz}, { hx, -hy, -hz}, { hx,  hy, -hz}, {-hx,  hy, -hz},
+            {-hx, -hy,  hz}, { hx, -hy,  hz}, { hx,  hy,  hz}, {-hx,  hy,  hz}
+        };
+
+        geometry_msgs::Point corners_map[8];
+        for (int i = 0; i < 8; i++) {
+            Eigen::Vector3f cm = transformToMap(corners_base[i]);
+            corners_map[i].x = cm.x();
+            corners_map[i].y = cm.y();
+            corners_map[i].z = cm.z();
+        }
+
+        // 发布 LINE_LIST 线框
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = "map";
+        marker.header.stamp = ros::Time::now();
         marker.ns = "cargo_core";
         marker.id = 0;
-        marker.type = visualization_msgs::Marker::CUBE;
+        marker.type = visualization_msgs::Marker::LINE_LIST;
         marker.action = visualization_msgs::Marker::ADD;
 
-        // 关键：让 RViz 每帧按 TF 重新变换，框会跟 odom/base_link 走
-        marker.frame_locked = true;
+        marker.pose.orientation.w = 1.0;  // identity，点已经是 map 坐标
+        marker.frame_locked = false;
 
-        // 使用 base_link 下的吊货中心
-        marker.pose.position.x = stable_centroid_.x();
-        marker.pose.position.y = stable_centroid_.y();
-        marker.pose.position.z = stable_centroid_.z();
+        marker.scale.x = 0.05;  // 线宽
 
-        marker.pose.orientation.x = 0.0;
-        marker.pose.orientation.y = 0.0;
-        marker.pose.orientation.z = 0.0;
-        marker.pose.orientation.w = 1.0;
-
-        marker.scale.x = std::max(stable_size_.x(), 0.30f);
-        marker.scale.y = std::max(stable_size_.y(), 0.30f);
-        marker.scale.z = std::max(stable_size_.z(), 0.30f);
-
-        // 黄色框
-        marker.color.r = 1.0;
+        // 绿色线框
+        marker.color.r = 0.0;
         marker.color.g = 1.0;
         marker.color.b = 0.0;
         marker.color.a = 0.8;
 
-        // 没有持续发布时自动消失，防止静止残留
-        marker.lifetime = ros::Duration(0.25);
+        marker.lifetime = ros::Duration(0.3);
+
+        // 12 条边，24 个点
+        auto addEdge = [&](int a, int b) {
+            marker.points.push_back(corners_map[a]);
+            marker.points.push_back(corners_map[b]);
+        };
+        // bottom
+        addEdge(0,1); addEdge(1,2); addEdge(2,3); addEdge(3,0);
+        // top
+        addEdge(4,5); addEdge(5,6); addEdge(6,7); addEdge(7,4);
+        // vertical
+        addEdge(0,4); addEdge(1,5); addEdge(2,6); addEdge(3,7);
 
         visualization_msgs::MarkerArray arr;
         arr.markers.push_back(marker);
@@ -882,14 +907,12 @@ private:
 
     void publishDeleteAllCoreBox() {
         visualization_msgs::MarkerArray arr;
-
         visualization_msgs::Marker del;
-        del.header.frame_id = "base_link";
-        del.header.stamp = ros::Time(0);
+        del.header.frame_id = "map";
+        del.header.stamp = ros::Time::now();
         del.ns = "cargo_core";
         del.id = 0;
         del.action = visualization_msgs::Marker::DELETEALL;
-
         arr.markers.push_back(del);
         core_bbox_marker_pub_.publish(arr);
     }
