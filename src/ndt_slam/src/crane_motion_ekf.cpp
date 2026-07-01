@@ -249,4 +249,24 @@ Sophus::SE3d CraneMotionEKF::buildPoseFromState(
     return out;
 }
 
+// v8-stable-r3-hotfix-minimal: 静止零速约束
+void CraneMotionEKF::applyStationaryConstraint(const Eigen::Vector2d& anchor_xy) {
+    // 强制位置到锚点
+    x_(0) = anchor_xy.x();
+    x_(1) = anchor_xy.y();
+    // 强制速度为零
+    x_(2) = 0.0;
+    x_(3) = 0.0;
+
+    // 收紧不确定性：位置 ±5cm，速度 ±0.02m/s
+    P_(0, 0) = 0.0025;
+    P_(1, 1) = 0.0025;
+    P_(2, 2) = 0.0004;
+    P_(3, 3) = 0.0004;
+
+    // 更新状态输出
+    status_.output_pos = x_.head<2>();
+    status_.velocity = x_.tail<2>();
+}
+
 }  // namespace ndt_slam

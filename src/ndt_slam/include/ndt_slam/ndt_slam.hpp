@@ -600,9 +600,10 @@ private:
     Sophus::SE3d published_pose_;
     bool motion_gate_stationary_ = false;
     int moving_confirm_count_ = 0;
-    bool stationary_freeze_tf_odom_ = true;
-    bool stationary_freeze_xy_ = true;
-    bool stationary_freeze_yaw_ = true;
+    // v8-stable-r3-hotfix-minimal: PoseFreeze 已禁用
+    bool stationary_freeze_tf_odom_ = false;
+    bool stationary_freeze_xy_ = false;
+    bool stationary_freeze_yaw_ = false;
     double stationary_pose_freeze_release_m_ = 0.80;
     int stationary_move_confirm_frames_ = 3;
 

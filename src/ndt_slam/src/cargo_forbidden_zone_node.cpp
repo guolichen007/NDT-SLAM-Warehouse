@@ -351,7 +351,7 @@ private:
         cargo_markers_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_forbidden_markers", 10);
 
         // P0.5 新增：三层 marker 发布
-        core_bbox_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_core_bbox_marker", 10);
+        core_bbox_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_core_bbox_marker", 1);  // v8-stable-r3-hotfix-minimal: queue_size=1
         remove_bbox_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_remove_bbox_marker", 10);
         forbidden_zone_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_forbidden_zone_marker", 10);
     }
@@ -808,180 +808,90 @@ private:
         // TODO: 从当前帧点云中提取吊货点云并发布
     }
 
-    // P0.5 新增：发布三层 marker
+    // v8-stable-r3-hotfix-minimal: 只发布 core box，base_link 坐标系
     void publishThreeLayerMarkers(const ros::Time& stamp) {
-        // v8: Marker gate - 只有 confirmed 状态才显示
-        bool can_publish = cargo_.valid &&
-                           cargo_state_ != PayloadSemanticState::UNKNOWN &&
-                           cargo_state_ != PayloadSemanticState::LOST &&
-                           observed_frames_ >= 3;  // 至少 3 帧才显示
+        // 从 velocity 判断是否静止（速度 < 0.1 m/s 认为静止）
+        float speed = cargo_.velocity.norm();
+        bool is_moving = speed > 0.1f;
 
-        if (!can_publish) {
-            // 发布 DELETE 清理旧 marker
-            visualization_msgs::MarkerArray markers;
-            visualization_msgs::Marker marker;
-            marker.header.stamp = ros::Time(0);
-            marker.header.frame_id = map_frame_;
-            marker.action = visualization_msgs::Marker::DELETEALL;
-            markers.markers.push_back(marker);
-            core_bbox_marker_pub_.publish(markers);
-            remove_bbox_marker_pub_.publish(markers);
-            forbidden_zone_marker_pub_.publish(markers);
+        // 判断是否应该显示框
+        // 只有 SUSPENDED_MOVING 或明确 moving 的吊货才显示框
+        bool should_show = cargo_.valid &&
+                           (cargo_state_ == PayloadSemanticState::SUSPENDED_MOVING ||
+                            cargo_state_ == PayloadSemanticState::GROUND_CARGO) &&
+                           observed_frames_ >= 3 &&
+                           is_moving;  // 移动时才显示
 
-            ROS_INFO_THROTTLE(1.0,
-                "[CargoMarkerGate] publish=0 state=%d observed=%d valid=%d reason=%s",
+        if (!should_show) {
+            // 静止、无效、lost、static 时，发布 DELETEALL
+            publishDeleteAllCoreBox();
+
+            ROS_DEBUG("[CargoMarkerGate] publish=0 state=%d observed=%d valid=%d speed=%.2f",
                 static_cast<int>(cargo_state_),
                 observed_frames_,
                 cargo_.valid ? 1 : 0,
-                !cargo_.valid ? "INVALID" : (cargo_state_ == PayloadSemanticState::UNKNOWN ? "UNKNOWN" : "LOST"));
+                speed);
             return;
         }
 
-        ROS_INFO_THROTTLE(1.0,
-            "[CargoMarkerGate] publish=1 state=%d observed=%d",
+        ROS_DEBUG("[CargoMarkerGate] publish=1 state=%d observed=%d speed=%.2f",
             static_cast<int>(cargo_state_),
-            observed_frames_);
+            observed_frames_,
+            speed);
 
-        // 1. Core Box：真实货物框，绿色线框（LINE_LIST）
-        {
-            visualization_msgs::MarkerArray markers;
-            visualization_msgs::Marker marker;
-            marker.header.stamp = ros::Time(0);
-            marker.header.frame_id = map_frame_;
-            marker.ns = "cargo_core_bbox";
-            marker.id = 0;
-            marker.type = visualization_msgs::Marker::LINE_LIST;
-            marker.action = visualization_msgs::Marker::ADD;
+        // 发布有效框：base_link 坐标系，跟随 odom
+        visualization_msgs::Marker marker;
 
-            marker.pose.orientation.w = 1.0;
+        marker.header.frame_id = "base_link";
+        marker.header.stamp = ros::Time(0);   // 跟最新 TF
+        marker.ns = "cargo_core";
+        marker.id = 0;
+        marker.type = visualization_msgs::Marker::CUBE;
+        marker.action = visualization_msgs::Marker::ADD;
 
-            // 线宽
-            marker.scale.x = 0.05;
+        // 关键：让 RViz 每帧按 TF 重新变换，框会跟 odom/base_link 走
+        marker.frame_locked = true;
 
-            // 绿色线框
-            marker.color.r = 0.0;
-            marker.color.g = 1.0;
-            marker.color.b = 0.0;
-            marker.color.a = 1.0;
-            marker.lifetime = ros::Duration(0.5);
+        // 使用 base_link 下的吊货中心
+        marker.pose.position.x = stable_centroid_.x();
+        marker.pose.position.y = stable_centroid_.y();
+        marker.pose.position.z = stable_centroid_.z();
 
-            // 计算 box 的 8 个角点
-            float cx = stable_centroid_.x();
-            float cy = stable_centroid_.y();
-            float cz = stable_centroid_.z();
-            float hx = stable_size_.x() / 2.0f;
-            float hy = stable_size_.y() / 2.0f;
-            float hz = stable_size_.z() / 2.0f;
+        marker.pose.orientation.x = 0.0;
+        marker.pose.orientation.y = 0.0;
+        marker.pose.orientation.z = 0.0;
+        marker.pose.orientation.w = 1.0;
 
-            // 最小尺寸保护
-            hx = std::max(hx, 0.15f);
-            hy = std::max(hy, 0.15f);
-            hz = std::max(hz, 0.15f);
+        marker.scale.x = std::max(stable_size_.x(), 0.30f);
+        marker.scale.y = std::max(stable_size_.y(), 0.30f);
+        marker.scale.z = std::max(stable_size_.z(), 0.30f);
 
-            // 8 个角点
-            geometry_msgs::Point p[8];
-            p[0].x = cx - hx; p[0].y = cy - hy; p[0].z = cz - hz;
-            p[1].x = cx + hx; p[1].y = cy - hy; p[1].z = cz - hz;
-            p[2].x = cx + hx; p[2].y = cy + hy; p[2].z = cz - hz;
-            p[3].x = cx - hx; p[3].y = cy + hy; p[3].z = cz - hz;
-            p[4].x = cx - hx; p[4].y = cy - hy; p[4].z = cz + hz;
-            p[5].x = cx + hx; p[5].y = cy - hy; p[5].z = cz + hz;
-            p[6].x = cx + hx; p[6].y = cy + hy; p[6].z = cz + hz;
-            p[7].x = cx - hx; p[7].y = cy + hy; p[7].z = cz + hz;
+        // 黄色框
+        marker.color.r = 1.0;
+        marker.color.g = 1.0;
+        marker.color.b = 0.0;
+        marker.color.a = 0.8;
 
-            // 12 条边（每条边由两个点组成）
-            // 底面
-            marker.points.push_back(p[0]); marker.points.push_back(p[1]);
-            marker.points.push_back(p[1]); marker.points.push_back(p[2]);
-            marker.points.push_back(p[2]); marker.points.push_back(p[3]);
-            marker.points.push_back(p[3]); marker.points.push_back(p[0]);
-            // 顶面
-            marker.points.push_back(p[4]); marker.points.push_back(p[5]);
-            marker.points.push_back(p[5]); marker.points.push_back(p[6]);
-            marker.points.push_back(p[6]); marker.points.push_back(p[7]);
-            marker.points.push_back(p[7]); marker.points.push_back(p[4]);
-            // 竖直边
-            marker.points.push_back(p[0]); marker.points.push_back(p[4]);
-            marker.points.push_back(p[1]); marker.points.push_back(p[5]);
-            marker.points.push_back(p[2]); marker.points.push_back(p[6]);
-            marker.points.push_back(p[3]); marker.points.push_back(p[7]);
+        // 没有持续发布时自动消失，防止静止残留
+        marker.lifetime = ros::Duration(0.25);
 
-            markers.markers.push_back(marker);
-            core_bbox_marker_pub_.publish(markers);
-        }
+        visualization_msgs::MarkerArray arr;
+        arr.markers.push_back(marker);
+        core_bbox_marker_pub_.publish(arr);
+    }
 
-        // 2. Remove Box：删除用框，橙色半透明
-        {
-            visualization_msgs::MarkerArray markers;
-            visualization_msgs::Marker marker;
-            marker.header.stamp = ros::Time(0);
-            marker.header.frame_id = map_frame_;
-            marker.ns = "cargo_remove_bbox";
-            marker.id = 0;
-            marker.type = visualization_msgs::Marker::CUBE;
-            marker.action = visualization_msgs::Marker::ADD;
+    void publishDeleteAllCoreBox() {
+        visualization_msgs::MarkerArray arr;
 
-            marker.pose.position.x = stable_centroid_.x();
-            marker.pose.position.y = stable_centroid_.y();
-            marker.pose.position.z = stable_centroid_.z();
-            marker.pose.orientation.w = 1.0;
+        visualization_msgs::Marker del;
+        del.header.frame_id = "base_link";
+        del.header.stamp = ros::Time(0);
+        del.ns = "cargo_core";
+        del.id = 0;
+        del.action = visualization_msgs::Marker::DELETEALL;
 
-            // 扩展框
-            marker.scale.x = stable_size_.x() + 2 * 0.25;  // remove_expand_xy
-            marker.scale.y = stable_size_.y() + 2 * 0.25;
-            marker.scale.z = stable_size_.z() + 0.05 + 0.20;  // z_down + z_up
-
-            // 最小尺寸保护
-            marker.scale.x = std::max(marker.scale.x, 0.50);
-            marker.scale.y = std::max(marker.scale.y, 0.50);
-            marker.scale.z = std::max(marker.scale.z, 0.50);
-
-            // 橙色半透明
-            marker.color.r = 1.0;
-            marker.color.g = 0.5;
-            marker.color.b = 0.0;
-            marker.color.a = 0.3;
-            marker.lifetime = ros::Duration(0.5);
-
-            markers.markers.push_back(marker);
-            remove_bbox_marker_pub_.publish(markers);
-        }
-
-        // 3. Forbidden Zone：禁行区，红色地面投影
-        {
-            visualization_msgs::MarkerArray markers;
-            visualization_msgs::Marker marker;
-            marker.header.stamp = ros::Time(0);
-            marker.header.frame_id = map_frame_;
-            marker.ns = "cargo_forbidden_zone";
-            marker.id = 0;
-            marker.type = visualization_msgs::Marker::CUBE;
-            marker.action = visualization_msgs::Marker::ADD;
-
-            marker.pose.position.x = stable_centroid_.x();
-            marker.pose.position.y = stable_centroid_.y();
-            marker.pose.position.z = 0.0;  // 地面
-            marker.pose.orientation.w = 1.0;
-
-            // 扩展框，投影到地面
-            marker.scale.x = stable_size_.x() + 2 * 0.50;  // forbidden_expand_xy
-            marker.scale.y = stable_size_.y() + 2 * 0.50;
-            marker.scale.z = 0.1;  // 薄片
-
-            // 最小尺寸保护
-            marker.scale.x = std::max(marker.scale.x, 1.0);
-            marker.scale.y = std::max(marker.scale.y, 1.0);
-
-            // 红色半透明
-            marker.color.r = 1.0;
-            marker.color.g = 0.0;
-            marker.color.b = 0.0;
-            marker.color.a = 0.2;
-            marker.lifetime = ros::Duration(0.5);
-
-            markers.markers.push_back(marker);
-            forbidden_zone_marker_pub_.publish(markers);
-        }
+        arr.markers.push_back(del);
+        core_bbox_marker_pub_.publish(arr);
     }
 };
 

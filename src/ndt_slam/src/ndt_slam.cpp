@@ -1378,13 +1378,22 @@ void NdtSlamNode::processCloudThread() {
         }
 
         // ========== 阶段 6：更新位姿 ==========
-        // v8-stable-r3: 使用 SoftYawFilter 替代 hard yaw lock
-        // NDT yaw 自由，只对输出 yaw 做滤波
+        // v8-stable-r3-hotfix-minimal: 统一 final_pose 发布链路
         Sophus::SE3d constrained_pose = new_pose;
         if (registration_success && crane_constraint_enabled_) {
             const auto& ekf_status = crane_motion_ekf_.status();
             double speed_xy = ekf_status.velocity.norm();
             constrained_pose = applyCraneOutputConstraint(new_pose, is_stationary_, speed_xy);
+        }
+
+        // v8-stable-r3-hotfix-minimal: 静止时 EKF 内部零速约束（替代 PoseFreeze）
+        if (registration_success && motion_gate_stationary_ && crane_motion_ekf_enabled_) {
+            Eigen::Vector2d anchor_xy(
+                stationary_anchor_pose_.translation().x(),
+                stationary_anchor_pose_.translation().y());
+            crane_motion_ekf_.applyStationaryConstraint(anchor_xy);
+            constrained_pose.translation().x() = anchor_xy.x();
+            constrained_pose.translation().y() = anchor_xy.y();
         }
 
         if (registration_success) {
@@ -1397,9 +1406,9 @@ void NdtSlamNode::processCloudThread() {
             // TF 用 ros::Time::now() 避免重复
             ros::Time publish_time = ros::Time::now();
 
-            // v8: PoseFreeze - 静止时冻结发布姿态
-            Sophus::SE3d pub_pose = selectPublishedPose(constrained_pose, publish_time);
-            publishOdometry(publish_time, msg->header.frame_id, pub_pose);
+            // v8-stable-r3-hotfix-minimal: selectPublishedPose 已透传
+            Sophus::SE3d final_pose = selectPublishedPose(constrained_pose, publish_time);
+            publishOdometry(publish_time, msg->header.frame_id, final_pose);
 
             // ICP 精配准移到后台线程，不阻塞主处理
             // NDT 结果直接用于地图插入，ICP 完成后更新位姿
@@ -1508,7 +1517,7 @@ void NdtSlamNode::processCloudThread() {
                                     last_ndt_fitness_ < 0.15;
 
             if (allow_map_commit) {
-                commitKeyFrameWithDynamicFiltering(filtered_cloud, pub_pose, publish_time);
+                commitKeyFrameWithDynamicFiltering(filtered_cloud, final_pose, publish_time);
             } else {
                 ROS_DEBUG("[MapCommit] skipped: ndt_accepted=%d fitness=%.3f",
                          ndt_accepted_for_commit ? 1 : 0, last_ndt_fitness_);
@@ -4533,66 +4542,15 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::edgePreservingMerge(
 
 // ========== 长期建图功能实现 ==========
 
-// v8: PoseFreeze - 静止时冻结发布姿态
+// v8-stable-r3-hotfix-minimal: PoseFreeze 已禁用
+// TF/odom 始终使用 EKF 输出的 constrained_pose
+// 静止时的零速约束由 CraneMotionEKF 内部处理
 Sophus::SE3d NdtSlamNode::selectPublishedPose(
     const Sophus::SE3d& constrained_pose,
     const ros::Time& stamp)
 {
-    if (!motion_gate_stationary_) {
-        published_pose_ = constrained_pose;
-        return published_pose_;
-    }
-
-    const Eigen::Vector3d cur = constrained_pose.translation();
-    const Eigen::Vector3d anchor = stationary_anchor_pose_.translation();
-
-    double drift_xy = (cur.head<2>() - anchor.head<2>()).norm();
-
-    if (stationary_freeze_tf_odom_ &&
-        drift_xy < stationary_pose_freeze_release_m_) {
-
-        // 冻结 pose：使用 anchor 的 xyzyaw
-        Sophus::SE3d frozen = constrained_pose;
-        Eigen::Vector3d t = anchor;
-        frozen.translation() = t;
-
-        if (stationary_freeze_yaw_) {
-            frozen.so3() = stationary_anchor_pose_.so3();
-        }
-
-        published_pose_ = frozen;
-
-        ROS_INFO_THROTTLE(1.0,
-            "[PoseFreeze] mode=STATIONARY_ANCHOR raw_xy=(%.3f,%.3f) pub_xy=(%.3f,%.3f) drift=%.3f action=FREEZE_TF_ODOM",
-            cur.x(), cur.y(),
-            published_pose_.translation().x(),
-            published_pose_.translation().y(),
-            drift_xy);
-
-        return published_pose_;
-    }
-
-    // 可能移动，需要连续确认
-    moving_confirm_count_++;
-    if (moving_confirm_count_ < stationary_move_confirm_frames_) {
-        published_pose_ = stationary_anchor_pose_;
-
-        ROS_INFO_THROTTLE(1.0,
-            "[PoseFreeze] mode=POSSIBLE_MOVE drift=%.3f confirm=%d/%d action=KEEP_FROZEN",
-            drift_xy,
-            moving_confirm_count_,
-            stationary_move_confirm_frames_);
-
-        return published_pose_;
-    }
-
-    // 确认移动，恢复发布
-    motion_gate_stationary_ = false;
-    moving_confirm_count_ = 0;
+    (void)stamp;
     published_pose_ = constrained_pose;
-
-    ROS_INFO("[PoseFreeze] mode=RELEASE drift=%.3f action=RESUME_TF_ODOM", drift_xy);
-
     return published_pose_;
 }
 

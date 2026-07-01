@@ -38,7 +38,7 @@ ndt_omp:
   resolution: 1.0
   step_size: 0.1
   transformation_epsilon: 0.01
-  max_iterations: 50
+  max_iterations: 30          # v8-stable-r3-hotfix-minimal: 从 50 改为 30，与 adaptive_ndt.normal 一致
 
 # 动态点过滤
 dynamic_filter:
@@ -131,11 +131,11 @@ crane_motion_constraint:
   lock_roll: true             # roll 锁定（天车不翻转）
   lock_pitch: true            # pitch 锁定（天车不俯仰）
   lock_yaw: false             # yaw 不锁定（NDT 需要横向自由度）
-  constrain_yaw: true         # v6: 启用 yaw 约束
+  constrain_yaw: false        # v8-stable-r3-hotfix-minimal: 禁用 yaw 约束，交给 soft_yaw_filter
   max_abs_z_drift: 0.05       # z 最大允许漂移（仅 constrain_z=true 时生效）
   max_roll_deg: 0.3           # roll 最大允许漂移（度）
   max_pitch_deg: 0.3          # pitch 最大允许漂移（度）
-  max_yaw_deg: 1.0            # v6: yaw 限幅 1 度
+  # max_yaw_deg: 1.0          # v8-stable-r3-hotfix-minimal: 已禁用，不再使用
 
 # ========== 吊货过滤配置 ==========
 

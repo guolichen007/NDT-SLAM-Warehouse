@@ -86,6 +86,9 @@ public:
 
     const Eigen::Vector4d& state() const { return x_; }
 
+    // v8-stable-r3-hotfix-minimal: 静止零速约束
+    void applyStationaryConstraint(const Eigen::Vector2d& anchor_xy);
+
 private:
     void predict(double dt, Eigen::Vector4d& x_pred, Eigen::Matrix4d& P_pred);
     void maybeRecover(const std::string& reason);
