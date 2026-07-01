@@ -98,6 +98,7 @@ private:
     int feature_weight_ = 8;
 
     void publishOdometry(const ros::Time& stamp, const std::string& cloud_frame_id, const Sophus::SE3d& pose = Sophus::SE3d());
+    void publishRuntimePath(const Sophus::SE3d& pose, const ros::Time& stamp);
 
     void publishInitialTransform();
     void publishTF(const ros::Time& stamp);
@@ -165,10 +166,16 @@ private:
     ros::Publisher objects_clean_map_pub_; // 非地面/货物地图（clean，BEV过滤后）
     ros::Publisher current_cloud_pub_;
     ros::Publisher path_pub_;
+    ros::Publisher runtime_path_pub_;
 
     // 轨迹历史
     nav_msgs::Path path_msg_;
     int path_max_size_ = 5000;  // 最大轨迹点数
+
+    // 运行时轨迹（不受 MotionGate 影响）
+    nav_msgs::Path runtime_path_msg_;
+    Eigen::Matrix4d last_path_pose_ = Eigen::Matrix4d::Identity();
+    bool has_last_path_pose_ = false;
 
     ros::ServiceServer reset_srv_;
     ros::ServiceServer set_pose_srv_;

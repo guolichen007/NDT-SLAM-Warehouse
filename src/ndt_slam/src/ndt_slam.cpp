@@ -100,9 +100,11 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     human_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_removed_history_cloud", 10);
     current_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(current_cloud_topic_, 10);
     path_pub_ = nh_.advertise<nav_msgs::Path>("/path", 10);
+    runtime_path_pub_ = nh_.advertise<nav_msgs::Path>("/ndt_slam/runtime_path", 1, true);
 
     // 初始化轨迹
     path_msg_.header.frame_id = "map";
+    runtime_path_msg_.header.frame_id = "map";
 
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>();
     tf2_buffer_ = std::make_unique<tf2_ros::Buffer>();
@@ -179,9 +181,11 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     human_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_removed_history_cloud", 10);
     current_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(current_cloud_topic_, 10);
     path_pub_ = nh_.advertise<nav_msgs::Path>("/path", 10);
+    runtime_path_pub_ = nh_.advertise<nav_msgs::Path>("/ndt_slam/runtime_path", 1, true);
 
     // 初始化轨迹
     path_msg_.header.frame_id = "map";
+    runtime_path_msg_.header.frame_id = "map";
 
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>();
     tf2_buffer_ = std::make_unique<tf2_ros::Buffer>();
@@ -1409,6 +1413,7 @@ void NdtSlamNode::processCloudThread() {
             // v8-stable-r3-hotfix-minimal: selectPublishedPose 已透传
             Sophus::SE3d final_pose = selectPublishedPose(constrained_pose, publish_time);
             publishOdometry(publish_time, msg->header.frame_id, final_pose);
+            publishRuntimePath(final_pose, publish_time);
 
             // ICP 精配准移到后台线程，不阻塞主处理
             // NDT 结果直接用于地图插入，ICP 完成后更新位姿
@@ -1791,6 +1796,41 @@ void NdtSlamNode::publishOdometry(const ros::Time& stamp, const std::string& clo
 
     path_msg_.header.stamp = stamp;
     path_pub_.publish(path_msg_);
+}
+
+void NdtSlamNode::publishRuntimePath(const Sophus::SE3d& pose, const ros::Time& stamp) {
+    Eigen::Vector3d t = pose.translation();
+
+    if (has_last_path_pose_) {
+        double dist = (t - last_path_pose_.block<3,1>(0,3)).head<2>().norm();
+        if (dist < 0.03) return;  // 3cm 以下不添加
+    }
+
+    geometry_msgs::PoseStamped ps;
+    ps.header.stamp = stamp;
+    ps.header.frame_id = "map";
+    ps.pose.position.x = t.x();
+    ps.pose.position.y = t.y();
+    ps.pose.position.z = t.z();
+
+    Eigen::Quaterniond q = pose.so3().unit_quaternion();
+    ps.pose.orientation.x = q.x();
+    ps.pose.orientation.y = q.y();
+    ps.pose.orientation.z = q.z();
+    ps.pose.orientation.w = q.w();
+
+    runtime_path_msg_.header.stamp = stamp;
+    runtime_path_msg_.poses.push_back(ps);
+
+    // 限制最大长度
+    if (runtime_path_msg_.poses.size() > 5000) {
+        runtime_path_msg_.poses.erase(runtime_path_msg_.poses.begin());
+    }
+
+    runtime_path_pub_.publish(runtime_path_msg_);
+
+    last_path_pose_.block<3,1>(0,3) = t;
+    has_last_path_pose_ = true;
 }
 
 void NdtSlamNode::publishInitialTransform() {
