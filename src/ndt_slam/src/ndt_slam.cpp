@@ -80,11 +80,11 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
 
     odom_pub_ = nh_.advertise<nav_msgs::Odometry>(odom_topic_, 10);
     pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>(pose_topic_, 10);
-    map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(map_topic_, 10);
-    display_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map", 10);
-    ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 10);
-    objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 10);
-    objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 10);
+    map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(map_topic_, 1, true);
+    display_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map", 1, true);
+    ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 1, true);
+    objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 1, true);
+    objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 1, true);
     near_field_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/near_field_removed", 10);
     payload_channel_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_channel_cloud", 10);
     payload_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_candidate_cloud", 10);
@@ -159,11 +159,11 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
 
     odom_pub_ = nh_.advertise<nav_msgs::Odometry>(odom_topic_, 10);
     pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>(pose_topic_, 10);
-    map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(map_topic_, 10);
-    display_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map", 10);
-    ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 10);
-    objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 10);
-    objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 10);
+    map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(map_topic_, 1, true);
+    display_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map", 1, true);
+    ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 1, true);
+    objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 1, true);
+    objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 1, true);
     near_field_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/near_field_removed", 10);
     payload_channel_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_channel_cloud", 10);
     payload_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_candidate_cloud", 10);
@@ -6566,6 +6566,11 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     }
     // 始终更新 clean_points
     last_clean_points_ = objects_clean_map_ ? objects_clean_map_->size() : 0;
+
+    // 修复：增量 commit 后立即发布 RViz 显示层
+    publishDisplayMap();
+    publishGroundMap();
+    publishObjectsMap();
 
     // 闭环检测
     if (keyframe_count_ % loop_detection_interval_ == 0) {
