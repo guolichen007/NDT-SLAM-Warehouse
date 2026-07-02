@@ -118,8 +118,8 @@ pointcloud_watchdog:
 
 # NDT 健康监控
 ndt_health:
-  fitness_warning_threshold: 2.0
-  fitness_warning_count: 50
+  fitness_warning_threshold: 0.35
+  fitness_warning_count: 5
 
 # 天车运动约束（三自由度建图：x/y/yaw 自由，z/roll/pitch 锁定）
 crane_motion_constraint:

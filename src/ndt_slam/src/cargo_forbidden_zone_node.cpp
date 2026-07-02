@@ -338,7 +338,7 @@ private:
 
             ROS_INFO("[CargoForbiddenZone] Config loaded from %s", config_file.c_str());
         } catch (const std::exception& e) {
-            ROS_ERROR("[CargoForbiddenZone] Config error: %s", e.what());
+            ROS_WARN_ONCE("[CargoForbiddenZone] Config parse warning: %s, using defaults", e.what());
         }
     }
 

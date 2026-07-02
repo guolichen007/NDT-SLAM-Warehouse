@@ -80,11 +80,11 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
 
     odom_pub_ = nh_.advertise<nav_msgs::Odometry>(odom_topic_, 10);
     pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>(pose_topic_, 10);
-    map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(map_topic_, 10);
-    display_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map", 10);
-    ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 10);
-    objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 10);
-    objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 10);
+    map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(map_topic_, 1, true);
+    display_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map", 1, true);
+    ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 1, true);
+    objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 1, true);
+    objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 1, true);
     near_field_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/near_field_removed", 10);
     payload_channel_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_channel_cloud", 10);
     payload_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_candidate_cloud", 10);
@@ -146,6 +146,7 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     }
 
     timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
+    visualization_timer_ = nh_.createTimer(ros::Duration(1.0), &NdtSlamNode::publishVisualizationHeartbeat, this);
 
     ROS_INFO("NdtSlamNode initialized with NDT_OMP");
     ROS_INFO("Services: reset, set_pose, relocalize, save_map, load_map, rebuild_map");
@@ -159,11 +160,11 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
 
     odom_pub_ = nh_.advertise<nav_msgs::Odometry>(odom_topic_, 10);
     pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>(pose_topic_, 10);
-    map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(map_topic_, 10);
-    display_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map", 10);
-    ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 10);
-    objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 10);
-    objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 10);
+    map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(map_topic_, 1, true);
+    display_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map", 1, true);
+    ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 1, true);
+    objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 1, true);
+    objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 1, true);
     near_field_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/near_field_removed", 10);
     payload_channel_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_channel_cloud", 10);
     payload_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_candidate_cloud", 10);
@@ -2374,44 +2375,102 @@ void NdtSlamNode::rebuildGroundAndObjectsMap() {
              ground_map_->size(), objects_map_->size(), objects_clean_map_->size());
 }
 
-void NdtSlamNode::publishDisplayMap() {
-    if (display_map_->empty()) return;
+void NdtSlamNode::publishVisualizationHeartbeat(const ros::TimerEvent&) {
+    const ros::Time stamp = ros::Time::now();
 
-    sensor_msgs::PointCloud2 map_msg;
-    pcl::toROSMsg(*display_map_, map_msg);
-    map_msg.header.stamp = ros::Time::now();
-    map_msg.header.frame_id = map_frame_;
-    display_map_pub_.publish(map_msg);
+    if (display_map_ && !display_map_->empty()) {
+        sensor_msgs::PointCloud2 msg;
+        pcl::toROSMsg(*display_map_, msg);
+        msg.header.frame_id = map_frame_;
+        msg.header.stamp = stamp;
+        display_map_pub_.publish(msg);
+    }
+
+    if (ground_map_ && !ground_map_->empty()) {
+        sensor_msgs::PointCloud2 msg;
+        pcl::toROSMsg(*ground_map_, msg);
+        msg.header.frame_id = map_frame_;
+        msg.header.stamp = stamp;
+        ground_map_pub_.publish(msg);
+    }
+
+    if (objects_map_ && !objects_map_->empty()) {
+        sensor_msgs::PointCloud2 msg;
+        pcl::toROSMsg(*objects_map_, msg);
+        msg.header.frame_id = map_frame_;
+        msg.header.stamp = stamp;
+        objects_map_pub_.publish(msg);
+    }
+
+    if (objects_clean_map_ && !objects_clean_map_->empty()) {
+        sensor_msgs::PointCloud2 msg;
+        pcl::toROSMsg(*objects_clean_map_, msg);
+        msg.header.frame_id = map_frame_;
+        msg.header.stamp = stamp;
+        objects_clean_map_pub_.publish(msg);
+    }
+
+    ROS_INFO_THROTTLE(5.0, "[VizHeartbeat] display=%zu ground=%zu objects=%zu clean=%zu",
+                      display_map_ ? display_map_->size() : 0,
+                      ground_map_ ? ground_map_->size() : 0,
+                      objects_map_ ? objects_map_->size() : 0,
+                      objects_clean_map_ ? objects_clean_map_->size() : 0);
+}
+
+void NdtSlamNode::publishDisplayMap() {
+    if (!display_map_ || display_map_->empty()) return;
+
+    sensor_msgs::PointCloud2 msg;
+    pcl::toROSMsg(*display_map_, msg);
+    msg.header.stamp = ros::Time::now();
+    msg.header.frame_id = map_frame_;
+    display_map_pub_.publish(msg);
+
+    ROS_INFO_THROTTLE(2.0, "[PublishDisplay] topic=/display_map frame=%s points=%zu subs=%u",
+                      msg.header.frame_id.c_str(), display_map_->size(),
+                      display_map_pub_.getNumSubscribers());
 }
 
 void NdtSlamNode::publishGroundMap() {
-    if (ground_map_->empty()) return;
+    if (!ground_map_ || ground_map_->empty()) return;
 
     sensor_msgs::PointCloud2 msg;
     pcl::toROSMsg(*ground_map_, msg);
     msg.header.stamp = ros::Time::now();
     msg.header.frame_id = map_frame_;
     ground_map_pub_.publish(msg);
+
+    ROS_INFO_THROTTLE(2.0, "[PublishGround] topic=/display_map_ground frame=%s points=%zu subs=%u",
+                      msg.header.frame_id.c_str(), ground_map_->size(),
+                      ground_map_pub_.getNumSubscribers());
 }
 
 void NdtSlamNode::publishObjectsMap() {
-    if (objects_map_->empty()) return;
+    if (!objects_map_ || objects_map_->empty()) return;
 
     sensor_msgs::PointCloud2 msg;
     pcl::toROSMsg(*objects_map_, msg);
     msg.header.stamp = ros::Time::now();
     msg.header.frame_id = map_frame_;
     objects_map_pub_.publish(msg);
+
+    ROS_INFO_THROTTLE(2.0, "[PublishObjects] topic=/display_map_objects frame=%s points=%zu subs=%u",
+                      msg.header.frame_id.c_str(), objects_map_->size(),
+                      objects_map_pub_.getNumSubscribers());
 }
 
 void NdtSlamNode::publishObjectsCleanMap() {
-    if (objects_clean_map_->empty()) return;
+    if (!objects_clean_map_ || objects_clean_map_->empty()) return;
 
     sensor_msgs::PointCloud2 msg;
     pcl::toROSMsg(*objects_clean_map_, msg);
     msg.header.stamp = ros::Time::now();
     msg.header.frame_id = map_frame_;
     objects_clean_map_pub_.publish(msg);
+
+    ROS_INFO_THROTTLE(2.0, "[PublishClean] topic=/display_map_objects_clean frame=%s points=%zu subs=%u",
+                      msg.header.frame_id.c_str(), objects_clean_map_->size(),
+                      objects_clean_map_pub_.getNumSubscribers());
 }
 
 void NdtSlamNode::rebuildCleanMap() {
