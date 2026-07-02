@@ -203,6 +203,28 @@ private:
     int stationary_frame_count_ = 0;
     ros::Time last_suspended_time_;
 
+    // 显示框稳定器
+    bool display_box_valid_ = false;
+    int display_locked_track_id_ = -1;
+    int display_lost_count_ = 0;
+    int display_candidate_track_id_ = -1;
+    int display_candidate_confirm_count_ = 0;
+    Eigen::Vector3f display_center_base_ = Eigen::Vector3f::Zero();
+    Eigen::Vector3f display_size_ = Eigen::Vector3f::Zero();
+    ros::Time display_update_stamp_;
+
+    // 显示稳定器参数
+    double display_center_alpha_ = 0.30;
+    double display_size_expand_alpha_ = 0.10;
+    double display_size_shrink_alpha_ = 0.02;
+    double display_max_center_step_ = 0.30;
+    double display_max_size_step_ = 0.08;
+    double display_hold_time_sec_ = 1.2;
+    int display_max_rejects_ = 8;
+    int display_track_lock_lost_max_ = 10;
+    int display_switch_confirm_frames_ = 3;
+    double display_reacquire_gate_m_ = 1.20;
+
     // 当前货物信息
     CargoInfo cargo_;
 
@@ -426,7 +448,16 @@ private:
         if (!cargo_.valid) return;
 
         cargo_.track_id = static_cast<int>(msg->data[IDX_TRACK_ID]);
-        cargo_.state = static_cast<PayloadSemanticState>(static_cast<int>(msg->data[IDX_STATE]));
+
+        // 修复状态映射：payload_track_info state (0=NONE, 1=PENDING, 2=DYNAMIC)
+        // → PayloadSemanticState (0=UNKNOWN, 1=GROUND_CARGO, 3=SUSPENDED_MOVING)
+        int raw_state = static_cast<int>(msg->data[IDX_STATE]);
+        switch (raw_state) {
+            case 0: cargo_.state = PayloadSemanticState::UNKNOWN; break;
+            case 1: cargo_.state = PayloadSemanticState::GROUND_CARGO; break;
+            case 2: cargo_.state = PayloadSemanticState::SUSPENDED_MOVING; break;
+            default: cargo_.state = PayloadSemanticState::UNKNOWN; break;
+        }
 
         // v8: 更新 observed_frames_
         if (cargo_.track_id == current_track_id_) {
@@ -543,27 +574,153 @@ private:
         publishResults();
     }
 
+    // 尺寸安全更新：变大快、变小慢、遮挡保护
+    Eigen::Vector3f safeSizeUpdate(const Eigen::Vector3f& stable,
+                                    const Eigen::Vector3f& measured) {
+        Eigen::Vector3f result = stable;
+
+        for (int i = 0; i < 3; i++) {
+            double ratio = (stable[i] > 0.01f) ? (measured[i] / stable[i]) : 1.0;
+
+            // 测量值太小（遮挡导致），不允许更新
+            if (ratio < 0.55) continue;
+            // 测量值太大（误检），不允许更新
+            if (ratio > 1.80) continue;
+
+            // 选择 alpha：变大快、变小慢
+            double alpha = (measured[i] > stable[i])
+                           ? display_size_expand_alpha_    // 0.10
+                           : display_size_shrink_alpha_;   // 0.02
+
+            // 低通滤波
+            double new_val = (1.0 - alpha) * stable[i] + alpha * measured[i];
+
+            // 单帧步长限制
+            double step = std::abs(new_val - stable[i]);
+            if (step > display_max_size_step_) {
+                new_val = stable[i] + (new_val > stable[i] ? display_max_size_step_ : -display_max_size_step_);
+            }
+
+            result[i] = new_val;
+        }
+
+        return result;
+    }
+
     void updateStableBbox() {
-        if (!cargo_.valid || cargo_state_ == PayloadSemanticState::UNKNOWN ||
-            cargo_state_ == PayloadSemanticState::LOST) {
+        Eigen::Vector3f measured_center = cargo_.centroid;
+        Eigen::Vector3f measured_size = cargo_.bbox_max - cargo_.bbox_min;
+        int track_id = cargo_.track_id;
+
+        // 尺寸合法性检查
+        bool size_valid = measured_size.x() > 0.2f && measured_size.x() < 8.0f &&
+                          measured_size.y() > 0.2f && measured_size.y() < 3.0f &&
+                          measured_size.z() > 0.05f && measured_size.z() < 5.0f;
+
+        if (!size_valid) {
+            measured_size = Eigen::Vector3f(default_length_x_, default_width_y_, default_height_z_);
+        }
+
+        // === Track Lock 逻辑 ===
+        if (!display_box_valid_) {
+            // 还没有有效框，需要初始化
+            if (cargo_.valid && cargo_state_ == PayloadSemanticState::SUSPENDED_MOVING) {
+                display_locked_track_id_ = track_id;
+                display_center_base_ = measured_center;
+                display_size_ = measured_size;
+                display_box_valid_ = true;
+                display_update_stamp_ = ros::Time::now();
+                display_lost_count_ = 0;
+                ROS_INFO("[CargoDisplayState] initial lock track=%d center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f)",
+                         track_id, measured_center.x(), measured_center.y(), measured_center.z(),
+                         measured_size.x(), measured_size.y(), measured_size.z());
+            }
+            stable_centroid_ = Eigen::Vector3f::Zero();
+            stable_size_ = Eigen::Vector3f(3.0f, 1.0f, 1.0f);
             return;
         }
 
-        // P0-4: 直接使用从 payload_track_info 接收的 bbox，不做低通滤波
-        // 这样可以确保 cargo_forbidden_zone_node 显示的框与 CargoBoxV2 计算的框一致
+        // === 已有有效框 ===
 
-        // 直接使用测量值
-        stable_centroid_ = cargo_.centroid;
+        // 同一个 track：正常更新
+        if (track_id == display_locked_track_id_ && cargo_.valid) {
+            display_lost_count_ = 0;
 
-        // 计算 size
-        Eigen::Vector3f raw_size = cargo_.bbox_max - cargo_.bbox_min;
-        if (raw_size.x() < 0.5f || raw_size.x() > 8.0f ||
-            raw_size.y() < 0.3f || raw_size.y() > 3.0f) {
-            raw_size = Eigen::Vector3f(default_length_x_, default_width_y_, default_height_z_);
+            // 中心：低通滤波 + 步长限制
+            Eigen::Vector3f center_step = measured_center - display_center_base_;
+            float center_dist = center_step.norm();
+            if (center_dist > display_max_center_step_) {
+                center_step *= display_max_center_step_ / center_dist;
+            }
+            display_center_base_ = (1.0f - display_center_alpha_) * display_center_base_
+                                 + display_center_alpha_ * (display_center_base_ + center_step);
+
+            // 尺寸：安全更新（变大快、变小慢、遮挡保护）
+            display_size_ = safeSizeUpdate(display_size_, measured_size);
+
+            display_update_stamp_ = ros::Time::now();
+
+            ROS_INFO_THROTTLE(2.0, "[CargoDisplayState] update track=%d center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f)",
+                              track_id,
+                              display_center_base_.x(), display_center_base_.y(), display_center_base_.z(),
+                              display_size_.x(), display_size_.y(), display_size_.z());
+        }
+        // 不同 track：需要连续确认才切换
+        else if (cargo_.valid && track_id != display_locked_track_id_) {
+            double jump = (measured_center - display_center_base_).norm();
+
+            // 大跳变直接拒绝
+            if (jump > display_reacquire_gate_m_ && display_lost_count_ <= display_track_lock_lost_max_) {
+                display_lost_count_++;
+                ROS_WARN_THROTTLE(0.5, "[CargoDisplayState] reject switch old=%d new=%d jump=%.2f lost=%d",
+                                  display_locked_track_id_, track_id, jump, display_lost_count_);
+            }
+            // 小跳变：连续确认后切换
+            else {
+                if (display_candidate_track_id_ != track_id) {
+                    display_candidate_track_id_ = track_id;
+                    display_candidate_confirm_count_ = 1;
+                } else {
+                    display_candidate_confirm_count_++;
+                }
+
+                if (display_candidate_confirm_count_ >= display_switch_confirm_frames_ ||
+                    display_lost_count_ > display_track_lock_lost_max_) {
+                    // 切换到新 track
+                    ROS_WARN("[CargoDisplayState] switch old=%d new=%d confirm=%d lost=%d",
+                             display_locked_track_id_, track_id, display_candidate_confirm_count_, display_lost_count_);
+                    display_locked_track_id_ = track_id;
+                    display_center_base_ = measured_center;
+                    display_size_ = safeSizeUpdate(display_size_, measured_size);
+                    display_update_stamp_ = ros::Time::now();
+                    display_lost_count_ = 0;
+                    display_candidate_track_id_ = -1;
+                    display_candidate_confirm_count_ = 0;
+                } else {
+                    display_lost_count_++;
+                }
+            }
+        }
+        // track 丢失：进入 hold
+        else {
+            display_lost_count_++;
+
+            // hold 期间继续用旧框
+            double hold_age = (ros::Time::now() - display_update_stamp_).toSec();
+            if (hold_age > display_hold_time_sec_ && display_lost_count_ > display_max_rejects_) {
+                ROS_INFO("[CargoDisplayState] expired track=%d hold_age=%.2f lost=%d",
+                         display_locked_track_id_, hold_age, display_lost_count_);
+                display_box_valid_ = false;
+                display_locked_track_id_ = -1;
+            }
         }
 
-        // 直接使用 raw_size，不做低通滤波
-        stable_size_ = raw_size;
+        // 输出到 stable_centroid_ / stable_size_（供 publishThreeLayerMarkers 使用）
+        stable_centroid_ = display_center_base_;
+        stable_size_ = display_size_;
+        stable_size_.x() = std::max(stable_size_.x(), 0.30f);
+        stable_size_.y() = std::max(stable_size_.y(), 0.30f);
+        stable_size_.z() = std::max(stable_size_.z(), 0.10f);
 
         // 更新 bbox
         float half_l = stable_size_.x() / 2.0f + safety_margin_x_;
@@ -830,10 +987,9 @@ private:
             moving_frame_count_ = 0;
         }
 
-        bool should_show = cargo_.valid &&
+        bool should_show = display_box_valid_ &&
                            (cargo_state_ == PayloadSemanticState::SUSPENDED_MOVING ||
                             cargo_state_ == PayloadSemanticState::GROUND_CARGO) &&
-                           observed_frames_ >= 3 &&
                            moving_frame_count_ >= 3 &&
                            has_odom_;
 
