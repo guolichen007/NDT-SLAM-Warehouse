@@ -2379,6 +2379,16 @@ void NdtSlamNode::rebuildGroundAndObjectsMap() {
 void NdtSlamNode::publishVisualizationHeartbeat(const ros::TimerEvent&) {
     const ros::Time stamp = ros::Time::now();
 
+    ROS_INFO_THROTTLE(2.0, "[VizHeartbeat] display=%zu subs=%u ground=%zu subs=%u objects=%zu subs=%u clean=%zu subs=%u",
+                      display_map_ ? display_map_->size() : 0,
+                      display_map_pub_.getNumSubscribers(),
+                      ground_map_ ? ground_map_->size() : 0,
+                      ground_map_pub_.getNumSubscribers(),
+                      objects_map_ ? objects_map_->size() : 0,
+                      objects_map_pub_.getNumSubscribers(),
+                      objects_clean_map_ ? objects_clean_map_->size() : 0,
+                      objects_clean_map_pub_.getNumSubscribers());
+
     if (display_map_ && !display_map_->empty()) {
         sensor_msgs::PointCloud2 msg;
         pcl::toROSMsg(*display_map_, msg);
@@ -2410,12 +2420,6 @@ void NdtSlamNode::publishVisualizationHeartbeat(const ros::TimerEvent&) {
         msg.header.stamp = stamp;
         objects_clean_map_pub_.publish(msg);
     }
-
-    ROS_INFO_THROTTLE(5.0, "[VizHeartbeat] display=%zu ground=%zu objects=%zu clean=%zu",
-                      display_map_ ? display_map_->size() : 0,
-                      ground_map_ ? ground_map_->size() : 0,
-                      objects_map_ ? objects_map_->size() : 0,
-                      objects_clean_map_ ? objects_clean_map_->size() : 0);
 }
 
 void NdtSlamNode::publishDisplayMap() {
