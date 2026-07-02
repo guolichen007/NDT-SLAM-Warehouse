@@ -248,6 +248,7 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     }
 
     timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
+    visualization_timer_ = nh_.createTimer(ros::Duration(1.0), &NdtSlamNode::publishVisualizationHeartbeat, this);
 
     ROS_INFO("NdtSlamNode initialized with NDT_OMP");
     ROS_INFO("Config file: %s", config_file_path.c_str());
