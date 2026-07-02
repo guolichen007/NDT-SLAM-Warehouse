@@ -282,7 +282,7 @@ cargo_box_estimator:
   min_suspended_hag: 0.35
 
   # 最小 core points
-  min_core_points: 8                # 从 5 提高到 8
+  min_core_points: 6                # 从 8 降低到 6
 
   # P0-6: 候选/确认两级阈值
   min_candidate_core_points: 5
@@ -302,7 +302,7 @@ cargo_box_estimator:
   init_max_area: 30.0
   init_max_aspect_ratio: 8.0
   init_min_bottom_hag: 0.45
-  init_min_core_points: 8           # 从 5 提高到 8
+  init_min_core_points: 6           # 从 8 降低到 6
 
 # ========== v8-stable-r3-final: CraneMotionEKF ==========
 crane_motion_ekf:

@@ -254,7 +254,7 @@ private:
     double cargo_max_center_step_m_ = 0.35;
     double cargo_max_size_step_m_ = 0.25;
 
-    // PoseSmoother：平滑 tracking_pose 输出
+    // PoseSmoother：平滑 tracking_pose 输出（旧版，保留兼容）
     struct PoseSmootherState {
         bool initialized = false;
         Sophus::SE3d last_pose;
@@ -263,6 +263,23 @@ private:
     PoseSmootherState tracking_pose_smoother_;
     double max_tracking_step_m_ = 0.20;
     double max_tracking_yaw_step_deg_ = 0.35;
+
+    // α-β 滤波器（新版平滑）
+    struct TrackingPoseFilter {
+        bool initialized = false;
+        double x = 0.0;
+        double y = 0.0;
+        double yaw = 0.0;
+        double vx = 0.0;
+        double vy = 0.0;
+        ros::Time stamp;
+    };
+    TrackingPoseFilter tracking_filter_;
+
+    // 输出 yaw 锚定
+    bool output_yaw_initialized_ = false;
+    double output_yaw_ref_ = 0.0;
+    double output_yaw_ = 0.0;
 
     // ========== Crane Motion Constraint（天车运动约束）==========
     bool crane_constraint_enabled_ = false;
@@ -667,6 +684,7 @@ private:
     // MotionGate 判定函数
     bool shouldCommitKeyframe(const Sophus::SE3d& current_pose, const ros::Time& current_time);
     bool shouldCommitKeyFrameV3(const PoseBundle& bundle, const ros::Time& stamp);
+    bool shouldCommitKeyFrameV4(const PoseBundle& bundle, const ros::Time& stamp);
     void runOnlineCargoDetection(const PoseBundle& bundle, const ros::Time& stamp);
 
     // Pose smooth functions
@@ -675,6 +693,9 @@ private:
     double normalizeAngle(double a) const;
     Sophus::SE3d blendPlanarPose(const Sophus::SE3d& a, const Sophus::SE3d& b, double ratio);
     Sophus::SE3d smoothTrackingPose(const Sophus::SE3d& target_pose, const ros::Time& stamp);
+    Sophus::SE3d smoothTrackingPoseV2(const Sophus::SE3d& meas_pose, const ros::Time& stamp);
+    void finalizeTrackingPose(PoseBundle& bundle, const ros::Time& stamp);
+    double smoothAnchoredOutputYaw(double meas_yaw, const ros::Time& stamp);
 
     // Cargo display functions
     bool acceptCargoTrackSwitch(int new_track_id, const Eigen::Vector3f& new_center, const ros::Time& stamp);

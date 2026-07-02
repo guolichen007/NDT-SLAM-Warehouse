@@ -1345,16 +1345,10 @@ void NdtSlamNode::processCloudThread() {
                             consistent_raw_motion_count_ = 0;
                         }
 
-                        // 确定 tracking_pose：blend + smooth（避免硬切换导致跳变）
-                        Sophus::SE3d tracking_target = bundle.refined_pose;
-                        if (bundle.ekf_frozen && bundle.ndt_healthy) {
-                            tracking_target = blendPlanarPose(bundle.refined_pose, bundle.ndt_raw_pose, 0.25);
-                            ROS_INFO_THROTTLE(2.0, "[PoseBundle] BLEND_RAW diff=%.3f fitness=%.3f ratio=0.25",
-                                              bundle.raw_refined_xy_diff, fitness_score);
-                        }
-                        bundle.tracking_pose = smoothTrackingPose(tracking_target, msg->header.stamp);
+                        // 确定 tracking_pose：finalizeTrackingPose（α-β 滤波 + yaw 锚定）
+                        finalizeTrackingPose(bundle, msg->header.stamp);
 
-                        // v8-stable-r3: 使用 EKF 输出作为 new_pose
+                        // v8-stable-r3: 使用 EKF 输出作为 new_pose（用于 local_map 更新）
                         new_pose = ekf_pose;
 
                         // NDT 健康日志（每秒一次）
@@ -1549,7 +1543,7 @@ void NdtSlamNode::processCloudThread() {
             runOnlineCargoDetection(bundle, publish_time);
 
             // ========== MotionGateV3 + MapCommit ==========
-            bool should_commit = shouldCommitKeyFrameV3(bundle, publish_time);
+            bool should_commit = shouldCommitKeyFrameV4(bundle, publish_time);
 
             if (should_commit) {
                 commitKeyFrameWithDynamicFiltering(filtered_cloud, final_pose, publish_time);
@@ -4971,6 +4965,103 @@ void NdtSlamNode::publishHeldCargoBox(const ros::Time& stamp) {
     }
 }
 
+// ========== α-β 滤波器（新版平滑）==========
+Sophus::SE3d NdtSlamNode::smoothTrackingPoseV2(
+    const Sophus::SE3d& meas_pose, const ros::Time& stamp) {
+    const double meas_x = meas_pose.translation().x();
+    const double meas_y = meas_pose.translation().y();
+    const double meas_yaw = getYaw(meas_pose);
+
+    if (!tracking_filter_.initialized) {
+        tracking_filter_.initialized = true;
+        tracking_filter_.x = meas_x;
+        tracking_filter_.y = meas_y;
+        tracking_filter_.yaw = meas_yaw;
+        tracking_filter_.vx = 0.0;
+        tracking_filter_.vy = 0.0;
+        tracking_filter_.stamp = stamp;
+        return makePlanarPose(meas_x, meas_y, 0.0, meas_yaw);
+    }
+
+    double dt = (stamp - tracking_filter_.stamp).toSec();
+    if (dt < 0.02 || dt > 0.30) dt = 0.10;
+
+    double pred_x = tracking_filter_.x + tracking_filter_.vx * dt;
+    double pred_y = tracking_filter_.y + tracking_filter_.vy * dt;
+
+    double ex = meas_x - pred_x;
+    double ey = meas_y - pred_y;
+
+    const double alpha = 0.25;
+    const double beta  = 0.08;
+
+    tracking_filter_.x = pred_x + alpha * ex;
+    tracking_filter_.y = pred_y + alpha * ey;
+    tracking_filter_.vx += beta * ex / dt;
+    tracking_filter_.vy += beta * ey / dt;
+
+    const double max_v = 0.60;
+    double vnorm = std::hypot(tracking_filter_.vx, tracking_filter_.vy);
+    if (vnorm > max_v) {
+        tracking_filter_.vx *= max_v / vnorm;
+        tracking_filter_.vy *= max_v / vnorm;
+    }
+
+    double dyaw = normalizeAngle(meas_yaw - tracking_filter_.yaw);
+    const double max_yaw_step = 0.05 * M_PI / 180.0;
+    dyaw = std::max(-max_yaw_step, std::min(max_yaw_step, dyaw));
+    tracking_filter_.yaw = normalizeAngle(tracking_filter_.yaw + dyaw);
+
+    tracking_filter_.stamp = stamp;
+
+    ROS_INFO_THROTTLE(0.5,
+        "[PoseSmoothV2] meas=(%.2f,%.2f,%.1fdeg) out=(%.2f,%.2f,%.1fdeg) vel=(%.2f,%.2f) err=(%.4f,%.4f)",
+        meas_x, meas_y, meas_yaw * 180.0 / M_PI,
+        tracking_filter_.x, tracking_filter_.y, tracking_filter_.yaw * 180.0 / M_PI,
+        tracking_filter_.vx, tracking_filter_.vy, ex, ey);
+
+    return makePlanarPose(tracking_filter_.x, tracking_filter_.y, 0.0, tracking_filter_.yaw);
+}
+
+// ========== 输出 yaw 锚定 ==========
+double NdtSlamNode::smoothAnchoredOutputYaw(double meas_yaw, const ros::Time& stamp) {
+    if (!output_yaw_initialized_) {
+        output_yaw_initialized_ = true;
+        output_yaw_ref_ = meas_yaw;
+        output_yaw_ = meas_yaw;
+        return output_yaw_;
+    }
+
+    double max_abs = 0.5 * M_PI / 180.0;    // ±0.5° 绝对限制
+    double max_step = 0.05 * M_PI / 180.0;  // 每帧最大 0.05°
+
+    double rel = normalizeAngle(meas_yaw - output_yaw_ref_);
+    rel = std::max(-max_abs, std::min(max_abs, rel));
+    double target = normalizeAngle(output_yaw_ref_ + rel);
+
+    double dyaw = normalizeAngle(target - output_yaw_);
+    dyaw = std::max(-max_step, std::min(max_step, dyaw));
+    output_yaw_ = normalizeAngle(output_yaw_ + dyaw);
+
+    return output_yaw_;
+}
+
+// ========== finalizeTrackingPose ==========
+void NdtSlamNode::finalizeTrackingPose(PoseBundle& bundle, const ros::Time& stamp) {
+    Sophus::SE3d target = bundle.refined_pose;
+
+    if (bundle.ekf_frozen && bundle.ndt_healthy) {
+        target = blendPlanarPose(bundle.refined_pose, bundle.ndt_raw_pose, 0.15);
+    }
+
+    double anchored_yaw = smoothAnchoredOutputYaw(getYaw(target), stamp);
+    Eigen::Vector3d t = target.translation();
+    Sophus::SE3d planar_target = makePlanarPose(t.x(), t.y(), 0.0, anchored_yaw);
+
+    bundle.tracking_pose = smoothTrackingPoseV2(planar_target, stamp);
+    current_pose_ = bundle.tracking_pose;
+}
+
 // cargo 检测：每帧独立运行，不依赖 MapCommit
 void NdtSlamNode::runOnlineCargoDetection(const PoseBundle& bundle, const ros::Time& stamp) {
     // payload_track_info 已经在前面发布了
@@ -4994,6 +5085,61 @@ void NdtSlamNode::runOnlineCargoDetection(const PoseBundle& bundle, const ros::T
         has_track ? 1 : 0,
         consecutive_cargo_rejects_,
         keyframe_count_);
+}
+
+// MotionGateV4：tracking_pose 为主，raw 只用于 recovery
+bool NdtSlamNode::shouldCommitKeyFrameV4(const PoseBundle& bundle, const ros::Time& stamp) {
+    if (!motion_gate_enabled_) return true;
+
+    if (keyframe_count_ == 0) {
+        last_keyframe_pose_for_gate_ = bundle.tracking_pose;
+        last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+        last_keyframe_time_for_gate_ = stamp;
+        return true;
+    }
+
+    double dt = (stamp - last_keyframe_time_for_gate_).toSec();
+
+    double raw_trans = (bundle.ndt_raw_pose.translation().head<2>() -
+                        last_keyframe_raw_pose_.translation().head<2>()).norm();
+
+    double tracking_trans = (bundle.tracking_pose.translation().head<2>() -
+                             last_keyframe_pose_for_gate_.translation().head<2>()).norm();
+
+    bool raw_recovery_mode = bundle.ekf_frozen ||
+                             keyframe_count_ <= 3 ||
+                             bundle.raw_refined_xy_diff > 0.25;
+
+    // RAW 只用于 recovery
+    if (raw_recovery_mode &&
+        bundle.ndt_healthy &&
+        bundle.fitness < 0.08 &&
+        raw_trans > 0.30 &&
+        dt > 1.0) {
+        ROS_WARN("[MotionGateV4] COMMIT_BY_RAW_RECOVERY raw=%.3f tracking=%.3f dt=%.2f fitness=%.3f kf=%d",
+                 raw_trans, tracking_trans, dt, bundle.fitness, keyframe_count_);
+        last_keyframe_pose_for_gate_ = bundle.tracking_pose;
+        last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+        last_keyframe_time_for_gate_ = stamp;
+        return true;
+    }
+
+    // 正常情况用 tracking_pose
+    if (!raw_recovery_mode && tracking_trans > 0.25 && dt > 1.2) {
+        ROS_INFO("[MotionGateV4] COMMIT_BY_TRACKING tracking=%.3f raw=%.3f dt=%.2f kf=%d",
+                 tracking_trans, raw_trans, dt, keyframe_count_);
+        last_keyframe_pose_for_gate_ = bundle.tracking_pose;
+        last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+        last_keyframe_time_for_gate_ = stamp;
+        return true;
+    }
+
+    ROS_INFO_THROTTLE(1.0,
+        "[MotionGateCheck] skip kf=%d dt=%.2f raw=%.3f tracking=%.3f fitness=%.3f recovery=%d frozen=%d",
+        keyframe_count_, dt, raw_trans, tracking_trans, bundle.fitness,
+        raw_recovery_mode ? 1 : 0, bundle.ekf_frozen ? 1 : 0);
+
+    return false;
 }
 
 void NdtSlamNode::releaseOldKeyframeClouds() {
