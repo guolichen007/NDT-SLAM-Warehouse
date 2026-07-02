@@ -264,6 +264,18 @@ private:
     double max_tracking_step_m_ = 0.20;
     double max_tracking_yaw_step_deg_ = 0.35;
 
+    // PoseSmoothV3 配置
+    double ps_alpha_normal_ = 0.25;
+    double ps_beta_normal_ = 0.08;
+    double ps_alpha_diag_ = 0.45;
+    double ps_beta_diag_ = 0.15;
+    double ps_max_vx_normal_ = 0.65;
+    double ps_max_vy_normal_ = 0.65;
+    double ps_max_v_total_normal_ = 0.80;
+    double ps_max_vx_diag_ = 0.90;
+    double ps_max_vy_diag_ = 0.90;
+    double ps_max_v_total_diag_ = 1.25;
+
     // α-β 滤波器（新版平滑）
     struct TrackingPoseFilter {
         bool initialized = false;
@@ -685,6 +697,7 @@ private:
     bool shouldCommitKeyframe(const Sophus::SE3d& current_pose, const ros::Time& current_time);
     bool shouldCommitKeyFrameV3(const PoseBundle& bundle, const ros::Time& stamp);
     bool shouldCommitKeyFrameV4(const PoseBundle& bundle, const ros::Time& stamp);
+    bool shouldCommitKeyFrameV5(const PoseBundle& bundle, const ros::Time& stamp);
     void runOnlineCargoDetection(const PoseBundle& bundle, const ros::Time& stamp);
 
     // Pose smooth functions
@@ -694,6 +707,7 @@ private:
     Sophus::SE3d blendPlanarPose(const Sophus::SE3d& a, const Sophus::SE3d& b, double ratio);
     Sophus::SE3d smoothTrackingPose(const Sophus::SE3d& target_pose, const ros::Time& stamp);
     Sophus::SE3d smoothTrackingPoseV2(const Sophus::SE3d& meas_pose, const ros::Time& stamp);
+    Sophus::SE3d smoothTrackingPoseV3(const Sophus::SE3d& meas_pose, const ros::Time& stamp, bool is_diag_motion);
     void finalizeTrackingPose(PoseBundle& bundle, const ros::Time& stamp);
     double smoothAnchoredOutputYaw(double meas_yaw, const ros::Time& stamp);
 

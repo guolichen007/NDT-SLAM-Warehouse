@@ -1,11 +1,11 @@
 <launch>
     <!-- 长期运行建图模式 -->
     <!-- 用途：雷达常开，天车静止时不重复建图，天车移动时增量落盘 -->
-    <!-- v8-stable-r3: 一个 launch 启动两个节点：ndt_slam_node + cargo_core_box_visualizer -->
 
     <!-- 参数 -->
     <arg name="use_sim_time" default="false"/>
     <arg name="use_rviz" default="true"/>
+    <arg name="use_cargo_visualizer" default="true"/>
 
     <!-- 设置使用真实时间（现场必须） -->
     <param name="/use_sim_time" value="$(arg use_sim_time)"/>
@@ -15,10 +15,12 @@
         <param name="config_file" value="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
     </node>
 
-    <!-- Cargo 可视化节点（只订阅 /payload_track_info，发布 /cargo_core_bbox_marker） -->
-    <node name="cargo_core_box_visualizer" pkg="ndt_slam" type="cargo_forbidden_zone_node" output="screen">
-        <param name="config_file" value="$(find ndt_slam)/config/cargo_core_box.yaml"/>
-    </node>
+    <!-- Cargo 可视化节点（可选，默认关闭，避免双 publisher 冲突） -->
+    <group if="$(arg use_cargo_visualizer)">
+        <node name="cargo_core_box_visualizer" pkg="ndt_slam" type="cargo_forbidden_zone_node" output="screen">
+            <param name="config_file" value="$(find ndt_slam)/config/cargo_forbidden_zone.yaml"/>
+        </node>
+    </group>
 
     <!-- 点云合并节点 -->
     <node name="pointcloud_merger" pkg="ndt_slam" type="pointcloud_merger" output="screen">

@@ -1543,7 +1543,7 @@ void NdtSlamNode::processCloudThread() {
             runOnlineCargoDetection(bundle, publish_time);
 
             // ========== MotionGateV3 + MapCommit ==========
-            bool should_commit = shouldCommitKeyFrameV4(bundle, publish_time);
+            bool should_commit = shouldCommitKeyFrameV5(bundle, publish_time);
 
             if (should_commit) {
                 commitKeyFrameWithDynamicFiltering(filtered_cloud, final_pose, publish_time);
@@ -5023,6 +5023,76 @@ Sophus::SE3d NdtSlamNode::smoothTrackingPoseV2(
     return makePlanarPose(tracking_filter_.x, tracking_filter_.y, 0.0, tracking_filter_.yaw);
 }
 
+// ========== PoseSmoothV3：分轴限速 + 斜向自适应 ==========
+Sophus::SE3d NdtSlamNode::smoothTrackingPoseV3(
+    const Sophus::SE3d& meas_pose, const ros::Time& stamp, bool is_diag_motion) {
+    const double meas_x = meas_pose.translation().x();
+    const double meas_y = meas_pose.translation().y();
+    const double meas_yaw = getYaw(meas_pose);
+
+    if (!tracking_filter_.initialized) {
+        tracking_filter_.initialized = true;
+        tracking_filter_.x = meas_x;
+        tracking_filter_.y = meas_y;
+        tracking_filter_.yaw = meas_yaw;
+        tracking_filter_.vx = 0.0;
+        tracking_filter_.vy = 0.0;
+        tracking_filter_.stamp = stamp;
+        return makePlanarPose(meas_x, meas_y, 0.0, meas_yaw);
+    }
+
+    double dt = (stamp - tracking_filter_.stamp).toSec();
+    if (dt < 0.02 || dt > 0.30) dt = 0.10;
+
+    // 斜向运动用更大的 alpha/beta
+    const double alpha = is_diag_motion ? ps_alpha_diag_ : ps_alpha_normal_;
+    const double beta  = is_diag_motion ? ps_beta_diag_  : ps_beta_normal_;
+
+    double pred_x = tracking_filter_.x + tracking_filter_.vx * dt;
+    double pred_y = tracking_filter_.y + tracking_filter_.vy * dt;
+
+    double ex = meas_x - pred_x;
+    double ey = meas_y - pred_y;
+
+    tracking_filter_.x = pred_x + alpha * ex;
+    tracking_filter_.y = pred_y + alpha * ey;
+    tracking_filter_.vx += beta * ex / dt;
+    tracking_filter_.vy += beta * ey / dt;
+
+    // 分轴限速
+    double max_vx = is_diag_motion ? ps_max_vx_diag_ : ps_max_vx_normal_;
+    double max_vy = is_diag_motion ? ps_max_vy_diag_ : ps_max_vy_normal_;
+    double max_v_total = is_diag_motion ? ps_max_v_total_diag_ : ps_max_v_total_normal_;
+
+    tracking_filter_.vx = std::max(-max_vx, std::min(max_vx, tracking_filter_.vx));
+    tracking_filter_.vy = std::max(-max_vy, std::min(max_vy, tracking_filter_.vy));
+
+    double vnorm = std::hypot(tracking_filter_.vx, tracking_filter_.vy);
+    bool saturated = false;
+    if (vnorm > max_v_total) {
+        tracking_filter_.vx *= max_v_total / vnorm;
+        tracking_filter_.vy *= max_v_total / vnorm;
+        saturated = true;
+    }
+
+    double dyaw = normalizeAngle(meas_yaw - tracking_filter_.yaw);
+    const double max_yaw_step = 0.05 * M_PI / 180.0;
+    dyaw = std::max(-max_yaw_step, std::min(max_yaw_step, dyaw));
+    tracking_filter_.yaw = normalizeAngle(tracking_filter_.yaw + dyaw);
+
+    tracking_filter_.stamp = stamp;
+
+    ROS_INFO_THROTTLE(0.5,
+        "[PoseSmoothV3] meas=(%.2f,%.2f,%.1fdeg) out=(%.2f,%.2f,%.1fdeg) "
+        "vel=(%.2f,%.2f) err=(%.4f,%.4f) diag=%d sat=%d",
+        meas_x, meas_y, meas_yaw * 180.0 / M_PI,
+        tracking_filter_.x, tracking_filter_.y, tracking_filter_.yaw * 180.0 / M_PI,
+        tracking_filter_.vx, tracking_filter_.vy, ex, ey,
+        is_diag_motion ? 1 : 0, saturated ? 1 : 0);
+
+    return makePlanarPose(tracking_filter_.x, tracking_filter_.y, 0.0, tracking_filter_.yaw);
+}
+
 // ========== 输出 yaw 锚定 ==========
 double NdtSlamNode::smoothAnchoredOutputYaw(double meas_yaw, const ros::Time& stamp) {
     if (!output_yaw_initialized_) {
@@ -5058,7 +5128,11 @@ void NdtSlamNode::finalizeTrackingPose(PoseBundle& bundle, const ros::Time& stam
     Eigen::Vector3d t = target.translation();
     Sophus::SE3d planar_target = makePlanarPose(t.x(), t.y(), 0.0, anchored_yaw);
 
-    bundle.tracking_pose = smoothTrackingPoseV2(planar_target, stamp);
+    // 计算 is_diag_motion（从 PoseSmoothV3 的速度判断）
+    bool is_diag = std::abs(tracking_filter_.vx) > 0.08 &&
+                   std::abs(tracking_filter_.vy) > 0.08;
+
+    bundle.tracking_pose = smoothTrackingPoseV3(planar_target, stamp, is_diag);
     current_pose_ = bundle.tracking_pose;
 }
 
@@ -5138,6 +5212,96 @@ bool NdtSlamNode::shouldCommitKeyFrameV4(const PoseBundle& bundle, const ros::Ti
         "[MotionGateCheck] skip kf=%d dt=%.2f raw=%.3f tracking=%.3f fitness=%.3f recovery=%d frozen=%d",
         keyframe_count_, dt, raw_trans, tracking_trans, bundle.fitness,
         raw_recovery_mode ? 1 : 0, bundle.ekf_frozen ? 1 : 0);
+
+    return false;
+}
+
+// MotionGateV5：斜向运动更早提交 + recovery 更宽松
+bool NdtSlamNode::shouldCommitKeyFrameV5(const PoseBundle& bundle, const ros::Time& stamp) {
+    if (!motion_gate_enabled_) return true;
+
+    if (keyframe_count_ == 0) {
+        last_keyframe_pose_for_gate_ = bundle.tracking_pose;
+        last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+        last_keyframe_time_for_gate_ = stamp;
+        return true;
+    }
+
+    double dt = (stamp - last_keyframe_time_for_gate_).toSec();
+
+    double raw_trans = (bundle.ndt_raw_pose.translation().head<2>() -
+                        last_keyframe_raw_pose_.translation().head<2>()).norm();
+
+    double tracking_trans = (bundle.tracking_pose.translation().head<2>() -
+                             last_keyframe_pose_for_gate_.translation().head<2>()).norm();
+
+    // 斜向运动检测
+    bool is_diag = std::abs(tracking_filter_.vx) > 0.08 &&
+                   std::abs(tracking_filter_.vy) > 0.08;
+
+    bool raw_recovery_mode = bundle.ekf_frozen ||
+                             keyframe_count_ <= 3 ||
+                             bundle.raw_refined_xy_diff > 0.25;
+
+    // 硬保护：防止一次积累过大
+    if (tracking_trans > 0.45 && dt > 0.30) {
+        ROS_WARN("[MotionGateV5] FORCE_COMMIT_TOO_FAR tracking=%.3f raw=%.3f dt=%.2f kf=%d",
+                 tracking_trans, raw_trans, dt, keyframe_count_);
+        last_keyframe_pose_for_gate_ = bundle.tracking_pose;
+        last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+        last_keyframe_time_for_gate_ = stamp;
+        return true;
+    }
+
+    // 斜向运动阈值
+    double trans_thresh = is_diag ? 0.22 : 0.28;
+    double time_thresh  = is_diag ? 0.60 : 1.00;
+
+    // 正常 tracking 提交
+    if (!raw_recovery_mode && tracking_trans > trans_thresh && dt > time_thresh) {
+        ROS_INFO("[MotionGateV5] COMMIT_BY_TRACKING%s tracking=%.3f raw=%.3f dt=%.2f kf=%d",
+                 is_diag ? "_DIAG" : "", tracking_trans, raw_trans, dt, keyframe_count_);
+        last_keyframe_pose_for_gate_ = bundle.tracking_pose;
+        last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+        last_keyframe_time_for_gate_ = stamp;
+        return true;
+    }
+
+    // Recovery 模式
+    if (raw_recovery_mode) {
+        // 允许 tracking 在 recovery 中也触发
+        if (tracking_trans > 0.25 && dt > 1.0 && bundle.fitness < 0.06) {
+            ROS_WARN("[MotionGateV5] COMMIT_BY_TRACKING_RECOVERY tracking=%.3f dt=%.2f fitness=%.3f",
+                     tracking_trans, dt, bundle.fitness);
+            last_keyframe_pose_for_gate_ = bundle.tracking_pose;
+            last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+            last_keyframe_time_for_gate_ = stamp;
+            return true;
+        }
+        // 超时强制提交
+        if (dt > 3.0 && tracking_trans > 0.18 && bundle.fitness < 0.08) {
+            ROS_WARN("[MotionGateV5] FORCE_COMMIT_RECOVERY_TIMEOUT tracking=%.3f dt=%.2f",
+                     tracking_trans, dt);
+            last_keyframe_pose_for_gate_ = bundle.tracking_pose;
+            last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+            last_keyframe_time_for_gate_ = stamp;
+            return true;
+        }
+        // 原始 raw recovery
+        if (raw_trans > 0.30 && dt > 1.0 && bundle.fitness < 0.08) {
+            ROS_WARN("[MotionGateV5] COMMIT_BY_RAW_RECOVERY raw=%.3f dt=%.2f",
+                     raw_trans, dt);
+            last_keyframe_pose_for_gate_ = bundle.tracking_pose;
+            last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+            last_keyframe_time_for_gate_ = stamp;
+            return true;
+        }
+    }
+
+    ROS_INFO_THROTTLE(1.0,
+        "[MotionGateCheck] skip kf=%d dt=%.2f raw=%.3f tracking=%.3f diag=%d recovery=%d fitness=%.3f",
+        keyframe_count_, dt, raw_trans, tracking_trans,
+        is_diag ? 1 : 0, raw_recovery_mode ? 1 : 0, bundle.fitness);
 
     return false;
 }
