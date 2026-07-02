@@ -5131,6 +5131,8 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
     constexpr int IDX_SCORE = 16;
     constexpr int IDX_BOTTOM_HAG = 17;
     constexpr int IDX_SUPPORT_RATIO = 18;
+    constexpr int IDX_Z_MIN_BASE = 19;
+    constexpr int IDX_Z_MAX_BASE = 20;
 
     if (payload_tracker_.getBestDynamicPayloadTrack(track)) {
         // 有有效 track
@@ -5171,6 +5173,40 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
         // 计算 support_ratio（静态支持率）
         float support_ratio = 0.0f;  // 暂时设为 0，后面会从 CargoBoxEstimator 获取
 
+        // 计算货物点云的 z 分位数（z_min_base 和 z_max_base）
+        float z_min_base = bbox_min.z();  // 默认使用 bbox
+        float z_max_base = bbox_max.z();
+
+        // 如果有 core_points，从实际点云计算 z 边界
+        if (track.has_core_box && track.core_box_base.suspended_points >= 8) {
+            // 获取 core_points（base_link 坐标系）
+            auto core_points = cargo_box_estimator_.getCorePointsCloud();
+            if (core_points && core_points->size() >= 8) {
+                std::vector<float> z_values;
+                z_values.reserve(core_points->size());
+                for (const auto& pt : core_points->points) {
+                    if (std::isfinite(pt.z)) {
+                        z_values.push_back(pt.z);
+                    }
+                }
+
+                if (z_values.size() >= 8) {
+                    // 计算 5% 和 95% 分位数
+                    size_t idx_low = z_values.size() / 20;  // 5%
+                    size_t idx_high = z_values.size() * 19 / 20;  // 95%
+
+                    std::nth_element(z_values.begin(), z_values.begin() + idx_low, z_values.end());
+                    z_min_base = z_values[idx_low];
+
+                    std::nth_element(z_values.begin(), z_values.begin() + idx_high, z_values.end());
+                    z_max_base = z_values[idx_high];
+
+                    ROS_DEBUG("[PayloadTrackInfoZ] id=%d z_min=%.3f z_max=%.3f height=%.3f pts=%zu",
+                             track.track_id, z_min_base, z_max_base, z_max_base - z_min_base, z_values.size());
+                }
+            }
+        }
+
         msg.data = {
             1.0f,  // IDX_VALID: 有效
             static_cast<float>(track.track_id),
@@ -5182,7 +5218,9 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
             static_cast<float>(track.point_count),
             score,
             bottom_hag,
-            support_ratio
+            support_ratio,
+            z_min_base,  // IDX_Z_MIN_BASE: 货物点云 z 的 5% 分位数
+            z_max_base   // IDX_Z_MAX_BASE: 货物点云 z 的 95% 分位数
         };
 
         // 发布端日志

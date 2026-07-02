@@ -213,6 +213,11 @@ private:
     float stable_cargo_z_min_ = 0.0f;
     ros::Time last_track_time_;
 
+    // 货物实际高度缓存（从 payload_track_info 的 z_min/z_max 字段获取）
+    float last_good_z_min_ = 0.0f;
+    float last_good_z_max_ = 0.0f;
+    bool has_stable_z_ = false;
+
     // 风险等级
     RiskLevel risk_level_ = RiskLevel::UNKNOWN;
 
@@ -375,10 +380,11 @@ private:
                                    msg->pose.pose.orientation.z);
 
         if (has_odom_) {
-            // 计算 odom delta
             Eigen::Vector3f odom_delta = new_pos - last_odom_position_;
-            // 更新 stable_centroid_ 的预测
-            stable_centroid_ += odom_delta;
+            // 只更新 XY，不更新 Z（天车 z 锁死，货物高度不应该被 odom z 污染）
+            stable_centroid_.x() += odom_delta.x();
+            stable_centroid_.y() += odom_delta.y();
+            // z 不动
         }
 
         last_odom_position_ = new_pos;
@@ -419,6 +425,8 @@ private:
         constexpr int IDX_SCORE = 16;
         constexpr int IDX_BOTTOM_HAG = 17;
         constexpr int IDX_SUPPORT_RATIO = 18;
+        constexpr int IDX_Z_MIN_BASE = 19;
+        constexpr int IDX_Z_MAX_BASE = 20;
 
         cargo_.valid = (msg->data[IDX_VALID] >= 0);
         if (!cargo_.valid) return;
@@ -441,6 +449,39 @@ private:
         cargo_.score = msg->data[IDX_SCORE];
         cargo_.bottom_hag = msg->data[IDX_BOTTOM_HAG];
         cargo_.support_ratio = msg->data[IDX_SUPPORT_RATIO];
+
+        // 读取 z_min_base 和 z_max_base（扩展字段）
+        float z_min_base = cargo_.bbox_min.z();  // 默认使用 bbox
+        float z_max_base = cargo_.bbox_max.z();
+        bool has_actual_z = false;
+
+        if (msg->data.size() >= 21) {
+            z_min_base = msg->data[IDX_Z_MIN_BASE];
+            z_max_base = msg->data[IDX_Z_MAX_BASE];
+
+            if (z_max_base - z_min_base > 0.08f) {
+                has_actual_z = true;
+            }
+        }
+
+        // 更新 stable_centroid_ 和 stable_size_ 的 z
+        if (has_actual_z) {
+            // 使用货物点云的实际高度
+            stable_centroid_.z() = 0.5f * (z_min_base + z_max_base);
+            stable_size_.z() = z_max_base - z_min_base;
+
+            // 缓存稳定高度
+            last_good_z_min_ = z_min_base;
+            last_good_z_max_ = z_max_base;
+            has_stable_z_ = true;
+        } else if (has_stable_z_) {
+            // 当前帧失败，用历史稳定高度兜底
+            stable_centroid_.z() = 0.5f * (last_good_z_min_ + last_good_z_max_);
+            stable_size_.z() = last_good_z_max_ - last_good_z_min_;
+        } else {
+            // 完全没有高度信息，用 center_base.z（来自 payload_track_info）
+            // 这是最后的兜底，不改 stable_centroid_.z
+        }
 
         // 接收端日志
         Eigen::Vector3f size = cargo_.bbox_max - cargo_.bbox_min;
@@ -808,29 +849,36 @@ private:
         // TODO: 从当前帧点云中提取吊货点云并发布
     }
 
-    // v8-stable-r3-hotfix-minimal: 只发布 core box，base_link 坐标系
+    // base_link → map 坐标转换 helper（Z 直接透传，天车 z 锁死）
+    Eigen::Vector3f transformToMap(const Eigen::Vector3f& pt_base) {
+        // XY：odom 旋转 + 平移
+        Eigen::Vector2f rotated_xy = (last_odom_orientation_ * pt_base).head<2>();
+        Eigen::Vector2f map_xy = last_odom_position_.head<2>() + rotated_xy;
+
+        // Z：天车 z 锁死，base_link.z == map.z，直接透传
+        return Eigen::Vector3f(map_xy.x(), map_xy.y(), pt_base.z());
+    }
+
+    // LINE_LIST 线框 + map 坐标系 + odom 转换
     void publishThreeLayerMarkers(const ros::Time& stamp) {
-        // 从 velocity 判断是否静止（速度 < 0.1 m/s 认为静止）
         float speed = cargo_.velocity.norm();
         bool is_moving = speed > 0.1f;
 
-        // 判断是否应该显示框
-        // 只有 SUSPENDED_MOVING 或明确 moving 的吊货才显示框
         bool should_show = cargo_.valid &&
                            (cargo_state_ == PayloadSemanticState::SUSPENDED_MOVING ||
                             cargo_state_ == PayloadSemanticState::GROUND_CARGO) &&
                            observed_frames_ >= 3 &&
-                           is_moving;  // 移动时才显示
+                           is_moving;
 
-        if (!should_show) {
-            // 静止、无效、lost、static 时，发布 DELETEALL
+        if (!should_show || !has_odom_) {
             publishDeleteAllCoreBox();
 
-            ROS_DEBUG("[CargoMarkerGate] publish=0 state=%d observed=%d valid=%d speed=%.2f",
+            ROS_DEBUG("[CargoMarkerGate] publish=0 state=%d observed=%d valid=%d speed=%.2f has_odom=%d",
                 static_cast<int>(cargo_state_),
                 observed_frames_,
                 cargo_.valid ? 1 : 0,
-                speed);
+                speed,
+                has_odom_ ? 1 : 0);
             return;
         }
 
@@ -839,41 +887,71 @@ private:
             observed_frames_,
             speed);
 
-        // 发布有效框：base_link 坐标系，跟随 odom
-        visualization_msgs::Marker marker;
+        // base_link → map 转换（Z 直接透传）
+        Eigen::Vector3f center_map = transformToMap(stable_centroid_);
 
-        marker.header.frame_id = "base_link";
-        marker.header.stamp = ros::Time(0);   // 跟最新 TF
+        // 计算 8 个角点（map 坐标系）
+        float hx = std::max(stable_size_.x() / 2.0f, 0.15f);
+        float hy = std::max(stable_size_.y() / 2.0f, 0.15f);
+        float hz = std::max(stable_size_.z() / 2.0f, 0.04f);  // 最小 4cm
+
+        Eigen::Vector3f corners_base[8] = {
+            {-hx, -hy, -hz}, { hx, -hy, -hz}, { hx,  hy, -hz}, {-hx,  hy, -hz},
+            {-hx, -hy,  hz}, { hx, -hy,  hz}, { hx,  hy,  hz}, {-hx,  hy,  hz}
+        };
+
+        geometry_msgs::Point corners_map[8];
+        for (int i = 0; i < 8; i++) {
+            // XY 用 odom 旋转
+            Eigen::Vector2f rot_xy = (last_odom_orientation_ * corners_base[i]).head<2>();
+            Eigen::Vector2f map_xy = last_odom_position_.head<2>() + rot_xy;
+
+            // Z 直接叠加到 center_map.z（实际货物高度）
+            corners_map[i].x = map_xy.x();
+            corners_map[i].y = map_xy.y();
+            corners_map[i].z = center_map.z() + corners_base[i].z();
+        }
+
+        // 发布 LINE_LIST 线框
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = "map";
+        marker.header.stamp = ros::Time::now();
         marker.ns = "cargo_core";
         marker.id = 0;
-        marker.type = visualization_msgs::Marker::CUBE;
+        marker.type = visualization_msgs::Marker::LINE_LIST;
         marker.action = visualization_msgs::Marker::ADD;
 
-        // 关键：让 RViz 每帧按 TF 重新变换，框会跟 odom/base_link 走
-        marker.frame_locked = true;
+        marker.pose.orientation.w = 1.0;  // identity，点已经是 map 坐标
+        marker.frame_locked = false;
 
-        // 使用 base_link 下的吊货中心
-        marker.pose.position.x = stable_centroid_.x();
-        marker.pose.position.y = stable_centroid_.y();
-        marker.pose.position.z = stable_centroid_.z();
+        marker.scale.x = 0.05;  // 线宽
 
-        marker.pose.orientation.x = 0.0;
-        marker.pose.orientation.y = 0.0;
-        marker.pose.orientation.z = 0.0;
-        marker.pose.orientation.w = 1.0;
-
-        marker.scale.x = std::max(stable_size_.x(), 0.30f);
-        marker.scale.y = std::max(stable_size_.y(), 0.30f);
-        marker.scale.z = std::max(stable_size_.z(), 0.30f);
-
-        // 黄色框
-        marker.color.r = 1.0;
+        // 绿色线框
+        marker.color.r = 0.0;
         marker.color.g = 1.0;
         marker.color.b = 0.0;
         marker.color.a = 0.8;
 
-        // 没有持续发布时自动消失，防止静止残留
-        marker.lifetime = ros::Duration(0.25);
+        marker.lifetime = ros::Duration(0.3);
+
+        // 12 条边，24 个点
+        auto addEdge = [&](int a, int b) {
+            marker.points.push_back(corners_map[a]);
+            marker.points.push_back(corners_map[b]);
+        };
+        // bottom
+        addEdge(0,1); addEdge(1,2); addEdge(2,3); addEdge(3,0);
+        // top
+        addEdge(4,5); addEdge(5,6); addEdge(6,7); addEdge(7,4);
+        // vertical
+        addEdge(0,4); addEdge(1,5); addEdge(2,6); addEdge(3,7);
+
+        // 诊断日志
+        ROS_INFO_THROTTLE(2.0,
+            "[BoxZ] track=%d center_z=%.2f height=%.2f source=centroid",
+            cargo_.track_id,
+            stable_centroid_.z(),
+            stable_size_.z());
 
         visualization_msgs::MarkerArray arr;
         arr.markers.push_back(marker);
@@ -882,14 +960,12 @@ private:
 
     void publishDeleteAllCoreBox() {
         visualization_msgs::MarkerArray arr;
-
         visualization_msgs::Marker del;
-        del.header.frame_id = "base_link";
-        del.header.stamp = ros::Time(0);
+        del.header.frame_id = "map";
+        del.header.stamp = ros::Time::now();
         del.ns = "cargo_core";
         del.id = 0;
         del.action = visualization_msgs::Marker::DELETEALL;
-
         arr.markers.push_back(del);
         core_bbox_marker_pub_.publish(arr);
     }
