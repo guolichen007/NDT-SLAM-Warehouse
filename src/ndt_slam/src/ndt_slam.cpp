@@ -1186,6 +1186,7 @@ void NdtSlamNode::processCloudThread() {
         // ========== 阶段 5：NDT_OMP 配准 ==========
         Sophus::SE3d new_pose = current_pose_;
         bool registration_success = false;
+        PoseBundle bundle;  // 在此声明，供后续阶段使用
         static Sophus::SE3d last_local_map_pose = Sophus::SE3d();
         static int frames_since_last_update = 0;
 
@@ -1260,6 +1261,11 @@ void NdtSlamNode::processCloudThread() {
 
                         new_pose = Sophus::SE3d(result_ortho);
 
+                        // ========== PoseBundle：分离 raw/refined/tracking ==========
+                        bundle.ndt_raw_pose = new_pose;
+                        bundle.fitness = fitness_score;
+                        bundle.ndt_healthy = ndt_->hasConverged() && fitness_score < 0.35;
+
                         // v8-stable-r3: CraneMotionEKF update
                         Sophus::SE3d ekf_pose = new_pose;
                         bool ndt_accepted = true;
@@ -1295,6 +1301,57 @@ void NdtSlamNode::processCloudThread() {
                                 ekf_status.diagonal_mode ? "DIAG" : "NORMAL",
                                 ekf_status.ndt_accepted ? 1 : 0,
                                 ekf_status.reject_reason.c_str());
+                        }
+
+                        bundle.refined_pose = ekf_pose;
+
+                        // 计算 raw vs refined 差异
+                        bundle.raw_refined_xy_diff =
+                            (bundle.ndt_raw_pose.translation().head<2>() -
+                             bundle.refined_pose.translation().head<2>()).norm();
+
+                        // EKF 冻结检测
+                        bundle.ekf_frozen = bundle.ndt_healthy &&
+                                            bundle.raw_refined_xy_diff > 0.25;
+
+                        // EKF unstick：连续 3 帧 raw 有变化但 refined 不变，reset EKF
+                        if (crane_motion_ekf_enabled_ &&
+                            bundle.ndt_healthy &&
+                            bundle.raw_refined_xy_diff > 0.25) {
+
+                            // 检查 raw 是否连续运动
+                            double raw_step = (bundle.ndt_raw_pose.translation().head<2>() -
+                                               current_pose_bundle_.ndt_raw_pose.translation().head<2>()).norm();
+                            if (raw_step > 0.03 && fitness_score < 0.30) {
+                                consistent_raw_motion_count_++;
+                            } else {
+                                consistent_raw_motion_count_ = 0;
+                            }
+
+                            if (consistent_raw_motion_count_ >= 3) {
+                                ROS_WARN("[EKFUnstick] reset to raw: diff=%.3f fitness=%.3f raw_step=%.3f count=%d",
+                                         bundle.raw_refined_xy_diff, fitness_score,
+                                         (bundle.ndt_raw_pose.translation().head<2>() -
+                                          current_pose_bundle_.ndt_raw_pose.translation().head<2>()).norm(),
+                                         consistent_raw_motion_count_);
+                                // 使用 initialize 重置 EKF 到 raw pose
+                                crane_motion_ekf_.initialize(bundle.ndt_raw_pose, msg->header.stamp);
+                                ekf_pose = bundle.ndt_raw_pose;
+                                bundle.refined_pose = ekf_pose;
+                                bundle.ekf_frozen = false;
+                                consistent_raw_motion_count_ = 0;
+                            }
+                        } else {
+                            consistent_raw_motion_count_ = 0;
+                        }
+
+                        // 确定 tracking_pose：EKF 冻结时用 raw_pose
+                        if (bundle.ekf_frozen && bundle.ndt_healthy) {
+                            bundle.tracking_pose = bundle.ndt_raw_pose;
+                            ROS_INFO_THROTTLE(2.0, "[PoseBundle] USING_RAW diff=%.3f fitness=%.3f",
+                                              bundle.raw_refined_xy_diff, fitness_score);
+                        } else {
+                            bundle.tracking_pose = bundle.refined_pose;
                         }
 
                         // v8-stable-r3: 使用 EKF 输出作为 new_pose
@@ -1377,49 +1434,41 @@ void NdtSlamNode::processCloudThread() {
             ROS_ERROR("NDT_OMP exception: %s", e.what());
         }
 
-        // ========== 阶段 6：更新位姿 ==========
-        // v8-stable-r3-hotfix-minimal: 统一 final_pose 发布链路
+        // ========== 阶段 6：更新位姿（使用 PoseBundle）==========
+        // tracking_pose：EKF 冻结时用 raw_pose，否则用 refined_pose
         Sophus::SE3d constrained_pose = new_pose;
         if (registration_success && crane_constraint_enabled_) {
             const auto& ekf_status = crane_motion_ekf_.status();
             double speed_xy = ekf_status.velocity.norm();
-            constrained_pose = applyCraneOutputConstraint(new_pose, is_stationary_, speed_xy);
+            // 使用 tracking_pose 而不是 refined_pose
+            Sophus::SE3d pose_for_constraint = bundle.ekf_frozen ? bundle.ndt_raw_pose : new_pose;
+            constrained_pose = applyCraneOutputConstraint(pose_for_constraint, is_stationary_, speed_xy);
         }
 
-        // v8-stable-r3-hotfix-minimal: 静止时 EKF 内部零速约束（替代 PoseFreeze）
-        if (registration_success && motion_gate_stationary_ && crane_motion_ekf_enabled_) {
-            Eigen::Vector2d anchor_xy(
-                stationary_anchor_pose_.translation().x(),
-                stationary_anchor_pose_.translation().y());
-            crane_motion_ekf_.applyStationaryConstraint(anchor_xy);
-            constrained_pose.translation().x() = anchor_xy.x();
-            constrained_pose.translation().y() = anchor_xy.y();
-        }
+        // 注意：不再使用 stationary_freeze anchor 约束冻结位姿
+        // 这是导致死锁的根因：EKF 冻结 → anchor 不变 → drift=0 → 永远 SKIP_COMMIT
 
         if (registration_success) {
             std::lock_guard<std::mutex> lock(cloud_mutex_);
-            current_pose_ = constrained_pose;  // 发布约束后的 pose
+            current_pose_ = constrained_pose;
+            current_pose_bundle_ = bundle;  // 保存 PoseBundle
         }
 
-        // ========== 阶段 7：发布结果（用完整点云建图）==========
+        // ========== 阶段 7：发布结果（每帧都执行，不受 MotionGate 影响）==========
         if (registration_success && !tracking_lost_) {
-            // TF 用 ros::Time::now() 避免重复
             ros::Time publish_time = ros::Time::now();
 
-            // v8-stable-r3-hotfix-minimal: selectPublishedPose 已透传
+            // 使用 constrained_pose 作为发布位姿
             Sophus::SE3d final_pose = selectPublishedPose(constrained_pose, publish_time);
             publishOdometry(publish_time, msg->header.frame_id, final_pose);
 
             // ICP 精配准移到后台线程，不阻塞主处理
-            // NDT 结果直接用于地图插入，ICP 完成后更新位姿
             Sophus::SE3d refined_pose = new_pose;
             if (local_map_->size() > 500 && feature_cloud->size() > 100) {
-                // 克隆数据用于后台 ICP
                 pcl::PointCloud<pcl::PointXYZ>::Ptr icp_source(new pcl::PointCloud<pcl::PointXYZ>(*feature_cloud));
                 pcl::PointCloud<pcl::PointXYZ>::Ptr icp_target(new pcl::PointCloud<pcl::PointXYZ>(*local_map_));
                 Sophus::SE3d icp_initial = new_pose;
 
-                // 如果上一轮 ICP 还在运行，跳过本轮
                 if (!rebuild_running_.load()) {
                     if (rebuild_thread_.joinable()) rebuild_thread_.join();
                     rebuild_running_.store(true);
@@ -1428,7 +1477,7 @@ void NdtSlamNode::processCloudThread() {
                             pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
                             icp.setInputSource(icp_source);
                             icp.setInputTarget(icp_target);
-                            icp.setMaximumIterations(15);  // 减少迭代次数，加速
+                            icp.setMaximumIterations(15);
                             icp.setTransformationEpsilon(1e-6);
                             icp.setMaxCorrespondenceDistance(0.3);
 
@@ -1452,36 +1501,28 @@ void NdtSlamNode::processCloudThread() {
                                     double pos_diff = ndt_to_icp.translation().norm();
                                     double rot_diff = ndt_to_icp.so3().log().norm() * 180.0 / M_PI;
 
-                                    // 转弯时放宽阈值：直线0.08m/0.3°，转弯0.15m/1.0°
                                     double pos_thresh = 0.08;
                                     double rot_thresh = 0.3;
                                     if (rot_diff > 0.15) {
-                                        // 检测到转弯，放宽阈值
                                         pos_thresh = 0.15;
                                         rot_thresh = 1.0;
                                     }
 
                                     if (pos_diff <= pos_thresh && rot_diff <= rot_thresh) {
-                                        // ICP 结果合理，更新精炼位姿（用于地图插入，不影响实时 odom）
                                         std::lock_guard<std::mutex> lock(cloud_mutex_);
                                         refined_pose_ = refined;
                                         has_refined_pose_ = true;
-
-                                        // 高质量标志：满足更严格条件时才用于 clean map 入图
                                         refined_pose_high_quality_ = (icp_fitness < 0.015 &&
                                                                       pos_diff < 0.03 &&
                                                                       rot_diff < 0.15);
-
-                                        // 每 50 帧输出一次，减少日志
                                         static int icp_refined_count = 0;
                                         icp_refined_count++;
                                         if (icp_refined_count % 50 == 1) {
-                                            ROS_DEBUG("[ICP-async] refined(%d): fitness=%.4f, pos_diff=%.4fm, rot_diff=%.2f°, high_quality=%d",
-                                                     icp_refined_count, icp_fitness, pos_diff, rot_diff, refined_pose_high_quality_.load() ? 1 : 0);
+                                            ROS_DEBUG("[ICP-async] refined(%d): fitness=%.4f, pos_diff=%.4fm, rot_diff=%.2f°",
+                                                     icp_refined_count, icp_fitness, pos_diff, rot_diff);
                                         }
                                     } else {
-                                        // 拒绝时改为 DEBUG，不输出到终端
-                                        ROS_DEBUG("[ICP-async] rejected: pos_diff=%.4fm rot_diff=%.2f° too large",
+                                        ROS_DEBUG("[ICP-async] rejected: pos_diff=%.4fm rot_diff=%.2f°",
                                                  pos_diff, rot_diff);
                                     }
                                 }
@@ -1492,11 +1533,9 @@ void NdtSlamNode::processCloudThread() {
                         rebuild_running_.store(false);
                     });
                 }
-
             }
 
-            // 建图使用约束后的 pose（和 current_pose_ 一致）
-            // 这样 local_map、keyframe、publish 都使用同一个约束 pose
+            // 建图使用 constrained_pose
             Sophus::SE3d map_pose = constrained_pose;
             {
                 std::lock_guard<std::mutex> lock(cloud_mutex_);
@@ -1506,22 +1545,20 @@ void NdtSlamNode::processCloudThread() {
             }
             addFrameToMap(filtered_cloud, map_pose, publish_time);
 
-            // v8-stable-r3: MapCommit 只允许在 ndt_accepted=true 且 fitness 合格时执行
-            // EKF prediction-only 帧可以发布 TF/odom，但不能写地图
-            bool ndt_accepted_for_commit = true;
-            if (crane_motion_ekf_enabled_) {
-                ndt_accepted_for_commit = crane_motion_ekf_.status().ndt_accepted;
-            }
+            // ========== cargo 检测（每帧都执行，不受 MotionGate 影响）==========
+            runOnlineCargoDetection(bundle, publish_time);
 
-            bool allow_map_commit = ndt_accepted_for_commit &&
-                                    last_ndt_fitness_ < 0.15;
+            // ========== MotionGateV3 + MapCommit ==========
+            bool should_commit = shouldCommitKeyFrameV3(bundle, publish_time);
 
-            if (allow_map_commit) {
+            if (should_commit) {
                 commitKeyFrameWithDynamicFiltering(filtered_cloud, final_pose, publish_time);
-            } else {
-                ROS_DEBUG("[MapCommit] skipped: ndt_accepted=%d fitness=%.3f",
-                         ndt_accepted_for_commit ? 1 : 0, last_ndt_fitness_);
+                publishDisplayMap();
+                publishGroundMap();
+                publishObjectsMap();
+                last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
             }
+
             success_frames++;
         }
 
@@ -4658,6 +4695,94 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
     return false;
 }
 
+// MotionGateV3：使用 raw + refined 双判断，防止 EKF 冻结导致死锁
+bool NdtSlamNode::shouldCommitKeyFrameV3(const PoseBundle& bundle, const ros::Time& stamp) {
+    if (!motion_gate_enabled_) {
+        return true;
+    }
+
+    double dt = (stamp - last_keyframe_time_for_gate_).toSec();
+
+    double refined_trans = (bundle.refined_pose.translation().head<2>() -
+                            last_keyframe_pose_for_gate_.translation().head<2>()).norm();
+
+    double raw_trans = (bundle.ndt_raw_pose.translation().head<2>() -
+                        last_keyframe_raw_pose_.translation().head<2>()).norm();
+
+    // 首帧总是允许
+    if (keyframe_count_ == 0) {
+        last_keyframe_pose_for_gate_ = bundle.refined_pose;
+        last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+        last_keyframe_time_for_gate_ = stamp;
+        return true;
+    }
+
+    // 关键：raw_trans 也能触发 commit（防止 EKF 冻结导致永远 SKIP）
+    if (dt > motion_gate_min_time_sec_ &&
+        bundle.ndt_healthy &&
+        raw_trans > motion_gate_min_translation_m_) {
+        ROS_WARN("[MotionGateV3] COMMIT_BY_RAW raw=%.3f refined=%.3f dt=%.2f fitness=%.3f kf=%d",
+                 raw_trans, refined_trans, dt, bundle.fitness, keyframe_count_);
+        last_keyframe_pose_for_gate_ = bundle.refined_pose;
+        last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+        last_keyframe_time_for_gate_ = stamp;
+        return true;
+    }
+
+    // refined_trans 也能触发 commit
+    if (dt > motion_gate_min_time_sec_ &&
+        refined_trans > motion_gate_min_translation_m_) {
+        ROS_INFO("[MotionGateV3] COMMIT_BY_REFINED raw=%.3f refined=%.3f dt=%.2f kf=%d",
+                 raw_trans, refined_trans, dt, keyframe_count_);
+        last_keyframe_pose_for_gate_ = bundle.refined_pose;
+        last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+        last_keyframe_time_for_gate_ = stamp;
+        return true;
+    }
+
+    // 防死锁：keyframe=1 超过 6 秒且 NDT 有变化
+    if (keyframe_count_ <= 1 && dt > 6.0 &&
+        bundle.ndt_healthy && raw_trans > 0.15) {
+        ROS_WARN("[MotionGateV3] FORCE_RECOVERY dt=%.2f raw=%.3f fitness=%.3f",
+                 dt, raw_trans, bundle.fitness);
+        last_keyframe_pose_for_gate_ = bundle.refined_pose;
+        last_keyframe_raw_pose_ = bundle.ndt_raw_pose;
+        last_keyframe_time_for_gate_ = stamp;
+        return true;
+    }
+
+    ROS_INFO_THROTTLE(2.0,
+        "[MotionGateCheck] skip kf=%d dt=%.2f raw=%.3f refined=%.3f fitness=%.3f frozen=%d",
+        keyframe_count_, dt, raw_trans, refined_trans, bundle.fitness, bundle.ekf_frozen ? 1 : 0);
+
+    return false;
+}
+
+// cargo 检测：每帧独立运行，不依赖 MapCommit
+void NdtSlamNode::runOnlineCargoDetection(const PoseBundle& bundle, const ros::Time& stamp) {
+    // payload_track_info 已经在前面发布了
+    // 这里主要确保 cargo marker 持续更新
+
+    // 检查是否有活跃的吊货 track
+    PayloadTrackInfo track;
+    bool has_track = payload_tracker_.getBestDynamicPayloadTrack(track);
+
+    // PayloadTrackInfo.state: 0=NONE, 1=PENDING, 2=DYNAMIC
+    if (has_track && track.state == 2) {  // 2 = DYNAMIC (SUSPENDED_MOVING)
+        consecutive_cargo_rejects_ = 0;
+        // cargo marker 由 cargo_forbidden_zone_node 独立发布
+    } else {
+        consecutive_cargo_rejects_++;
+    }
+
+    ROS_INFO_THROTTLE(2.0,
+        "[CargoOnline] tracks=%zu has_track=%d rejects=%d kf=%d",
+        payload_tracker_.getTracks().size(),
+        has_track ? 1 : 0,
+        consecutive_cargo_rejects_,
+        keyframe_count_);
+}
+
 void NdtSlamNode::releaseOldKeyframeClouds() {
     if (max_active_keyframes_ <= 0) return;
 
@@ -5741,16 +5866,8 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         frame_seq_, stamp.toSec(), cloud->size(),
         pose.translation().x(), pose.translation().y(), pose.translation().z());
 
-    // MotionGate：静止时不跑完整 pipeline
-    bool should_commit = true;
-    if (motion_gate_enabled_) {
-        should_commit = shouldCommitKeyframe(pose, stamp);
-    }
-
-    if (!should_commit) {
-        ROS_DEBUG("[MotionGate] frame=%lu stationary, skip commit pipeline", frame_seq_);
-        return;
-    }
+    // MotionGate 检查已移到外部 shouldCommitKeyFrameV3
+    // 这里不再重复检查，避免旧的 shouldCommitKeyframe（基于 refined pose）导致死锁
 
     const Eigen::Matrix4d T_map_base = pose.matrix();
 

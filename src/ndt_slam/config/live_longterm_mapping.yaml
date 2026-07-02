@@ -68,9 +68,9 @@ longterm_mapping:
 # MotionGate：静止检测和门控
 motion_gate:
   enabled: true
-  min_translation_m: 0.30      # 最小位移（米）
+  min_translation_m: 0.20      # 从 0.30 降低，防止 EKF 冻结时永远 SKIP
   min_rotation_deg: 3.0        # 最小旋转（度）
-  min_time_between_keyframes_sec: 2.0  # 最小时间间隔（秒）
+  min_time_between_keyframes_sec: 1.0  # 从 2.0 降低
 
 # 关键帧 active window
 online_cache:
@@ -309,15 +309,15 @@ crane_motion_ekf:
   enabled: true
   source: "estimated"          # estimated / plc
 
-  q_pos: 0.05
-  q_vel: 0.30
+  q_pos: 0.10                  # 从 0.05 增大，让 EKF 更信任 NDT
+  q_vel: 0.60                  # 从 0.30 增大
 
   r_ndt_base: 0.02
   r_ndt_max: 2.0
   fitness_to_r_scale: 5.0
 
-  innovation_gate_m: 0.50
-  innovation_reject_m: 1.50
+  innovation_gate_m: 0.80      # 从 0.50 放宽
+  innovation_reject_m: 2.00    # 从 1.50 放宽
 
   max_speed_x: 2.0
   max_speed_y: 2.0

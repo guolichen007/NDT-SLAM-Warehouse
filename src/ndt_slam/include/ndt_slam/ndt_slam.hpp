@@ -71,6 +71,17 @@ struct MappingTask {
     ros::Time stamp;
 };
 
+// 位姿包：分离 raw/refined/tracking 三条位姿链路
+struct PoseBundle {
+    Sophus::SE3d ndt_raw_pose;       // NDT 输出，不能被 yaw/ekf 硬压
+    Sophus::SE3d refined_pose;       // EKF + z/roll/pitch/yaw soft 后的发布位姿
+    Sophus::SE3d tracking_pose;      // current_scan_map 和 cargo 使用
+    bool ndt_healthy = false;
+    bool ekf_frozen = false;
+    double fitness = 0.0;
+    double raw_refined_xy_diff = 0.0;
+};
+
 class NdtSlamNode {
 public:
     NdtSlamNode() = delete;
@@ -213,6 +224,12 @@ private:
     std::atomic<bool> has_refined_pose_{false};  // 是否有可用的精炼位姿
     std::atomic<bool> refined_pose_high_quality_{false};  // 精炼位姿是否满足高质量入图条件
     bool initialized_ = false;
+
+    // PoseBundle：分离 raw/refined/tracking 三条位姿链路
+    PoseBundle current_pose_bundle_;
+    Sophus::SE3d last_keyframe_raw_pose_;
+    int consistent_raw_motion_count_ = 0;
+    int consecutive_cargo_rejects_ = 0;
 
     // ========== Crane Motion Constraint（天车运动约束）==========
     bool crane_constraint_enabled_ = false;
@@ -616,6 +633,8 @@ private:
 
     // MotionGate 判定函数
     bool shouldCommitKeyframe(const Sophus::SE3d& current_pose, const ros::Time& current_time);
+    bool shouldCommitKeyFrameV3(const PoseBundle& bundle, const ros::Time& stamp);
+    void runOnlineCargoDetection(const PoseBundle& bundle, const ros::Time& stamp);
     void releaseOldKeyframeClouds();
 
     // 磁盘 tile 写入
