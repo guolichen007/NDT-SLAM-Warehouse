@@ -395,6 +395,8 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr last_cloud_;
     Sophus::SE3d relocalized_pose_;
     ros::Timer timer_;
+    ros::Timer visualization_timer_;
+    void publishVisualizationHeartbeat(const ros::TimerEvent& event);
 
     // Loop closure deduplication
     std::set<std::pair<int, int>> processed_loops_;
