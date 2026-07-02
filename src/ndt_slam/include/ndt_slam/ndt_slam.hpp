@@ -231,6 +231,39 @@ private:
     int consistent_raw_motion_count_ = 0;
     int consecutive_cargo_rejects_ = 0;
 
+    // CargoDisplayState：货物框显示稳定器
+    struct CargoDisplayBox {
+        bool valid = false;
+        int track_id = -1;
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f size = Eigen::Vector3f::Zero();
+        ros::Time stamp;
+        int lost_count = 0;
+        int reject_count = 0;
+    };
+    CargoDisplayBox cargo_display_box_;
+    int locked_payload_track_id_ = -1;
+    int locked_track_lost_count_ = 0;
+    int candidate_track_id_ = -1;
+    int candidate_confirm_count_ = 0;
+    int cargo_track_lock_lost_max_ = 8;
+    int cargo_switch_confirm_frames_ = 3;
+    double cargo_bbox_hold_time_sec_ = 0.8;
+    double cargo_center_alpha_ = 0.25;
+    double cargo_size_alpha_ = 0.20;
+    double cargo_max_center_step_m_ = 0.35;
+    double cargo_max_size_step_m_ = 0.25;
+
+    // PoseSmoother：平滑 tracking_pose 输出
+    struct PoseSmootherState {
+        bool initialized = false;
+        Sophus::SE3d last_pose;
+        ros::Time last_stamp;
+    };
+    PoseSmootherState tracking_pose_smoother_;
+    double max_tracking_step_m_ = 0.20;
+    double max_tracking_yaw_step_deg_ = 0.35;
+
     // ========== Crane Motion Constraint（天车运动约束）==========
     bool crane_constraint_enabled_ = false;
     bool lock_z_ = true;
@@ -635,6 +668,21 @@ private:
     bool shouldCommitKeyframe(const Sophus::SE3d& current_pose, const ros::Time& current_time);
     bool shouldCommitKeyFrameV3(const PoseBundle& bundle, const ros::Time& stamp);
     void runOnlineCargoDetection(const PoseBundle& bundle, const ros::Time& stamp);
+
+    // Pose smooth functions
+    Sophus::SE3d makePlanarPose(double x, double y, double z, double yaw);
+    double getYaw(const Sophus::SE3d& pose) const;
+    double normalizeAngle(double a) const;
+    Sophus::SE3d blendPlanarPose(const Sophus::SE3d& a, const Sophus::SE3d& b, double ratio);
+    Sophus::SE3d smoothTrackingPose(const Sophus::SE3d& target_pose, const ros::Time& stamp);
+
+    // Cargo display functions
+    bool acceptCargoTrackSwitch(int new_track_id, const Eigen::Vector3f& new_center, const ros::Time& stamp);
+    void updateCargoDisplayBox(int track_id, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const ros::Time& stamp);
+    void onCargoBoxRejected(const ros::Time& stamp, const std::string& reason);
+    void publishCargoDisplayBox(const CargoDisplayBox& box, const ros::Time& stamp);
+    void publishHeldCargoBox(const ros::Time& stamp);
+    Eigen::Vector3f limitVectorStep(const Eigen::Vector3f& old_v, const Eigen::Vector3f& new_v, float max_step);
     void releaseOldKeyframeClouds();
 
     // 磁盘 tile 写入

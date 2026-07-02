@@ -1345,14 +1345,14 @@ void NdtSlamNode::processCloudThread() {
                             consistent_raw_motion_count_ = 0;
                         }
 
-                        // 确定 tracking_pose：EKF 冻结时用 raw_pose
+                        // 确定 tracking_pose：blend + smooth（避免硬切换导致跳变）
+                        Sophus::SE3d tracking_target = bundle.refined_pose;
                         if (bundle.ekf_frozen && bundle.ndt_healthy) {
-                            bundle.tracking_pose = bundle.ndt_raw_pose;
-                            ROS_INFO_THROTTLE(2.0, "[PoseBundle] USING_RAW diff=%.3f fitness=%.3f",
+                            tracking_target = blendPlanarPose(bundle.refined_pose, bundle.ndt_raw_pose, 0.25);
+                            ROS_INFO_THROTTLE(2.0, "[PoseBundle] BLEND_RAW diff=%.3f fitness=%.3f ratio=0.25",
                                               bundle.raw_refined_xy_diff, fitness_score);
-                        } else {
-                            bundle.tracking_pose = bundle.refined_pose;
                         }
+                        bundle.tracking_pose = smoothTrackingPose(tracking_target, msg->header.stamp);
 
                         // v8-stable-r3: 使用 EKF 输出作为 new_pose
                         new_pose = ekf_pose;
@@ -4756,6 +4756,219 @@ bool NdtSlamNode::shouldCommitKeyFrameV3(const PoseBundle& bundle, const ros::Ti
         keyframe_count_, dt, raw_trans, refined_trans, bundle.fitness, bundle.ekf_frozen ? 1 : 0);
 
     return false;
+}
+
+// ========== Pose Smooth Functions ==========
+
+Sophus::SE3d NdtSlamNode::makePlanarPose(double x, double y, double z, double yaw) {
+    Eigen::AngleAxisd yaw_aa(yaw, Eigen::Vector3d::UnitZ());
+    Eigen::Quaterniond q(yaw_aa);
+    return Sophus::SE3d(q, Eigen::Vector3d(x, y, z));
+}
+
+double NdtSlamNode::getYaw(const Sophus::SE3d& pose) const {
+    Eigen::Matrix3d R = pose.rotationMatrix();
+    return std::atan2(R(1, 0), R(0, 0));
+}
+
+double NdtSlamNode::normalizeAngle(double a) const {
+    while (a > M_PI) a -= 2.0 * M_PI;
+    while (a < -M_PI) a += 2.0 * M_PI;
+    return a;
+}
+
+Sophus::SE3d NdtSlamNode::blendPlanarPose(
+    const Sophus::SE3d& a, const Sophus::SE3d& b, double ratio) {
+    ratio = std::max(0.0, std::min(1.0, ratio));
+    Eigen::Vector3d ta = a.translation();
+    Eigen::Vector3d tb = b.translation();
+    double ya = getYaw(a);
+    double yb = getYaw(b);
+    double dy = normalizeAngle(yb - ya);
+    double y = normalizeAngle(ya + ratio * dy);
+    Eigen::Vector3d t = ta + ratio * (tb - ta);
+    return makePlanarPose(t.x(), t.y(), 0.0, y);
+}
+
+Sophus::SE3d NdtSlamNode::smoothTrackingPose(
+    const Sophus::SE3d& target_pose, const ros::Time& stamp) {
+    if (!tracking_pose_smoother_.initialized) {
+        tracking_pose_smoother_.initialized = true;
+        tracking_pose_smoother_.last_pose = target_pose;
+        tracking_pose_smoother_.last_stamp = stamp;
+        return target_pose;
+    }
+
+    double dt = (stamp - tracking_pose_smoother_.last_stamp).toSec();
+    if (dt <= 0.0 || dt > 0.5) dt = 0.1;
+
+    const Sophus::SE3d& last_pose = tracking_pose_smoother_.last_pose;
+    Eigen::Vector3d last_t = last_pose.translation();
+    Eigen::Vector3d target_t = target_pose.translation();
+    Eigen::Vector3d delta = target_t - last_t;
+
+    double max_step = std::min(max_tracking_step_m_, 1.20 * dt);
+    double dxy = delta.head<2>().norm();
+    if (dxy > max_step && dxy > 1e-4) {
+        double s = max_step / dxy;
+        delta.x() *= s;
+        delta.y() *= s;
+    }
+
+    double last_yaw = getYaw(last_pose);
+    double target_yaw = getYaw(target_pose);
+    double dyaw = normalizeAngle(target_yaw - last_yaw);
+    double max_yaw_step = max_tracking_yaw_step_deg_ * M_PI / 180.0;
+    dyaw = std::max(-max_yaw_step, std::min(max_yaw_step, dyaw));
+
+    Sophus::SE3d out = makePlanarPose(
+        last_t.x() + delta.x(), last_t.y() + delta.y(), 0.0,
+        normalizeAngle(last_yaw + dyaw));
+
+    tracking_pose_smoother_.last_pose = out;
+    tracking_pose_smoother_.last_stamp = stamp;
+
+    ROS_INFO_THROTTLE(2.0,
+        "[PoseSmooth] target=(%.2f,%.2f,%.1fdeg) smooth=(%.2f,%.2f,%.1fdeg) step=%.3f yaw_step=%.2fdeg",
+        target_t.x(), target_t.y(), target_yaw * 180.0 / M_PI,
+        out.translation().x(), out.translation().y(), getYaw(out) * 180.0 / M_PI,
+        dxy, dyaw * 180.0 / M_PI);
+
+    return out;
+}
+
+// ========== Cargo Display Functions ==========
+
+Eigen::Vector3f NdtSlamNode::limitVectorStep(
+    const Eigen::Vector3f& old_v, const Eigen::Vector3f& new_v, float max_step) {
+    Eigen::Vector3f d = new_v - old_v;
+    float n = d.norm();
+    if (n > max_step && n > 1e-4f) {
+        d *= max_step / n;
+    }
+    return old_v + d;
+}
+
+bool NdtSlamNode::acceptCargoTrackSwitch(
+    int new_track_id, const Eigen::Vector3f& new_center, const ros::Time& stamp) {
+    if (locked_payload_track_id_ < 0) {
+        locked_payload_track_id_ = new_track_id;
+        candidate_track_id_ = -1;
+        candidate_confirm_count_ = 0;
+        ROS_INFO("[CargoTrackLock] initial lock track=%d", new_track_id);
+        return true;
+    }
+
+    if (new_track_id == locked_payload_track_id_) {
+        locked_track_lost_count_ = 0;
+        candidate_track_id_ = -1;
+        candidate_confirm_count_ = 0;
+        return true;
+    }
+
+    // 拒绝大跳变
+    if (cargo_display_box_.valid) {
+        double jump = (new_center - cargo_display_box_.center_base).norm();
+        if (jump > 1.20 && locked_track_lost_count_ <= cargo_track_lock_lost_max_) {
+            ROS_WARN_THROTTLE(0.5, "[CargoTrackLock] reject switch old=%d new=%d jump=%.2f lost=%d",
+                              locked_payload_track_id_, new_track_id, jump, locked_track_lost_count_);
+            return false;
+        }
+    }
+
+    // 需要连续确认
+    if (candidate_track_id_ != new_track_id) {
+        candidate_track_id_ = new_track_id;
+        candidate_confirm_count_ = 1;
+        return false;
+    }
+    candidate_confirm_count_++;
+
+    if (candidate_confirm_count_ >= cargo_switch_confirm_frames_ ||
+        locked_track_lost_count_ > cargo_track_lock_lost_max_) {
+        ROS_WARN("[CargoTrackLock] switch old=%d new=%d confirm=%d lost=%d",
+                 locked_payload_track_id_, new_track_id, candidate_confirm_count_, locked_track_lost_count_);
+        locked_payload_track_id_ = new_track_id;
+        candidate_track_id_ = -1;
+        candidate_confirm_count_ = 0;
+        locked_track_lost_count_ = 0;
+        return true;
+    }
+
+    return false;
+}
+
+void NdtSlamNode::updateCargoDisplayBox(
+    int track_id, const Eigen::Vector3f& center, const Eigen::Vector3f& size, const ros::Time& stamp) {
+    if (!acceptCargoTrackSwitch(track_id, center, stamp)) {
+        publishHeldCargoBox(stamp);
+        return;
+    }
+
+    if (!cargo_display_box_.valid) {
+        cargo_display_box_.valid = true;
+        cargo_display_box_.track_id = track_id;
+        cargo_display_box_.center_base = center;
+        cargo_display_box_.size = size;
+        cargo_display_box_.stamp = stamp;
+        cargo_display_box_.lost_count = 0;
+        cargo_display_box_.reject_count = 0;
+        publishCargoDisplayBox(cargo_display_box_, stamp);
+        return;
+    }
+
+    // 低通滤波 + 步长限制
+    Eigen::Vector3f center_limited = limitVectorStep(
+        cargo_display_box_.center_base, center, cargo_max_center_step_m_);
+    Eigen::Vector3f size_limited = limitVectorStep(
+        cargo_display_box_.size, size, cargo_max_size_step_m_);
+
+    cargo_display_box_.center_base =
+        (1.0f - cargo_center_alpha_) * cargo_display_box_.center_base +
+        cargo_center_alpha_ * center_limited;
+    cargo_display_box_.size =
+        (1.0f - cargo_size_alpha_) * cargo_display_box_.size +
+        cargo_size_alpha_ * size_limited;
+    cargo_display_box_.track_id = track_id;
+    cargo_display_box_.stamp = stamp;
+    cargo_display_box_.lost_count = 0;
+    cargo_display_box_.reject_count = 0;
+
+    publishCargoDisplayBox(cargo_display_box_, stamp);
+}
+
+void NdtSlamNode::onCargoBoxRejected(const ros::Time& stamp, const std::string& reason) {
+    if (!cargo_display_box_.valid) return;
+
+    double age = (stamp - cargo_display_box_.stamp).toSec();
+    cargo_display_box_.reject_count++;
+
+    if (age < cargo_bbox_hold_time_sec_ && cargo_display_box_.reject_count <= 5) {
+        ROS_WARN_THROTTLE(0.5, "[BBoxHold] hold track=%d age=%.2f reject=%d reason=%s",
+                          cargo_display_box_.track_id, age, cargo_display_box_.reject_count, reason.c_str());
+        publishCargoDisplayBox(cargo_display_box_, stamp);
+        return;
+    }
+
+    cargo_display_box_.valid = false;
+    locked_payload_track_id_ = -1;
+    ROS_INFO("[BBoxHold] expired track=%d age=%.2f reject=%d",
+             cargo_display_box_.track_id, age, cargo_display_box_.reject_count);
+}
+
+void NdtSlamNode::publishCargoDisplayBox(const CargoDisplayBox& box, const ros::Time& stamp) {
+    // 这个函数由 cargo_forbidden_zone_node 的 marker 发布替代
+    // 这里只做日志
+    ROS_INFO_THROTTLE(2.0, "[CargoDisplayBox] track=%d center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f)",
+                      box.track_id,
+                      box.center_base.x(), box.center_base.y(), box.center_base.z(),
+                      box.size.x(), box.size.y(), box.size.z());
+}
+
+void NdtSlamNode::publishHeldCargoBox(const ros::Time& stamp) {
+    if (cargo_display_box_.valid) {
+        publishCargoDisplayBox(cargo_display_box_, stamp);
+    }
 }
 
 // cargo 检测：每帧独立运行，不依赖 MapCommit
