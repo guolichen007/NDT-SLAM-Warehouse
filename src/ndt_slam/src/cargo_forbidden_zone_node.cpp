@@ -223,6 +223,15 @@ private:
     float stable_cargo_z_min_ = 0.0f;
     ros::Time last_track_time_;
 
+    // P0-5: precise geometry 状态
+    bool has_precise_bbox_ = false;
+    Eigen::Vector3f precise_bbox_center_base_ = Eigen::Vector3f::Zero();
+    Eigen::Vector3f precise_bbox_size_ = Eigen::Vector3f::Zero();
+    float precise_z_min_base_ = 0.0f;
+    float precise_z_max_base_ = 0.0f;
+    float stable_z_min_base_ = 0.0f;
+    float stable_z_max_base_ = 0.0f;
+
     // 风险等级
     RiskLevel risk_level_ = RiskLevel::UNKNOWN;
 
@@ -437,8 +446,12 @@ private:
         if (has_odom_) {
             // 计算 odom delta
             Eigen::Vector3f odom_delta = new_pos - last_odom_position_;
-            // 更新 stable_centroid_ 的预测
-            stable_centroid_ += odom_delta;
+
+            // P0-5: stable_centroid_ / display_state_.center_base are in base_link coordinates.
+            // They must NOT be shifted by odom/map delta.
+            // publishThreeLayerMarkers transforms base_link corners to map at publish time.
+            // Odom callback must not modify cargo box geometry.
+            // stable_centroid_ += odom_delta;  // REMOVED: This was polluting cargo geometry
         }
 
         last_odom_position_ = new_pos;
@@ -529,6 +542,9 @@ private:
         if (size.x() <= 0 || size.y() <= 0 || size.z() <= 0) {
             ROS_WARN("[PayloadTrackInfoSub] Invalid bbox size=(%.2f,%.2f,%.2f)", size.x(), size.y(), size.z());
         }
+
+        // P0-5: 从 payload 更新精确几何
+        updatePreciseGeometryFromPayload(ros::Time::now());
 
         // 更新状态机
         updateCargoStateMachine();
@@ -628,9 +644,136 @@ private:
         }
     }
 
+    // P0-5: 判断是否是有效的精确 bbox
+    bool isValidPreciseBbox(const CargoInfo& c) const {
+        if (!isPreciseSource(c.box_source)) return false;
+
+        const Eigen::Vector3f size = c.bbox_max - c.bbox_min;
+
+        if (!std::isfinite(size.x()) ||
+            !std::isfinite(size.y()) ||
+            !std::isfinite(size.z())) {
+            return false;
+        }
+
+        if (size.x() < 0.05f || size.y() < 0.05f || size.z() < 0.05f) {
+            return false;
+        }
+
+        if (size.x() > 8.0f || size.y() > 8.0f || size.z() > 5.0f) {
+            return false;
+        }
+
+        if (c.bbox_max.z() <= c.bbox_min.z()) {
+            return false;
+        }
+
+        return true;
+    }
+
+    // P0-5: 从 payload 更新精确几何
+    void updatePreciseGeometryFromPayload(const ros::Time& stamp) {
+        if (!isValidPreciseBbox(cargo_)) {
+            has_precise_bbox_ = false;
+
+            ROS_WARN_THROTTLE(
+                1.0,
+                "[CargoGeometryFix] reject track=%d source=%s invalid_precise_bbox "
+                "bbox_min=(%.2f,%.2f,%.2f) bbox_max=(%.2f,%.2f,%.2f)",
+                cargo_.track_id,
+                sourceToString(cargo_.box_source),
+                cargo_.bbox_min.x(), cargo_.bbox_min.y(), cargo_.bbox_min.z(),
+                cargo_.bbox_max.x(), cargo_.bbox_max.y(), cargo_.bbox_max.z());
+            return;
+        }
+
+        precise_bbox_center_base_ = 0.5f * (cargo_.bbox_min + cargo_.bbox_max);
+        precise_bbox_size_ = cargo_.bbox_max - cargo_.bbox_min;
+        precise_z_min_base_ = cargo_.bbox_min.z();
+        precise_z_max_base_ = cargo_.bbox_max.z();
+
+        stable_centroid_ = precise_bbox_center_base_;
+        stable_size_ = precise_bbox_size_;
+        stable_z_min_base_ = precise_z_min_base_;
+        stable_z_max_base_ = precise_z_max_base_;
+        has_precise_bbox_ = true;
+
+        ROS_INFO_THROTTLE(
+            0.5,
+            "[CargoGeometryFix] track=%d source=%s "
+            "bbox_min=(%.2f,%.2f,%.2f) bbox_max=(%.2f,%.2f,%.2f) "
+            "center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
+            cargo_.track_id,
+            sourceToString(cargo_.box_source),
+            cargo_.bbox_min.x(), cargo_.bbox_min.y(), cargo_.bbox_min.z(),
+            cargo_.bbox_max.x(), cargo_.bbox_max.y(), cargo_.bbox_max.z(),
+            stable_centroid_.x(), stable_centroid_.y(), stable_centroid_.z(),
+            stable_size_.x(), stable_size_.y(), stable_size_.z(),
+            stable_z_min_base_,
+            stable_z_max_base_);
+    }
+
+    // P0-5: 判断 display_state 是否被污染
+    bool displayStateLooksPolluted() const {
+        if (!display_state_.valid) return false;
+
+        const float center_err = (display_state_.center_base - stable_centroid_).norm();
+
+        const bool center_z_bad =
+            std::abs(display_state_.center_base.z()) < 0.05f &&
+            stable_z_min_base_ > 0.3f &&
+            stable_z_max_base_ > stable_z_min_base_;
+
+        const bool default_size =
+            std::abs(display_state_.size.x() - 3.0f) < 0.05f &&
+            std::abs(display_state_.size.y() - 1.0f) < 0.05f &&
+            std::abs(display_state_.size.z() - 1.0f) < 0.05f;
+
+        return center_err > 0.50f || center_z_bad || default_size;
+    }
+
+    // P0-5: 从精确 bbox 重置 display_state
+    void resetDisplayStateFromPreciseBbox(const ros::Time& stamp, const char* reason) {
+        display_state_.valid = true;
+        display_state_.locked_track_id = cargo_.track_id;
+        display_state_.center_base = stable_centroid_;
+        display_state_.size = stable_size_;
+        display_state_.z_min_base = stable_z_min_base_;
+        display_state_.z_max_base = stable_z_max_base_;
+        display_state_.yaw_base = 0.0f;
+        display_state_.box_source = cargo_.box_source;
+
+        display_state_.last_good_center = stable_centroid_;
+        display_state_.last_good_size = stable_size_;
+        display_state_.last_update_stamp = stamp;
+        display_state_.lost_count = 0;
+        display_state_.candidate_track_id = -1;
+        display_state_.candidate_confirm_count = 0;
+        display_state_.deleteall_sent_after_invalid = false;
+
+        ROS_WARN(
+            "[CargoGeometryReset] reason=%s track=%d source=%s "
+            "center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
+            reason,
+            cargo_.track_id,
+            sourceToString(cargo_.box_source),
+            stable_centroid_.x(), stable_centroid_.y(), stable_centroid_.z(),
+            stable_size_.x(), stable_size_.y(), stable_size_.z(),
+            stable_z_min_base_,
+            stable_z_max_base_);
+    }
+
     // P0-4: 重写 CargoDisplayStateMachine
     void updateStableBboxStateMachine() {
         ros::Time now = ros::Time::now();
+
+        // P0-5: 污染状态强制 reset
+        if (has_precise_bbox_) {
+            if (!display_state_.valid || displayStateLooksPolluted()) {
+                resetDisplayStateFromPreciseBbox(now, "precise_bbox_or_polluted_state");
+                return;
+            }
+        }
 
         // P0-5: source-aware 判断
         const bool precise_source = isPreciseSource(cargo_.box_source);
@@ -692,8 +835,8 @@ private:
             display_state_.box_source = cargo_.box_source;
 
             // P0-5: 更新真实几何信息
-            display_state_.z_min_base = cargo_.bbox_min.z();
-            display_state_.z_max_base = cargo_.bbox_max.z();
+            display_state_.z_min_base = stable_z_min_base_;
+            display_state_.z_max_base = stable_z_max_base_;
             display_state_.yaw_base = 0.0f;  // 暂时没有 yaw，后续再做 PCA OBB
         } else if (display_state_.locked_track_id == cargo_.track_id) {
             // 同 track 更新
@@ -709,9 +852,24 @@ private:
             display_state_.box_source = cargo_.box_source;
 
             // P0-5: 更新真实几何信息
-            display_state_.z_min_base = cargo_.bbox_min.z();
-            display_state_.z_max_base = cargo_.bbox_max.z();
+            display_state_.z_min_base = stable_z_min_base_;
+            display_state_.z_max_base = stable_z_max_base_;
             display_state_.yaw_base = 0.0f;  // 暂时没有 yaw，后续再做 PCA OBB
+
+            // P0-5: 防默认尺寸锁死
+            const bool size_still_default =
+                std::abs(display_state_.size.x() - 3.0f) < 0.05f &&
+                std::abs(display_state_.size.y() - 1.0f) < 0.05f &&
+                std::abs(display_state_.size.z() - 1.0f) < 0.05f;
+
+            const bool stable_not_default =
+                (std::abs(stable_size_.x() - 3.0f) > 0.10f ||
+                 std::abs(stable_size_.y() - 1.0f) > 0.10f ||
+                 std::abs(stable_size_.z() - 1.0f) > 0.10f);
+
+            if (size_still_default && stable_not_default) {
+                display_state_.size = stable_size_;
+            }
         } else {
             // 不同 track，检查 jump
             double jump = (stable_centroid_ - display_state_.center_base).norm();
@@ -748,6 +906,12 @@ private:
                 display_state_.candidate_confirm_count = 0;
                 display_state_.valid = true;
                 display_state_.deleteall_sent_after_invalid = false;
+                display_state_.box_source = cargo_.box_source;
+
+                // P0-5: 更新真实几何信息
+                display_state_.z_min_base = stable_z_min_base_;
+                display_state_.z_max_base = stable_z_max_base_;
+                display_state_.yaw_base = 0.0f;  // 暂时没有 yaw，后续再做 PCA OBB
             }
         }
     }
@@ -1062,6 +1226,53 @@ private:
                       sourceToString(display_state_.box_source));
             return;
         }
+
+        // P0-5: frame guard - 检查 display_state 是否被污染
+        if (isPreciseSource(display_state_.box_source)) {
+            const float center_err = (display_state_.center_base - stable_centroid_).norm();
+
+            if (center_err > 0.30f) {
+                ROS_ERROR_THROTTLE(
+                    1.0,
+                    "[CargoFrameBug] display_center != bbox_center, skip marker "
+                    "display=(%.2f,%.2f,%.2f) bbox=(%.2f,%.2f,%.2f) err=%.2f",
+                    display_state_.center_base.x(), display_state_.center_base.y(), display_state_.center_base.z(),
+                    stable_centroid_.x(), stable_centroid_.y(), stable_centroid_.z(),
+                    center_err);
+                publishDeleteAllCoreBoxThrottled();
+                return;
+            }
+
+            if (std::abs(display_state_.center_base.z()) < 0.05f &&
+                display_state_.z_min_base > 0.3f) {
+                ROS_ERROR_THROTTLE(
+                    1.0,
+                    "[CargoFrameBug] center z polluted by odom/map origin, skip marker "
+                    "center=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
+                    display_state_.center_base.x(),
+                    display_state_.center_base.y(),
+                    display_state_.center_base.z(),
+                    display_state_.z_min_base,
+                    display_state_.z_max_base);
+                publishDeleteAllCoreBoxThrottled();
+                return;
+            }
+        }
+
+        ROS_INFO_THROTTLE(
+            1.0,
+            "[CargoMarkerFrameCheck] track=%d source=%s "
+            "center_base=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
+            display_state_.locked_track_id,
+            sourceToString(display_state_.box_source),
+            display_state_.center_base.x(),
+            display_state_.center_base.y(),
+            display_state_.center_base.z(),
+            display_state_.size.x(),
+            display_state_.size.y(),
+            display_state_.size.z(),
+            display_state_.z_min_base,
+            display_state_.z_max_base);
 
         // P0-5: 用真实几何生成 marker 8 个角点
         // 在 base_link 下按 center + yaw + size 生成 8 个角点，再逐点 transform 到 map
