@@ -64,6 +64,38 @@ struct KISSConfig {
 
 namespace ndt_slam {
 
+// P0-5: CargoBoxSource 枚举
+enum CargoBoxSource : int {
+    BOX_SOURCE_NONE = 0,
+    BOX_SOURCE_V2_CORE = 1,
+    BOX_SOURCE_LAST_GOOD = 2,
+    BOX_SOURCE_OLD_BBOX = 3,
+    BOX_SOURCE_CENTER_ONLY = 4
+};
+
+// P0-5: payload_track_info 索引常量
+constexpr int IDX_VALID = 0;
+constexpr int IDX_TRACK_ID = 1;
+constexpr int IDX_STATE = 2;
+constexpr int IDX_CENTROID_X = 3;
+constexpr int IDX_CENTROID_Y = 4;
+constexpr int IDX_CENTROID_Z = 5;
+constexpr int IDX_VEL_X = 6;
+constexpr int IDX_VEL_Y = 7;
+constexpr int IDX_VEL_Z = 8;
+constexpr int IDX_BBOX_MIN_X = 9;
+constexpr int IDX_BBOX_MIN_Y = 10;
+constexpr int IDX_BBOX_MIN_Z = 11;
+constexpr int IDX_BBOX_MAX_X = 12;
+constexpr int IDX_BBOX_MAX_Y = 13;
+constexpr int IDX_BBOX_MAX_Z = 14;
+constexpr int IDX_POINT_COUNT = 15;
+constexpr int IDX_SCORE = 16;
+constexpr int IDX_BOTTOM_HAG = 17;
+constexpr int IDX_SUPPORT_RATIO = 18;
+constexpr int IDX_BOX_SOURCE = 19;
+constexpr int PAYLOAD_TRACK_INFO_SIZE = 20;
+
 struct MappingTask {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
     Eigen::Vector3d position;

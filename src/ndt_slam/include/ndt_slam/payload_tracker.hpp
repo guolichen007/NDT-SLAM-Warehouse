@@ -214,6 +214,7 @@ struct PayloadTrackInfo {
     // P3: CargoBoxV2 的 core_box 信息（base_link 坐标系）
     bool has_core_box = false;
     CargoBox core_box_base;
+    bool using_last_good_box = false;  // P0-5: 是否使用 last_good_box fallback
 };
 
 // 轨迹跟踪管理器

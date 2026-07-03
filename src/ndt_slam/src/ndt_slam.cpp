@@ -5248,36 +5248,16 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
     PayloadTrackInfo track;
     std_msgs::Float32MultiArray msg;
 
-    // 定义统一索引常量，禁止手写魔法数字
-    constexpr int IDX_VALID = 0;
-    constexpr int IDX_TRACK_ID = 1;
-    constexpr int IDX_STATE = 2;
-    constexpr int IDX_CENTER_X = 3;
-    constexpr int IDX_CENTER_Y = 4;
-    constexpr int IDX_CENTER_Z = 5;
-    constexpr int IDX_VEL_X = 6;
-    constexpr int IDX_VEL_Y = 7;
-    constexpr int IDX_VEL_Z = 8;
-    constexpr int IDX_BBOX_MIN_X = 9;
-    constexpr int IDX_BBOX_MIN_Y = 10;
-    constexpr int IDX_BBOX_MIN_Z = 11;
-    constexpr int IDX_BBOX_MAX_X = 12;
-    constexpr int IDX_BBOX_MAX_Y = 13;
-    constexpr int IDX_BBOX_MAX_Z = 14;
-    constexpr int IDX_POINT_COUNT = 15;
-    constexpr int IDX_SCORE = 16;
-    constexpr int IDX_BOTTOM_HAG = 17;
-    constexpr int IDX_SUPPORT_RATIO = 18;
-
     if (payload_tracker_.getBestDynamicPayloadTrack(track)) {
         // 有有效 track
         // 计算 score（综合评分）
         float score = track.track_duration * 0.3f + track.direction_consistency * 0.7f;
 
-        // P3: 使用 core_box 如果可用，否则使用旧 bbox
+        // P0-5: 使用 core_box 如果可用，否则使用旧 bbox
         Eigen::Vector3f bbox_min, bbox_max;
         float bottom_hag = 0.0f;
         int core_pts = 0;
+        float box_source = BOX_SOURCE_NONE;
 
         if (track.has_core_box) {
             // 使用 CargoBoxV2 的 core_box
@@ -5286,23 +5266,32 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
             bottom_hag = track.core_box_base.bottom_hag;
             core_pts = track.core_box_base.suspended_points;
 
+            box_source = track.using_last_good_box
+                ? BOX_SOURCE_LAST_GOOD
+                : BOX_SOURCE_V2_CORE;
+
             // [PayloadTrackInfoCore] 日志
-            // v8-stable-r3: 降为 DEBUG
-            ROS_DEBUG("[PayloadTrackInfoCore] id=%d state=%d source=CORE_BOX "
-                     "core_size=(%.2f,%.2f,%.2f) bottom_hag=%.2f core_pts=%d",
-                     track.track_id, track.state,
-                     track.core_box_base.size.x(),
-                     track.core_box_base.size.y(),
-                     track.core_box_base.size.z(),
-                     bottom_hag, core_pts);
+            ROS_INFO_THROTTLE(
+                1.0,
+                "[PayloadTrackInfoCore] id=%d state=%d source=%s has_core=%d using_last_good=%d "
+                "bbox_min=(%.2f,%.2f,%.2f) bbox_max=(%.2f,%.2f,%.2f)",
+                track.track_id, track.state,
+                box_source == BOX_SOURCE_V2_CORE ? "V2_CORE" : "LAST_GOOD",
+                track.has_core_box ? 1 : 0,
+                track.using_last_good_box ? 1 : 0,
+                bbox_min.x(), bbox_min.y(), bbox_min.z(),
+                bbox_max.x(), bbox_max.y(), bbox_max.z());
         } else {
             // 回退到旧 bbox
             bbox_min = track.bbox_min_map;
             bbox_max = track.bbox_max_map;
             bottom_hag = track.bbox_min_map.z();
+            box_source = BOX_SOURCE_OLD_BBOX;
 
-            ROS_WARN("[PayloadTrackInfoCore] id=%d state=%d source=OLD_BBOX (no core_box available)",
-                     track.track_id, track.state);
+            ROS_WARN_THROTTLE(
+                2.0,
+                "[PayloadTrackInfoCore] id=%d state=%d source=OLD_BBOX no_core_box=1 using_track_default_bbox=1",
+                track.track_id, track.state);
         }
 
         // 计算 support_ratio（静态支持率）
@@ -5319,8 +5308,13 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
             static_cast<float>(track.point_count),
             score,
             bottom_hag,
-            support_ratio
+            support_ratio,
+            box_source  // IDX_BOX_SOURCE: 框来源
         };
+
+        // 验证 msg.data 大小
+        ROS_ASSERT_MSG(msg.data.size() == PAYLOAD_TRACK_INFO_SIZE,
+                       "payload_track_info size must be 20, got %zu", msg.data.size());
 
         // 发布端日志
         ROS_DEBUG("[PayloadTrackInfoPub] id=%d state=%d center=(%.2f,%.2f,%.2f) "
@@ -5347,8 +5341,13 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
             0.0f,              // point_count
             0.0f,              // score
             0.0f,              // bottom_hag
-            0.0f               // support_ratio
+            0.0f,              // support_ratio
+            0.0f               // box_source = NONE
         };
+
+        // 验证 msg.data 大小
+        ROS_ASSERT_MSG(msg.data.size() == PAYLOAD_TRACK_INFO_SIZE,
+                       "payload_track_info size must be 20, got %zu", msg.data.size());
     }
 
     payload_track_info_pub_.publish(msg);
