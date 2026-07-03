@@ -612,6 +612,15 @@ private:
     bool stationary_freeze_xy_ = false;
     bool stationary_freeze_yaw_ = false;
     double stationary_pose_freeze_release_m_ = 0.80;
+
+    // P0-3: MapCommit evidence only. Does NOT affect runtime odom/TF/path.
+    Sophus::SE3d last_raw_ndt_pose_;
+    Sophus::SE3d last_commit_raw_pose_;
+    Sophus::SE3d last_commit_refined_pose_;
+    Sophus::SE3d last_commit_runtime_pose_;
+
+    bool has_last_raw_ndt_pose_ = false;
+    bool has_commit_gate_reference_ = false;
     int stationary_move_confirm_frames_ = 3;
 
     Sophus::SE3d selectPublishedPose(const Sophus::SE3d& constrained_pose, const ros::Time& stamp);

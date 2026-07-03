@@ -1264,6 +1264,11 @@ void NdtSlamNode::processCloudThread() {
 
                         new_pose = Sophus::SE3d(result_ortho);
 
+                        // P0-3: 保存 raw pose for MapCommit evidence
+                        // Note: This is ONLY used for MapCommit evidence, NOT for odom/TF/runtime_path
+                        last_raw_ndt_pose_ = new_pose;
+                        has_last_raw_ndt_pose_ = true;
+
                         // v8-stable-r3: CraneMotionEKF update
                         Sophus::SE3d ekf_pose = new_pose;
                         bool ndt_accepted = true;
@@ -4679,6 +4684,57 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
             (current_pose.translation() - stationary_anchor_pose_.translation()).norm();
         double elapsed = current_time.toSec() - stationary_start_time_;
 
+        // P0-3: evidence 检查必须放在任何 SKIP_COMMIT 判断之前
+        // 计算 evidence_trans = max(raw_trans, refined_trans, runtime_trans)
+        double raw_trans = 0.0;
+        double refined_trans = 0.0;
+        double runtime_trans = 0.0;
+
+        if (has_commit_gate_reference_) {
+            if (has_last_raw_ndt_pose_) {
+                raw_trans = (last_raw_ndt_pose_.translation().head<2>() -
+                            last_commit_raw_pose_.translation().head<2>()).norm();
+            }
+
+            refined_trans = (current_pose.translation().head<2>() -
+                            last_commit_refined_pose_.translation().head<2>()).norm();
+            runtime_trans = (current_pose.translation().head<2>() -
+                            last_commit_runtime_pose_.translation().head<2>()).norm();
+        }
+
+        double evidence_trans = std::max(raw_trans, std::max(refined_trans, runtime_trans));
+
+        ROS_INFO_THROTTLE(
+            2.0,
+            "[MotionGateEvidence] raw=%.3f refined=%.3f runtime=%.3f evidence=%.3f dt=%.2f fitness=%.3f kf=%d",
+            raw_trans,
+            refined_trans,
+            runtime_trans,
+            evidence_trans,
+            elapsed,
+            last_ndt_fitness_,
+            keyframe_count_);
+
+        // 初期解冻条件：keyframe <= 1 且 dt > 3.0 且 evidence_trans > 0.15 且 fitness < 0.12
+        if (keyframe_count_ <= 1 &&
+            elapsed > 3.0 &&
+            evidence_trans > 0.15 &&
+            last_ndt_fitness_ < 0.12) {
+            ROS_WARN(
+                "[MotionGate] unfreeze_initial_map_commit raw=%.3f refined=%.3f runtime=%.3f evidence=%.3f dt=%.2f fitness=%.3f",
+                raw_trans,
+                refined_trans,
+                runtime_trans,
+                evidence_trans,
+                elapsed,
+                last_ndt_fitness_);
+            // 确认移动，恢复提交
+            is_stationary_ = false;
+            stationary_anchor_valid_ = false;
+            moving_confirm_frames_ = 0;
+            return true;
+        }
+
         // 漂移在 ignore_radius 内，认为是 NDT 静止漂移，不提交
         if (drift_from_anchor < motion_gate_stationary_drift_ignore_radius_) {
             ROS_INFO_THROTTLE(2.0,
@@ -4705,8 +4761,31 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
                  drift_from_anchor, motion_gate_moving_confirm_frames_);
     }
 
-    // 正常移动检测
-    if (moved_enough && time_elapsed_enough && !is_stationary_) {
+    // 正常移动检测（使用 evidence_trans）
+    // 计算 evidence_trans = max(raw_trans, refined_trans, runtime_trans)
+    double raw_trans_move = 0.0;
+    double refined_trans_move = 0.0;
+    double runtime_trans_move = 0.0;
+
+    if (has_commit_gate_reference_) {
+        if (has_last_raw_ndt_pose_) {
+            raw_trans_move = (last_raw_ndt_pose_.translation().head<2>() -
+                             last_commit_raw_pose_.translation().head<2>()).norm();
+        }
+
+        refined_trans_move = (current_pose.translation().head<2>() -
+                             last_commit_refined_pose_.translation().head<2>()).norm();
+        runtime_trans_move = (current_pose.translation().head<2>() -
+                             last_commit_runtime_pose_.translation().head<2>()).norm();
+    }
+
+    double evidence_trans_move = std::max(raw_trans_move, std::max(refined_trans_move, runtime_trans_move));
+
+    // 正常运动提交条件
+    if (evidence_trans_move > motion_gate_min_translation_m_ &&
+        time_elapsed_enough &&
+        last_ndt_fitness_ < 0.15 &&
+        !is_stationary_) {
         last_keyframe_pose_for_gate_ = current_pose;
         last_keyframe_time_for_gate_ = current_time;
         moved_frame_count_++;
@@ -6635,6 +6714,21 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     publishDisplayMap();
     publishGroundMap();
     publishObjectsMap();
+
+    // P0-3: gate reference 只能在 MapCommit 成功后更新
+    if (has_last_raw_ndt_pose_) {
+        last_commit_raw_pose_ = last_raw_ndt_pose_;
+    }
+    last_commit_refined_pose_ = current_pose_;
+    last_commit_runtime_pose_ = current_pose_;
+    has_commit_gate_reference_ = true;
+
+    // 添加 DisplayMapPublish 日志
+    ROS_INFO(
+        "[DisplayMapPublish] keyframe=%zu display_points=%zu subs=%d reason=map_commit",
+        loop_closure_detector_.getKeyFrames().size(),
+        display_map_ ? display_map_->size() : 0,
+        display_map_pub_.getNumSubscribers());
 
     // 闭环检测
     if (keyframe_count_ % loop_detection_interval_ == 0) {
