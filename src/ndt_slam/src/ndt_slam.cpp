@@ -5308,8 +5308,11 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectHookFixedCargo(
         }
     }
 
-    ROS_INFO_THROTTLE(1.0, "[HookFixedCargoROI] points_in=%zu points_after_roi=%zu",
-                      cloud_base->size(), roi_cloud->size());
+    ROS_INFO("[HookFixedCargoROI] points_in=%zu points_after_roi=%zu roi_center=(%.2f,%.2f) roi_half=(%.2f,%.2f) z=[%.2f,%.2f]",
+             cloud_base->size(), roi_cloud->size(),
+             hook_fixed_config_.roi_center_x, hook_fixed_config_.roi_center_y,
+             hook_fixed_config_.roi_half_x, hook_fixed_config_.roi_half_y,
+             hook_fixed_config_.roi_z_min, hook_fixed_config_.roi_z_max);
 
     if (roi_cloud->size() < static_cast<size_t>(hook_fixed_config_.min_cluster_points)) {
         result.reject_reason = "roi_too_few_points";
