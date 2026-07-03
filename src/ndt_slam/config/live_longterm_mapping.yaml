@@ -241,9 +241,15 @@ cargo_box_estimator:
   min_hag_for_candidate: 0.20
   min_payload_bottom_hag: 0.45
   z_hist_bin: 0.10
-  min_z_band_points: 5
+  min_z_band_points: 3
   dense_bin_ratio: 0.15
   dense_bin_min_points: 2
+
+  # P0-5: 分阶段阈值（locked track 下使用更宽松的阈值）
+  locked_min_core_points: 4
+  locked_min_z_band_points: 2
+  use_last_good_box_fallback: true
+  fallback_hold_time_sec: 1.2
   min_dense_band_height: 0.10
   max_dense_band_height: 3.50
 

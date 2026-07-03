@@ -144,6 +144,12 @@ struct CargoBoxEstimatorConfig {
     int min_update_core_points = 8;       // 已锁定 track 更新最小点数
     int min_confirm_observed_frames = 3;  // 确认所需观察帧数
 
+    // P0-5: 分阶段阈值（locked track 下使用更宽松的阈值）
+    int locked_min_core_points = 4;
+    int locked_min_z_band_points = 2;
+    bool use_last_good_box_fallback = true;
+    float fallback_hold_time_sec = 1.2f;
+
     // 显示框扩展
     float core_expand_xy = 0.05f;
     float core_expand_z_down = 0.03f;

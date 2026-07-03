@@ -79,6 +79,12 @@ void CargoBoxEstimator::configureFromYaml(const std::string& config_file) {
             config_.min_update_core_points = cb["min_update_core_points"].as<int>(8);
             config_.min_confirm_observed_frames = cb["min_confirm_observed_frames"].as<int>(3);
 
+            // P0-5: 分阶段阈值（locked track 下使用更宽松的阈值）
+            config_.locked_min_core_points = cb["locked_min_core_points"].as<int>(4);
+            config_.locked_min_z_band_points = cb["locked_min_z_band_points"].as<int>(2);
+            config_.use_last_good_box_fallback = cb["use_last_good_box_fallback"].as<bool>(true);
+            config_.fallback_hold_time_sec = cb["fallback_hold_time_sec"].as<double>(1.2);
+
             // 显示框扩展
             config_.core_expand_xy = cb["core_expand_xy"].as<double>(0.05);
             config_.core_expand_z_down = cb["core_expand_z_down"].as<double>(0.03);
