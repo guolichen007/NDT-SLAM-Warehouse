@@ -272,6 +272,11 @@ private:
 
         bool deleteall_sent_after_invalid = false;
         int box_source = BOX_SOURCE_NONE;  // P0-5: 框来源
+
+        // P0-5: 真实几何信息
+        float z_min_base = 0.0f;
+        float z_max_base = 0.0f;
+        float yaw_base = 0.0f;
     };
 
     CargoDisplayState display_state_;
@@ -684,6 +689,12 @@ private:
             display_state_.candidate_track_id = -1;
             display_state_.candidate_confirm_count = 0;
             display_state_.deleteall_sent_after_invalid = false;
+            display_state_.box_source = cargo_.box_source;
+
+            // P0-5: 更新真实几何信息
+            display_state_.z_min_base = cargo_.bbox_min.z();
+            display_state_.z_max_base = cargo_.bbox_max.z();
+            display_state_.yaw_base = 0.0f;  // 暂时没有 yaw，后续再做 PCA OBB
         } else if (display_state_.locked_track_id == cargo_.track_id) {
             // 同 track 更新
             display_state_.center_base = limitCenterStep(display_state_.center_base, stable_centroid_);
@@ -695,6 +706,12 @@ private:
             display_state_.candidate_track_id = -1;
             display_state_.candidate_confirm_count = 0;
             display_state_.deleteall_sent_after_invalid = false;
+            display_state_.box_source = cargo_.box_source;
+
+            // P0-5: 更新真实几何信息
+            display_state_.z_min_base = cargo_.bbox_min.z();
+            display_state_.z_max_base = cargo_.bbox_max.z();
+            display_state_.yaw_base = 0.0f;  // 暂时没有 yaw，后续再做 PCA OBB
         } else {
             // 不同 track，检查 jump
             double jump = (stable_centroid_ - display_state_.center_base).norm();
@@ -1046,25 +1063,51 @@ private:
             return;
         }
 
-        // base_link → map 转换
-        Eigen::Vector3f center_map = transformToMap(display_state_.center_base);
+        // P0-5: 用真实几何生成 marker 8 个角点
+        // 在 base_link 下按 center + yaw + size 生成 8 个角点，再逐点 transform 到 map
+        const float hx = std::max(display_state_.size.x() * 0.5f, 0.05f);
+        const float hy = std::max(display_state_.size.y() * 0.5f, 0.05f);
+        const float z_min = display_state_.z_min_base;
+        const float z_max = display_state_.z_max_base;
 
-        // 计算 8 个角点（map 坐标系）
-        float hx = std::max(display_state_.size.x() / 2.0f, 0.15f);
-        float hy = std::max(display_state_.size.y() / 2.0f, 0.15f);
-        float hz = std::max(display_state_.size.z() / 2.0f, 0.15f);
+        // 质量检查
+        if (z_max <= z_min || display_state_.size.x() < 0.10f || display_state_.size.y() < 0.10f) {
+            ROS_WARN_THROTTLE(1.0, "[CargoBoxQuality] invalid geometry: z=[%.2f,%.2f] size=(%.2f,%.2f)",
+                              z_min, z_max, display_state_.size.x(), display_state_.size.y());
+            publishDeleteAllCoreBoxThrottled();
+            return;
+        }
 
-        Eigen::Vector3f corners_base[8] = {
-            {-hx, -hy, -hz}, { hx, -hy, -hz}, { hx,  hy, -hz}, {-hx,  hy, -hz},
-            {-hx, -hy,  hz}, { hx, -hy,  hz}, { hx,  hy,  hz}, {-hx,  hy,  hz}
-        };
+        const float cyaw = std::cos(display_state_.yaw_base);
+        const float syaw = std::sin(display_state_.yaw_base);
 
-        geometry_msgs::Point corners_map[8];
-        for (int i = 0; i < 8; i++) {
-            Eigen::Vector3f cm = transformToMap(corners_base[i]);
-            corners_map[i].x = cm.x();
-            corners_map[i].y = cm.y();
-            corners_map[i].z = cm.z();
+        std::vector<Eigen::Vector3f> corners_base;
+        for (float z : {z_min, z_max}) {
+            for (auto xy : std::vector<Eigen::Vector2f>{
+                {-hx, -hy}, {hx, -hy}, {hx, hy}, {-hx, hy}
+            }) {
+                Eigen::Vector2f r;
+                r.x() = cyaw * xy.x() - syaw * xy.y();
+                r.y() = syaw * xy.x() + cyaw * xy.y();
+
+                Eigen::Vector3f p;
+                p.x() = display_state_.center_base.x() + r.x();
+                p.y() = display_state_.center_base.y() + r.y();
+                p.z() = z;
+
+                corners_base.push_back(p);
+            }
+        }
+
+        // 逐点 transform 到 map
+        std::vector<geometry_msgs::Point> corners_map;
+        for (const auto& p_base : corners_base) {
+            Eigen::Vector3f p_map = transformToMap(p_base);
+            geometry_msgs::Point q;
+            q.x = p_map.x();
+            q.y = p_map.y();
+            q.z = p_map.z();
+            corners_map.push_back(q);
         }
 
         // 发布 LINE_LIST 线框
@@ -1096,21 +1139,37 @@ private:
 
         marker.lifetime = ros::Duration(0.3);
 
-        // 12 条边，24 个点
-        auto addEdge = [&](int a, int b) {
-            marker.points.push_back(corners_map[a]);
-            marker.points.push_back(corners_map[b]);
+        // P0-5: 12 条边，24 个点（使用 std::vector）
+        const int edges[12][2] = {
+            {0,1},{1,2},{2,3},{3,0},
+            {4,5},{5,6},{6,7},{7,4},
+            {0,4},{1,5},{2,6},{3,7}
         };
-        // bottom
-        addEdge(0,1); addEdge(1,2); addEdge(2,3); addEdge(3,0);
-        // top
-        addEdge(4,5); addEdge(5,6); addEdge(6,7); addEdge(7,4);
-        // vertical
-        addEdge(0,4); addEdge(1,5); addEdge(2,6); addEdge(3,7);
+
+        for (const auto& edge : edges) {
+            marker.points.push_back(corners_map[edge[0]]);
+            marker.points.push_back(corners_map[edge[1]]);
+        }
 
         visualization_msgs::MarkerArray arr;
         arr.markers.push_back(marker);
         core_bbox_marker_pub_.publish(arr);
+
+        // P0-5: 质量检查日志
+        ROS_INFO_THROTTLE(
+            1.0,
+            "[CargoBoxQuality] source=%s track=%d center_base=(%.2f,%.2f,%.2f) "
+            "size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f] frame=base_to_map",
+            sourceToString(display_state_.box_source),
+            display_state_.locked_track_id,
+            display_state_.center_base.x(),
+            display_state_.center_base.y(),
+            display_state_.center_base.z(),
+            display_state_.size.x(),
+            display_state_.size.y(),
+            display_state_.size.z(),
+            display_state_.z_min_base,
+            display_state_.z_max_base);
     }
 
     void publishDeleteAllCoreBox() {
