@@ -93,6 +93,7 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     payload_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_pending_cloud", 10);
     cargo_dynamic_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/cargo_dynamic_removed_cloud", 10);
     payload_track_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_track_info", 10);
+    payload_precise_box_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_precise_box_info", 10);
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
     human_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_pending_cloud", 10);
@@ -174,6 +175,7 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     payload_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_pending_cloud", 10);
     cargo_dynamic_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/cargo_dynamic_removed_cloud", 10);
     payload_track_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_track_info", 10);
+    payload_precise_box_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_precise_box_info", 10);
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
     human_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_pending_cloud", 10);
@@ -5273,7 +5275,7 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
         Eigen::Vector3f bbox_min, bbox_max;
         float bottom_hag = 0.0f;
         int core_pts = 0;
-        float box_source = BOX_SOURCE_NONE;
+        float box_source = BOX_SOURCE_NONE;  // 初始化为 NONE
 
         if (track.has_core_box) {
             // 使用 CargoBoxV2 的 core_box
@@ -5332,6 +5334,9 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
         ROS_ASSERT_MSG(msg.data.size() == PAYLOAD_TRACK_INFO_SIZE,
                        "payload_track_info size must be 20, got %zu", msg.data.size());
 
+        // Commit C: 发布 payload_precise_box_info
+        publishPayloadPreciseBoxInfo(track, box_source, stamp);
+
         // 发布端日志
         ROS_DEBUG("[PayloadTrackInfoPub] id=%d state=%d center=(%.2f,%.2f,%.2f) "
                   "bbox_min=(%.2f,%.2f,%.2f) bbox_max=(%.2f,%.2f,%.2f) "
@@ -5364,9 +5369,114 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
         // 验证 msg.data 大小
         ROS_ASSERT_MSG(msg.data.size() == PAYLOAD_TRACK_INFO_SIZE,
                        "payload_track_info size must be 20, got %zu", msg.data.size());
+
+        // Commit C: 发布 payload_precise_box_info（invalid，无有效 track）
+        PayloadTrackInfo empty_track;
+        publishPayloadPreciseBoxInfo(empty_track, BOX_SOURCE_NONE, stamp);
     }
 
     payload_track_info_pub_.publish(msg);
+}
+
+// Commit C: 发布 payload_precise_box_info
+void NdtSlamNode::publishPayloadPreciseBoxInfo(const PayloadTrackInfo& track, float box_source, const ros::Time& stamp) {
+    std_msgs::Float32MultiArray msg;
+    msg.data.resize(PRECISE_BOX_INFO_SIZE, 0.0f);
+
+    // 检查是否是精确来源
+    bool is_precise = (box_source == BOX_SOURCE_V2_CORE || box_source == BOX_SOURCE_LAST_GOOD);
+
+    if (!is_precise || !track.has_core_box) {
+        // 不是精确来源，发布 invalid
+        msg.data[0] = 0.0f;  // valid = 0
+        payload_precise_box_info_pub_.publish(msg);
+        return;
+    }
+
+    // 计算 center_base 和 size
+    Eigen::Vector3f bbox_min = track.core_box_base.bbox_min;
+    Eigen::Vector3f bbox_max = track.core_box_base.bbox_max;
+    Eigen::Vector3f center_base = 0.5f * (bbox_min + bbox_max);
+    Eigen::Vector3f size = bbox_max - bbox_min;
+    float z_min_base = bbox_min.z();
+    float z_max_base = bbox_max.z();
+    float yaw_base = 0.0f;  // 暂时没有 yaw
+
+    // 生成 8 个角点（base_link 坐标系）
+    float hx = std::max(size.x() * 0.5f, 0.05f);
+    float hy = std::max(size.y() * 0.5f, 0.05f);
+    float cyaw = std::cos(yaw_base);
+    float syaw = std::sin(yaw_base);
+
+    std::vector<Eigen::Vector3f> corners_base;
+    for (float z : {z_min_base, z_max_base}) {
+        for (auto xy : std::vector<Eigen::Vector2f>{
+            {-hx, -hy}, {hx, -hy}, {hx, hy}, {-hx, hy}
+        }) {
+            Eigen::Vector2f r;
+            r.x() = cyaw * xy.x() - syaw * xy.y();
+            r.y() = syaw * xy.x() + cyaw * xy.y();
+
+            Eigen::Vector3f p;
+            p.x() = center_base.x() + r.x();
+            p.y() = center_base.y() + r.y();
+            p.z() = z;
+
+            corners_base.push_back(p);
+        }
+    }
+
+    // 使用同一帧 runtime_pose/refined_pose transform corners_base -> corners_map
+    Sophus::SE3d current_pose;
+    {
+        std::lock_guard<std::mutex> lock(cloud_mutex_);
+        current_pose = current_pose_;
+    }
+
+    std::vector<Eigen::Vector3f> corners_map;
+    for (const auto& p_base : corners_base) {
+        Eigen::Vector3d p_base_d = p_base.cast<double>();
+        Eigen::Vector3d p_map_d = current_pose * p_base_d;
+        corners_map.push_back(p_map_d.cast<float>());
+    }
+
+    // 填充 msg.data
+    msg.data[0] = 1.0f;  // valid = 1
+    msg.data[1] = static_cast<float>(track.track_id);
+    msg.data[2] = box_source;
+    msg.data[3] = static_cast<float>(track.state);
+    msg.data[4] = 1.0f;  // quality_pass = 1
+    msg.data[5] = 1.0f;  // confidence = 1
+    msg.data[6] = center_base.x();
+    msg.data[7] = center_base.y();
+    msg.data[8] = center_base.z();
+    msg.data[9] = size.x();
+    msg.data[10] = size.y();
+    msg.data[11] = size.z();
+    msg.data[12] = z_min_base;
+    msg.data[13] = z_max_base;
+    msg.data[14] = yaw_base;
+    msg.data[15] = 0.0f;  // reserved
+
+    // 填充 8 个 map corners
+    for (int i = 0; i < 8; i++) {
+        msg.data[IDX_CORNER_MAP_START + i * 3 + 0] = corners_map[i].x();
+        msg.data[IDX_CORNER_MAP_START + i * 3 + 1] = corners_map[i].y();
+        msg.data[IDX_CORNER_MAP_START + i * 3 + 2] = corners_map[i].z();
+    }
+
+    payload_precise_box_info_pub_.publish(msg);
+
+    // 日志
+    ROS_INFO_THROTTLE(
+        1.0,
+        "[CargoPreciseBoxInfo] track=%d source=%s valid=1 center_base=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) first_corner_map=(%.2f,%.2f,%.2f) pose=(%.2f,%.2f,%.2f)",
+        track.track_id,
+        box_source == BOX_SOURCE_V2_CORE ? "V2_CORE" : "LAST_GOOD",
+        center_base.x(), center_base.y(), center_base.z(),
+        size.x(), size.y(), size.z(),
+        corners_map[0].x(), corners_map[0].y(), corners_map[0].z(),
+        current_pose.translation().x(), current_pose.translation().y(), current_pose.translation().z());
 }
 
 // ========== P1: Cargo Deny History ==========

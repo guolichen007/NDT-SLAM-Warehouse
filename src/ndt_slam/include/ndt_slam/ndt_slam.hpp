@@ -611,6 +611,9 @@ private:
     ros::Publisher payload_track_info_pub_;
     void publishPayloadTrackInfo(const ros::Time& stamp);
 
+    // Commit C: payload precise box info
+    void publishPayloadPreciseBoxInfo(const PayloadTrackInfo& track, float box_source, const ros::Time& stamp);
+
     // ========== 长期建图功能 ==========
     // MotionGate：静止检测和门控
     bool longterm_mapping_enabled_ = false;
@@ -813,6 +816,11 @@ private:
     int selected_payload_track_id_ = -1;
     bool has_selected_payload_track_ = false;
     ros::Time selected_payload_stamp_;
+
+    // ========== Commit C: payload precise box info ==========
+    ros::Publisher payload_precise_box_info_pub_;
+    static constexpr int PRECISE_BOX_INFO_SIZE = 40;
+    static constexpr int IDX_CORNER_MAP_START = 16;
 };
 
 } // namespace ndt_slam
