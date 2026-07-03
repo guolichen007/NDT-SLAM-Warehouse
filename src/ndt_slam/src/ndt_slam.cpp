@@ -5402,6 +5402,41 @@ void NdtSlamNode::publishPayloadPreciseBoxInfo(const PayloadTrackInfo& track, fl
     float z_max_base = bbox_max.z();
     float yaw_base = 0.0f;  // 暂时没有 yaw
 
+    // Commit D: V2_CORE 质量门
+    float long_side = std::max(size.x(), size.y());
+    float short_side = std::min(size.x(), size.y());
+    float area = long_side * short_side;
+    bool quality_pass = true;
+
+    if (long_side < 0.50f) quality_pass = false;
+    if (short_side < 0.25f) quality_pass = false;
+    if (size.z() < 0.30f) quality_pass = false;
+    if (area < 0.25f) quality_pass = false;
+    if (long_side > 8.0f) quality_pass = false;
+    if (short_side > 5.0f) quality_pass = false;
+    if (size.z() > 3.0f) quality_pass = false;
+    if (track.core_box_base.suspended_points < 12) quality_pass = false;
+
+    ROS_INFO_THROTTLE(
+        1.0,
+        "[CargoBoxQualityGate] track=%d pass=%d size=(%.2f,%.2f,%.2f) long=%.2f short=%.2f h=%.2f core=%d source=%s",
+        track.track_id, quality_pass ? 1 : 0,
+        size.x(), size.y(), size.z(),
+        long_side, short_side, size.z(),
+        track.core_box_base.suspended_points,
+        box_source == BOX_SOURCE_V2_CORE ? "V2_CORE" : "LAST_GOOD");
+
+    if (!quality_pass) {
+        // 小碎片不通过质量门
+        msg.data[0] = 0.0f;  // valid = 0
+        payload_precise_box_info_pub_.publish(msg);
+        ROS_WARN_THROTTLE(1.0,
+            "[CargoBoxQualityReject] track=%d size=(%.2f,%.2f,%.2f) long=%.2f short=%.2f core=%d",
+            track.track_id, size.x(), size.y(), size.z(),
+            long_side, short_side, track.core_box_base.suspended_points);
+        return;
+    }
+
     // 生成 8 个角点（base_link 坐标系）
     float hx = std::max(size.x() * 0.5f, 0.05f);
     float hy = std::max(size.y() * 0.5f, 0.05f);

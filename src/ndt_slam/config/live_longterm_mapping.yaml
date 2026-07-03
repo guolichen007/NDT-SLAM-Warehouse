@@ -253,6 +253,19 @@ cargo_box_estimator:
   min_dense_band_height: 0.10
   max_dense_band_height: 3.50
 
+  # Commit D: V2_CORE 质量门
+  visual_min_long_side: 0.50
+  visual_min_short_side: 0.25
+  visual_min_height: 0.30
+  visual_min_area_xy: 0.25
+  visual_max_long_side: 8.0
+  visual_max_short_side: 5.0
+  visual_max_height: 3.0
+  visual_min_core_points: 12
+  track_switch_confirm_frames: 3
+  track_switch_max_jump_m: 1.20
+  selected_track_hold_sec: 1.20
+
   # 分位数参数
   xy_percentile_low: 2.0
   xy_percentile_high: 98.0
