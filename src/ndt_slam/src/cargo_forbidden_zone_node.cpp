@@ -243,6 +243,40 @@ private:
     ros::Timer marker_timer_;
     double marker_publish_rate_ = 15.0;  // 15Hz
 
+    // P0-4: CargoDisplayState 独立状态结构
+    struct CargoDisplayState {
+        bool valid = false;
+        int locked_track_id = -1;
+
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f size = Eigen::Vector3f::Zero();
+
+        Eigen::Vector3f last_good_center = Eigen::Vector3f::Zero();
+        Eigen::Vector3f last_good_size = Eigen::Vector3f::Zero();
+
+        ros::Time last_update_stamp;
+        int lost_count = 0;
+
+        int candidate_track_id = -1;
+        int candidate_confirm_count = 0;
+
+        bool deleteall_sent_after_invalid = false;
+    };
+
+    CargoDisplayState display_state_;
+
+    // P0-4: 常量定义
+    static constexpr double DISPLAY_HOLD_TIME_SEC = 1.2;
+    static constexpr double JUMP_REJECT_GATE_M = 1.20;
+    static constexpr int SWITCH_CONFIRM_FRAMES = 3;
+    static constexpr double SIZE_ALPHA_GROW = 0.10;
+    static constexpr double SIZE_ALPHA_SHRINK = 0.02;
+    static constexpr double SIZE_MAX_STEP_M = 0.08;
+    static constexpr double CENTER_MAX_STEP_M = 0.30;
+    static constexpr double SIZE_MIN_RATIO = 0.55;
+    static constexpr double SIZE_MAX_RATIO = 1.80;
+    static constexpr double DELETEALL_THROTTLE_SEC = 5.0;
+
     void loadConfig() {
         std::string config_file;
         pnh_.param<std::string>("config_file", config_file, "");
@@ -546,41 +580,150 @@ private:
     }
 
     void update() {
-        updateStableBbox();
+        updateStableBboxStateMachine();
         updateRiskLevel();
         publishResults();
     }
 
-    void updateStableBbox() {
+    // P0-4: 重写 CargoDisplayStateMachine
+    void updateStableBboxStateMachine() {
+        ros::Time now = ros::Time::now();
+
+        // 没有有效 cargo 时，处理 hold/expire 逻辑
         if (!cargo_.valid || cargo_state_ == PayloadSemanticState::UNKNOWN ||
             cargo_state_ == PayloadSemanticState::LOST) {
+            if (display_state_.valid) {
+                display_state_.lost_count++;
+                double hold_age = (now - display_state_.last_update_stamp).toSec();
+
+                if (hold_age > DISPLAY_HOLD_TIME_SEC && display_state_.lost_count > 8) {
+                    // 只打印一次 expire
+                    if (!display_state_.deleteall_sent_after_invalid) {
+                        ROS_INFO("[CargoDisplayState] expired track=%d hold_age=%.2f lost=%d",
+                                 display_state_.locked_track_id, hold_age, display_state_.lost_count);
+                        display_state_.valid = false;
+                        display_state_.deleteall_sent_after_invalid = true;
+                    }
+                }
+            }
             return;
         }
 
-        // P0-4: 直接使用从 payload_track_info 接收的 bbox，不做低通滤波
-        // 这样可以确保 cargo_forbidden_zone_node 显示的框与 CargoBoxV2 计算的框一致
+        // 有有效 cargo
+        if (!display_state_.valid) {
+            // 首次锁定
+            display_state_.valid = true;
+            display_state_.locked_track_id = cargo_.track_id;
+            display_state_.center_base = stable_centroid_;
+            display_state_.size = stable_size_;
+            display_state_.last_good_center = stable_centroid_;
+            display_state_.last_good_size = stable_size_;
+            display_state_.last_update_stamp = now;
+            display_state_.lost_count = 0;
+            display_state_.candidate_track_id = -1;
+            display_state_.candidate_confirm_count = 0;
+            display_state_.deleteall_sent_after_invalid = false;
+        } else if (display_state_.locked_track_id == cargo_.track_id) {
+            // 同 track 更新
+            display_state_.center_base = limitCenterStep(display_state_.center_base, stable_centroid_);
+            display_state_.size = safeSizeUpdate(display_state_.size, stable_size_);
+            display_state_.last_good_center = display_state_.center_base;
+            display_state_.last_good_size = display_state_.size;
+            display_state_.last_update_stamp = now;
+            display_state_.lost_count = 0;
+            display_state_.candidate_track_id = -1;
+            display_state_.candidate_confirm_count = 0;
+            display_state_.deleteall_sent_after_invalid = false;
+        } else {
+            // 不同 track，检查 jump
+            double jump = (stable_centroid_ - display_state_.center_base).norm();
 
-        // 直接使用测量值
-        stable_centroid_ = cargo_.centroid;
+            if (jump > JUMP_REJECT_GATE_M) {
+                // jump 太大，拒绝
+                ROS_WARN_THROTTLE(1.0, "[CargoDisplayState] reject jump=%.2f old=%d new=%d",
+                                  jump, display_state_.locked_track_id, cargo_.track_id);
+                display_state_.candidate_track_id = -1;
+                display_state_.candidate_confirm_count = 0;
+                return;
+            }
 
-        // 计算 size
-        Eigen::Vector3f raw_size = cargo_.bbox_max - cargo_.bbox_min;
-        if (raw_size.x() < 0.5f || raw_size.x() > 8.0f ||
-            raw_size.y() < 0.3f || raw_size.y() > 3.0f) {
-            raw_size = Eigen::Vector3f(default_length_x_, default_width_y_, default_height_z_);
+            // 小跳变，连续确认后切换
+            if (display_state_.candidate_track_id != cargo_.track_id) {
+                display_state_.candidate_track_id = cargo_.track_id;
+                display_state_.candidate_confirm_count = 1;
+            } else {
+                display_state_.candidate_confirm_count++;
+            }
+
+            if (display_state_.candidate_confirm_count >= SWITCH_CONFIRM_FRAMES) {
+                // 切换到新 track
+                ROS_WARN("[CargoDisplayState] switch old=%d new=%d confirm=%d",
+                         display_state_.locked_track_id, cargo_.track_id, display_state_.candidate_confirm_count);
+                display_state_.locked_track_id = cargo_.track_id;
+                display_state_.center_base = stable_centroid_;
+                display_state_.size = stable_size_;
+                display_state_.last_good_center = stable_centroid_;
+                display_state_.last_good_size = stable_size_;
+                display_state_.last_update_stamp = now;
+                display_state_.lost_count = 0;
+                display_state_.candidate_track_id = -1;
+                display_state_.candidate_confirm_count = 0;
+                display_state_.valid = true;
+                display_state_.deleteall_sent_after_invalid = false;
+            }
+        }
+    }
+
+    // P0-4: 安全尺寸更新函数
+    Eigen::Vector3f safeSizeUpdate(const Eigen::Vector3f& old_size, const Eigen::Vector3f& new_size) {
+        Eigen::Vector3f result = old_size;
+
+        for (int i = 0; i < 3; ++i) {
+            const double old_val = old_size[i];
+            const double new_val = new_size[i];
+
+            if (old_val < 0.01) {
+                result[i] = new_val;
+                continue;
+            }
+
+            const double ratio = new_val / old_val;
+            if (ratio < SIZE_MIN_RATIO || ratio > SIZE_MAX_RATIO) {
+                continue;
+            }
+
+            const double diff = new_val - old_val;
+            const double limited = std::max(-SIZE_MAX_STEP_M, std::min(SIZE_MAX_STEP_M, diff));
+            const double alpha = diff > 0.0 ? SIZE_ALPHA_GROW : SIZE_ALPHA_SHRINK;
+            result[i] = old_val + alpha * limited;
         }
 
-        // 直接使用 raw_size，不做低通滤波
-        stable_size_ = raw_size;
+        return result;
+    }
 
-        // 更新 bbox
-        float half_l = stable_size_.x() / 2.0f + safety_margin_x_;
-        float half_w = stable_size_.y() / 2.0f + safety_margin_y_;
-        stable_bbox_min_ = stable_centroid_ - Eigen::Vector3f(half_l, half_w, 0);
-        stable_bbox_max_ = stable_centroid_ + Eigen::Vector3f(half_l, half_w, stable_size_.z());
-        stable_cargo_z_min_ = stable_centroid_.z() - stable_size_.z() / 2.0f;
+    // P0-4: 限制中心步长
+    Eigen::Vector3f limitCenterStep(const Eigen::Vector3f& old_center, const Eigen::Vector3f& new_center) {
+        Eigen::Vector3f diff = new_center - old_center;
+        float dist = diff.norm();
 
-        last_track_time_ = ros::Time::now();
+        if (dist > CENTER_MAX_STEP_M) {
+            diff *= CENTER_MAX_STEP_M / dist;
+        }
+
+        return old_center + diff;
+    }
+
+    // P0-4: 节流 DELETEALL
+    void publishDeleteAllCoreBoxThrottled() {
+        static ros::Time last_deleteall_time;
+        ros::Time now = ros::Time::now();
+
+        if ((now - last_deleteall_time).toSec() < DELETEALL_THROTTLE_SEC) {
+            return;
+        }
+
+        last_deleteall_time = now;
+        publishDeleteAllCoreBox();
     }
 
     void updateRiskLevel() {
@@ -826,42 +969,19 @@ private:
 
     // v8-stable-r3: LINE_LIST 线框 + map 坐标系 + odom 转换
     void publishThreeLayerMarkers(const ros::Time& stamp) {
-        // 从 velocity 判断是否静止（速度 < 0.1 m/s 认为静止）
-        float speed = cargo_.velocity.norm();
-        bool is_moving = speed > 0.1f;
-
-        // 判断是否应该显示框
-        // 只有 SUSPENDED_MOVING 或明确 moving 的吊货才显示框
-        bool should_show = cargo_.valid &&
-                           (cargo_state_ == PayloadSemanticState::SUSPENDED_MOVING ||
-                            cargo_state_ == PayloadSemanticState::GROUND_CARGO) &&
-                           observed_frames_ >= 3 &&
-                           is_moving;  // 移动时才显示
-
-        if (!should_show || !has_odom_) {
-            publishDeleteAllCoreBox();
-
-            ROS_DEBUG("[CargoMarkerGate] publish=0 state=%d observed=%d valid=%d speed=%.2f has_odom=%d",
-                static_cast<int>(cargo_state_),
-                observed_frames_,
-                cargo_.valid ? 1 : 0,
-                speed,
-                has_odom_ ? 1 : 0);
+        // P0-4: 只读 display_state_，不依赖 cargo_.valid / cargo_state_
+        if (!display_state_.valid || !has_odom_) {
+            publishDeleteAllCoreBoxThrottled();
             return;
         }
 
-        ROS_DEBUG("[CargoMarkerGate] publish=1 state=%d observed=%d speed=%.2f",
-            static_cast<int>(cargo_state_),
-            observed_frames_,
-            speed);
-
         // base_link → map 转换
-        Eigen::Vector3f center_map = transformToMap(stable_centroid_);
+        Eigen::Vector3f center_map = transformToMap(display_state_.center_base);
 
         // 计算 8 个角点（map 坐标系）
-        float hx = std::max(stable_size_.x() / 2.0f, 0.15f);
-        float hy = std::max(stable_size_.y() / 2.0f, 0.15f);
-        float hz = std::max(stable_size_.z() / 2.0f, 0.15f);
+        float hx = std::max(display_state_.size.x() / 2.0f, 0.15f);
+        float hy = std::max(display_state_.size.y() / 2.0f, 0.15f);
+        float hz = std::max(display_state_.size.z() / 2.0f, 0.15f);
 
         Eigen::Vector3f corners_base[8] = {
             {-hx, -hy, -hz}, { hx, -hy, -hz}, { hx,  hy, -hz}, {-hx,  hy, -hz},
