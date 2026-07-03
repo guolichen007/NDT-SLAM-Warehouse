@@ -35,6 +35,15 @@
 
 namespace ndt_slam {
 
+// P0-5: CargoBoxSource 枚举
+enum CargoBoxSource : int {
+    BOX_SOURCE_NONE = 0,
+    BOX_SOURCE_V2_CORE = 1,
+    BOX_SOURCE_LAST_GOOD = 2,
+    BOX_SOURCE_OLD_BBOX = 3,
+    BOX_SOURCE_CENTER_ONLY = 4
+};
+
 // 货物语义状态
 enum class PayloadSemanticState {
     UNKNOWN = 0,
@@ -91,6 +100,7 @@ struct CargoInfo {
     float score = 0.0f;
     float bottom_hag = 0.0f;
     float support_ratio = 0.0f;
+    int box_source = 0;  // P0-5: 框来源（0=NONE, 1=V2_CORE, 2=LAST_GOOD, 3=OLD_BBOX, 4=CENTER_ONLY）
 };
 
 class CargoForbiddenZoneNode {
@@ -261,6 +271,7 @@ private:
         int candidate_confirm_count = 0;
 
         bool deleteall_sent_after_invalid = false;
+        int box_source = BOX_SOURCE_NONE;  // P0-5: 框来源
     };
 
     CargoDisplayState display_state_;
@@ -438,8 +449,9 @@ private:
     }
 
     void payloadTrackCallback(const std_msgs::Float32MultiArray::ConstPtr& msg) {
-        if (msg->data.size() < 19) {
-            ROS_WARN("[PayloadTrackInfoSub] Invalid message size: %zu (expected >= 19)", msg->data.size());
+        // P0-5: 检查消息大小，必须至少 20 个 float
+        if (msg->data.size() < 20) {
+            ROS_WARN("[PayloadTrackInfoSub] Invalid message size: %zu (expected >= 20)", msg->data.size());
             return;
         }
 
@@ -463,12 +475,16 @@ private:
         constexpr int IDX_SCORE = 16;
         constexpr int IDX_BOTTOM_HAG = 17;
         constexpr int IDX_SUPPORT_RATIO = 18;
+        constexpr int IDX_BOX_SOURCE = 19;
 
         cargo_.valid = (msg->data[IDX_VALID] >= 0);
         if (!cargo_.valid) return;
 
         cargo_.track_id = static_cast<int>(msg->data[IDX_TRACK_ID]);
         cargo_.state = static_cast<PayloadSemanticState>(static_cast<int>(msg->data[IDX_STATE]));
+
+        // P0-5: 读取 box_source
+        cargo_.box_source = static_cast<int>(msg->data[IDX_BOX_SOURCE]);
 
         // v8: 更新 observed_frames_
         if (cargo_.track_id == current_track_id_) {
@@ -585,9 +601,54 @@ private:
         publishResults();
     }
 
+    // P0-5: 判断是否是精确来源
+    bool isPreciseSource(int source) const {
+        return source == BOX_SOURCE_V2_CORE || source == BOX_SOURCE_LAST_GOOD;
+    }
+
+    // P0-5: 判断是否是默认来源
+    bool isDefaultSource(int source) const {
+        return source == BOX_SOURCE_OLD_BBOX || source == BOX_SOURCE_CENTER_ONLY || source == BOX_SOURCE_NONE;
+    }
+
+    // P0-5: source 转字符串
+    const char* sourceToString(int source) const {
+        switch (source) {
+            case BOX_SOURCE_NONE: return "NONE";
+            case BOX_SOURCE_V2_CORE: return "V2_CORE";
+            case BOX_SOURCE_LAST_GOOD: return "LAST_GOOD";
+            case BOX_SOURCE_OLD_BBOX: return "OLD_BBOX";
+            case BOX_SOURCE_CENTER_ONLY: return "CENTER_ONLY";
+            default: return "UNKNOWN";
+        }
+    }
+
     // P0-4: 重写 CargoDisplayStateMachine
     void updateStableBboxStateMachine() {
         ros::Time now = ros::Time::now();
+
+        // P0-5: source-aware 判断
+        const bool precise_source = isPreciseSource(cargo_.box_source);
+
+        if (cargo_.valid && !precise_source) {
+            ROS_INFO_THROTTLE(
+                1.0,
+                "[CargoBoxSource] track=%d source=%s action=NO_GREEN_BOX keep_valid=%d",
+                cargo_.track_id,
+                sourceToString(cargo_.box_source),
+                display_state_.valid ? 1 : 0);
+
+            // 如果已有 precise display_state，保持 hold
+            // 如果没有，不初始化绿色框
+            if (!display_state_.valid) {
+                publishDeleteAllCoreBoxThrottled();
+                return;
+            }
+
+            // 不改变 locked_track_id，不改变 size，不改变 last_good
+            // 只让原来的 hold 逻辑继续运行
+            return;
+        }
 
         // 没有有效 cargo 时，处理 hold/expire 逻辑
         if (!cargo_.valid || cargo_state_ == PayloadSemanticState::UNKNOWN ||
@@ -975,6 +1036,16 @@ private:
             return;
         }
 
+        // P0-5: source 检查，禁止默认框发布到绿色 core marker
+        if (!isPreciseSource(display_state_.box_source)) {
+            // 绝对禁止默认框发布到绿色 core marker
+            publishDeleteAllCoreBoxThrottled();
+            ROS_DEBUG("[CargoBoxSource] track=%d source=%s action=NO_GREEN_BOX",
+                      display_state_.locked_track_id,
+                      sourceToString(display_state_.box_source));
+            return;
+        }
+
         // base_link → map 转换
         Eigen::Vector3f center_map = transformToMap(display_state_.center_base);
 
@@ -1010,11 +1081,18 @@ private:
 
         marker.scale.x = 0.05;  // 线宽
 
-        // 绿色线框
+        // P0-5: 根据 box_source 设置颜色和透明度
         marker.color.r = 0.0;
         marker.color.g = 1.0;
         marker.color.b = 0.0;
-        marker.color.a = 0.8;
+
+        if (display_state_.box_source == BOX_SOURCE_V2_CORE) {
+            marker.color.a = 0.9;  // 实线框
+        } else if (display_state_.box_source == BOX_SOURCE_LAST_GOOD) {
+            marker.color.a = 0.45;  // 半透明框
+        } else {
+            marker.color.a = 0.8;  // 默认
+        }
 
         marker.lifetime = ros::Duration(0.3);
 
