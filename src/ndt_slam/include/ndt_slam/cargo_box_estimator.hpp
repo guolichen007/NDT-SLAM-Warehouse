@@ -197,7 +197,8 @@ public:
         CargoBox& core_box,
         CargoBox& remove_box,
         CargoBox& forbidden_box,
-        const CargoBox* prev_core_box = nullptr);
+        const CargoBox* prev_core_box = nullptr,
+        bool is_locked_track = false);
 
     // 获取调试点云
     pcl::PointCloud<pcl::PointXYZ>::Ptr getHagFilteredCloud() const { return hag_filtered_cloud_; }
@@ -231,7 +232,9 @@ private:
         float ground_z,
         float& band_min_hag,
         float& band_max_hag,
-        pcl::PointCloud<pcl::PointXYZ>::Ptr& core_points_out);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& core_points_out,
+        int effective_min_z_band = 20,
+        int effective_min_core = 30);
 
     // 计算 core bbox（使用分位数）
     void computeCoreBbox(

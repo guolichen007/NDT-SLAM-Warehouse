@@ -5977,10 +5977,11 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                 const CargoBox* prev_core_box = track.has_last_core_box ? &track.last_core_box : nullptr;
 
                 CargoBox core_box, remove_box, forbidden_box;
+                // P0-5: 暂时传递 is_locked_track=false，后续再实现 locked track 判断
                 bool box_valid = cargo_box_estimator_.estimateCargoBox(
                     cluster_base, ground_model,
                     core_box, remove_box, forbidden_box,
-                    prev_core_box);
+                    prev_core_box, false);
 
                 if (!box_valid) {
                     // [CargoBoxReject] 日志（DEBUG）

@@ -243,9 +243,11 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
     float ground_z,
     float& band_min_hag,
     float& band_max_hag,
-    pcl::PointCloud<pcl::PointXYZ>::Ptr& core_points_out) {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& core_points_out,
+    int effective_min_z_band,
+    int effective_min_core) {
 
-    if (!points || points->size() < static_cast<size_t>(config_.min_z_band_points)) {
+    if (!points || points->size() < static_cast<size_t>(effective_min_z_band)) {
         return false;
     }
 
@@ -308,9 +310,9 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
         }
     }
 
-    if (best_count < config_.min_z_band_points) {
+    if (best_count < effective_min_z_band) {
         ROS_WARN("[CargoBoxV2] FAIL: best_count=%d < min_z_band_points=%d (hag_vals=%zu, bins=%d, dense_thresh=%d)",
-                  best_count, config_.min_z_band_points, hag_values.size(), num_bins, dense_thresh);
+                  best_count, effective_min_z_band, hag_values.size(), num_bins, dense_thresh);
         return false;
     }
 
@@ -338,9 +340,9 @@ bool CargoBoxEstimator::findDenseBandByHagHistogram(
         }
     }
 
-    if (core_points_out->size() < static_cast<size_t>(config_.min_core_points)) {
+    if (core_points_out->size() < static_cast<size_t>(effective_min_core)) {
         ROS_WARN("[CargoBoxV2] FAIL: core_points_out.size()=%zu < min_core_points=%d (band=[%.2f,%.2f])",
-                  core_points_out->size(), config_.min_core_points, band_min_hag, band_max_hag);
+                  core_points_out->size(), effective_min_core, band_min_hag, band_max_hag);
         return false;
     }
     return true;
@@ -516,11 +518,24 @@ bool CargoBoxEstimator::estimateCargoBox(
     CargoBox& core_box,
     CargoBox& remove_box,
     CargoBox& forbidden_box,
-    const CargoBox* prev_core_box) {
+    const CargoBox* prev_core_box,
+    bool is_locked_track) {
 
     if (!config_.enabled || !cluster || cluster->size() < static_cast<size_t>(config_.min_cluster_points)) {
         return false;
     }
+
+    // P0-5: 计算 effective 阈值
+    const int effective_min_core = is_locked_track
+        ? config_.locked_min_core_points
+        : config_.min_core_points;
+
+    const int effective_min_z_band = is_locked_track
+        ? config_.locked_min_z_band_points
+        : config_.min_z_band_points;
+
+    ROS_DEBUG("[CargoBoxV2Threshold] locked=%d effective_min_core=%d effective_min_z_band=%d",
+              is_locked_track ? 1 : 0, effective_min_core, effective_min_z_band);
 
     // 初始化调试点云
     hag_filtered_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
@@ -620,7 +635,8 @@ bool CargoBoxEstimator::estimateCargoBox(
     pcl::PointCloud<pcl::PointXYZ>::Ptr core_points(new pcl::PointCloud<pcl::PointXYZ>);
 
     if (!findDenseBandByHagHistogram(selected_component.points, ground_z,
-                                     band_min_hag, band_max_hag, core_points)) {
+                                     band_min_hag, band_max_hag, core_points,
+                                     effective_min_z_band, effective_min_core)) {
         ROS_DEBUG("[CargoBoxV2] Failed to find dense band");
         core_box.reject_reason = RejectReason::NO_DENSE_BAND;
         return false;
