@@ -3289,17 +3289,17 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                         ROS_DEBUG("[CargoRemoved] dynamic_payload points=%zu", track_result.dynamic_payload->size());
                     }
                 }
-
-                // ========== HookFixedCargoDetector ==========
-                ROS_INFO_THROTTLE(2.0, "[HookFixedCargoDetector] calling detectHookFixedCargo, cloud_size=%zu",
-                                  filtered_cloud ? filtered_cloud->size() : 0);
-                hook_fixed_cargo_ = detectHookFixedCargo(filtered_cloud, stamp);
-                hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
-                publishSelectedCorePoints(hook_fixed_cargo_, stamp);
-
-                // 发布吊货跟踪信息（用于避障节点）
-                publishPayloadTrackInfo(stamp);
             }
+
+            // ========== HookFixedCargoDetector（每帧都执行，不受 payload_tracker 影响）==========
+            ROS_INFO_THROTTLE(2.0, "[HookFixedCargoDetector] calling detectHookFixedCargo, cloud_size=%zu",
+                              filtered_cloud ? filtered_cloud->size() : 0);
+            hook_fixed_cargo_ = detectHookFixedCargo(filtered_cloud, stamp);
+            hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
+            publishSelectedCorePoints(hook_fixed_cargo_, stamp);
+
+            // 发布吊货跟踪信息（用于避障节点）
+            publishPayloadTrackInfo(stamp);
 
             // ========== HumanObjectDynamicFilter（人体动态过滤）==========
             pcl::PointCloud<pcl::PointXYZ>::Ptr kf_human_safe_objects(new pcl::PointCloud<pcl::PointXYZ>);
