@@ -246,6 +246,9 @@ public:
     // 获取当前最可信的动态吊货 track
     bool getBestDynamicPayloadTrack(PayloadTrackInfo& out) const;
 
+    // Commit B: 根据 track_id 获取 track
+    bool getTrackById(int track_id, PayloadTrackInfo& out) const;
+
     // 获取配置
     const PayloadTrackerConfig& getConfig() const { return config_; }
 

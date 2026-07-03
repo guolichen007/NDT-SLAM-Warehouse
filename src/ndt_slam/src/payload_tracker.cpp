@@ -688,6 +688,80 @@ bool PayloadTrackManager::getBestDynamicPayloadTrack(PayloadTrackInfo& out) cons
     return true;
 }
 
+// Commit B: 根据 track_id 获取 track
+bool PayloadTrackManager::getTrackById(int track_id, PayloadTrackInfo& out) const {
+    const ObjectTrack* target = nullptr;
+
+    for (const auto& t : tracks_) {
+        if (t.track_id == track_id) {
+            target = &t;
+            break;
+        }
+    }
+
+    if (!target) return false;
+
+    out.track_id = target->track_id;
+
+    // 统一状态编码：TrackState -> PayloadSemanticState
+    switch (target->state) {
+        case TrackState::NEW:
+        case TrackState::PENDING_STATIC:
+            out.state = 2;  // SUSPENDED_CANDIDATE
+            break;
+        case TrackState::DYNAMIC_PAYLOAD:
+        case TrackState::SUSPENDED_MOVING:
+            out.state = 3;  // SUSPENDED_MOVING
+            break;
+        case TrackState::SUSPENDED_STATIC:
+            out.state = 4;  // SUSPENDED_STATIC
+            break;
+        case TrackState::EXPIRED:
+            out.state = 7;  // LOST
+            break;
+        default:
+            out.state = 0;  // UNKNOWN
+            break;
+    }
+
+    // 使用 display bbox
+    out.centroid_map = target->centroid_map_display;
+    out.bbox_min_map = target->bbox_min_map_display;
+    out.bbox_max_map = target->bbox_max_map_display;
+
+    // 使用最近一帧的实际点数
+    out.point_count = target->cloud_history.empty() ? 0 : target->cloud_history.back()->size();
+    out.direction_consistency = target->direction_consistency;
+    out.map_displacement = target->map_displacement;
+
+    // 计算 track_duration
+    out.track_duration = static_cast<float>(target->last_seen_time - target->first_seen_time);
+
+    // 从轨迹计算速度向量
+    if (target->trajectory_map.size() >= 2) {
+        const auto& last = target->trajectory_map.back();
+        const auto& prev = target->trajectory_map[target->trajectory_map.size() - 2];
+        Eigen::Vector3f dir = (last.position - prev.position);
+        float dist = dir.norm();
+        if (dist > 0.001f) {
+            dir /= dist;
+            out.velocity_map = dir * target->velocity;
+        }
+    }
+
+    // 复制 CargoBoxV2 的 core_box 信息
+    if (target->has_last_core_box) {
+        out.has_core_box = true;
+        out.core_box_base = target->last_core_box;
+        out.using_last_good_box = target->using_last_good_box;
+    } else {
+        out.has_core_box = false;
+        out.using_last_good_box = false;
+    }
+
+    return true;
+}
+
 // ========== P0.5 新增：base_link 下的 EMA 平滑 ==========
 
 void PayloadTrackManager::updateBaseEma(ObjectTrack& track, const ClusterInfo& cluster_base) {

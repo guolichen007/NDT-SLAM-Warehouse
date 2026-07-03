@@ -808,6 +808,11 @@ private:
         double trajectory_length = 0.0;
         int loop_closures = 0;
     };
+
+    // ========== Commit B: cargo target 一致性 ==========
+    int selected_payload_track_id_ = -1;
+    bool has_selected_payload_track_ = false;
+    ros::Time selected_payload_stamp_;
 };
 
 } // namespace ndt_slam

@@ -5248,7 +5248,23 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
     PayloadTrackInfo track;
     std_msgs::Float32MultiArray msg;
 
-    if (payload_tracker_.getBestDynamicPayloadTrack(track)) {
+    // Commit B: 只发布 selected_payload_track_id_ 对应的 track
+    bool has_track = false;
+    if (has_selected_payload_track_) {
+        has_track = payload_tracker_.getTrackById(selected_payload_track_id_, track);
+        if (!has_track) {
+            ROS_WARN_THROTTLE(1.0,
+                "[CargoTargetConsistency] boxfollow_track=%d payload_track=-1 match=0 reason=no_selected_track",
+                selected_payload_track_id_);
+            has_selected_payload_track_ = false;
+        }
+    }
+
+    if (!has_track) {
+        has_track = payload_tracker_.getBestDynamicPayloadTrack(track);
+    }
+
+    if (has_track) {
         // 有有效 track
         // 计算 score（综合评分）
         float score = track.track_duration * 0.3f + track.direction_consistency * 0.7f;
@@ -6196,6 +6212,11 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                             track.display_size.x(),
                             track.display_size.y(),
                             track.display_size.z());
+
+                        // Commit B: 保存 selected payload track
+                        selected_payload_track_id_ = track.track_id;
+                        has_selected_payload_track_ = true;
+                        selected_payload_stamp_ = stamp;
                     }
 
                     // 发布调试点云（每 20 帧一次）
