@@ -250,7 +250,15 @@ private:
 
     // 订阅者
     ros::Subscriber payload_track_sub_;
+    ros::Subscriber payload_precise_box_info_sub_;  // Commit C: 订阅 precise box info
     ros::Subscriber odom_sub_;  // P0.5: 订阅 odom 用于预测
+
+    // Commit C: precise box info 状态
+    bool precise_box_active_ = false;
+    ros::Time precise_box_stamp_;
+    std::vector<geometry_msgs::Point> precise_corners_map_;
+    int precise_track_id_ = -1;
+    int precise_source_ = BOX_SOURCE_NONE;
 
     // P0.5 新增：odom 状态
     Eigen::Vector3f last_odom_position_ = Eigen::Vector3f::Zero();
@@ -428,6 +436,9 @@ private:
     void setupSubscribers() {
         payload_track_sub_ = nh_.subscribe("/payload_track_info", 10,
                                            &CargoForbiddenZoneNode::payloadTrackCallback, this);
+        // Commit C: 订阅 payload_precise_box_info
+        payload_precise_box_info_sub_ = nh_.subscribe("/payload_precise_box_info", 10,
+                                                      &CargoForbiddenZoneNode::payloadPreciseBoxInfoCallback, this);
         // P0.5: 订阅 odom 用于预测
         odom_sub_ = nh_.subscribe("/odom", 10,
                                   &CargoForbiddenZoneNode::odomCallback, this);
@@ -457,6 +468,54 @@ private:
         last_odom_position_ = new_pos;
         last_odom_orientation_ = new_ori;
         has_odom_ = true;
+    }
+
+    // Commit C: payload_precise_box_info 回调
+    void payloadPreciseBoxInfoCallback(const std_msgs::Float32MultiArray::ConstPtr& msg) {
+        if (msg->data.size() < 40) {
+            return;
+        }
+
+        // 解析消息
+        constexpr int IDX_VALID = 0;
+        constexpr int IDX_TRACK_ID = 1;
+        constexpr int IDX_SOURCE = 2;
+        constexpr int IDX_CORNER_MAP_START = 16;
+
+        float valid = msg->data[IDX_VALID];
+        if (valid < 0.5f) {
+            // invalid，不更新
+            return;
+        }
+
+        int track_id = static_cast<int>(msg->data[IDX_TRACK_ID]);
+        int source = static_cast<int>(msg->data[IDX_SOURCE]);
+
+        // 只接受 V2_CORE 和 LAST_GOOD
+        if (source != BOX_SOURCE_V2_CORE && source != BOX_SOURCE_LAST_GOOD) {
+            return;
+        }
+
+        // 解析 8 个 map corners
+        precise_corners_map_.clear();
+        for (int i = 0; i < 8; i++) {
+            geometry_msgs::Point p;
+            p.x = msg->data[IDX_CORNER_MAP_START + i * 3 + 0];
+            p.y = msg->data[IDX_CORNER_MAP_START + i * 3 + 1];
+            p.z = msg->data[IDX_CORNER_MAP_START + i * 3 + 2];
+            precise_corners_map_.push_back(p);
+        }
+
+        precise_track_id_ = track_id;
+        precise_source_ = source;
+        precise_box_stamp_ = ros::Time::now();
+        precise_box_active_ = true;
+
+        ROS_INFO_THROTTLE(
+            1.0,
+            "[CargoMarkerMapCorners] track=%d source=%s valid=1 frame=map corners=8",
+            track_id,
+            source == BOX_SOURCE_V2_CORE ? "V2_CORE" : "LAST_GOOD");
     }
 
     // P0.5 新增：timer 高频发布 marker
@@ -1211,7 +1270,46 @@ private:
 
     // v8-stable-r3: LINE_LIST 线框 + map 坐标系 + odom 转换
     void publishThreeLayerMarkers(const ros::Time& stamp) {
-        // P0-4: 只读 display_state_，不依赖 cargo_.valid / cargo_state_
+        // Commit C: 优先使用 /payload_precise_box_info 的 map corners
+        if (precise_box_active_ && (ros::Time::now() - precise_box_stamp_).toSec() < 0.5) {
+            // 使用 map corners 发布 marker
+            visualization_msgs::Marker marker;
+            marker.header.frame_id = "map";
+            marker.header.stamp = ros::Time::now();
+            marker.ns = "cargo_core";
+            marker.id = 0;
+            marker.type = visualization_msgs::Marker::LINE_LIST;
+            marker.action = visualization_msgs::Marker::ADD;
+            marker.pose.orientation.w = 1.0;
+            marker.frame_locked = false;
+            marker.scale.x = 0.05;
+
+            // 根据 source 设置颜色
+            marker.color.r = 0.0;
+            marker.color.g = 1.0;
+            marker.color.b = 0.0;
+            marker.color.a = (precise_source_ == BOX_SOURCE_V2_CORE) ? 0.9f : 0.45f;
+            marker.lifetime = ros::Duration(0.3);
+
+            // 12 条边
+            const int edges[12][2] = {
+                {0,1},{1,2},{2,3},{3,0},
+                {4,5},{5,6},{6,7},{7,4},
+                {0,4},{1,5},{2,6},{3,7}
+            };
+
+            for (const auto& edge : edges) {
+                marker.points.push_back(precise_corners_map_[edge[0]]);
+                marker.points.push_back(precise_corners_map_[edge[1]]);
+            }
+
+            visualization_msgs::MarkerArray arr;
+            arr.markers.push_back(marker);
+            core_bbox_marker_pub_.publish(arr);
+            return;
+        }
+
+        // 旧的 display_state_ 逻辑（fallback）
         if (!display_state_.valid || !has_odom_) {
             publishDeleteAllCoreBoxThrottled();
             return;

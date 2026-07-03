@@ -5284,9 +5284,41 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
             bottom_hag = track.core_box_base.bottom_hag;
             core_pts = track.core_box_base.suspended_points;
 
-            box_source = track.using_last_good_box
-                ? BOX_SOURCE_LAST_GOOD
-                : BOX_SOURCE_V2_CORE;
+            // Commit D: 在设置 box_source 之前先计算 quality_pass
+            Eigen::Vector3f size = bbox_max - bbox_min;
+            float long_side = std::max(size.x(), size.y());
+            float short_side = std::min(size.x(), size.y());
+            float area = long_side * short_side;
+            bool quality_pass = true;
+
+            if (long_side < 0.50f) quality_pass = false;
+            if (short_side < 0.25f) quality_pass = false;
+            if (size.z() < 0.30f) quality_pass = false;
+            if (area < 0.25f) quality_pass = false;
+            if (long_side > 8.0f) quality_pass = false;
+            if (short_side > 5.0f) quality_pass = false;
+            if (size.z() > 3.0f) quality_pass = false;
+            if (track.core_box_base.suspended_points < 12) quality_pass = false;
+
+            // 根据 quality_pass 设置 box_source
+            if (!quality_pass) {
+                // 小碎片不通过质量门，降级为 OLD_BBOX
+                box_source = BOX_SOURCE_OLD_BBOX;
+                ROS_WARN_THROTTLE(1.0,
+                    "[CargoBoxQualityGate] track=%d pass=0 raw_source=V2_CORE final_source=OLD_BBOX size=(%.2f,%.2f,%.2f) long=%.2f short=%.2f core=%d",
+                    track.track_id, size.x(), size.y(), size.z(),
+                    long_side, short_side, track.core_box_base.suspended_points);
+            } else {
+                box_source = track.using_last_good_box
+                    ? BOX_SOURCE_LAST_GOOD
+                    : BOX_SOURCE_V2_CORE;
+                ROS_INFO_THROTTLE(1.0,
+                    "[CargoBoxQualityGate] track=%d pass=1 raw_source=V2_CORE final_source=%s size=(%.2f,%.2f,%.2f) long=%.2f short=%.2f core=%d",
+                    track.track_id,
+                    box_source == BOX_SOURCE_V2_CORE ? "V2_CORE" : "LAST_GOOD",
+                    size.x(), size.y(), size.z(),
+                    long_side, short_side, track.core_box_base.suspended_points);
+            }
 
             // [PayloadTrackInfoCore] 日志
             ROS_INFO_THROTTLE(
@@ -5294,7 +5326,7 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
                 "[PayloadTrackInfoCore] id=%d state=%d source=%s has_core=%d using_last_good=%d "
                 "bbox_min=(%.2f,%.2f,%.2f) bbox_max=(%.2f,%.2f,%.2f)",
                 track.track_id, track.state,
-                box_source == BOX_SOURCE_V2_CORE ? "V2_CORE" : "LAST_GOOD",
+                box_source == BOX_SOURCE_V2_CORE ? "V2_CORE" : (box_source == BOX_SOURCE_LAST_GOOD ? "LAST_GOOD" : "OLD_BBOX"),
                 track.has_core_box ? 1 : 0,
                 track.using_last_good_box ? 1 : 0,
                 bbox_min.x(), bbox_min.y(), bbox_min.z(),
