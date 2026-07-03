@@ -5262,14 +5262,42 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
         }
     }
 
+    // P0-6: 不允许 fallback，只发布 selected track
     if (!has_track) {
-        has_track = payload_tracker_.getBestDynamicPayloadTrack(track);
+        // 发布 invalid
+        msg.data = {
+            -1.0f,   // IDX_VALID: 无效
+            -1.0f,   // IDX_TRACK_ID
+            0.0f,    // IDX_STATE = NONE
+            0.0f, 0.0f, 0.0f,  // centroid
+            0.0f, 0.0f, 0.0f,  // velocity
+            0.0f, 0.0f, 0.0f,  // bbox_min
+            0.0f, 0.0f, 0.0f,  // bbox_max
+            0.0f,              // point_count
+            0.0f,              // score
+            0.0f,              // bottom_hag
+            0.0f,              // support_ratio
+            0.0f               // box_source = NONE
+        };
+
+        ROS_INFO_THROTTLE(1.0,
+            "[CargoTargetHardCheck] selected=%d payload=-1 match=0 reason=no_selected_track",
+            selected_payload_track_id_);
+
+        payload_track_info_pub_.publish(msg);
+        return;
     }
 
     if (has_track) {
         // 有有效 track
         // 计算 score（综合评分）
         float score = track.track_duration * 0.3f + track.direction_consistency * 0.7f;
+
+        // P0-6: CargoTargetHardCheck 日志
+        ROS_INFO_THROTTLE(1.0,
+            "[CargoTargetHardCheck] selected=%d payload=%d match=1 source=%s",
+            selected_payload_track_id_, track.track_id,
+            track.has_core_box ? "HAS_CORE" : "NO_CORE");
 
         // P0-5: 使用 core_box 如果可用，否则使用旧 bbox
         Eigen::Vector3f bbox_min, bbox_max;
@@ -5302,10 +5330,10 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
 
             // 根据 quality_pass 设置 box_source
             if (!quality_pass) {
-                // 小碎片不通过质量门，降级为 OLD_BBOX
-                box_source = BOX_SOURCE_OLD_BBOX;
+                // P0-6: pass=0 不准 OLD_BBOX，使用 NONE
+                box_source = BOX_SOURCE_NONE;
                 ROS_WARN_THROTTLE(1.0,
-                    "[CargoBoxQualityGate] track=%d pass=0 raw_source=V2_CORE final_source=OLD_BBOX size=(%.2f,%.2f,%.2f) long=%.2f short=%.2f core=%d",
+                    "[CargoBoxQualityGate] track=%d pass=0 final_source=NONE size=(%.2f,%.2f,%.2f) long=%.2f short=%.2f core=%d action=NO_GREEN_BOX",
                     track.track_id, size.x(), size.y(), size.z(),
                     long_side, short_side, track.core_box_base.suspended_points);
             } else {
@@ -5313,7 +5341,7 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
                     ? BOX_SOURCE_LAST_GOOD
                     : BOX_SOURCE_V2_CORE;
                 ROS_INFO_THROTTLE(1.0,
-                    "[CargoBoxQualityGate] track=%d pass=1 raw_source=V2_CORE final_source=%s size=(%.2f,%.2f,%.2f) long=%.2f short=%.2f core=%d",
+                    "[CargoBoxQualityGate] track=%d pass=1 final_source=%s size=(%.2f,%.2f,%.2f) long=%.2f short=%.2f core=%d action=GREEN_BOX",
                     track.track_id,
                     box_source == BOX_SOURCE_V2_CORE ? "V2_CORE" : "LAST_GOOD",
                     size.x(), size.y(), size.z(),
@@ -6170,11 +6198,13 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                 const CargoBox* prev_core_box = track.has_last_core_box ? &track.last_core_box : nullptr;
 
                 CargoBox core_box, remove_box, forbidden_box;
-                // P0-5: 暂时传递 is_locked_track=false，后续再实现 locked track 判断
+                // P0-6: 计算 is_locked_track
+                bool is_locked_track = track.observed_frames >= 3 ||
+                                       track.has_last_core_box;
                 bool box_valid = cargo_box_estimator_.estimateCargoBox(
                     cluster_base, ground_model,
                     core_box, remove_box, forbidden_box,
-                    prev_core_box, false);
+                    prev_core_box, is_locked_track);
 
                 if (!box_valid) {
                     // [CargoBoxReject] 日志（DEBUG）

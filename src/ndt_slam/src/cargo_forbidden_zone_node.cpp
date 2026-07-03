@@ -298,6 +298,10 @@ private:
 
     CargoDisplayState display_state_;
 
+    // P0-6: marker 模式参数
+    bool use_precise_map_corners_marker_ = false;
+    bool use_base_link_marker_ = true;
+
     // P0-4: 常量定义
     static constexpr double DISPLAY_HOLD_TIME_SEC = 1.2;
     static constexpr double JUMP_REJECT_GATE_M = 1.20;
@@ -313,6 +317,13 @@ private:
     void loadConfig() {
         std::string config_file;
         pnh_.param<std::string>("config_file", config_file, "");
+
+        // P0-6: 读取 marker 模式参数
+        pnh_.param<bool>("use_precise_map_corners_marker", use_precise_map_corners_marker_, false);
+        pnh_.param<bool>("use_base_link_marker", use_base_link_marker_, true);
+
+        ROS_INFO("[CargoForbiddenZone] use_precise_map_corners_marker=%d use_base_link_marker=%d",
+                 use_precise_map_corners_marker_ ? 1 : 0, use_base_link_marker_ ? 1 : 0);
 
         // P0-3: 配置加载保护
         if (config_file.empty()) {
@@ -562,6 +573,19 @@ private:
 
         // P0-5: 读取 box_source
         cargo_.box_source = static_cast<int>(msg->data[IDX_BOX_SOURCE]);
+
+        // P0-6: 无效 source 必须清框
+        if (!isPreciseSource(cargo_.box_source)) {
+            display_state_.valid = false;
+            has_precise_bbox_ = false;
+            publishDeleteAllCoreBoxThrottled();
+
+            ROS_INFO_THROTTLE(
+                1.0,
+                "[CargoDisplayClear] source=%s action=DELETEALL",
+                sourceToString(cargo_.box_source));
+            return;
+        }
 
         // v8: 更新 observed_frames_
         if (cargo_.track_id == current_track_id_) {
@@ -1268,56 +1292,25 @@ private:
         return last_odom_position_ + rotated;
     }
 
-    // v8-stable-r3: LINE_LIST 线框 + map 坐标系 + odom 转换
+    // v8-stable-r3: LINE_LIST 线框 + base_link 坐标系 + frame_locked
     void publishThreeLayerMarkers(const ros::Time& stamp) {
-        // Commit C: 优先使用 /payload_precise_box_info 的 map corners
-        if (precise_box_active_ && (ros::Time::now() - precise_box_stamp_).toSec() < 0.5) {
-            // 使用 map corners 发布 marker
-            visualization_msgs::Marker marker;
-            marker.header.frame_id = "map";
-            marker.header.stamp = ros::Time::now();
-            marker.ns = "cargo_core";
-            marker.id = 0;
-            marker.type = visualization_msgs::Marker::LINE_LIST;
-            marker.action = visualization_msgs::Marker::ADD;
-            marker.pose.orientation.w = 1.0;
-            marker.frame_locked = false;
-            marker.scale.x = 0.05;
-
-            // 根据 source 设置颜色
-            marker.color.r = 0.0;
-            marker.color.g = 1.0;
-            marker.color.b = 0.0;
-            marker.color.a = (precise_source_ == BOX_SOURCE_V2_CORE) ? 0.9f : 0.45f;
-            marker.lifetime = ros::Duration(0.3);
-
-            // 12 条边
-            const int edges[12][2] = {
-                {0,1},{1,2},{2,3},{3,0},
-                {4,5},{5,6},{6,7},{7,4},
-                {0,4},{1,5},{2,6},{3,7}
-            };
-
-            for (const auto& edge : edges) {
-                marker.points.push_back(precise_corners_map_[edge[0]]);
-                marker.points.push_back(precise_corners_map_[edge[1]]);
-            }
-
-            visualization_msgs::MarkerArray arr;
-            arr.markers.push_back(marker);
-            core_bbox_marker_pub_.publish(arr);
-            return;
+        // P0-6: 禁用 map corners 主显示，改用 base_link marker
+        if (use_precise_map_corners_marker_ &&
+            precise_box_active_ &&
+            (ros::Time::now() - precise_box_stamp_).toSec() < 0.5) {
+            // 只允许发 debug marker，不能发 /cargo_core_bbox_marker
+            ROS_INFO_THROTTLE(1.0, "[CargoMarkerMapCorners] debug_only=1 not_core_marker");
+            // 不 return，继续往下走 base_link marker
         }
 
-        // 旧的 display_state_ 逻辑（fallback）
-        if (!display_state_.valid || !has_odom_) {
+        // 检查 display_state 是否有效
+        if (!display_state_.valid) {
             publishDeleteAllCoreBoxThrottled();
             return;
         }
 
-        // P0-5: source 检查，禁止默认框发布到绿色 core marker
+        // source 检查，禁止默认框发布到绿色 core marker
         if (!isPreciseSource(display_state_.box_source)) {
-            // 绝对禁止默认框发布到绿色 core marker
             publishDeleteAllCoreBoxThrottled();
             ROS_DEBUG("[CargoBoxSource] track=%d source=%s action=NO_GREEN_BOX",
                       display_state_.locked_track_id,
@@ -1325,160 +1318,101 @@ private:
             return;
         }
 
-        // P0-5: frame guard - 检查 display_state 是否被污染
-        if (isPreciseSource(display_state_.box_source)) {
-            const float center_err = (display_state_.center_base - stable_centroid_).norm();
-
-            if (center_err > 0.30f) {
-                ROS_ERROR_THROTTLE(
-                    1.0,
-                    "[CargoFrameBug] display_center != bbox_center, skip marker "
-                    "display=(%.2f,%.2f,%.2f) bbox=(%.2f,%.2f,%.2f) err=%.2f",
-                    display_state_.center_base.x(), display_state_.center_base.y(), display_state_.center_base.z(),
-                    stable_centroid_.x(), stable_centroid_.y(), stable_centroid_.z(),
-                    center_err);
-                publishDeleteAllCoreBoxThrottled();
-                return;
-            }
-
-            if (std::abs(display_state_.center_base.z()) < 0.05f &&
-                display_state_.z_min_base > 0.3f) {
-                ROS_ERROR_THROTTLE(
-                    1.0,
-                    "[CargoFrameBug] center z polluted by odom/map origin, skip marker "
-                    "center=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
-                    display_state_.center_base.x(),
-                    display_state_.center_base.y(),
-                    display_state_.center_base.z(),
-                    display_state_.z_min_base,
-                    display_state_.z_max_base);
-                publishDeleteAllCoreBoxThrottled();
-                return;
-            }
+        // 检查是否启用 base_link marker
+        if (!use_base_link_marker_) {
+            publishDeleteAllCoreBoxThrottled();
+            return;
         }
 
         ROS_INFO_THROTTLE(
-            1.0,
-            "[CargoMarkerFrameCheck] track=%d source=%s "
-            "center_base=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
-            display_state_.locked_track_id,
-            sourceToString(display_state_.box_source),
-            display_state_.center_base.x(),
-            display_state_.center_base.y(),
-            display_state_.center_base.z(),
-            display_state_.size.x(),
-            display_state_.size.y(),
-            display_state_.size.z(),
-            display_state_.z_min_base,
-            display_state_.z_max_base);
+            2.0,
+            "[CargoMarkerMode] mode=base_link use_map_corners=%d",
+            use_precise_map_corners_marker_ ? 1 : 0);
 
-        // P0-5: 用真实几何生成 marker 8 个角点
-        // 在 base_link 下按 center + yaw + size 生成 8 个角点，再逐点 transform 到 map
+        // 构造 base_link marker
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = "base_link";
+        marker.header.stamp = ros::Time(0);
+        marker.ns = "cargo_core";
+        marker.id = 0;
+        marker.type = visualization_msgs::Marker::LINE_LIST;
+        marker.action = visualization_msgs::Marker::ADD;
+        marker.pose.orientation.w = 1.0;
+        marker.frame_locked = true;
+        marker.scale.x = 0.05;
+        marker.lifetime = ros::Duration(0.3);
+
+        // 根据 source 设置颜色
+        marker.color.r = 0.0;
+        marker.color.g = 1.0;
+        marker.color.b = 0.0;
+        marker.color.a = (display_state_.box_source == BOX_SOURCE_V2_CORE) ? 0.9f : 0.45f;
+
+        // 角点生成（base_link 坐标系）
         const float hx = std::max(display_state_.size.x() * 0.5f, 0.05f);
         const float hy = std::max(display_state_.size.y() * 0.5f, 0.05f);
         const float z_min = display_state_.z_min_base;
         const float z_max = display_state_.z_max_base;
 
-        // 质量检查
-        if (z_max <= z_min || display_state_.size.x() < 0.10f || display_state_.size.y() < 0.10f) {
-            ROS_WARN_THROTTLE(1.0, "[CargoBoxQuality] invalid geometry: z=[%.2f,%.2f] size=(%.2f,%.2f)",
-                              z_min, z_max, display_state_.size.x(), display_state_.size.y());
+        // z 检查
+        if (z_max <= z_min || (z_max - z_min) < 0.05f) {
+            ROS_WARN_THROTTLE(1.0, "[CargoMarkerBaseLink] invalid_z z=[%.2f,%.2f]", z_min, z_max);
             publishDeleteAllCoreBoxThrottled();
             return;
         }
 
-        const float cyaw = std::cos(display_state_.yaw_base);
-        const float syaw = std::sin(display_state_.yaw_base);
+        const float yaw = display_state_.yaw_base;
+        const float cy = std::cos(yaw);
+        const float sy = std::sin(yaw);
 
-        std::vector<Eigen::Vector3f> corners_base;
+        std::vector<Eigen::Vector2f> local_xy = {
+            {-hx, -hy}, {hx, -hy}, {hx, hy}, {-hx, hy}
+        };
+
+        std::vector<Eigen::Vector3f> corners;
         for (float z : {z_min, z_max}) {
-            for (auto xy : std::vector<Eigen::Vector2f>{
-                {-hx, -hy}, {hx, -hy}, {hx, hy}, {-hx, hy}
-            }) {
-                Eigen::Vector2f r;
-                r.x() = cyaw * xy.x() - syaw * xy.y();
-                r.y() = syaw * xy.x() + cyaw * xy.y();
-
+            for (const auto& xy : local_xy) {
                 Eigen::Vector3f p;
-                p.x() = display_state_.center_base.x() + r.x();
-                p.y() = display_state_.center_base.y() + r.y();
+                p.x() = display_state_.center_base.x() + cy * xy.x() - sy * xy.y();
+                p.y() = display_state_.center_base.y() + sy * xy.x() + cy * xy.y();
                 p.z() = z;
-
-                corners_base.push_back(p);
+                corners.push_back(p);
             }
         }
 
-        // 逐点 transform 到 map
-        std::vector<geometry_msgs::Point> corners_map;
-        for (const auto& p_base : corners_base) {
-            Eigen::Vector3f p_map = transformToMap(p_base);
-            geometry_msgs::Point q;
-            q.x = p_map.x();
-            q.y = p_map.y();
-            q.z = p_map.z();
-            corners_map.push_back(q);
-        }
-
-        // 发布 LINE_LIST 线框
-        visualization_msgs::Marker marker;
-        marker.header.frame_id = "map";
-        marker.header.stamp = ros::Time::now();
-        marker.ns = "cargo_core";
-        marker.id = 0;
-        marker.type = visualization_msgs::Marker::LINE_LIST;
-        marker.action = visualization_msgs::Marker::ADD;
-
-        marker.pose.orientation.w = 1.0;  // identity，点已经是 map 坐标
-        marker.frame_locked = false;
-
-        marker.scale.x = 0.05;  // 线宽
-
-        // P0-5: 根据 box_source 设置颜色和透明度
-        marker.color.r = 0.0;
-        marker.color.g = 1.0;
-        marker.color.b = 0.0;
-
-        if (display_state_.box_source == BOX_SOURCE_V2_CORE) {
-            marker.color.a = 0.9;  // 实线框
-        } else if (display_state_.box_source == BOX_SOURCE_LAST_GOOD) {
-            marker.color.a = 0.45;  // 半透明框
-        } else {
-            marker.color.a = 0.8;  // 默认
-        }
-
-        marker.lifetime = ros::Duration(0.3);
-
-        // P0-5: 12 条边，24 个点（使用 std::vector）
         const int edges[12][2] = {
             {0,1},{1,2},{2,3},{3,0},
             {4,5},{5,6},{6,7},{7,4},
             {0,4},{1,5},{2,6},{3,7}
         };
 
-        for (const auto& edge : edges) {
-            marker.points.push_back(corners_map[edge[0]]);
-            marker.points.push_back(corners_map[edge[1]]);
+        for (const auto& e : edges) {
+            geometry_msgs::Point p;
+            p.x = corners[e[0]].x();
+            p.y = corners[e[0]].y();
+            p.z = corners[e[0]].z();
+            marker.points.push_back(p);
+
+            p.x = corners[e[1]].x();
+            p.y = corners[e[1]].y();
+            p.z = corners[e[1]].z();
+            marker.points.push_back(p);
         }
 
+        // 发布 marker
         visualization_msgs::MarkerArray arr;
         arr.markers.push_back(marker);
         core_bbox_marker_pub_.publish(arr);
 
-        // P0-5: 质量检查日志
         ROS_INFO_THROTTLE(
             1.0,
-            "[CargoBoxQuality] source=%s track=%d center_base=(%.2f,%.2f,%.2f) "
-            "size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f] frame=base_to_map",
-            sourceToString(display_state_.box_source),
+            "[CargoMarkerBaseLink] track=%d source=%s frame=base_link frame_locked=1 "
+            "center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
             display_state_.locked_track_id,
-            display_state_.center_base.x(),
-            display_state_.center_base.y(),
-            display_state_.center_base.z(),
-            display_state_.size.x(),
-            display_state_.size.y(),
-            display_state_.size.z(),
-            display_state_.z_min_base,
-            display_state_.z_max_base);
+            sourceToString(display_state_.box_source),
+            display_state_.center_base.x(), display_state_.center_base.y(), display_state_.center_base.z(),
+            display_state_.size.x(), display_state_.size.y(), display_state_.size.z(),
+            display_state_.z_min_base, display_state_.z_max_base);
     }
 
     void publishDeleteAllCoreBox() {
