@@ -1728,6 +1728,12 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::filterOutlierPoints(const pcl::
     return filtered_cloud;
 }
 
+// CRITICAL RUNTIME CHAIN - DO NOT MODIFY
+// a7be4bf runtime pose chain must stay unchanged:
+// NDT/refined/EKF -> publishOdometry -> TF -> publishRuntimePath.
+// MotionGate controls MapCommit only.
+// raw_ndt_pose is allowed only as MapCommit evidence.
+// Do NOT route raw_pose/tracking_pose to odom/TF/runtime_path/current_cloud.
 void NdtSlamNode::publishOdometry(const ros::Time& stamp, const std::string& cloud_frame_id, const Sophus::SE3d& pose_override) {
     const Sophus::SE3d final_pose = pose_override.matrix().isIdentity() ?
         [this]() { std::lock_guard<std::mutex> lock(cloud_mutex_); return current_pose_; }() :
@@ -1798,6 +1804,12 @@ void NdtSlamNode::publishOdometry(const ros::Time& stamp, const std::string& clo
     path_pub_.publish(path_msg_);
 }
 
+// CRITICAL RUNTIME CHAIN - DO NOT MODIFY
+// a7be4bf runtime pose chain must stay unchanged:
+// NDT/refined/EKF -> publishOdometry -> TF -> publishRuntimePath.
+// MotionGate controls MapCommit only.
+// raw_ndt_pose is allowed only as MapCommit evidence.
+// Do NOT route raw_pose/tracking_pose to odom/TF/runtime_path/current_cloud.
 void NdtSlamNode::publishRuntimePath(const Sophus::SE3d& pose, const ros::Time& stamp) {
     Eigen::Vector3d t = pose.translation();
 
@@ -4594,6 +4606,12 @@ Sophus::SE3d NdtSlamNode::selectPublishedPose(
     return published_pose_;
 }
 
+// CRITICAL RUNTIME CHAIN - DO NOT MODIFY
+// a7be4bf runtime pose chain must stay unchanged:
+// NDT/refined/EKF -> publishOdometry -> TF -> publishRuntimePath.
+// MotionGate controls MapCommit only.
+// raw_ndt_pose is allowed only as MapCommit evidence.
+// Do NOT route raw_pose/tracking_pose to odom/TF/runtime_path/current_cloud.
 bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const ros::Time& current_time) {
     if (!motion_gate_enabled_) {
         return true;  // 未启用 MotionGate，始终允许
@@ -5747,6 +5765,12 @@ bool NdtSlamNode::isDuplicateFrameBySignature(const FrameSignature& cur) const
 // 正确顺序：ground/objects 分割 → CargoBoxV2 → 吊货删除 → HumanFilter → MapCommit
 // ============================================================================
 
+// CRITICAL RUNTIME CHAIN - DO NOT MODIFY
+// a7be4bf runtime pose chain must stay unchanged:
+// NDT/refined/EKF -> publishOdometry -> TF -> publishRuntimePath.
+// MotionGate controls MapCommit only.
+// raw_ndt_pose is allowed only as MapCommit evidence.
+// Do NOT route raw_pose/tracking_pose to odom/TF/runtime_path/current_cloud.
 void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
     const Sophus::SE3d& pose,
