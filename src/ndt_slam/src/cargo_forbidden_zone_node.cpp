@@ -246,10 +246,20 @@ private:
     void loadConfig() {
         std::string config_file;
         pnh_.param<std::string>("config_file", config_file, "");
+
+        // P0-3: 配置加载保护
         if (config_file.empty()) {
-            ROS_WARN("[CargoForbiddenZone] No config file specified, using defaults");
+            ROS_ERROR("[CargoForbiddenZone] config_file param is EMPTY");
             return;
         }
+
+        // 检查文件是否存在
+        std::ifstream f(config_file);
+        if (!f.good()) {
+            ROS_ERROR("[CargoForbiddenZone] config file does not exist: %s", config_file.c_str());
+            return;
+        }
+        f.close();
 
         try {
             YAML::Node cfg = YAML::LoadFile(config_file);
