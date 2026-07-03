@@ -821,6 +821,83 @@ private:
     ros::Publisher payload_precise_box_info_pub_;
     static constexpr int PRECISE_BOX_INFO_SIZE = 40;
     static constexpr int IDX_CORNER_MAP_START = 16;
+
+    // ========== HookFixedCargoDetector ==========
+    struct HookCargoDetection {
+        bool valid = false;
+        int local_id = 0;
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f size_visible = Eigen::Vector3f::Zero();
+        float z05 = 0.0f;
+        float z50 = 0.0f;
+        float z95 = 0.0f;
+        float visible_height = 0.0f;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr core_points_base;
+        float score = 0.0f;
+        std::string reject_reason;
+    };
+
+    struct HookCargoBottomEstimate {
+        bool valid = false;
+        float bottom_z_base = 0.0f;
+        float top_z_base = 0.0f;
+        float height = 0.0f;
+        float uncertainty = 0.0f;
+        float confidence = 0.0f;
+        std::string source;
+    };
+
+    struct HookFixedCargoConfig {
+        bool enabled = true;
+        float roi_center_x = 0.0f;
+        float roi_center_y = -2.2f;
+        float roi_half_x = 1.5f;
+        float roi_half_y = 1.5f;
+        float roi_z_min = 0.25f;
+        float roi_z_max = 3.0f;
+        float voxel_leaf = 0.05f;
+        float cluster_tolerance = 0.20f;
+        int min_cluster_points = 15;
+        int max_cluster_points = 8000;
+        float reject_rope_radius = 0.08f;
+        float reject_rope_min_z = 2.0f;
+        float reject_structure_z = 3.2f;
+        std::string xy_mode = "roi_center";
+        float xy_alpha = 0.15f;
+        float z_alpha = 0.30f;
+        float size_alpha = 0.20f;
+        float min_long_side = 0.30f;
+        float min_short_side = 0.20f;
+        float min_visible_height = 0.08f;
+        float max_long_side = 4.0f;
+        float max_short_side = 3.0f;
+        float max_height = 3.0f;
+        int bottom_min_points = 15;
+        float visible_side_min_height = 0.30f;
+        float bottom_band_height = 0.10f;
+        int bottom_band_min_points = 5;
+        int bottom_band_min_xy_cells = 2;
+        float bottom_xy_cell_size = 0.10f;
+        float points_uncertainty = 0.12f;
+        float height_memory_uncertainty = 0.18f;
+        float invalid_uncertainty = 0.30f;
+        float stable_height_alpha = 0.25f;
+        bool allow_visible_box_without_bottom = true;
+    };
+
+    HookFixedCargoConfig hook_fixed_config_;
+    HookCargoDetection hook_fixed_cargo_;
+    HookCargoBottomEstimate hook_fixed_bottom_;
+    float stable_height_ = 0.0f;
+    bool has_stable_height_ = false;
+
+    ros::Publisher cargo_selected_core_points_pub_;
+
+    HookCargoDetection detectHookFixedCargo(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base, const ros::Time& stamp);
+    HookCargoBottomEstimate estimateCargoBottom(const HookCargoDetection& detection);
+    void publishSelectedCorePoints(const HookCargoDetection& detection, const ros::Time& stamp);
+    Eigen::Vector3f smoothVector(const Eigen::Vector3f& current, const Eigen::Vector3f& new_val, float alpha);
+    float smoothFloat(float current, float new_val, float alpha);
 };
 
 } // namespace ndt_slam

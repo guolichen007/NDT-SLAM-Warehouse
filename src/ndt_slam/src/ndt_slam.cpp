@@ -94,6 +94,7 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     cargo_dynamic_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/cargo_dynamic_removed_cloud", 10);
     payload_track_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_track_info", 10);
     payload_precise_box_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_precise_box_info", 10);
+    cargo_selected_core_points_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/cargo_selected_core_points", 10);
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
     human_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_pending_cloud", 10);
@@ -176,6 +177,7 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     cargo_dynamic_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/cargo_dynamic_removed_cloud", 10);
     payload_track_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_track_info", 10);
     payload_precise_box_info_pub_ = nh_.advertise<std_msgs::Float32MultiArray>("/payload_precise_box_info", 10);
+    cargo_selected_core_points_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/cargo_selected_core_points", 10);
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
     human_pending_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_pending_cloud", 10);
@@ -828,6 +830,39 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                      adaptive_ndt_enabled_ ? 1 : 0,
                      adaptive_target_total_ms_,
                      adaptive_emergency_total_ms_);
+        }
+
+        // HookFixedCargoDetector 配置
+        if (config["hook_fixed_cargo_detector"]) {
+            const auto hfc = config["hook_fixed_cargo_detector"];
+            hook_fixed_config_.enabled = hfc["enabled"].as<bool>(true);
+            hook_fixed_config_.roi_center_x = hfc["roi_center_x"].as<float>(0.0f);
+            hook_fixed_config_.roi_center_y = hfc["roi_center_y"].as<float>(-2.2f);
+            hook_fixed_config_.roi_half_x = hfc["roi_half_x"].as<float>(1.5f);
+            hook_fixed_config_.roi_half_y = hfc["roi_half_y"].as<float>(1.5f);
+            hook_fixed_config_.roi_z_min = hfc["roi_z_min"].as<float>(0.25f);
+            hook_fixed_config_.roi_z_max = hfc["roi_z_max"].as<float>(3.0f);
+            hook_fixed_config_.voxel_leaf = hfc["voxel_leaf"].as<float>(0.05f);
+            hook_fixed_config_.cluster_tolerance = hfc["cluster_tolerance"].as<float>(0.20f);
+            hook_fixed_config_.min_cluster_points = hfc["min_cluster_points"].as<int>(15);
+            hook_fixed_config_.max_cluster_points = hfc["max_cluster_points"].as<int>(8000);
+            hook_fixed_config_.reject_rope_radius = hfc["reject_rope_radius"].as<float>(0.08f);
+            hook_fixed_config_.reject_rope_min_z = hfc["reject_rope_min_z"].as<float>(2.0f);
+            hook_fixed_config_.reject_structure_z = hfc["reject_structure_z"].as<float>(3.2f);
+            hook_fixed_config_.xy_mode = hfc["xy_mode"].as<std::string>("roi_center");
+            hook_fixed_config_.min_long_side = hfc["min_long_side"].as<float>(0.30f);
+            hook_fixed_config_.min_short_side = hfc["min_short_side"].as<float>(0.20f);
+            hook_fixed_config_.min_visible_height = hfc["min_visible_height"].as<float>(0.08f);
+            hook_fixed_config_.max_long_side = hfc["max_long_side"].as<float>(4.0f);
+            hook_fixed_config_.max_short_side = hfc["max_short_side"].as<float>(3.0f);
+            hook_fixed_config_.max_height = hfc["max_height"].as<float>(3.0f);
+            hook_fixed_config_.allow_visible_box_without_bottom = hfc["allow_visible_box_without_bottom"].as<bool>(true);
+
+            ROS_INFO("[HookFixedCargoDetector] enabled=%d roi_center=(%.2f,%.2f) roi_half=(%.2f,%.2f) z=[%.2f,%.2f]",
+                     hook_fixed_config_.enabled ? 1 : 0,
+                     hook_fixed_config_.roi_center_x, hook_fixed_config_.roi_center_y,
+                     hook_fixed_config_.roi_half_x, hook_fixed_config_.roi_half_y,
+                     hook_fixed_config_.roi_z_min, hook_fixed_config_.roi_z_max);
         }
 
     } catch (const YAML::Exception& e) {
@@ -3255,6 +3290,11 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                     }
                 }
 
+                // ========== HookFixedCargoDetector ==========
+                hook_fixed_cargo_ = detectHookFixedCargo(filtered_cloud, stamp);
+                hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
+                publishSelectedCorePoints(hook_fixed_cargo_, stamp);
+
                 // 发布吊货跟踪信息（用于避障节点）
                 publishPayloadTrackInfo(stamp);
             }
@@ -5244,173 +5284,345 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
     active_map_rebuild_running_ = false;
 }
 
+// ========== HookFixedCargoDetector ==========
+
+NdtSlamNode::HookCargoDetection NdtSlamNode::detectHookFixedCargo(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base, const ros::Time& stamp) {
+    HookCargoDetection result;
+
+    if (!hook_fixed_config_.enabled || !cloud_base || cloud_base->empty()) {
+        result.reject_reason = "disabled_or_empty";
+        return result;
+    }
+
+    // 1. CropBox 裁剪固定 ROI
+    pcl::PointCloud<pcl::PointXYZ>::Ptr roi_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    for (const auto& p : cloud_base->points) {
+        if (p.x >= hook_fixed_config_.roi_center_x - hook_fixed_config_.roi_half_x &&
+            p.x <= hook_fixed_config_.roi_center_x + hook_fixed_config_.roi_half_x &&
+            p.y >= hook_fixed_config_.roi_center_y - hook_fixed_config_.roi_half_y &&
+            p.y <= hook_fixed_config_.roi_center_y + hook_fixed_config_.roi_half_y &&
+            p.z >= hook_fixed_config_.roi_z_min &&
+            p.z <= hook_fixed_config_.roi_z_max) {
+            roi_cloud->points.push_back(p);
+        }
+    }
+
+    ROS_INFO_THROTTLE(1.0, "[HookFixedCargoROI] points_in=%zu points_after_roi=%zu",
+                      cloud_base->size(), roi_cloud->size());
+
+    if (roi_cloud->size() < static_cast<size_t>(hook_fixed_config_.min_cluster_points)) {
+        result.reject_reason = "roi_too_few_points";
+        return result;
+    }
+
+    // 2. 过滤吊具/钢丝绳/上方结构
+    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    for (const auto& p : roi_cloud->points) {
+        float dist_xy = std::sqrt(p.x * p.x + p.y * p.y);
+        bool is_rope = dist_xy < hook_fixed_config_.reject_rope_radius &&
+                       p.z > hook_fixed_config_.reject_rope_min_z;
+        bool is_structure = p.z > hook_fixed_config_.reject_structure_z;
+
+        if (!is_rope && !is_structure) {
+            filtered_cloud->points.push_back(p);
+        }
+    }
+
+    if (filtered_cloud->size() < static_cast<size_t>(hook_fixed_config_.min_cluster_points)) {
+        result.reject_reason = "filtered_too_few_points";
+        return result;
+    }
+
+    // 3. Voxel 下采样
+    pcl::PointCloud<pcl::PointXYZ>::Ptr voxel_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::VoxelGrid<pcl::PointXYZ> voxel;
+    voxel.setInputCloud(filtered_cloud);
+    voxel.setLeafSize(hook_fixed_config_.voxel_leaf, hook_fixed_config_.voxel_leaf, hook_fixed_config_.voxel_leaf);
+    voxel.filter(*voxel_cloud);
+
+    // 4. 欧式聚类
+    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+    tree->setInputCloud(voxel_cloud);
+
+    std::vector<pcl::PointIndices> cluster_indices;
+    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
+    ec.setClusterTolerance(hook_fixed_config_.cluster_tolerance);
+    ec.setMinClusterSize(hook_fixed_config_.min_cluster_points);
+    ec.setMaxClusterSize(hook_fixed_config_.max_cluster_points);
+    ec.setSearchMethod(tree);
+    ec.setInputCloud(voxel_cloud);
+    ec.extract(cluster_indices);
+
+    ROS_INFO_THROTTLE(1.0, "[HookFixedCargoROI] clusters=%zu", cluster_indices.size());
+
+    if (cluster_indices.empty()) {
+        result.reject_reason = "no_clusters";
+        return result;
+    }
+
+    // 5. 选择最佳候选
+    Eigen::Vector3f roi_center(hook_fixed_config_.roi_center_x, hook_fixed_config_.roi_center_y, 0.0f);
+    int best_idx = -1;
+    float best_score = -1.0f;
+
+    for (size_t i = 0; i < cluster_indices.size(); i++) {
+        const auto& indices = cluster_indices[i];
+
+        // 提取点云
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cluster_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        for (int idx : indices.indices) {
+            cluster_cloud->points.push_back(voxel_cloud->points[idx]);
+        }
+
+        // 计算 bbox（手动计算 min/max）
+        float min_x = std::numeric_limits<float>::max();
+        float min_y = std::numeric_limits<float>::max();
+        float min_z = std::numeric_limits<float>::max();
+        float max_x = std::numeric_limits<float>::lowest();
+        float max_y = std::numeric_limits<float>::lowest();
+        float max_z = std::numeric_limits<float>::lowest();
+
+        for (const auto& p : cluster_cloud->points) {
+            min_x = std::min(min_x, p.x);
+            min_y = std::min(min_y, p.y);
+            min_z = std::min(min_z, p.z);
+            max_x = std::max(max_x, p.x);
+            max_y = std::max(max_y, p.y);
+            max_z = std::max(max_z, p.z);
+        }
+
+        Eigen::Vector3f center_base(
+            (min_x + max_x) / 2.0f,
+            (min_y + max_y) / 2.0f,
+            (min_z + max_z) / 2.0f);
+        Eigen::Vector3f size_visible(
+            max_x - min_x,
+            max_y - min_y,
+            max_z - min_z);
+
+        // 尺寸检查
+        float long_side = std::max(size_visible.x(), size_visible.y());
+        float short_side = std::min(size_visible.x(), size_visible.y());
+        float visible_height = size_visible.z();
+
+        if (long_side < hook_fixed_config_.min_long_side ||
+            short_side < hook_fixed_config_.min_short_side ||
+            visible_height < hook_fixed_config_.min_visible_height ||
+            long_side > hook_fixed_config_.max_long_side ||
+            short_side > hook_fixed_config_.max_short_side ||
+            visible_height > hook_fixed_config_.max_height) {
+            continue;
+        }
+
+        // 计算到 ROI 中心的距离
+        float dist_to_center = (center_base.head<2>() - roi_center.head<2>()).norm();
+
+        // 计算质量分数（距离越近越好，点数越多越好）
+        float center_score = 1.0f - (dist_to_center / 3.0f);
+        float points_score = std::min(1.0f, static_cast<float>(cluster_cloud->size()) / 100.0f);
+        float score = center_score * 0.6f + points_score * 0.4f;
+
+        if (score > best_score) {
+            best_score = score;
+            best_idx = i;
+        }
+    }
+
+    if (best_idx < 0) {
+        result.reject_reason = "no_valid_cluster";
+        return result;
+    }
+
+    // 6. 构建结果
+    const auto& best_indices = cluster_indices[best_idx];
+    result.core_points_base.reset(new pcl::PointCloud<pcl::PointXYZ>);
+
+    float min_x = std::numeric_limits<float>::max();
+    float min_y = std::numeric_limits<float>::max();
+    float min_z = std::numeric_limits<float>::max();
+    float max_x = std::numeric_limits<float>::lowest();
+    float max_y = std::numeric_limits<float>::lowest();
+    float max_z = std::numeric_limits<float>::lowest();
+
+    for (int idx : best_indices.indices) {
+        const auto& p = voxel_cloud->points[idx];
+        result.core_points_base->points.push_back(p);
+        min_x = std::min(min_x, p.x);
+        min_y = std::min(min_y, p.y);
+        min_z = std::min(min_z, p.z);
+        max_x = std::max(max_x, p.x);
+        max_y = std::max(max_y, p.y);
+        max_z = std::max(max_z, p.z);
+    }
+
+    result.center_base = Eigen::Vector3f(
+        (min_x + max_x) / 2.0f,
+        (min_y + max_y) / 2.0f,
+        (min_z + max_z) / 2.0f);
+    result.size_visible = Eigen::Vector3f(
+        max_x - min_x,
+        max_y - min_y,
+        max_z - min_z);
+    result.z05 = min_z;
+    result.z50 = (min_z + max_z) / 2.0f;
+    result.z95 = max_z;
+    result.visible_height = max_z - min_z;
+    result.score = best_score;
+    result.valid = true;
+    result.local_id = best_idx;
+
+    ROS_INFO_THROTTLE(1.0, "[HookFixedCargoSelect] valid=1 id=%d center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) points=%zu",
+                      result.local_id,
+                      result.center_base.x(), result.center_base.y(), result.center_base.z(),
+                      result.size_visible.x(), result.size_visible.y(), result.size_visible.z(),
+                      result.core_points_base->size());
+
+    return result;
+}
+
+NdtSlamNode::HookCargoBottomEstimate NdtSlamNode::estimateCargoBottom(const HookCargoDetection& detection) {
+    HookCargoBottomEstimate result;
+
+    if (!detection.valid || !detection.core_points_base || detection.core_points_base->empty()) {
+        result.source = "invalid";
+        result.uncertainty = hook_fixed_config_.invalid_uncertainty;
+        return result;
+    }
+
+    // 计算 z05, z50, z95
+    std::vector<float> z_values;
+    for (const auto& p : detection.core_points_base->points) {
+        z_values.push_back(p.z);
+    }
+    std::sort(z_values.begin(), z_values.end());
+
+    float z05 = z_values[static_cast<size_t>(z_values.size() * 0.05)];
+    float z50 = z_values[static_cast<size_t>(z_values.size() * 0.50)];
+    float z95 = z_values[static_cast<size_t>(z_values.size() * 0.95)];
+    float visible_height = z95 - z05;
+
+    // 检查 side_visible
+    int bottom_band_points = 0;
+    for (float z : z_values) {
+        if (z >= z05 && z <= z05 + hook_fixed_config_.bottom_band_height) {
+            bottom_band_points++;
+        }
+    }
+
+    bool side_visible = visible_height >= hook_fixed_config_.visible_side_min_height &&
+                        bottom_band_points >= hook_fixed_config_.bottom_band_min_points;
+
+    if (side_visible) {
+        result.valid = true;
+        result.bottom_z_base = z05;
+        result.top_z_base = z95;
+        result.height = visible_height;
+        result.source = "points_visible_side";
+        result.uncertainty = hook_fixed_config_.points_uncertainty;
+        result.confidence = 0.8f;
+
+        // 更新 stable_height
+        if (!has_stable_height_) {
+            stable_height_ = visible_height;
+            has_stable_height_ = true;
+        } else {
+            stable_height_ = hook_fixed_config_.stable_height_alpha * visible_height +
+                            (1.0f - hook_fixed_config_.stable_height_alpha) * stable_height_;
+        }
+
+        ROS_INFO_THROTTLE(1.0, "[CargoBottom] source=points_visible_side z05=%.2f z50=%.2f z95=%.2f visible_h=%.2f band_pts=%d bottom=%.2f top=%.2f h=%.2f unc=%.2f conf=%.2f",
+                          z05, z50, z95, visible_height, bottom_band_points,
+                          result.bottom_z_base, result.top_z_base, result.height,
+                          result.uncertainty, result.confidence);
+    } else if (has_stable_height_) {
+        result.valid = true;
+        result.top_z_base = z95;
+        result.bottom_z_base = z95 - stable_height_;
+        result.height = stable_height_;
+        result.source = "height_memory";
+        result.uncertainty = hook_fixed_config_.height_memory_uncertainty;
+        result.confidence = 0.6f;
+
+        ROS_INFO_THROTTLE(1.0, "[CargoBottom] source=height_memory z95=%.2f stable_h=%.2f bottom=%.2f top=%.2f unc=%.2f",
+                          z95, stable_height_, result.bottom_z_base, result.top_z_base, result.uncertainty);
+    } else {
+        result.valid = false;
+        result.source = "invalid";
+        result.uncertainty = hook_fixed_config_.invalid_uncertainty;
+        result.confidence = 0.0f;
+
+        ROS_INFO_THROTTLE(1.0, "[CargoBottom] source=invalid reason=no_side_no_height_memory z05=%.2f z95=%.2f visible_h=%.2f",
+                          z05, z95, visible_height);
+    }
+
+    return result;
+}
+
+void NdtSlamNode::publishSelectedCorePoints(const HookCargoDetection& detection, const ros::Time& stamp) {
+    sensor_msgs::PointCloud2 msg;
+    if (detection.valid && detection.core_points_base && !detection.core_points_base->empty()) {
+        pcl::toROSMsg(*detection.core_points_base, msg);
+        msg.header.stamp = stamp;
+        msg.header.frame_id = "base_link";
+
+        ROS_INFO_THROTTLE(1.0, "[CargoSelectedCorePoints] source=hook_fixed_roi points=%zu frame=base_link",
+                          detection.core_points_base->size());
+    } else {
+        msg.header.stamp = stamp;
+        msg.header.frame_id = "base_link";
+    }
+    cargo_selected_core_points_pub_.publish(msg);
+}
+
+Eigen::Vector3f NdtSlamNode::smoothVector(const Eigen::Vector3f& current, const Eigen::Vector3f& new_val, float alpha) {
+    return current * (1.0f - alpha) + new_val * alpha;
+}
+
+float NdtSlamNode::smoothFloat(float current, float new_val, float alpha) {
+    return current * (1.0f - alpha) + new_val * alpha;
+}
+
 // ========== 吊货跟踪信息发布 ==========
 
 void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
-    PayloadTrackInfo track;
     std_msgs::Float32MultiArray msg;
 
-    // Commit B: 只发布 selected_payload_track_id_ 对应的 track
-    bool has_track = false;
-    if (has_selected_payload_track_) {
-        has_track = payload_tracker_.getTrackById(selected_payload_track_id_, track);
-        if (!has_track) {
-            ROS_WARN_THROTTLE(1.0,
-                "[CargoTargetConsistency] boxfollow_track=%d payload_track=-1 match=0 reason=no_selected_track",
-                selected_payload_track_id_);
-            has_selected_payload_track_ = false;
-        }
-    }
+    // 使用 HookFixedCargoDetector 作为主要来源
+    if (hook_fixed_cargo_.valid) {
+        // 有效检测
+        float box_source = BOX_SOURCE_V2_CORE;
 
-    // P0-6: 不允许 fallback，只发布 selected track
-    if (!has_track) {
-        // 发布 invalid
-        msg.data = {
-            -1.0f,   // IDX_VALID: 无效
-            -1.0f,   // IDX_TRACK_ID
-            0.0f,    // IDX_STATE = NONE
-            0.0f, 0.0f, 0.0f,  // centroid
-            0.0f, 0.0f, 0.0f,  // velocity
-            0.0f, 0.0f, 0.0f,  // bbox_min
-            0.0f, 0.0f, 0.0f,  // bbox_max
-            0.0f,              // point_count
-            0.0f,              // score
-            0.0f,              // bottom_hag
-            0.0f,              // support_ratio
-            0.0f               // box_source = NONE
-        };
+        // 使用 hook_fixed_cargo_ 的 bbox
+        Eigen::Vector3f bbox_min = hook_fixed_cargo_.center_base - hook_fixed_cargo_.size_visible / 2.0f;
+        Eigen::Vector3f bbox_max = hook_fixed_cargo_.center_base + hook_fixed_cargo_.size_visible / 2.0f;
 
-        ROS_INFO_THROTTLE(1.0,
-            "[CargoTargetHardCheck] selected=%d payload=-1 match=0 reason=no_selected_track",
-            selected_payload_track_id_);
-
-        payload_track_info_pub_.publish(msg);
-        return;
-    }
-
-    if (has_track) {
-        // 有有效 track
-        // 计算 score（综合评分）
-        float score = track.track_duration * 0.3f + track.direction_consistency * 0.7f;
-
-        // P0-6: CargoTargetHardCheck 日志
-        ROS_INFO_THROTTLE(1.0,
-            "[CargoTargetHardCheck] selected=%d payload=%d match=1 source=%s",
-            selected_payload_track_id_, track.track_id,
-            track.has_core_box ? "HAS_CORE" : "NO_CORE");
-
-        // P0-5: 使用 core_box 如果可用，否则使用旧 bbox
-        Eigen::Vector3f bbox_min, bbox_max;
-        float bottom_hag = 0.0f;
-        int core_pts = 0;
-        float box_source = BOX_SOURCE_NONE;  // 初始化为 NONE
-
-        if (track.has_core_box) {
-            // 使用 CargoBoxV2 的 core_box
-            bbox_min = track.core_box_base.bbox_min;
-            bbox_max = track.core_box_base.bbox_max;
-            bottom_hag = track.core_box_base.bottom_hag;
-            core_pts = track.core_box_base.suspended_points;
-
-            // Commit D: 在设置 box_source 之前先计算 quality_pass
-            Eigen::Vector3f size = bbox_max - bbox_min;
-            float long_side = std::max(size.x(), size.y());
-            float short_side = std::min(size.x(), size.y());
-            float area = long_side * short_side;
-            bool quality_pass = true;
-
-            if (long_side < 0.50f) quality_pass = false;
-            if (short_side < 0.25f) quality_pass = false;
-            if (size.z() < 0.30f) quality_pass = false;
-            if (area < 0.25f) quality_pass = false;
-            if (long_side > 8.0f) quality_pass = false;
-            if (short_side > 5.0f) quality_pass = false;
-            if (size.z() > 3.0f) quality_pass = false;
-            if (track.core_box_base.suspended_points < 12) quality_pass = false;
-
-            // 根据 quality_pass 设置 box_source
-            if (!quality_pass) {
-                // P0-6: pass=0 不准 OLD_BBOX，使用 NONE
-                box_source = BOX_SOURCE_NONE;
-                ROS_WARN_THROTTLE(1.0,
-                    "[CargoBoxQualityGate] track=%d pass=0 final_source=NONE size=(%.2f,%.2f,%.2f) long=%.2f short=%.2f core=%d action=NO_GREEN_BOX",
-                    track.track_id, size.x(), size.y(), size.z(),
-                    long_side, short_side, track.core_box_base.suspended_points);
-            } else {
-                box_source = track.using_last_good_box
-                    ? BOX_SOURCE_LAST_GOOD
-                    : BOX_SOURCE_V2_CORE;
-                ROS_INFO_THROTTLE(1.0,
-                    "[CargoBoxQualityGate] track=%d pass=1 final_source=%s size=(%.2f,%.2f,%.2f) long=%.2f short=%.2f core=%d action=GREEN_BOX",
-                    track.track_id,
-                    box_source == BOX_SOURCE_V2_CORE ? "V2_CORE" : "LAST_GOOD",
-                    size.x(), size.y(), size.z(),
-                    long_side, short_side, track.core_box_base.suspended_points);
-            }
-
-            // [PayloadTrackInfoCore] 日志
-            ROS_INFO_THROTTLE(
-                1.0,
-                "[PayloadTrackInfoCore] id=%d state=%d source=%s has_core=%d using_last_good=%d "
-                "bbox_min=(%.2f,%.2f,%.2f) bbox_max=(%.2f,%.2f,%.2f)",
-                track.track_id, track.state,
-                box_source == BOX_SOURCE_V2_CORE ? "V2_CORE" : (box_source == BOX_SOURCE_LAST_GOOD ? "LAST_GOOD" : "OLD_BBOX"),
-                track.has_core_box ? 1 : 0,
-                track.using_last_good_box ? 1 : 0,
-                bbox_min.x(), bbox_min.y(), bbox_min.z(),
-                bbox_max.x(), bbox_max.y(), bbox_max.z());
-        } else {
-            // 回退到旧 bbox
-            bbox_min = track.bbox_min_map;
-            bbox_max = track.bbox_max_map;
-            bottom_hag = track.bbox_min_map.z();
-            box_source = BOX_SOURCE_OLD_BBOX;
-
-            ROS_WARN_THROTTLE(
-                2.0,
-                "[PayloadTrackInfoCore] id=%d state=%d source=OLD_BBOX no_core_box=1 using_track_default_bbox=1",
-                track.track_id, track.state);
-        }
-
-        // 计算 support_ratio（静态支持率）
-        float support_ratio = 0.0f;  // 暂时设为 0，后面会从 CargoBoxEstimator 获取
+        // 使用底部估计
+        float bottom_hag = hook_fixed_bottom_.valid ? hook_fixed_bottom_.bottom_z_base : hook_fixed_cargo_.z05;
 
         msg.data = {
             1.0f,  // IDX_VALID: 有效
-            static_cast<float>(track.track_id),
-            static_cast<float>(track.state),
-            track.centroid_map.x(), track.centroid_map.y(), track.centroid_map.z(),
-            track.velocity_map.x(), track.velocity_map.y(), track.velocity_map.z(),
+            static_cast<float>(hook_fixed_cargo_.local_id),
+            2.0f,  // IDX_STATE = SUSPENDED_MOVING
+            hook_fixed_cargo_.center_base.x(), hook_fixed_cargo_.center_base.y(), hook_fixed_cargo_.center_base.z(),
+            0.0f, 0.0f, 0.0f,  // velocity
             bbox_min.x(), bbox_min.y(), bbox_min.z(),
             bbox_max.x(), bbox_max.y(), bbox_max.z(),
-            static_cast<float>(track.point_count),
-            score,
+            static_cast<float>(hook_fixed_cargo_.core_points_base ? hook_fixed_cargo_.core_points_base->size() : 0),
+            hook_fixed_cargo_.score,
             bottom_hag,
-            support_ratio,
-            box_source  // IDX_BOX_SOURCE: 框来源
+            0.0f,  // support_ratio
+            box_source
         };
 
-        // 验证 msg.data 大小
-        ROS_ASSERT_MSG(msg.data.size() == PAYLOAD_TRACK_INFO_SIZE,
-                       "payload_track_info size must be 20, got %zu", msg.data.size());
+        ROS_INFO_THROTTLE(1.0,
+            "[CargoSourceMode] mode=hook_local_roi global_dynamic_track=debug_only source=V2_CORE");
 
-        // Commit C: 发布 payload_precise_box_info
-        publishPayloadPreciseBoxInfo(track, box_source, stamp);
-
-        // 发布端日志
-        ROS_DEBUG("[PayloadTrackInfoPub] id=%d state=%d center=(%.2f,%.2f,%.2f) "
-                  "bbox_min=(%.2f,%.2f,%.2f) bbox_max=(%.2f,%.2f,%.2f) "
-                  "size=(%.2f,%.2f,%.2f) pts=%d score=%.2f hag=%.2f support=%.2f",
-                  track.track_id, (int)track.state,
-                  track.centroid_map.x(), track.centroid_map.y(), track.centroid_map.z(),
-                  bbox_min.x(), bbox_min.y(), bbox_min.z(),
-                  bbox_max.x(), bbox_max.y(), bbox_max.z(),
-                  bbox_max.x() - bbox_min.x(),
-                  bbox_max.y() - bbox_min.y(),
-                  bbox_max.z() - bbox_min.z(),
-                  track.point_count, score, bottom_hag, support_ratio);
+        ROS_INFO_THROTTLE(1.0,
+            "[CargoTargetHardCheck] source=hook_roi selected=%d payload=%d match=1",
+            hook_fixed_cargo_.local_id, hook_fixed_cargo_.local_id);
     } else {
-        // 没有有效 track
+        // 无效检测
         msg.data = {
             -1.0f,   // IDX_VALID: 无效
             -1.0f,   // IDX_TRACK_ID
@@ -5426,17 +5638,17 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
             0.0f               // box_source = NONE
         };
 
-        // 验证 msg.data 大小
-        ROS_ASSERT_MSG(msg.data.size() == PAYLOAD_TRACK_INFO_SIZE,
-                       "payload_track_info size must be 20, got %zu", msg.data.size());
-
-        // Commit C: 发布 payload_precise_box_info（invalid，无有效 track）
-        PayloadTrackInfo empty_track;
-        publishPayloadPreciseBoxInfo(empty_track, BOX_SOURCE_NONE, stamp);
+        ROS_INFO_THROTTLE(1.0,
+            "[CargoTargetHardCheck] source=hook_roi selected=-1 payload=-1 match=0 reason=no_hook_cargo");
     }
 
     payload_track_info_pub_.publish(msg);
 }
+
+// ========== payload_precise_box_info 发布 ==========
+
+// 注：payload_precise_box_info 发布逻辑已移至 HookFixedCargoDetector
+// 当前版本使用 HookFixedCargoDetector 作为主要来源，不再发布 payload_precise_box_info
 
 // Commit C: 发布 payload_precise_box_info
 void NdtSlamNode::publishPayloadPreciseBoxInfo(const PayloadTrackInfo& track, float box_source, const ros::Time& stamp) {
