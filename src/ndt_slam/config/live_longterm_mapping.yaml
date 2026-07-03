@@ -437,24 +437,24 @@ rviz_publish:
 hook_fixed_cargo_detector:
   enabled: true
 
-  # 固定 ROI（base_link 坐标系）
+  # 固定 ROI（base_link 坐标系）- 临时放宽，先确认能检测到
   roi_center_x: 0.0
   roi_center_y: -2.2
-  roi_half_x: 1.5
-  roi_half_y: 1.5
-  roi_z_min: 0.25
-  roi_z_max: 3.0
+  roi_half_x: 2.2
+  roi_half_y: 2.2
+  roi_z_min: 0.10
+  roi_z_max: 3.20
 
-  # 检测参数
+  # 检测参数 - 临时放宽，先确认能检测到
   voxel_leaf: 0.05
-  cluster_tolerance: 0.20
-  min_cluster_points: 15
-  max_cluster_points: 8000
+  cluster_tolerance: 0.30
+  min_cluster_points: 5
+  max_cluster_points: 10000
 
-  # 过滤吊具/钢丝绳/上方结构
-  reject_rope_radius: 0.08
-  reject_rope_min_z: 2.0
-  reject_structure_z: 3.2
+  # 过滤吊具/钢丝绳/上方结构 - 临时放宽，先确认能检测到
+  reject_rope_radius: 0.03
+  reject_rope_min_z: 3.5
+  reject_structure_z: 4.5
 
   # 框稳定
   xy_mode: "roi_center"

@@ -963,13 +963,27 @@ void NdtSlamNode::processCloudThread() {
 
         // ========== 阶段 2：预处理（范围过滤 + 降采样）==========
         pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr hook_input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
         for (const auto& p : input_cloud->points) {
             if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) {
                 double range = std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
                 if (range > 0.5 && range < 30.0) {
                     filtered_cloud->push_back(p);
+                    hook_input_cloud->push_back(p);
                 }
             }
+        }
+
+        // 为 HookFixedCargoDetector 创建 0.05m 细节点云（用于吊货检测）
+        if (hook_input_cloud->size() > 0) {
+            pcl::VoxelGrid<pcl::PointXYZ> hook_vf;
+            hook_vf.setInputCloud(hook_input_cloud);
+            hook_vf.setLeafSize(0.05f, 0.05f, 0.05f);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr hook_downsampled(new pcl::PointCloud<pcl::PointXYZ>);
+            hook_vf.filter(*hook_downsampled);
+            hook_input_cloud = hook_downsampled;
+            ROS_INFO_THROTTLE(1.0, "[HookInput] source=fine_base_before_ndt_voxel frame=base_link raw_before_voxel=%zu hook_input=%zu leaf=0.05",
+                              filtered_cloud->size(), hook_input_cloud->size());
         }
 
         // 体素降采样（0.2m，比 merger 的 0.15m 略粗，实现有效降采样）
@@ -3293,9 +3307,9 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
 
             // ========== HookFixedCargoDetector（每帧都执行，不受 payload_tracker 影响）==========
             ROS_INFO("[HookFixedCargoDetector] calling detectHookFixedCargo, cloud_size=%zu enabled=%d",
-                     filtered_cloud ? filtered_cloud->size() : 0,
+                     hook_input_cloud ? hook_input_cloud->size() : 0,
                      hook_fixed_config_.enabled ? 1 : 0);
-            hook_fixed_cargo_ = detectHookFixedCargo(filtered_cloud, stamp);
+            hook_fixed_cargo_ = detectHookFixedCargo(hook_input_cloud, stamp);
             hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
             publishSelectedCorePoints(hook_fixed_cargo_, stamp);
 
@@ -5311,19 +5325,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectHookFixedCargo(
         }
     }
 
-    ROS_INFO("[HookFixedCargoROI] points_in=%zu points_after_roi=%zu roi_center=(%.2f,%.2f) roi_half=(%.2f,%.2f) z=[%.2f,%.2f]",
-             cloud_base->size(), roi_cloud->size(),
-             hook_fixed_config_.roi_center_x, hook_fixed_config_.roi_center_y,
-             hook_fixed_config_.roi_half_x, hook_fixed_config_.roi_half_y,
-             hook_fixed_config_.roi_z_min, hook_fixed_config_.roi_z_max);
-
-    if (roi_cloud->size() < static_cast<size_t>(hook_fixed_config_.min_cluster_points)) {
-        result.reject_reason = "roi_too_few_points";
-        return result;
-    }
-
     // 2. 过滤吊具/钢丝绳/上方结构
-    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr roi_filtered(new pcl::PointCloud<pcl::PointXYZ>);
     for (const auto& p : roi_cloud->points) {
         float dist_xy = std::sqrt(p.x * p.x + p.y * p.y);
         bool is_rope = dist_xy < hook_fixed_config_.reject_rope_radius &&
@@ -5331,19 +5334,14 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectHookFixedCargo(
         bool is_structure = p.z > hook_fixed_config_.reject_structure_z;
 
         if (!is_rope && !is_structure) {
-            filtered_cloud->points.push_back(p);
+            roi_filtered->points.push_back(p);
         }
     }
 
-    if (filtered_cloud->size() < static_cast<size_t>(hook_fixed_config_.min_cluster_points)) {
-        result.reject_reason = "filtered_too_few_points";
-        return result;
-    }
-
-    // 3. Voxel 下采样
+    // 3. Voxel 下采样（0.05m，保留吊货细节）
     pcl::PointCloud<pcl::PointXYZ>::Ptr voxel_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::VoxelGrid<pcl::PointXYZ> voxel;
-    voxel.setInputCloud(filtered_cloud);
+    voxel.setInputCloud(roi_filtered);
     voxel.setLeafSize(hook_fixed_config_.voxel_leaf, hook_fixed_config_.voxel_leaf, hook_fixed_config_.voxel_leaf);
     voxel.filter(*voxel_cloud);
 
@@ -5360,10 +5358,30 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectHookFixedCargo(
     ec.setInputCloud(voxel_cloud);
     ec.extract(cluster_indices);
 
-    ROS_INFO_THROTTLE(1.0, "[HookFixedCargoROI] clusters=%zu", cluster_indices.size());
+    // 每阶段点数日志
+    ROS_INFO("[HookFixedCargoROI] enabled=%d input=%zu roi_raw=%zu after_filter=%zu voxel=%zu clusters=%zu",
+             hook_fixed_config_.enabled ? 1 : 0,
+             cloud_base->size(),
+             roi_cloud->size(),
+             roi_filtered->size(),
+             voxel_cloud->size(),
+             cluster_indices.size());
+
+    if (roi_cloud->size() < static_cast<size_t>(hook_fixed_config_.min_cluster_points)) {
+        result.reject_reason = "roi_too_few_points";
+        ROS_INFO("[HookFixedCargoSelect] valid=0 reason=roi_empty roi_points=%zu", roi_cloud->size());
+        return result;
+    }
+
+    if (roi_filtered->size() < static_cast<size_t>(hook_fixed_config_.min_cluster_points)) {
+        result.reject_reason = "filtered_too_few_points";
+        ROS_INFO("[HookFixedCargoSelect] valid=0 reason=filter_empty filtered_points=%zu", roi_filtered->size());
+        return result;
+    }
 
     if (cluster_indices.empty()) {
         result.reject_reason = "no_clusters";
+        ROS_INFO("[HookFixedCargoSelect] valid=0 reason=no_cluster voxel_points=%zu", voxel_cloud->size());
         return result;
     }
 
@@ -5437,6 +5455,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectHookFixedCargo(
 
     if (best_idx < 0) {
         result.reject_reason = "no_valid_cluster";
+        ROS_INFO("[HookFixedCargoSelect] valid=0 reason=all_rejected clusters=%zu", cluster_indices.size());
         return result;
     }
 
