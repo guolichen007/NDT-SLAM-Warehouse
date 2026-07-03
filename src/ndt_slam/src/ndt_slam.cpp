@@ -1657,6 +1657,16 @@ void NdtSlamNode::processCloudThread() {
                 if (longterm_mapping_enabled_ && keyframe_count_ > 0 && keyframe_count_ % rebuild_every_keyframes_ == 0) {
                     rebuildActiveMapFromRecentKeyframes();
                 }
+
+                // ========== HookFixedCargoDetector（每帧都执行，不受 payload_tracker 影响）==========
+                ROS_INFO("[HookFixedCargoTRACE] reached_hook_detect_point frame=%d", total_frames);
+
+                hook_fixed_cargo_ = detectHookFixedCargo(hook_input_cloud, msg->header.stamp);
+                hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
+                publishSelectedCorePoints(hook_fixed_cargo_, msg->header.stamp);
+
+                // 发布吊货跟踪信息（用于避障节点）
+                publishPayloadTrackInfo(msg->header.stamp);
             }
         }
     }
@@ -3304,30 +3314,6 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                     }
                 }
             }
-
-            // ========== HookFixedCargoDetector（每帧都执行，不受 payload_tracker 影响）==========
-            ROS_ERROR(
-                "[HookFixedCargoCALL] before_detect enabled=%d hook_input_ptr=%d hook_input_points=%zu stamp=%.3f",
-                hook_fixed_config_.enabled ? 1 : 0,
-                hook_input_cloud ? 1 : 0,
-                hook_input_cloud ? hook_input_cloud->size() : 0,
-                stamp.toSec()
-            );
-
-            hook_fixed_cargo_ = detectHookFixedCargo(hook_input_cloud, stamp);
-
-            ROS_ERROR(
-                "[HookFixedCargoCALL] after_detect valid=%d reason=%s selected_points=%zu",
-                hook_fixed_cargo_.valid ? 1 : 0,
-                hook_fixed_cargo_.reject_reason.c_str(),
-                hook_fixed_cargo_.core_points_base ? hook_fixed_cargo_.core_points_base->size() : 0
-            );
-
-            hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
-            publishSelectedCorePoints(hook_fixed_cargo_, stamp);
-
-            // 发布吊货跟踪信息（用于避障节点）
-            publishPayloadTrackInfo(stamp);
 
             // ========== HumanObjectDynamicFilter（人体动态过滤）==========
             pcl::PointCloud<pcl::PointXYZ>::Ptr kf_human_safe_objects(new pcl::PointCloud<pcl::PointXYZ>);
