@@ -3291,6 +3291,8 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 }
 
                 // ========== HookFixedCargoDetector ==========
+                ROS_INFO_THROTTLE(2.0, "[HookFixedCargoDetector] calling detectHookFixedCargo, cloud_size=%zu",
+                                  filtered_cloud ? filtered_cloud->size() : 0);
                 hook_fixed_cargo_ = detectHookFixedCargo(filtered_cloud, stamp);
                 hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
                 publishSelectedCorePoints(hook_fixed_cargo_, stamp);
