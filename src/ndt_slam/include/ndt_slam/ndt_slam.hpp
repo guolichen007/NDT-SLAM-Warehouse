@@ -835,6 +835,7 @@ private:
         float z50 = 0.0f;
         float z95 = 0.0f;
         float visible_height = 0.0f;
+        float xy_area = 0.0f;  // XY 面积
         pcl::PointCloud<pcl::PointXYZ>::Ptr core_points_base;
         float score = 0.0f;
         std::string reject_reason;
@@ -899,6 +900,7 @@ private:
     HookCargoDetection detectHookFixedCargo(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base, const ros::Time& stamp);
     HookCargoBottomEstimate estimateCargoBottom(const HookCargoDetection& detection);
     void publishSelectedCorePoints(const HookCargoDetection& detection, const ros::Time& stamp);
+    void publishSelectedCorePoints(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const ros::Time& stamp);
     Eigen::Vector3f smoothVector(const Eigen::Vector3f& current, const Eigen::Vector3f& new_val, float alpha);
     float smoothFloat(float current, float new_val, float alpha);
 
@@ -932,6 +934,22 @@ private:
         // auto_lock_center 相关
         std::string center_mode = "auto_lock_center";  // manual_roi_center / auto_lock_center
         float max_auto_center_offset = 1.20f;
+
+        // locked association gate 相关
+        float locked_update_max_center_dist = 0.65f;
+        float locked_update_min_overlap_ratio = 0.30f;
+        float locked_update_max_z_jump = 0.45f;
+        float locked_update_max_top_jump = 0.60f;
+        int locked_update_min_points = 20;
+
+        // 锁定时 strong 条件（比更新时更严格）
+        int lock_strong_min_points = 80;
+        float lock_min_visible_height = 0.50f;
+        float lock_min_xy_area = 0.40f;
+
+        // locked search margin
+        float locked_search_margin_x = 0.30f;
+        float locked_search_margin_y = 0.30f;
     };
 
     struct HookCargoLock {
@@ -964,6 +982,15 @@ private:
         Eigen::Vector2f locked_center_xy = Eigen::Vector2f::Zero();
         bool has_locked_center = false;
         std::string center_source;
+
+        // 重复帧检测
+        ros::Time last_hook_processed_stamp;
+        uint64_t last_hook_processed_hash = 0;
+
+        // last accepted detection（用于 LOCKED 后显示）
+        pcl::PointCloud<pcl::PointXYZ>::Ptr last_accepted_core_points;
+        Eigen::Vector3f last_accepted_center = Eigen::Vector3f::Zero();
+        bool has_last_accepted = false;
     };
 
     HookCargoLockConfig hook_lock_config_;
@@ -972,12 +999,15 @@ private:
     void updateHookCargoLock(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
     bool isStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
     bool isWeakDetection(const HookCargoDetection& det);
+    bool isLockStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    bool isDetectionConsistentWithLockedBox(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, std::string* reject_reason);
     Eigen::Vector3f computeFixedCenterSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
     Eigen::Vector3f medianSize(const std::deque<Eigen::Vector3f>& buffer);
     void updateLockedHeight(const HookCargoBottomEstimate& bottom, const ros::Time& stamp, bool initialize);
     void maybeUpdateLockedSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
     void growUncertainty();
     void clearHookLock();
+    uint64_t computeCloudHash(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
 };
 
 } // namespace ndt_slam
