@@ -6016,7 +6016,7 @@ void NdtSlamNode::updateHookCargoLock(
                 growUncertainty();
 
                 auto anchor = getCargoAnchorXY();
-                ROS_WARN_THROTTLE(0.5,
+                ROS_DEBUG_THROTTLE(2.0,
                     "[CargoLockUpdate] accepted=0 reason=%s raw_center=(%.2f,%.2f,%.2f) anchor=(%.2f,%.2f) raw_points=%zu",
                     reject_reason.c_str(),
                     det.center_base.x(), det.center_base.y(), det.center_base.z(),
