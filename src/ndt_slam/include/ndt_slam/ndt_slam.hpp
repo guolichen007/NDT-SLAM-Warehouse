@@ -865,6 +865,26 @@ private:
         float anchor_x = 0.0f;
         float anchor_y = 0.0f;
 
+        // 检测和 marker 降频
+        float detect_rate_hz = 5.0f;
+        float marker_rate_hz = 5.0f;
+
+        // debug 点云发布（默认关闭）
+        bool publish_debug_points = false;
+        bool publish_selected_core_points = false;
+        bool publish_raw_candidate_points = false;
+        bool publish_default_box_marker = false;
+
+        // 日志控制
+        bool verbose_debug = false;
+        float summary_log_period = 2.0f;
+
+        // 旧 cargo 链路开关（默认关闭）
+        bool use_global_payload_tracker = false;
+        bool use_cargobox_v2 = false;
+        bool use_dynamic_history_eraser = false;
+        bool enable_hook_cargo_removal = false;
+
         // 检测窗口围绕 anchor 裁剪
         float search_half_x = 1.20f;
         float search_half_y = 1.20f;
@@ -897,17 +917,32 @@ private:
         float size_change_max_ratio = 0.60f;
         float size_update_alpha = 0.15f;
 
-        float bottom_alpha_points = 0.30f;
-        float bottom_alpha_hold = 0.10f;
+        float bottom_alpha_points = 0.25f;
+        float bottom_alpha_hold = 0.05f;
         float bottom_max_uncertainty = 0.35f;
 
         float lost_hold_sec = 5.0f;
         float lost_clear_sec = 15.0f;
-
-        bool verbose_debug = false;
     };
 
     OdomAnchorBoxConfig odom_anchor_config_;
+
+    // 降频控制
+    ros::Time last_anchor_detect_stamp_;
+    ros::Time last_anchor_marker_stamp_;
+    ros::Time last_anchor_summary_stamp_;
+
+    bool shouldRunOdomAnchorDetect(const ros::Time& stamp) {
+        if (last_anchor_detect_stamp_.isZero()) return true;
+        return (stamp - last_anchor_detect_stamp_).toSec() >=
+               1.0 / odom_anchor_config_.detect_rate_hz;
+    }
+
+    bool shouldPublishOdomAnchorMarker(const ros::Time& stamp) {
+        if (last_anchor_marker_stamp_.isZero()) return true;
+        return (stamp - last_anchor_marker_stamp_).toSec() >=
+               1.0 / odom_anchor_config_.marker_rate_hz;
+    }
 
     // 获取 anchor XY
     Eigen::Vector2f getCargoAnchorXY() const {

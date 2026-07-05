@@ -781,8 +781,8 @@ private:
         stable_z_max_base_ = precise_z_max_base_;
         has_precise_bbox_ = true;
 
-        ROS_INFO_THROTTLE(
-            0.5,
+        ROS_DEBUG_THROTTLE(
+            2.0,
             "[CargoGeometryFix] track=%d source=%s "
             "bbox_min=(%.2f,%.2f,%.2f) bbox_max=(%.2f,%.2f,%.2f) "
             "center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
@@ -1404,8 +1404,8 @@ private:
         arr.markers.push_back(marker);
         core_bbox_marker_pub_.publish(arr);
 
-        ROS_INFO_THROTTLE(
-            1.0,
+        ROS_DEBUG_THROTTLE(
+            2.0,
             "[CargoMarkerBaseLink] track=%d source=%s frame=base_link frame_locked=1 "
             "center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
             display_state_.locked_track_id,

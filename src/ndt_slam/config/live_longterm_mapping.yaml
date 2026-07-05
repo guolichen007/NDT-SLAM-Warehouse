@@ -523,16 +523,6 @@ hook_cargo_lock:
   locked_search_margin_x: 0.30
   locked_search_margin_y: 0.30
 
-  # P1: 先禁用 HookCargoRemoval，恢复 A7 轨迹基准
-  enable_hook_cargo_removal: false
-
-  # P2: 锁定中心配置
-  center_mode: "manual_body_center"  # manual_body_center / auto_lock_body_center
-  manual_center_x: 1.06
-  manual_center_y: -2.31
-
-  # body strong 候选条件
-
 
 # ========== OdomAnchorBox 配置 ==========
 odom_anchored_cargo_box:
@@ -541,6 +531,26 @@ odom_anchored_cargo_box:
   # 绿色框中心锚点（默认 base_link/odom 原点）
   anchor_x: 0.0
   anchor_y: 0.0
+
+  # 检测和 marker 降频
+  detect_rate_hz: 5.0
+  marker_rate_hz: 5.0
+
+  # debug 点云发布（默认关闭）
+  publish_debug_points: false
+  publish_selected_core_points: false
+  publish_raw_candidate_points: false
+  publish_default_box_marker: false
+
+  # 日志控制
+  verbose_debug: false
+  summary_log_period: 2.0
+
+  # 旧 cargo 链路开关（默认关闭）
+  use_global_payload_tracker: false
+  use_cargobox_v2: false
+  use_dynamic_history_eraser: false
+  enable_hook_cargo_removal: false
 
   # 检测窗口围绕 anchor 裁剪
   search_half_x: 1.20
@@ -572,6 +582,14 @@ odom_anchored_cargo_box:
   size_update_confirm_frames: 5
   size_change_min_ratio: 0.20
   size_change_max_ratio: 0.60
+  size_update_alpha: 0.15
+
+  bottom_alpha_points: 0.25
+  bottom_alpha_hold: 0.05
+  bottom_max_uncertainty: 0.35
+
+  lost_hold_sec: 5.0
+  lost_clear_sec: 15.0
   size_update_alpha: 0.15
 
   bottom_alpha_points: 0.30

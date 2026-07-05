@@ -914,11 +914,6 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                      hook_lock_config_.lock_min_visible_height,
                      hook_lock_config_.lock_min_xy_area,
                      hook_lock_config_.locked_update_max_center_dist);
-
-            // P1: 先禁用 HookCargoRemoval
-            hook_lock_config_.enable_hook_cargo_removal = hcl["enable_hook_cargo_removal"].as<bool>(false);
-            ROS_INFO("[HookCargoLock] enable_hook_cargo_removal=%d",
-                     hook_lock_config_.enable_hook_cargo_removal ? 1 : 0);
         }
 
         // ========== OdomAnchorBox 配置 ==========
@@ -927,10 +922,34 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             odom_anchor_config_.enabled = oac["enabled"].as<bool>(true);
             odom_anchor_config_.anchor_x = oac["anchor_x"].as<float>(0.0f);
             odom_anchor_config_.anchor_y = oac["anchor_y"].as<float>(0.0f);
+
+            // 检测和 marker 降频
+            odom_anchor_config_.detect_rate_hz = oac["detect_rate_hz"].as<float>(5.0f);
+            odom_anchor_config_.marker_rate_hz = oac["marker_rate_hz"].as<float>(5.0f);
+
+            // debug 点云发布
+            odom_anchor_config_.publish_debug_points = oac["publish_debug_points"].as<bool>(false);
+            odom_anchor_config_.publish_selected_core_points = oac["publish_selected_core_points"].as<bool>(false);
+            odom_anchor_config_.publish_raw_candidate_points = oac["publish_raw_candidate_points"].as<bool>(false);
+            odom_anchor_config_.publish_default_box_marker = oac["publish_default_box_marker"].as<bool>(false);
+
+            // 日志控制
+            odom_anchor_config_.verbose_debug = oac["verbose_debug"].as<bool>(false);
+            odom_anchor_config_.summary_log_period = oac["summary_log_period"].as<float>(2.0f);
+
+            // 旧 cargo 链路开关
+            odom_anchor_config_.use_global_payload_tracker = oac["use_global_payload_tracker"].as<bool>(false);
+            odom_anchor_config_.use_cargobox_v2 = oac["use_cargobox_v2"].as<bool>(false);
+            odom_anchor_config_.use_dynamic_history_eraser = oac["use_dynamic_history_eraser"].as<bool>(false);
+            odom_anchor_config_.enable_hook_cargo_removal = oac["enable_hook_cargo_removal"].as<bool>(false);
+
+            // 检测窗口
             odom_anchor_config_.search_half_x = oac["search_half_x"].as<float>(1.20f);
             odom_anchor_config_.search_half_y = oac["search_half_y"].as<float>(1.20f);
             odom_anchor_config_.search_z_min = oac["search_z_min"].as<float>(0.05f);
             odom_anchor_config_.search_z_max = oac["search_z_max"].as<float>(3.20f);
+
+            // 尺寸配置
             odom_anchor_config_.default_size_x = oac["default_size_x"].as<float>(0.50f);
             odom_anchor_config_.default_size_y = oac["default_size_y"].as<float>(0.35f);
             odom_anchor_config_.default_size_z = oac["default_size_z"].as<float>(0.25f);
@@ -950,18 +969,21 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             odom_anchor_config_.size_change_min_ratio = oac["size_change_min_ratio"].as<float>(0.20f);
             odom_anchor_config_.size_change_max_ratio = oac["size_change_max_ratio"].as<float>(0.60f);
             odom_anchor_config_.size_update_alpha = oac["size_update_alpha"].as<float>(0.15f);
-            odom_anchor_config_.bottom_alpha_points = oac["bottom_alpha_points"].as<float>(0.30f);
-            odom_anchor_config_.bottom_alpha_hold = oac["bottom_alpha_hold"].as<float>(0.10f);
+            odom_anchor_config_.bottom_alpha_points = oac["bottom_alpha_points"].as<float>(0.25f);
+            odom_anchor_config_.bottom_alpha_hold = oac["bottom_alpha_hold"].as<float>(0.05f);
             odom_anchor_config_.bottom_max_uncertainty = oac["bottom_max_uncertainty"].as<float>(0.35f);
             odom_anchor_config_.lost_hold_sec = oac["lost_hold_sec"].as<float>(5.0f);
             odom_anchor_config_.lost_clear_sec = oac["lost_clear_sec"].as<float>(15.0f);
-            odom_anchor_config_.verbose_debug = oac["verbose_debug"].as<bool>(false);
 
-            ROS_INFO("[OdomAnchorBoxConfig] enabled=%d anchor=(%.2f,%.2f) search_half=(%.2f,%.2f) z=[%.2f,%.2f]",
+            ROS_INFO("[OdomAnchorBoxConfig] enabled=%d anchor=(%.2f,%.2f) detect_rate=%.1f marker_rate=%.1f debug_points=%d global_payload=%d cargobox_v2=%d dynamic_eraser=%d removal=%d",
                      odom_anchor_config_.enabled ? 1 : 0,
                      odom_anchor_config_.anchor_x, odom_anchor_config_.anchor_y,
-                     odom_anchor_config_.search_half_x, odom_anchor_config_.search_half_y,
-                     odom_anchor_config_.search_z_min, odom_anchor_config_.search_z_max);
+                     odom_anchor_config_.detect_rate_hz, odom_anchor_config_.marker_rate_hz,
+                     odom_anchor_config_.publish_debug_points ? 1 : 0,
+                     odom_anchor_config_.use_global_payload_tracker ? 1 : 0,
+                     odom_anchor_config_.use_cargobox_v2 ? 1 : 0,
+                     odom_anchor_config_.use_dynamic_history_eraser ? 1 : 0,
+                     odom_anchor_config_.enable_hook_cargo_removal ? 1 : 0);
         }
 
     } catch (const YAML::Exception& e) {
@@ -1110,12 +1132,12 @@ void NdtSlamNode::processCloudThread() {
             pcl::PointCloud<pcl::PointXYZ>::Ptr hook_downsampled(new pcl::PointCloud<pcl::PointXYZ>);
             hook_vf.filter(*hook_downsampled);
             hook_input_cloud = hook_downsampled;
-            ROS_INFO_THROTTLE(1.0, "[HookInput] source=fine_base_before_ndt_voxel frame=base_link raw_before_voxel=%zu hook_input=%zu leaf=0.05",
+            ROS_DEBUG_THROTTLE(1.0, "[HookInput] source=fine_base_before_ndt_voxel frame=base_link raw_before_voxel=%zu hook_input=%zu leaf=0.05",
                               filtered_cloud->size(), hook_input_cloud->size());
         }
 
         // ========== HookFixedCargoDetector（每帧都执行，在 NDT 和 MapCommit 之前）==========
-        ROS_INFO_THROTTLE(0.2,
+        ROS_DEBUG_THROTTLE(2.0,
             "[HookFrame] frame=%d before_detect hook_input=%zu longterm=%d enabled=%d",
             total_frames,
             hook_input_cloud ? hook_input_cloud->size() : 0,
@@ -1140,28 +1162,50 @@ void NdtSlamNode::processCloudThread() {
             }
         }
 
+        // OdomAnchorBox 检测（降频执行）
         if (!skip_hook_this_frame && odom_anchor_config_.enabled && hook_input_cloud && !hook_input_cloud->empty()) {
-            hook_fixed_cargo_ = detectCargoAroundOdomAnchor(hook_input_cloud, msg->header.stamp);
-            hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
-            updateHookCargoLock(hook_fixed_cargo_, hook_fixed_bottom_, msg->header.stamp);
+            if (shouldRunOdomAnchorDetect(msg->header.stamp)) {
+                hook_fixed_cargo_ = detectCargoAroundOdomAnchor(hook_input_cloud, msg->header.stamp);
+                hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
+                updateHookCargoLock(hook_fixed_cargo_, hook_fixed_bottom_, msg->header.stamp);
 
-            // 发布 selected_core_points
-            if (hook_fixed_cargo_.valid) {
-                publishSelectedCorePoints(hook_fixed_cargo_, msg->header.stamp);
+                // 发布 selected_core_points（默认关闭）
+                if (odom_anchor_config_.publish_selected_core_points && hook_fixed_cargo_.valid) {
+                    publishSelectedCorePoints(hook_fixed_cargo_, msg->header.stamp);
+                }
+
+                last_anchor_detect_stamp_ = msg->header.stamp;
+
+                // OdomAnchorSummary 日志（每 2 秒一次）
+                if ((msg->header.stamp - last_anchor_summary_stamp_).toSec() >= odom_anchor_config_.summary_log_period) {
+                    auto anchor = getCargoAnchorXY();
+                    ROS_INFO("[OdomAnchorSummary] locked=%d anchor=(%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f] points=%zu debug_points=%d",
+                             (hook_lock_.state == HookCargoLockState::LOCKED || hook_lock_.state == HookCargoLockState::LOST_HOLD) ? 1 : 0,
+                             anchor.x(), anchor.y(),
+                             hook_lock_.has_locked_size ? hook_lock_.locked_size.x() : 0.0f,
+                             hook_lock_.has_locked_size ? hook_lock_.locked_size.y() : 0.0f,
+                             hook_lock_.has_locked_size ? hook_lock_.locked_size.z() : 0.0f,
+                             hook_lock_.stable_bottom_z, hook_lock_.stable_top_z,
+                             hook_fixed_cargo_.core_points_base ? hook_fixed_cargo_.core_points_base->size() : 0,
+                             odom_anchor_config_.publish_debug_points ? 1 : 0);
+                    last_anchor_summary_stamp_ = msg->header.stamp;
+                }
             }
 
-            // 发布 payload_track_info（用于避障节点）
-            if (hook_lock_.state == HookCargoLockState::LOCKED ||
-                hook_lock_.state == HookCargoLockState::LOST_HOLD) {
-                publishPayloadTrackInfoFromOdomAnchorBox(msg->header.stamp);
-            } else {
-                publishPayloadTrackInfoInvalid("not_locked");
+            // marker 发布（降频执行）
+            if (shouldPublishOdomAnchorMarker(msg->header.stamp)) {
+                if (hook_lock_.state == HookCargoLockState::LOCKED ||
+                    hook_lock_.state == HookCargoLockState::LOST_HOLD) {
+                    publishPayloadTrackInfoFromOdomAnchorBox(msg->header.stamp);
+                } else {
+                    publishPayloadTrackInfoInvalid("not_locked");
+                }
+                last_anchor_marker_stamp_ = msg->header.stamp;
             }
         } else if (!skip_hook_this_frame) {
             hook_fixed_cargo_.valid = false;
             hook_fixed_bottom_.valid = false;
             updateHookCargoLock(hook_fixed_cargo_, hook_fixed_bottom_, msg->header.stamp);
-            publishPayloadTrackInfoInvalid("hook_disabled");
         }
 
         // 体素降采样（0.2m，比 merger 的 0.15m 略粗，实现有效降采样）
@@ -1306,7 +1350,7 @@ void NdtSlamNode::processCloudThread() {
 
         // ========== Hook locked box 剔除（NDT 输入）==========
         // P1: 先禁用 HookCargoRemoval，恢复 A7 轨迹基准
-        if (hook_lock_config_.enable_hook_cargo_removal &&
+        if (odom_anchor_config_.enable_hook_cargo_removal &&
             (hook_lock_.state == HookCargoLockState::LOCKED ||
              hook_lock_.state == HookCargoLockState::LOST_HOLD)) {
             if (hook_lock_.has_locked_size) {
@@ -1342,7 +1386,7 @@ void NdtSlamNode::processCloudThread() {
                              hook_removed_count, registration_cloud->size());
                 }
             }
-        } else if (!hook_lock_config_.enable_hook_cargo_removal) {
+        } else if (!odom_anchor_config_.enable_hook_cargo_removal) {
             ROS_INFO_THROTTLE(1.0,
                 "[HookCargoRemoval] enabled=0 reason=trajectory_validation_only");
         }
@@ -5844,7 +5888,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
 
     if (crop_cloud->empty()) {
         result.reject_reason = "crop_empty";
-        ROS_INFO_THROTTLE(1.0, "[OdomAnchorDetect] input=%zu crop=0 anchor=(%.2f,%.2f)",
+        ROS_DEBUG_THROTTLE(1.0, "[OdomAnchorDetect] input=%zu crop=0 anchor=(%.2f,%.2f)",
                           cloud_base->size(), cx, cy);
         return result;
     }
@@ -5858,7 +5902,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
 
     if (voxel_cloud->size() < static_cast<size_t>(odom_anchor_config_.weak_min_points)) {
         result.reject_reason = "too_few_points";
-        ROS_INFO_THROTTLE(1.0, "[OdomAnchorDetect] input=%zu crop=%zu voxel=%zu too_few",
+        ROS_DEBUG_THROTTLE(1.0, "[OdomAnchorDetect] input=%zu crop=%zu voxel=%zu too_few",
                           cloud_base->size(), crop_cloud->size(), voxel_cloud->size());
         return result;
     }
@@ -5878,7 +5922,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
 
     if (cluster_indices.empty()) {
         result.reject_reason = "no_clusters";
-        ROS_INFO_THROTTLE(1.0, "[OdomAnchorDetect] input=%zu crop=%zu voxel=%zu clusters=0",
+        ROS_DEBUG_THROTTLE(1.0, "[OdomAnchorDetect] input=%zu crop=%zu voxel=%zu clusters=0",
                           cloud_base->size(), crop_cloud->size(), voxel_cloud->size());
         return result;
     }
@@ -6153,7 +6197,7 @@ void NdtSlamNode::updateHookCargoLock(
     bool strong = isStrongDetection(det, bottom);
     bool weak = isWeakDetection(det);
 
-    ROS_INFO_THROTTLE(0.5,
+    ROS_DEBUG_THROTTLE(2.0,
         "[UpdateHookCargoLock] state=%d det.valid=%d points=%zu bottom.valid=%d",
         static_cast<int>(hook_lock_.state),
         det.valid ? 1 : 0,
@@ -6246,7 +6290,7 @@ void NdtSlamNode::updateHookCargoLock(
                 }
 
                 auto anchor = getCargoAnchorXY();
-                ROS_INFO("[CargoLockUpdate] accepted=1 reason=%s raw_center=(%.2f,%.2f,%.2f) anchor=(%.2f,%.2f) raw_points=%zu",
+                ROS_DEBUG_THROTTLE(1.0, "[CargoLockUpdate] accepted=1 reason=%s raw_center=(%.2f,%.2f,%.2f) anchor=(%.2f,%.2f) raw_points=%zu",
                          reject_reason.c_str(),
                          det.center_base.x(), det.center_base.y(), det.center_base.z(),
                          anchor.x(), anchor.y(),
@@ -6378,7 +6422,7 @@ void NdtSlamNode::publishSelectedCorePoints(const HookCargoDetection& detection,
         msg.header.stamp = stamp;
         msg.header.frame_id = "base_link";
 
-        ROS_INFO_THROTTLE(1.0, "[CargoSelectedCorePoints] source=hook_fixed_roi points=%zu frame=base_link",
+        ROS_DEBUG_THROTTLE(1.0, "[CargoSelectedCorePoints] source=hook_fixed_roi points=%zu frame=base_link",
                           detection.core_points_base->size());
     } else {
         msg.header.stamp = stamp;
@@ -6394,7 +6438,7 @@ void NdtSlamNode::publishSelectedCorePoints(const pcl::PointCloud<pcl::PointXYZ>
         msg.header.stamp = stamp;
         msg.header.frame_id = "base_link";
 
-        ROS_INFO_THROTTLE(1.0, "[CargoSelectedCorePoints] source=locked_last_good points=%zu frame=base_link",
+        ROS_DEBUG_THROTTLE(1.0, "[CargoSelectedCorePoints] source=locked_last_good points=%zu frame=base_link",
                           cloud->size());
     } else {
         msg.header.stamp = stamp;
@@ -6521,15 +6565,15 @@ void NdtSlamNode::publishPayloadTrackInfoFromLockedHookBox(const ros::Time& stam
             box_source
         };
 
-        ROS_INFO_THROTTLE(1.0,
+        ROS_DEBUG_THROTTLE(2.0,
             "[CargoBoxLock] state=%s center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
             hook_lock_.state == HookCargoLockState::LOCKED ? "LOCKED" : "LOST_HOLD",
             center.x(), center.y(), center.z(),
             size.x(), size.y(), size.z(),
             zmin, zmax);
 
-        ROS_INFO_THROTTLE(1.0,
-            "[CargoTargetHardCheck] source=hook_roi selected=0 payload=0 match=1 state=%d",
+        ROS_DEBUG_THROTTLE(2.0,
+            "[CargoTargetHardCheck] source=odom_anchor selected=0 payload=0 match=1 state=%d",
             static_cast<int>(hook_lock_.state));
     } else {
         // 无效检测
@@ -6681,7 +6725,7 @@ void NdtSlamNode::buildLockedOdomFixedCargoBox(const ros::Time& stamp) {
     Eigen::Vector3f center(cx, cy, 0.5f * (zmin + zmax));
 
     // 发布 CargoMarkerBaseLink
-    ROS_INFO_THROTTLE(1.0,
+    ROS_DEBUG_THROTTLE(2.0,
         "[CargoMarkerBaseLink] center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
         center.x(), center.y(), center.z(),
         size.x(), size.y(), size.z(),
@@ -7427,9 +7471,13 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     TrackResult payload_track_result;
     pcl::PointCloud<pcl::PointXYZ>::Ptr cargo_removed_base(new pcl::PointCloud<pcl::PointXYZ>);
 
-    if (payload_tracker_config_.enabled &&
-        channel_filter_config_.enabled &&
-        payload_candidates && !payload_candidates->empty())
+    // Gate: 旧 global cargo 链路（OdomAnchorBox 模式下默认关闭）
+    bool run_legacy_cargo = payload_tracker_config_.enabled &&
+                            channel_filter_config_.enabled &&
+                            payload_candidates && !payload_candidates->empty() &&
+                            (!odom_anchor_config_.enabled || odom_anchor_config_.use_global_payload_tracker);
+
+    if (run_legacy_cargo)
     {
         // 3.1 先更新 PayloadTracker
         std::map<CellKey, float> empty_ground_model;
@@ -7437,7 +7485,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
             payload_candidates, T_map_base, stamp.toSec(), empty_ground_model);
 
         // 3.2 再对每个 track 估计 CargoBoxV2
-        if (cargo_box_estimator_config_.enabled) {
+        if (cargo_box_estimator_config_.enabled && odom_anchor_config_.use_cargobox_v2) {
             // P4: 从 ground_base 构建局部地面模型
             SimpleGroundModel ground_model = buildGroundModelFromGroundBase(ground_base, 1.0f);
 
@@ -7786,15 +7834,19 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         }
     }
 
-    // v8-stable-r3: [Cargo] 日志（每 2 秒一次）
-    ROS_INFO_THROTTLE(2.0,
-             "[Cargo] tracks=%zu moving=%d static=%d active=%zu removed=%zu weak_skip=%d fallback=%d",
-             payload_tracker_.getTracks().size(),
-             moving_tracks, static_tracks,
-             active_cargo_remove_boxes_base.size(),
-             cargo_removed_base->size(),
-             skipped_no_box + skipped_no_overlap + skipped_state,
-             last_good_count + core_fallback_count);
+    // v8-stable-r3: [Cargo] 日志（每 2 秒一次，DEBUG）
+    if (run_legacy_cargo) {
+        ROS_DEBUG_THROTTLE(2.0,
+                 "[Cargo] tracks=%zu moving=%d static=%d active=%zu removed=%zu weak_skip=%d fallback=%d",
+                 payload_tracker_.getTracks().size(),
+                 moving_tracks, static_tracks,
+                 active_cargo_remove_boxes_base.size(),
+                 cargo_removed_base->size(),
+                 skipped_no_box + skipped_no_overlap + skipped_state,
+                 last_good_count + core_fallback_count);
+    } else {
+        ROS_DEBUG_THROTTLE(5.0, "[CargoLegacy] skipped reason=odom_anchor_mode");
+    }
 
     // ------------------------------------------------------------------------
     // 4. CargoCommit：当前帧吊货点删除（必须在 MapCommit 前）
@@ -7809,7 +7861,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
 
     // ========== Hook locked box 剔除（必须在 MapCommit 前）==========
     // P1: 先禁用 HookCargoRemoval，恢复 A7 轨迹基准
-    if (hook_lock_config_.enable_hook_cargo_removal &&
+    if (odom_anchor_config_.enable_hook_cargo_removal &&
         (hook_lock_.state == HookCargoLockState::LOCKED ||
          hook_lock_.state == HookCargoLockState::LOST_HOLD)) {
         if (hook_lock_.has_locked_size) {
@@ -7845,7 +7897,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
             // 合并到 cargo_removed_base
             *cargo_removed_base += *hook_cargo_removed_base;
 
-            ROS_INFO("[HookCargoRemoval] source=hook_lock state=%s removed_reg=%zu removed_commit=%zu center=(%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
+            ROS_DEBUG_THROTTLE(2.0, "[HookCargoRemoval] source=hook_lock state=%s removed_reg=%zu removed_commit=%zu center=(%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
                      hook_lock_.state == HookCargoLockState::LOCKED ? "LOCKED" : "LOST_HOLD",
                      hook_cargo_removed_base->size(),
                      hook_cargo_removed_base->size(),
