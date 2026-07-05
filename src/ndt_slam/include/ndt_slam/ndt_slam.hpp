@@ -898,6 +898,70 @@ private:
     void publishSelectedCorePoints(const HookCargoDetection& detection, const ros::Time& stamp);
     Eigen::Vector3f smoothVector(const Eigen::Vector3f& current, const Eigen::Vector3f& new_val, float alpha);
     float smoothFloat(float current, float new_val, float alpha);
+
+    // ========== HookCargoLock 状态机 ==========
+    enum class HookCargoLockState {
+        EMPTY = 0,
+        CANDIDATE = 1,
+        LOCKED = 2,
+        LOST_HOLD = 3
+    };
+
+    struct HookCargoLockConfig {
+        bool enabled = true;
+        int lock_confirm_frames = 3;
+        int size_init_window = 5;
+        float lost_hold_sec = 3.0f;
+        float lost_clear_sec = 8.0f;
+        int strong_min_points = 30;
+        int weak_min_points = 5;
+        float size_change_min_ratio = 0.20f;
+        float size_change_max_ratio = 0.60f;
+        int size_update_confirm_frames = 5;
+        float size_update_alpha = 0.15f;
+        float bottom_alpha_points = 0.30f;
+        float bottom_alpha_memory = 0.15f;
+        float bottom_hold_uncertainty_growth = 0.02f;
+        float bottom_max_uncertainty = 0.35f;
+    };
+
+    struct HookCargoLock {
+        HookCargoLockState state = HookCargoLockState::EMPTY;
+        int confirm_count = 0;
+        int lost_count = 0;
+        int size_update_count = 0;
+
+        ros::Time last_seen_stamp;
+        ros::Time last_good_height_stamp;
+        ros::Time locked_stamp;
+
+        Eigen::Vector3f locked_center_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f locked_size = Eigen::Vector3f::Zero();
+
+        float stable_bottom_z = 0.0f;
+        float stable_top_z = 0.0f;
+        float stable_height = 0.0f;
+        float bottom_uncertainty = 0.30f;
+
+        bool has_locked_size = false;
+        bool has_good_height = false;
+
+        std::deque<Eigen::Vector3f> init_size_buffer;
+        std::deque<Eigen::Vector3f> size_candidate_buffer;
+    };
+
+    HookCargoLockConfig hook_lock_config_;
+    HookCargoLock hook_lock_;
+
+    void updateHookCargoLock(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
+    bool isStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    bool isWeakDetection(const HookCargoDetection& det);
+    Eigen::Vector3f computeFixedCenterSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    Eigen::Vector3f medianSize(const std::deque<Eigen::Vector3f>& buffer);
+    void updateLockedHeight(const HookCargoBottomEstimate& bottom, const ros::Time& stamp, bool initialize);
+    void maybeUpdateLockedSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    void growUncertainty();
+    void clearHookLock();
 };
 
 } // namespace ndt_slam
