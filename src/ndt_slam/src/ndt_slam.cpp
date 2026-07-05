@@ -1016,6 +1016,37 @@ void NdtSlamNode::processCloudThread() {
                               filtered_cloud->size(), hook_input_cloud->size());
         }
 
+        // ========== HookFixedCargoDetector（每帧都执行，在 NDT 和 MapCommit 之前）==========
+        ROS_INFO_THROTTLE(0.2,
+            "[HookFrame] frame=%d before_detect hook_input=%zu longterm=%d enabled=%d",
+            total_frames,
+            hook_input_cloud ? hook_input_cloud->size() : 0,
+            longterm_mapping_enabled_ ? 1 : 0,
+            hook_fixed_config_.enabled ? 1 : 0);
+
+        if (hook_fixed_config_.enabled && hook_input_cloud && !hook_input_cloud->empty()) {
+            hook_fixed_cargo_ = detectHookFixedCargo(hook_input_cloud, msg->header.stamp);
+            hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
+            updateHookCargoLock(hook_fixed_cargo_, hook_fixed_bottom_, msg->header.stamp);
+            publishSelectedCorePoints(hook_fixed_cargo_, msg->header.stamp);
+
+            // 构建锁定的 odom-fixed cargo box
+            buildLockedOdomFixedCargoBox(msg->header.stamp);
+
+            // 发布 payload_track_info（用于避障节点）
+            if (hook_lock_.state == HookCargoLockState::LOCKED ||
+                hook_lock_.state == HookCargoLockState::LOST_HOLD) {
+                publishPayloadTrackInfoFromLockedHookBox(msg->header.stamp);
+            } else {
+                publishPayloadTrackInfoInvalid("not_locked");
+            }
+        } else {
+            hook_fixed_cargo_.valid = false;
+            hook_fixed_bottom_.valid = false;
+            updateHookCargoLock(hook_fixed_cargo_, hook_fixed_bottom_, msg->header.stamp);
+            publishPayloadTrackInfoInvalid("hook_disabled");
+        }
+
         // 体素降采样（0.2m，比 merger 的 0.15m 略粗，实现有效降采样）
         size_t pre_voxel_size = filtered_cloud->size();
         if (filtered_cloud->size() > 5000) {
@@ -1155,6 +1186,42 @@ void NdtSlamNode::processCloudThread() {
         // 使用 buildRegistrationCloud 替代原来的 objects x4 + ground full
         pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud =
             buildRegistrationCloud(human_safe_objects, ground_cloud);
+
+        // ========== Hook locked box 剔除（NDT 输入）==========
+        if (hook_lock_.state == HookCargoLockState::LOCKED ||
+            hook_lock_.state == HookCargoLockState::LOST_HOLD) {
+            if (hook_lock_.has_locked_size) {
+                float cx = hook_fixed_config_.roi_center_x;
+                float cy = hook_fixed_config_.roi_center_y;
+                Eigen::Vector3f size = hook_lock_.locked_size;
+                float zmin = hook_lock_.stable_bottom_z;
+                float zmax = hook_lock_.stable_top_z;
+
+                // 构建 Hook locked box
+                Eigen::Vector3f hook_bbox_min(cx - size.x() * 0.5f, cy - size.y() * 0.5f, zmin);
+                Eigen::Vector3f hook_bbox_max(cx + size.x() * 0.5f, cy + size.y() * 0.5f, zmax);
+
+                // 从 registration_cloud 中剔除 Hook locked box 内的点
+                pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+                size_t hook_removed_count = 0;
+
+                for (const auto& p : registration_cloud->points) {
+                    if (p.x >= hook_bbox_min.x() && p.x <= hook_bbox_max.x() &&
+                        p.y >= hook_bbox_min.y() && p.y <= hook_bbox_max.y() &&
+                        p.z >= hook_bbox_min.z() && p.z <= hook_bbox_max.z()) {
+                        hook_removed_count++;
+                    } else {
+                        registration_cloud_filtered->push_back(p);
+                    }
+                }
+
+                if (hook_removed_count > 0) {
+                    registration_cloud = registration_cloud_filtered;
+                    ROS_DEBUG("[HookCargoRemoval] ndt_input removed=%zu remaining=%zu",
+                             hook_removed_count, registration_cloud->size());
+                }
+            }
+        }
 
         // ========== 地面法向量诊断 ==========
         // 初始化时和每 100 帧输出一次，用于检测外参 roll/pitch 误差
@@ -1689,17 +1756,6 @@ void NdtSlamNode::processCloudThread() {
                 }
             }
 
-            // ========== HookFixedCargoDetector（每帧都执行，不受 payload_tracker 影响）==========
-            ROS_INFO_THROTTLE(1.0, "[HookFrame] frame=%d hook_input=%zu",
-                              total_frames, hook_input_cloud ? hook_input_cloud->size() : 0);
-
-            hook_fixed_cargo_ = detectHookFixedCargo(hook_input_cloud, msg->header.stamp);
-            hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
-            updateHookCargoLock(hook_fixed_cargo_, hook_fixed_bottom_, msg->header.stamp);
-            publishSelectedCorePoints(hook_fixed_cargo_, msg->header.stamp);
-
-            // 发布吊货跟踪信息（用于避障节点）
-            publishPayloadTrackInfo(msg->header.stamp);
         }
     }
 
@@ -5622,9 +5678,9 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectHookFixedCargo(
 
 bool NdtSlamNode::isStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom) {
     if (!det.valid || !det.core_points_base) return false;
-    return det.core_points_base->size() >= static_cast<size_t>(hook_lock_config_.strong_min_points) &&
-           bottom.valid &&
-           det.visible_height >= hook_fixed_config_.min_visible_height;
+    // strong_detection 不依赖 bottom.valid，只检查点数
+    // det.valid 已经表示货物在 ROI 内且被检测到
+    return det.core_points_base->size() >= static_cast<size_t>(hook_lock_config_.strong_min_points);
 }
 
 bool NdtSlamNode::isWeakDetection(const HookCargoDetection& det) {
@@ -6004,6 +6060,138 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
     }
 
     payload_track_info_pub_.publish(msg);
+}
+
+// ========== 从锁定的 Hook Box 发布 payload_track_info ==========
+void NdtSlamNode::publishPayloadTrackInfoFromLockedHookBox(const ros::Time& stamp) {
+    std_msgs::Float32MultiArray msg;
+
+    // 使用 hook_lock_ 状态
+    bool should_publish_valid = (hook_lock_.state == HookCargoLockState::LOCKED ||
+                                 hook_lock_.state == HookCargoLockState::LOST_HOLD) &&
+                                 hook_lock_.has_locked_size;
+
+    if (should_publish_valid) {
+        // 使用固定的 ROI center
+        float cx = hook_fixed_config_.roi_center_x;
+        float cy = hook_fixed_config_.roi_center_y;
+
+        Eigen::Vector3f size = hook_lock_.locked_size;
+        float zmin = hook_lock_.stable_bottom_z;
+        float zmax = hook_lock_.stable_top_z;
+
+        Eigen::Vector3f bbox_min(cx - size.x() * 0.5f, cy - size.y() * 0.5f, zmin);
+        Eigen::Vector3f bbox_max(cx + size.x() * 0.5f, cy + size.y() * 0.5f, zmax);
+        Eigen::Vector3f center(cx, cy, 0.5f * (zmin + zmax));
+
+        float box_source = (hook_lock_.state == HookCargoLockState::LOCKED) ? 1.0f : 2.0f;
+
+        msg.data = {
+            1.0f,  // IDX_VALID: 有效
+            0.0f,  // IDX_TRACK_ID
+            3.0f,  // IDX_STATE = SUSPENDED_MOVING
+            center.x(), center.y(), center.z(),
+            0.0f, 0.0f, 0.0f,  // velocity
+            bbox_min.x(), bbox_min.y(), bbox_min.z(),
+            bbox_max.x(), bbox_max.y(), bbox_max.z(),
+            static_cast<float>(hook_lock_.has_locked_size ? 30 : 0),  // point_count
+            1.0f,  // score
+            hook_lock_.stable_bottom_z,  // bottom_hag
+            hook_lock_.bottom_uncertainty,  // support_ratio (repurpose as uncertainty)
+            box_source
+        };
+
+        ROS_INFO_THROTTLE(1.0,
+            "[CargoBoxLock] state=%s center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
+            hook_lock_.state == HookCargoLockState::LOCKED ? "LOCKED" : "LOST_HOLD",
+            center.x(), center.y(), center.z(),
+            size.x(), size.y(), size.z(),
+            zmin, zmax);
+
+        ROS_INFO_THROTTLE(1.0,
+            "[CargoTargetHardCheck] source=hook_roi selected=0 payload=0 match=1 state=%d",
+            static_cast<int>(hook_lock_.state));
+    } else {
+        // 无效检测
+        msg.data = {
+            -1.0f,   // IDX_VALID: 无效
+            -1.0f,   // IDX_TRACK_ID
+            0.0f,    // IDX_STATE = NONE
+            0.0f, 0.0f, 0.0f,  // centroid
+            0.0f, 0.0f, 0.0f,  // velocity
+            0.0f, 0.0f, 0.0f,  // bbox_min
+            0.0f, 0.0f, 0.0f,  // bbox_max
+            0.0f,              // point_count
+            0.0f,              // score
+            0.0f,              // bottom_hag
+            0.0f,              // support_ratio
+            0.0f               // box_source = NONE
+        };
+
+        ROS_INFO_THROTTLE(1.0,
+            "[CargoTargetHardCheck] source=hook_roi selected=-1 payload=-1 match=0 reason=not_locked state=%d",
+            static_cast<int>(hook_lock_.state));
+    }
+
+    payload_track_info_pub_.publish(msg);
+}
+
+// ========== 发布无效 payload_track_info ==========
+void NdtSlamNode::publishPayloadTrackInfoInvalid(const std::string& reason) {
+    std_msgs::Float32MultiArray msg;
+    msg.data = {
+        -1.0f,   // IDX_VALID: 无效
+        -1.0f,   // IDX_TRACK_ID
+        0.0f,    // IDX_STATE = NONE
+        0.0f, 0.0f, 0.0f,  // centroid
+        0.0f, 0.0f, 0.0f,  // velocity
+        0.0f, 0.0f, 0.0f,  // bbox_min
+        0.0f, 0.0f, 0.0f,  // bbox_max
+        0.0f,              // point_count
+        0.0f,              // score
+        0.0f,              // bottom_hag
+        0.0f,              // support_ratio
+        0.0f               // box_source = NONE
+    };
+
+    ROS_INFO_THROTTLE(1.0,
+        "[CargoTargetHardCheck] source=hook_roi selected=-1 payload=-1 match=0 reason=%s state=%d",
+        reason.c_str(), static_cast<int>(hook_lock_.state));
+
+    payload_track_info_pub_.publish(msg);
+}
+
+// ========== 构建锁定的 odom-fixed cargo box ==========
+void NdtSlamNode::buildLockedOdomFixedCargoBox(const ros::Time& stamp) {
+    // 只有在 LOCKED 或 LOST_HOLD 状态下才构建 box
+    if (hook_lock_.state != HookCargoLockState::LOCKED &&
+        hook_lock_.state != HookCargoLockState::LOST_HOLD) {
+        return;
+    }
+
+    if (!hook_lock_.has_locked_size) {
+        return;
+    }
+
+    // 使用固定的 ROI center
+    float cx = hook_fixed_config_.roi_center_x;
+    float cy = hook_fixed_config_.roi_center_y;
+
+    Eigen::Vector3f size = hook_lock_.locked_size;
+    float zmin = hook_lock_.stable_bottom_z;
+    float zmax = hook_lock_.stable_top_z;
+
+    // 构建 odom-fixed bbox
+    Eigen::Vector3f bbox_min(cx - size.x() * 0.5f, cy - size.y() * 0.5f, zmin);
+    Eigen::Vector3f bbox_max(cx + size.x() * 0.5f, cy + size.y() * 0.5f, zmax);
+    Eigen::Vector3f center(cx, cy, 0.5f * (zmin + zmax));
+
+    // 发布 CargoMarkerBaseLink
+    ROS_INFO_THROTTLE(1.0,
+        "[CargoMarkerBaseLink] center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
+        center.x(), center.y(), center.z(),
+        size.x(), size.y(), size.z(),
+        zmin, zmax);
 }
 
 // ========== payload_precise_box_info 发布 ==========
@@ -7124,6 +7312,50 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         active_cargo_remove_boxes_base,
         objects_after_cargo_base,
         cargo_removed_base);
+
+    // ========== Hook locked box 剔除（必须在 MapCommit 前）==========
+    if (hook_lock_.state == HookCargoLockState::LOCKED ||
+        hook_lock_.state == HookCargoLockState::LOST_HOLD) {
+        if (hook_lock_.has_locked_size) {
+            float cx = hook_fixed_config_.roi_center_x;
+            float cy = hook_fixed_config_.roi_center_y;
+            Eigen::Vector3f size = hook_lock_.locked_size;
+            float zmin = hook_lock_.stable_bottom_z;
+            float zmax = hook_lock_.stable_top_z;
+
+            // 构建 Hook locked box
+            Eigen::Vector3f hook_bbox_min(cx - size.x() * 0.5f, cy - size.y() * 0.5f, zmin);
+            Eigen::Vector3f hook_bbox_max(cx + size.x() * 0.5f, cy + size.y() * 0.5f, zmax);
+
+            // 从 objects_after_cargo_base 中剔除 Hook locked box 内的点
+            pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_hook_base(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr hook_cargo_removed_base(new pcl::PointCloud<pcl::PointXYZ>);
+
+            for (const auto& p : objects_after_cargo_base->points) {
+                if (p.x >= hook_bbox_min.x() && p.x <= hook_bbox_max.x() &&
+                    p.y >= hook_bbox_min.y() && p.y <= hook_bbox_max.y() &&
+                    p.z >= hook_bbox_min.z() && p.z <= hook_bbox_max.z()) {
+                    hook_cargo_removed_base->push_back(p);
+                } else {
+                    objects_after_hook_base->push_back(p);
+                }
+            }
+
+            // 更新 objects_after_cargo_base
+            objects_after_cargo_base = objects_after_hook_base;
+
+            // 合并到 cargo_removed_base
+            *cargo_removed_base += *hook_cargo_removed_base;
+
+            ROS_INFO("[HookCargoRemoval] source=hook_lock state=%s removed_reg=%zu removed_commit=%zu center=(%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
+                     hook_lock_.state == HookCargoLockState::LOCKED ? "LOCKED" : "LOST_HOLD",
+                     hook_cargo_removed_base->size(),
+                     hook_cargo_removed_base->size(),
+                     cx, cy,
+                     size.x(), size.y(), size.z(),
+                     zmin, zmax);
+        }
+    }
 
     // [CargoCommit] 日志
     // v8-stable-r3: 降为 DEBUG

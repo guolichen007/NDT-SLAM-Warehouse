@@ -610,6 +610,9 @@ private:
     // 吊货跟踪信息发布（用于避障节点）
     ros::Publisher payload_track_info_pub_;
     void publishPayloadTrackInfo(const ros::Time& stamp);
+    void publishPayloadTrackInfoFromLockedHookBox(const ros::Time& stamp);
+    void publishPayloadTrackInfoInvalid(const std::string& reason);
+    void buildLockedOdomFixedCargoBox(const ros::Time& stamp);
 
     // Commit C: payload precise box info
     void publishPayloadPreciseBoxInfo(const PayloadTrackInfo& track, float box_source, const ros::Time& stamp);
