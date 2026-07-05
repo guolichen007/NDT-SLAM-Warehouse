@@ -3,7 +3,7 @@
 # 用法: bash slam_monitor.sh [监控间隔秒数]
 
 INTERVAL=${1:-60}
-DATA_DIR="/home/ydkj/slam_data/maps/live/current"
+DATA_DIR="/home/ydkj/NDT-slam-ws/maps/live/current"
 STATUS_FILE="$DATA_DIR/runtime_status.json"
 TREND_FILE="$DATA_DIR/memory_trend.csv"
 ALERTS_FILE="$DATA_DIR/alerts.log"

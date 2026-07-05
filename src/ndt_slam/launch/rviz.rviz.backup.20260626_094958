@@ -29,7 +29,7 @@ Panels:
   - Class: rviz/Time
     Name: Time
     SyncMode: 0
-    SyncSource: ""
+    SyncSource: Image
 Preferences:
   PromptSaveOnExit: true
 Toolbars:
@@ -56,17 +56,17 @@ Visualization Manager:
       Reference Frame: <Fixed Frame>
       Value: true
     - Class: rviz/Image
-      Enabled: false
+      Enabled: true
       Image Topic: /hikcamera/img_stream_150
       Max Value: 1
       Median window: 5
       Min Value: 0
       Name: Image
       Normalize Range: true
-      Queue Size: 1
+      Queue Size: 2
       Transport Hint: raw
       Unreliable: false
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -77,15 +77,15 @@ Visualization Manager:
       Channel Name: intensity
       Class: rviz/PointCloud2
       Color: 255; 255; 255
-      Color Transformer: FlatColor
+      Color Transformer: Intensity
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
-      Name: registration_map
+      Name: PointCloud2
       Position Transformer: XYZ
-      Queue Size: 1
+      Queue Size: 10
       Selectable: true
       Size (Pixels): 1
       Size (m): 0.009999999776482582
@@ -93,7 +93,7 @@ Visualization Manager:
       Topic: /map
       Unreliable: false
       Use Fixed Frame: true
-      Use rainbow: false
+      Use rainbow: true
       Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
@@ -121,8 +121,8 @@ Visualization Manager:
       Topic: /display_map
       Unreliable: false
       Use Fixed Frame: true
-      Use rainbow: false
-      Value: true
+      Use rainbow: true
+      Value: false
     - Alpha: 0.3
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -135,7 +135,7 @@ Visualization Manager:
       Color: 100; 100; 100
       Color Transformer: FlatColor
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
@@ -149,8 +149,8 @@ Visualization Manager:
       Topic: /display_map_ground
       Unreliable: false
       Use Fixed Frame: true
-      Use rainbow: false
-      Value: false
+      Use rainbow: true
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -163,7 +163,7 @@ Visualization Manager:
       Color: 255; 100; 0
       Color Transformer: FlatColor
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
@@ -177,7 +177,7 @@ Visualization Manager:
       Topic: /display_map_objects
       Unreliable: false
       Use Fixed Frame: true
-      Use rainbow: false
+      Use rainbow: true
       Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
@@ -205,7 +205,7 @@ Visualization Manager:
       Topic: /display_map_objects_clean
       Unreliable: false
       Use Fixed Frame: true
-      Use rainbow: false
+      Use rainbow: true
       Value: true
     - Alpha: 0.5
       Autocompute Intensity Bounds: true
@@ -216,16 +216,16 @@ Visualization Manager:
       Axis: Z
       Channel Name: intensity
       Class: rviz/PointCloud2
-      Color: 255; 255; 255
+      Color: 255; 0; 0
       Color Transformer: FlatColor
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
-      Name: current_cloud
+      Name: PointCloud2
       Position Transformer: XYZ
-      Queue Size: 1
+      Queue Size: 10
       Selectable: true
       Size (Pixels): 2
       Size (m): 0.009999999776482582
@@ -233,8 +233,8 @@ Visualization Manager:
       Topic: /mapping_current_cloud
       Unreliable: false
       Use Fixed Frame: true
-      Use rainbow: false
-      Value: false
+      Use rainbow: true
+      Value: true
     - Angle Tolerance: 0.10000000149011612
       Class: rviz/Odometry
       Covariance:
@@ -245,18 +245,18 @@ Visualization Manager:
           Frame: Local
           Offset: 1
           Scale: 1
-          Value: false
+          Value: true
         Position:
           Alpha: 0.30000001192092896
           Color: 204; 51; 204
           Scale: 1
-          Value: false
-        Value: false
+          Value: true
+        Value: true
       Enabled: true
       Keep: 1
       Name: Odometry
       Position Tolerance: 0.10000000149011612
-      Queue Size: 1
+      Queue Size: 10
       Shape:
         Alpha: 1
         Axes Length: 0.5
@@ -293,162 +293,6 @@ Visualization Manager:
       Topic: /path
       Unreliable: false
       Value: true
-    - Alpha: 1
-      Buffer Length: 1
-      Class: rviz/Path
-      Color: 255; 165; 0
-      Enabled: true
-      Head Diameter: 0.30000001192092896
-      Head Length: 0.20000000298023224
-      Length: 0.30000001192092896
-      Line Style: Lines
-      Line Width: 0.029999999329447746
-      Name: Runtime Path
-      Offset:
-        X: 0
-        Y: 0
-        Z: 0
-      Pose Color: 255; 85; 255
-      Pose Style: None
-      Radius: 0.029999999329447746
-      Shaft Diameter: 0.10000000149011612
-      Shaft Length: 0.10000000149011612
-      Topic: /ndt_slam/runtime_path
-      Unreliable: false
-      Value: true
-    - Alpha: 1
-      Autocompute Intensity Bounds: true
-      Autocompute Value Bounds:
-        Max Value: 10
-        Min Value: -10
-        Value: true
-      Axis: Z
-      Channel Name: intensity
-      Class: rviz/PointCloud2
-      Color: 255; 255; 0
-      Color Transformer: FlatColor
-      Decay Time: 0
-      Enabled: false
-      Invert Rainbow: false
-      Max Color: 255; 255; 255
-      Min Color: 0; 0; 0
-      Name: suspended_payload_candidate
-      Position Transformer: XYZ
-      Queue Size: 1
-      Selectable: true
-      Size (Pixels): 3
-      Size (m): 0.009999999776482582
-      Style: Points
-      Topic: /suspended_payload_candidate_cloud
-      Unreliable: false
-      Use Fixed Frame: true
-      Use rainbow: false
-      Value: false
-    - Alpha: 1
-      Autocompute Intensity Bounds: true
-      Autocompute Value Bounds:
-        Max Value: 10
-        Min Value: -10
-        Value: true
-      Axis: Z
-      Channel Name: intensity
-      Class: rviz/PointCloud2
-      Color: 0; 255; 0
-      Color Transformer: FlatColor
-      Decay Time: 0
-      Enabled: true
-      Invert Rainbow: false
-      Max Color: 255; 255; 255
-      Min Color: 0; 0; 0
-      Name: suspended_payload
-      Position Transformer: XYZ
-      Queue Size: 1
-      Selectable: true
-      Size (Pixels): 3
-      Size (m): 0.009999999776482582
-      Style: Points
-      Topic: /suspended_payload_cloud
-      Unreliable: false
-      Use Fixed Frame: true
-      Use rainbow: false
-      Value: true
-    - Alpha: 1
-      Class: rviz/MarkerArray
-      Enabled: false
-      Marker Topic: /cargo_raw_bbox_marker
-      Name: cargo_raw_bbox
-      Namespaces:
-        {}
-      Queue Size: 1
-      Value: false
-    - Alpha: 0.6
-      Class: rviz/MarkerArray
-      Enabled: false
-      Marker Topic: /cargo_stable_bbox_marker
-      Name: cargo_stable_bbox
-      Namespaces:
-        {}
-      Queue Size: 1
-      Value: false
-    - Alpha: 1
-      Class: rviz/MarkerArray
-      Enabled: false
-      Marker Topic: /cargo_track_status_marker
-      Name: cargo_track_status
-      Namespaces:
-        {}
-      Queue Size: 1
-      Value: false
-    - Alpha: 0.8
-      Class: rviz/PointCloud2
-      Color: 255; 0; 0
-      Color Transformer: FlatColor
-      Decay Time: 0
-      Enabled: true
-      Invert Rainbow: false
-      Max Color: 255; 255; 255
-      Max Intensity: 4096
-      Min Color: 0; 0; 0
-      Min Intensity: 0
-      Name: cargo_selected_core_points
-      Position Transformer: XYZ
-      Queue Size: 10
-      Selectable: true
-      Size (Pixels): 3
-      Size (m): 0.009999999776482582
-      Style: Points
-      Topic: /cargo_selected_core_points
-      Unreliable: false
-      Use Fixed Frame: true
-      Use rainbow: true
-      Value: true
-    - Alpha: 1
-      Class: rviz/MarkerArray
-      Enabled: true
-      Marker Topic: /cargo_core_bbox_marker
-      Name: cargo_core_bbox
-      Namespaces:
-        {}
-      Queue Size: 1
-      Value: true
-    - Alpha: 0.5
-      Class: rviz/MarkerArray
-      Enabled: false
-      Marker Topic: /cargo_remove_bbox_marker
-      Name: cargo_remove_bbox
-      Namespaces:
-        {}
-      Queue Size: 1
-      Value: false
-    - Alpha: 0.3
-      Class: rviz/MarkerArray
-      Enabled: false
-      Marker Topic: /cargo_forbidden_zone_marker
-      Name: cargo_forbidden_zone
-      Namespaces:
-        {}
-      Queue Size: 1
-      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

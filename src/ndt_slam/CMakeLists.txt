@@ -74,6 +74,10 @@ set(LIBRARY_SOURCES
   src/human_object_filter.cpp
   # 动态事件管理
   src/dynamic_event_manager.cpp
+  # P0.5: 货物框估计器
+  src/cargo_box_estimator.cpp
+  # v8-stable-r3: CraneMotionEKF
+  src/crane_motion_ekf.cpp
 )
 
 add_library(ndt_slam_lib SHARED
@@ -118,6 +122,14 @@ add_executable(cloud_diagnostics src/CloudDiagnostics.cpp)
 target_link_libraries(cloud_diagnostics
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
+)
+
+# 吊货禁行区节点
+add_executable(cargo_forbidden_zone_node src/cargo_forbidden_zone_node.cpp)
+target_link_libraries(cargo_forbidden_zone_node
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  yaml-cpp
 )
 
 install(TARGETS ndt_slam_lib ndt_slam_node

@@ -38,7 +38,7 @@ ndt_omp:
   resolution: 1.0
   step_size: 0.1
   transformation_epsilon: 0.01
-  max_iterations: 50
+  max_iterations: 30          # v8-stable-r3-hotfix-minimal: 从 50 改为 30，与 adaptive_ndt.normal 一致
 
 # 动态点过滤
 dynamic_filter:
@@ -80,7 +80,7 @@ online_cache:
 # 磁盘增量保存
 persistent_map:
   enabled: true
-  root_dir: "/home/ydkj/slam_data/maps/live/current"
+  root_dir: "/home/ydkj/NDT-slam-ws/maps/live/current"
   tile_size_m: 20.0            # tile 大小（米）
   flush_interval_sec: 60       # flush 间隔（秒）
   max_dirty_tiles_in_memory: 20  # 最大 dirty tile 数量
@@ -118,8 +118,24 @@ pointcloud_watchdog:
 
 # NDT 健康监控
 ndt_health:
-  fitness_warning_threshold: 2.0
-  fitness_warning_count: 50
+  fitness_warning_threshold: 0.35
+  fitness_warning_count: 5
+
+# 天车运动约束（三自由度建图：x/y/yaw 自由，z/roll/pitch 锁定）
+crane_motion_constraint:
+  enabled: true
+  lock_z: true                # z 锁定（天车雷达高度固定）
+  fixed_z_source: "config"    # config: 使用 fixed_z 值; first_frame: 使用第一帧值
+  fixed_z: 0.0                # 固定 z 值（map 坐标系下 base_link 高度）
+  constrain_z: false          # 不使用限幅模式
+  lock_roll: true             # roll 锁定（天车不翻转）
+  lock_pitch: true            # pitch 锁定（天车不俯仰）
+  lock_yaw: false             # yaw 不锁定（NDT 需要横向自由度）
+  constrain_yaw: false        # v8-stable-r3-hotfix-minimal: 禁用 yaw 约束，交给 soft_yaw_filter
+  max_abs_z_drift: 0.05       # z 最大允许漂移（仅 constrain_z=true 时生效）
+  max_roll_deg: 0.3           # roll 最大允许漂移（度）
+  max_pitch_deg: 0.3          # pitch 最大允许漂移（度）
+  # max_yaw_deg: 1.0          # v8-stable-r3-hotfix-minimal: 已禁用，不再使用
 
 # ========== 吊货过滤配置 ==========
 
@@ -163,15 +179,424 @@ dynamic_event_manager:
 
 human_object_filter:
   enabled: true
-  min_hag: 0.35
+  min_hag: 0.15           # P1: 降低到 0.15m
   max_hag: 2.30
-  min_cluster_height: 0.60
+  min_cluster_height: 0.40  # P1: 降低到 0.40m
   max_cluster_height: 2.20
-  min_points: 20
-  max_points: 2000
+  min_points: 5             # P1: 降低到 5，捕获弱小簇
+  max_points: 500           # P1: 降低到 500
   min_area_m2: 0.04
   max_area_m2: 1.20
-  max_width_m: 1.00
-  max_length_m: 1.00
+  max_width_m: 1.20         # P1: 降低到 1.20
+  max_length_m: 1.20        # P1: 降低到 1.20
   bev_resolution: 0.10
   merge_gap_m: 0.15
+
+  # P1: 区分 strong/weak 的阈值
+  min_points_strong: 30     # >= 30 points: strong human/dynamic，直接删除
+  min_points_weak: 5        # 5-30 points: weak transient，禁止进入地图
+
+  # P1: deny history 配置
+  human_deny_ttl: 15.0      # 人员 deny cells 保留 15 秒
+
+# HumanObjectTracking（人体跟踪）
+human_object_tracking:
+  enabled: true
+  window_sec: 2.0
+  confirm_frames: 2
+  map_displacement_thresh_m: 0.20
+  velocity_thresh_mps: 0.10
+  max_match_distance_m: 0.80
+  max_missed_frames: 5
+
+# HumanObjectEraser（人体历史反删）
+human_object_eraser:
+  enabled: true
+  history_sec: 10.0
+  capsule_radius_m: 0.65
+  use_track_height_range: true
+  z_margin_m: 0.30
+  hag_margin_m: 0.30
+  pre_guard_sec: 2.0
+  post_guard_sec: 3.0
+  erase_objects_only: true
+  erase_ground: false
+  async_update: true
+
+# ========== CargoBoxEstimator 配置 ==========
+cargo_box_estimator:
+  enabled: true
+
+  # 聚类参数
+  min_cluster_points: 40
+  max_cluster_points: 20000
+
+  # BEV 连通域参数
+  bev_resolution: 0.10
+  bev_min_points_per_cell: 1
+  bev_min_component_cells: 2
+  bev_connectivity: 8
+
+  # 悬空主体层检测
+  min_hag_for_candidate: 0.20
+  min_payload_bottom_hag: 0.45
+  z_hist_bin: 0.10
+  min_z_band_points: 3
+  dense_bin_ratio: 0.15
+  dense_bin_min_points: 2
+
+  # P0-5: 分阶段阈值（locked track 下使用更宽松的阈值）
+  locked_min_core_points: 4
+  locked_min_z_band_points: 2
+  use_last_good_box_fallback: true
+  fallback_hold_time_sec: 1.2
+  min_dense_band_height: 0.10
+  max_dense_band_height: 3.50
+
+  # Commit D: V2_CORE 质量门
+  visual_min_long_side: 0.50
+  visual_min_short_side: 0.25
+  visual_min_height: 0.30
+  visual_min_area_xy: 0.25
+  visual_max_long_side: 8.0
+  visual_max_short_side: 5.0
+  visual_max_height: 3.0
+  visual_min_core_points: 12
+  track_switch_confirm_frames: 3
+  track_switch_max_jump_m: 1.20
+  selected_track_hold_sec: 1.20
+
+  # 分位数参数
+  xy_percentile_low: 2.0
+  xy_percentile_high: 98.0
+  z_percentile_low: 5.0
+  z_percentile_high: 98.0
+
+  # 轴向约束 OBB
+  use_crane_axis_obb: true
+
+  # 尺寸限制
+  max_width: 6.0
+  max_length: 16.0
+  max_height: 5.0
+
+  # 显示框扩展（core box）
+  core_expand_xy: 0.05
+  core_expand_z_down: 0.03
+  core_expand_z_up: 0.10
+
+  # 删除框扩展（remove box）
+  remove_expand_xy: 0.25
+  remove_expand_z_down: 0.05
+  remove_expand_z_up: 0.20
+
+  # 禁行区扩展
+  forbidden_expand_xy: 0.50
+  forbidden_height: 3.0
+
+  # 尺寸增长率限制（防止框体突然变大）
+  max_size_growth_ratio: 1.35
+
+  # 最小悬空高度（不能作为吊货的最低 HAG）
+  min_suspended_hag: 0.35
+
+  # 最小 core points
+  min_core_points: 5
+
+  # P0-6: 候选/确认两级阈值
+  min_candidate_core_points: 5
+  min_confirm_core_points: 25
+  min_update_core_points: 8
+  min_confirm_observed_frames: 3
+
+  # 绝对尺寸约束
+  max_core_length: 12.0
+  max_core_width: 4.0
+  max_core_height: 4.0
+  min_core_length: 0.30
+  min_core_width: 0.30
+  min_core_height: 0.10
+
+  # 初始化质量约束
+  init_max_area: 30.0
+  init_max_aspect_ratio: 8.0
+  init_min_bottom_hag: 0.45
+  init_min_core_points: 5
+
+# ========== v8-stable-r3-final: CraneMotionEKF ==========
+crane_motion_ekf:
+  enabled: true
+  source: "estimated"          # estimated / plc
+
+  q_pos: 0.05
+  q_vel: 0.30
+
+  r_ndt_base: 0.02
+  r_ndt_max: 2.0
+  fitness_to_r_scale: 5.0
+
+  innovation_gate_m: 0.50
+  innovation_reject_m: 1.50
+
+  max_speed_x: 2.0
+  max_speed_y: 2.0
+  max_accel_x: 1.0
+  max_accel_y: 1.0
+
+  commit_requires_ndt_accept: true
+  max_rejected_frames_for_commit: 0
+
+  diagonal_mode:
+    enabled: true
+    min_vx: 0.05
+    min_vy: 0.05
+    min_speed: 0.10
+    lateral_gate_m: 0.20
+    tangential_gate_m: 0.40
+    lateral_damping: 0.70
+    tangential_damping: 0.40
+
+  recovery:
+    max_frames_since_good_ndt: 30
+    max_high_fitness_frames: 10
+    max_reject_innovation_frames: 5
+    high_fitness_threshold: 0.15
+
+# ========== v8-stable-r3-final: SoftYawFilter ==========
+soft_yaw_filter:
+  enabled: true
+  mode: "soft_filter"
+
+  alpha_stationary: 0.04
+  alpha_moving: 0.18
+  alpha_speed_extra: 0.05
+
+  max_step_deg_stationary: 0.08
+  max_step_deg_moving: 0.35
+
+  warn_raw_filtered_diff_deg: 3.0
+
+# ========== v8-stable-r3-final: Registration Input ==========
+registration_input:
+  ndt_input_voxel_size: 0.30
+  object_weight_repeat: 2
+  ground_sample_ratio: 0.20
+  max_ndt_points: 8000
+  min_objects_for_weighting: 500
+
+# ========== v8-stable-r3-final: Adaptive NDT ==========
+adaptive_ndt:
+  enabled: true
+  target_total_ms: 80.0
+  emergency_total_ms: 120.0
+
+  normal:
+    max_iterations: 30
+    ndt_input_voxel_size: 0.30
+    ground_sample_ratio: 0.20
+    object_weight_repeat: 2
+    max_ndt_points: 8000
+
+  overload:
+    max_iterations: 20
+    ndt_input_voxel_size: 0.35
+    ground_sample_ratio: 0.10
+    object_weight_repeat: 1
+    max_ndt_points: 6000
+
+  emergency:
+    max_iterations: 15
+    ndt_input_voxel_size: 0.40
+    ground_sample_ratio: 0.05
+    object_weight_repeat: 1
+    max_ndt_points: 4000
+
+# ========== v8-stable-r3-final: ICP Refine ==========
+icp_refine:
+  enabled: false
+  run_after_ndt: true
+  use_objects_only: true
+  max_iterations: 8
+  max_correspondence_distance: 0.20
+  transformation_epsilon: 0.002
+  min_object_points: 800
+  max_icp_ms: 15.0
+
+# ========== v8-stable-r3-final: Debug Publish ==========
+debug_publish:
+  enabled: false
+  publish_every_n_frames: 10
+
+# ========== v8-stable-r3-final: RViz Publish ==========
+rviz_publish:
+  display_map_rate_hz: 1.0
+  objects_clean_rate_hz: 1.0
+  current_cloud_rate_hz: 3.0
+
+# ========== HookFixedCargoDetector ==========
+hook_fixed_cargo_detector:
+  enabled: true
+
+  # 固定 ROI（base_link 坐标系）- 临时放宽，先确认能检测到
+  roi_center_x: 0.0
+  roi_center_y: -2.2
+  roi_half_x: 2.2
+  roi_half_y: 2.2
+  roi_z_min: 0.10
+  roi_z_max: 3.20
+
+  # 检测参数 - 临时放宽，先确认能检测到
+  voxel_leaf: 0.05
+  cluster_tolerance: 0.30
+  min_cluster_points: 5
+  max_cluster_points: 10000
+
+  # 过滤吊具/钢丝绳/上方结构 - 临时放宽，先确认能检测到
+  reject_rope_radius: 0.03
+  reject_rope_min_z: 3.5
+  reject_structure_z: 4.5
+
+  # 框稳定
+  xy_mode: "roi_center"
+  xy_alpha: 0.15
+  z_alpha: 0.30
+  size_alpha: 0.20
+
+  # 尺寸门
+  min_long_side: 0.30
+  min_short_side: 0.20
+  min_visible_height: 0.08
+  max_long_side: 4.0
+  max_short_side: 3.0
+  max_height: 3.0
+
+  # 底部估计
+  bottom_min_points: 15
+  visible_side_min_height: 0.30
+  bottom_band_height: 0.10
+  bottom_band_min_points: 5
+  bottom_band_min_xy_cells: 2
+  bottom_xy_cell_size: 0.10
+
+  # 不确定性
+  points_uncertainty: 0.12
+  height_memory_uncertainty: 0.18
+  invalid_uncertainty: 0.30
+  stable_height_alpha: 0.25
+
+  # 允许没有底部估计时也显示框
+  allow_visible_box_without_bottom: true
+
+# ========== HookCargoLock 状态机 ==========
+hook_cargo_lock:
+  enabled: true
+  lock_confirm_frames: 3
+  size_init_window: 5
+  lost_hold_sec: 3.0
+  lost_clear_sec: 8.0
+  strong_min_points: 30
+  weak_min_points: 5
+  size_change_min_ratio: 0.20
+  size_change_max_ratio: 0.60
+  size_update_confirm_frames: 5
+  size_update_alpha: 0.15
+  candidate_hold_sec: 1.0
+  candidate_max_weak_frames: 10
+  bottom_alpha_points: 0.30
+  bottom_alpha_memory: 0.15
+  bottom_hold_uncertainty_growth: 0.02
+  bottom_max_uncertainty: 0.35
+
+  # locked association gate
+  locked_update_max_center_dist: 0.65
+  locked_update_min_overlap_ratio: 0.30
+  locked_update_max_z_jump: 0.45
+  locked_update_max_top_jump: 0.60
+  locked_update_min_points: 20
+
+  # 锁定时 strong 条件（比更新时更严格）
+  lock_strong_min_points: 80
+  lock_min_visible_height: 0.50
+  lock_min_xy_area: 0.40
+
+  # locked search margin
+  locked_search_margin_x: 0.30
+  locked_search_margin_y: 0.30
+
+
+# ========== OdomAnchorBox 配置 ==========
+odom_anchored_cargo_box:
+  enabled: true
+
+  # 绿色框中心锚点（默认 base_link/odom 原点）
+  anchor_x: 0.0
+  anchor_y: 0.0
+
+  # 检测和 marker 降频
+  detect_rate_hz: 5.0
+  marker_rate_hz: 5.0
+
+  # debug 点云发布（默认关闭）
+  publish_debug_points: false
+  publish_selected_core_points: false
+  publish_raw_candidate_points: false
+  publish_default_box_marker: false
+
+  # 日志控制
+  verbose_debug: false
+  summary_log_period: 2.0
+
+  # 旧 cargo 链路开关（默认关闭）
+  use_global_payload_tracker: false
+  use_cargobox_v2: false
+  use_dynamic_history_eraser: false
+  enable_hook_cargo_removal: false
+
+  # 检测窗口围绕 anchor 裁剪
+  search_half_x: 1.20
+  search_half_y: 1.20
+  search_z_min: 0.05
+  search_z_max: 3.20
+
+  # 默认小参考框（仅 debug）
+  default_size_x: 0.50
+  default_size_y: 0.35
+  default_size_z: 0.25
+
+  # 检测到货物后的尺寸范围
+  min_size_x: 0.60
+  min_size_y: 0.40
+  min_size_z: 0.20
+  max_size_x: 2.50
+  max_size_y: 1.60
+  max_size_z: 2.00
+
+  size_margin_x: 0.10
+  size_margin_y: 0.10
+  size_margin_z: 0.05
+
+  lock_confirm_frames: 2
+  strong_min_points: 50
+  weak_min_points: 10
+
+  size_update_confirm_frames: 5
+  size_change_min_ratio: 0.20
+  size_change_max_ratio: 0.60
+  size_update_alpha: 0.15
+
+  bottom_alpha_points: 0.25
+  bottom_alpha_hold: 0.05
+  bottom_max_uncertainty: 0.35
+
+  lost_hold_sec: 5.0
+  lost_clear_sec: 15.0
+  size_update_alpha: 0.15
+
+  bottom_alpha_points: 0.30
+  bottom_alpha_hold: 0.10
+  bottom_max_uncertainty: 0.35
+
+  lost_hold_sec: 5.0
+  lost_clear_sec: 15.0
+
+  verbose_debug: false

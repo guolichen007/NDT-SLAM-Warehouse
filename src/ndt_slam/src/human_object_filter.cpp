@@ -1,4 +1,5 @@
 #include "ndt_slam/human_object_filter.hpp"
+#include <ros/ros.h>
 #include <pcl/filters/crop_box.h>
 #include <pcl/common/centroid.h>
 #include <pcl/common/common.h>
@@ -49,10 +50,12 @@ void HumanObjectDynamicFilter::processFrame(
     clusterBEV(objects_cloud_base, clusters);
 
     // Step 2: 判断每个聚类是否符合人体特征
+    // P1: 区分 strong human（>=30 points）和 weak transient（5-30 points）
     std::vector<int> human_cluster_indices;
     std::vector<Eigen::Vector3d> cluster_centroids;
     std::vector<Eigen::Vector3d> cluster_bbox_mins;
     std::vector<Eigen::Vector3d> cluster_bbox_maxs;
+    std::vector<bool> cluster_is_strong;  // P1: 标记是否为 strong human
 
     for (size_t i = 0; i < clusters.size(); i++) {
         Eigen::Vector3d centroid, bbox_min, bbox_max;
@@ -61,6 +64,19 @@ void HumanObjectDynamicFilter::processFrame(
             cluster_centroids.push_back(centroid);
             cluster_bbox_mins.push_back(bbox_min);
             cluster_bbox_maxs.push_back(bbox_max);
+
+            // P1: 判断是 strong 还是 weak
+            bool is_strong = (clusters[i]->size() >= static_cast<size_t>(filter_config_.min_points_strong));
+            cluster_is_strong.push_back(is_strong);
+
+            // P1: 将 weak transient 也写入 deny history
+            // 这样即使 weak cluster 没有被跟踪，也会被拒绝进入地图
+            if (!is_strong) {
+                // weak transient：写入 deny cells
+                addDenyCells(bbox_min, bbox_max, timestamp, human_deny_ttl_);
+                ROS_DEBUG("[HumanFilterV2] weak transient cluster: points=%zu, added to deny history",
+                          clusters[i]->size());
+            }
         }
     }
 
@@ -170,6 +186,24 @@ void HumanObjectDynamicFilter::processFrame(
 
     // 清理过期跟踪
     cleanupExpiredTracks(timestamp);
+
+    // P1: 清理过期的 deny cells
+    cleanupExpiredDenyCells(timestamp);
+
+    // P1: 输出统计信息
+    int strong_count = 0, weak_count = 0;
+    for (size_t j = 0; j < human_cluster_indices.size(); j++) {
+        if (cluster_is_strong[j]) {
+            strong_count++;
+        } else {
+            weak_count++;
+        }
+    }
+
+    if (strong_count > 0 || weak_count > 0) {
+        ROS_DEBUG("[HumanFilterV2] strong=%d, weak=%d, removed=%zu, deny_cells=%d",
+                  strong_count, weak_count, human_cluster_indices.size(), getDenyCellCount());
+    }
 }
 
 void HumanObjectDynamicFilter::clusterBEV(
@@ -572,6 +606,72 @@ bool HumanObjectDynamicFilter::isPointInPolygonPrism(
     }
 
     return inside;
+}
+
+// ========== P1: Deny History 管理 ==========
+
+void HumanObjectDynamicFilter::addDenyCells(
+    const Eigen::Vector3d& bbox_min, const Eigen::Vector3d& bbox_max,
+    double current_time, double ttl_sec) {
+
+    double bev_res = filter_config_.bev_resolution;
+    int x_min = std::floor(bbox_min.x() / bev_res);
+    int x_max = std::floor(bbox_max.x() / bev_res);
+    int y_min = std::floor(bbox_min.y() / bev_res);
+    int y_max = std::floor(bbox_max.y() / bev_res);
+
+    for (int x = x_min; x <= x_max; x++) {
+        for (int y = y_min; y <= y_max; y++) {
+            auto key = std::make_pair(x, y);
+            auto it = human_deny_cells_.find(key);
+            if (it != human_deny_cells_.end()) {
+                // 更新已有条目
+                it->second.last_seen_time = current_time;
+                it->second.hit_count++;
+            } else {
+                // 创建新条目
+                DenyCellEntry entry;
+                entry.first_seen_time = current_time;
+                entry.last_seen_time = current_time;
+                entry.hit_count = 1;
+                human_deny_cells_[key] = entry;
+            }
+        }
+    }
+}
+
+bool HumanObjectDynamicFilter::isCellDenied(double x, double y, double current_time) const {
+    int bev_x = std::floor(x / filter_config_.bev_resolution);
+    int bev_y = std::floor(y / filter_config_.bev_resolution);
+    auto key = std::make_pair(bev_x, bev_y);
+
+    auto it = human_deny_cells_.find(key);
+    if (it == human_deny_cells_.end()) {
+        return false;
+    }
+
+    // 检查是否过期
+    double age = current_time - it->second.last_seen_time;
+    return age < human_deny_ttl_;
+}
+
+void HumanObjectDynamicFilter::cleanupExpiredDenyCells(double current_time) {
+    std::vector<std::pair<int,int>> expired_keys;
+
+    for (const auto& entry : human_deny_cells_) {
+        double age = current_time - entry.second.last_seen_time;
+        if (age >= human_deny_ttl_) {
+            expired_keys.push_back(entry.first);
+        }
+    }
+
+    for (const auto& key : expired_keys) {
+        human_deny_cells_.erase(key);
+    }
+}
+
+int HumanObjectDynamicFilter::getDenyCellCount() const {
+    return human_deny_cells_.size();
 }
 
 } // namespace ndt_slam

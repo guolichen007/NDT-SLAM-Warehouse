@@ -1,0 +1,95 @@
+# 吊货避障配置
+
+cargo_forbidden_zone:
+  map_frame: "map"
+  enabled: true
+
+  input:
+    use_tiles_objects: true
+    objects_tiles_dir: "/home/ydkj/NDT-slam-ws/maps/live/current/tiles_objects"
+    payload_track_topic: "/payload_track_info"
+
+  # 吊货识别参数
+  suspended_payload:
+    enabled: true
+
+    # ROI（base_link 坐标系）
+    roi_x_min: -5.0
+    roi_x_max: 5.0
+    roi_y_min: -4.0
+    roi_y_max: 4.0
+    roi_z_min: -2.0
+    roi_z_max: 6.0
+
+    # 聚类参数
+    cluster_tolerance: 0.35
+    min_cluster_points: 60
+    max_cluster_points: 20000
+
+    # HAG 判断
+    min_floating_gap: 0.30
+    strong_floating_gap: 0.60
+    max_support_ratio: 0.20
+
+    # 评分权重
+    min_score_to_lock: 0.70
+    w_base_stability: 0.30
+    w_map_motion: 0.20
+    w_floating_gap: 0.20
+    w_support: 0.15
+    w_roi: 0.10
+    w_size: 0.05
+
+  # 货物定位状态机
+  cargo_localization:
+    enabled: true
+    max_lost_frames: 8
+    min_confirm_frames: 2
+    keep_suspended_timeout_sec: 5.0
+    moving_confirm_frames: 2
+    min_bbox_point_count: 50
+    min_map_displacement: 0.25
+    min_direction_consistency: 0.65
+
+  # bbox 滤波
+  bbox_filter:
+    use_quantile_bbox: true
+    quantile_xy_low: 0.05
+    quantile_xy_high: 0.95
+    quantile_z_low: 0.10
+    quantile_z_high: 0.90
+    centroid_filter_alpha: 0.60
+    size_filter_alpha: 0.25
+    max_position_jump: 1.50       # soft gate: 1.5m
+    residual_hard_gate: 3.00      # hard gate: 3.0m
+    switch_confirm_frames: 3      # 连续 3 帧异常才切换
+    max_size_change_per_frame: 0.40
+    use_velocity_compensation: true
+    max_compensation_dt: 0.30
+
+  # 默认货物尺寸
+  cargo_size:
+    default_length_x: 3.0
+    default_width_y: 1.0
+    default_height_z: 1.0
+
+  # 安全边距
+  inflation:
+    safety_margin_x: 0.25
+    safety_margin_y: 0.25
+
+  # 功能开关（暂时禁用）
+  prediction:
+    enabled: false
+  collision_warning:
+    enabled: false
+  decision:
+    enabled: false
+
+  # 可视化
+  visualization:
+    publish_raw_bbox: true
+    publish_stable_bbox: true
+    publish_status_text: true
+    publish_candidate_cloud: true
+    publish_suspended_cloud: true

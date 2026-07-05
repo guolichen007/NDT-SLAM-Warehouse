@@ -5,9 +5,9 @@ echo "========== NDT-SLAM 长期建图部署 =========="
 
 # 1. 创建数据目录
 echo "[1/7] 创建数据目录..."
-mkdir -p /home/ydkj/slam_data/maps/live/current
-mkdir -p /home/ydkj/slam_data/maps/live/archive
-mkdir -p /home/ydkj/slam_data/logs
+mkdir -p /home/ydkj/NDT-slam-ws/maps/live/current
+mkdir -p /home/ydkj/NDT-slam-ws/maps/live/archive
+mkdir -p /home/ydkj/NDT-slam-ws/logs
 
 # 2. 检查磁盘空间
 echo "[2/7] 检查磁盘空间..."
@@ -65,6 +65,6 @@ echo "========== 部署完成 =========="
 echo "启动 SLAM:  sudo systemctl start ndt-slam"
 echo "查看状态:    sudo systemctl status ndt-slam"
 echo "查看日志:    journalctl -u ndt-slam -f"
-echo "查看运行:    cat /home/ydkj/slam_data/maps/live/current/runtime_status.json"
-echo "查看趋势:    tail -f /home/ydkj/slam_data/maps/live/current/memory_trend.csv"
-echo "查看告警:    tail -f /home/ydkj/slam_data/maps/live/current/alerts.log"
+echo "查看运行:    cat /home/ydkj/NDT-slam-ws/maps/live/current/runtime_status.json"
+echo "查看趋势:    tail -f /home/ydkj/NDT-slam-ws/maps/live/current/memory_trend.csv"
+echo "查看告警:    tail -f /home/ydkj/NDT-slam-ws/maps/live/current/alerts.log"

@@ -28,7 +28,13 @@
 #include <condition_variable>
 #include <atomic>
 #include <memory>
+
+// P0.5: 货物框估计器
+#include <ndt_slam/cargo_box_estimator.hpp>
 #include <set>
+
+// v8-stable-r3: CraneMotionEKF
+#include <ndt_slam/crane_motion_ekf.hpp>
 
 // NDT_OMP
 #include <pclomp/ndt_omp.h>
@@ -57,6 +63,38 @@ struct KISSConfig {
 }}
 
 namespace ndt_slam {
+
+// P0-5: CargoBoxSource 枚举
+enum CargoBoxSource : int {
+    BOX_SOURCE_NONE = 0,
+    BOX_SOURCE_V2_CORE = 1,
+    BOX_SOURCE_LAST_GOOD = 2,
+    BOX_SOURCE_OLD_BBOX = 3,
+    BOX_SOURCE_CENTER_ONLY = 4
+};
+
+// P0-5: payload_track_info 索引常量
+constexpr int IDX_VALID = 0;
+constexpr int IDX_TRACK_ID = 1;
+constexpr int IDX_STATE = 2;
+constexpr int IDX_CENTROID_X = 3;
+constexpr int IDX_CENTROID_Y = 4;
+constexpr int IDX_CENTROID_Z = 5;
+constexpr int IDX_VEL_X = 6;
+constexpr int IDX_VEL_Y = 7;
+constexpr int IDX_VEL_Z = 8;
+constexpr int IDX_BBOX_MIN_X = 9;
+constexpr int IDX_BBOX_MIN_Y = 10;
+constexpr int IDX_BBOX_MIN_Z = 11;
+constexpr int IDX_BBOX_MAX_X = 12;
+constexpr int IDX_BBOX_MAX_Y = 13;
+constexpr int IDX_BBOX_MAX_Z = 14;
+constexpr int IDX_POINT_COUNT = 15;
+constexpr int IDX_SCORE = 16;
+constexpr int IDX_BOTTOM_HAG = 17;
+constexpr int IDX_SUPPORT_RATIO = 18;
+constexpr int IDX_BOX_SOURCE = 19;
+constexpr int PAYLOAD_TRACK_INFO_SIZE = 20;
 
 struct MappingTask {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
@@ -92,6 +130,7 @@ private:
     int feature_weight_ = 8;
 
     void publishOdometry(const ros::Time& stamp, const std::string& cloud_frame_id, const Sophus::SE3d& pose = Sophus::SE3d());
+    void publishRuntimePath(const Sophus::SE3d& pose, const ros::Time& stamp);
 
     void publishInitialTransform();
     void publishTF(const ros::Time& stamp);
@@ -159,10 +198,16 @@ private:
     ros::Publisher objects_clean_map_pub_; // 非地面/货物地图（clean，BEV过滤后）
     ros::Publisher current_cloud_pub_;
     ros::Publisher path_pub_;
+    ros::Publisher runtime_path_pub_;
 
     // 轨迹历史
     nav_msgs::Path path_msg_;
     int path_max_size_ = 5000;  // 最大轨迹点数
+
+    // 运行时轨迹（不受 MotionGate 影响）
+    nav_msgs::Path runtime_path_msg_;
+    Eigen::Matrix4d last_path_pose_ = Eigen::Matrix4d::Identity();
+    bool has_last_path_pose_ = false;
 
     ros::ServiceServer reset_srv_;
     ros::ServiceServer set_pose_srv_;
@@ -207,8 +252,78 @@ private:
     std::atomic<bool> has_refined_pose_{false};  // 是否有可用的精炼位姿
     std::atomic<bool> refined_pose_high_quality_{false};  // 精炼位姿是否满足高质量入图条件
     bool initialized_ = false;
+
+    // ========== Crane Motion Constraint（天车运动约束）==========
+    bool crane_constraint_enabled_ = false;
+    bool lock_z_ = true;
+    bool constrain_z_ = false;       // 是否限制 z 漂移范围
+    std::string fixed_z_source_ = "config";  // config 或 first_frame
+    double fixed_z_value_ = 0.0;     // 配置文件中的固定 z 值
+    bool lock_roll_ = true;
+    bool lock_pitch_ = true;
+    bool lock_yaw_ = false;
+    bool constrain_yaw_ = false;
+    double fixed_z_ = 0.0;
+    double fixed_roll_ = 0.0;
+    double fixed_pitch_ = 0.0;
+    double fixed_yaw_ = 0.0;
+    double max_abs_z_drift_ = 0.10;
+    double max_roll_deg_ = 0.3;
+    double max_pitch_deg_ = 0.3;
+    double max_yaw_deg_ = 1.0;
+    bool first_pose_initialized_ = false;
+
+    // 约束函数
+    Sophus::SE3d applyCraneMotionConstraint(const Sophus::SE3d& raw_pose, const std::string& stage);
+    void so3ToRpy(const Sophus::SO3d& r, double& roll, double& pitch, double& yaw);
+    Sophus::SO3d rpyToSO3(double roll, double pitch, double yaw);
     ros::Time last_stamp_;
     std::atomic<bool> tracking_lost_{false};
+
+    // ========== v8-stable-r3: CraneMotionEKF ==========
+    CraneMotionEKF crane_motion_ekf_;
+    CraneMotionEKFConfig crane_motion_ekf_cfg_;
+    bool crane_motion_ekf_enabled_ = true;
+
+    // ========== v8-stable-r3: SoftYawFilter ==========
+    bool soft_yaw_enabled_ = true;
+    bool filtered_yaw_initialized_ = false;
+    double filtered_yaw_rad_ = 0.0;
+
+    double yaw_filter_alpha_stationary_ = 0.04;
+    double yaw_filter_alpha_moving_ = 0.18;
+    double yaw_filter_alpha_speed_extra_ = 0.05;
+
+    double yaw_max_step_stationary_rad_ = 0.08 * M_PI / 180.0;
+    double yaw_max_step_moving_rad_ = 0.35 * M_PI / 180.0;
+    double yaw_warn_raw_filtered_diff_rad_ = 3.0 * M_PI / 180.0;
+
+    double updateSoftYaw(double raw_yaw, double speed_xy, bool is_stationary);
+    Sophus::SE3d applyCraneOutputConstraint(const Sophus::SE3d& pose_in,
+                                            bool is_stationary,
+                                            double speed_xy);
+
+    // ========== v8-stable-r3: Registration Input ==========
+    double ndt_input_voxel_size_ = 0.30;
+    int object_weight_repeat_ = 2;
+    double ground_sample_ratio_ = 0.20;
+    int max_ndt_points_ = 8000;
+    int min_objects_for_weighting_ = 500;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr sampleCloudByRatio(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double ratio);
+    void voxelDownsampleInPlace(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double leaf);
+    void limitCloudUniformInPlace(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, int max_points);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr buildRegistrationCloud(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& human_safe_objects,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_cloud);
+
+    // ========== v8-stable-r3: Adaptive NDT ==========
+    bool adaptive_ndt_enabled_ = true;
+    double adaptive_target_total_ms_ = 80.0;
+    double adaptive_emergency_total_ms_ = 120.0;
+    double last_total_ms_ = 0.0;
+    int consecutive_good_perf_frames_ = 0;
 
     std::mutex cloud_mutex_;
     std::queue<sensor_msgs::PointCloud2::ConstPtr> cloud_queue_;
@@ -291,6 +406,37 @@ private:
     PoseGraphOptimizer pose_graph_optimizer_;
     int loop_detection_interval_ = 10;
     int keyframe_count_ = 0;
+
+    // P0: DuplicateFrameGuard 内容指纹
+    struct FrameSignature {
+        size_t cloud_size = 0;
+        double stamp = 0.0;
+        Eigen::Vector3d pose_xyz = Eigen::Vector3d::Zero();
+        Eigen::Vector3f first_pt = Eigen::Vector3f::Zero();
+        Eigen::Vector3f mid_pt = Eigen::Vector3f::Zero();
+        Eigen::Vector3f last_pt = Eigen::Vector3f::Zero();
+        Eigen::Vector3f centroid_sample = Eigen::Vector3f::Zero();
+        uint64_t hash = 0;
+    };
+
+    FrameSignature last_frame_signature_;
+    uint64_t frame_seq_ = 0;
+    double last_processed_stamp_ = -1.0;
+    uint64_t skipped_duplicate_frames_ = 0;
+    size_t last_clean_points_ = 0;
+
+    // P0: processCloudThread 重复帧检测
+    ros::Time last_processed_frame_stamp_;
+    size_t last_processed_frame_size_ = 0;
+    uint64_t last_processed_frame_hash_ = 0;
+    int duplicate_frame_skip_count_ = 0;
+
+    FrameSignature computeFrameSignature(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const ros::Time& stamp,
+        const Sophus::SE3d& pose);
+    bool isDuplicateFrameBySignature(const FrameSignature& cur) const;
+
     pcl::PointCloud<pcl::PointXYZ>::Ptr last_cloud_;
     Sophus::SE3d relocalized_pose_;
     ros::Timer timer_;
@@ -317,12 +463,23 @@ private:
     PayloadTrackManager payload_tracker_;
     PayloadTrackerConfig payload_tracker_config_;
 
+    // P0.5: CargoBoxEstimator 货物框估计器
+    CargoBoxEstimator cargo_box_estimator_;
+    CargoBoxEstimatorConfig cargo_box_estimator_config_;
+
     // 通道过滤 debug 话题
     ros::Publisher payload_channel_pub_;      // /payload_channel_cloud
     ros::Publisher payload_candidate_pub_;    // /payload_candidate_cloud
     ros::Publisher safe_objects_pub_;         // /safe_objects_cloud
     ros::Publisher payload_dynamic_pub_;      // /payload_dynamic_cloud
     ros::Publisher payload_pending_pub_;      // /payload_pending_cloud
+    ros::Publisher cargo_dynamic_removed_pub_; // /cargo_dynamic_removed_cloud
+
+    // CargoBoxEstimator V2 调试 topic
+    ros::Publisher cargo_core_points_pub_;     // /cargo_core_points_cloud
+    ros::Publisher cargo_hag_filtered_pub_;    // /cargo_hag_filtered_cloud
+    ros::Publisher cargo_components_pub_;      // /cargo_bev_components_cloud
+    ros::Publisher cargo_rejected_low_pub_;    // /cargo_rejected_low_points_cloud
 
     // 人体过滤模块
     HumanObjectDynamicFilter human_filter_;
@@ -341,6 +498,129 @@ private:
     DynamicEventManager dynamic_event_manager_;
     DynamicEventConfig dynamic_event_config_;
 
+    // P1: Cargo deny history（持久化）
+    struct DenyCellEntry {
+        double first_seen_time;
+        double last_seen_time;
+        int hit_count;
+    };
+    std::map<std::pair<int,int>, DenyCellEntry> cargo_deny_history_;
+    double cargo_deny_ttl_ = 120.0;  // cargo deny cells 保留 120 秒
+
+    // 添加 cargo deny cells
+    void addCargoDenyCells(const Eigen::Vector3d& bbox_min, const Eigen::Vector3d& bbox_max,
+                           double current_time);
+
+    // 检查 cell 是否被 cargo deny
+    bool isCargoDenied(double x, double y, double current_time) const;
+
+    // 清理过期的 cargo deny cells
+    void cleanupExpiredCargoDenyCells(double current_time);
+
+    // ========== P0-3: 3D Dynamic Deny Volume（替代 2D BEV deny）==========
+    struct DynamicDenyVolume3D {
+        int ix;
+        int iy;
+        float z_min;
+        float z_max;
+        double stamp;
+        int source;      // 0=cargo, 1=human
+        int track_id;
+    };
+
+    // 3D deny volume 存储（key = (ix, iy)）
+    std::map<std::pair<int,int>, std::vector<DynamicDenyVolume3D>> dynamic_deny_volume_map_;
+    double dynamic_deny_resolution_ = 0.15;  // 与 BEV 分辨率一致
+    double dynamic_deny_ttl_ = 8.0;          // 3D deny volume 保留时间
+
+    // 添加 3D deny volume
+    void addCargoDenyVolume3D(const CargoBox& remove_box, double current_time, int track_id);
+
+    // 清理过期的 3D deny volumes
+    void cleanupExpiredCargoDenyVolumes3D(double current_time);
+
+    // 检查点是否被 3D deny volume 拒绝
+    bool isPointDeniedBy3DHistory(float x, float y, float z) const;
+
+    // ========== v6: DynamicHistoryEraser 增量反删 ==========
+    struct SweptVolumeMap {
+        Eigen::Vector3f min_map;
+        Eigen::Vector3f max_map;
+        double stamp;
+        int track_id;
+        bool from_fallback;
+    };
+
+    // 当前帧新增的 swept volume（用于立即反删）
+    std::vector<SweptVolumeMap> new_cargo_volumes_this_frame_;
+
+    // 历史 swept volume（用于 CleanMap rebuild）
+    std::vector<SweptVolumeMap> cargo_swept_history_;
+    double cargo_swept_ttl_ = 15.0;  // 历史 volume 保留时间
+
+    // 从 cloud 中删除被 swept volume 覆盖的点
+    size_t eraseDynamicPointsFromCloud(
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const std::vector<SweptVolumeMap>& volumes);
+
+    // 清理过期的 swept volume
+    void cleanupExpiredSweptVolumes(double current_time);
+
+    // ========== P0-1: 新的关键帧提交流程 ==========
+    // 重写的关键帧提交函数，确保正确的处理顺序：
+    // 1. ground/objects 分割
+    // 2. CargoBoxV2 + PayloadTracker
+    // 3. 吊货点删除
+    // 4. HumanFilter
+    // 5. MapCommit（最后）
+    void commitKeyFrameWithDynamicFiltering(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const Sophus::SE3d& pose,
+        const ros::Time& stamp);
+
+    // 从 objects 中删除吊货 remove_box 内的点（3D 检查）
+    void removePointsInsideCargoRemoveBoxes3D(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& input_base,
+        const std::vector<Box3D>& remove_boxes_map,
+        const Eigen::Matrix4d& T_map_base,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& output_base,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& removed_base);
+
+    // P2: 在 base_link 坐标系下删除吊货点（不用变换到 map）
+    void removePointsInsideCargoRemoveBoxesBase(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& input_base,
+        const std::vector<CargoBox>& remove_boxes_base,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& output_base,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& removed_base);
+
+    // v8: 统一 active remove box 生成
+    struct ActiveRemoveDecision {
+        bool active = false;
+        CargoBox box;
+        std::string source;
+        int overlap = 0;
+        std::string reason;
+    };
+
+    ActiveRemoveDecision buildActiveRemoveBoxForTrack(
+        const ObjectTrack& track,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_base,
+        double stamp);
+
+    int countPointsInsideBoxBase(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const CargoBox& box);
+
+    CargoBox expandCoreToRemoveBox(const CargoBox& core_box);
+
+    // 吊货跟踪信息发布（用于避障节点）
+    ros::Publisher payload_track_info_pub_;
+    void publishPayloadTrackInfo(const ros::Time& stamp);
+    void publishPayloadTrackInfoInvalid(const std::string& reason);
+    void buildLockedOdomFixedCargoBox(const ros::Time& stamp);
+
+    // Commit C: payload precise box info
+
     // ========== 长期建图功能 ==========
     // MotionGate：静止检测和门控
     bool longterm_mapping_enabled_ = false;
@@ -353,6 +633,39 @@ private:
     bool is_stationary_ = false;
     int stationary_frame_count_ = 0;
     int moved_frame_count_ = 0;
+
+    // P1: MotionGate stationary anchor（防止静止漂移误触发）
+    bool stationary_anchor_valid_ = false;
+    Sophus::SE3d stationary_anchor_pose_;
+    double stationary_start_time_ = 0.0;
+    int moving_confirm_frames_ = 0;
+    double motion_gate_stationary_drift_ignore_radius_ = 0.60;
+    int motion_gate_moving_confirm_frames_ = 2;
+    double motion_gate_moving_min_velocity_ = 0.08;
+    double last_frame_stamp_for_gate_ = 0.0;
+    Eigen::Vector3d last_frame_pos_for_gate_ = Eigen::Vector3d::Zero();
+
+    // v8: PoseFreeze - 静止时冻结发布姿态
+    Sophus::SE3d published_pose_;
+    bool motion_gate_stationary_ = false;
+    int moving_confirm_count_ = 0;
+    // v8-stable-r3-hotfix-minimal: PoseFreeze 已禁用
+    bool stationary_freeze_tf_odom_ = false;
+    bool stationary_freeze_xy_ = false;
+    bool stationary_freeze_yaw_ = false;
+    double stationary_pose_freeze_release_m_ = 0.80;
+
+    // P0-3: MapCommit evidence only. Does NOT affect runtime odom/TF/path.
+    Sophus::SE3d last_raw_ndt_pose_;
+    Sophus::SE3d last_commit_raw_pose_;
+    Sophus::SE3d last_commit_refined_pose_;
+    Sophus::SE3d last_commit_runtime_pose_;
+
+    bool has_last_raw_ndt_pose_ = false;
+    bool has_commit_gate_reference_ = false;
+    int stationary_move_confirm_frames_ = 3;
+
+    Sophus::SE3d selectPublishedPose(const Sophus::SE3d& constrained_pose, const ros::Time& stamp);
 
     // 关键帧 active window
     int max_active_keyframes_ = 80;
@@ -505,6 +818,290 @@ private:
         double trajectory_length = 0.0;
         int loop_closures = 0;
     };
+
+    // ========== Commit B: cargo target 一致性 ==========
+    int selected_payload_track_id_ = -1;
+    bool has_selected_payload_track_ = false;
+    ros::Time selected_payload_stamp_;
+
+    // ========== Commit C: payload precise box info ==========
+    ros::Publisher payload_precise_box_info_pub_;
+    static constexpr int PRECISE_BOX_INFO_SIZE = 40;
+    static constexpr int IDX_CORNER_MAP_START = 16;
+
+    // ========== HookFixedCargoDetector ==========
+    struct HookCargoDetection {
+        bool valid = false;
+        int local_id = 0;
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f size_visible = Eigen::Vector3f::Zero();
+        float z05 = 0.0f;
+        float z50 = 0.0f;
+        float z95 = 0.0f;
+        float visible_height = 0.0f;
+        float xy_area = 0.0f;  // XY 面积
+        pcl::PointCloud<pcl::PointXYZ>::Ptr core_points_base;
+        float score = 0.0f;
+        std::string reject_reason;
+    };
+
+    struct HookCargoBottomEstimate {
+        bool valid = false;
+        float bottom_z_base = 0.0f;
+        float top_z_base = 0.0f;
+        float height = 0.0f;
+        float uncertainty = 0.0f;
+        float confidence = 0.0f;
+        std::string source;
+    };
+
+    // ========== OdomAnchorBox 配置 ==========
+    struct OdomAnchorBoxConfig {
+        bool enabled = true;
+
+        // 绿色框中心锚点（默认 base_link/odom 原点）
+        float anchor_x = 0.0f;
+        float anchor_y = 0.0f;
+
+        // 检测和 marker 降频
+        float detect_rate_hz = 5.0f;
+        float marker_rate_hz = 5.0f;
+
+        // debug 点云发布（默认关闭）
+        bool publish_debug_points = false;
+        bool publish_selected_core_points = false;
+        bool publish_raw_candidate_points = false;
+        bool publish_default_box_marker = false;
+
+        // 日志控制
+        bool verbose_debug = false;
+        float summary_log_period = 2.0f;
+
+        // 旧 cargo 链路开关（默认关闭）
+        bool use_global_payload_tracker = false;
+        bool use_cargobox_v2 = false;
+        bool use_dynamic_history_eraser = false;
+        bool enable_hook_cargo_removal = false;
+
+        // 检测窗口围绕 anchor 裁剪
+        float search_half_x = 1.20f;
+        float search_half_y = 1.20f;
+        float search_z_min = 0.05f;
+        float search_z_max = 3.20f;
+
+        // 默认小参考框（仅 debug）
+        float default_size_x = 0.50f;
+        float default_size_y = 0.35f;
+        float default_size_z = 0.25f;
+
+        // 检测到货物后的尺寸范围
+        float min_size_x = 0.60f;
+        float min_size_y = 0.40f;
+        float min_size_z = 0.20f;
+        float max_size_x = 2.50f;
+        float max_size_y = 1.60f;
+        float max_size_z = 2.00f;
+
+        float size_margin_x = 0.10f;
+        float size_margin_y = 0.10f;
+        float size_margin_z = 0.05f;
+
+        int lock_confirm_frames = 2;
+        int strong_min_points = 50;
+        int weak_min_points = 10;
+
+        int size_update_confirm_frames = 5;
+        float size_change_min_ratio = 0.20f;
+        float size_change_max_ratio = 0.60f;
+        float size_update_alpha = 0.15f;
+
+        float bottom_alpha_points = 0.25f;
+        float bottom_alpha_hold = 0.05f;
+        float bottom_max_uncertainty = 0.35f;
+
+        float lost_hold_sec = 5.0f;
+        float lost_clear_sec = 15.0f;
+    };
+
+    OdomAnchorBoxConfig odom_anchor_config_;
+
+    // 降频控制
+    ros::Time last_anchor_detect_stamp_;
+    ros::Time last_anchor_marker_stamp_;
+    ros::Time last_anchor_summary_stamp_;
+
+    bool shouldRunOdomAnchorDetect(const ros::Time& stamp) {
+        if (last_anchor_detect_stamp_.isZero()) return true;
+        return (stamp - last_anchor_detect_stamp_).toSec() >=
+               1.0 / odom_anchor_config_.detect_rate_hz;
+    }
+
+    bool shouldPublishOdomAnchorMarker(const ros::Time& stamp) {
+        if (last_anchor_marker_stamp_.isZero()) return true;
+        return (stamp - last_anchor_marker_stamp_).toSec() >=
+               1.0 / odom_anchor_config_.marker_rate_hz;
+    }
+
+    // 获取 anchor XY
+    Eigen::Vector2f getCargoAnchorXY() const {
+        return Eigen::Vector2f(odom_anchor_config_.anchor_x, odom_anchor_config_.anchor_y);
+    }
+
+    struct HookFixedCargoConfig {
+        bool enabled = true;
+        float roi_center_x = 0.0f;
+        float roi_center_y = -2.2f;
+        float roi_half_x = 1.5f;
+        float roi_half_y = 1.5f;
+        float roi_z_min = 0.25f;
+        float roi_z_max = 3.0f;
+        float voxel_leaf = 0.05f;
+        float cluster_tolerance = 0.20f;
+        int min_cluster_points = 15;
+        int max_cluster_points = 8000;
+        float reject_rope_radius = 0.08f;
+        float reject_rope_min_z = 2.0f;
+        float reject_structure_z = 3.2f;
+        std::string xy_mode = "roi_center";
+        float xy_alpha = 0.15f;
+        float z_alpha = 0.30f;
+        float size_alpha = 0.20f;
+        float min_long_side = 0.30f;
+        float min_short_side = 0.20f;
+        float min_visible_height = 0.08f;
+        float max_long_side = 4.0f;
+        float max_short_side = 3.0f;
+        float max_height = 3.0f;
+        int bottom_min_points = 15;
+        float visible_side_min_height = 0.30f;
+        float bottom_band_height = 0.10f;
+        int bottom_band_min_points = 5;
+        int bottom_band_min_xy_cells = 2;
+        float bottom_xy_cell_size = 0.10f;
+        float points_uncertainty = 0.12f;
+        float height_memory_uncertainty = 0.18f;
+        float invalid_uncertainty = 0.30f;
+        float stable_height_alpha = 0.25f;
+        bool allow_visible_box_without_bottom = true;
+    };
+
+    HookFixedCargoConfig hook_fixed_config_;
+    HookCargoDetection hook_fixed_cargo_;
+    HookCargoBottomEstimate hook_fixed_bottom_;
+    float stable_height_ = 0.0f;
+    bool has_stable_height_ = false;
+
+    ros::Publisher cargo_selected_core_points_pub_;
+
+    HookCargoBottomEstimate estimateCargoBottom(const HookCargoDetection& detection);
+    void publishSelectedCorePoints(const HookCargoDetection& detection, const ros::Time& stamp);
+    void publishSelectedCorePoints(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const ros::Time& stamp);
+    Eigen::Vector3f smoothVector(const Eigen::Vector3f& current, const Eigen::Vector3f& new_val, float alpha);
+    float smoothFloat(float current, float new_val, float alpha);
+
+    // ========== HookCargoLock 状态机 ==========
+    enum class HookCargoLockState {
+        EMPTY = 0,
+        CANDIDATE = 1,
+        LOCKED = 2,
+        LOST_HOLD = 3
+    };
+
+    struct HookCargoLockConfig {
+        bool enabled = true;
+        int lock_confirm_frames = 3;
+        int size_init_window = 5;
+        float lost_hold_sec = 3.0f;
+        float lost_clear_sec = 8.0f;
+        int strong_min_points = 30;
+        int weak_min_points = 5;
+        float candidate_hold_sec = 1.0f;
+        int candidate_max_weak_frames = 10;
+        float size_change_min_ratio = 0.20f;
+        float size_change_max_ratio = 0.60f;
+        int size_update_confirm_frames = 5;
+        float size_update_alpha = 0.15f;
+        float bottom_alpha_points = 0.30f;
+        float bottom_alpha_memory = 0.15f;
+        float bottom_hold_uncertainty_growth = 0.02f;
+        float bottom_max_uncertainty = 0.35f;
+
+        // locked association gate 相关
+        float locked_update_max_center_dist = 0.65f;
+        float locked_update_min_overlap_ratio = 0.30f;
+        float locked_update_max_z_jump = 0.45f;
+        float locked_update_max_top_jump = 0.60f;
+        int locked_update_min_points = 20;
+
+        // 锁定时 strong 条件（比更新时更严格）
+        int lock_strong_min_points = 80;
+        float lock_min_visible_height = 0.50f;
+        float lock_min_xy_area = 0.40f;
+
+        // locked search margin
+        float locked_search_margin_x = 0.30f;
+        float locked_search_margin_y = 0.30f;
+
+        // P1: 先禁用 HookCargoRemoval，恢复 A7 轨迹基准
+        bool enable_hook_cargo_removal = false;
+    };
+
+    struct HookCargoLock {
+        HookCargoLockState state = HookCargoLockState::EMPTY;
+        int confirm_count = 0;
+        int weak_count = 0;
+        int lost_count = 0;
+        int size_update_count = 0;
+
+        ros::Time last_seen_stamp;
+        ros::Time last_good_height_stamp;
+        ros::Time locked_stamp;
+
+        Eigen::Vector3f locked_size = Eigen::Vector3f::Zero();
+
+        float stable_bottom_z = 0.0f;
+        float stable_top_z = 0.0f;
+        float stable_height = 0.0f;
+        float bottom_uncertainty = 0.30f;
+
+        bool has_locked_size = false;
+        bool has_good_height = false;
+
+        std::deque<Eigen::Vector3f> init_size_buffer;
+        std::deque<Eigen::Vector3f> size_candidate_buffer;
+
+        // 重复帧检测
+        ros::Time last_hook_processed_stamp;
+        uint64_t last_hook_processed_hash = 0;
+
+        // last accepted detection（用于 LOCKED 后显示）
+        pcl::PointCloud<pcl::PointXYZ>::Ptr last_accepted_core_points;
+        Eigen::Vector3f last_accepted_center = Eigen::Vector3f::Zero();
+        bool has_last_accepted = false;
+    };
+
+    HookCargoLockConfig hook_lock_config_;
+    HookCargoLock hook_lock_;
+
+    // OdomAnchorBox 新函数
+    HookCargoDetection detectCargoAroundOdomAnchor(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
+        const ros::Time& stamp);
+    void publishPayloadTrackInfoFromOdomAnchorBox(const ros::Time& stamp);
+
+    void updateHookCargoLock(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
+    bool isStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    bool isWeakDetection(const HookCargoDetection& det);
+    bool isLockStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    bool isBodyStrongCandidate(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    bool isDetectionConsistentWithLockedBox(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, std::string* reject_reason);
+    Eigen::Vector3f computeFixedCenterSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    Eigen::Vector3f medianSize(const std::deque<Eigen::Vector3f>& buffer);
+    void updateLockedHeight(const HookCargoBottomEstimate& bottom, const ros::Time& stamp, bool initialize);
+    void maybeUpdateLockedSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    void growUncertainty();
+    void clearHookLock();
+    uint64_t computeCloudHash(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
 };
 
 } // namespace ndt_slam

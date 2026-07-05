@@ -1,0 +1,12 @@
+<launch>
+  <!-- 吊货禁行区节点 -->
+  <arg name="config_file"
+       default="$(find ndt_slam)/config/cargo_forbidden_zone.yaml" />
+
+  <node pkg="ndt_slam"
+        type="cargo_forbidden_zone_node"
+        name="cargo_forbidden_zone_node"
+        output="screen">
+    <param name="config_file" value="$(arg config_file)" />
+  </node>
+</launch>

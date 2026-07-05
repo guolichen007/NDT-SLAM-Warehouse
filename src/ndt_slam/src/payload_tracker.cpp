@@ -22,6 +22,16 @@ void PayloadTrackManager::configureFromYaml(const std::string& config_file) {
             config_.cluster_tolerance = pt["cluster_tolerance"].as<double>(0.5);
             config_.max_match_distance = pt["max_match_distance"].as<double>(0.8);
             config_.max_match_bbox_ratio = pt["max_match_bbox_ratio"].as<double>(0.5);
+
+            // P0.5 新增：base_link 优先匹配参数
+            config_.max_match_distance_base = pt["max_match_distance_base"].as<double>(0.80);
+            config_.max_match_residual_map = pt["max_match_residual_map"].as<double>(1.20);
+            config_.max_match_bbox_ratio_base = pt["max_match_bbox_ratio_base"].as<double>(0.70);
+
+            // P0.5 新增：EMA 平滑参数
+            config_.centroid_base_alpha = pt["centroid_base_alpha"].as<double>(0.60);
+            config_.size_base_alpha = pt["size_base_alpha"].as<double>(0.25);
+            config_.lock_switch_confirm_frames = pt["lock_switch_confirm_frames"].as<int>(3);
             config_.window_sec = pt["window_sec"].as<double>(3.0);
             config_.motion_confirm_frames = pt["motion_confirm_frames"].as<int>(3);
             config_.displacement_thresh = pt["displacement_thresh"].as<double>(0.25);
@@ -111,36 +121,57 @@ std::vector<ClusterInfo> PayloadTrackManager::extractClusters(
 // ========== 匹配 ==========
 
 MatchResult PayloadTrackManager::matchClusters(
-    const std::vector<ClusterInfo>& clusters) {
+    const std::vector<ClusterInfo>& clusters_map,
+    const std::vector<ClusterInfo>& clusters_base,
+    const Eigen::Matrix4d& T_map_base) {
 
     MatchResult result;
     std::vector<bool> track_matched(tracks_.size(), false);
-    std::vector<bool> cluster_matched(clusters.size(), false);
+    std::vector<bool> cluster_matched(clusters_map.size(), false);
 
-    // 贪心匹配：对每个活跃 track，找最近的未匹配 cluster
+    // P0.5 新增：base_link 优先匹配
+    // 天车场景中，吊货相对雷达稳定，仓库固定物体相对 base_link 移动
+    // 所以优先用 base_link 坐标匹配，map 坐标只做 odom 预测残差校验
+
+    Eigen::Matrix3d R = T_map_base.block<3,3>(0,0);
+    Eigen::Vector3d t = T_map_base.block<3,1>(0,3);
+
     for (size_t ti = 0; ti < tracks_.size(); ti++) {
         if (tracks_[ti].state == TrackState::EXPIRED) continue;
 
-        double best_dist = config_.max_match_distance;
+        double best_score = 1e9;
         int best_ci = -1;
 
-        for (size_t ci = 0; ci < clusters.size(); ci++) {
+        for (size_t ci = 0; ci < clusters_map.size(); ci++) {
             if (cluster_matched[ci]) continue;
 
-            // 距离约束
-            double dist = (tracks_[ti].centroid_map - clusters[ci].centroid).norm();
-            if (dist > config_.max_match_distance) continue;
+            // 1. base_link 下距离匹配（主要判据）
+            double dist_base = (tracks_[ti].centroid_base - clusters_base[ci].centroid).norm();
+            if (dist_base > config_.max_match_distance_base) continue;
 
-            // 包围盒尺寸约束
-            Eigen::Vector3f track_size = tracks_[ti].bbox_max_map - tracks_[ti].bbox_min_map;
-            Eigen::Vector3f cluster_size = clusters[ci].bbox_max - clusters[ci].bbox_min;
+            // 2. map 下 odom 预测残差（辅助判据）
+            // 用上一帧的 T_map_base 预测当前 track 在 map 下的位置
+            Eigen::Vector3d centroid_map_last_d = tracks_[ti].centroid_map.cast<double>();
+            // 如果有上一帧的 T_map_base，用 odom delta 预测
+            if (tracks_[ti].last_T_map_base != Eigen::Matrix4d::Identity()) {
+                Eigen::Matrix4d T_delta = T_map_base * tracks_[ti].last_T_map_base.inverse();
+                centroid_map_last_d = T_delta.block<3,3>(0,0) * centroid_map_last_d + T_delta.block<3,1>(0,3);
+            }
+            double residual_map = (centroid_map_last_d - clusters_map[ci].centroid.cast<double>()).norm();
+            if (residual_map > config_.max_match_residual_map) continue;
+
+            // 3. 包围盒尺寸约束（base_link 下）
+            Eigen::Vector3f track_size = tracks_[ti].bbox_max_base - tracks_[ti].bbox_min_base;
+            Eigen::Vector3f cluster_size = clusters_base[ci].bbox_max - clusters_base[ci].bbox_min;
             float size_diff = (track_size - cluster_size).cwiseAbs().maxCoeff();
             float size_max = track_size.cwiseMax(cluster_size).maxCoeff();
-            if (size_max > 0.1f && size_diff / size_max > config_.max_match_bbox_ratio)
+            if (size_max > 0.1f && size_diff / size_max > config_.max_match_bbox_ratio_base)
                 continue;
 
-            if (dist < best_dist) {
-                best_dist = dist;
+            // 综合评分：base 距离权重 2.0，map 残差权重 1.0
+            double score = 2.0 * dist_base + 1.0 * residual_map;
+            if (score < best_score) {
+                best_score = score;
                 best_ci = ci;
             }
         }
@@ -156,7 +187,7 @@ MatchResult PayloadTrackManager::matchClusters(
     for (size_t ti = 0; ti < tracks_.size(); ti++) {
         if (!track_matched[ti]) result.unmatched_tracks.push_back((int)ti);
     }
-    for (size_t ci = 0; ci < clusters.size(); ci++) {
+    for (size_t ci = 0; ci < clusters_map.size(); ci++) {
         if (!cluster_matched[ci]) result.unmatched_clusters.push_back((int)ci);
     }
 
@@ -268,6 +299,20 @@ void PayloadTrackManager::updateMotionStats(ObjectTrack& track) {
 //   - 在 map 下，吊货随天车移动（map_displacement 大）
 //   - 这正好与仓库固定结构相反
 
+bool PayloadTrackManager::isCargoSizeValid(const ObjectTrack& track) const {
+    // 检查 bbox 尺寸是否在合理范围内
+    float length = track.bbox_max_map.x() - track.bbox_min_map.x();
+    float width = track.bbox_max_map.y() - track.bbox_min_map.y();
+    float height = track.bbox_max_map.z() - track.bbox_min_map.z();
+
+    // 合理范围：长 0.6-8m，宽 0.3-3.5m，高 0.2-3m
+    bool valid = (length >= 0.6f && length <= 8.0f &&
+                  width >= 0.3f && width <= 3.5f &&
+                  height >= 0.2f && height <= 3.0f);
+
+    return valid;
+}
+
 void PayloadTrackManager::checkStateTransition(ObjectTrack& track) {
     switch (track.state) {
     case TrackState::NEW:
@@ -285,22 +330,64 @@ void PayloadTrackManager::checkStateTransition(ObjectTrack& track) {
                            track.velocity > config_.velocity_thresh &&
                            track.direction_consistency > config_.direction_consistency_thresh);
 
-        if (base_stable && map_moving) {
-            // base_link 稳定 + map 移动 = 吊货
-            track.state = TrackState::DYNAMIC_PAYLOAD;
-            ROS_WARN("[PayloadTracker] track %d → DYNAMIC_PAYLOAD! "
-                     "base_std=%.2f, map_disp=%.2f vel=%.2f dir=%.2f frames=%d",
-                     track.track_id, track.base_center_std,
-                     track.map_displacement, track.velocity,
-                     track.direction_consistency, track.observed_frames);
+        // HAG 判断（悬浮识别）
+        bool has_ground_gap = (track.hag_min > config_.min_floating_gap);
+        bool size_valid = isCargoSizeValid(track);
+
+        if (base_stable && size_valid) {
+            if (has_ground_gap && map_moving) {
+                // 悬浮 + 移动 = SUSPENDED_MOVING
+                track.state = TrackState::SUSPENDED_MOVING;
+                ROS_WARN("[PayloadTracker] track %d → SUSPENDED_MOVING! "
+                         "hag_min=%.2f, base_std=%.2f, map_disp=%.2f vel=%.2f",
+                         track.track_id, track.hag_min, track.base_center_std,
+                         track.map_displacement, track.velocity);
+            } else if (has_ground_gap && track.observed_frames >= config_.min_suspended_observed_frames) {
+                // 悬浮 + 静止 = SUSPENDED_STATIC
+                track.state = TrackState::SUSPENDED_STATIC;
+                ROS_WARN("[PayloadTracker] track %d → SUSPENDED_STATIC! "
+                         "hag_min=%.2f, base_std=%.2f, frames=%d",
+                         track.track_id, track.hag_min, track.base_center_std,
+                         track.observed_frames);
+            } else if (map_moving) {
+                // 地面 + 移动 = DYNAMIC_PAYLOAD
+                track.state = TrackState::DYNAMIC_PAYLOAD;
+                ROS_WARN("[PayloadTracker] track %d → DYNAMIC_PAYLOAD! "
+                         "hag_min=%.2f, base_std=%.2f, map_disp=%.2f vel=%.2f",
+                         track.track_id, track.hag_min, track.base_center_std,
+                         track.map_displacement, track.velocity);
+            }
         }
-        // 注意：如果 base_link 不稳定但 map 稳定，说明是仓库静态结构
-        // 这种情况保持 PENDING_STATIC，最终会变成 EXPIRED 或保持 pending
         break;
     }
 
     case TrackState::DYNAMIC_PAYLOAD:
-        // 已确认动态，保持状态直到消失
+        // 已确认动态，检查是否应该升级为悬浮
+        if (config_.suspended_detection_enabled && track.hag_min > config_.strong_floating_gap) {
+            track.state = TrackState::SUSPENDED_MOVING;
+            ROS_WARN("[PayloadTracker] track %d upgraded to SUSPENDED_MOVING (hag_min=%.2f)",
+                     track.track_id, track.hag_min);
+        }
+        break;
+
+    case TrackState::SUSPENDED_STATIC:
+        // 悬浮静止，检查是否开始移动
+        if (track.velocity > config_.velocity_thresh * 2) {
+            track.state = TrackState::SUSPENDED_MOVING;
+            ROS_WARN("[PayloadTracker] track %d → SUSPENDED_MOVING (started moving)",
+                     track.track_id);
+        }
+        break;
+
+    case TrackState::SUSPENDED_MOVING:
+        // 悬浮移动，检查是否停止
+        if (config_.keep_suspended_when_stopped &&
+            track.velocity < config_.velocity_thresh &&
+            track.map_displacement < config_.displacement_thresh) {
+            track.state = TrackState::SUSPENDED_STATIC;
+            ROS_WARN("[PayloadTracker] track %d → SUSPENDED_STATIC (stopped)",
+                     track.track_id);
+        }
         break;
 
     case TrackState::EXPIRED:
@@ -352,8 +439,8 @@ TrackResult PayloadTrackManager::update(
         clusters_map[i].cloud = clusters_base[i].cloud;
     }
 
-    // 3. 匹配（使用 map 坐标系的 cluster）
-    auto match = matchClusters(clusters_map);
+    // 3. 匹配（P0.5: base_link 优先匹配）
+    auto match = matchClusters(clusters_map, clusters_base, T_map_base);
 
     // 4. 更新匹配到的 track
     for (auto& [ti, ci] : match.matches) {
@@ -393,6 +480,13 @@ TrackResult PayloadTrackManager::update(
             track.cloud_history.pop_front();
         }
 
+        // P0.5 新增：更新 base_link 下的 EMA 平滑
+        updateBaseEma(track, cluster_base);
+
+        // P0.5 新增：用当前 T_map_base 把 base bbox 转成 map bbox
+        transformBaseBboxToMap(track, T_map_base);
+        track.last_bbox_time = stamp;
+
         // 更新运动统计（双坐标系）
         updateMotionStats(track);
 
@@ -405,11 +499,16 @@ TrackResult PayloadTrackManager::update(
         case TrackState::PENDING_STATIC:
             *result.pending += *cluster_base.cloud;
             break;
+        case TrackState::SUSPENDED_STATIC:
+            // 悬挂静止不等于地图静态，吊着不动的货物仍不能进入 permanent static map
+            *result.pending += *cluster_base.cloud;
+            break;
         case TrackState::DYNAMIC_PAYLOAD:
+        case TrackState::SUSPENDED_MOVING:
             *result.dynamic_payload += *cluster_base.cloud;
             break;
         case TrackState::EXPIRED:
-            *result.static_confirmed += *cluster_base.cloud;
+            // 第一版不要直接塞进 static_confirmed，避免动态货物丢失后被写入静态地图
             break;
         }
     }
@@ -437,6 +536,19 @@ TrackResult PayloadTrackManager::update(
         new_track.centroid_base = clusters_base[ci].centroid;
         new_track.bbox_min_base = clusters_base[ci].bbox_min;
         new_track.bbox_max_base = clusters_base[ci].bbox_max;
+
+        // P0.5 新增：初始化 EMA 字段
+        new_track.centroid_base_ema = clusters_base[ci].centroid;
+        new_track.size_ema = clusters_base[ci].bbox_max - clusters_base[ci].bbox_min;
+        new_track.bbox_min_base_ema = clusters_base[ci].bbox_min;
+        new_track.bbox_max_base_ema = clusters_base[ci].bbox_max;
+
+        // 初始化 display bbox（与当前帧一致）
+        new_track.centroid_map_display = clusters_map[ci].centroid;
+        new_track.bbox_min_map_display = clusters_map[ci].bbox_min;
+        new_track.bbox_max_map_display = clusters_map[ci].bbox_max;
+
+        new_track.last_T_map_base = T_map_base;
 
         new_track.hag_min = clusters_base[ci].hag_min;
         new_track.hag_max = clusters_base[ci].hag_max;
@@ -485,11 +597,283 @@ TrackResult PayloadTrackManager::update(
 std::vector<ObjectTrack> PayloadTrackManager::getDynamicTracks() const {
     std::vector<ObjectTrack> dynamic;
     for (const auto& t : tracks_) {
-        if (t.state == TrackState::DYNAMIC_PAYLOAD) {
+        if (t.state == TrackState::DYNAMIC_PAYLOAD ||
+            t.state == TrackState::SUSPENDED_MOVING ||
+            t.state == TrackState::SUSPENDED_STATIC) {
             dynamic.push_back(t);
         }
     }
     return dynamic;
+}
+
+bool PayloadTrackManager::getBestDynamicPayloadTrack(PayloadTrackInfo& out) const {
+    const ObjectTrack* best = nullptr;
+    int best_score = -1;
+
+    for (const auto& t : tracks_) {
+        // 包含 DYNAMIC_PAYLOAD、SUSPENDED_MOVING、SUSPENDED_STATIC
+        if (t.state != TrackState::DYNAMIC_PAYLOAD &&
+            t.state != TrackState::SUSPENDED_MOVING &&
+            t.state != TrackState::SUSPENDED_STATIC) continue;
+
+        // 评分：observed_frames * direction_consistency
+        int score = static_cast<int>(t.observed_frames * t.direction_consistency * 100);
+        if (score > best_score) {
+            best_score = score;
+            best = &t;
+        }
+    }
+
+    if (!best) return false;
+
+    out.track_id = best->track_id;
+
+    // 统一状态编码：TrackState -> PayloadSemanticState
+    // NEW/PENDING_STATIC -> SUSPENDED_CANDIDATE (2)
+    // DYNAMIC_PAYLOAD/SUSPENDED_MOVING -> SUSPENDED_MOVING (3)
+    // SUSPENDED_STATIC -> SUSPENDED_STATIC (4)
+    // EXPIRED -> LOST (7)
+    switch (best->state) {
+        case TrackState::NEW:
+        case TrackState::PENDING_STATIC:
+            out.state = 2;  // SUSPENDED_CANDIDATE
+            break;
+        case TrackState::DYNAMIC_PAYLOAD:
+        case TrackState::SUSPENDED_MOVING:
+            out.state = 3;  // SUSPENDED_MOVING
+            break;
+        case TrackState::SUSPENDED_STATIC:
+            out.state = 4;  // SUSPENDED_STATIC
+            break;
+        case TrackState::EXPIRED:
+            out.state = 7;  // LOST
+            break;
+        default:
+            out.state = 0;  // UNKNOWN
+            break;
+    }
+
+    // P0.5: 使用 display bbox（由 base EMA 转换而来）
+    out.centroid_map = best->centroid_map_display;
+    out.bbox_min_map = best->bbox_min_map_display;
+    out.bbox_max_map = best->bbox_max_map_display;
+    // 使用最近一帧的实际点数，而不是 observed_frames
+    out.point_count = best->cloud_history.empty() ? 0 : best->cloud_history.back()->size();
+    out.direction_consistency = best->direction_consistency;
+    out.map_displacement = best->map_displacement;
+
+    // 计算 track_duration
+    out.track_duration = static_cast<float>(best->last_seen_time - best->first_seen_time);
+
+    // 从轨迹计算速度向量
+    if (best->trajectory_map.size() >= 2) {
+        const auto& last = best->trajectory_map.back();
+        const auto& prev = best->trajectory_map[best->trajectory_map.size() - 2];
+        Eigen::Vector3f dir = (last.position - prev.position);
+        float dist = dir.norm();
+        if (dist > 0.001f) {
+            dir /= dist;
+            out.velocity_map = dir * best->velocity;
+        }
+    }
+
+    // P3: 复制 CargoBoxV2 的 core_box 信息
+    if (best->has_last_core_box) {
+        out.has_core_box = true;
+        out.core_box_base = best->last_core_box;
+    } else {
+        out.has_core_box = false;
+    }
+
+    return true;
+}
+
+// Commit B: 根据 track_id 获取 track
+bool PayloadTrackManager::getTrackById(int track_id, PayloadTrackInfo& out) const {
+    const ObjectTrack* target = nullptr;
+
+    for (const auto& t : tracks_) {
+        if (t.track_id == track_id) {
+            target = &t;
+            break;
+        }
+    }
+
+    if (!target) return false;
+
+    out.track_id = target->track_id;
+
+    // 统一状态编码：TrackState -> PayloadSemanticState
+    switch (target->state) {
+        case TrackState::NEW:
+        case TrackState::PENDING_STATIC:
+            out.state = 2;  // SUSPENDED_CANDIDATE
+            break;
+        case TrackState::DYNAMIC_PAYLOAD:
+        case TrackState::SUSPENDED_MOVING:
+            out.state = 3;  // SUSPENDED_MOVING
+            break;
+        case TrackState::SUSPENDED_STATIC:
+            out.state = 4;  // SUSPENDED_STATIC
+            break;
+        case TrackState::EXPIRED:
+            out.state = 7;  // LOST
+            break;
+        default:
+            out.state = 0;  // UNKNOWN
+            break;
+    }
+
+    // 使用 display bbox
+    out.centroid_map = target->centroid_map_display;
+    out.bbox_min_map = target->bbox_min_map_display;
+    out.bbox_max_map = target->bbox_max_map_display;
+
+    // 使用最近一帧的实际点数
+    out.point_count = target->cloud_history.empty() ? 0 : target->cloud_history.back()->size();
+    out.direction_consistency = target->direction_consistency;
+    out.map_displacement = target->map_displacement;
+
+    // 计算 track_duration
+    out.track_duration = static_cast<float>(target->last_seen_time - target->first_seen_time);
+
+    // 从轨迹计算速度向量
+    if (target->trajectory_map.size() >= 2) {
+        const auto& last = target->trajectory_map.back();
+        const auto& prev = target->trajectory_map[target->trajectory_map.size() - 2];
+        Eigen::Vector3f dir = (last.position - prev.position);
+        float dist = dir.norm();
+        if (dist > 0.001f) {
+            dir /= dist;
+            out.velocity_map = dir * target->velocity;
+        }
+    }
+
+    // 复制 CargoBoxV2 的 core_box 信息
+    if (target->has_last_core_box) {
+        out.has_core_box = true;
+        out.core_box_base = target->last_core_box;
+        out.using_last_good_box = target->using_last_good_box;
+    } else {
+        out.has_core_box = false;
+        out.using_last_good_box = false;
+    }
+
+    return true;
+}
+
+// ========== P0.5 新增：base_link 下的 EMA 平滑 ==========
+
+void PayloadTrackManager::updateBaseEma(ObjectTrack& track, const ClusterInfo& cluster_base) {
+    float alpha_c = config_.centroid_base_alpha;
+    float alpha_s = config_.size_base_alpha;
+
+    // 第一帧初始化
+    if (track.centroid_base_ema.isZero() && track.observed_frames <= 1) {
+        track.centroid_base_ema = cluster_base.centroid;
+        track.size_ema = cluster_base.bbox_max - cluster_base.bbox_min;
+        track.bbox_min_base_ema = cluster_base.bbox_min;
+        track.bbox_max_base_ema = cluster_base.bbox_max;
+        return;
+    }
+
+    // 中心点 EMA
+    track.centroid_base_ema = alpha_c * cluster_base.centroid +
+                              (1.0f - alpha_c) * track.centroid_base_ema;
+
+    // 尺寸 EMA
+    Eigen::Vector3f cluster_size = cluster_base.bbox_max - cluster_base.bbox_min;
+    track.size_ema = alpha_s * cluster_size + (1.0f - alpha_s) * track.size_ema;
+
+    // bbox min/max 由中心和尺寸推导
+    Eigen::Vector3f half_size = track.size_ema / 2.0f;
+    track.bbox_min_base_ema = track.centroid_base_ema - half_size;
+    track.bbox_max_base_ema = track.centroid_base_ema + half_size;
+}
+
+void PayloadTrackManager::transformBaseBboxToMap(ObjectTrack& track, const Eigen::Matrix4d& T_map_base) {
+    Eigen::Matrix3d R = T_map_base.block<3,3>(0,0);
+    Eigen::Vector3d t = T_map_base.block<3,1>(0,3);
+
+    // 转换中心点
+    Eigen::Vector3d centroid_map_d = R * track.centroid_base_ema.cast<double>() + t;
+    track.centroid_map_display = centroid_map_d.cast<float>();
+
+    // 转换 bbox min/max（8 个角点都转换，然后取 min/max）
+    Eigen::Vector3f corners[2] = {track.bbox_min_base_ema, track.bbox_max_base_ema};
+    Eigen::Vector3f map_min(1e9, 1e9, 1e9);
+    Eigen::Vector3f map_max(-1e9, -1e9, -1e9);
+
+    for (int i = 0; i < 2; i++) {
+        for (int j = 0; j < 2; j++) {
+            for (int k = 0; k < 2; k++) {
+                Eigen::Vector3f corner(corners[i].x(), corners[j].y(), corners[k].z());
+                Eigen::Vector3d corner_map = R * corner.cast<double>() + t;
+                Eigen::Vector3f corner_map_f = corner_map.cast<float>();
+                map_min = map_min.cwiseMin(corner_map_f);
+                map_max = map_max.cwiseMax(corner_map_f);
+            }
+        }
+    }
+
+    track.bbox_min_map_display = map_min;
+    track.bbox_max_map_display = map_max;
+
+    // 保存当前 T_map_base
+    track.last_T_map_base = T_map_base;
+}
+
+// ============================================================================
+// P1: 清理过期的 SUSPENDED_STATIC track
+// ============================================================================
+
+void PayloadTrackManager::cleanupStaleSuspendedStaticTracks(double current_time)
+{
+    const double suspended_static_ttl = 20.0;
+    const int suspended_static_max_reinit_reject = 6;
+    const int suspended_static_min_core_points = 25;
+
+    int expired_count = 0;
+
+    for (auto& track : tracks_) {
+        if (track.state != TrackState::SUSPENDED_STATIC) {
+            continue;
+        }
+
+        double age_since_seen = current_time - track.last_seen_time;
+
+        bool timeout = age_since_seen > suspended_static_ttl;
+        bool too_many_reject = track.size_jump_count > suspended_static_max_reinit_reject;
+        bool weak_core = track.has_last_core_box &&
+                         track.last_core_box.suspended_points < suspended_static_min_core_points;
+
+        if (timeout || too_many_reject || weak_core) {
+            ROS_INFO("[TrackCleanup] expire suspended_static track=%d age=%.1f reject_count=%d core_pts=%d reason=%s",
+                     track.track_id,
+                     age_since_seen,
+                     track.size_jump_count,
+                     track.has_last_core_box ? track.last_core_box.suspended_points : 0,
+                     timeout ? "timeout" : (too_many_reject ? "too_many_reject" : "weak_core"));
+
+            track.state = TrackState::EXPIRED;
+            expired_count++;
+        }
+    }
+
+    // 压缩已过期的 track
+    tracks_.erase(
+        std::remove_if(
+            tracks_.begin(),
+            tracks_.end(),
+            [&](const ObjectTrack& t) {
+                return t.state == TrackState::EXPIRED &&
+                       current_time - t.last_seen_time > 2.0;
+            }),
+        tracks_.end());
+
+    if (expired_count > 0) {
+        ROS_INFO("[TrackCleanup] expired=%d active_tracks=%zu", expired_count, tracks_.size());
+    }
 }
 
 } // namespace ndt_slam

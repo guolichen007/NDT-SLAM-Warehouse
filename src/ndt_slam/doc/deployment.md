@@ -23,13 +23,13 @@ journalctl -u ndt-slam -f
 bash src/ndt_slam/scripts/deploy/slam_monitor.sh 60
 
 # 查看运行状态
-cat /home/ydkj/slam_data/maps/live/current/runtime_status.json | python3 -m json.tool
+cat /home/ydkj/NDT-slam-ws/maps/live/current/runtime_status.json | python3 -m json.tool
 
 # 查看趋势
-tail -f /home/ydkj/slam_data/maps/live/current/memory_trend.csv
+tail -f /home/ydkj/NDT-slam-ws/maps/live/current/memory_trend.csv
 
 # 查看告警
-tail -f /home/ydkj/slam_data/maps/live/current/alerts.log
+tail -f /home/ydkj/NDT-slam-ws/maps/live/current/alerts.log
 ```
 
 ## 一键部署
