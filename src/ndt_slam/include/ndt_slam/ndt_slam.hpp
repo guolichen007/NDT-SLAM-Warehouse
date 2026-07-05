@@ -915,6 +915,8 @@ private:
         float lost_clear_sec = 8.0f;
         int strong_min_points = 30;
         int weak_min_points = 5;
+        float candidate_hold_sec = 1.0f;
+        int candidate_max_weak_frames = 10;
         float size_change_min_ratio = 0.20f;
         float size_change_max_ratio = 0.60f;
         int size_update_confirm_frames = 5;
@@ -928,6 +930,7 @@ private:
     struct HookCargoLock {
         HookCargoLockState state = HookCargoLockState::EMPTY;
         int confirm_count = 0;
+        int weak_count = 0;
         int lost_count = 0;
         int size_update_count = 0;
 

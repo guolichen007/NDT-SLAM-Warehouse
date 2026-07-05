@@ -500,6 +500,8 @@ hook_cargo_lock:
   size_change_max_ratio: 0.60
   size_update_confirm_frames: 5
   size_update_alpha: 0.15
+  candidate_hold_sec: 1.0
+  candidate_max_weak_frames: 10
   bottom_alpha_points: 0.30
   bottom_alpha_memory: 0.15
   bottom_hold_uncertainty_growth: 0.02

@@ -883,6 +883,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.bottom_alpha_memory = hcl["bottom_alpha_memory"].as<float>(0.15f);
             hook_lock_config_.bottom_hold_uncertainty_growth = hcl["bottom_hold_uncertainty_growth"].as<float>(0.02f);
             hook_lock_config_.bottom_max_uncertainty = hcl["bottom_max_uncertainty"].as<float>(0.35f);
+            hook_lock_config_.candidate_hold_sec = hcl["candidate_hold_sec"].as<float>(1.0f);
+            hook_lock_config_.candidate_max_weak_frames = hcl["candidate_max_weak_frames"].as<int>(10);
 
             ROS_INFO("[HookCargoLock] enabled=%d lock_confirm=%d lost_hold=%.1f lost_clear=%.1f strong=%d weak=%d",
                      hook_lock_config_.enabled ? 1 : 0,
@@ -1685,18 +1687,19 @@ void NdtSlamNode::processCloudThread() {
                 if (longterm_mapping_enabled_ && keyframe_count_ > 0 && keyframe_count_ % rebuild_every_keyframes_ == 0) {
                     rebuildActiveMapFromRecentKeyframes();
                 }
-
-                // ========== HookFixedCargoDetector（每帧都执行，不受 payload_tracker 影响）==========
-                ROS_INFO("[HookFixedCargoTRACE] reached_hook_detect_point frame=%d", total_frames);
-
-                hook_fixed_cargo_ = detectHookFixedCargo(hook_input_cloud, msg->header.stamp);
-                hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
-                updateHookCargoLock(hook_fixed_cargo_, hook_fixed_bottom_, msg->header.stamp);
-                publishSelectedCorePoints(hook_fixed_cargo_, msg->header.stamp);
-
-                // 发布吊货跟踪信息（用于避障节点）
-                publishPayloadTrackInfo(msg->header.stamp);
             }
+
+            // ========== HookFixedCargoDetector（每帧都执行，不受 payload_tracker 影响）==========
+            ROS_INFO_THROTTLE(1.0, "[HookFrame] frame=%d hook_input=%zu",
+                              total_frames, hook_input_cloud ? hook_input_cloud->size() : 0);
+
+            hook_fixed_cargo_ = detectHookFixedCargo(hook_input_cloud, msg->header.stamp);
+            hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
+            updateHookCargoLock(hook_fixed_cargo_, hook_fixed_bottom_, msg->header.stamp);
+            publishSelectedCorePoints(hook_fixed_cargo_, msg->header.stamp);
+
+            // 发布吊货跟踪信息（用于避障节点）
+            publishPayloadTrackInfo(msg->header.stamp);
         }
     }
 
@@ -5638,18 +5641,29 @@ Eigen::Vector3f NdtSlamNode::computeFixedCenterSize(
         return Eigen::Vector3f(0.5f, 0.35f, 0.25f);
     }
 
-    float x_min = 1e9, x_max = -1e9, y_min = 1e9, y_max = -1e9;
+    // 使用 P05/P95 代替 min/max
+    std::vector<float> xs, ys;
     for (const auto& p : det.core_points_base->points) {
-        x_min = std::min(x_min, p.x); x_max = std::max(x_max, p.x);
-        y_min = std::min(y_min, p.y); y_max = std::max(y_max, p.y);
+        xs.push_back(p.x);
+        ys.push_back(p.y);
     }
+    std::sort(xs.begin(), xs.end());
+    std::sort(ys.begin(), ys.end());
 
-    float sx = 2.0f * std::max(std::fabs(x_min - cx), std::fabs(x_max - cx)) + 0.10f;
-    float sy = 2.0f * std::max(std::fabs(y_min - cy), std::fabs(y_max - cy)) + 0.10f;
+    int n = xs.size();
+    float x05 = xs[static_cast<int>(n * 0.05)];
+    float x95 = xs[static_cast<int>(n * 0.95)];
+    float y05 = ys[static_cast<int>(n * 0.05)];
+    float y95 = ys[static_cast<int>(n * 0.95)];
+
+    // 以 ROI center 对称扩展
+    float sx_raw = 2.0f * std::max(std::fabs(x05 - cx), std::fabs(x95 - cx)) + 0.10f;
+    float sy_raw = 2.0f * std::max(std::fabs(y05 - cy), std::fabs(y95 - cy)) + 0.10f;
     float sz = bottom.valid ? std::max(bottom.height, 0.20f) : 0.25f;
 
-    sx = std::max(0.60f, std::min(sx, 2.80f));
-    sy = std::max(0.40f, std::min(sy, 1.80f));
+    // 收紧尺寸限制
+    float sx = std::max(0.60f, std::min(sx_raw, 2.30f));
+    float sy = std::max(0.40f, std::min(sy_raw, 1.40f));
     sz = std::max(0.20f, std::min(sz, 2.00f));
 
     return Eigen::Vector3f(sx, sy, sz);
@@ -5750,6 +5764,7 @@ void NdtSlamNode::updateHookCargoLock(
     case HookCargoLockState::CANDIDATE:
         if (strong) {
             hook_lock_.confirm_count++;
+            hook_lock_.weak_count = 0;
             hook_lock_.init_size_buffer.push_back(computeFixedCenterSize(det, bottom));
             hook_lock_.last_seen_stamp = stamp;
             ROS_INFO("[CargoLock] CANDIDATE confirm=%d", hook_lock_.confirm_count);
@@ -5765,10 +5780,23 @@ void NdtSlamNode::updateHookCargoLock(
                 ROS_WARN("[CargoLock] CANDIDATE->LOCKED size=(%.2f,%.2f,%.2f)",
                          hook_lock_.locked_size.x(), hook_lock_.locked_size.y(), hook_lock_.locked_size.z());
             }
+        } else if (weak) {
+            // 弱检测保持 CANDIDATE，不清零
+            hook_lock_.weak_count++;
+            hook_lock_.last_seen_stamp = stamp;
+            ROS_INFO("[CargoLock] CANDIDATE weak_hold confirm=%d weak=%d",
+                     hook_lock_.confirm_count, hook_lock_.weak_count);
         } else {
-            hook_lock_.state = HookCargoLockState::EMPTY;
-            hook_lock_.confirm_count = 0;
-            ROS_INFO("[CargoLock] CANDIDATE->EMPTY (no strong detection)");
+            // 无检测，检查超时
+            double age = (stamp - hook_lock_.last_seen_stamp).toSec();
+            if (age < hook_lock_config_.candidate_hold_sec) {
+                ROS_INFO("[CargoLock] CANDIDATE no_detect_hold age=%.2f confirm=%d",
+                         age, hook_lock_.confirm_count);
+            } else {
+                hook_lock_.state = HookCargoLockState::EMPTY;
+                hook_lock_.confirm_count = 0;
+                ROS_INFO("[CargoLock] CANDIDATE->EMPTY (timeout %.1f)", age);
+            }
         }
         break;
 
