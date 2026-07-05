@@ -425,6 +425,12 @@ private:
     uint64_t skipped_duplicate_frames_ = 0;
     size_t last_clean_points_ = 0;
 
+    // P0: processCloudThread 重复帧检测
+    ros::Time last_processed_frame_stamp_;
+    size_t last_processed_frame_size_ = 0;
+    uint64_t last_processed_frame_hash_ = 0;
+    int duplicate_frame_skip_count_ = 0;
+
     FrameSignature computeFrameSignature(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
         const ros::Time& stamp,
@@ -931,10 +937,6 @@ private:
         float bottom_hold_uncertainty_growth = 0.02f;
         float bottom_max_uncertainty = 0.35f;
 
-        // auto_lock_center 相关
-        std::string center_mode = "auto_lock_center";  // manual_roi_center / auto_lock_center
-        float max_auto_center_offset = 1.20f;
-
         // locked association gate 相关
         float locked_update_max_center_dist = 0.65f;
         float locked_update_min_overlap_ratio = 0.30f;
@@ -950,6 +952,21 @@ private:
         // locked search margin
         float locked_search_margin_x = 0.30f;
         float locked_search_margin_y = 0.30f;
+
+        // P1: 先禁用 HookCargoRemoval，恢复 A7 轨迹基准
+        bool enable_hook_cargo_removal = false;
+
+        // P2: 锁定中心配置
+        std::string center_mode = "manual_body_center";  // manual_body_center / auto_lock_body_center
+        float manual_center_x = 1.06f;
+        float manual_center_y = -2.31f;
+
+        // body strong 候选条件
+        int lock_body_min_points = 120;
+        float lock_body_min_xy_area = 0.60f;
+        float lock_body_min_visible_height = 0.50f;
+        float lock_body_max_bottom_z = 1.50f;
+        float lock_body_max_top_z = 1.80f;
     };
 
     struct HookCargoLock {
@@ -1000,6 +1017,7 @@ private:
     bool isStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
     bool isWeakDetection(const HookCargoDetection& det);
     bool isLockStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    bool isBodyStrongCandidate(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
     bool isDetectionConsistentWithLockedBox(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, std::string* reject_reason);
     Eigen::Vector3f computeFixedCenterSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
     Eigen::Vector3f medianSize(const std::deque<Eigen::Vector3f>& buffer);

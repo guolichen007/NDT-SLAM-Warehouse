@@ -506,8 +506,6 @@ hook_cargo_lock:
   bottom_alpha_memory: 0.15
   bottom_hold_uncertainty_growth: 0.02
   bottom_max_uncertainty: 0.35
-  center_mode: "auto_lock_center"
-  max_auto_center_offset: 1.20
 
   # locked association gate
   locked_update_max_center_dist: 0.65
@@ -524,3 +522,18 @@ hook_cargo_lock:
   # locked search margin
   locked_search_margin_x: 0.30
   locked_search_margin_y: 0.30
+
+  # P1: 先禁用 HookCargoRemoval，恢复 A7 轨迹基准
+  enable_hook_cargo_removal: false
+
+  # P2: 锁定中心配置
+  center_mode: "manual_body_center"  # manual_body_center / auto_lock_body_center
+  manual_center_x: 1.06
+  manual_center_y: -2.31
+
+  # body strong 候选条件
+  lock_body_min_points: 120
+  lock_body_min_xy_area: 0.60
+  lock_body_min_visible_height: 0.50
+  lock_body_max_bottom_z: 1.50
+  lock_body_max_top_z: 1.80
