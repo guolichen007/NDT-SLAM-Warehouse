@@ -928,6 +928,10 @@ private:
         float bottom_alpha_memory = 0.15f;
         float bottom_hold_uncertainty_growth = 0.02f;
         float bottom_max_uncertainty = 0.35f;
+
+        // auto_lock_center 相关
+        std::string center_mode = "auto_lock_center";  // manual_roi_center / auto_lock_center
+        float max_auto_center_offset = 1.20f;
     };
 
     struct HookCargoLock {
@@ -954,6 +958,12 @@ private:
 
         std::deque<Eigen::Vector3f> init_size_buffer;
         std::deque<Eigen::Vector3f> size_candidate_buffer;
+
+        // auto_lock_center 相关
+        std::deque<Eigen::Vector2f> init_center_buffer;
+        Eigen::Vector2f locked_center_xy = Eigen::Vector2f::Zero();
+        bool has_locked_center = false;
+        std::string center_source;
     };
 
     HookCargoLockConfig hook_lock_config_;

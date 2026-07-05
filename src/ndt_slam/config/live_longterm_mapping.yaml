@@ -506,3 +506,5 @@ hook_cargo_lock:
   bottom_alpha_memory: 0.15
   bottom_hold_uncertainty_growth: 0.02
   bottom_max_uncertainty: 0.35
+  center_mode: "auto_lock_center"
+  max_auto_center_offset: 1.20
