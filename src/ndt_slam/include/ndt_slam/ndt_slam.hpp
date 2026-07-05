@@ -857,6 +857,63 @@ private:
         std::string source;
     };
 
+    // ========== OdomAnchorBox 配置 ==========
+    struct OdomAnchorBoxConfig {
+        bool enabled = true;
+
+        // 绿色框中心锚点（默认 base_link/odom 原点）
+        float anchor_x = 0.0f;
+        float anchor_y = 0.0f;
+
+        // 检测窗口围绕 anchor 裁剪
+        float search_half_x = 1.20f;
+        float search_half_y = 1.20f;
+        float search_z_min = 0.05f;
+        float search_z_max = 3.20f;
+
+        // 默认小参考框（仅 debug）
+        float default_size_x = 0.50f;
+        float default_size_y = 0.35f;
+        float default_size_z = 0.25f;
+
+        // 检测到货物后的尺寸范围
+        float min_size_x = 0.60f;
+        float min_size_y = 0.40f;
+        float min_size_z = 0.20f;
+        float max_size_x = 2.50f;
+        float max_size_y = 1.60f;
+        float max_size_z = 2.00f;
+
+        float size_margin_x = 0.10f;
+        float size_margin_y = 0.10f;
+        float size_margin_z = 0.05f;
+
+        int lock_confirm_frames = 2;
+        int strong_min_points = 50;
+        int weak_min_points = 10;
+
+        int size_update_confirm_frames = 5;
+        float size_change_min_ratio = 0.20f;
+        float size_change_max_ratio = 0.60f;
+        float size_update_alpha = 0.15f;
+
+        float bottom_alpha_points = 0.30f;
+        float bottom_alpha_hold = 0.10f;
+        float bottom_max_uncertainty = 0.35f;
+
+        float lost_hold_sec = 5.0f;
+        float lost_clear_sec = 15.0f;
+
+        bool verbose_debug = false;
+    };
+
+    OdomAnchorBoxConfig odom_anchor_config_;
+
+    // 获取 anchor XY
+    Eigen::Vector2f getCargoAnchorXY() const {
+        return Eigen::Vector2f(odom_anchor_config_.anchor_x, odom_anchor_config_.anchor_y);
+    }
+
     struct HookFixedCargoConfig {
         bool enabled = true;
         float roi_center_x = 0.0f;
@@ -955,18 +1012,6 @@ private:
 
         // P1: 先禁用 HookCargoRemoval，恢复 A7 轨迹基准
         bool enable_hook_cargo_removal = false;
-
-        // P2: 锁定中心配置
-        std::string center_mode = "manual_body_center";  // manual_body_center / auto_lock_body_center
-        float manual_center_x = 1.06f;
-        float manual_center_y = -2.31f;
-
-        // body strong 候选条件
-        int lock_body_min_points = 120;
-        float lock_body_min_xy_area = 0.60f;
-        float lock_body_min_visible_height = 0.50f;
-        float lock_body_max_bottom_z = 1.50f;
-        float lock_body_max_top_z = 1.80f;
     };
 
     struct HookCargoLock {
@@ -980,7 +1025,6 @@ private:
         ros::Time last_good_height_stamp;
         ros::Time locked_stamp;
 
-        Eigen::Vector3f locked_center_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f locked_size = Eigen::Vector3f::Zero();
 
         float stable_bottom_z = 0.0f;
@@ -994,12 +1038,6 @@ private:
         std::deque<Eigen::Vector3f> init_size_buffer;
         std::deque<Eigen::Vector3f> size_candidate_buffer;
 
-        // auto_lock_center 相关
-        std::deque<Eigen::Vector2f> init_center_buffer;
-        Eigen::Vector2f locked_center_xy = Eigen::Vector2f::Zero();
-        bool has_locked_center = false;
-        std::string center_source;
-
         // 重复帧检测
         ros::Time last_hook_processed_stamp;
         uint64_t last_hook_processed_hash = 0;
@@ -1012,6 +1050,12 @@ private:
 
     HookCargoLockConfig hook_lock_config_;
     HookCargoLock hook_lock_;
+
+    // OdomAnchorBox 新函数
+    HookCargoDetection detectCargoAroundOdomAnchor(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
+        const ros::Time& stamp);
+    void publishPayloadTrackInfoFromOdomAnchorBox(const ros::Time& stamp);
 
     void updateHookCargoLock(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
     bool isStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);

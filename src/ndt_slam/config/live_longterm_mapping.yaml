@@ -532,8 +532,53 @@ hook_cargo_lock:
   manual_center_y: -2.31
 
   # body strong 候选条件
-  lock_body_min_points: 120
-  lock_body_min_xy_area: 0.60
-  lock_body_min_visible_height: 0.50
-  lock_body_max_bottom_z: 1.50
-  lock_body_max_top_z: 1.80
+
+
+# ========== OdomAnchorBox 配置 ==========
+odom_anchored_cargo_box:
+  enabled: true
+
+  # 绿色框中心锚点（默认 base_link/odom 原点）
+  anchor_x: 0.0
+  anchor_y: 0.0
+
+  # 检测窗口围绕 anchor 裁剪
+  search_half_x: 1.20
+  search_half_y: 1.20
+  search_z_min: 0.05
+  search_z_max: 3.20
+
+  # 默认小参考框（仅 debug）
+  default_size_x: 0.50
+  default_size_y: 0.35
+  default_size_z: 0.25
+
+  # 检测到货物后的尺寸范围
+  min_size_x: 0.60
+  min_size_y: 0.40
+  min_size_z: 0.20
+  max_size_x: 2.50
+  max_size_y: 1.60
+  max_size_z: 2.00
+
+  size_margin_x: 0.10
+  size_margin_y: 0.10
+  size_margin_z: 0.05
+
+  lock_confirm_frames: 2
+  strong_min_points: 50
+  weak_min_points: 10
+
+  size_update_confirm_frames: 5
+  size_change_min_ratio: 0.20
+  size_change_max_ratio: 0.60
+  size_update_alpha: 0.15
+
+  bottom_alpha_points: 0.30
+  bottom_alpha_hold: 0.10
+  bottom_max_uncertainty: 0.35
+
+  lost_hold_sec: 5.0
+  lost_clear_sec: 15.0
+
+  verbose_debug: false
