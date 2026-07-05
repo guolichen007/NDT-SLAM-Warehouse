@@ -250,7 +250,6 @@ private:
 
     // 订阅者
     ros::Subscriber payload_track_sub_;
-    ros::Subscriber payload_precise_box_info_sub_;  // Commit C: 订阅 precise box info
     ros::Subscriber odom_sub_;  // P0.5: 订阅 odom 用于预测
 
     // Commit C: precise box info 状态
@@ -447,9 +446,6 @@ private:
     void setupSubscribers() {
         payload_track_sub_ = nh_.subscribe("/payload_track_info", 10,
                                            &CargoForbiddenZoneNode::payloadTrackCallback, this);
-        // Commit C: 订阅 payload_precise_box_info
-        payload_precise_box_info_sub_ = nh_.subscribe("/payload_precise_box_info", 10,
-                                                      &CargoForbiddenZoneNode::payloadPreciseBoxInfoCallback, this);
         // P0.5: 订阅 odom 用于预测
         odom_sub_ = nh_.subscribe("/odom", 10,
                                   &CargoForbiddenZoneNode::odomCallback, this);
@@ -482,52 +478,6 @@ private:
     }
 
     // Commit C: payload_precise_box_info 回调
-    void payloadPreciseBoxInfoCallback(const std_msgs::Float32MultiArray::ConstPtr& msg) {
-        if (msg->data.size() < 40) {
-            return;
-        }
-
-        // 解析消息
-        constexpr int IDX_VALID = 0;
-        constexpr int IDX_TRACK_ID = 1;
-        constexpr int IDX_SOURCE = 2;
-        constexpr int IDX_CORNER_MAP_START = 16;
-
-        float valid = msg->data[IDX_VALID];
-        if (valid < 0.5f) {
-            // invalid，不更新
-            return;
-        }
-
-        int track_id = static_cast<int>(msg->data[IDX_TRACK_ID]);
-        int source = static_cast<int>(msg->data[IDX_SOURCE]);
-
-        // 只接受 V2_CORE 和 LAST_GOOD
-        if (source != BOX_SOURCE_V2_CORE && source != BOX_SOURCE_LAST_GOOD) {
-            return;
-        }
-
-        // 解析 8 个 map corners
-        precise_corners_map_.clear();
-        for (int i = 0; i < 8; i++) {
-            geometry_msgs::Point p;
-            p.x = msg->data[IDX_CORNER_MAP_START + i * 3 + 0];
-            p.y = msg->data[IDX_CORNER_MAP_START + i * 3 + 1];
-            p.z = msg->data[IDX_CORNER_MAP_START + i * 3 + 2];
-            precise_corners_map_.push_back(p);
-        }
-
-        precise_track_id_ = track_id;
-        precise_source_ = source;
-        precise_box_stamp_ = ros::Time::now();
-        precise_box_active_ = true;
-
-        ROS_INFO_THROTTLE(
-            1.0,
-            "[CargoMarkerMapCorners] track=%d source=%s valid=1 frame=map corners=8",
-            track_id,
-            source == BOX_SOURCE_V2_CORE ? "V2_CORE" : "LAST_GOOD");
-    }
 
     // P0.5 新增：timer 高频发布 marker
     void markerTimerCallback(const ros::TimerEvent& event) {

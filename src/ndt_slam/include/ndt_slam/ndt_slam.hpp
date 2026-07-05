@@ -616,12 +616,10 @@ private:
     // 吊货跟踪信息发布（用于避障节点）
     ros::Publisher payload_track_info_pub_;
     void publishPayloadTrackInfo(const ros::Time& stamp);
-    void publishPayloadTrackInfoFromLockedHookBox(const ros::Time& stamp);
     void publishPayloadTrackInfoInvalid(const std::string& reason);
     void buildLockedOdomFixedCargoBox(const ros::Time& stamp);
 
     // Commit C: payload precise box info
-    void publishPayloadPreciseBoxInfo(const PayloadTrackInfo& track, float box_source, const ros::Time& stamp);
 
     // ========== 长期建图功能 ==========
     // MotionGate：静止检测和门控
@@ -995,7 +993,6 @@ private:
 
     ros::Publisher cargo_selected_core_points_pub_;
 
-    HookCargoDetection detectHookFixedCargo(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base, const ros::Time& stamp);
     HookCargoBottomEstimate estimateCargoBottom(const HookCargoDetection& detection);
     void publishSelectedCorePoints(const HookCargoDetection& detection, const ros::Time& stamp);
     void publishSelectedCorePoints(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const ros::Time& stamp);
