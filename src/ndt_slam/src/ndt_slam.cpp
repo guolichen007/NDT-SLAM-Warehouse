@@ -1042,6 +1042,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             if (oac["cargo_warning"]) {
                 auto cw = oac["cargo_warning"];
                 odom_anchor_config_.cargo_warning.enabled = cw["enabled"].as<bool>(true);
+                odom_anchor_config_.cargo_warning.publish_alarm_msg = cw["publish_alarm_msg"].as<bool>(false);
+                odom_anchor_config_.cargo_warning.publish_debug_marker = cw["publish_debug_marker"].as<bool>(true);
                 odom_anchor_config_.cargo_warning.level1_distance_m = cw["level1_distance_m"].as<float>(3.0f);
                 odom_anchor_config_.cargo_warning.level2_distance_m = cw["level2_distance_m"].as<float>(5.0f);
                 odom_anchor_config_.cargo_warning.min_vertical_clearance_m = cw["min_vertical_clearance_m"].as<float>(0.80f);
@@ -1053,16 +1055,18 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 odom_anchor_config_.cargo_warning.exclude_ground = cw["exclude_ground"].as<bool>(true);
                 odom_anchor_config_.cargo_warning.ground_hag_min_m = cw["ground_hag_min_m"].as<float>(0.20f);
                 odom_anchor_config_.cargo_warning.exclude_self_cargo = cw["exclude_self_cargo"].as<bool>(true);
-                odom_anchor_config_.cargo_warning.self_cargo_margin_xy_m = cw["self_cargo_margin_xy_m"].as<float>(0.25f);
-                odom_anchor_config_.cargo_warning.self_cargo_margin_z_m = cw["self_cargo_margin_z_m"].as<float>(0.20f);
+                odom_anchor_config_.cargo_warning.self_cargo_margin_xy_m = cw["self_cargo_margin_xy_m"].as<float>(0.45f);
+                odom_anchor_config_.cargo_warning.self_cargo_margin_z_m = cw["self_cargo_margin_z_m"].as<float>(0.35f);
                 odom_anchor_config_.cargo_warning.debounce_frames = cw["debounce_frames"].as<int>(2);
                 odom_anchor_config_.cargo_warning.clear_hold_sec = cw["clear_hold_sec"].as<float>(0.5f);
                 odom_anchor_config_.cargo_warning.level1_alarm_code = cw["level1_alarm_code"].as<int>(17);
                 odom_anchor_config_.cargo_warning.level2_alarm_code = cw["level2_alarm_code"].as<int>(18);
                 odom_anchor_config_.cargo_warning.clear_alarm_code = cw["clear_alarm_code"].as<int>(0);
 
-                ROS_INFO("[CargoWarningConfig] enabled=%d level1_dist=%.1f level2_dist=%.1f clearance=%.2f",
+                ROS_INFO("[CargoWarningConfig] enabled=%d publish_alarm=%d debug_marker=%d level1_dist=%.1f level2_dist=%.1f clearance=%.2f",
                          odom_anchor_config_.cargo_warning.enabled ? 1 : 0,
+                         odom_anchor_config_.cargo_warning.publish_alarm_msg ? 1 : 0,
+                         odom_anchor_config_.cargo_warning.publish_debug_marker ? 1 : 0,
                          odom_anchor_config_.cargo_warning.level1_distance_m,
                          odom_anchor_config_.cargo_warning.level2_distance_m,
                          odom_anchor_config_.cargo_warning.min_vertical_clearance_m);
@@ -8803,29 +8807,31 @@ void NdtSlamNode::publishCargoWarning(const CargoWarningData& warning, const ros
     last_cargo_warning_ = warning;
     last_cargo_warning_stamp_ = stamp;
 
-    // 发布 JSON 格式的预警消息
-    std_msgs::String msg;
-    std::ostringstream oss;
-    oss << "{"
-        << "\"valid\":" << (warning.valid ? "true" : "false") << ","
-        << "\"level\":" << static_cast<int>(warning.level) << ","
-        << "\"alarm_code\":" << warning.alarm_code << ","
-        << "\"distance_to_footprint_m\":" << std::fixed << std::setprecision(2) << warning.distance_to_footprint_m << ","
-        << "\"clearance_m\":" << std::fixed << std::setprecision(2) << warning.clearance_m << ","
-        << "\"cargo_bottom_z\":" << std::fixed << std::setprecision(2) << warning.cargo_bottom_z << ","
-        << "\"cargo_bottom_safe_z\":" << std::fixed << std::setprecision(2) << warning.cargo_bottom_safe_z << ","
-        << "\"cargo_top_z\":" << std::fixed << std::setprecision(2) << warning.cargo_top_z << ","
-        << "\"obstacle_top_z\":" << std::fixed << std::setprecision(2) << warning.obstacle_top_z << ","
-        << "\"obstacle_point_count\":" << warning.obstacle_point_count << ","
-        << "\"source\":\"" << warning.source << "\","
-        << "\"reason\":\"" << warning.reason << "\""
-        << "}";
-    msg.data = oss.str();
-    cargo_warning_pub_.publish(msg);
+    // 只有 publish_alarm_msg=true 时才发布正式报警消息
+    if (odom_anchor_config_.cargo_warning.publish_alarm_msg) {
+        std_msgs::String msg;
+        std::ostringstream oss;
+        oss << "{"
+            << "\"valid\":" << (warning.valid ? "true" : "false") << ","
+            << "\"level\":" << static_cast<int>(warning.level) << ","
+            << "\"alarm_code\":" << warning.alarm_code << ","
+            << "\"distance_to_footprint_m\":" << std::fixed << std::setprecision(2) << warning.distance_to_footprint_m << ","
+            << "\"clearance_m\":" << std::fixed << std::setprecision(2) << warning.clearance_m << ","
+            << "\"cargo_bottom_z\":" << std::fixed << std::setprecision(2) << warning.cargo_bottom_z << ","
+            << "\"cargo_bottom_safe_z\":" << std::fixed << std::setprecision(2) << warning.cargo_bottom_safe_z << ","
+            << "\"cargo_top_z\":" << std::fixed << std::setprecision(2) << warning.cargo_top_z << ","
+            << "\"obstacle_top_z\":" << std::fixed << std::setprecision(2) << warning.obstacle_top_z << ","
+            << "\"obstacle_point_count\":" << warning.obstacle_point_count << ","
+            << "\"source\":\"" << warning.source << "\","
+            << "\"reason\":\"" << warning.reason << "\""
+            << "}";
+        msg.data = oss.str();
+        cargo_warning_pub_.publish(msg);
+    }
 
-    // 日志
+    // 日志（始终输出，用于调试）
     if (warning.level > 0) {
-        ROS_WARN_THROTTLE(1.0, "[CargoWarning] level=%d alarm=%d dist=%.2f clearance=%.2f cargo_bottom=%.2f obstacle_top=%.2f reason=%s",
+        ROS_WARN_THROTTLE(1.0, "[CargoWarning] level=%d alarm=%d dist=%.2f clearance=%.2f cargo_bottom=%.2f obstacle_top=%.2f reason=%s publish_alarm=%d",
                           warning.level, warning.alarm_code,
                           warning.distance_to_footprint_m, warning.clearance_m,
                           warning.cargo_bottom_z, warning.obstacle_top_z,
@@ -8842,6 +8848,7 @@ void NdtSlamNode::publishCargoWarningMarkers(
     const ros::Time& stamp) {
 
     if (!odom_anchor_config_.cargo_warning.enabled) return;
+    if (!odom_anchor_config_.cargo_warning.publish_debug_marker) return;
 
     const auto& config = odom_anchor_config_.cargo_warning;
 

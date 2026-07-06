@@ -626,8 +626,11 @@ odom_anchored_cargo_box:
     sub_cluster_min_points: 20
 
   # ========== Cargo Warning 配置 ==========
+  # 注意：当前版本为 tightbox baseline，正式避障报警仍在开发中
   cargo_warning:
     enabled: true
+    publish_alarm_msg: false  # 不向外发布正式报警，只发布 debug marker
+    publish_debug_marker: true
 
     level1_distance_m: 3.0
     level2_distance_m: 5.0

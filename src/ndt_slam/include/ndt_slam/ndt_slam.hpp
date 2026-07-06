@@ -967,6 +967,8 @@ private:
         // Cargo Warning 子配置
         struct CargoWarningConfig {
             bool enabled = true;
+            bool publish_alarm_msg = false;  // 不向外发布正式报警，只发布 debug
+            bool publish_debug_marker = true;
 
             float level1_distance_m = 3.0f;
             float level2_distance_m = 5.0f;
@@ -983,8 +985,8 @@ private:
             float ground_hag_min_m = 0.20f;
 
             bool exclude_self_cargo = true;
-            float self_cargo_margin_xy_m = 0.25f;
-            float self_cargo_margin_z_m = 0.20f;
+            float self_cargo_margin_xy_m = 0.45f;
+            float self_cargo_margin_z_m = 0.35f;
 
             int debounce_frames = 2;
             float clear_hold_sec = 0.5f;
