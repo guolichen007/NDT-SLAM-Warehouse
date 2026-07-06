@@ -335,8 +335,8 @@ crane_motion_ekf:
   r_ndt_max: 2.0
   fitness_to_r_scale: 5.0
 
-  innovation_gate_m: 0.50
-  innovation_reject_m: 1.50
+  innovation_gate_m: 0.35
+  innovation_reject_m: 1.00
 
   max_speed_x: 2.0
   max_speed_y: 2.0
