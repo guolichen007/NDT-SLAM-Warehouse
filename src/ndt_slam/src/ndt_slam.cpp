@@ -324,6 +324,13 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
     try {
         YAML::Node config = YAML::LoadFile(config_file_path);
 
+        // 调试配置
+        if (config["debug"]) {
+            auto dbg = config["debug"];
+            debug_cfg_.publish_runtime_path = dbg["publish_runtime_path"].as<bool>(false);
+            ROS_INFO("[DebugConfig] publish_runtime_path=%d", debug_cfg_.publish_runtime_path ? 1 : 0);
+        }
+
         if (config["pointcloud_topic"]) {
             pointcloud_topic_ = config["pointcloud_topic"].as<std::string>();
         }
@@ -1265,16 +1272,13 @@ void NdtSlamNode::processCloudThread() {
 
                 last_anchor_detect_stamp_ = msg->header.stamp;
 
-                // OdomAnchorSummary 日志（每 2 秒一次）
+                // OdomAnchorSummary 日志（每 2 秒一次）- 使用 CargoState
                 if ((msg->header.stamp - last_anchor_summary_stamp_).toSec() >= odom_anchor_config_.summary_log_period) {
-                    auto anchor = getCargoAnchorXY();
-                    ROS_INFO("[OdomAnchorSummary] locked=%d anchor=(%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f] points=%zu debug_points=%d",
-                             (hook_lock_.state == HookCargoLockState::LOCKED || hook_lock_.state == HookCargoLockState::LOST_HOLD) ? 1 : 0,
-                             anchor.x(), anchor.y(),
-                             hook_lock_.has_locked_size ? hook_lock_.locked_size.x() : 0.0f,
-                             hook_lock_.has_locked_size ? hook_lock_.locked_size.y() : 0.0f,
-                             hook_lock_.has_locked_size ? hook_lock_.locked_size.z() : 0.0f,
-                             hook_lock_.stable_bottom_z, hook_lock_.stable_top_z,
+                    ROS_INFO("[OdomAnchorSummary] locked=%d center=(%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f] points=%zu debug_points=%d",
+                             (cargo_state_.state == CargoState::LOCKED || cargo_state_.state == CargoState::LOST) ? 1 : 0,
+                             cargo_state_.center_base.x(), cargo_state_.center_base.y(),
+                             cargo_state_.size.x(), cargo_state_.size.y(), cargo_state_.size.z(),
+                             cargo_state_.bottom_z, cargo_state_.top_z,
                              hook_fixed_cargo_.core_points_base ? hook_fixed_cargo_.core_points_base->size() : 0,
                              odom_anchor_config_.publish_debug_points ? 1 : 0);
                     last_anchor_summary_stamp_ = msg->header.stamp;
@@ -1841,7 +1845,11 @@ void NdtSlamNode::processCloudThread() {
             // v8-stable-r3-hotfix-minimal: selectPublishedPose 已透传
             Sophus::SE3d final_pose = selectPublishedPose(constrained_pose, publish_time);
             publishOdometry(publish_time, msg->header.frame_id, final_pose);
-            publishRuntimePath(final_pose, publish_time);
+
+            // runtime_path 只是调试显示，不参与算法
+            if (debug_cfg_.publish_runtime_path) {
+                publishRuntimePath(final_pose, publish_time);
+            }
 
             // ICP 精配准移到后台线程，不阻塞主处理
             // NDT 结果直接用于地图插入，ICP 完成后更新位姿
@@ -6350,11 +6358,59 @@ void NdtSlamNode::updateCargoState(
             cargo_state_.source = "tight_box";
         }
 
-        // 更新高度
+        // 更新高度（带稳定保护）
         if (bottom.valid) {
-            cargo_state_.bottom_z = bottom.bottom_z_base;
-            cargo_state_.top_z = bottom.top_z_base;
-            cargo_state_.bottom_unc = bottom.uncertainty;
+            float new_bottom = bottom.bottom_z_base;
+            float new_top = bottom.top_z_base;
+
+            // 底部高度稳定保护
+            if (cargo_state_.valid_height) {
+                float dz = new_bottom - cargo_state_.bottom_z;
+
+                // 单帧突然下降超过 0.45m，先 hold
+                if (dz < -0.45f) {
+                    low_bottom_reject_count_++;
+                    if (low_bottom_reject_count_ < 3) {
+                        // 保持上一帧高度
+                        ROS_INFO_THROTTLE(1.0, "[CargoHeightFilter] reject_bottom_drop dz=%.2f hold_count=%d reason=large_drop",
+                                         dz, low_bottom_reject_count_);
+                        // 不更新 bottom_z, top_z
+                    } else {
+                        // 连续 3 帧确认，接受新高度
+                        cargo_state_.bottom_z = new_bottom;
+                        cargo_state_.top_z = new_top;
+                        cargo_state_.bottom_unc = bottom.uncertainty;
+                        low_bottom_reject_count_ = 0;
+                        ROS_INFO("[CargoHeightFilter] accept_bottom_drop dz=%.2f confirmed_frames=3", dz);
+                    }
+                } else if (dz > 0.60f) {
+                    // 单帧突然上升超过 0.60m，先 hold
+                    high_bottom_reject_count_++;
+                    if (high_bottom_reject_count_ < 3) {
+                        ROS_INFO_THROTTLE(1.0, "[CargoHeightFilter] reject_bottom_rise dz=%.2f hold_count=%d reason=large_rise",
+                                         dz, high_bottom_reject_count_);
+                    } else {
+                        cargo_state_.bottom_z = new_bottom;
+                        cargo_state_.top_z = new_top;
+                        cargo_state_.bottom_unc = bottom.uncertainty;
+                        high_bottom_reject_count_ = 0;
+                        ROS_INFO("[CargoHeightFilter] accept_bottom_rise dz=%.2f confirmed_frames=3", dz);
+                    }
+                } else {
+                    // 正常更新
+                    cargo_state_.bottom_z = new_bottom;
+                    cargo_state_.top_z = new_top;
+                    cargo_state_.bottom_unc = bottom.uncertainty;
+                    low_bottom_reject_count_ = 0;
+                    high_bottom_reject_count_ = 0;
+                }
+            } else {
+                // 首次有效高度
+                cargo_state_.bottom_z = new_bottom;
+                cargo_state_.top_z = new_top;
+                cargo_state_.bottom_unc = bottom.uncertainty;
+            }
+
             cargo_state_.valid_height = true;
         } else if (det.valid && !cargo_state_.valid_height) {
             // CargoBottom invalid 但 TightBox z 有效，使用 fallback
@@ -6368,6 +6424,22 @@ void NdtSlamNode::updateCargoState(
         // 计算 bottom_safe_z
         if (cargo_state_.valid_height) {
             cargo_state_.bottom_safe_z = cargo_state_.bottom_z - cargo_state_.bottom_unc - 0.05f;
+        }
+
+        // ========== 同步 CargoState 回 hook_lock_ ==========
+        // 让所有下游（Marker、Removal、Warning）使用同一份数据
+        if (cargo_state_.valid_geometry) {
+            hook_lock_.locked_center_base = cargo_state_.center_base;
+            hook_lock_.last_accepted_center = cargo_state_.center_base;
+            hook_lock_.locked_size = cargo_state_.size;
+            hook_lock_.has_locked_size = true;
+        }
+
+        if (cargo_state_.valid_height) {
+            hook_lock_.stable_bottom_z = cargo_state_.bottom_z;
+            hook_lock_.stable_top_z = cargo_state_.top_z;
+            hook_lock_.bottom_uncertainty = cargo_state_.bottom_unc;
+            hook_lock_.has_good_height = true;
         }
 
         break;

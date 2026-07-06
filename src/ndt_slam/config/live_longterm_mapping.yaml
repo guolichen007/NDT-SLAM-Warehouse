@@ -1,6 +1,10 @@
 # 长期建图配置文件
 # 用于 warehouse_live_longterm_mapping.launch
 
+# 调试选项
+debug:
+  publish_runtime_path: false  # runtime_path 只是显示辅助，不参与算法
+
 # 点云话题
 pointcloud_topic: "/merged_points"
 odom_topic: "/odom"
@@ -640,8 +644,8 @@ odom_anchored_cargo_box:
     ground_hag_min_m: 0.20
 
     exclude_self_cargo: true
-    self_cargo_margin_xy_m: 0.25
-    self_cargo_margin_z_m: 0.20
+    self_cargo_margin_xy_m: 0.45
+    self_cargo_margin_z_m: 0.35
 
     debounce_frames: 2
     clear_hold_sec: 0.5

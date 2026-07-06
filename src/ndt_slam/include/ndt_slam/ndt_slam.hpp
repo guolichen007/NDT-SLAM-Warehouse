@@ -285,6 +285,11 @@ private:
     ros::Time last_stamp_;
     std::atomic<bool> tracking_lost_{false};
 
+    // ========== 调试配置 ==========
+    struct DebugConfig {
+        bool publish_runtime_path = false;
+    } debug_cfg_;
+
     // ========== v8-stable-r3: CraneMotionEKF ==========
     CraneMotionEKF crane_motion_ekf_;
     CraneMotionEKFConfig crane_motion_ekf_cfg_;
@@ -1150,6 +1155,10 @@ private:
     CargoState cargo_state_;
     CargoBoxObservation last_tight_box_obs_;
 
+    // 底部高度稳定保护
+    int low_bottom_reject_count_ = 0;
+    int high_bottom_reject_count_ = 0;
+
     // 统一配置 getter
     bool isHookCargoRemovalEnabled() const {
         return hook_lock_config_.enable_hook_cargo_removal;
@@ -1167,6 +1176,7 @@ private:
         ros::Time locked_stamp;
 
         Eigen::Vector3f locked_size = Eigen::Vector3f::Zero();
+        Eigen::Vector3f locked_center_base = Eigen::Vector3f::Zero();  // CargoState 同步
 
         float stable_bottom_z = 0.0f;
         float stable_top_z = 0.0f;
