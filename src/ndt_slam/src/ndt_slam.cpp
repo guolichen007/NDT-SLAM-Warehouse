@@ -919,13 +919,17 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.locked_search_margin_x = hcl["locked_search_margin_x"].as<float>(0.30f);
             hook_lock_config_.locked_search_margin_y = hcl["locked_search_margin_y"].as<float>(0.30f);
 
-            ROS_INFO("[HookCargoLock] enabled=%d lock_confirm=%d lost_hold=%.1f lost_clear=%.1f strong=%d weak=%d center_mode=%s",
+            // 吊物点云去除
+            hook_lock_config_.enable_hook_cargo_removal = hcl["enable_hook_cargo_removal"].as<bool>(false);
+
+            ROS_INFO("[HookCargoLock] enabled=%d lock_confirm=%d lost_hold=%.1f lost_clear=%.1f strong=%d weak=%d removal=%d",
                      hook_lock_config_.enabled ? 1 : 0,
                      hook_lock_config_.lock_confirm_frames,
                      hook_lock_config_.lost_hold_sec,
                      hook_lock_config_.lost_clear_sec,
                      hook_lock_config_.strong_min_points,
-                     hook_lock_config_.weak_min_points);
+                     hook_lock_config_.weak_min_points,
+                     hook_lock_config_.enable_hook_cargo_removal ? 1 : 0);
             ROS_INFO("[HookCargoLock] lock_strong=%d min_visible_h=%.2f min_xy_area=%.2f max_center_dist=%.2f",
                      hook_lock_config_.lock_strong_min_points,
                      hook_lock_config_.lock_min_visible_height,
@@ -1443,22 +1447,20 @@ void NdtSlamNode::processCloudThread() {
             buildRegistrationCloud(human_safe_objects, ground_cloud);
 
         // ========== Hook locked box 剔除（NDT 输入）==========
-        // P1: 先禁用 HookCargoRemoval，恢复 A7 轨迹基准
-        if (odom_anchor_config_.enable_hook_cargo_removal &&
+        // 使用 tight_box 而不是旧的 locked_size
+        if (hook_lock_config_.enable_hook_cargo_removal &&
             (hook_lock_.state == HookCargoLockState::LOCKED ||
              hook_lock_.state == HookCargoLockState::LOST_HOLD)) {
             if (hook_lock_.has_locked_size) {
-                // 强制使用 anchor
-                auto anchor = getCargoAnchorXY();
-                float cx = anchor.x();
-                float cy = anchor.y();
+                // 使用 tight_box 的中心和尺寸
+                Eigen::Vector3f center = hook_lock_.last_accepted_center;
                 Eigen::Vector3f size = hook_lock_.locked_size;
                 float zmin = hook_lock_.stable_bottom_z;
                 float zmax = hook_lock_.stable_top_z;
 
                 // 构建 Hook locked box
-                Eigen::Vector3f hook_bbox_min(cx - size.x() * 0.5f, cy - size.y() * 0.5f, zmin);
-                Eigen::Vector3f hook_bbox_max(cx + size.x() * 0.5f, cy + size.y() * 0.5f, zmax);
+                Eigen::Vector3f hook_bbox_min(center.x() - size.x() * 0.5f, center.y() - size.y() * 0.5f, zmin);
+                Eigen::Vector3f hook_bbox_max(center.x() + size.x() * 0.5f, center.y() + size.y() * 0.5f, zmax);
 
                 // 从 registration_cloud 中剔除 Hook locked box 内的点
                 pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
@@ -1476,13 +1478,13 @@ void NdtSlamNode::processCloudThread() {
 
                 if (hook_removed_count > 0) {
                     registration_cloud = registration_cloud_filtered;
-                    ROS_DEBUG("[HookCargoRemoval] ndt_input removed=%zu remaining=%zu",
-                             hook_removed_count, registration_cloud->size());
+                    ROS_INFO_THROTTLE(1.0, "[RegistrationCargoRemoval] enabled=1 before=%zu removed=%zu after=%zu source=tight_box",
+                                     registration_cloud->size() + hook_removed_count, hook_removed_count, registration_cloud->size());
                 }
             }
-        } else if (!odom_anchor_config_.enable_hook_cargo_removal) {
-            ROS_INFO_THROTTLE(1.0,
-                "[HookCargoRemoval] enabled=0 reason=trajectory_validation_only");
+        } else if (!hook_lock_config_.enable_hook_cargo_removal) {
+            ROS_INFO_THROTTLE(2.0,
+                "[HookCargoRemoval] enabled=0 reason=config_disabled");
         }
 
         // ========== 地面法向量诊断 ==========
