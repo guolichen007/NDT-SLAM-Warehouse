@@ -88,6 +88,32 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
         return ndt_pose;
     }
 
+    // 高 fitness 拒绝：fitness 太差时拒绝 NDT 测量，使用预测值
+    if (cfg_.reject_high_fitness && ndt_fitness > cfg_.ndt_fitness_reject_threshold) {
+        Eigen::Vector4d x_pred;
+        Eigen::Matrix4d P_pred;
+        const double dt_pred = (stamp - last_stamp_).toSec();
+        predict(dt_pred, x_pred, P_pred);
+
+        x_ = x_pred;
+        P_ = P_pred;
+        status_.ndt_accepted = false;
+        status_.frames_since_good_ndt++;
+        status_.high_fitness_frames++;
+        status_.reject_reason = "HIGH_FITNESS";
+
+        last_stamp_ = stamp;
+        status_.output_pos = x_.head<2>();
+        status_.velocity = x_.tail<2>();
+        status_.fitness = ndt_fitness;
+        status_.p_trace = P_.trace();
+
+        ROS_WARN_THROTTLE(1.0, "[EKFReject] reason=high_fitness fitness=%.3f threshold=%.3f use=prediction",
+                         ndt_fitness, cfg_.ndt_fitness_reject_threshold);
+
+        return buildPoseFromState(x_, pose_template);
+    }
+
     const double dt = (stamp - last_stamp_).toSec();
 
     Eigen::Vector4d x_pred;

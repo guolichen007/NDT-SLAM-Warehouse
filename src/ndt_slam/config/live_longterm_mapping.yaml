@@ -550,7 +550,6 @@ odom_anchored_cargo_box:
   use_global_payload_tracker: false
   use_cargobox_v2: false
   use_dynamic_history_eraser: false
-  enable_hook_cargo_removal: false
 
   # 检测窗口围绕 anchor 裁剪
   search_half_x: 1.20
@@ -694,3 +693,6 @@ hook_cargo_lock:
 crane_motion_ekf:
   innovation_gate_m: 0.35
   innovation_reject_m: 1.00
+  reject_high_fitness: true
+  ndt_fitness_reject_threshold: 0.30
+  ndt_fitness_recover_threshold: 0.12

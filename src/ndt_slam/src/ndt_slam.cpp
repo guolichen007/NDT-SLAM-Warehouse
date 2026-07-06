@@ -767,6 +767,11 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             crane_motion_ekf_cfg_.innovation_gate_m = n["innovation_gate_m"].as<double>(0.50);
             crane_motion_ekf_cfg_.innovation_reject_m = n["innovation_reject_m"].as<double>(1.50);
 
+            // 高 fitness 拒绝
+            crane_motion_ekf_cfg_.reject_high_fitness = n["reject_high_fitness"].as<bool>(true);
+            crane_motion_ekf_cfg_.ndt_fitness_reject_threshold = n["ndt_fitness_reject_threshold"].as<double>(0.30);
+            crane_motion_ekf_cfg_.ndt_fitness_recover_threshold = n["ndt_fitness_recover_threshold"].as<double>(0.12);
+
             crane_motion_ekf_cfg_.max_speed_x = n["max_speed_x"].as<double>(2.0);
             crane_motion_ekf_cfg_.max_speed_y = n["max_speed_y"].as<double>(2.0);
 
@@ -792,12 +797,14 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
             crane_motion_ekf_.setConfig(crane_motion_ekf_cfg_);
 
-            ROS_INFO("[CraneMotionEKF] enabled=%d q_pos=%.3f q_vel=%.3f gate=%.2f reject=%.2f",
+            ROS_INFO("[CraneMotionEKF] enabled=%d q_pos=%.3f q_vel=%.3f gate=%.2f reject=%.2f reject_high_fitness=%d fitness_threshold=%.2f",
                      crane_motion_ekf_enabled_ ? 1 : 0,
                      crane_motion_ekf_cfg_.q_pos,
                      crane_motion_ekf_cfg_.q_vel,
                      crane_motion_ekf_cfg_.innovation_gate_m,
-                     crane_motion_ekf_cfg_.innovation_reject_m);
+                     crane_motion_ekf_cfg_.innovation_reject_m,
+                     crane_motion_ekf_cfg_.reject_high_fitness ? 1 : 0,
+                     crane_motion_ekf_cfg_.ndt_fitness_reject_threshold);
         }
 
         // v8-stable-r3: SoftYawFilter 参数
@@ -962,7 +969,6 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             odom_anchor_config_.use_global_payload_tracker = oac["use_global_payload_tracker"].as<bool>(false);
             odom_anchor_config_.use_cargobox_v2 = oac["use_cargobox_v2"].as<bool>(false);
             odom_anchor_config_.use_dynamic_history_eraser = oac["use_dynamic_history_eraser"].as<bool>(false);
-            odom_anchor_config_.enable_hook_cargo_removal = oac["enable_hook_cargo_removal"].as<bool>(false);
 
             // 检测窗口
             odom_anchor_config_.search_half_x = oac["search_half_x"].as<float>(1.20f);
@@ -1055,16 +1061,19 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                          odom_anchor_config_.cargo_warning.min_vertical_clearance_m);
             }
 
-            ROS_INFO("[OdomAnchorBoxConfig] enabled=%d anchor=(%.2f,%.2f) detect_rate=%.1f marker_rate=%.1f debug_points=%d global_payload=%d cargobox_v2=%d dynamic_eraser=%d removal=%d",
+            ROS_INFO("[OdomAnchorBoxConfig] enabled=%d anchor=(%.2f,%.2f) detect_rate=%.1f marker_rate=%.1f debug_points=%d global_payload=%d cargobox_v2=%d dynamic_eraser=%d",
                      odom_anchor_config_.enabled ? 1 : 0,
                      odom_anchor_config_.anchor_x, odom_anchor_config_.anchor_y,
                      odom_anchor_config_.detect_rate_hz, odom_anchor_config_.marker_rate_hz,
                      odom_anchor_config_.publish_debug_points ? 1 : 0,
                      odom_anchor_config_.use_global_payload_tracker ? 1 : 0,
                      odom_anchor_config_.use_cargobox_v2 ? 1 : 0,
-                     odom_anchor_config_.use_dynamic_history_eraser ? 1 : 0,
-                     odom_anchor_config_.enable_hook_cargo_removal ? 1 : 0);
+                     odom_anchor_config_.use_dynamic_history_eraser ? 1 : 0);
         }
+
+        // ConfigFinal 日志
+        ROS_INFO("[ConfigFinal] hook_cargo_removal=%d source=config",
+                 hook_lock_config_.enable_hook_cargo_removal ? 1 : 0);
 
     } catch (const YAML::Exception& e) {
         ROS_ERROR("YAML parse error: %s", e.what());
@@ -1447,42 +1456,43 @@ void NdtSlamNode::processCloudThread() {
             buildRegistrationCloud(human_safe_objects, ground_cloud);
 
         // ========== Hook locked box 剔除（NDT 输入）==========
-        // 使用 tight_box 而不是旧的 locked_size
-        if (hook_lock_config_.enable_hook_cargo_removal &&
-            (hook_lock_.state == HookCargoLockState::LOCKED ||
-             hook_lock_.state == HookCargoLockState::LOST_HOLD)) {
-            if (hook_lock_.has_locked_size) {
-                // 使用 tight_box 的中心和尺寸
-                Eigen::Vector3f center = hook_lock_.last_accepted_center;
-                Eigen::Vector3f size = hook_lock_.locked_size;
-                float zmin = hook_lock_.stable_bottom_z;
-                float zmax = hook_lock_.stable_top_z;
+        // 使用 CargoState 统一状态
+        if (isHookCargoRemovalEnabled() &&
+            cargo_state_.state == CargoState::LOCKED &&
+            cargo_state_.valid_geometry && cargo_state_.valid_height) {
+            // 使用 CargoState 的中心和尺寸
+            Eigen::Vector3f center = cargo_state_.center_base;
+            Eigen::Vector3f size = cargo_state_.size;
+            float zmin = cargo_state_.bottom_z - 0.10f;
+            float zmax = cargo_state_.top_z + 0.10f;
 
-                // 构建 Hook locked box
-                Eigen::Vector3f hook_bbox_min(center.x() - size.x() * 0.5f, center.y() - size.y() * 0.5f, zmin);
-                Eigen::Vector3f hook_bbox_max(center.x() + size.x() * 0.5f, center.y() + size.y() * 0.5f, zmax);
+            // 构建 Hook locked box
+            Eigen::Vector3f hook_bbox_min(center.x() - size.x() * 0.5f, center.y() - size.y() * 0.5f, zmin);
+            Eigen::Vector3f hook_bbox_max(center.x() + size.x() * 0.5f, center.y() + size.y() * 0.5f, zmax);
 
-                // 从 registration_cloud 中剔除 Hook locked box 内的点
-                pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
-                size_t hook_removed_count = 0;
+            // 从 registration_cloud 中剔除 Hook locked box 内的点
+            pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+            size_t hook_removed_count = 0;
 
-                for (const auto& p : registration_cloud->points) {
-                    if (p.x >= hook_bbox_min.x() && p.x <= hook_bbox_max.x() &&
-                        p.y >= hook_bbox_min.y() && p.y <= hook_bbox_max.y() &&
-                        p.z >= hook_bbox_min.z() && p.z <= hook_bbox_max.z()) {
-                        hook_removed_count++;
-                    } else {
-                        registration_cloud_filtered->push_back(p);
-                    }
-                }
-
-                if (hook_removed_count > 0) {
-                    registration_cloud = registration_cloud_filtered;
-                    ROS_INFO_THROTTLE(1.0, "[RegistrationCargoRemoval] enabled=1 before=%zu removed=%zu after=%zu source=tight_box",
-                                     registration_cloud->size() + hook_removed_count, hook_removed_count, registration_cloud->size());
+            for (const auto& p : registration_cloud->points) {
+                if (p.x >= hook_bbox_min.x() && p.x <= hook_bbox_max.x() &&
+                    p.y >= hook_bbox_min.y() && p.y <= hook_bbox_max.y() &&
+                    p.z >= hook_bbox_min.z() && p.z <= hook_bbox_max.z()) {
+                    hook_removed_count++;
+                } else {
+                    registration_cloud_filtered->push_back(p);
                 }
             }
-        } else if (!hook_lock_config_.enable_hook_cargo_removal) {
+
+            if (hook_removed_count > 0) {
+                registration_cloud = registration_cloud_filtered;
+                ROS_INFO_THROTTLE(1.0, "[RegistrationCargoRemoval] enabled=1 before=%zu removed=%zu after=%zu center=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
+                                 registration_cloud->size() + hook_removed_count, hook_removed_count, registration_cloud->size(),
+                                 center.x(), center.y(), center.z(),
+                                 size.x(), size.y(), size.z(),
+                                 cargo_state_.bottom_z, cargo_state_.top_z);
+            }
+        } else if (!isHookCargoRemovalEnabled()) {
             ROS_INFO_THROTTLE(2.0,
                 "[HookCargoRemoval] enabled=0 reason=config_disabled");
         }
@@ -7585,51 +7595,45 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         cargo_removed_base);
 
     // ========== Hook locked box 剔除（必须在 MapCommit 前）==========
-    // P1: 先禁用 HookCargoRemoval，恢复 A7 轨迹基准
-    if (odom_anchor_config_.enable_hook_cargo_removal &&
-        (hook_lock_.state == HookCargoLockState::LOCKED ||
-         hook_lock_.state == HookCargoLockState::LOST_HOLD)) {
-        if (hook_lock_.has_locked_size) {
-            // 强制使用 anchor
-            auto anchor = getCargoAnchorXY();
-            float cx = anchor.x();
-            float cy = anchor.y();
-            Eigen::Vector3f size = hook_lock_.locked_size;
-            float zmin = hook_lock_.stable_bottom_z;
-            float zmax = hook_lock_.stable_top_z;
+    // 使用 CargoState 统一状态
+    if (isHookCargoRemovalEnabled() &&
+        cargo_state_.state == CargoState::LOCKED &&
+        cargo_state_.valid_geometry && cargo_state_.valid_height) {
+        // 使用 CargoState 的中心和尺寸
+        Eigen::Vector3f center = cargo_state_.center_base;
+        Eigen::Vector3f size = cargo_state_.size;
+        float zmin = cargo_state_.bottom_z - 0.10f;
+        float zmax = cargo_state_.top_z + 0.10f;
 
-            // 构建 Hook locked box
-            Eigen::Vector3f hook_bbox_min(cx - size.x() * 0.5f, cy - size.y() * 0.5f, zmin);
-            Eigen::Vector3f hook_bbox_max(cx + size.x() * 0.5f, cy + size.y() * 0.5f, zmax);
+        // 构建 Hook locked box
+        Eigen::Vector3f hook_bbox_min(center.x() - size.x() * 0.5f, center.y() - size.y() * 0.5f, zmin);
+        Eigen::Vector3f hook_bbox_max(center.x() + size.x() * 0.5f, center.y() + size.y() * 0.5f, zmax);
 
-            // 从 objects_after_cargo_base 中剔除 Hook locked box 内的点
-            pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_hook_base(new pcl::PointCloud<pcl::PointXYZ>);
-            pcl::PointCloud<pcl::PointXYZ>::Ptr hook_cargo_removed_base(new pcl::PointCloud<pcl::PointXYZ>);
+        // 从 objects_after_cargo_base 中剔除 Hook locked box 内的点
+        pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_hook_base(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr hook_cargo_removed_base(new pcl::PointCloud<pcl::PointXYZ>);
 
-            for (const auto& p : objects_after_cargo_base->points) {
-                if (p.x >= hook_bbox_min.x() && p.x <= hook_bbox_max.x() &&
-                    p.y >= hook_bbox_min.y() && p.y <= hook_bbox_max.y() &&
-                    p.z >= hook_bbox_min.z() && p.z <= hook_bbox_max.z()) {
-                    hook_cargo_removed_base->push_back(p);
-                } else {
-                    objects_after_hook_base->push_back(p);
-                }
+        for (const auto& p : objects_after_cargo_base->points) {
+            if (p.x >= hook_bbox_min.x() && p.x <= hook_bbox_max.x() &&
+                p.y >= hook_bbox_min.y() && p.y <= hook_bbox_max.y() &&
+                p.z >= hook_bbox_min.z() && p.z <= hook_bbox_max.z()) {
+                hook_cargo_removed_base->push_back(p);
+            } else {
+                objects_after_hook_base->push_back(p);
             }
-
-            // 更新 objects_after_cargo_base
-            objects_after_cargo_base = objects_after_hook_base;
-
-            // 合并到 cargo_removed_base
-            *cargo_removed_base += *hook_cargo_removed_base;
-
-            ROS_DEBUG_THROTTLE(2.0, "[HookCargoRemoval] source=hook_lock state=%s removed_reg=%zu removed_commit=%zu center=(%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
-                     hook_lock_.state == HookCargoLockState::LOCKED ? "LOCKED" : "LOST_HOLD",
-                     hook_cargo_removed_base->size(),
-                     hook_cargo_removed_base->size(),
-                     cx, cy,
-                     size.x(), size.y(), size.z(),
-                     zmin, zmax);
         }
+
+        // 更新 objects_after_cargo_base
+        objects_after_cargo_base = objects_after_hook_base;
+
+        // 合并到 cargo_removed_base
+        *cargo_removed_base += *hook_cargo_removed_base;
+
+        ROS_DEBUG_THROTTLE(2.0, "[HookCargoRemoval] source=cargo_state state=LOCKED removed_commit=%zu center=(%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
+                 hook_cargo_removed_base->size(),
+                 center.x(), center.y(),
+                 size.x(), size.y(), size.z(),
+                 zmin, zmax);
     }
 
     // [CargoCommit] 日志

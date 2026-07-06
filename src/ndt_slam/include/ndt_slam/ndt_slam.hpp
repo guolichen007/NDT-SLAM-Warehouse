@@ -1109,9 +1109,51 @@ private:
         float locked_search_margin_x = 0.30f;
         float locked_search_margin_y = 0.30f;
 
-        // P1: 先禁用 HookCargoRemoval，恢复 A7 轨迹基准
-        bool enable_hook_cargo_removal = false;
+        // 吊物点云去除开关
+        bool enable_hook_cargo_removal = true;
     };
+
+    // ========== 统一货物状态结构 ==========
+    struct CargoBoxObservation {
+        bool valid = false;
+
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();   // tight box center in base_link
+        Eigen::Vector3f size = Eigen::Vector3f::Zero();          // tight box size
+        float z_min = 0.0f;
+        float z_max = 0.0f;
+
+        int selected_points = 0;
+        float confidence = 0.0f;
+        std::string source = "tight_box";
+    };
+
+    struct CargoState {
+        enum State { EMPTY, CANDIDATE, LOCKED, LOST };
+
+        State state = EMPTY;
+        bool valid_geometry = false;
+        bool valid_height = false;
+
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f size = Eigen::Vector3f::Zero();
+
+        float bottom_z = 0.0f;
+        float bottom_safe_z = 0.0f;
+        float top_z = 0.0f;
+        float bottom_unc = 0.0f;
+
+        int locked_frames = 0;
+        ros::Time stamp;
+        std::string source;
+    };
+
+    CargoState cargo_state_;
+    CargoBoxObservation last_tight_box_obs_;
+
+    // 统一配置 getter
+    bool isHookCargoRemovalEnabled() const {
+        return hook_lock_config_.enable_hook_cargo_removal;
+    }
 
     struct HookCargoLock {
         HookCargoLockState state = HookCargoLockState::EMPTY;
