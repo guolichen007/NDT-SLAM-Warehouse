@@ -1254,6 +1254,9 @@ private:
     void clearHookLock();
     uint64_t computeCloudHash(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
 
+    // CargoState 更新函数
+    void updateCargoState(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
+
     // Cargo Warning 函数
     CargoWarningData computeCargoWarning(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,

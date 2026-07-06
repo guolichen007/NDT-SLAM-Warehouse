@@ -1283,24 +1283,25 @@ void NdtSlamNode::processCloudThread() {
 
             // marker 发布（降频执行）
             if (shouldPublishOdomAnchorMarker(msg->header.stamp)) {
-                if (hook_lock_.state == HookCargoLockState::LOCKED ||
-                    hook_lock_.state == HookCargoLockState::LOST_HOLD) {
+                if (cargo_state_.state == CargoState::LOCKED ||
+                    cargo_state_.state == CargoState::LOST) {
                     publishPayloadTrackInfoFromOdomAnchorBox(msg->header.stamp);
 
-                    // Cargo Warning 计算和发布
-                    if (odom_anchor_config_.cargo_warning.enabled && hook_lock_.has_locked_size) {
+                    // Cargo Warning 计算和发布（使用 CargoState）
+                    if (odom_anchor_config_.cargo_warning.enabled &&
+                        cargo_state_.valid_geometry && cargo_state_.valid_height) {
                         CargoWarningData warning = computeCargoWarning(
                             hook_input_cloud,
-                            hook_lock_.last_accepted_center,
-                            hook_lock_.locked_size,
-                            hook_lock_.stable_bottom_z,
-                            hook_lock_.bottom_uncertainty,
+                            cargo_state_.center_base,
+                            cargo_state_.size,
+                            cargo_state_.bottom_z,
+                            cargo_state_.bottom_unc,
                             msg->header.stamp);
 
                         publishCargoWarning(warning, msg->header.stamp);
                         publishCargoWarningMarkers(
-                            hook_lock_.last_accepted_center,
-                            hook_lock_.locked_size,
+                            cargo_state_.center_base,
+                            cargo_state_.size,
                             warning,
                             msg->header.stamp);
                     }
@@ -6277,6 +6278,111 @@ void NdtSlamNode::updateHookCargoLock(
         }
         break;
     }
+
+    // ========== 更新 CargoState ==========
+    // 将 HookCargoLock 状态同步到统一的 CargoState
+    updateCargoState(det, bottom, stamp);
+}
+
+void NdtSlamNode::updateCargoState(
+    const HookCargoDetection& det,
+    const HookCargoBottomEstimate& bottom,
+    const ros::Time& stamp) {
+
+    // 同步状态
+    switch (hook_lock_.state) {
+    case HookCargoLockState::EMPTY:
+        cargo_state_.state = CargoState::EMPTY;
+        cargo_state_.valid_geometry = false;
+        cargo_state_.valid_height = false;
+        break;
+
+    case HookCargoLockState::CANDIDATE:
+        cargo_state_.state = CargoState::CANDIDATE;
+        // CANDIDATE 阶段不更新几何，等待 LOCKED
+        break;
+
+    case HookCargoLockState::LOCKED:
+    case HookCargoLockState::LOST_HOLD:
+        cargo_state_.state = (hook_lock_.state == HookCargoLockState::LOCKED) ?
+                            CargoState::LOCKED : CargoState::LOST;
+        cargo_state_.locked_frames++;
+        cargo_state_.stamp = stamp;
+
+        // 使用 TightBox 观测更新几何
+        if (det.valid && det.core_points_base && !det.core_points_base->empty()) {
+            // 保存观测
+            last_tight_box_obs_.valid = true;
+            last_tight_box_obs_.center_base = det.center_base;
+            last_tight_box_obs_.size = det.size_visible;
+            last_tight_box_obs_.z_min = det.z05;
+            last_tight_box_obs_.z_max = det.z95;
+            last_tight_box_obs_.selected_points = det.core_points_base->size();
+            last_tight_box_obs_.source = "tight_box";
+
+            // 自适应更新 center（允许一定偏移）
+            if (cargo_state_.valid_geometry) {
+                float center_alpha = 0.25f;
+                float max_center_step = 0.08f;
+
+                Eigen::Vector3f center_diff = det.center_base - cargo_state_.center_base;
+                for (int i = 0; i < 2; ++i) {  // 只更新 x, y
+                    float step = std::max(-max_center_step, std::min(center_diff(i), max_center_step));
+                    cargo_state_.center_base(i) += center_alpha * step;
+                }
+
+                // 自适应更新 size
+                float size_alpha = 0.30f;
+                float max_size_step = 0.10f;
+
+                Eigen::Vector3f size_diff = det.size_visible - cargo_state_.size;
+                for (int i = 0; i < 3; ++i) {
+                    float step = std::max(-max_size_step, std::min(size_diff(i), max_size_step));
+                    cargo_state_.size(i) += size_alpha * step;
+                }
+            } else {
+                // 初始化
+                cargo_state_.center_base = det.center_base;
+                cargo_state_.size = det.size_visible;
+            }
+
+            cargo_state_.valid_geometry = true;
+            cargo_state_.source = "tight_box";
+        }
+
+        // 更新高度
+        if (bottom.valid) {
+            cargo_state_.bottom_z = bottom.bottom_z_base;
+            cargo_state_.top_z = bottom.top_z_base;
+            cargo_state_.bottom_unc = bottom.uncertainty;
+            cargo_state_.valid_height = true;
+        } else if (det.valid && !cargo_state_.valid_height) {
+            // CargoBottom invalid 但 TightBox z 有效，使用 fallback
+            cargo_state_.bottom_z = det.z05;
+            cargo_state_.top_z = det.z95;
+            cargo_state_.bottom_unc = 0.18f;
+            cargo_state_.valid_height = true;
+            cargo_state_.source = "tight_box_z_fallback";
+        }
+
+        // 计算 bottom_safe_z
+        if (cargo_state_.valid_height) {
+            cargo_state_.bottom_safe_z = cargo_state_.bottom_z - cargo_state_.bottom_unc - 0.05f;
+        }
+
+        break;
+    }
+
+    // 日志
+    if (cargo_state_.state == CargoState::LOCKED || cargo_state_.state == CargoState::LOST) {
+        ROS_INFO_THROTTLE(1.0, "[CargoState] state=%s center=(%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f] valid_h=%d source=%s",
+                         cargo_state_.state == CargoState::LOCKED ? "LOCKED" : "LOST",
+                         cargo_state_.center_base.x(), cargo_state_.center_base.y(),
+                         cargo_state_.size.x(), cargo_state_.size.y(), cargo_state_.size.z(),
+                         cargo_state_.bottom_z, cargo_state_.top_z,
+                         cargo_state_.valid_height ? 1 : 0,
+                         cargo_state_.source.c_str());
+    }
 }
 
 NdtSlamNode::HookCargoBottomEstimate NdtSlamNode::estimateCargoBottom(const HookCargoDetection& detection) {
@@ -8445,13 +8551,14 @@ NdtSlamNode::CargoWarningData NdtSlamNode::computeCargoWarning(
     warning.cargo_center = cargo_center;
     warning.cargo_size = cargo_size;
 
-    // 提取障碍物点（排除货物自身和地面）
+    // 提取障碍物点（排除货物自身、地面和高处结构）
     pcl::PointCloud<pcl::PointXYZ>::Ptr obstacle_cloud(new pcl::PointCloud<pcl::PointXYZ>);
 
     float half_x = cargo_size.x() * 0.5f;
     float half_y = cargo_size.y() * 0.5f;
     float margin_xy = config.self_cargo_margin_xy_m;
     float margin_z = config.self_cargo_margin_z_m;
+    float cargo_top_z = cargo_bottom_z + cargo_size.z();
 
     // 估算地面高度
     float ground_z = cloud_base->points[0].z;
@@ -8459,13 +8566,21 @@ NdtSlamNode::CargoWarningData NdtSlamNode::computeCargoWarning(
         if (p.z < ground_z) ground_z = p.z;
     }
 
+    size_t before_count = cloud_base->size();
+    size_t ground_filtered = 0;
+    size_t self_filtered = 0;
+    size_t high_filtered = 0;
+
     for (const auto& p : cloud_base->points) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
 
         // 排除地面点
         if (config.exclude_ground) {
             float hag = p.z - ground_z;
-            if (hag < config.ground_hag_min_m) continue;
+            if (hag < config.ground_hag_min_m) {
+                ground_filtered++;
+                continue;
+            }
         }
 
         // 排除货物自身点（tight box 外扩 margin）
@@ -8473,11 +8588,18 @@ NdtSlamNode::CargoWarningData NdtSlamNode::computeCargoWarning(
             float dx = std::abs(p.x - cargo_center.x()) - (half_x + margin_xy);
             float dy = std::abs(p.y - cargo_center.y()) - (half_y + margin_xy);
             float dz_low = cargo_bottom_z - margin_z;
-            float dz_high = cargo_bottom_z + cargo_size.z() + margin_z;
+            float dz_high = cargo_top_z + margin_z;
 
             if (dx < 0 && dy < 0 && p.z >= dz_low && p.z <= dz_high) {
+                self_filtered++;
                 continue;  // 在货物区域内
             }
+        }
+
+        // 排除高处吊具/绳索/上方结构
+        if (p.z > cargo_top_z + 0.30f) {
+            high_filtered++;
+            continue;
         }
 
         obstacle_cloud->push_back(p);
@@ -8578,6 +8700,12 @@ NdtSlamNode::CargoWarningData NdtSlamNode::computeCargoWarning(
         warning.alarm_code = config.clear_alarm_code;
         warning.reason = "clear";
     }
+
+    // CargoWarningDebug 日志
+    ROS_INFO_THROTTLE(1.0, "[CargoWarningDebug] before=%zu ground_filtered=%zu self_filtered=%zu high_filtered=%zu candidate=%zu clusters=%zu selected_dist=%.2f selected_top=%.2f clearance=%.2f level=%d",
+                     before_count, ground_filtered, self_filtered, high_filtered,
+                     obstacle_cloud->size(), cluster_indices.size(),
+                     min_distance, max_obstacle_top_z, clearance, warning.level);
 
     return warning;
 }
