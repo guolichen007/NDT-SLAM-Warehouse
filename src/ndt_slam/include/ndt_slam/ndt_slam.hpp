@@ -5,10 +5,15 @@
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/Path.h>
 #include <geometry_msgs/TransformStamped.h>
+#include <geometry_msgs/Point.h>
+#include <geometry_msgs/Vector3.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <std_srvs/Empty.h>
+#include <std_msgs/String.h>
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -279,6 +284,11 @@ private:
     Sophus::SO3d rpyToSO3(double roll, double pitch, double yaw);
     ros::Time last_stamp_;
     std::atomic<bool> tracking_lost_{false};
+
+    // ========== 调试配置 ==========
+    struct DebugConfig {
+        bool publish_runtime_path = false;
+    } debug_cfg_;
 
     // ========== v8-stable-r3: CraneMotionEKF ==========
     CraneMotionEKF crane_motion_ekf_;
@@ -921,6 +931,70 @@ private:
 
         float lost_hold_sec = 5.0f;
         float lost_clear_sec = 15.0f;
+
+        // Tight Box 子配置
+        struct TightBoxConfig {
+            bool enabled = true;
+
+            // 软对称模式
+            std::string anchor_symmetry_mode = "soft";  // strict / soft / off
+            float max_center_offset_m = 0.35f;
+
+            // HAG 预过滤
+            bool hag_filter_enabled = true;
+            float hag_min_m = 0.15f;
+            float hag_max_m = 2.50f;
+
+            // 分位数参数
+            float percentile_low = 0.08f;
+            float percentile_high = 0.92f;
+
+            // 框扩展 margin
+            float margin_xy_m = 0.05f;
+            float margin_z_m = 0.03f;
+
+            // LOCKED 后尺寸自适应
+            std::string size_update_mode = "adaptive";  // locked / adaptive
+            float size_update_alpha = 0.30f;
+            float max_size_change_per_frame_m = 0.10f;
+
+            // 子簇重聚类
+            bool sub_cluster_enabled = true;
+            float sub_cluster_tolerance_m = 0.10f;
+            int sub_cluster_min_points = 20;
+        } tight_box;
+
+        // Cargo Warning 子配置
+        struct CargoWarningConfig {
+            bool enabled = true;
+            bool publish_alarm_msg = false;  // 不向外发布正式报警，只发布 debug
+            bool publish_debug_marker = true;
+
+            float level1_distance_m = 3.0f;
+            float level2_distance_m = 5.0f;
+            float min_vertical_clearance_m = 0.80f;
+
+            bool cargo_bottom_use_uncertainty = true;
+            float cargo_bottom_extra_margin_m = 0.05f;
+
+            float obstacle_top_percentile = 0.95f;
+            int obstacle_min_points = 5;
+            float obstacle_cluster_tolerance_m = 0.25f;
+
+            bool exclude_ground = true;
+            float ground_hag_min_m = 0.20f;
+
+            bool exclude_self_cargo = true;
+            float self_cargo_margin_xy_m = 0.45f;
+            float self_cargo_margin_z_m = 0.35f;
+
+            int debounce_frames = 2;
+            float clear_hold_sec = 0.5f;
+
+            int level1_alarm_code = 17;
+            int level2_alarm_code = 18;
+            int clear_alarm_code = 0;
+        } cargo_warning;
     };
 
     OdomAnchorBoxConfig odom_anchor_config_;
@@ -1042,9 +1116,55 @@ private:
         float locked_search_margin_x = 0.30f;
         float locked_search_margin_y = 0.30f;
 
-        // P1: 先禁用 HookCargoRemoval，恢复 A7 轨迹基准
-        bool enable_hook_cargo_removal = false;
+        // 吊物点云去除开关
+        bool enable_hook_cargo_removal = true;
     };
+
+    // ========== 统一货物状态结构 ==========
+    struct CargoBoxObservation {
+        bool valid = false;
+
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();   // tight box center in base_link
+        Eigen::Vector3f size = Eigen::Vector3f::Zero();          // tight box size
+        float z_min = 0.0f;
+        float z_max = 0.0f;
+
+        int selected_points = 0;
+        float confidence = 0.0f;
+        std::string source = "tight_box";
+    };
+
+    struct CargoState {
+        enum State { EMPTY, CANDIDATE, LOCKED, LOST };
+
+        State state = EMPTY;
+        bool valid_geometry = false;
+        bool valid_height = false;
+
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f size = Eigen::Vector3f::Zero();
+
+        float bottom_z = 0.0f;
+        float bottom_safe_z = 0.0f;
+        float top_z = 0.0f;
+        float bottom_unc = 0.0f;
+
+        int locked_frames = 0;
+        ros::Time stamp;
+        std::string source;
+    };
+
+    CargoState cargo_state_;
+    CargoBoxObservation last_tight_box_obs_;
+
+    // 底部高度稳定保护
+    int low_bottom_reject_count_ = 0;
+    int high_bottom_reject_count_ = 0;
+
+    // 统一配置 getter
+    bool isHookCargoRemovalEnabled() const {
+        return hook_lock_config_.enable_hook_cargo_removal;
+    }
 
     struct HookCargoLock {
         HookCargoLockState state = HookCargoLockState::EMPTY;
@@ -1058,6 +1178,7 @@ private:
         ros::Time locked_stamp;
 
         Eigen::Vector3f locked_size = Eigen::Vector3f::Zero();
+        Eigen::Vector3f locked_center_base = Eigen::Vector3f::Zero();  // CargoState 同步
 
         float stable_bottom_z = 0.0f;
         float stable_top_z = 0.0f;
@@ -1083,6 +1204,48 @@ private:
     HookCargoLockConfig hook_lock_config_;
     HookCargoLock hook_lock_;
 
+    // ========== Cargo Warning 数据结构 ==========
+    struct CargoWarningData {
+        bool valid = false;
+        uint8_t level = 0;  // 0=NONE, 1=LEVEL_1, 2=LEVEL_2
+        uint16_t alarm_code = 0;
+
+        // 距离和净空
+        float distance_to_footprint_m = 0.0f;
+        float clearance_m = 0.0f;
+
+        // 货物高度
+        float cargo_bottom_z = 0.0f;
+        float cargo_bottom_safe_z = 0.0f;
+        float cargo_top_z = 0.0f;
+        float cargo_bottom_uncertainty = 0.0f;
+
+        // 障碍物信息
+        float obstacle_top_z = 0.0f;
+        uint32_t obstacle_point_count = 0;
+        Eigen::Vector3f obstacle_nearest_point = Eigen::Vector3f::Zero();
+
+        // 货物框
+        Eigen::Vector3f cargo_center = Eigen::Vector3f::Zero();
+        Eigen::Vector3f cargo_size = Eigen::Vector3f::Zero();
+
+        // 元信息
+        std::string source;
+        std::string reason;
+    };
+
+    // Cargo Warning 状态
+    int cargo_warning_debounce_count_ = 0;
+    CargoWarningData last_cargo_warning_;
+    ros::Time last_cargo_warning_stamp_;
+
+    // Cargo Warning publisher
+    ros::Publisher cargo_warning_pub_;
+    ros::Publisher cargo_warning_text_pub_;
+    ros::Publisher cargo_tight_box_marker_pub_;
+    ros::Publisher cargo_warning_zone_marker_pub_;
+    ros::Publisher cargo_warning_obstacle_marker_pub_;
+
     // OdomAnchorBox 新函数
     HookCargoDetection detectCargoAroundOdomAnchor(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
@@ -1102,6 +1265,24 @@ private:
     void growUncertainty();
     void clearHookLock();
     uint64_t computeCloudHash(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
+
+    // CargoState 更新函数
+    void updateCargoState(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
+
+    // Cargo Warning 函数
+    CargoWarningData computeCargoWarning(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
+        const Eigen::Vector3f& cargo_center,
+        const Eigen::Vector3f& cargo_size,
+        float cargo_bottom_z,
+        float cargo_bottom_uncertainty,
+        const ros::Time& stamp);
+    void publishCargoWarning(const CargoWarningData& warning, const ros::Time& stamp);
+    void publishCargoWarningMarkers(
+        const Eigen::Vector3f& cargo_center,
+        const Eigen::Vector3f& cargo_size,
+        const CargoWarningData& warning,
+        const ros::Time& stamp);
 };
 
 } // namespace ndt_slam

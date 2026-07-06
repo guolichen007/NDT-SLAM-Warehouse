@@ -18,3 +18,33 @@ roslaunch ndt_slam warehouse_live_longterm_mapping.launch
 # 定位运行
 roslaunch ndt_slam warehouse_runtime.launch
 ```
+
+## Cargo Warning V1
+
+货物预警系统，详见 [README_cargo_warning_v1.md](README_cargo_warning_v1.md)。
+
+### 关键 Topic
+
+| Topic | 类型 | 说明 |
+|-------|------|------|
+| `/cargo_warning` | `std_msgs/String` | 预警消息（JSON 格式） |
+| `/cargo_tight_box_marker` | `visualization_msgs/Marker` | 绿色货物紧框 |
+| `/cargo_warning_zone_marker` | `visualization_msgs/MarkerArray` | 黄色/红色预警范围 |
+| `/cargo_warning_obstacle_marker` | `visualization_msgs/Marker` | 白色最近危险障碍物 |
+
+### 启动参数
+
+```bash
+roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
+  odom_anchored_cargo_box_enabled:=true \
+  hook_cargo_removal_enabled:=true \
+  cargo_warning_enabled:=true
+```
+
+## 配置文件
+
+| 文件 | 用途 |
+|------|------|
+| `config/live_longterm_mapping.yaml` | 长期建图配置（含 Cargo Warning） |
+| `config/slam_params.yaml` | 主配置 |
+| `config/cargo_forbidden_zone.yaml` | Cargo 可视化节点配置 |

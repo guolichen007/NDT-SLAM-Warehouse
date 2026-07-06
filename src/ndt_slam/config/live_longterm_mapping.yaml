@@ -1,6 +1,10 @@
 # 长期建图配置文件
 # 用于 warehouse_live_longterm_mapping.launch
 
+# 调试选项
+debug:
+  publish_runtime_path: false  # runtime_path 只是显示辅助，不参与算法
+
 # 点云话题
 pointcloud_topic: "/merged_points"
 odom_topic: "/odom"
@@ -335,8 +339,8 @@ crane_motion_ekf:
   r_ndt_max: 2.0
   fitness_to_r_scale: 5.0
 
-  innovation_gate_m: 0.50
-  innovation_reject_m: 1.50
+  innovation_gate_m: 0.35
+  innovation_reject_m: 1.00
 
   max_speed_x: 2.0
   max_speed_y: 2.0
@@ -550,7 +554,6 @@ odom_anchored_cargo_box:
   use_global_payload_tracker: false
   use_cargobox_v2: false
   use_dynamic_history_eraser: false
-  enable_hook_cargo_removal: false
 
   # 检测窗口围绕 anchor 裁剪
   search_half_x: 1.20
@@ -590,13 +593,113 @@ odom_anchored_cargo_box:
 
   lost_hold_sec: 5.0
   lost_clear_sec: 15.0
-  size_update_alpha: 0.15
 
+  # ========== Tight Box 配置 ==========
+  tight_box:
+    enabled: true
+
+    # 软对称模式，避免一侧杂点把整框撑大
+    anchor_symmetry_mode: "soft"     # strict / soft / off
+    max_center_offset_m: 0.35
+
+    # HAG 预过滤，过滤地面反射和高处吊具/绳索
+    hag_filter_enabled: true
+    hag_min_m: 0.15
+    hag_max_m: 2.50
+
+    # 分位数参数，比原 p05/p95 稍微收紧
+    percentile_low: 0.08
+    percentile_high: 0.92
+
+    # 框扩展 margin
+    margin_xy_m: 0.05
+    margin_z_m: 0.03
+
+    # LOCKED 后仍允许尺寸自适应
+    size_update_mode: "adaptive"     # locked / adaptive
+    size_update_alpha: 0.30
+    max_size_change_per_frame_m: 0.10
+
+    # 子簇重聚类，尽量把吊具/绳索/货物分开
+    sub_cluster_enabled: true
+    sub_cluster_tolerance_m: 0.10
+    sub_cluster_min_points: 20
+
+  # ========== Cargo Warning 配置 ==========
+  # 注意：当前版本为 tightbox baseline，正式避障报警仍在开发中
+  cargo_warning:
+    enabled: true
+    publish_alarm_msg: false  # 不向外发布正式报警，只发布 debug marker
+    publish_debug_marker: true
+
+    level1_distance_m: 3.0
+    level2_distance_m: 5.0
+    min_vertical_clearance_m: 0.80
+
+    cargo_bottom_use_uncertainty: true
+    cargo_bottom_extra_margin_m: 0.05
+
+    obstacle_top_percentile: 0.95
+    obstacle_min_points: 5
+    obstacle_cluster_tolerance_m: 0.25
+
+    exclude_ground: true
+    ground_hag_min_m: 0.20
+
+    exclude_self_cargo: true
+    self_cargo_margin_xy_m: 0.45
+    self_cargo_margin_z_m: 0.35
+
+    debounce_frames: 2
+    clear_hold_sec: 0.5
+
+    level1_alarm_code: 17
+    level2_alarm_code: 18
+    clear_alarm_code: 0
+
+# ========== HookCargoLock 状态机 ==========
+hook_cargo_lock:
+  enabled: true
+  lock_confirm_frames: 3
+  size_init_window: 5
+  lost_hold_sec: 3.0
+  lost_clear_sec: 8.0
+  strong_min_points: 30
+  weak_min_points: 5
+  size_change_min_ratio: 0.20
+  size_change_max_ratio: 0.60
+  size_update_confirm_frames: 5
+  size_update_alpha: 0.15
+  candidate_hold_sec: 1.0
+  candidate_max_weak_frames: 10
   bottom_alpha_points: 0.30
-  bottom_alpha_hold: 0.10
+  bottom_alpha_memory: 0.15
+  bottom_hold_uncertainty_growth: 0.02
   bottom_max_uncertainty: 0.35
 
-  lost_hold_sec: 5.0
-  lost_clear_sec: 15.0
+  # locked association gate
+  locked_update_max_center_dist: 0.65
+  locked_update_min_overlap_ratio: 0.30
+  locked_update_max_z_jump: 0.45
+  locked_update_max_top_jump: 0.60
+  locked_update_min_points: 20
 
-  verbose_debug: false
+  # 锁定时 strong 条件（比更新时更严格）
+  lock_strong_min_points: 80
+  lock_min_visible_height: 0.50
+  lock_min_xy_area: 0.40
+
+  # locked search margin
+  locked_search_margin_x: 0.30
+  locked_search_margin_y: 0.30
+
+  # 启用吊物点云去除
+  enable_hook_cargo_removal: true
+
+# ========== CraneMotionEKF 配置 ==========
+crane_motion_ekf:
+  innovation_gate_m: 0.35
+  innovation_reject_m: 1.00
+  reject_high_fitness: true
+  ndt_fitness_reject_threshold: 0.30
+  ndt_fitness_recover_threshold: 0.12

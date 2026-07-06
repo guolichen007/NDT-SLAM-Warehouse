@@ -38,6 +38,11 @@ struct CraneMotionEKFConfig {
     int max_high_fitness_frames = 10;
     int max_reject_innovation_frames = 5;
     double high_fitness_threshold = 0.15;
+
+    // 高 fitness 拒绝
+    bool reject_high_fitness = true;
+    double ndt_fitness_reject_threshold = 0.30;
+    double ndt_fitness_recover_threshold = 0.12;
 };
 
 struct CraneMotionEKFStatus {

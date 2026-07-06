@@ -8,6 +8,11 @@
     <arg name="use_rviz" default="true"/>
     <arg name="use_cargo_visualizer" default="true"/>
     <arg name="ndt_publish_cargo_markers" default="false"/>
+    <arg name="publish_rslidar_tf" default="true"/>
+    <arg name="persistent_map" default="true"/>
+    <arg name="odom_anchored_cargo_box_enabled" default="true"/>
+    <arg name="hook_cargo_removal_enabled" default="true"/>
+    <arg name="cargo_warning_enabled" default="true"/>
 
     <!-- 设置使用真实时间（现场必须） -->
     <param name="/use_sim_time" value="$(arg use_sim_time)"/>
@@ -36,7 +41,10 @@
     </node>
 
     <!-- 雷达到 base_link 的 TF（唯一名字避免冲突） -->
-    <node name="base_link_to_rslidar_tf" pkg="tf" type="static_transform_publisher"
+    <node if="$(arg publish_rslidar_tf)"
+          name="ndt_slam_rslidar_tf"
+          pkg="tf"
+          type="static_transform_publisher"
           args="0 0 0 0 0 0 base_link rslidar 100"/>
 
     <!-- RViz 可视化（可选） -->
