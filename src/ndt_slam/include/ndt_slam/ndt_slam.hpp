@@ -101,13 +101,6 @@ constexpr int IDX_SUPPORT_RATIO = 18;
 constexpr int IDX_BOX_SOURCE = 19;
 constexpr int PAYLOAD_TRACK_INFO_SIZE = 20;
 
-struct MappingTask {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
-    Eigen::Vector3d position;
-    Eigen::Quaterniond orientation;
-    ros::Time stamp;
-};
-
 class NdtSlamNode {
 public:
     NdtSlamNode() = delete;
@@ -167,7 +160,6 @@ private:
     void publishMap();
     void publishCurrentCloud();
 
-    void processingWorker();
     void processLoopClosure();
 
     bool resetService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response);
@@ -288,6 +280,27 @@ private:
     // ========== 调试配置 ==========
     struct DebugConfig {
         bool publish_runtime_path = false;
+
+        // 日志控制
+        double summary_interval_sec = 2.0;
+        double warn_throttle_sec = 2.0;
+
+        bool debug_config = false;
+        bool debug_frame_start = false;
+        bool debug_ndt_health = false;
+        bool debug_ekf = false;
+        bool debug_motion_gate = false;
+        bool debug_pose_flow = false;
+        bool debug_map_commit = false;
+        bool debug_perf = true;           // 测试时打开，输出 ndt_ms
+        bool debug_cargo = false;
+        bool debug_cargo_bottom = false;
+        bool debug_cargo_warning = false;
+        bool debug_tight_box = false;
+        bool debug_dynamic_filter = false;
+        bool debug_odom_anchor = false;
+        bool debug_registration_removal = false;
+        bool debug_hook_removal = false;
     } debug_cfg_;
 
     // ========== v8-stable-r3: CraneMotionEKF ==========
@@ -373,12 +386,7 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr current_cloud_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr current_cloud_transformed_;
     std::mutex map_mutex_;
-    std::mutex task_queue_mutex_;
-    std::condition_variable task_cv_;
-    std::queue<MappingTask> task_queue_;
-    std::vector<std::thread> worker_threads_;
     std::atomic<bool> running_{true};
-    int num_worker_threads_ = 0;
     double voxel_size_ = 0.2;            // 配准地图体素大小
     double display_voxel_size_ = 0.1;    // 显示地图体素大小（全量）
     double ground_voxel_size_ = 0.15;    // 地面点体素大小（较粗）
@@ -723,6 +731,7 @@ private:
     double delta_yaw_ = 0.0;
     double average_process_time_ms_ = 0.0;
     double average_ndt_time_ms_ = 0.0;
+    double last_ndt_time_ms_ = 0.0;
     bool memory_guard_triggered_ = false;
     bool disk_guard_triggered_ = false;
     ros::Time last_flush_time_local_;
@@ -805,33 +814,6 @@ private:
 
     // 从关键帧重建地图（不叠加旧 PCD）
     void rebuildMapFromKeyframes(const std::string& session_dir);
-
-    // 生成地图质量报告
-    void generateMapQualityReport(const std::string& session_dir);
-
-    // 离线精配准模式
-    void offlineRefinePoses(const std::string& session_dir, const std::string& localization_map_path);
-
-    // 导出导航地图
-    void exportNavigationMap(const std::string& session_dir, double resolution = 0.1);
-
-    // 地图质量统计
-    struct MapQualityStats {
-        int total_keyframes = 0;
-        int accepted_keyframes = 0;
-        int rejected_keyframes = 0;
-        double avg_fitness = 0.0;
-        double avg_inlier_ratio = 0.0;
-        double map_thickness_avg = 0.0;
-        double map_thickness_max = 0.0;
-        int localization_points = 0;
-        int detail_points = 0;
-        int ground_points = 0;
-        int objects_raw_points = 0;
-        int objects_clean_points = 0;
-        double trajectory_length = 0.0;
-        int loop_closures = 0;
-    };
 
     // ========== Commit B: cargo target 一致性 ==========
     int selected_payload_track_id_ = -1;

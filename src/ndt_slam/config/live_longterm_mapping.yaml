@@ -5,6 +5,28 @@
 debug:
   publish_runtime_path: false  # runtime_path 只是显示辅助，不参与算法
 
+# 日志配置
+logging:
+  summary_interval_sec: 2.0
+  warn_throttle_sec: 2.0
+
+  debug_config: false
+  debug_frame_start: false
+  debug_ndt_health: false
+  debug_ekf: false
+  debug_motion_gate: false
+  debug_pose_flow: false
+  debug_map_commit: false
+  debug_perf: true           # 测试时打开，输出 ndt_ms
+  debug_cargo: false
+  debug_cargo_bottom: false
+  debug_cargo_warning: false
+  debug_tight_box: false
+  debug_dynamic_filter: false
+  debug_odom_anchor: false
+  debug_registration_removal: false
+  debug_hook_removal: false
+
 # 点云话题
 pointcloud_topic: "/merged_points"
 odom_topic: "/odom"
