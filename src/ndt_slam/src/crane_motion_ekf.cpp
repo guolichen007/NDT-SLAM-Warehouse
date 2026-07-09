@@ -295,4 +295,24 @@ void CraneMotionEKF::applyStationaryConstraint(const Eigen::Vector2d& anchor_xy)
     status_.velocity = x_.tail<2>();
 }
 
+// fix/588-runtime-localization-stable: 只清速度，不改位置
+void CraneMotionEKF::applyZeroVelocityConstraint() {
+    if (!initialized_) {
+        return;
+    }
+
+    // 只零速，不改位置
+    x_(2) = 0.0;  // vx
+    x_(3) = 0.0;  // vy
+
+    // 只收紧速度协方差，不收紧位置协方差
+    P_(2, 2) = std::min(P_(2, 2), 0.0004);
+    P_(3, 3) = std::min(P_(3, 3), 0.0004);
+
+    // P_(0,0)、P_(1,1) 不允许在这里修改
+
+    status_.output_pos = x_.head<2>();
+    status_.velocity = x_.tail<2>();
+}
+
 }  // namespace ndt_slam

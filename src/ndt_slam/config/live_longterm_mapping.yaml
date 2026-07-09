@@ -83,7 +83,7 @@ online_cache:
 
 # 磁盘增量保存
 persistent_map:
-  enabled: true
+  enabled: false  # fix/588-runtime-localization-stable: 验证时必须 false
   root_dir: "/home/ydkj/NDT-slam-ws/maps/live/current"
   tile_size_m: 20.0            # tile 大小（米）
   flush_interval_sec: 60       # flush 间隔（秒）

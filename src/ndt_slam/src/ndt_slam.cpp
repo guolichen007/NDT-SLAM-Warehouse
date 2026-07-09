@@ -1826,14 +1826,13 @@ void NdtSlamNode::processCloudThread() {
             constrained_pose = applyCraneOutputConstraint(new_pose, is_stationary_, speed_xy);
         }
 
-        // v8-stable-r3-hotfix-minimal: 静止时 EKF 内部零速约束（替代 PoseFreeze）
+        // fix/588-runtime-localization-stable: MotionGate 只控制 MapCommit，不冻结定位输出
+        // 只做零速约束，不重置 EKF 位置，不覆写 constrained_pose
         if (registration_success && motion_gate_stationary_ && crane_motion_ekf_enabled_) {
-            Eigen::Vector2d anchor_xy(
-                stationary_anchor_pose_.translation().x(),
-                stationary_anchor_pose_.translation().y());
-            crane_motion_ekf_.applyStationaryConstraint(anchor_xy);
-            constrained_pose.translation().x() = anchor_xy.x();
-            constrained_pose.translation().y() = anchor_xy.y();
+            crane_motion_ekf_.applyZeroVelocityConstraint();
+
+            ROS_DEBUG_THROTTLE(1.0,
+                "[MotionGateEKF] stationary_zero_velocity=1 pose_override=0 map_commit_only=1");
         }
 
         if (registration_success) {
@@ -5101,21 +5100,44 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
             moving_confirm_frames_ = 0;
             moving_confirm_count_ = 0;
 
-            ROS_INFO("[MotionGate] Crane stopped | keyframes=%d | anchor=(%.2f,%.2f,%.2f) | pausing map commit",
+            // fix/588-runtime-localization-stable: 记录 raw anchor 用于 stationary exit 判断
+            if (has_last_raw_ndt_pose_) {
+                stationary_raw_anchor_pose_ = last_raw_ndt_pose_;
+                stationary_raw_anchor_valid_ = true;
+            } else {
+                stationary_raw_anchor_pose_ = current_pose;
+                stationary_raw_anchor_valid_ = false;
+            }
+
+            ROS_INFO("[MotionGate] Crane stopped | keyframes=%d | anchor=(%.2f,%.2f,%.2f) raw_anchor=(%.2f,%.2f,%.2f) | pausing map commit only",
                      keyframe_count_,
-                     current_pose.translation().x(),
-                     current_pose.translation().y(),
-                     current_pose.translation().z());
+                     stationary_anchor_pose_.translation().x(),
+                     stationary_anchor_pose_.translation().y(),
+                     stationary_anchor_pose_.translation().z(),
+                     stationary_raw_anchor_pose_.translation().x(),
+                     stationary_raw_anchor_pose_.translation().y(),
+                     stationary_raw_anchor_pose_.translation().z());
         }
     } else if (!detected_stationary) {
         stationary_frame_count_ = 0;
     }
 
-    // P1: 静止期间检查漂移（从 anchor 开始的漂移）
+    // P1: 静止期间检查漂移（使用 raw NDT drift 避免 frozen pose 反馈环）
     if (is_stationary_ && stationary_anchor_valid_) {
-        double drift_from_anchor =
-            (current_pose.translation() - stationary_anchor_pose_.translation()).norm();
         double elapsed = current_time.toSec() - stationary_start_time_;
+
+        // 计算 filtered_drift（仅用于日志）
+        double filtered_drift =
+            (current_pose.translation().head<2>() -
+             stationary_anchor_pose_.translation().head<2>()).norm();
+
+        // 计算 raw_drift（主退出证据）
+        double raw_drift = filtered_drift;
+        if (stationary_raw_anchor_valid_ && has_last_raw_ndt_pose_) {
+            raw_drift =
+                (last_raw_ndt_pose_.translation().head<2>() -
+                 stationary_raw_anchor_pose_.translation().head<2>()).norm();
+        }
 
         // P0-3: evidence 检查必须放在任何 SKIP_COMMIT 判断之前
         // 计算 evidence_trans = max(raw_trans, refined_trans, runtime_trans)
@@ -5161,18 +5183,22 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
                 evidence_trans,
                 elapsed,
                 last_ndt_fitness_);
-            // 确认移动，恢复提交
+            // 确认移动，恢复提交，必须复位所有 stationary 状态
             is_stationary_ = false;
+            motion_gate_stationary_ = false;
             stationary_anchor_valid_ = false;
+            stationary_raw_anchor_valid_ = false;
             moving_confirm_frames_ = 0;
+            moving_confirm_count_ = 0;
+            stationary_frame_count_ = 0;
             return true;
         }
 
         // 漂移在 ignore_radius 内，认为是 NDT 静止漂移，不提交
-        if (drift_from_anchor < motion_gate_stationary_drift_ignore_radius_) {
+        if (raw_drift < motion_gate_stationary_drift_ignore_radius_) {
             ROS_INFO_THROTTLE(2.0,
-                "[MotionGate] stationary_freeze drift=%.3f elapsed=%.1f action=SKIP_COMMIT",
-                drift_from_anchor, elapsed);
+                "[MotionGate] stationary_skip_map_commit raw_drift=%.3f filtered_drift=%.3f elapsed=%.1f action=SKIP_MAP_COMMIT odom_publish=1 pose_override=0",
+                raw_drift, filtered_drift, elapsed);
             return false;
         }
 
@@ -5180,18 +5206,22 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
         moving_confirm_frames_++;
         if (moving_confirm_frames_ < motion_gate_moving_confirm_frames_) {
             ROS_INFO_THROTTLE(1.0,
-                "[MotionGate] possible_move drift=%.3f confirm=%d/%d action=WAIT",
-                drift_from_anchor, moving_confirm_frames_, motion_gate_moving_confirm_frames_);
+                "[MotionGate] possible_move raw_drift=%.3f filtered_drift=%.3f confirm=%d/%d action=WAIT_MAP_COMMIT",
+                raw_drift, filtered_drift, moving_confirm_frames_, motion_gate_moving_confirm_frames_);
             return false;
         }
 
-        // 确认移动，恢复提交
+        // 确认移动，恢复提交，必须复位所有 stationary 状态
         is_stationary_ = false;
+        motion_gate_stationary_ = false;
         stationary_anchor_valid_ = false;
+        stationary_raw_anchor_valid_ = false;
         moving_confirm_frames_ = 0;
+        moving_confirm_count_ = 0;
+        stationary_frame_count_ = 0;
 
-        ROS_INFO("[MotionGate] Crane moving | drift=%.3f confirmed=%d | resuming map commit",
-                 drift_from_anchor, motion_gate_moving_confirm_frames_);
+        ROS_INFO("[MotionGate] exit_stationary raw_drift=%.3f filtered_drift=%.3f confirm=%d action=RESUME_MAP_COMMIT",
+                 raw_drift, filtered_drift, motion_gate_moving_confirm_frames_);
     }
 
     // 正常移动检测（使用 evidence_trans）

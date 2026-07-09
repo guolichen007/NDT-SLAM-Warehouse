@@ -94,6 +94,9 @@ public:
     // v8-stable-r3-hotfix-minimal: 静止零速约束
     void applyStationaryConstraint(const Eigen::Vector2d& anchor_xy);
 
+    // fix/588-runtime-localization-stable: 只清速度，不改位置
+    void applyZeroVelocityConstraint();
+
 private:
     void predict(double dt, Eigen::Vector4d& x_pred, Eigen::Matrix4d& P_pred);
     void maybeRecover(const std::string& reason);

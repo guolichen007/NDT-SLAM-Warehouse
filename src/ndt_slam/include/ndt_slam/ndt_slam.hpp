@@ -675,6 +675,10 @@ private:
     bool has_commit_gate_reference_ = false;
     int stationary_move_confirm_frames_ = 3;
 
+    // fix/588-runtime-localization-stable: raw anchor for stationary exit evidence
+    Sophus::SE3d stationary_raw_anchor_pose_;
+    bool stationary_raw_anchor_valid_ = false;
+
     Sophus::SE3d selectPublishedPose(const Sophus::SE3d& constrained_pose, const ros::Time& stamp);
 
     // 关键帧 active window
