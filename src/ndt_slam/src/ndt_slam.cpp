@@ -304,6 +304,13 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     ROS_INFO("NdtSlamNode initialized with NDT_OMP");
     ROS_INFO("Config file: %s", config_file_path.c_str());
     ROS_INFO("Services: reset, set_pose, relocalize, save_map, load_map, rebuild_map");
+
+    // Runtime diagnostics: configure and log startup
+    if (runtime_diag_config_.enabled) {
+        runtime_diag_.configure(runtime_diag_config_, diag_output_dir_);
+        logStartupConfig();
+        logBuildId();
+    }
 }
 
 NdtSlamNode::~NdtSlamNode() {
@@ -1207,6 +1214,29 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         // ConfigFinal 日志
         ROS_INFO("[ConfigFinal] hook_cargo_removal=%d source=config",
                  hook_lock_config_.enable_hook_cargo_removal ? 1 : 0);
+
+        // Runtime Diagnostics 配置
+        if (config["debug"] && config["debug"]["runtime_diagnostics"]) {
+            auto diag = config["debug"]["runtime_diagnostics"];
+            runtime_diag_config_.enabled = diag["enabled"].as<bool>(false);
+            runtime_diag_config_.console_period_sec = diag["console_period_sec"].as<double>(1.0);
+            runtime_diag_config_.csv_enabled = diag["csv_enabled"].as<bool>(true);
+            runtime_diag_config_.csv_flush_period_sec = diag["csv_flush_period_sec"].as<double>(1.0);
+            runtime_diag_config_.warn_consecutive_overrun_frames = diag["warn_consecutive_overrun_frames"].as<int>(3);
+            runtime_diag_config_.warn_prediction_only_frames = diag["warn_prediction_only_frames"].as<int>(3);
+            runtime_diag_config_.warn_target_fallback_frames = diag["warn_target_fallback_frames"].as<int>(3);
+            runtime_diag_config_.warn_cargo_bottom_jump_m = diag["warn_cargo_bottom_jump_m"].as<double>(0.20);
+            runtime_diag_config_.warn_cargo_height_jump_m = diag["warn_cargo_height_jump_m"].as<double>(0.20);
+
+            // 默认输出目录
+            diag_output_dir_ = "/home/ydkj/ndt_slam_runtime_data";
+
+            ROS_INFO("[RuntimeDiagnostics] enabled=%d console_period=%.1f csv=%d csv_flush=%.1f",
+                     runtime_diag_config_.enabled ? 1 : 0,
+                     runtime_diag_config_.console_period_sec,
+                     runtime_diag_config_.csv_enabled ? 1 : 0,
+                     runtime_diag_config_.csv_flush_period_sec);
+        }
 
     } catch (const YAML::Exception& e) {
         ROS_ERROR("YAML parse error: %s", e.what());
@@ -2392,6 +2422,126 @@ void NdtSlamNode::processCloudThread() {
                           << last_target_reason_ << ","
                           << (ekf_accept ? 1 : 0) << ","
                           << reject_reason << std::endl;
+            }
+        }
+
+        // ========== Runtime Diagnostics 输出 ==========
+        if (runtime_diag_.isEnabled()) {
+            diag_frame_index_++;
+            diag_last_cloud_stamp_ = last_stamp_.toSec();
+            diag_processed_frame_count_++;
+            if (last_ndt_converged_) diag_converged_count_++;
+
+            // 写入 NDT 帧 CSV
+            NdtFrameRecord ndt_rec;
+            ndt_rec.frame_index = diag_frame_index_;
+            ndt_rec.cloud_stamp = diag_last_cloud_stamp_;
+            ndt_rec.sensor_dt_ms = last_sensor_dt_ * 1000.0;
+            ndt_rec.raw_points = last_source_points_;
+            ndt_rec.registration_points = last_source_points_;
+            ndt_rec.target_points = last_target_points_;
+            ndt_rec.target_source = last_actual_target_source_;
+            ndt_rec.target_version = target_version_;
+            ndt_rec.ndt_align_ms = last_ndt_time_ms_;
+            ndt_rec.total_ms = average_process_time_ms_;
+            ndt_rec.ndt_converged = last_ndt_converged_;
+            ndt_rec.ndt_iterations = last_ndt_iterations_;
+            ndt_rec.fitness = last_ndt_fitness_;
+            ndt_rec.raw_step_m = last_raw_step_;
+            ndt_rec.prediction_only = prediction_only;
+            ndt_rec.prediction_reason = reject_reason;
+            ndt_rec.map_commit_allowed = allow_map_commit;
+            ndt_rec.map_commit_reason = allow_map_commit ? "accepted" : "blocked";
+            runtime_diag_.writeNdtFrame(ndt_rec);
+
+            // NDT 风险检测
+            if (!last_ndt_converged_) {
+                runtime_diag_.logNdtRiskNotConverged(
+                    diag_frame_index_, diag_last_cloud_stamp_, last_ndt_fitness_,
+                    last_ndt_iterations_, last_actual_target_source_, last_target_points_,
+                    last_source_points_, last_ndt_time_ms_, average_process_time_ms_);
+            }
+
+            // Fitness spike 检测
+            double fitness_median = runtime_diag_.fitnessStats().median();
+            double fitness_mad = runtime_diag_.fitnessStats().mad();
+            if (last_ndt_fitness_ > fitness_median + 5 * fitness_mad ||
+                last_ndt_fitness_ > fitness_median * 2.0) {
+                runtime_diag_.logNdtRiskFitnessSpike(
+                    diag_frame_index_, diag_last_cloud_stamp_, last_ndt_fitness_,
+                    fitness_median, fitness_mad, 2.0, last_ndt_converged_,
+                    last_raw_step_, innovation);
+            }
+
+            // Frame overrun 检测
+            double frame_budget_ms = 100.0;  // 默认 10Hz
+            if (last_sensor_dt_ > 0.01) {
+                frame_budget_ms = last_sensor_dt_ * 1000.0;
+            }
+            if (average_process_time_ms_ > frame_budget_ms) {
+                runtime_diag_.incrementFrameOverrun();
+                runtime_diag_.logPipelineRiskFrameOverrun(
+                    diag_frame_index_, diag_last_cloud_stamp_, 1.0, frame_budget_ms,
+                    average_process_time_ms_, 0, 0, last_ndt_time_ms_, 0, 0,
+                    runtime_diag_.consecutiveOverruns());
+
+                if (runtime_diag_.consecutiveOverruns() >= 3) {
+                    runtime_diag_.logPipelineRiskSustainedOverrun(
+                        runtime_diag_.consecutiveOverruns(), 0, 0, 0);
+                }
+            } else {
+                runtime_diag_.resetConsecutiveOverruns();
+            }
+
+            // Prediction-only 检测
+            if (prediction_only) {
+                runtime_diag_.incrementPredictionOnly();
+                diag_consecutive_prediction_only_++;
+                if (diag_consecutive_prediction_only_ == 1) {
+                    runtime_diag_.logEkfRiskPredictionOnly(
+                        diag_frame_index_, diag_last_cloud_stamp_, reject_reason,
+                        last_ndt_fitness_, last_ndt_converged_, innovation,
+                        diag_consecutive_prediction_only_);
+                }
+                if (diag_consecutive_prediction_only_ > 3) {
+                    runtime_diag_.logEkfRiskPredictionStreak(
+                        diag_consecutive_prediction_only_, 0, diag_last_valid_ndt_stamp_);
+                }
+            } else {
+                runtime_diag_.resetConsecutivePredictionOnly();
+                diag_consecutive_prediction_only_ = 0;
+                diag_last_valid_ndt_stamp_ = diag_last_cloud_stamp_;
+            }
+
+            // Raw step exceeded 检测
+            if (last_raw_step_ > max_allowed_step + 0.001) {
+                runtime_diag_.incrementRawStepExceeded();
+                runtime_diag_.logOdomRiskRawStepExceeded(
+                    diag_frame_index_, diag_last_cloud_stamp_, last_sensor_dt_ * 1000.0,
+                    0, 0, 0, last_raw_step_, max_allowed_step, last_ndt_fitness_,
+                    last_ndt_converged_);
+            }
+
+            // Output step violation 检测
+            if (output_step > max_allowed_step + 0.0001) {
+                runtime_diag_.incrementOutputStepViolation();
+                runtime_diag_.logOdomRiskOutputStepViolation(
+                    diag_frame_index_, diag_last_cloud_stamp_, 0, 0, 0,
+                    output_step, max_allowed_step);
+            }
+
+            // 周期性健康日志
+            static ros::Time last_diag_health_time;
+            if ((ros::Time::now() - last_diag_health_time).toSec() >= 1.0) {
+                logNdtHealthPeriodic();
+                last_diag_health_time = ros::Time::now();
+            }
+
+            // Cargo 健康日志
+            static ros::Time last_cargo_health_time;
+            if ((ros::Time::now() - last_cargo_health_time).toSec() >= 1.0) {
+                logCargoHealthPeriodic();
+                last_cargo_health_time = ros::Time::now();
             }
         }
 
@@ -9418,6 +9568,106 @@ void NdtSlamNode::publishCargoWarningMarkers(
         obstacle_marker.lifetime = ros::Duration(0.5);
         cargo_warning_obstacle_marker_pub_.publish(obstacle_marker);
     }
+}
+
+// ========== Runtime Diagnostics 辅助函数 ==========
+
+void NdtSlamNode::logStartupConfig() {
+    if (!runtime_diag_.isEnabled()) return;
+
+    std::map<std::string, std::string> params;
+    params["git_sha"] = "3f7283d2cb0de8612adff31ac51fdf127effac11";
+    params["config_path"] = diag_output_dir_;
+    params["mapping_mode"] = "longterm_mapping";
+    params["cloud_topic"] = pointcloud_topic_;
+    params["subscriber_queue"] = "10";
+    params["ndt_resolution"] = std::to_string(ndt_resolution_);
+    params["ndt_step_size"] = std::to_string(ndt_step_size_);
+    params["ndt_epsilon"] = std::to_string(ndt_transformation_epsilon_);
+    params["ndt_max_iterations"] = std::to_string(ndt_max_iterations_);
+    params["reject_high_fitness"] = "false";
+    params["fitness_threshold"] = "2.00";
+    params["map_commit_max_fitness"] = std::to_string(map_commit_max_fitness_);
+    params["max_speed_mps"] = "2.00";
+    params["max_step_safety_factor"] = "1.10";
+    params["max_step_min_m"] = "0.05";
+    params["max_step_max_m"] = "0.25";
+    params["innovation_gate_m"] = "0.35";
+    params["innovation_reject_m"] = "1.00";
+    params["target_min_points"] = std::to_string(localization_target_min_points_);
+    params["merger_max_pair_dt_sec"] = "0.060";
+    params["merger_stale_timeout_sec"] = "0.120";
+    params["alarm_14_17_18_enabled"] = "0";
+    runtime_diag_.logRunConfig(params);
+}
+
+void NdtSlamNode::logBuildId() {
+    if (!runtime_diag_.isEnabled()) return;
+
+    std::map<std::string, std::string> params;
+    params["git_sha"] = "3f7283d2cb0de8612adff31ac51fdf127effac11";
+    params["git_branch"] = "fix/588-production-localization-cargo-fusion-v4";
+    params["build_time"] = __DATE__ " " __TIME__;
+    params["source_root"] = "/home/ydkj/NDT-slam-ws/src/ndt_slam";
+    params["executable_path"] = "/home/ydkj/NDT-slam-ws/devel/lib/ndt_slam/ndt_slam_node";
+    runtime_diag_.logBuildId(params);
+}
+
+void NdtSlamNode::logNdtHealthPeriodic() {
+    if (!runtime_diag_.isEnabled()) return;
+
+    double input_hz = diag_input_frame_count_ > 0 ?
+        diag_input_frame_count_ / debug_cfg_.summary_interval_sec : 0.0;
+    double processed_hz = diag_processed_frame_count_ > 0 ?
+        diag_processed_frame_count_ / debug_cfg_.summary_interval_sec : 0.0;
+    double converged_ratio = diag_processed_frame_count_ > 0 ?
+        static_cast<double>(diag_converged_count_) / diag_processed_frame_count_ : 0.0;
+
+    runtime_diag_.logNdtHealth(
+        diag_frame_index_, diag_last_cloud_stamp_,
+        input_hz, processed_hz, last_sensor_dt_,
+        last_total_ms_, last_ndt_time_ms_,
+        last_actual_target_source_, last_target_points_,
+        converged_ratio, last_ndt_fitness_,
+        runtime_diag_.predictionOnlyCount(), diag_consecutive_prediction_only_,
+        last_raw_step_, 0.0, 0.0);  // output_step 在 odom 发布时更新
+
+    // 重置计数
+    diag_input_frame_count_ = 0;
+    diag_processed_frame_count_ = 0;
+    diag_converged_count_ = 0;
+}
+
+void NdtSlamNode::logCargoHealthPeriodic() {
+    if (!runtime_diag_.isEnabled()) return;
+
+    CargoFrameRecord rec;
+    rec.stamp = cargo_state_.stamp.toSec();
+    rec.track_id = selected_payload_track_id_;
+    rec.center_x = cargo_state_.center_base.x();
+    rec.center_y = cargo_state_.center_base.y();
+    rec.center_z = cargo_state_.center_base.z();
+    rec.size_x = cargo_state_.size.x();
+    rec.size_y = cargo_state_.size.y();
+    rec.size_z = cargo_state_.size.z();
+    rec.raw_bottom_z = cargo_state_.bottom_z;
+    rec.filtered_bottom_z = cargo_state_.bottom_z;
+    rec.stable_bottom_z = cargo_state_.bottom_safe_z;
+    rec.top_z = cargo_state_.top_z;
+    rec.height_m = cargo_state_.top_z - cargo_state_.bottom_z;
+    rec.bottom_valid = cargo_state_.valid_height;
+    rec.height_valid = cargo_state_.valid_height;
+    rec.observation_valid = cargo_state_.valid_geometry;
+
+    switch (cargo_state_.state) {
+        case CargoState::EMPTY: rec.track_state = "EMPTY"; break;
+        case CargoState::CANDIDATE: rec.track_state = "CANDIDATE"; break;
+        case CargoState::LOCKED: rec.track_state = "LOCKED"; break;
+        case CargoState::LOST: rec.track_state = "LOST"; break;
+    }
+
+    runtime_diag_.logCargoHealth(rec);
+    runtime_diag_.writeCargoFrame(rec);
 }
 
 } // namespace ndt_slam

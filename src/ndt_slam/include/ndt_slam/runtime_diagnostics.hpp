@@ -1,0 +1,317 @@
+#pragma once
+// Runtime diagnostics for 1.0x and 1.5x acceptance testing.
+// Observes only — does not change any algorithm result.
+
+#include <string>
+#include <fstream>
+#include <deque>
+#include <mutex>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+#include <algorithm>
+#include <cmath>
+#include <map>
+
+namespace ndt_slam {
+
+// Fixed-format risk tags — grep-friendly, never change the string.
+struct RuntimeDiagnosticsConfig {
+  bool enabled = false;
+  double console_period_sec = 1.0;
+  bool csv_enabled = true;
+  double csv_flush_period_sec = 1.0;
+  int warn_consecutive_overrun_frames = 3;
+  int warn_prediction_only_frames = 3;
+  int warn_target_fallback_frames = 3;
+  double warn_cargo_bottom_jump_m = 0.20;
+  double warn_cargo_height_jump_m = 0.20;
+};
+
+// Rolling statistics with fixed window to avoid unbounded memory growth.
+class RollingStats {
+public:
+  explicit RollingStats(size_t window = 200) : window_(window) {}
+
+  void add(double v) {
+    buf_.push_back(v);
+    if (buf_.size() > window_) buf_.pop_front();
+  }
+
+  double median() const {
+    if (buf_.empty()) return 0.0;
+    std::vector<double> s(buf_.begin(), buf_.end());
+    std::sort(s.begin(), s.end());
+    return s[s.size() / 2];
+  }
+
+  double p95() const {
+    if (buf_.empty()) return 0.0;
+    std::vector<double> s(buf_.begin(), buf_.end());
+    std::sort(s.begin(), s.end());
+    size_t idx = static_cast<size_t>(s.size() * 0.95);
+    if (idx >= s.size()) idx = s.size() - 1;
+    return s[idx];
+  }
+
+  double p99() const {
+    if (buf_.empty()) return 0.0;
+    std::vector<double> s(buf_.begin(), buf_.end());
+    std::sort(s.begin(), s.end());
+    size_t idx = static_cast<size_t>(s.size() * 0.99);
+    if (idx >= s.size()) idx = s.size() - 1;
+    return s[idx];
+  }
+
+  double max() const {
+    if (buf_.empty()) return 0.0;
+    return *std::max_element(buf_.begin(), buf_.end());
+  }
+
+  double mad() const {
+    if (buf_.empty()) return 0.0;
+    double med = median();
+    std::vector<double> abs_dev;
+    abs_dev.reserve(buf_.size());
+    for (double v : buf_) abs_dev.push_back(std::abs(v - med));
+    std::sort(abs_dev.begin(), abs_dev.end());
+    return abs_dev[abs_dev.size() / 2];
+  }
+
+  size_t count() const { return buf_.size(); }
+
+private:
+  size_t window_;
+  std::deque<double> buf_;
+};
+
+// NDT per-frame record for CSV output.
+struct NdtFrameRecord {
+  int frame_index = 0;
+  double cloud_stamp = 0.0;
+  double sensor_dt_ms = 0.0;
+  double wall_interarrival_ms = 0.0;
+  int raw_points = 0;
+  int merged_points = 0;
+  int filtered_points = 0;
+  int registration_points = 0;
+  int target_points = 0;
+  std::string target_source;
+  int target_version = 0;
+  bool target_reused = false;
+  bool target_fallback = false;
+  double preprocess_ms = 0.0;
+  double target_prepare_ms = 0.0;
+  double set_input_target_ms = 0.0;
+  double ndt_align_ms = 0.0;
+  double ekf_ms = 0.0;
+  double map_commit_ms = 0.0;
+  double total_ms = 0.0;
+  bool ndt_converged = false;
+  int ndt_iterations = 0;
+  double fitness = 0.0;
+  double transformation_probability = 0.0;
+  double raw_x = 0.0, raw_y = 0.0, raw_z = 0.0;
+  double output_x = 0.0, output_y = 0.0, output_z = 0.0;
+  double raw_step_m = 0.0;
+  double output_step_m = 0.0;
+  double allowed_step_m = 0.0;
+  double innovation_m = 0.0;
+  bool prediction_only = false;
+  std::string prediction_reason;
+  bool map_commit_allowed = false;
+  std::string map_commit_reason;
+};
+
+// Cargo per-frame record for CSV output.
+struct CargoFrameRecord {
+  double stamp = 0.0;
+  std::string track_state;
+  int track_id = -1;
+  std::string lock_state;
+  bool observation_valid = false;
+  int cluster_points = 0;
+  int support_points = 0;
+  double center_x = 0.0, center_y = 0.0, center_z = 0.0;
+  double size_x = 0.0, size_y = 0.0, size_z = 0.0;
+  double raw_bottom_z = 0.0;
+  double filtered_bottom_z = 0.0;
+  double stable_bottom_z = 0.0;
+  double top_z = 0.0;
+  double height_m = 0.0;
+  bool bottom_valid = false;
+  bool height_valid = false;
+  bool filter_accepted = false;
+  std::string filter_reason;
+  int lost_frames = 0;
+  double odom_x = 0.0, odom_y = 0.0, odom_z = 0.0;
+};
+
+class RuntimeDiagnostics {
+public:
+  RuntimeDiagnostics();
+
+  void configure(const RuntimeDiagnosticsConfig& cfg, const std::string& output_dir);
+
+  // ---- startup parameter dump (once) ----
+  void logRunConfig(const std::map<std::string, std::string>& params);
+  void logMergerCfg(const std::map<std::string, std::string>& params);
+  void logBuildId(const std::map<std::string, std::string>& params);
+
+  // ---- per-frame NDT CSV ----
+  void writeNdtFrame(const NdtFrameRecord& rec);
+
+  // ---- per-frame Cargo CSV ----
+  void writeCargoFrame(const CargoFrameRecord& rec);
+
+  // ---- periodic health ----
+  void logNdtHealth(int frame, double stamp, double input_hz, double processed_hz,
+                    double sensor_dt_ms, double total_ms_last, double ndt_ms_last,
+                    const std::string& target_source, int target_points,
+                    double converged_ratio, double fitness_last,
+                    int prediction_only_count, int consecutive_prediction_only,
+                    double raw_step_m, double output_step_m, double allowed_step_m);
+
+  void logMergerHealth(int64_t received_201, int64_t received_203, int64_t paired,
+                       int64_t single_201, int64_t single_203,
+                       double pair_ratio, double pair_dt_ms_p50,
+                       double pair_dt_ms_p95, double pair_dt_ms_max,
+                       double output_hz, int64_t dropped, int64_t reused,
+                       const std::string& last_mode);
+
+  void logCargoHealth(const CargoFrameRecord& rec);
+
+  // ---- risk outputs (greppable fixed format) ----
+  void logNdtRiskNotConverged(int frame, double stamp, double fitness, int iterations,
+                               const std::string& target_source, int target_points,
+                               int input_points, double ndt_ms, double total_ms);
+  void logNdtRiskFitnessSpike(int frame, double stamp, double fitness,
+                               double rolling_median, double rolling_mad,
+                               double configured_threshold, bool converged,
+                               double raw_step_m, double innovation_m);
+  void logNdtRiskTargetTooSmall(int frame, double stamp, const std::string& candidate_source,
+                                 int candidate_points, int required_points,
+                                 const std::string& fallback_source, int fallback_points);
+  void logNdtRiskTargetFallbackStreak(int count, const std::string& current_source,
+                                       const std::string& fallback_source);
+
+  void logMergerRiskSingleTimeout(const std::string& sensor, double stamp,
+                                   double pair_wait_wall_ms, double nearest_sensor_dt_ms,
+                                   int64_t received_201, int64_t received_203,
+                                   int64_t paired, int64_t single_count);
+  void logMergerRiskPairDtExceeded(double stamp_201, double stamp_203,
+                                    double pair_dt_ms, double limit_ms);
+  void logMergerRiskCloudReuse(const std::string& sensor, double stamp, double previous_stamp);
+
+  void logPipelineRiskFrameOverrun(int frame, double stamp, double playback_rate,
+                                    double frame_budget_ms, double total_ms,
+                                    double preprocess_ms, double target_prepare_ms,
+                                    double ndt_align_ms, double ekf_ms,
+                                    double map_commit_ms, int consecutive_overruns);
+  void logPipelineRiskSustainedOverrun(int count, double estimated_backlog_frames,
+                                        double processed_hz, double input_hz);
+
+  void logOdomRiskRawStepExceeded(int frame, double stamp, double sensor_dt_ms,
+                                   double raw_dx, double raw_dy, double raw_dz,
+                                   double raw_step_m, double allowed_step_m,
+                                   double fitness, bool converged);
+  void logOdomRiskOutputStepViolation(int frame, double stamp,
+                                       double output_dx, double output_dy, double output_dz,
+                                       double output_step_m, double allowed_step_m);
+
+  void logEkfRiskPredictionOnly(int frame, double stamp, const std::string& cause,
+                                 double fitness, bool converged, double innovation_m,
+                                 int consecutive_count);
+  void logEkfRiskPredictionStreak(int count, double duration_sec, double last_valid_stamp);
+  void logEkfRiskRecovery(const std::string& recovery_cause, int high_fitness_frames,
+                           int prediction_only_frames, double innovation_m,
+                           double fitness, double covariance_before, double covariance_after);
+
+  void logMapCommitBlocked(const std::string& reason, double fitness, bool converged,
+                            bool prediction_only, bool step_valid,
+                            const std::string& target_source);
+
+  // ---- cargo risk outputs ----
+  void logCargoRiskDetectionLost(double stamp, int track_id, const std::string& previous_state,
+                                  const std::string& current_state, int lost_frames,
+                                  double last_valid_bottom_z);
+  void logCargoRiskInsufficientPoints(double stamp, int track_id, int cluster_points,
+                                       int required_points);
+  void logCargoRiskBottomJump(double stamp, int track_id, double previous_bottom_z,
+                               double raw_bottom_z, double filtered_bottom_z,
+                               double delta_m, bool filter_accepted,
+                               const std::string& filter_reason);
+  void logCargoRiskHeightJump(double stamp, int track_id, double previous_height_m,
+                               double height_m, double delta_m, double bottom_z, double top_z);
+  void logCargoRiskHeightInvalid(double stamp, int track_id, bool bottom_valid,
+                                  bool top_valid, int cluster_points,
+                                  const std::string& state);
+  void logCargoRiskBoxGeometryJump(double stamp, int track_id, double center_delta_m,
+                                    double size_delta_x, double size_delta_y,
+                                    double size_delta_z, double odom_step_m);
+
+  // ---- flush CSV buffers ----
+  void flushCsv();
+
+  // ---- accessors for stats ----
+  const RollingStats& totalMsStats() const { return total_ms_stats_; }
+  const RollingStats& ndtMsStats() const { return ndt_ms_stats_; }
+  const RollingStats& fitnessStats() const { return fitness_stats_; }
+
+  int frameOverrunCount() const { return frame_overrun_count_; }
+  int consecutiveOverruns() const { return consecutive_overruns_; }
+  int predictionOnlyCount() const { return prediction_only_count_; }
+  int maxPredictionStreak() const { return max_prediction_streak_; }
+  int targetFallbackCount() const { return target_fallback_count_; }
+  int maxTargetFallbackStreak() const { return max_target_fallback_streak_; }
+  int rawStepExceededCount() const { return raw_step_exceeded_count_; }
+  int outputStepViolationCount() const { return output_step_violation_count_; }
+
+  void incrementFrameOverrun() { frame_overrun_count_++; consecutive_overruns_++; }
+  void resetConsecutiveOverruns() { consecutive_overruns_ = 0; }
+  void incrementPredictionOnly() { prediction_only_count_++; consecutive_prediction_only_++; }
+  void resetConsecutivePredictionOnly() {
+    max_prediction_streak_ = std::max(max_prediction_streak_, consecutive_prediction_only_);
+    consecutive_prediction_only_ = 0;
+  }
+  void incrementTargetFallback() { target_fallback_count_++; consecutive_target_fallback_++; }
+  void resetConsecutiveTargetFallback() {
+    max_target_fallback_streak_ = std::max(max_target_fallback_streak_, consecutive_target_fallback_);
+    consecutive_target_fallback_ = 0;
+  }
+  void incrementRawStepExceeded() { raw_step_exceeded_count_++; }
+  void incrementOutputStepViolation() { output_step_violation_count_++; }
+
+  bool isEnabled() const { return cfg_.enabled; }
+
+private:
+  std::string timestamp() const;
+  void maybeFlushCsv();
+
+  RuntimeDiagnosticsConfig cfg_;
+  std::string output_dir_;
+
+  std::ofstream ndt_csv_;
+  std::ofstream cargo_csv_;
+  std::mutex csv_mutex_;
+
+  RollingStats total_ms_stats_;
+  RollingStats ndt_ms_stats_;
+  RollingStats fitness_stats_;
+
+  int frame_overrun_count_ = 0;
+  int consecutive_overruns_ = 0;
+  int prediction_only_count_ = 0;
+  int consecutive_prediction_only_ = 0;
+  int max_prediction_streak_ = 0;
+  int target_fallback_count_ = 0;
+  int consecutive_target_fallback_ = 0;
+  int max_target_fallback_streak_ = 0;
+  int raw_step_exceeded_count_ = 0;
+  int output_step_violation_count_ = 0;
+
+  std::chrono::steady_clock::time_point last_csv_flush_;
+  std::chrono::steady_clock::time_point last_health_console_;
+};
+
+}  // namespace ndt_slam

@@ -159,6 +159,8 @@ private:
         std::deque<CloudFrame> queue;
         std::uint64_t next_sequence = 0;
         ros::Subscriber sub;
+        std::atomic<std::uint64_t> total_received{0};
+        std::atomic<std::uint64_t> single_count{0};
     };
 
     struct SelectedFrame {
@@ -194,6 +196,9 @@ private:
             ROS_WARN_THROTTLE(2.0, "[MergerSync] dropped empty cloud from %s", name.c_str());
             return;
         }
+
+        // 增加接收计数
+        lidar_it->second.total_received.fetch_add(1, std::memory_order_relaxed);
 
         if (transform_to_base_) {
             pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(
@@ -318,6 +323,7 @@ private:
             SelectedFrame{fallback_lidar->name, fallback_lidar->queue.front()});
         fallback_lidar->queue.pop_front();
         ++fallback_count_;
+        fallback_lidar->single_count.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 
@@ -400,6 +406,77 @@ private:
         ROS_DEBUG_STREAM("[MergerSync] " << diag_msg.data);
         ROS_INFO_STREAM_THROTTLE(diagnostic_log_period_sec_,
                                  "[MergerSync] " << diag_msg.data);
+
+        // ========== Runtime Diagnostics: MERGER_HEALTH ==========
+        {
+            static ros::Time last_merger_health_time;
+            if ((ros::Time::now() - last_merger_health_time).toSec() >= 1.0) {
+                int64_t received_201 = 0, received_203 = 0;
+                int64_t paired = paired_count_.load();
+                int64_t single_201 = 0, single_203 = 0;
+                int64_t dropped = overflow_drop_count_.load() + superseded_drop_count_.load() + empty_drop_count_.load();
+                int64_t reused = 0;
+
+                // 计算各雷达接收数
+                for (const auto& kv : lidars_) {
+                    if (kv.first.find("201") != std::string::npos) {
+                        received_201 = kv.second.total_received.load();
+                        single_201 = kv.second.single_count.load();
+                    } else if (kv.first.find("203") != std::string::npos) {
+                        received_203 = kv.second.total_received.load();
+                        single_203 = kv.second.single_count.load();
+                    }
+                }
+
+                double total_published = published_count_.load();
+                double pair_ratio = total_published > 0 ? paired / total_published : 0.0;
+                double output_hz = total_published / std::max(0.001, (ros::Time::now() - last_merger_health_time).toSec());
+
+                std::cout << "[MERGER_HEALTH]"
+                          << " received_201=" << received_201
+                          << " received_203=" << received_203
+                          << " paired=" << paired
+                          << " single_201=" << single_201
+                          << " single_203=" << single_203
+                          << " pair_ratio=" << std::fixed << std::setprecision(2) << pair_ratio
+                          << " pair_dt_ms_p50=" << std::setprecision(1) << (work.pair_dt_sec < 0 ? -1.0 : work.pair_dt_sec * 1000.0)
+                          << " pair_dt_ms_p95=" << (work.pair_dt_sec < 0 ? -1.0 : work.pair_dt_sec * 1000.0)
+                          << " pair_dt_ms_max=" << (work.pair_dt_sec < 0 ? -1.0 : work.pair_dt_sec * 1000.0)
+                          << " output_hz=" << std::setprecision(1) << output_hz
+                          << " dropped=" << dropped
+                          << " reused=" << reused
+                          << " last_mode=" << work.mode
+                          << std::endl;
+
+                // SINGLE_TIMEOUT 风险输出
+                if (work.mode == "single_timeout") {
+                    std::string sensor = work.frames[0].lidar_name;
+                    std::cout << "[MERGER_RISK] reason=SINGLE_TIMEOUT"
+                              << " sensor=" << sensor
+                              << " stamp=" << std::fixed << std::setprecision(6) << latest_stamp.toSec()
+                              << " pair_wait_wall_ms=" << std::setprecision(1) << work.oldest_age_sec * 1000.0
+                              << " nearest_sensor_dt_ms=" << (work.pair_dt_sec < 0 ? -1.0 : work.pair_dt_sec * 1000.0)
+                              << " received_201=" << received_201
+                              << " received_203=" << received_203
+                              << " paired=" << paired
+                              << " single_count=" << fallback_count_.load()
+                              << std::endl;
+                }
+
+                // PAIR_DT_EXCEEDED 风险输出
+                if (work.pair_dt_sec > max_pair_dt_sec_) {
+                    std::cout << "[MERGER_RISK] reason=PAIR_DT_EXCEEDED"
+                              << " stamp_201=" << std::fixed << std::setprecision(6) << (work.frames.size() > 0 ? work.frames[0].frame.stamp.toSec() : 0.0)
+                              << " stamp_203=" << (work.frames.size() > 1 ? work.frames[1].frame.stamp.toSec() : 0.0)
+                              << " pair_dt_ms=" << std::setprecision(1) << work.pair_dt_sec * 1000.0
+                              << " limit_ms=" << max_pair_dt_sec_ * 1000.0
+                              << std::endl;
+                }
+
+                last_merger_health_time = ros::Time::now();
+            }
+        }
+
         if (work.mode == "single_timeout") {
             ROS_WARN_STREAM_THROTTLE(
                 1.0, "[MergerSync] counterpart timeout; published true single cloud: "

@@ -78,6 +78,8 @@ set(LIBRARY_SOURCES
   src/cargo_box_estimator.cpp
   # v8-stable-r3: CraneMotionEKF
   src/crane_motion_ekf.cpp
+  # Runtime diagnostics (1.0x/1.5x acceptance testing)
+  src/runtime_diagnostics.cpp
 )
 
 add_library(ndt_slam_lib SHARED

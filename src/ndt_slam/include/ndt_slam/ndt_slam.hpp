@@ -50,6 +50,9 @@
 #include "ndt_slam/payload_tracker.hpp"
 #include "ndt_slam/human_object_filter.hpp"
 #include "ndt_slam/dynamic_event_manager.hpp"
+
+// Runtime diagnostics (1.0x/1.5x acceptance testing)
+#include "ndt_slam/runtime_diagnostics.hpp"
 #include "lidar_slam2_msgs/SaveMap.h"
 #include "lidar_slam2_msgs/LoadMap.h"
 
@@ -1370,6 +1373,35 @@ private:
         const Eigen::Vector3f& cargo_size,
         const CargoWarningData& warning,
         const ros::Time& stamp);
+
+    // ========== Runtime Diagnostics (1.0x/1.5x acceptance testing) ==========
+    RuntimeDiagnostics runtime_diag_;
+    RuntimeDiagnosticsConfig runtime_diag_config_;
+    std::string diag_output_dir_;
+
+    // 用于健康状态统计
+    int diag_frame_index_ = 0;
+    double diag_last_cloud_stamp_ = 0.0;
+    double diag_last_wall_time_ = 0.0;
+    int diag_consecutive_overruns_ = 0;
+    int diag_consecutive_prediction_only_ = 0;
+    int diag_consecutive_target_fallback_ = 0;
+    int diag_input_frame_count_ = 0;
+    int diag_processed_frame_count_ = 0;
+    int diag_converged_count_ = 0;
+    double diag_last_valid_ndt_stamp_ = 0.0;
+
+    // 用于cargo风险检测
+    float diag_last_bottom_z_ = 0.0f;
+    float diag_last_height_m_ = 0.0f;
+    int diag_cargo_lost_frames_ = 0;
+    int diag_last_track_id_ = -1;
+    std::string diag_last_cargo_state_ = "EMPTY";
+
+    void logStartupConfig();
+    void logBuildId();
+    void logNdtHealthPeriodic();
+    void logCargoHealthPeriodic();
 };
 
 } // namespace ndt_slam

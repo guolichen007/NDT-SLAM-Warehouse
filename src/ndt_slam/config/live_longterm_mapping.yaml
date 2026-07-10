@@ -4,6 +4,16 @@
 # 调试选项
 debug:
   publish_runtime_path: false  # runtime_path 只是显示辅助，不参与算法
+  runtime_diagnostics:
+    enabled: true
+    console_period_sec: 1.0
+    csv_enabled: true
+    csv_flush_period_sec: 1.0
+    warn_consecutive_overrun_frames: 3
+    warn_prediction_only_frames: 3
+    warn_target_fallback_frames: 3
+    warn_cargo_bottom_jump_m: 0.20
+    warn_cargo_height_jump_m: 0.20
 
 # 日志配置
 logging:
