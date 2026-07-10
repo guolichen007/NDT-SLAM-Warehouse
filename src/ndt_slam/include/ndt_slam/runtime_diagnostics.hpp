@@ -150,6 +150,7 @@ struct CargoFrameRecord {
 class RuntimeDiagnostics {
 public:
   RuntimeDiagnostics();
+  ~RuntimeDiagnostics();
 
   void configure(const RuntimeDiagnosticsConfig& cfg, const std::string& output_dir);
 

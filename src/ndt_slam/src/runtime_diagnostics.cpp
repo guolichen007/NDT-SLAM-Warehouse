@@ -10,6 +10,19 @@ RuntimeDiagnostics::RuntimeDiagnostics()
     : last_csv_flush_(std::chrono::steady_clock::now()),
       last_health_console_(std::chrono::steady_clock::now()) {}
 
+RuntimeDiagnostics::~RuntimeDiagnostics() {
+  // 确保CSV文件被正确关闭
+  std::lock_guard<std::mutex> lock(csv_mutex_);
+  if (ndt_csv_.is_open()) {
+    ndt_csv_.flush();
+    ndt_csv_.close();
+  }
+  if (cargo_csv_.is_open()) {
+    cargo_csv_.flush();
+    cargo_csv_.close();
+  }
+}
+
 void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
                                     const std::string& output_dir) {
   cfg_ = cfg;

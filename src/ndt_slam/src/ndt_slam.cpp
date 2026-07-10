@@ -2427,26 +2427,31 @@ void NdtSlamNode::processCloudThread() {
 
         // ========== Runtime Diagnostics 输出 ==========
         if (runtime_diag_.isEnabled()) {
-            // 从 EKF 获取状态
+            // 从 EKF 获取状态（安全访问）
             double diag_innovation = 0.0;
             double diag_output_step = 0.0;
             double diag_max_allowed_step = 0.0;
             bool diag_prediction_only = false;
             std::string diag_reject_reason = "NONE";
             bool diag_allow_map_commit = false;
-            if (crane_motion_ekf_enabled_) {
-                const auto& ekf_status = crane_motion_ekf_.status();
-                diag_innovation = ekf_status.innovation_norm;
-                diag_output_step = ekf_status.output_step;
-                diag_max_allowed_step = ekf_status.max_allowed_step;
-                diag_prediction_only = ekf_status.prediction_only;
-                diag_reject_reason = ekf_status.reject_reason;
-            }
-            // 重新计算 allow_map_commit
-            {
-                const bool commit_accept_ok = !crane_motion_ekf_enabled_ || crane_motion_ekf_.status().ndt_accepted;
-                const bool commit_fitness_ok = std::isfinite(last_ndt_fitness_) && last_ndt_fitness_ <= map_commit_max_fitness_;
-                diag_allow_map_commit = commit_accept_ok && commit_fitness_ok;
+            try {
+                if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
+                    const auto& ekf_status = crane_motion_ekf_.status();
+                    diag_innovation = ekf_status.innovation_norm;
+                    diag_output_step = ekf_status.output_step;
+                    diag_max_allowed_step = ekf_status.max_allowed_step;
+                    diag_prediction_only = ekf_status.prediction_only;
+                    diag_reject_reason = ekf_status.reject_reason;
+                    diag_allow_map_commit = ekf_status.ndt_accepted;
+                }
+                // 重新计算 allow_map_commit
+                {
+                    const bool commit_fitness_ok = std::isfinite(last_ndt_fitness_) && last_ndt_fitness_ <= map_commit_max_fitness_;
+                    diag_allow_map_commit = diag_allow_map_commit && commit_fitness_ok;
+                }
+            } catch (...) {
+                // 如果EKF状态访问失败，使用默认值
+                diag_allow_map_commit = false;
             }
 
             diag_frame_index_++;
