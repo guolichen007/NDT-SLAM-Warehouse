@@ -29,3 +29,9 @@ payload_debug/
 
 # 系统文件
 .DS_Store
+test_results/
+build/
+devel/
+install/
+logs/
+log/
