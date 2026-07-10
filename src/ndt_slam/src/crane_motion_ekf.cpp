@@ -79,6 +79,32 @@ Sophus::SE3d CraneMotionEKF::predictPose(const Sophus::SE3d& pose_template,
     return buildPoseFromState(x_pred, pose_template);
 }
 
+Sophus::SE3d CraneMotionEKF::predictPoseReadOnly(const Sophus::SE3d& current_pose,
+                                                  double dt) const {
+    if (!initialized_) {
+        return current_pose;
+    }
+
+    // 限制 dt 范围，避免异常值
+    dt = std::max(1e-3, std::min(dt, 0.5));
+
+    // 使用恒速模型外推 x/y
+    Eigen::Vector4d x_pred = x_;
+    x_pred(0) += x_(2) * dt;  // x + vx * dt
+    x_pred(1) += x_(3) * dt;  // y + vy * dt
+
+    // 限幅速度
+    x_pred(2) = std::clamp(x_pred(2), -cfg_.max_speed_x, cfg_.max_speed_x);
+    x_pred(3) = std::clamp(x_pred(3), -cfg_.max_speed_y, cfg_.max_speed_y);
+
+    // 构建预测 pose：只修改 x/y，保持 z/roll/pitch/yaw 不变
+    Sophus::SE3d predicted = current_pose;
+    predicted.translation().x() = x_pred(0);
+    predicted.translation().y() = x_pred(1);
+
+    return predicted;
+}
+
 Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
                                            double ndt_fitness,
                                            const Sophus::SE3d& pose_template,

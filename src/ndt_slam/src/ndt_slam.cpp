@@ -145,8 +145,23 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     ndt_->setStepSize(ndt_step_size_);
     ndt_->setTransformationEpsilon(ndt_transformation_epsilon_);
     ndt_->setMaximumIterations(ndt_max_iterations_);
-    ROS_INFO("NDT_OMP initialized: resolution=%.2f, step_size=%.2f, max_iter=%d",
-             ndt_resolution_, ndt_step_size_, ndt_max_iterations_);
+
+    // V3: 设置 NDT_OMP 多线程和邻域搜索方法
+    ndt_->setNumThreads(ndt_num_threads_);
+    if (ndt_neighbor_search_method_ == "DIRECT7") {
+        ndt_->setNeighborhoodSearchMethod(pclomp::DIRECT7);
+        ROS_INFO("NDT_OMP: using DIRECT7 neighbor search");
+    } else if (ndt_neighbor_search_method_ == "DIRECT1") {
+        ndt_->setNeighborhoodSearchMethod(pclomp::DIRECT1);
+        ROS_INFO("NDT_OMP: using DIRECT1 neighbor search");
+    } else {
+        ndt_->setNeighborhoodSearchMethod(pclomp::KDTREE);
+        ROS_INFO("NDT_OMP: using KDTREE neighbor search");
+    }
+
+    ROS_INFO("NDT_OMP initialized: resolution=%.2f, step_size=%.2f, max_iter=%d, threads=%d, search=%s",
+             ndt_resolution_, ndt_step_size_, ndt_max_iterations_, ndt_num_threads_,
+             ndt_neighbor_search_method_.c_str());
 
     shutdown_ = false;
     running_ = true;
@@ -467,6 +482,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             if (ndt["step_size"]) ndt_step_size_ = ndt["step_size"].as<double>();
             if (ndt["transformation_epsilon"]) ndt_transformation_epsilon_ = ndt["transformation_epsilon"].as<double>();
             if (ndt["max_iterations"]) ndt_max_iterations_ = ndt["max_iterations"].as<int>();
+            if (ndt["num_threads"]) ndt_num_threads_ = ndt["num_threads"].as<int>();
+            if (ndt["neighbor_search_method"]) ndt_neighbor_search_method_ = ndt["neighbor_search_method"].as<std::string>();
         }
 
         // 动态点过滤参数
@@ -843,12 +860,14 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             ground_sample_ratio_ = n["ground_sample_ratio"].as<double>(0.20);
             max_ndt_points_ = n["max_ndt_points"].as<int>(8000);
             min_objects_for_weighting_ = n["min_objects_for_weighting"].as<int>(500);
+            min_registration_points_ = n["min_registration_points"].as<int>(2500);
 
-            ROS_INFO("[RegistrationInput] voxel=%.2f repeat=%d ground_ratio=%.2f max_points=%d",
+            ROS_INFO("[RegistrationInput] voxel=%.2f repeat=%d ground_ratio=%.2f max_points=%d min_points=%d",
                      ndt_input_voxel_size_,
                      object_weight_repeat_,
                      ground_sample_ratio_,
-                     max_ndt_points_);
+                     max_ndt_points_,
+                     min_registration_points_);
         }
 
         // v8-stable-r3: Adaptive NDT 参数
@@ -1645,15 +1664,41 @@ void NdtSlamNode::processCloudThread() {
                 target_rebuild_count_++;
 
                 pcl::PointCloud<pcl::PointXYZ> aligned;
-                Eigen::Matrix4f initial_guess = current_pose_.matrix().cast<float>();
+
+                // V3: 使用 EKF 预测作为 initial guess（如果 EKF 已初始化）
+                Eigen::Matrix4f initial_guess;
+                if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
+                    // 计算 dt
+                    double dt = (msg->header.stamp - last_processed_frame_stamp_).toSec();
+                    if (dt <= 0.0 || dt > 1.0) {
+                        dt = 0.1;  // 默认 100ms
+                    }
+                    Sophus::SE3d predicted = crane_motion_ekf_.predictPoseReadOnly(current_pose_, dt);
+                    initial_guess = predicted.matrix().cast<float>();
+                } else {
+                    initial_guess = current_pose_.matrix().cast<float>();
+                }
+
                 last_source_points_ = static_cast<int>(registration_cloud->size());
                 last_target_points_ = static_cast<int>(local_map_->size());
+
+                // 计算 initial_guess 到 current_pose_ 的距离（用于诊断）
+                Eigen::Vector3f initial_pos = initial_guess.block<3,1>(0,3);
+                Eigen::Vector3f current_pos = current_pose_.matrix().cast<float>().block<3,1>(0,3);
+                last_init_dist_ = (initial_pos - current_pos).norm();
 
                 auto ndt_start = std::chrono::steady_clock::now();
                 ndt_->align(aligned, initial_guess);
                 auto ndt_end = std::chrono::steady_clock::now();
                 double ndt_time_ms = std::chrono::duration<double, std::milli>(ndt_end - ndt_start).count();
                 last_ndt_time_ms_ = ndt_time_ms;
+
+                // 计算 raw_step（NDT结果到initial_guess的距离）
+                if (ndt_->hasConverged()) {
+                    Eigen::Matrix4f ndt_result = ndt_->getFinalTransformation();
+                    Eigen::Vector3f ndt_pos = ndt_result.block<3,1>(0,3);
+                    last_raw_step_ = (ndt_pos - initial_pos).norm();
+                }
 
                 // NDT 时间预算：超过 100ms 输出警告（起重机场景 NDT 正常需要 70-120ms）
                 static const double NDT_TIME_BUDGET_MS = 300.0;
@@ -1670,6 +1715,7 @@ void NdtSlamNode::processCloudThread() {
                     Eigen::Matrix4f result = ndt_->getFinalTransformation();
                     double fitness_score = ndt_->getFitnessScore();
                     double trans_prob = ndt_->getTransformationProbability();
+                    last_ndt_iterations_ = ndt_->getFinalNumIteration();
                     ROS_DEBUG("NDT: converged, fitness=%.4f, prob=%.6f", fitness_score, trans_prob);
                     if (fitness_score > 5.0) {
                         ROS_WARN("NDT: high fitness score=%.4f, matching quality may be poor", fitness_score);
@@ -1990,12 +2036,94 @@ void NdtSlamNode::processCloudThread() {
 
         // [Perf] 日志：debug_perf 开启时逐帧输出，否则不输出
         if (debug_cfg_.debug_perf) {
-            ROS_INFO("[Perf] total=%.1fms ndt=%.1fms fitness=%.3f kf=%d frame=%d",
+            // 计算 innovation（EKF状态到NDT结果的距离）
+            double innovation = 0.0;
+            if (crane_motion_ekf_enabled_) {
+                const auto& ekf_status = crane_motion_ekf_.status();
+                innovation = ekf_status.innovation_norm;
+            }
+
+            // 计算 source_build_ms 和 target_build_ms（近似值）
+            double source_build_ms = 0.0;
+            double target_build_ms = 0.0;
+
+            ROS_INFO("[Perf] total=%.1fms source=%.1fms target_build=%.1fms ndt=%.1fms "
+                     "fitness=%.3f iter=%d converged=%d "
+                     "init_dist=%.3f raw_step=%.3f innov=%.3f "
+                     "src_pts=%d tgt_pts=%d tgt_ver=%lu tgt_rebuild=%d "
+                     "frame=%d",
                      average_process_time_ms_,
+                     source_build_ms,
+                     target_build_ms,
                      last_ndt_time_ms_,
                      last_ndt_fitness_,
-                     keyframe_count_,
+                     last_ndt_iterations_,
+                     ndt_->hasConverged() ? 1 : 0,
+                     last_init_dist_,
+                     last_raw_step_,
+                     innovation,
+                     last_source_points_,
+                     last_target_points_,
+                     target_version_,
+                     target_rebuild_count_,
                      total_frames);
+        }
+
+        // CSV 输出：每帧记录到 /tmp/588_ndt_profile.csv
+        {
+            static bool csv_header_written = false;
+            if (!csv_initialized_) {
+                csv_file_.open("/tmp/588_ndt_profile.csv", std::ios::out | std::ios::trunc);
+                if (csv_file_.is_open()) {
+                    csv_file_ << "frame,stamp,"
+                              << "source_points,target_points,target_version,target_rebuild,"
+                              << "source_build_ms,target_build_ms,ndt_ms,total_ms,"
+                              << "fitness,converged,iterations,"
+                              << "init_to_result_dist,raw_step,final_step,innovation,"
+                              << "target_source_type,"
+                              << "ekf_accept,reject_reason" << std::endl;
+                    csv_header_written = true;
+                    csv_initialized_ = true;
+                }
+            }
+
+            if (csv_file_.is_open()) {
+                // 计算 EKF accept 和 reject_reason
+                bool ekf_accept = true;
+                std::string reject_reason = "NONE";
+                if (crane_motion_ekf_enabled_) {
+                    const auto& ekf_status = crane_motion_ekf_.status();
+                    ekf_accept = ekf_status.ndt_accepted;
+                    reject_reason = ekf_status.reject_reason;
+                }
+
+                // 计算 innovation
+                double innovation = 0.0;
+                if (crane_motion_ekf_enabled_) {
+                    innovation = crane_motion_ekf_.status().innovation_norm;
+                }
+
+                csv_file_ << total_frames << ","
+                          << last_stamp_.toSec() << ","
+                          << last_source_points_ << ","
+                          << last_target_points_ << ","
+                          << target_version_ << ","
+                          << target_rebuild_count_ << ","
+                          << "0.0,"  // source_build_ms (placeholder)
+                          << "0.0,"  // target_build_ms (placeholder)
+                          << last_ndt_time_ms_ << ","
+                          << average_process_time_ms_ << ","
+                          << last_ndt_fitness_ << ","
+                          << (ndt_->hasConverged() ? 1 : 0) << ","
+                          << last_ndt_iterations_ << ","
+                          << last_init_dist_ << ","
+                          << last_raw_step_ << ","
+                          << last_raw_step_ << ","  // final_step (same as raw_step for now)
+                          << innovation << ","
+                          << "local_map,"  // target_source_type (placeholder)
+                          << (ekf_accept ? 1 : 0) << ","
+                          << reject_reason << std::endl;
+            }
         }
 
         // Status 只在运动时报告，每 30 秒一次
@@ -6891,10 +7019,12 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::buildRegistrationCloud(
         repeat = 1;
     }
 
+    // V3: object 点优先
     for (int i = 0; i < repeat; ++i) {
         *registration_cloud += *human_safe_objects;
     }
 
+    // V3: ground 只保留指定比例（默认 5%）
     auto ground_sampled = sampleCloudByRatio(
         ground_cloud,
         ground_sample_ratio_);
@@ -6902,6 +7032,19 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::buildRegistrationCloud(
     *registration_cloud += *ground_sampled;
 
     voxelDownsampleInPlace(registration_cloud, ndt_input_voxel_size_);
+
+    // V3: 检查最小点数，不足时回退到旧模式
+    if (static_cast<int>(registration_cloud->size()) < min_registration_points_) {
+        ROS_WARN_THROTTLE(5.0, "[RegistrationInput] points=%zu < min=%d, fallback to full ground",
+                          registration_cloud->size(), min_registration_points_);
+        // 回退：使用完整 ground
+        registration_cloud->clear();
+        for (int i = 0; i < repeat; ++i) {
+            *registration_cloud += *human_safe_objects;
+        }
+        *registration_cloud += *ground_cloud;
+        voxelDownsampleInPlace(registration_cloud, ndt_input_voxel_size_);
+    }
 
     limitCloudUniformInPlace(registration_cloud, max_ndt_points_);
 

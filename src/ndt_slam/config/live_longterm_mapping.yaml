@@ -65,6 +65,8 @@ ndt_omp:
   step_size: 0.1
   transformation_epsilon: 0.01
   max_iterations: 30          # v8-stable-r3-hotfix-minimal: 从 50 改为 30，与 adaptive_ndt.normal 一致
+  num_threads: 4              # V3: NDT_OMP 多线程加速
+  neighbor_search_method: DIRECT7  # V3: DIRECT7 比 KDTREE 快，搜索相同相邻体素集合
 
 # 动态点过滤
 dynamic_filter:
@@ -404,11 +406,12 @@ soft_yaw_filter:
 
 # ========== v8-stable-r3-final: Registration Input ==========
 registration_input:
-  ndt_input_voxel_size: 0.30
+  ndt_input_voxel_size: 0.35   # V3: 从 0.30 增大到 0.35，降低点数
   object_weight_repeat: 2
-  ground_sample_ratio: 0.20
-  max_ndt_points: 8000
+  ground_sample_ratio: 0.05    # V3: 从 0.20 降到 0.05，降低地面主导
+  max_ndt_points: 5000         # V3: 从 8000 降到 5000，降低NDT计算量
   min_objects_for_weighting: 500
+  min_registration_points: 2500  # V3: 最小配准点数，不足时回退旧模式
 
 # ========== v8-stable-r3-final: Adaptive NDT ==========
 adaptive_ndt:

@@ -82,6 +82,10 @@ public:
     Sophus::SE3d predictPose(const Sophus::SE3d& pose_template,
                              const ros::Time& stamp);
 
+    // V3: 只读预测，不修改EKF状态，用于NDT initial guess
+    Sophus::SE3d predictPoseReadOnly(const Sophus::SE3d& current_pose,
+                                     double dt) const;
+
     Sophus::SE3d updateWithNDT(const Sophus::SE3d& ndt_pose,
                                double ndt_fitness,
                                const Sophus::SE3d& pose_template,

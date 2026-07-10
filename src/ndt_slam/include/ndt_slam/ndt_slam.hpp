@@ -333,6 +333,7 @@ private:
     double ground_sample_ratio_ = 0.20;
     int max_ndt_points_ = 8000;
     int min_objects_for_weighting_ = 500;
+    int min_registration_points_ = 2500;  // V3: 最小配准点数
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr sampleCloudByRatio(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double ratio);
@@ -377,6 +378,8 @@ private:
     double ndt_step_size_ = 0.1;
     double ndt_transformation_epsilon_ = 0.01;
     int ndt_max_iterations_ = 100;
+    int ndt_num_threads_ = 4;  // V3: NDT_OMP 多线程
+    std::string ndt_neighbor_search_method_ = "DIRECT7";  // V3: 邻域搜索方法
 
     // KISS-ICP config (保留用于参数读取兼容)
     kiss_icp::pipeline::KISSConfig kiss_icp_config_;
