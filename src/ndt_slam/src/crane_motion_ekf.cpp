@@ -341,4 +341,35 @@ void CraneMotionEKF::applyZeroVelocityConstraint() {
     status_.velocity = x_.tail<2>();
 }
 
+// V3: 慢帧保护 - 计算额外的 R 增量
+double CraneMotionEKF::computeSlowFrameExtraR(double ndt_time_ms) const {
+    if (!cfg_.slow_frame_guard_enabled) {
+        return 0.0;
+    }
+
+    if (ndt_time_ms > cfg_.slow_frame_warn_ms) {
+        return cfg_.slow_frame_extra_r;
+    }
+
+    return 0.0;
+}
+
+// V3: 物理步长保护 - 检查 NDT 结果是否非物理
+bool CraneMotionEKF::isNonPhysicalStep(double raw_step, double ndt_time_ms, double dt) const {
+    if (!cfg_.slow_frame_guard_enabled) {
+        return false;
+    }
+
+    // 只在慢帧时检查物理步长
+    if (ndt_time_ms <= 80.0) {
+        return false;
+    }
+
+    // 计算最大物理步长
+    double max_step = cfg_.max_speed_mps * dt * cfg_.max_step_safety_factor;
+    max_step = std::clamp(max_step, cfg_.max_step_min_m, cfg_.max_step_max_m);
+
+    return raw_step > max_step;
+}
+
 }  // namespace ndt_slam

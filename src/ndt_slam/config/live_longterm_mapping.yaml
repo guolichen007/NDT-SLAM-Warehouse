@@ -390,6 +390,20 @@ crane_motion_ekf:
     max_reject_innovation_frames: 5
     high_fitness_threshold: 0.15
 
+  # V3: 慢帧保护
+  ndt_runtime_guard:
+    enabled: true
+    warn_ms: 100.0
+    emergency_ms: 120.0
+    slow_extra_r: 0.30
+
+  # V3: 物理步长保护
+  crane_motion_limit:
+    max_speed_mps: 0.50
+    max_step_safety_factor: 1.5
+    max_step_min_m: 0.08
+    max_step_max_m: 0.25
+
 # ========== v8-stable-r3-final: SoftYawFilter ==========
 soft_yaw_filter:
   enabled: true

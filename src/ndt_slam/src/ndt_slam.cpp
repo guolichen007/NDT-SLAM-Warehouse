@@ -813,8 +813,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             crane_motion_ekf_cfg_.r_ndt_max = n["r_ndt_max"].as<double>(2.0);
             crane_motion_ekf_cfg_.fitness_to_r_scale = n["fitness_to_r_scale"].as<double>(5.0);
 
-            crane_motion_ekf_cfg_.innovation_gate_m = n["innovation_gate_m"].as<double>(0.50);
-            crane_motion_ekf_cfg_.innovation_reject_m = n["innovation_reject_m"].as<double>(1.50);
+            crane_motion_ekf_cfg_.innovation_gate_m = n["innovation_gate_m"].as<double>(0.35);
+            crane_motion_ekf_cfg_.innovation_reject_m = n["innovation_reject_m"].as<double>(1.00);
 
             // 高 fitness 拒绝
             crane_motion_ekf_cfg_.reject_high_fitness = n["reject_high_fitness"].as<bool>(true);
@@ -823,6 +823,24 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
             crane_motion_ekf_cfg_.max_speed_x = n["max_speed_x"].as<double>(2.0);
             crane_motion_ekf_cfg_.max_speed_y = n["max_speed_y"].as<double>(2.0);
+
+            // V3: 慢帧保护配置
+            if (n["ndt_runtime_guard"]) {
+                const auto g = n["ndt_runtime_guard"];
+                crane_motion_ekf_cfg_.slow_frame_guard_enabled = g["enabled"].as<bool>(true);
+                crane_motion_ekf_cfg_.slow_frame_warn_ms = g["warn_ms"].as<double>(100.0);
+                crane_motion_ekf_cfg_.slow_frame_emergency_ms = g["emergency_ms"].as<double>(120.0);
+                crane_motion_ekf_cfg_.slow_frame_extra_r = g["slow_extra_r"].as<double>(0.30);
+            }
+
+            // V3: 物理步长保护配置
+            if (n["crane_motion_limit"]) {
+                const auto m = n["crane_motion_limit"];
+                crane_motion_ekf_cfg_.max_speed_mps = m["max_speed_mps"].as<double>(0.50);
+                crane_motion_ekf_cfg_.max_step_safety_factor = m["max_step_safety_factor"].as<double>(1.5);
+                crane_motion_ekf_cfg_.max_step_min_m = m["max_step_min_m"].as<double>(0.08);
+                crane_motion_ekf_cfg_.max_step_max_m = m["max_step_max_m"].as<double>(0.25);
+            }
 
             if (n["diagonal_mode"]) {
                 const auto d = n["diagonal_mode"];
@@ -1845,10 +1863,30 @@ void NdtSlamNode::processCloudThread() {
                         Sophus::SE3d ekf_pose = new_pose;
                         bool ndt_accepted = true;
 
+                        // V3: 慢帧保护 - 检查是否需要使用 EKF prediction
+                        bool use_prediction = false;
+                        std::string reject_reason_slow = "NONE";
+                        if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
+                            double dt = (msg->header.stamp - last_processed_frame_stamp_).toSec();
+                            if (dt <= 0.0 || dt > 1.0) dt = 0.1;
+
+                            // 物理步长保护
+                            if (crane_motion_ekf_.isNonPhysicalStep(last_raw_step_, ndt_time_ms, dt)) {
+                                use_prediction = true;
+                                reject_reason_slow = "SLOW_NONPHYSICAL_STEP";
+                                ROS_WARN_THROTTLE(2.0, "[NDT-guard] slow_frame nonphysical: raw_step=%.3f ndt_ms=%.1f dt=%.3f",
+                                                 last_raw_step_, ndt_time_ms, dt);
+                            }
+                        }
+
                         if (crane_motion_ekf_enabled_) {
                             if (!crane_motion_ekf_.initialized()) {
                                 crane_motion_ekf_.initialize(new_pose, msg->header.stamp);
                                 ekf_pose = new_pose;
+                            } else if (use_prediction) {
+                                // V3: 使用 EKF prediction 替代 NDT 结果
+                                ekf_pose = crane_motion_ekf_.predictPoseReadOnly(current_pose_, ndt_time_ms / 1000.0);
+                                // 不更新 EKF 状态，只使用预测
                             } else {
                                 ekf_pose = crane_motion_ekf_.updateWithNDT(
                                     new_pose,

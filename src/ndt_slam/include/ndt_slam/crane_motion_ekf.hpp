@@ -19,11 +19,23 @@ struct CraneMotionEKFConfig {
     double r_ndt_max = 2.0;
     double fitness_to_r_scale = 5.0;
 
-    double innovation_gate_m = 0.50;
-    double innovation_reject_m = 1.50;
+    double innovation_gate_m = 0.35;   // V3: 收紧到 0.35
+    double innovation_reject_m = 1.00; // V3: 收紧到 1.00
 
     double max_speed_x = 2.0;
     double max_speed_y = 2.0;
+
+    // V3: 慢帧降权
+    bool slow_frame_guard_enabled = true;
+    double slow_frame_warn_ms = 100.0;
+    double slow_frame_emergency_ms = 120.0;
+    double slow_frame_extra_r = 0.30;
+
+    // V3: 物理步长保护
+    double max_speed_mps = 0.50;
+    double max_step_safety_factor = 1.5;
+    double max_step_min_m = 0.08;
+    double max_step_max_m = 0.25;
 
     bool diagonal_enabled = true;
     double diagonal_min_vx = 0.05;
@@ -90,6 +102,12 @@ public:
                                double ndt_fitness,
                                const Sophus::SE3d& pose_template,
                                const ros::Time& stamp);
+
+    // V3: 慢帧保护 - 传入 NDT 时间，返回额外的 R 增量
+    double computeSlowFrameExtraR(double ndt_time_ms) const;
+
+    // V3: 物理步长保护 - 检查 NDT 结果是否非物理
+    bool isNonPhysicalStep(double raw_step, double ndt_time_ms, double dt) const;
 
     const CraneMotionEKFStatus& status() const { return status_; }
 
