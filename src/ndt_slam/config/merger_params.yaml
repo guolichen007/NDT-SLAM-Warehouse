@@ -1,12 +1,24 @@
-# 双雷达点云拼接配置
-# 两个雷达安装位置不同，必须变换到 base_link 后再合并
-# 否则点云错位，KISS-ICP 无法配准
-
+# Dual-lidar consume-once synchronization.
+# Both clouds are rigidly transformed into base_link before they are merged.
 output_topic: "/merged_points"
 output_frame: "base_link"
+diagnostics_topic: "/pointcloud_merger/diagnostics"
 transform_to_base: true
 use_voxel_filter: true
 voxel_size: 0.15
+
+sync:
+  # The measured warehouse bag offset is about 48 ms. Keep this just above
+  # that offset, and validate pair_dt_ms from the diagnostics topic on Ubuntu.
+  max_pair_dt_sec: 0.060
+  # A cloud is published alone only after this wall-clock wait. It is never
+  # copied into the missing lidar slot.
+  stale_timeout_sec: 0.120
+  # The timer only selects/consumes work; PCL transform/filter work is lock-free.
+  timer_period_sec: 0.010
+  max_queue_size: 8
+  subscriber_queue_size: 10
+  diagnostic_log_period_sec: 2.0
 
 lidars:
   - name: "lidar150"
