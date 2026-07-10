@@ -2427,6 +2427,28 @@ void NdtSlamNode::processCloudThread() {
 
         // ========== Runtime Diagnostics 输出 ==========
         if (runtime_diag_.isEnabled()) {
+            // 从 EKF 获取状态
+            double diag_innovation = 0.0;
+            double diag_output_step = 0.0;
+            double diag_max_allowed_step = 0.0;
+            bool diag_prediction_only = false;
+            std::string diag_reject_reason = "NONE";
+            bool diag_allow_map_commit = false;
+            if (crane_motion_ekf_enabled_) {
+                const auto& ekf_status = crane_motion_ekf_.status();
+                diag_innovation = ekf_status.innovation_norm;
+                diag_output_step = ekf_status.output_step;
+                diag_max_allowed_step = ekf_status.max_allowed_step;
+                diag_prediction_only = ekf_status.prediction_only;
+                diag_reject_reason = ekf_status.reject_reason;
+            }
+            // 重新计算 allow_map_commit
+            {
+                const bool commit_accept_ok = !crane_motion_ekf_enabled_ || crane_motion_ekf_.status().ndt_accepted;
+                const bool commit_fitness_ok = std::isfinite(last_ndt_fitness_) && last_ndt_fitness_ <= map_commit_max_fitness_;
+                diag_allow_map_commit = commit_accept_ok && commit_fitness_ok;
+            }
+
             diag_frame_index_++;
             diag_last_cloud_stamp_ = last_stamp_.toSec();
             diag_processed_frame_count_++;
@@ -2448,10 +2470,13 @@ void NdtSlamNode::processCloudThread() {
             ndt_rec.ndt_iterations = last_ndt_iterations_;
             ndt_rec.fitness = last_ndt_fitness_;
             ndt_rec.raw_step_m = last_raw_step_;
-            ndt_rec.prediction_only = prediction_only;
-            ndt_rec.prediction_reason = reject_reason;
-            ndt_rec.map_commit_allowed = allow_map_commit;
-            ndt_rec.map_commit_reason = allow_map_commit ? "accepted" : "blocked";
+            ndt_rec.output_step_m = diag_output_step;
+            ndt_rec.allowed_step_m = diag_max_allowed_step;
+            ndt_rec.innovation_m = diag_innovation;
+            ndt_rec.prediction_only = diag_prediction_only;
+            ndt_rec.prediction_reason = diag_reject_reason;
+            ndt_rec.map_commit_allowed = diag_allow_map_commit;
+            ndt_rec.map_commit_reason = diag_allow_map_commit ? "accepted" : "blocked";
             runtime_diag_.writeNdtFrame(ndt_rec);
 
             // NDT 风险检测
@@ -2470,7 +2495,7 @@ void NdtSlamNode::processCloudThread() {
                 runtime_diag_.logNdtRiskFitnessSpike(
                     diag_frame_index_, diag_last_cloud_stamp_, last_ndt_fitness_,
                     fitness_median, fitness_mad, 2.0, last_ndt_converged_,
-                    last_raw_step_, innovation);
+                    last_raw_step_, diag_innovation);
             }
 
             // Frame overrun 检测
@@ -2494,13 +2519,13 @@ void NdtSlamNode::processCloudThread() {
             }
 
             // Prediction-only 检测
-            if (prediction_only) {
+            if (diag_prediction_only) {
                 runtime_diag_.incrementPredictionOnly();
                 diag_consecutive_prediction_only_++;
                 if (diag_consecutive_prediction_only_ == 1) {
                     runtime_diag_.logEkfRiskPredictionOnly(
-                        diag_frame_index_, diag_last_cloud_stamp_, reject_reason,
-                        last_ndt_fitness_, last_ndt_converged_, innovation,
+                        diag_frame_index_, diag_last_cloud_stamp_, diag_reject_reason,
+                        last_ndt_fitness_, last_ndt_converged_, diag_innovation,
                         diag_consecutive_prediction_only_);
                 }
                 if (diag_consecutive_prediction_only_ > 3) {
@@ -2514,20 +2539,20 @@ void NdtSlamNode::processCloudThread() {
             }
 
             // Raw step exceeded 检测
-            if (last_raw_step_ > max_allowed_step + 0.001) {
+            if (last_raw_step_ > diag_max_allowed_step + 0.001) {
                 runtime_diag_.incrementRawStepExceeded();
                 runtime_diag_.logOdomRiskRawStepExceeded(
                     diag_frame_index_, diag_last_cloud_stamp_, last_sensor_dt_ * 1000.0,
-                    0, 0, 0, last_raw_step_, max_allowed_step, last_ndt_fitness_,
+                    0, 0, 0, last_raw_step_, diag_max_allowed_step, last_ndt_fitness_,
                     last_ndt_converged_);
             }
 
             // Output step violation 检测
-            if (output_step > max_allowed_step + 0.0001) {
+            if (diag_output_step > diag_max_allowed_step + 0.0001) {
                 runtime_diag_.incrementOutputStepViolation();
                 runtime_diag_.logOdomRiskOutputStepViolation(
                     diag_frame_index_, diag_last_cloud_stamp_, 0, 0, 0,
-                    output_step, max_allowed_step);
+                    diag_output_step, diag_max_allowed_step);
             }
 
             // 周期性健康日志
@@ -9453,7 +9478,7 @@ void NdtSlamNode::publishCargoWarning(const CargoWarningData& warning, const ros
 
     // 日志（始终输出，用于调试）
     if (warning.level > 0) {
-        ROS_WARN_THROTTLE(1.0, "[CargoWarning] level=%d alarm=%d dist=%.2f clearance=%.2f cargo_bottom=%.2f obstacle_top=%.2f reason=%s publish_alarm=%d",
+        ROS_WARN_THROTTLE(1.0, "[CargoWarning] level=%d alarm=%d dist=%.2f clearance=%.2f cargo_bottom=%.2f obstacle_top=%.2f reason=%s",
                           warning.level, warning.alarm_code,
                           warning.distance_to_footprint_m, warning.clearance_m,
                           warning.cargo_bottom_z, warning.obstacle_top_z,

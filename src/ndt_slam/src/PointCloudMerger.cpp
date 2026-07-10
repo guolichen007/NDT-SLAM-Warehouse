@@ -159,8 +159,8 @@ private:
         std::deque<CloudFrame> queue;
         std::uint64_t next_sequence = 0;
         ros::Subscriber sub;
-        std::atomic<std::uint64_t> total_received{0};
-        std::atomic<std::uint64_t> single_count{0};
+        std::uint64_t total_received = 0;
+        std::uint64_t single_count = 0;
     };
 
     struct SelectedFrame {
@@ -197,8 +197,11 @@ private:
             return;
         }
 
-        // 增加接收计数
-        lidar_it->second.total_received.fetch_add(1, std::memory_order_relaxed);
+        // 增加接收计数（在锁内更新）
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            lidars_.at(name).total_received++;
+        }
 
         if (transform_to_base_) {
             pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(
@@ -323,7 +326,7 @@ private:
             SelectedFrame{fallback_lidar->name, fallback_lidar->queue.front()});
         fallback_lidar->queue.pop_front();
         ++fallback_count_;
-        fallback_lidar->single_count.fetch_add(1, std::memory_order_relaxed);
+        fallback_lidar->single_count++;
         return true;
     }
 
@@ -417,14 +420,17 @@ private:
                 int64_t dropped = overflow_drop_count_.load() + superseded_drop_count_.load() + empty_drop_count_.load();
                 int64_t reused = 0;
 
-                // 计算各雷达接收数
-                for (const auto& kv : lidars_) {
-                    if (kv.first.find("201") != std::string::npos) {
-                        received_201 = kv.second.total_received.load();
-                        single_201 = kv.second.single_count.load();
-                    } else if (kv.first.find("203") != std::string::npos) {
-                        received_203 = kv.second.total_received.load();
-                        single_203 = kv.second.single_count.load();
+                // 计算各雷达接收数（需要锁保护）
+                {
+                    std::lock_guard<std::mutex> lock(queue_mutex_);
+                    for (const auto& kv : lidars_) {
+                        if (kv.first.find("201") != std::string::npos) {
+                            received_201 = kv.second.total_received;
+                            single_201 = kv.second.single_count;
+                        } else if (kv.first.find("203") != std::string::npos) {
+                            received_203 = kv.second.total_received;
+                            single_203 = kv.second.single_count;
+                        }
                     }
                 }
 
