@@ -864,14 +864,27 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
             crane_motion_ekf_.setConfig(crane_motion_ekf_cfg_);
 
-            ROS_INFO("[CraneMotionEKF] enabled=%d q_pos=%.3f q_vel=%.3f gate=%.2f reject=%.2f reject_high_fitness=%d fitness_threshold=%.2f",
+            ROS_INFO("[CraneMotionEKF] enabled=%d q_pos=%.3f q_vel=%.3f gate=%.2f reject=%.2f reject_high_fitness=%d fitness_reject=%.3f fitness_recover=%.3f",
                      crane_motion_ekf_enabled_ ? 1 : 0,
                      crane_motion_ekf_cfg_.q_pos,
                      crane_motion_ekf_cfg_.q_vel,
                      crane_motion_ekf_cfg_.innovation_gate_m,
                      crane_motion_ekf_cfg_.innovation_reject_m,
                      crane_motion_ekf_cfg_.reject_high_fitness ? 1 : 0,
-                     crane_motion_ekf_cfg_.ndt_fitness_reject_threshold);
+                     crane_motion_ekf_cfg_.ndt_fitness_reject_threshold,
+                     crane_motion_ekf_cfg_.ndt_fitness_recover_threshold);
+            ROS_INFO("[CraneMotionEKF:RuntimeGuard] enabled=%d warn_ms=%.1f emergency_ms=%.1f slow_extra_r=%.3f",
+                     crane_motion_ekf_cfg_.slow_frame_guard_enabled ? 1 : 0,
+                     crane_motion_ekf_cfg_.slow_frame_warn_ms,
+                     crane_motion_ekf_cfg_.slow_frame_emergency_ms,
+                     crane_motion_ekf_cfg_.slow_frame_extra_r);
+            ROS_INFO("[CraneMotionEKF:MotionLimit] max_speed=%.3f safety=%.3f step_min=%.3f step_max=%.3f axis_speed=(%.3f,%.3f)",
+                     crane_motion_ekf_cfg_.max_speed_mps,
+                     crane_motion_ekf_cfg_.max_step_safety_factor,
+                     crane_motion_ekf_cfg_.max_step_min_m,
+                     crane_motion_ekf_cfg_.max_step_max_m,
+                     crane_motion_ekf_cfg_.max_speed_x,
+                     crane_motion_ekf_cfg_.max_speed_y);
         }
 
         // v8-stable-r3: SoftYawFilter 参数
@@ -928,10 +941,17 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             crop_update_yaw_deg_ = lt["update_yaw_deg"].as<double>(2.0);
             crop_update_min_interval_frames_ = lt["update_min_interval_frames"].as<int>(3);
 
-            ROS_INFO("[LocTarget] enabled=%d crop=%d radius=(%.1f, %.1f) update_dist=%.2f update_yaw=%.1f",
-                     localization_target_enabled_, crop_enabled_,
+            ROS_INFO("[LocTarget] enabled=%d objects_only=%d ground_edge=%d min=%d max=%d voxel=%.2f crop=%d radius=(%.1f,%.1f) update_dist=%.2f update_yaw=%.1f min_interval=%d",
+                     localization_target_enabled_ ? 1 : 0,
+                     use_objects_only_initial_ ? 1 : 0,
+                     include_ground_edge_ ? 1 : 0,
+                     localization_target_min_points_,
+                     localization_target_max_points_,
+                     localization_target_voxel_size_,
+                     crop_enabled_ ? 1 : 0,
                      crop_radius_x_, crop_radius_y_,
-                     crop_update_distance_m_, crop_update_yaw_deg_);
+                     crop_update_distance_m_, crop_update_yaw_deg_,
+                     crop_update_min_interval_frames_);
         }
 
         // v8-stable-r3: Adaptive NDT 参数

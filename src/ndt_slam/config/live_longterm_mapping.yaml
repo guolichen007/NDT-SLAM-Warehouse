@@ -365,6 +365,9 @@ crane_motion_ekf:
 
   innovation_gate_m: 0.35
   innovation_reject_m: 1.00
+  reject_high_fitness: true
+  ndt_fitness_reject_threshold: 0.50    # V3: 从 0.30 提高到 0.50，降低误拒绝
+  ndt_fitness_recover_threshold: 0.12
 
   max_speed_x: 2.0
   max_speed_y: 2.0
@@ -583,6 +586,8 @@ hook_cargo_lock:
   locked_search_margin_x: 0.30
   locked_search_margin_y: 0.30
 
+  # 启用吊物点云去除
+  enable_hook_cargo_removal: true
 
 # ========== OdomAnchorBox 配置 ==========
 odom_anchored_cargo_box:
@@ -712,50 +717,3 @@ odom_anchored_cargo_box:
     level1_alarm_code: 17
     level2_alarm_code: 18
     clear_alarm_code: 0
-
-# ========== HookCargoLock 状态机 ==========
-hook_cargo_lock:
-  enabled: true
-  lock_confirm_frames: 3
-  size_init_window: 5
-  lost_hold_sec: 3.0
-  lost_clear_sec: 8.0
-  strong_min_points: 30
-  weak_min_points: 5
-  size_change_min_ratio: 0.20
-  size_change_max_ratio: 0.60
-  size_update_confirm_frames: 5
-  size_update_alpha: 0.15
-  candidate_hold_sec: 1.0
-  candidate_max_weak_frames: 10
-  bottom_alpha_points: 0.30
-  bottom_alpha_memory: 0.15
-  bottom_hold_uncertainty_growth: 0.02
-  bottom_max_uncertainty: 0.35
-
-  # locked association gate
-  locked_update_max_center_dist: 0.65
-  locked_update_min_overlap_ratio: 0.30
-  locked_update_max_z_jump: 0.45
-  locked_update_max_top_jump: 0.60
-  locked_update_min_points: 20
-
-  # 锁定时 strong 条件（比更新时更严格）
-  lock_strong_min_points: 80
-  lock_min_visible_height: 0.50
-  lock_min_xy_area: 0.40
-
-  # locked search margin
-  locked_search_margin_x: 0.30
-  locked_search_margin_y: 0.30
-
-  # 启用吊物点云去除
-  enable_hook_cargo_removal: true
-
-# ========== CraneMotionEKF 配置 ==========
-crane_motion_ekf:
-  innovation_gate_m: 0.35
-  innovation_reject_m: 1.00
-  reject_high_fitness: true
-  ndt_fitness_reject_threshold: 0.50    # V3: 从 0.30 提高到 0.50，降低误拒绝
-  ndt_fitness_recover_threshold: 0.12
