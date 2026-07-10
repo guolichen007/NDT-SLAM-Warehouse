@@ -23,6 +23,7 @@
 #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/common/transforms.h>
 #include <pcl/io/pcd_io.h>
+#include <fstream>
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -340,6 +341,17 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr buildRegistrationCloud(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& human_safe_objects,
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_cloud);
+
+    // ========== V3: NDT 诊断 ==========
+    uint64_t target_version_ = 0;
+    int target_rebuild_count_ = 0;
+    int last_source_points_ = 0;
+    int last_target_points_ = 0;
+    double last_init_dist_ = 0.0;
+    double last_raw_step_ = 0.0;
+    int last_ndt_iterations_ = 0;
+    std::ofstream csv_file_;
+    bool csv_initialized_ = false;
 
     // ========== v8-stable-r3: Adaptive NDT ==========
     bool adaptive_ndt_enabled_ = true;

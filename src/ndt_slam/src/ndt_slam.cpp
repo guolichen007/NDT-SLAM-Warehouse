@@ -1641,9 +1641,13 @@ void NdtSlamNode::processCloudThread() {
                 // 配准阶段（带时间预算）
                 ndt_->setInputTarget(local_map_);
                 ndt_->setInputSource(registration_cloud);
+                target_version_++;
+                target_rebuild_count_++;
 
                 pcl::PointCloud<pcl::PointXYZ> aligned;
                 Eigen::Matrix4f initial_guess = current_pose_.matrix().cast<float>();
+                last_source_points_ = static_cast<int>(registration_cloud->size());
+                last_target_points_ = static_cast<int>(local_map_->size());
 
                 auto ndt_start = std::chrono::steady_clock::now();
                 ndt_->align(aligned, initial_guess);
