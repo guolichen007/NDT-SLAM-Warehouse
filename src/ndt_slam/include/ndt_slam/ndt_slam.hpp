@@ -141,8 +141,13 @@ private:
     // V3: Localization Target 管理
     void updateLocalizationTarget(const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud,
                                    const Sophus::SE3d& pose);
-    void swapLocalizationTargetBuffers();
-    void updateCroppedCachedTarget(const Sophus::SE3d& predicted_pose);
+    bool swapLocalizationTargetBuffers();
+    bool updateCroppedCachedTarget(const Sophus::SE3d& predicted_pose);
+    void bindNdtInputTarget(
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& target,
+        const std::string& source,
+        uint64_t content_version,
+        const std::string& reason);
 
     void rebuildGlobalMap();
     void rebuildGlobalMapFiltered();  // 使用 filtered keyframes + dynamic mask 重建地图
@@ -387,6 +392,15 @@ private:
     std::mutex localization_target_mutex_;
     bool localization_target_ready_ = false;
 
+    enum class LocalizationTargetState {
+        BOOTSTRAP_LOCAL_MAP = 0,
+        BUILDING_TARGET = 1,
+        TARGET_READY = 2,
+        TARGET_DEGRADED = 3
+    };
+    LocalizationTargetState localization_target_state_ =
+        LocalizationTargetState::BOOTSTRAP_LOCAL_MAP;
+
     // V3: Cropped cached target
     pcl::PointCloud<pcl::PointXYZ>::Ptr cached_target_;
     bool cached_target_valid_ = false;
@@ -394,6 +408,15 @@ private:
     double cached_yaw_ = 0.0;
     uint64_t cached_target_version_ = 0;
     int cached_target_points_ = 0;
+
+    // Target actually bound to NDT.  Content versions, not frame numbers,
+    // decide whether setInputTarget() must rebuild NDT's target structure.
+    pcl::PointCloud<pcl::PointXYZ>::ConstPtr last_bound_ndt_target_;
+    uint64_t last_bound_ndt_target_version_ = 0;
+    uint64_t local_map_version_ = 0;
+    std::string last_bound_ndt_target_source_ = "none";
+    std::string last_actual_target_source_ = "bootstrap_local_map";
+    std::string last_target_reason_ = "startup";
 
     // V3: Localization Target 配置
     bool localization_target_enabled_ = true;
