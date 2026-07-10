@@ -85,3 +85,16 @@ See: `docs/known_issues/588_cropped_target_diagonal_drift.md`
 4. Performance optimization
 5. Full 1.0× regression verification
 6. Guarded target activation with probation/fallback/quarantine
+
+## GitHub Issue
+
+Status: **PENDING MANUAL CREATION**
+
+Title: `[P0][588] Cropped localization target causes odom loss and persistent drift during diagonal motion`
+
+Body: See `docs/known_issues/588_cropped_target_diagonal_drift.md`
+
+Labels: `bug`, `P0`, `regression`, `localization`, `NDT`
+
+Note: `gh` CLI not available in this environment. Issue must be created
+manually via GitHub web interface or from a machine with `gh` installed.
