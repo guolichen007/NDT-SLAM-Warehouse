@@ -400,9 +400,9 @@ crane_motion_ekf:
   # V3: 物理步长保护
   crane_motion_limit:
     max_speed_mps: 0.50
-    max_step_safety_factor: 1.5
+    max_step_safety_factor: 1.2      # V3: 从 1.5 降到 1.2，收紧步长限制
     max_step_min_m: 0.08
-    max_step_max_m: 0.25
+    max_step_max_m: 0.15             # V3: 从 0.25 降到 0.15，收紧最大步长
 
 # ========== v8-stable-r3-final: SoftYawFilter ==========
 soft_yaw_filter:
@@ -757,5 +757,5 @@ crane_motion_ekf:
   innovation_gate_m: 0.35
   innovation_reject_m: 1.00
   reject_high_fitness: true
-  ndt_fitness_reject_threshold: 0.30
+  ndt_fitness_reject_threshold: 0.50    # V3: 从 0.30 提高到 0.50，降低误拒绝
   ndt_fitness_recover_threshold: 0.12
