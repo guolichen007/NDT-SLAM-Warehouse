@@ -953,7 +953,12 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         // V3: Localization Target 参数
         if (config["localization_target"]) {
             const auto lt = config["localization_target"];
-            localization_target_enabled_ = lt["enabled"].as<bool>(true);
+            // Backward compatibility: old "enabled" maps to build_enabled only
+            bool old_enabled = lt["enabled"].as<bool>(true);
+            localization_target_build_enabled_ = lt["build_enabled"].as<bool>(old_enabled);
+            localization_target_use_for_ndt_ = lt["use_for_ndt"].as<bool>(false);
+            // legacy flag: true only if both build and use are true
+            localization_target_enabled_ = localization_target_build_enabled_;
             use_objects_only_initial_ = lt["use_objects_only_initial"].as<bool>(true);
             include_ground_edge_ = lt["include_ground_edge"].as<bool>(false);
             localization_target_min_points_ = lt["min_points"].as<int>(3000);
@@ -966,8 +971,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             crop_update_yaw_deg_ = lt["update_yaw_deg"].as<double>(2.0);
             crop_update_min_interval_frames_ = lt["update_min_interval_frames"].as<int>(3);
 
-            ROS_INFO("[LocTarget] enabled=%d objects_only=%d ground_edge=%d min=%d max=%d voxel=%.2f crop=%d radius=(%.1f,%.1f) update_dist=%.2f update_yaw=%.1f min_interval=%d",
-                     localization_target_enabled_ ? 1 : 0,
+            ROS_INFO("[LocTarget] build_enabled=%d use_for_ndt=%d objects_only=%d ground_edge=%d min=%d max=%d voxel=%.2f crop=%d radius=(%.1f,%.1f) update_dist=%.2f update_yaw=%.1f min_interval=%d",
+                     localization_target_build_enabled_ ? 1 : 0,
+                     localization_target_use_for_ndt_ ? 1 : 0,
                      use_objects_only_initial_ ? 1 : 0,
                      include_ground_edge_ ? 1 : 0,
                      localization_target_min_points_,
@@ -1826,7 +1832,7 @@ void NdtSlamNode::processCloudThread() {
                 std::string selected_reason = "target_not_ready";
                 uint64_t selected_version = local_map_version_;
 
-                if (localization_target_enabled_ && localization_target_ready_) {
+                if (localization_target_use_for_ndt_ && localization_target_enabled_ && localization_target_ready_) {
                     if (crop_enabled_) {
                         Sophus::SE3d predicted_pose = current_pose_;
                         if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
@@ -1863,6 +1869,9 @@ void NdtSlamNode::processCloudThread() {
                 } else if (!localization_target_enabled_) {
                     selected_source = "local_map";
                     selected_reason = "localization_target_disabled";
+                } else if (!localization_target_use_for_ndt_) {
+                    selected_source = "local_map";
+                    selected_reason = "SHADOW_ONLY";
                 }
 
                 bindNdtInputTarget(selected_target, selected_source,

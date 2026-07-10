@@ -424,7 +424,9 @@ private:
     std::string last_target_reason_ = "startup";
 
     // V3: Localization Target 配置
-    bool localization_target_enabled_ = true;
+    bool localization_target_enabled_ = true;   // legacy: maps to build_enabled
+    bool localization_target_build_enabled_ = true;   // build target in shadow
+    bool localization_target_use_for_ndt_ = false;    // bind to NDT (production default: false)
     bool use_objects_only_initial_ = true;
     bool include_ground_edge_ = false;
     int localization_target_min_points_ = 3000;

@@ -449,7 +449,9 @@ registration_input:
 
 # ========== V3: Localization Target ==========
 localization_target:
-  enabled: true
+  enabled: true              # legacy: maps to build_enabled
+  build_enabled: true        # continue building target in shadow mode
+  use_for_ndt: false         # PRODUCTION DEFAULT: do NOT bind unvalidated target to NDT
   use_objects_only_initial: true
   include_ground_edge: false
   min_points: 3000
