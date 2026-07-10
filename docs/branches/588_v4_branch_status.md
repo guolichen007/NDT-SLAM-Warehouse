@@ -98,3 +98,20 @@ Labels: `bug`, `P0`, `regression`, `localization`, `NDT`
 
 Note: `gh` CLI not available in this environment. Issue must be created
 manually via GitHub web interface or from a machine with `gh` installed.
+
+## Fix Applied (2026-07-10)
+
+**Verdict after fix: PASS**
+
+Key changes:
+- `use_for_ndt: false` (production default)
+- Unvalidated targets stay in shadow mode
+- NDT uses local_map only
+
+Results:
+- Cropped target use: 162 → 0
+- Fitness P95: 7.415 → 0.123
+- Prediction-only: 63 → 5
+- Diagonal drift: YES → NO
+
+See: `tests/regression/588_v4/final_acceptance_report.md`
