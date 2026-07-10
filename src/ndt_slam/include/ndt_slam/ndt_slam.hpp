@@ -356,9 +356,26 @@ private:
     int last_target_points_ = 0;
     double last_init_dist_ = 0.0;
     double last_raw_step_ = 0.0;
+    double last_sensor_dt_ = 0.10;
+    bool last_ndt_converged_ = false;
     int last_ndt_iterations_ = 0;
     std::ofstream csv_file_;
     bool csv_initialized_ = false;
+
+    // End-to-end runtime counters. Callback and processing run on different
+    // threads, so counters are atomic and are diagnostic-only.
+    std::atomic<uint64_t> cloud_callback_count_{0};
+    std::atomic<uint64_t> queue_overwrite_drop_count_{0};
+    std::atomic<uint64_t> cloud_dequeue_count_{0};
+    std::atomic<uint64_t> empty_cloud_skip_count_{0};
+    std::atomic<uint64_t> duplicate_cloud_skip_count_{0};
+    std::atomic<uint64_t> invalid_sensor_dt_count_{0};
+    std::atomic<uint64_t> ndt_attempt_count_{0};
+    std::atomic<uint64_t> ndt_converged_count_{0};
+    std::atomic<uint64_t> ndt_nonconverged_count_{0};
+    std::atomic<uint64_t> ekf_accept_count_{0};
+    std::atomic<uint64_t> ekf_reject_count_{0};
+    std::atomic<uint64_t> odom_publish_count_{0};
 
     // ========== V3: Localization Target (解耦自 local_map_) ==========
     pcl::PointCloud<pcl::PointXYZ>::Ptr localization_target_front_;

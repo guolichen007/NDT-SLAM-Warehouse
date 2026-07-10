@@ -1200,12 +1200,16 @@ void NdtSlamNode::initializeParameters() {
 }
 
 void NdtSlamNode::pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg) {
+    cloud_callback_count_.fetch_add(1, std::memory_order_relaxed);
     last_pointcloud_time_ = ros::Time::now();
     pointcloud_stale_ = false;
 
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         // 只保留最新帧，丢弃旧帧，避免处理积压
+        queue_overwrite_drop_count_.fetch_add(
+            static_cast<uint64_t>(cloud_queue_.size()),
+            std::memory_order_relaxed);
         cloud_queue_ = std::queue<sensor_msgs::PointCloud2::ConstPtr>();
         cloud_queue_.push(msg);
     }
@@ -1240,9 +1244,11 @@ void NdtSlamNode::processCloudThread() {
         }
 
         if (!msg) continue;
+        cloud_dequeue_count_.fetch_add(1, std::memory_order_relaxed);
 
         total_frames++;
         auto start_time = std::chrono::steady_clock::now();
+        last_ndt_converged_ = false;
 
         // 保存消息时间戳，供 publishCurrentCloud 使用
         last_stamp_ = msg->header.stamp;
@@ -1252,6 +1258,7 @@ void NdtSlamNode::processCloudThread() {
         pcl::fromROSMsg(*msg, *input_cloud);
 
         if (input_cloud->empty()) {
+            empty_cloud_skip_count_.fetch_add(1, std::memory_order_relaxed);
             ROS_WARN("Empty pointCloud, skipping");
             continue;
         }
@@ -1271,6 +1278,7 @@ void NdtSlamNode::processCloudThread() {
             input_cloud->size() == last_processed_frame_size_ &&
             cloud_hash == last_processed_frame_hash_) {
             duplicate_frame_skip_count_++;
+            duplicate_cloud_skip_count_.fetch_add(1, std::memory_order_relaxed);
             ROS_WARN_THROTTLE(1.0,
                 "[FrameSkipAll] reason=duplicate_frame stamp=%.3f cloud_size=%zu hash=%lu skipped=%d",
                 msg->header.stamp.toSec(),
@@ -1279,6 +1287,24 @@ void NdtSlamNode::processCloudThread() {
                 duplicate_frame_skip_count_);
             continue;  // 跳过本帧，不执行任何后续处理
         }
+
+        // Preserve the previous processed sensor stamp before updating the
+        // duplicate-frame signature.  All prediction/crop/gating in this
+        // frame must use sensor time, not NDT wall-clock runtime.
+        double sensor_dt = 0.10;
+        if (!last_processed_frame_stamp_.isZero()) {
+            sensor_dt = (msg->header.stamp - last_processed_frame_stamp_).toSec();
+            if (!std::isfinite(sensor_dt) || sensor_dt <= 0.0 || sensor_dt > 1.0) {
+                invalid_sensor_dt_count_.fetch_add(1, std::memory_order_relaxed);
+                ROS_WARN_THROTTLE(2.0,
+                    "[SensorTime] invalid_dt=%.6f current=%.6f previous=%.6f fallback=0.100",
+                    sensor_dt,
+                    msg->header.stamp.toSec(),
+                    last_processed_frame_stamp_.toSec());
+                sensor_dt = 0.10;
+            }
+        }
+        last_sensor_dt_ = sensor_dt;
 
         // 更新帧签名
         last_processed_frame_stamp_ = msg->header.stamp;
@@ -1750,11 +1776,8 @@ void NdtSlamNode::processCloudThread() {
                         // 计算预测 pose（用于裁剪）
                         Sophus::SE3d predicted_pose = current_pose_;
                         if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
-                            double dt = (msg->header.stamp - last_processed_frame_stamp_).toSec();
-                            if (dt <= 0.0 || dt > 1.0) {
-                                dt = 0.1;
-                            }
-                            predicted_pose = crane_motion_ekf_.predictPoseReadOnly(current_pose_, dt);
+                            predicted_pose = crane_motion_ekf_.predictPoseReadOnly(
+                                current_pose_, last_sensor_dt_);
                         }
 
                         // 更新 cropped cached target
@@ -1794,12 +1817,8 @@ void NdtSlamNode::processCloudThread() {
                 // V3: 使用 EKF 预测作为 initial guess（如果 EKF 已初始化）
                 Eigen::Matrix4f initial_guess;
                 if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
-                    // 计算 dt
-                    double dt = (msg->header.stamp - last_processed_frame_stamp_).toSec();
-                    if (dt <= 0.0 || dt > 1.0) {
-                        dt = 0.1;  // 默认 100ms
-                    }
-                    Sophus::SE3d predicted = crane_motion_ekf_.predictPoseReadOnly(current_pose_, dt);
+                    Sophus::SE3d predicted = crane_motion_ekf_.predictPoseReadOnly(
+                        current_pose_, last_sensor_dt_);
                     initial_guess = predicted.matrix().cast<float>();
                 } else {
                     initial_guess = current_pose_.matrix().cast<float>();
@@ -1813,22 +1832,31 @@ void NdtSlamNode::processCloudThread() {
                 last_init_dist_ = (initial_pos - current_pos).norm();
 
                 auto ndt_start = std::chrono::steady_clock::now();
+                ndt_attempt_count_.fetch_add(1, std::memory_order_relaxed);
                 ndt_->align(aligned, initial_guess);
                 auto ndt_end = std::chrono::steady_clock::now();
                 double ndt_time_ms = std::chrono::duration<double, std::milli>(ndt_end - ndt_start).count();
                 last_ndt_time_ms_ = ndt_time_ms;
+                last_ndt_converged_ = ndt_->hasConverged();
+                if (last_ndt_converged_) {
+                    ndt_converged_count_.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    ndt_nonconverged_count_.fetch_add(1, std::memory_order_relaxed);
+                }
 
                 // 计算 raw_step（NDT结果到initial_guess的距离）
-                if (ndt_->hasConverged()) {
+                if (last_ndt_converged_) {
                     Eigen::Matrix4f ndt_result = ndt_->getFinalTransformation();
                     Eigen::Vector3f ndt_pos = ndt_result.block<3,1>(0,3);
                     last_raw_step_ = (ndt_pos - initial_pos).norm();
                 }
 
-                // NDT 时间预算：超过 100ms 输出警告（起重机场景 NDT 正常需要 70-120ms）
-                static const double NDT_TIME_BUDGET_MS = 300.0;
+                // Use the single configured runtime threshold.  The previous
+                // implementation had conflicting hard-coded 80/100/300 ms
+                // definitions, which made diagnostics impossible to compare.
                 static int ndt_warn_count = 0;
-                if (ndt_time_ms > NDT_TIME_BUDGET_MS) {
+                if (crane_motion_ekf_cfg_.slow_frame_guard_enabled &&
+                    ndt_time_ms > crane_motion_ekf_cfg_.slow_frame_warn_ms) {
                     ndt_warn_count++;
                     // 静止时不输出，运动时每 100 次输出一次
                     if (!is_stationary_ && (ndt_warn_count <= 3 || ndt_warn_count % 100 == 0)) {
@@ -1836,7 +1864,7 @@ void NdtSlamNode::processCloudThread() {
                     }
                 }
 
-                if (ndt_->hasConverged()) {
+                if (last_ndt_converged_) {
                     Eigen::Matrix4f result = ndt_->getFinalTransformation();
                     double fitness_score = ndt_->getFitnessScore();
                     double trans_prob = ndt_->getTransformationProbability();
@@ -1887,15 +1915,13 @@ void NdtSlamNode::processCloudThread() {
                         bool use_prediction = false;
                         std::string reject_reason_slow = "NONE";
                         if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
-                            double dt = (msg->header.stamp - last_processed_frame_stamp_).toSec();
-                            if (dt <= 0.0 || dt > 1.0) dt = 0.1;
-
                             // 物理步长保护
-                            if (crane_motion_ekf_.isNonPhysicalStep(last_raw_step_, ndt_time_ms, dt)) {
+                            if (crane_motion_ekf_.isNonPhysicalStep(
+                                    last_raw_step_, ndt_time_ms, last_sensor_dt_)) {
                                 use_prediction = true;
                                 reject_reason_slow = "SLOW_NONPHYSICAL_STEP";
                                 ROS_WARN_THROTTLE(2.0, "[NDT-guard] slow_frame nonphysical: raw_step=%.3f ndt_ms=%.1f dt=%.3f",
-                                                 last_raw_step_, ndt_time_ms, dt);
+                                                 last_raw_step_, ndt_time_ms, last_sensor_dt_);
                             }
                         }
 
@@ -1916,6 +1942,11 @@ void NdtSlamNode::processCloudThread() {
                             }
 
                             ndt_accepted = crane_motion_ekf_.status().ndt_accepted;
+                            if (ndt_accepted) {
+                                ekf_accept_count_.fetch_add(1, std::memory_order_relaxed);
+                            } else {
+                                ekf_reject_count_.fetch_add(1, std::memory_order_relaxed);
+                            }
 
                             // EKF 日志：debug_ekf 开启时输出
                             if (debug_cfg_.debug_ekf) {
@@ -1949,7 +1980,7 @@ void NdtSlamNode::processCloudThread() {
                             ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec,
                                               "[NDTHealth] fitness=%.3f, converged=%d, "
                                               "raw_pose=(%.2f, %.2f, %.2f), raw_rpy=(%.1f, %.1f, %.1f)deg",
-                                              fitness_score, ndt_->hasConverged() ? 1 : 0,
+                                              fitness_score, last_ndt_converged_ ? 1 : 0,
                                               raw_pos.x(), raw_pos.y(), raw_pos.z(),
                                               raw_roll * 180.0 / M_PI, raw_pitch * 180.0 / M_PI,
                                               raw_yaw * 180.0 / M_PI);
@@ -2049,6 +2080,7 @@ void NdtSlamNode::processCloudThread() {
             // v8-stable-r3-hotfix-minimal: selectPublishedPose 已透传
             Sophus::SE3d final_pose = selectPublishedPose(constrained_pose, publish_time);
             publishOdometry(publish_time, msg->header.frame_id, final_pose);
+            odom_publish_count_.fetch_add(1, std::memory_order_relaxed);
 
             // runtime_path 只是调试显示，不参与算法
             if (debug_cfg_.publish_runtime_path) {
@@ -2194,16 +2226,17 @@ void NdtSlamNode::processCloudThread() {
                 innovation = ekf_status.innovation_norm;
             }
 
-            ROS_INFO("[Perf] total=%.1fms ndt=%.1fms "
+            ROS_INFO("[Perf] total=%.1fms ndt=%.1fms sensor_dt=%.3fs "
                      "fitness=%.3f iter=%d converged=%d "
                      "init_dist=%.3f raw_step=%.3f innov=%.3f "
                      "src_pts=%d tgt_pts=%d tgt_ver=%lu setInput=%d "
                      "frame=%d",
                      average_process_time_ms_,
                      last_ndt_time_ms_,
+                     last_sensor_dt_,
                      last_ndt_fitness_,
                      last_ndt_iterations_,
-                     ndt_->hasConverged() ? 1 : 0,
+                     last_ndt_converged_ ? 1 : 0,
                      last_init_dist_,
                      last_raw_step_,
                      innovation,
@@ -2220,7 +2253,7 @@ void NdtSlamNode::processCloudThread() {
             if (!csv_initialized_) {
                 csv_file_.open("/tmp/588_ndt_profile.csv", std::ios::out | std::ios::trunc);
                 if (csv_file_.is_open()) {
-                    csv_file_ << "frame,stamp,"
+                    csv_file_ << "frame,stamp,sensor_dt,"
                               << "source_points,target_points,target_version,setInput_count,"
                               << "ndt_ms,total_ms,"
                               << "fitness,converged,iterations,"
@@ -2256,6 +2289,7 @@ void NdtSlamNode::processCloudThread() {
 
                 csv_file_ << total_frames << ","
                           << last_stamp_.toSec() << ","
+                          << last_sensor_dt_ << ","
                           << last_source_points_ << ","
                           << last_target_points_ << ","
                           << target_version_ << ","
@@ -2263,7 +2297,7 @@ void NdtSlamNode::processCloudThread() {
                           << last_ndt_time_ms_ << ","
                           << average_process_time_ms_ << ","
                           << last_ndt_fitness_ << ","
-                          << (ndt_->hasConverged() ? 1 : 0) << ","
+                          << (last_ndt_converged_ ? 1 : 0) << ","
                           << last_ndt_iterations_ << ","
                           << last_init_dist_ << ","
                           << last_raw_step_ << ","
@@ -2273,6 +2307,21 @@ void NdtSlamNode::processCloudThread() {
                           << reject_reason << std::endl;
             }
         }
+
+        ROS_INFO_THROTTLE(2.0,
+            "[PipelineCounters] callback=%llu queue_drop=%llu dequeued=%llu empty=%llu duplicate=%llu invalid_dt=%llu ndt_attempt=%llu converged=%llu nonconverged=%llu ekf_accept=%llu ekf_reject=%llu odom=%llu",
+            static_cast<unsigned long long>(cloud_callback_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(queue_overwrite_drop_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(cloud_dequeue_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(empty_cloud_skip_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(duplicate_cloud_skip_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(invalid_sensor_dt_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(ndt_attempt_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(ndt_converged_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(ndt_nonconverged_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(ekf_accept_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(ekf_reject_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(odom_publish_count_.load(std::memory_order_relaxed)));
 
         // Status 只在运动时报告，每 30 秒一次
         if (!is_stationary_ && (ros::Time::now() - last_log_time).toSec() > 30.0) {
