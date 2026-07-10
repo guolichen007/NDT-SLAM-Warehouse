@@ -413,6 +413,23 @@ registration_input:
   min_objects_for_weighting: 500
   min_registration_points: 2500  # V3: 最小配准点数，不足时回退旧模式
 
+# ========== V3: Localization Target ==========
+localization_target:
+  enabled: true
+  use_objects_only_initial: true
+  include_ground_edge: false
+  min_points: 3000
+  max_points: 60000
+  voxel_size: 0.30
+
+  # Cropped cached target
+  crop_enabled: true
+  radius_x: 15.0
+  radius_y: 7.0
+  update_distance_m: 0.50
+  update_yaw_deg: 2.0
+  update_min_interval_frames: 3
+
 # ========== v8-stable-r3-final: Adaptive NDT ==========
 adaptive_ndt:
   enabled: true

@@ -139,6 +139,12 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     current_cloud_transformed_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     last_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
 
+    // V3: Localization Target 初始化
+    localization_target_front_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    localization_target_back_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    localization_target_snapshot_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    cached_target_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+
     // 初始化 NDT_OMP（使用配置参数）
     ndt_.reset(new pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>());
     ndt_->setResolution(ndt_resolution_);
@@ -249,14 +255,32 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     current_cloud_transformed_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     last_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
 
+    // V3: Localization Target 初始化
+    localization_target_front_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    localization_target_back_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    localization_target_snapshot_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    cached_target_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+
     // 初始化 NDT_OMP（使用从配置文件加载的参数，而非硬编码）
     ndt_.reset(new pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>());
     ndt_->setResolution(ndt_resolution_);
     ndt_->setStepSize(ndt_step_size_);
     ndt_->setTransformationEpsilon(ndt_transformation_epsilon_);
     ndt_->setMaximumIterations(ndt_max_iterations_);
-    ROS_INFO("NDT_OMP initialized: resolution=%.2f, step_size=%.2f, max_iter=%d",
-             ndt_resolution_, ndt_step_size_, ndt_max_iterations_);
+
+    // V3: 设置 NDT_OMP 多线程和邻域搜索方法
+    ndt_->setNumThreads(ndt_num_threads_);
+    if (ndt_neighbor_search_method_ == "DIRECT7") {
+        ndt_->setNeighborhoodSearchMethod(pclomp::DIRECT7);
+    } else if (ndt_neighbor_search_method_ == "DIRECT1") {
+        ndt_->setNeighborhoodSearchMethod(pclomp::DIRECT1);
+    } else {
+        ndt_->setNeighborhoodSearchMethod(pclomp::KDTREE);
+    }
+
+    ROS_INFO("NDT_OMP initialized: resolution=%.2f, step_size=%.2f, max_iter=%d, threads=%d, search=%s",
+             ndt_resolution_, ndt_step_size_, ndt_max_iterations_, ndt_num_threads_,
+             ndt_neighbor_search_method_.c_str());
 
     // 初始化 PayloadTrackManager
     payload_tracker_.configureFromYaml(config_file_path);
@@ -868,6 +892,28 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                      ground_sample_ratio_,
                      max_ndt_points_,
                      min_registration_points_);
+        }
+
+        // V3: Localization Target 参数
+        if (config["localization_target"]) {
+            const auto lt = config["localization_target"];
+            localization_target_enabled_ = lt["enabled"].as<bool>(true);
+            use_objects_only_initial_ = lt["use_objects_only_initial"].as<bool>(true);
+            include_ground_edge_ = lt["include_ground_edge"].as<bool>(false);
+            localization_target_min_points_ = lt["min_points"].as<int>(3000);
+            localization_target_max_points_ = lt["max_points"].as<int>(60000);
+            localization_target_voxel_size_ = lt["voxel_size"].as<double>(0.30);
+            crop_enabled_ = lt["crop_enabled"].as<bool>(true);
+            crop_radius_x_ = lt["radius_x"].as<double>(15.0);
+            crop_radius_y_ = lt["radius_y"].as<double>(7.0);
+            crop_update_distance_m_ = lt["update_distance_m"].as<double>(0.50);
+            crop_update_yaw_deg_ = lt["update_yaw_deg"].as<double>(2.0);
+            crop_update_min_interval_frames_ = lt["update_min_interval_frames"].as<int>(3);
+
+            ROS_INFO("[LocTarget] enabled=%d crop=%d radius=(%.1f, %.1f) update_dist=%.2f update_yaw=%.1f",
+                     localization_target_enabled_, crop_enabled_,
+                     crop_radius_x_, crop_radius_y_,
+                     crop_update_distance_m_, crop_update_yaw_deg_);
         }
 
         // v8-stable-r3: Adaptive NDT 参数
@@ -1658,10 +1704,52 @@ void NdtSlamNode::processCloudThread() {
                 }
             } else {
                 // 配准阶段（带时间预算）
-                ndt_->setInputTarget(local_map_);
+
+                // V3: 使用 Localization Target 而不是 local_map_
+                if (localization_target_enabled_ && localization_target_ready_) {
+                    // 使用 cropped cached target
+                    if (crop_enabled_) {
+                        // 计算预测 pose（用于裁剪）
+                        Sophus::SE3d predicted_pose = current_pose_;
+                        if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
+                            double dt = (msg->header.stamp - last_processed_frame_stamp_).toSec();
+                            if (dt <= 0.0 || dt > 1.0) {
+                                dt = 0.1;
+                            }
+                            predicted_pose = crane_motion_ekf_.predictPoseReadOnly(current_pose_, dt);
+                        }
+
+                        // 更新 cropped cached target
+                        updateCroppedCachedTarget(predicted_pose);
+
+                        if (cached_target_valid_ && cached_target_->size() > 100) {
+                            ndt_->setInputTarget(cached_target_);
+                            last_target_points_ = static_cast<int>(cached_target_->size());
+                        } else {
+                            // 回退到 local_map_
+                            ndt_->setInputTarget(local_map_);
+                            last_target_points_ = static_cast<int>(local_map_->size());
+                        }
+                    } else {
+                        // 直接使用 localization_target_snapshot_
+                        std::lock_guard<std::mutex> lock(localization_target_mutex_);
+                        if (localization_target_snapshot_ && localization_target_snapshot_->size() > 100) {
+                            ndt_->setInputTarget(localization_target_snapshot_);
+                            last_target_points_ = static_cast<int>(localization_target_snapshot_->size());
+                        } else {
+                            ndt_->setInputTarget(local_map_);
+                            last_target_points_ = static_cast<int>(local_map_->size());
+                        }
+                    }
+                } else {
+                    // 回退到 local_map_
+                    ndt_->setInputTarget(local_map_);
+                    last_target_points_ = static_cast<int>(local_map_->size());
+                }
+
                 ndt_->setInputSource(registration_cloud);
                 target_version_++;
-                target_rebuild_count_++;
+                setInputTarget_count_++;
 
                 pcl::PointCloud<pcl::PointXYZ> aligned;
 
@@ -1680,7 +1768,6 @@ void NdtSlamNode::processCloudThread() {
                 }
 
                 last_source_points_ = static_cast<int>(registration_cloud->size());
-                last_target_points_ = static_cast<int>(local_map_->size());
 
                 // 计算 initial_guess 到 current_pose_ 的距离（用于诊断）
                 Eigen::Vector3f initial_pos = initial_guess.block<3,1>(0,3);
@@ -2018,6 +2105,12 @@ void NdtSlamNode::processCloudThread() {
 
             if (allow_map_commit) {
                 commitKeyFrameWithDynamicFiltering(filtered_cloud, final_pose, publish_time);
+
+                // V3: 更新 Localization Target（只在 accepted keyframe 时更新）
+                if (localization_target_enabled_) {
+                    updateLocalizationTarget(objects_clean_map_, final_pose);
+                    swapLocalizationTargetBuffers();
+                }
             } else {
                 ROS_DEBUG("[MapCommit] skipped: ndt_accepted=%d fitness=%.3f",
                          ndt_accepted_for_commit ? 1 : 0, last_ndt_fitness_);
@@ -2043,18 +2136,12 @@ void NdtSlamNode::processCloudThread() {
                 innovation = ekf_status.innovation_norm;
             }
 
-            // 计算 source_build_ms 和 target_build_ms（近似值）
-            double source_build_ms = 0.0;
-            double target_build_ms = 0.0;
-
-            ROS_INFO("[Perf] total=%.1fms source=%.1fms target_build=%.1fms ndt=%.1fms "
+            ROS_INFO("[Perf] total=%.1fms ndt=%.1fms "
                      "fitness=%.3f iter=%d converged=%d "
                      "init_dist=%.3f raw_step=%.3f innov=%.3f "
-                     "src_pts=%d tgt_pts=%d tgt_ver=%lu tgt_rebuild=%d "
+                     "src_pts=%d tgt_pts=%d tgt_ver=%lu setInput=%d "
                      "frame=%d",
                      average_process_time_ms_,
-                     source_build_ms,
-                     target_build_ms,
                      last_ndt_time_ms_,
                      last_ndt_fitness_,
                      last_ndt_iterations_,
@@ -2065,7 +2152,7 @@ void NdtSlamNode::processCloudThread() {
                      last_source_points_,
                      last_target_points_,
                      target_version_,
-                     target_rebuild_count_,
+                     setInputTarget_count_,
                      total_frames);
         }
 
@@ -2076,10 +2163,10 @@ void NdtSlamNode::processCloudThread() {
                 csv_file_.open("/tmp/588_ndt_profile.csv", std::ios::out | std::ios::trunc);
                 if (csv_file_.is_open()) {
                     csv_file_ << "frame,stamp,"
-                              << "source_points,target_points,target_version,target_rebuild,"
-                              << "source_build_ms,target_build_ms,ndt_ms,total_ms,"
+                              << "source_points,target_points,target_version,setInput_count,"
+                              << "ndt_ms,total_ms,"
                               << "fitness,converged,iterations,"
-                              << "init_to_result_dist,raw_step,final_step,innovation,"
+                              << "init_to_result_dist,raw_step,innovation,"
                               << "target_source_type,"
                               << "ekf_accept,reject_reason" << std::endl;
                     csv_header_written = true;
@@ -2103,14 +2190,18 @@ void NdtSlamNode::processCloudThread() {
                     innovation = crane_motion_ekf_.status().innovation_norm;
                 }
 
+                // 确定 target_source_type
+                std::string target_source = "local_map";
+                if (localization_target_enabled_ && localization_target_ready_) {
+                    target_source = crop_enabled_ ? "cropped_target" : "loc_target";
+                }
+
                 csv_file_ << total_frames << ","
                           << last_stamp_.toSec() << ","
                           << last_source_points_ << ","
                           << last_target_points_ << ","
                           << target_version_ << ","
-                          << target_rebuild_count_ << ","
-                          << "0.0,"  // source_build_ms (placeholder)
-                          << "0.0,"  // target_build_ms (placeholder)
+                          << setInputTarget_count_ << ","
                           << last_ndt_time_ms_ << ","
                           << average_process_time_ms_ << ","
                           << last_ndt_fitness_ << ","
@@ -2118,9 +2209,8 @@ void NdtSlamNode::processCloudThread() {
                           << last_ndt_iterations_ << ","
                           << last_init_dist_ << ","
                           << last_raw_step_ << ","
-                          << last_raw_step_ << ","  // final_step (same as raw_step for now)
                           << innovation << ","
-                          << "local_map,"  // target_source_type (placeholder)
+                          << target_source << ","
                           << (ekf_accept ? 1 : 0) << ","
                           << reject_reason << std::endl;
             }
@@ -4249,12 +4339,34 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         local_map_->clear();
     }
 
+    // V3: 清理 Localization Target
+    {
+        std::lock_guard<std::mutex> lock(localization_target_mutex_);
+        localization_target_front_->clear();
+        localization_target_back_->clear();
+        localization_target_snapshot_->clear();
+        localization_target_version_ = 0;
+        localization_target_ready_ = false;
+        cached_target_valid_ = false;
+        setInputTarget_count_ = 0;
+    }
+
     // 重置 NDT_OMP（使用配置参数，而非硬编码）
     ndt_.reset(new pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>());
     ndt_->setResolution(ndt_resolution_);
     ndt_->setStepSize(ndt_step_size_);
     ndt_->setTransformationEpsilon(ndt_transformation_epsilon_);
     ndt_->setMaximumIterations(ndt_max_iterations_);
+
+    // V3: 设置 NDT_OMP 多线程和邻域搜索方法
+    ndt_->setNumThreads(ndt_num_threads_);
+    if (ndt_neighbor_search_method_ == "DIRECT7") {
+        ndt_->setNeighborhoodSearchMethod(pclomp::DIRECT7);
+    } else if (ndt_neighbor_search_method_ == "DIRECT1") {
+        ndt_->setNeighborhoodSearchMethod(pclomp::DIRECT1);
+    } else {
+        ndt_->setNeighborhoodSearchMethod(pclomp::KDTREE);
+    }
 
     frame_count_ = 0;
     keyframe_count_ = 0;
@@ -7005,6 +7117,151 @@ void NdtSlamNode::limitCloudUniformInPlace(
     limited->is_dense = false;
 
     cloud.swap(limited);
+}
+
+// ============================================================================
+// V3: Localization Target 管理
+// ============================================================================
+
+void NdtSlamNode::updateLocalizationTarget(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud,
+    const Sophus::SE3d& pose) {
+    if (!objects_cloud || objects_cloud->size() < 100) {
+        return;
+    }
+
+    // 只接受稳定的关键帧更新 target
+    // objects_cloud 已经是经过 dynamic filtering 的 objects_clean_map
+    std::lock_guard<std::mutex> lock(localization_target_mutex_);
+
+    // 将当前关键帧的 objects 点变换到 map 坐标系并累加到 back buffer
+    if (!localization_target_back_) {
+        localization_target_back_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    }
+
+    *localization_target_back_ += *objects_cloud;
+
+    // 体素降采样
+    if (localization_target_back_->size() > 10000) {
+        pcl::VoxelGrid<pcl::PointXYZ> vf;
+        vf.setInputCloud(localization_target_back_);
+        vf.setLeafSize(localization_target_voxel_size_,
+                       localization_target_voxel_size_,
+                       localization_target_voxel_size_);
+        pcl::PointCloud<pcl::PointXYZ> filtered;
+        vf.filter(filtered);
+        *localization_target_back_ = filtered;
+    }
+
+    // 裁剪远处点（以当前 pose 为中心，30m 半径）
+    Eigen::Vector3d center = pose.translation();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cropped(new pcl::PointCloud<pcl::PointXYZ>);
+    for (const auto& p : localization_target_back_->points) {
+        double dx = p.x - center.x();
+        double dy = p.y - center.y();
+        if (dx * dx + dy * dy < 900.0) {  // 30m 半径
+            cropped->push_back(p);
+        }
+    }
+    localization_target_back_ = cropped;
+
+    // 限制最大点数
+    if (static_cast<int>(localization_target_back_->size()) > localization_target_max_points_) {
+        limitCloudUniformInPlace(localization_target_back_, localization_target_max_points_);
+    }
+}
+
+void NdtSlamNode::swapLocalizationTargetBuffers() {
+    std::lock_guard<std::mutex> lock(localization_target_mutex_);
+
+    if (!localization_target_back_ || localization_target_back_->size() < 100) {
+        return;
+    }
+
+    // Swap front/back
+    localization_target_front_ = localization_target_back_;
+    localization_target_back_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+
+    // 更新 snapshot（用于 NDT align 的只读副本）
+    localization_target_snapshot_ = localization_target_front_;
+    localization_target_version_++;
+    localization_target_ready_ = true;
+
+    ROS_DEBUG_THROTTLE(5.0, "[LocTarget] swapped: version=%lu points=%zu",
+                       localization_target_version_,
+                       localization_target_snapshot_->size());
+}
+
+void NdtSlamNode::updateCroppedCachedTarget(const Sophus::SE3d& predicted_pose) {
+    crop_frames_since_update_++;
+
+    Eigen::Vector3d pred_pos = predicted_pose.translation();
+    double pred_yaw = predicted_pose.so3().log().z();
+
+    // 检查是否需要更新
+    double dist = (pred_pos.head<2>() - cached_center_xy_.head<2>()).norm();
+    double yaw_diff = std::abs(pred_yaw - cached_yaw_);
+    if (yaw_diff > M_PI) yaw_diff = 2 * M_PI - yaw_diff;
+
+    bool need_rebuild =
+        !cached_target_valid_ ||
+        dist > crop_update_distance_m_ ||
+        yaw_diff > (crop_update_yaw_deg_ * M_PI / 180.0) ||
+        localization_target_version_ != cached_target_version_ ||
+        crop_frames_since_update_ >= crop_update_min_interval_frames_;
+
+    if (!need_rebuild) {
+        return;
+    }
+
+    // 获取 snapshot（只读）
+    pcl::PointCloud<pcl::PointXYZ>::Ptr target_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(localization_target_mutex_);
+        if (!localization_target_snapshot_ || localization_target_snapshot_->size() < 100) {
+            return;
+        }
+        target_snapshot = localization_target_snapshot_;
+    }
+
+    // 裁剪：以 predicted_pose 为中心
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cropped(new pcl::PointCloud<pcl::PointXYZ>);
+    for (const auto& p : target_snapshot->points) {
+        double dx = p.x - pred_pos.x();
+        double dy = p.y - pred_pos.y();
+        // 椭圆裁剪：radius_x 沿 x，radius_y 沿 y（简化为矩形裁剪）
+        if (std::abs(dx) < crop_radius_x_ && std::abs(dy) < crop_radius_y_) {
+            cropped->push_back(p);
+        }
+    }
+
+    if (cropped->size() < 100) {
+        return;
+    }
+
+    // 体素降采样
+    pcl::VoxelGrid<pcl::PointXYZ> vf;
+    vf.setInputCloud(cropped);
+    vf.setLeafSize(localization_target_voxel_size_,
+                   localization_target_voxel_size_,
+                   localization_target_voxel_size_);
+    pcl::PointCloud<pcl::PointXYZ> filtered;
+    vf.filter(filtered);
+
+    // 限制最大点数（使用指针版本）
+    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_ptr(new pcl::PointCloud<pcl::PointXYZ>(filtered));
+    if (static_cast<int>(filtered_ptr->size()) > localization_target_max_points_) {
+        limitCloudUniformInPlace(filtered_ptr, localization_target_max_points_);
+    }
+
+    // 更新缓存
+    cached_target_ = filtered_ptr;
+    cached_center_xy_ = pred_pos;
+    cached_yaw_ = pred_yaw;
+    cached_target_version_ = localization_target_version_;
+    cached_target_points_ = static_cast<int>(cached_target_->size());
+    cached_target_valid_ = true;
+    crop_frames_since_update_ = 0;
 }
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::buildRegistrationCloud(

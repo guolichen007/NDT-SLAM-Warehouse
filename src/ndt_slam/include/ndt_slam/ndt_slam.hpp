@@ -138,6 +138,12 @@ private:
                        const Sophus::SE3d& pose,
                        const ros::Time& stamp);
 
+    // V3: Localization Target 管理
+    void updateLocalizationTarget(const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud,
+                                   const Sophus::SE3d& pose);
+    void swapLocalizationTargetBuffers();
+    void updateCroppedCachedTarget(const Sophus::SE3d& predicted_pose);
+
     void rebuildGlobalMap();
     void rebuildGlobalMapFiltered();  // 使用 filtered keyframes + dynamic mask 重建地图
     void rebuildDisplayMap();     // 重建细体素显示地图
@@ -353,6 +359,44 @@ private:
     int last_ndt_iterations_ = 0;
     std::ofstream csv_file_;
     bool csv_initialized_ = false;
+
+    // ========== V3: Localization Target (解耦自 local_map_) ==========
+    pcl::PointCloud<pcl::PointXYZ>::Ptr localization_target_front_;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr localization_target_back_;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr localization_target_snapshot_;
+
+    uint64_t localization_target_version_ = 0;
+    uint64_t localization_target_snapshot_version_ = 0;
+    std::mutex localization_target_mutex_;
+    bool localization_target_ready_ = false;
+
+    // V3: Cropped cached target
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cached_target_;
+    bool cached_target_valid_ = false;
+    Eigen::Vector3d cached_center_xy_ = Eigen::Vector3d::Zero();
+    double cached_yaw_ = 0.0;
+    uint64_t cached_target_version_ = 0;
+    int cached_target_points_ = 0;
+
+    // V3: Localization Target 配置
+    bool localization_target_enabled_ = true;
+    bool use_objects_only_initial_ = true;
+    bool include_ground_edge_ = false;
+    int localization_target_min_points_ = 3000;
+    int localization_target_max_points_ = 60000;
+    double localization_target_voxel_size_ = 0.30;
+
+    // V3: Cropped target 配置
+    bool crop_enabled_ = true;
+    double crop_radius_x_ = 15.0;
+    double crop_radius_y_ = 7.0;
+    double crop_update_distance_m_ = 0.50;
+    double crop_update_yaw_deg_ = 2.0;
+    int crop_update_min_interval_frames_ = 3;
+    int crop_frames_since_update_ = 0;
+
+    // V3: 诊断计数
+    int setInputTarget_count_ = 0;
 
     // ========== v8-stable-r3: Adaptive NDT ==========
     bool adaptive_ndt_enabled_ = true;
