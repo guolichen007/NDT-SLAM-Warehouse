@@ -365,20 +365,27 @@ crane_motion_ekf:
 
   innovation_gate_m: 0.35
   innovation_reject_m: 1.00
-  reject_high_fitness: true
-  ndt_fitness_reject_threshold: 0.50    # V3: 从 0.30 提高到 0.50，降低误拒绝
+  # Fitness depends on target density.  Inflate EKF R instead of using a
+  # binary reject cliff; innovation/NIS and the output invariant remain active.
+  reject_high_fitness: false
+  ndt_fitness_reject_threshold: 2.00
   ndt_fitness_recover_threshold: 0.12
 
   max_speed_x: 2.0
   max_speed_y: 2.0
-  max_accel_x: 1.0
-  max_accel_y: 1.0
+  max_accel_x: 1.5
+  max_accel_y: 1.5
 
   commit_requires_ndt_accept: true
+  map_commit_max_fitness: 2.0
   max_rejected_frames_for_commit: 0
 
   diagonal_mode:
-    enabled: true
+    # Independent axes allow a second trolley axis to start without being
+    # damped as a lateral outlier relative to the previous velocity vector.
+    axis_independent_gate: true
+    enabled: false
+    nis_reject_threshold: 13.82
     min_vx: 0.05
     min_vy: 0.05
     min_speed: 0.10
@@ -402,10 +409,10 @@ crane_motion_ekf:
 
   # V3: 物理步长保护
   crane_motion_limit:
-    max_speed_mps: 0.50
-    max_step_safety_factor: 1.2      # V3: 从 1.5 降到 1.2，收紧步长限制
-    max_step_min_m: 0.08
-    max_step_max_m: 0.15             # V3: 从 0.25 降到 0.15，收紧最大步长
+    max_speed_mps: 2.00
+    max_step_safety_factor: 1.10
+    max_step_min_m: 0.05
+    max_step_max_m: 0.25
 
 # ========== v8-stable-r3-final: SoftYawFilter ==========
 soft_yaw_filter:

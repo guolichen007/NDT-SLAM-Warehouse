@@ -24,6 +24,8 @@ struct CraneMotionEKFConfig {
 
     double max_speed_x = 2.0;
     double max_speed_y = 2.0;
+    double max_accel_x = 1.0;
+    double max_accel_y = 1.0;
 
     // V3: 慢帧降权
     bool slow_frame_guard_enabled = true;
@@ -37,7 +39,10 @@ struct CraneMotionEKFConfig {
     double max_step_min_m = 0.08;
     double max_step_max_m = 0.25;
 
-    bool diagonal_enabled = true;
+    // Legacy velocity-direction damping can suppress a real second-axis
+    // start.  Independent X/Y innovation gates are the production default.
+    bool axis_independent_gate = true;
+    bool diagonal_enabled = false;
     double diagonal_min_vx = 0.05;
     double diagonal_min_vy = 0.05;
     double diagonal_min_speed = 0.10;
@@ -45,6 +50,7 @@ struct CraneMotionEKFConfig {
     double tangential_gate_m = 0.40;
     double lateral_damping = 0.70;
     double tangential_damping = 0.40;
+    double nis_reject_threshold = 13.82;  // chi-square, 2 DoF, 99.9%
 
     int max_frames_since_good_ndt = 30;
     int max_high_fitness_frames = 10;
@@ -62,6 +68,8 @@ struct CraneMotionEKFStatus {
     bool ndt_accepted = false;
     bool diagonal_mode = false;
     bool recovered = false;
+    bool prediction_only = false;
+    bool step_limited = false;
 
     Eigen::Vector2d predicted_pos = Eigen::Vector2d::Zero();
     Eigen::Vector2d ndt_pos = Eigen::Vector2d::Zero();
@@ -75,6 +83,11 @@ struct CraneMotionEKFStatus {
     double measurement_r = 0.0;
     double p_trace = 0.0;
     double fitness = 0.0;
+    double sensor_dt = 0.0;
+    double ndt_time_ms = 0.0;
+    double nis = 0.0;
+    double output_step = 0.0;
+    double max_allowed_step = 0.0;
 
     int frames_since_good_ndt = 0;
     int high_fitness_frames = 0;
@@ -101,7 +114,15 @@ public:
     Sophus::SE3d updateWithNDT(const Sophus::SE3d& ndt_pose,
                                double ndt_fitness,
                                const Sophus::SE3d& pose_template,
-                               const ros::Time& stamp);
+                               const ros::Time& stamp,
+                               double ndt_time_ms = 0.0);
+
+    // Advance x/P/stamp when a measurement is unavailable or rejected.  A
+    // read-only prediction must never be used as the published runtime state.
+    Sophus::SE3d predictWithoutMeasurement(
+        const Sophus::SE3d& pose_template,
+        const ros::Time& stamp,
+        const std::string& reason);
 
     // V3: 慢帧保护 - 传入 NDT 时间，返回额外的 R 增量
     double computeSlowFrameExtraR(double ndt_time_ms) const;
@@ -122,6 +143,14 @@ public:
 private:
     void predict(double dt, Eigen::Vector4d& x_pred, Eigen::Matrix4d& P_pred);
     void maybeRecover(const std::string& reason);
+    double sanitizeDt(const ros::Time& stamp) const;
+    double computeMaxOutputStep(double dt) const;
+    bool enforceOutputStep(const Eigen::Vector2d& previous_pos,
+                           double dt,
+                           Eigen::Vector4d& state);
+    void enforceVelocityAndAcceleration(const Eigen::Vector2d& previous_velocity,
+                                        double dt,
+                                        Eigen::Vector4d& state) const;
 
     Sophus::SE3d buildPoseFromState(const Eigen::Vector4d& state,
                                     const Sophus::SE3d& pose_template) const;

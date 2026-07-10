@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <boost/filesystem.hpp>
 #include <malloc.h>
@@ -823,6 +824,15 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
             crane_motion_ekf_cfg_.max_speed_x = n["max_speed_x"].as<double>(2.0);
             crane_motion_ekf_cfg_.max_speed_y = n["max_speed_y"].as<double>(2.0);
+            crane_motion_ekf_cfg_.max_accel_x = n["max_accel_x"].as<double>(1.0);
+            crane_motion_ekf_cfg_.max_accel_y = n["max_accel_y"].as<double>(1.0);
+            map_commit_requires_ndt_accept_ =
+                n["commit_requires_ndt_accept"].as<bool>(true);
+            map_commit_max_fitness_ =
+                n["map_commit_max_fitness"].as<double>(2.0);
+            if (!map_commit_requires_ndt_accept_) {
+                ROS_WARN("[MapCommit] commit_requires_ndt_accept=false is unsafe and will be ignored");
+            }
 
             // V3: 慢帧保护配置
             if (n["ndt_runtime_guard"]) {
@@ -844,7 +854,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
             if (n["diagonal_mode"]) {
                 const auto d = n["diagonal_mode"];
-                crane_motion_ekf_cfg_.diagonal_enabled = d["enabled"].as<bool>(true);
+                crane_motion_ekf_cfg_.axis_independent_gate =
+                    d["axis_independent_gate"].as<bool>(true);
+                crane_motion_ekf_cfg_.diagonal_enabled = d["enabled"].as<bool>(false);
                 crane_motion_ekf_cfg_.diagonal_min_vx = d["min_vx"].as<double>(0.05);
                 crane_motion_ekf_cfg_.diagonal_min_vy = d["min_vy"].as<double>(0.05);
                 crane_motion_ekf_cfg_.diagonal_min_speed = d["min_speed"].as<double>(0.10);
@@ -852,6 +864,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 crane_motion_ekf_cfg_.tangential_gate_m = d["tangential_gate_m"].as<double>(0.40);
                 crane_motion_ekf_cfg_.lateral_damping = d["lateral_damping"].as<double>(0.70);
                 crane_motion_ekf_cfg_.tangential_damping = d["tangential_damping"].as<double>(0.40);
+                crane_motion_ekf_cfg_.nis_reject_threshold =
+                    d["nis_reject_threshold"].as<double>(13.82);
             }
 
             if (n["recovery"]) {
@@ -878,13 +892,17 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                      crane_motion_ekf_cfg_.slow_frame_warn_ms,
                      crane_motion_ekf_cfg_.slow_frame_emergency_ms,
                      crane_motion_ekf_cfg_.slow_frame_extra_r);
-            ROS_INFO("[CraneMotionEKF:MotionLimit] max_speed=%.3f safety=%.3f step_min=%.3f step_max=%.3f axis_speed=(%.3f,%.3f)",
+            ROS_INFO("[CraneMotionEKF:MotionLimit] max_speed=%.3f safety=%.3f step_min=%.3f step_max=%.3f axis_speed=(%.3f,%.3f) axis_accel=(%.3f,%.3f) axis_gate=%d map_commit_fitness=%.3f",
                      crane_motion_ekf_cfg_.max_speed_mps,
                      crane_motion_ekf_cfg_.max_step_safety_factor,
                      crane_motion_ekf_cfg_.max_step_min_m,
                      crane_motion_ekf_cfg_.max_step_max_m,
                      crane_motion_ekf_cfg_.max_speed_x,
-                     crane_motion_ekf_cfg_.max_speed_y);
+                     crane_motion_ekf_cfg_.max_speed_y,
+                     crane_motion_ekf_cfg_.max_accel_x,
+                     crane_motion_ekf_cfg_.max_accel_y,
+                     crane_motion_ekf_cfg_.axis_independent_gate ? 1 : 0,
+                     map_commit_max_fitness_);
         }
 
         // v8-stable-r3: SoftYawFilter 参数
@@ -1857,7 +1875,8 @@ void NdtSlamNode::processCloudThread() {
                 if (last_ndt_converged_) {
                     Eigen::Matrix4f ndt_result = ndt_->getFinalTransformation();
                     Eigen::Vector3f ndt_pos = ndt_result.block<3,1>(0,3);
-                    last_raw_step_ = (ndt_pos - initial_pos).norm();
+                    last_raw_step_ =
+                        (ndt_pos - initial_pos).head<2>().norm();
                 }
 
                 // Use the single configured runtime threshold.  The previous
@@ -1928,8 +1947,8 @@ void NdtSlamNode::processCloudThread() {
                             if (crane_motion_ekf_.isNonPhysicalStep(
                                     last_raw_step_, ndt_time_ms, last_sensor_dt_)) {
                                 use_prediction = true;
-                                reject_reason_slow = "SLOW_NONPHYSICAL_STEP";
-                                ROS_WARN_THROTTLE(2.0, "[NDT-guard] slow_frame nonphysical: raw_step=%.3f ndt_ms=%.1f dt=%.3f",
+                                reject_reason_slow = "NONPHYSICAL_NDT_CORRECTION";
+                                ROS_WARN_THROTTLE(2.0, "[NDT-guard] nonphysical correction: raw_step=%.3f ndt_ms=%.1f dt=%.3f",
                                                  last_raw_step_, ndt_time_ms, last_sensor_dt_);
                             }
                         }
@@ -1939,15 +1958,17 @@ void NdtSlamNode::processCloudThread() {
                                 crane_motion_ekf_.initialize(new_pose, msg->header.stamp);
                                 ekf_pose = new_pose;
                             } else if (use_prediction) {
-                                // V3: 使用 EKF prediction 替代 NDT 结果
-                                ekf_pose = crane_motion_ekf_.predictPoseReadOnly(current_pose_, ndt_time_ms / 1000.0);
-                                // 不更新 EKF 状态，只使用预测
+                                // A published prediction must advance EKF x/P/stamp.
+                                ekf_pose = crane_motion_ekf_.predictWithoutMeasurement(
+                                    new_pose, msg->header.stamp,
+                                    reject_reason_slow);
                             } else {
                                 ekf_pose = crane_motion_ekf_.updateWithNDT(
                                     new_pose,
                                     fitness_score,
                                     new_pose,
-                                    msg->header.stamp);
+                                    msg->header.stamp,
+                                    ndt_time_ms);
                             }
 
                             ndt_accepted = crane_motion_ekf_.status().ndt_accepted;
@@ -1962,18 +1983,24 @@ void NdtSlamNode::processCloudThread() {
                                 const auto& ekf_status = crane_motion_ekf_.status();
                                 ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec,
                                     "[EKF] pred=(%.2f,%.2f) ndt=(%.2f,%.2f) out=(%.2f,%.2f) "
-                                    "vel=(%.2f,%.2f) innov=%.3f lat=%.3f tan=%.3f R=%.4f P=%.4f mode=%s accept=%d reject=%s",
+                                    "vel=(%.2f,%.2f) innov=%.3f nis=%.2f step=%.3f/%.3f "
+                                    "lat=%.3f tan=%.3f R=%.4f P=%.4f mode=%s accept=%d predict=%d limited=%d reject=%s",
                                     ekf_status.predicted_pos.x(), ekf_status.predicted_pos.y(),
                                     ekf_status.ndt_pos.x(), ekf_status.ndt_pos.y(),
                                     ekf_status.output_pos.x(), ekf_status.output_pos.y(),
                                     ekf_status.velocity.x(), ekf_status.velocity.y(),
                                     ekf_status.innovation_norm,
+                                    ekf_status.nis,
+                                    ekf_status.output_step,
+                                    ekf_status.max_allowed_step,
                                     ekf_status.lateral_error,
                                     ekf_status.tangential_error,
                                     ekf_status.measurement_r,
                                     ekf_status.p_trace,
                                     ekf_status.diagonal_mode ? "DIAG" : "NORMAL",
                                     ekf_status.ndt_accepted ? 1 : 0,
+                                    ekf_status.prediction_only ? 1 : 0,
+                                    ekf_status.step_limited ? 1 : 0,
                                     ekf_status.reject_reason.c_str());
                             }
                         }
@@ -2008,14 +2035,19 @@ void NdtSlamNode::processCloudThread() {
                         double move_dist = delta.translation().norm();
                         double move_rot = delta.so3().log().norm();
 
-                        // 长期模式下，静止时不更新 local_map，保持 NDT target 不变
-                        if (longterm_mapping_enabled_ && is_stationary_) {
+                        // Prediction-only/rejected poses must not feed either
+                        // the persistent map or the runtime registration map.
+                        if (!ndt_accepted) {
+                            ROS_DEBUG("[LocalMap] skipped rejected/prediction-only frame");
+                        } else if (longterm_mapping_enabled_ && is_stationary_) {
                             // 静止：不更新 local_map
                             ROS_DEBUG("[LocalMap] Stationary, skipping local_map update");
                         } else if (move_dist > 0.5 || move_rot > 0.08 || frames_since_last_update > 15) {
                             // 用配准点云更新局部地图
                             pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZ>);
-                            pcl::transformPointCloud(*registration_cloud, *transformed, result_ortho.cast<float>());
+                            pcl::transformPointCloud(
+                                *registration_cloud, *transformed,
+                                new_pose.matrix().cast<float>());
                             *local_map_ += *transformed;
 
                             // 清理远处的点（15m 半径，更紧凑的局部地图）
@@ -2046,12 +2078,31 @@ void NdtSlamNode::processCloudThread() {
                             last_local_map_pose = new_pose;
                             frames_since_last_update = 0;
                         }
+                    } else if (crane_motion_ekf_enabled_ &&
+                               crane_motion_ekf_.initialized()) {
+                        ROS_WARN_THROTTLE(
+                            1.0,
+                            "NDT returned an invalid transformation; advancing EKF prediction");
+                        new_pose = crane_motion_ekf_.predictWithoutMeasurement(
+                            current_pose_, msg->header.stamp,
+                            "NDT_INVALID_TRANSFORM");
+                        registration_success = true;
+                        ekf_reject_count_.fetch_add(1, std::memory_order_relaxed);
                     }
                 } else {
                     static int no_converge_count = 0;
                     no_converge_count++;
                     if (no_converge_count <= 5 || no_converge_count % 50 == 0) {
-                        ROS_WARN("NDT: not converged (count=%d), using previous pose", no_converge_count);
+                        ROS_WARN("NDT: not converged (count=%d), advancing EKF prediction", no_converge_count);
+                    }
+                    last_ndt_fitness_ = std::numeric_limits<double>::infinity();
+                    last_raw_step_ = 0.0;
+                    if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
+                        new_pose = crane_motion_ekf_.predictWithoutMeasurement(
+                            current_pose_, msg->header.stamp,
+                            "NDT_NOT_CONVERGED");
+                        registration_success = true;
+                        ekf_reject_count_.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
             }
@@ -2084,8 +2135,14 @@ void NdtSlamNode::processCloudThread() {
 
         // ========== 阶段 7：发布结果（用完整点云建图）==========
         if (registration_success && !tracking_lost_) {
-            // TF 用 ros::Time::now() 避免重复
-            ros::Time publish_time = ros::Time::now();
+            // Keep the complete frame context on the sensor timestamp.  The
+            // callback already rejects duplicate sensor frames.
+            ros::Time publish_time = msg->header.stamp.isZero()
+                ? ros::Time::now()
+                : msg->header.stamp;
+            const bool runtime_ndt_accepted =
+                !crane_motion_ekf_enabled_ ||
+                crane_motion_ekf_.status().ndt_accepted;
 
             // v8-stable-r3-hotfix-minimal: selectPublishedPose 已透传
             Sophus::SE3d final_pose = selectPublishedPose(constrained_pose, publish_time);
@@ -2100,7 +2157,8 @@ void NdtSlamNode::processCloudThread() {
             // ICP 精配准移到后台线程，不阻塞主处理
             // NDT 结果直接用于地图插入，ICP 完成后更新位姿
             Sophus::SE3d refined_pose = new_pose;
-            if (local_map_->size() > 500 && feature_cloud->size() > 100) {
+            if (runtime_ndt_accepted &&
+                local_map_->size() > 500 && feature_cloud->size() > 100) {
                 // 克隆数据用于后台 ICP
                 pcl::PointCloud<pcl::PointXYZ>::Ptr icp_source(new pcl::PointCloud<pcl::PointXYZ>(*feature_cloud));
                 pcl::PointCloud<pcl::PointXYZ>::Ptr icp_target(new pcl::PointCloud<pcl::PointXYZ>(*local_map_));
@@ -2187,7 +2245,7 @@ void NdtSlamNode::processCloudThread() {
             Sophus::SE3d map_pose = constrained_pose;
             {
                 std::lock_guard<std::mutex> lock(cloud_mutex_);
-                if (has_refined_pose_.load()) {
+                if (runtime_ndt_accepted && has_refined_pose_.load()) {
                     map_pose = applyCraneMotionConstraint(refined_pose_, "refined");
                 }
             }
@@ -2195,13 +2253,15 @@ void NdtSlamNode::processCloudThread() {
 
             // v8-stable-r3: MapCommit 只允许在 ndt_accepted=true 且 fitness 合格时执行
             // EKF prediction-only 帧可以发布 TF/odom，但不能写地图
-            bool ndt_accepted_for_commit = true;
-            if (crane_motion_ekf_enabled_) {
-                ndt_accepted_for_commit = crane_motion_ekf_.status().ndt_accepted;
-            }
+            const bool ndt_accepted_for_commit = runtime_ndt_accepted;
 
-            bool allow_map_commit = ndt_accepted_for_commit &&
-                                    last_ndt_fitness_ < 0.15;
+            // Prediction-only poses are valid runtime outputs but can never
+            // become map evidence.  Keep this invariant even if a legacy
+            // configuration attempts to relax the old flag.
+            const bool commit_accept_ok = ndt_accepted_for_commit;
+            const bool commit_fitness_ok = std::isfinite(last_ndt_fitness_) &&
+                last_ndt_fitness_ <= map_commit_max_fitness_;
+            bool allow_map_commit = commit_accept_ok && commit_fitness_ok;
 
             if (allow_map_commit) {
                 commitKeyFrameWithDynamicFiltering(filtered_cloud, final_pose, publish_time);
@@ -2212,8 +2272,10 @@ void NdtSlamNode::processCloudThread() {
                     swapLocalizationTargetBuffers();
                 }
             } else {
-                ROS_DEBUG("[MapCommit] skipped: ndt_accepted=%d fitness=%.3f",
-                         ndt_accepted_for_commit ? 1 : 0, last_ndt_fitness_);
+                ROS_DEBUG("[MapCommit] skipped: ndt_accepted=%d require_accept=%d fitness=%.3f max_fitness=%.3f",
+                         ndt_accepted_for_commit ? 1 : 0,
+                         map_commit_requires_ndt_accept_ ? 1 : 0,
+                         last_ndt_fitness_, map_commit_max_fitness_);
             }
             success_frames++;
         }
@@ -2270,7 +2332,8 @@ void NdtSlamNode::processCloudThread() {
                               << "source_points,target_points,target_version,setInput_count,"
                               << "ndt_ms,total_ms,"
                               << "fitness,converged,iterations,"
-                              << "init_to_result_dist,raw_step,innovation,"
+                              << "init_to_result_dist,raw_step,innovation,nis,"
+                              << "output_step,max_allowed_step,prediction_only,step_limited,"
                               << "target_source_type,target_reason,"
                               << "ekf_accept,reject_reason" << std::endl;
                     csv_header_written = true;
@@ -2290,8 +2353,19 @@ void NdtSlamNode::processCloudThread() {
 
                 // 计算 innovation
                 double innovation = 0.0;
+                double nis = 0.0;
+                double output_step = 0.0;
+                double max_allowed_step = 0.0;
+                bool prediction_only = false;
+                bool step_limited = false;
                 if (crane_motion_ekf_enabled_) {
-                    innovation = crane_motion_ekf_.status().innovation_norm;
+                    const auto& status = crane_motion_ekf_.status();
+                    innovation = status.innovation_norm;
+                    nis = status.nis;
+                    output_step = status.output_step;
+                    max_allowed_step = status.max_allowed_step;
+                    prediction_only = status.prediction_only;
+                    step_limited = status.step_limited;
                 }
 
                 csv_file_ << total_frames << ","
@@ -2309,6 +2383,11 @@ void NdtSlamNode::processCloudThread() {
                           << last_init_dist_ << ","
                           << last_raw_step_ << ","
                           << innovation << ","
+                          << nis << ","
+                          << output_step << ","
+                          << max_allowed_step << ","
+                          << (prediction_only ? 1 : 0) << ","
+                          << (step_limited ? 1 : 0) << ","
                           << last_actual_target_source_ << ","
                           << last_target_reason_ << ","
                           << (ekf_accept ? 1 : 0) << ","
@@ -5261,11 +5340,11 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
             last_ndt_fitness_,
             keyframe_count_);
 
-        // 初期解冻条件：keyframe <= 1 且 dt > 3.0 且 evidence_trans > 0.15 且 fitness < 0.12
+        // Outer MapCommit quality gating has already accepted this frame; do
+        // not introduce a second, stricter fitness cliff in MotionGate.
         if (keyframe_count_ <= 1 &&
             elapsed > 3.0 &&
-            evidence_trans > 0.15 &&
-            last_ndt_fitness_ < 0.12) {
+            evidence_trans > 0.15) {
             ROS_WARN(
                 "[MotionGate] unfreeze_initial_map_commit raw=%.3f refined=%.3f runtime=%.3f evidence=%.3f dt=%.2f fitness=%.3f",
                 raw_trans,
@@ -5338,7 +5417,6 @@ bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const r
     // 正常运动提交条件
     if (evidence_trans_move > motion_gate_min_translation_m_ &&
         time_elapsed_enough &&
-        last_ndt_fitness_ < 0.15 &&
         !is_stationary_) {
         last_keyframe_pose_for_gate_ = current_pose;
         last_keyframe_time_for_gate_ = current_time;

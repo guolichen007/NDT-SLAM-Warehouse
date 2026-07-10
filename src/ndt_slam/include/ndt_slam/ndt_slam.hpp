@@ -319,6 +319,8 @@ private:
     CraneMotionEKF crane_motion_ekf_;
     CraneMotionEKFConfig crane_motion_ekf_cfg_;
     bool crane_motion_ekf_enabled_ = true;
+    bool map_commit_requires_ndt_accept_ = true;
+    double map_commit_max_fitness_ = 2.0;
 
     // ========== v8-stable-r3: SoftYawFilter ==========
     bool soft_yaw_enabled_ = true;
