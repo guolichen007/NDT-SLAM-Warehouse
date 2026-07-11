@@ -29,14 +29,21 @@
 #include <Eigen/Geometry>
 #include <sophus/se3.hpp>
 #include <queue>
+#include <deque>
+#include <chrono>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <cstdint>
 #include <memory>
+#include <limits>
+#include <utility>
 
 // P0.5: 货物框估计器
 #include <ndt_slam/cargo_box_estimator.hpp>
+#include <ndt_slam/cargo_bottom_fusion.hpp>
+#include <ndt_slam/cargo_safety_evaluator.hpp>
 #include <set>
 
 // v8-stable-r3: CraneMotionEKF
@@ -55,6 +62,8 @@
 #include "ndt_slam/runtime_diagnostics.hpp"
 #include "lidar_slam2_msgs/SaveMap.h"
 #include "lidar_slam2_msgs/LoadMap.h"
+#include "lidar_slam2_msgs/CargoBottomEstimate.h"
+#include "lidar_slam2_msgs/CargoSafetyStatus.h"
 
 // KISS-ICP config struct (保留用于兼容)
 namespace kiss_icp { namespace pipeline {
@@ -260,9 +269,57 @@ private:
     double model_deviation_threshold_ = 0.4;
 
     Sophus::SE3d current_pose_;
-    Sophus::SE3d refined_pose_;           // ICP 精炼位姿（用于地图插入）
-    std::atomic<bool> has_refined_pose_{false};  // 是否有可用的精炼位姿
-    std::atomic<bool> refined_pose_high_quality_{false};  // 精炼位姿是否满足高质量入图条件
+
+    // ICP refinement is an optional, frame-scoped map aid.  Its worker state
+    // is deliberately independent from asynchronous map rebuilding, and a
+    // result is consumed at most once after its frame/map identity is checked.
+    struct IcpRefineConfig {
+        bool enabled = false;
+        bool run_after_ndt = true;
+        bool use_objects_only = true;
+        int max_iterations = 8;
+        double max_correspondence_distance = 0.20;
+        double transformation_epsilon = 0.002;
+        int min_object_points = 800;
+        double max_icp_ms = 15.0;
+        double max_fitness = 0.50;
+    } icp_refine_cfg_;
+
+    struct IcpRefineJob {
+        uint64_t frame_index = 0;
+        ros::Time stamp;
+        uint64_t local_map_version = 0;
+        Sophus::SE3d ndt_pose;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr source;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr target;
+    };
+
+    struct IcpRefineResult {
+        bool valid = false;
+        uint64_t frame_index = 0;
+        ros::Time stamp;
+        uint64_t local_map_version = 0;
+        Sophus::SE3d pose;
+        double fitness = std::numeric_limits<double>::infinity();
+        double elapsed_ms = 0.0;
+    };
+
+    std::thread icp_thread_;
+    std::atomic<bool> icp_running_{false};
+    std::mutex icp_result_mutex_;
+    IcpRefineResult icp_result_;
+    uint64_t runtime_frame_index_ = 0;
+    std::atomic<uint64_t> icp_cloud_copy_count_{0};
+    std::atomic<uint64_t> icp_job_count_{0};
+    std::atomic<uint64_t> icp_thread_count_{0};
+    std::atomic<uint64_t> icp_result_use_count_{0};
+    std::atomic<uint64_t> icp_stale_drop_count_{0};
+
+    void startIcpRefineJob(IcpRefineJob job);
+    bool consumeIcpRefineResult(uint64_t current_frame,
+                                const ros::Time& current_stamp,
+                                uint64_t current_map_version,
+                                Sophus::SE3d& refined_pose);
     bool initialized_ = false;
 
     // ========== Crane Motion Constraint（天车运动约束）==========
@@ -371,6 +428,8 @@ private:
     int last_ndt_iterations_ = 0;
     std::ofstream csv_file_;
     bool csv_initialized_ = false;
+    double last_commit_clean_map_ms_ = 0.0;
+    double last_commit_display_map_ms_ = 0.0;
 
     // End-to-end runtime counters. Callback and processing run on different
     // threads, so counters are atomic and are diagnostic-only.
@@ -378,6 +437,7 @@ private:
     std::atomic<uint64_t> queue_overwrite_drop_count_{0};
     std::atomic<uint64_t> cloud_dequeue_count_{0};
     std::atomic<uint64_t> empty_cloud_skip_count_{0};
+    std::atomic<uint64_t> too_few_points_skip_count_{0};
     std::atomic<uint64_t> duplicate_cloud_skip_count_{0};
     std::atomic<uint64_t> invalid_sensor_dt_count_{0};
     std::atomic<uint64_t> ndt_attempt_count_{0};
@@ -453,7 +513,12 @@ private:
     int consecutive_good_perf_frames_ = 0;
 
     std::mutex cloud_mutex_;
-    std::queue<sensor_msgs::PointCloud2::ConstPtr> cloud_queue_;
+    struct CloudQueueEntry {
+        sensor_msgs::PointCloud2::ConstPtr message;
+        std::chrono::steady_clock::time_point enqueued_at;
+    };
+    std::deque<CloudQueueEntry> cloud_queue_;
+    std::size_t localization_queue_capacity_ = 1U;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::condition_variable tracking_cv_;
@@ -769,15 +834,11 @@ private:
     double last_frame_stamp_for_gate_ = 0.0;
     Eigen::Vector3d last_frame_pos_for_gate_ = Eigen::Vector3d::Zero();
 
-    // v8: PoseFreeze - 静止时冻结发布姿态
+    // MotionGate state is map-commit evidence only. Runtime pose publication
+    // never reads these flags.
     Sophus::SE3d published_pose_;
     bool motion_gate_stationary_ = false;
     int moving_confirm_count_ = 0;
-    // v8-stable-r3-hotfix-minimal: PoseFreeze 已禁用
-    bool stationary_freeze_tf_odom_ = false;
-    bool stationary_freeze_xy_ = false;
-    bool stationary_freeze_yaw_ = false;
-    double stationary_pose_freeze_release_m_ = 0.80;
 
     // P0-3: MapCommit evidence only. Does NOT affect runtime odom/TF/path.
     Sophus::SE3d last_raw_ndt_pose_;
@@ -794,6 +855,14 @@ private:
     bool stationary_raw_anchor_valid_ = false;
 
     Sophus::SE3d selectPublishedPose(const Sophus::SE3d& constrained_pose, const ros::Time& stamp);
+
+    // The only production entry point to MotionGate.  It verifies that gate
+    // evaluation cannot modify the runtime EKF state or current pose.
+    bool evaluateMotionGateForMapCommit(const Sophus::SE3d& pose,
+                                        const ros::Time& stamp);
+    std::atomic<uint64_t> motion_gate_invariant_check_count_{0};
+    std::atomic<uint64_t> motion_gate_invariant_violation_count_{0};
+    std::atomic<uint64_t> motion_gate_map_commit_block_count_{0};
 
     // 关键帧 active window
     int max_active_keyframes_ = 80;
@@ -1154,6 +1223,8 @@ private:
     HookFixedCargoConfig hook_fixed_config_;
     HookCargoDetection hook_fixed_cargo_;
     HookCargoBottomEstimate hook_fixed_bottom_;
+    bool hook_observation_associated_current_ = false;
+    ros::Time hook_observation_association_stamp_;
     float stable_height_ = 0.0f;
     bool has_stable_height_ = false;
 
@@ -1315,95 +1386,4 @@ private:
         // 障碍物信息
         float obstacle_top_z = 0.0f;
         uint32_t obstacle_point_count = 0;
-        Eigen::Vector3f obstacle_nearest_point = Eigen::Vector3f::Zero();
-
-        // 货物框
-        Eigen::Vector3f cargo_center = Eigen::Vector3f::Zero();
-        Eigen::Vector3f cargo_size = Eigen::Vector3f::Zero();
-
-        // 元信息
-        std::string source;
-        std::string reason;
-    };
-
-    // Cargo Warning 状态
-    int cargo_warning_debounce_count_ = 0;
-    CargoWarningData last_cargo_warning_;
-    ros::Time last_cargo_warning_stamp_;
-
-    // Cargo Warning publisher
-    ros::Publisher cargo_warning_pub_;
-    ros::Publisher cargo_warning_text_pub_;
-    ros::Publisher cargo_tight_box_marker_pub_;
-    ros::Publisher cargo_warning_zone_marker_pub_;
-    ros::Publisher cargo_warning_obstacle_marker_pub_;
-
-    // OdomAnchorBox 新函数
-    HookCargoDetection detectCargoAroundOdomAnchor(
-        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
-        const ros::Time& stamp);
-    void publishPayloadTrackInfoFromOdomAnchorBox(const ros::Time& stamp);
-
-    void updateHookCargoLock(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
-    bool isStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
-    bool isWeakDetection(const HookCargoDetection& det);
-    bool isLockStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
-    bool isBodyStrongCandidate(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
-    bool isDetectionConsistentWithLockedBox(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, std::string* reject_reason);
-    Eigen::Vector3f computeFixedCenterSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
-    Eigen::Vector3f medianSize(const std::deque<Eigen::Vector3f>& buffer);
-    void updateLockedHeight(const HookCargoBottomEstimate& bottom, const ros::Time& stamp, bool initialize);
-    void maybeUpdateLockedSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
-    void growUncertainty();
-    void clearHookLock();
-    uint64_t computeCloudHash(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
-
-    // CargoState 更新函数
-    void updateCargoState(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
-
-    // Cargo Warning 函数
-    CargoWarningData computeCargoWarning(
-        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
-        const Eigen::Vector3f& cargo_center,
-        const Eigen::Vector3f& cargo_size,
-        float cargo_bottom_z,
-        float cargo_bottom_uncertainty,
-        const ros::Time& stamp);
-    void publishCargoWarning(const CargoWarningData& warning, const ros::Time& stamp);
-    void publishCargoWarningMarkers(
-        const Eigen::Vector3f& cargo_center,
-        const Eigen::Vector3f& cargo_size,
-        const CargoWarningData& warning,
-        const ros::Time& stamp);
-
-    // ========== Runtime Diagnostics (1.0x/1.5x acceptance testing) ==========
-    RuntimeDiagnostics runtime_diag_;
-    RuntimeDiagnosticsConfig runtime_diag_config_;
-    std::string diag_output_dir_;
-
-    // 用于健康状态统计
-    int diag_frame_index_ = 0;
-    double diag_last_cloud_stamp_ = 0.0;
-    double diag_last_wall_time_ = 0.0;
-    int diag_consecutive_overruns_ = 0;
-    int diag_consecutive_prediction_only_ = 0;
-    int diag_consecutive_target_fallback_ = 0;
-    int diag_input_frame_count_ = 0;
-    int diag_processed_frame_count_ = 0;
-    int diag_converged_count_ = 0;
-    double diag_last_valid_ndt_stamp_ = 0.0;
-
-    // 用于cargo风险检测
-    float diag_last_bottom_z_ = 0.0f;
-    float diag_last_height_m_ = 0.0f;
-    int diag_cargo_lost_frames_ = 0;
-    int diag_last_track_id_ = -1;
-    std::string diag_last_cargo_state_ = "EMPTY";
-
-    void logStartupConfig();
-    void logBuildId();
-    void logNdtHealthPeriodic();
-    void logCargoHealthPeriodic();
-};
-
-} // namespace ndt_slam
+        Eigen::Vecto

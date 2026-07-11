@@ -74,6 +74,25 @@ namespace ndt_slam {
 using lidar_slam2::utils::PointCloud2ToEigen;
 using lidar_slam2::utils::GetTimestamps;
 
+static_assert(static_cast<std::uint8_t>(CargoBottomSource::INVALID) ==
+              lidar_slam2_msgs::CargoBottomEstimate::SOURCE_INVALID,
+              "Cargo source schema drift: INVALID");
+static_assert(static_cast<std::uint8_t>(CargoBottomSource::POINTS) ==
+              lidar_slam2_msgs::CargoBottomEstimate::SOURCE_POINTS,
+              "Cargo source schema drift: POINTS");
+static_assert(static_cast<std::uint8_t>(CargoBottomSource::MAP_DIFF) ==
+              lidar_slam2_msgs::CargoBottomEstimate::SOURCE_MAP_DIFF,
+              "Cargo source schema drift: MAP_DIFF");
+static_assert(static_cast<std::uint8_t>(CargoBottomSource::MAP_STATIC) ==
+              lidar_slam2_msgs::CargoBottomEstimate::SOURCE_MAP_STATIC,
+              "Cargo source schema drift: MAP_STATIC");
+static_assert(static_cast<std::uint8_t>(CargoBottomSource::RECENT_STABLE) ==
+              lidar_slam2_msgs::CargoBottomEstimate::SOURCE_RECENT_STABLE,
+              "Cargo source schema drift: RECENT_STABLE");
+static_assert(static_cast<std::uint8_t>(CargoBottomSource::ORIGIN_HEIGHT) ==
+              lidar_slam2_msgs::CargoBottomEstimate::SOURCE_ORIGIN_HEIGHT,
+              "Cargo source schema drift: ORIGIN_HEIGHT");
+
 NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     : nh_(nh) {
     initializeParameters();
@@ -104,6 +123,12 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     cargo_tight_box_marker_pub_ = nh_.advertise<visualization_msgs::Marker>("/cargo_tight_box_marker", 10);
     cargo_warning_zone_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_warning_zone_marker", 10);
     cargo_warning_obstacle_marker_pub_ = nh_.advertise<visualization_msgs::Marker>("/cargo_warning_obstacle_marker", 10);
+    cargo_bottom_estimate_pub_ = nh_.advertise<lidar_slam2_msgs::CargoBottomEstimate>(
+        "/cargo_avoidance/bottom_estimate", 1);
+    cargo_safety_status_pub_ = nh_.advertise<lidar_slam2_msgs::CargoSafetyStatus>(
+        "/cargo_avoidance/safety_status", 1);
+    cargo_fused_box_marker_pub_ = nh_.advertise<visualization_msgs::Marker>(
+        "/cargo_avoidance/fused_box_marker", 2);
 
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
@@ -210,6 +235,12 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     cargo_tight_box_marker_pub_ = nh_.advertise<visualization_msgs::Marker>("/cargo_tight_box_marker", 10);
     cargo_warning_zone_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cargo_warning_zone_marker", 10);
     cargo_warning_obstacle_marker_pub_ = nh_.advertise<visualization_msgs::Marker>("/cargo_warning_obstacle_marker", 10);
+    cargo_bottom_estimate_pub_ = nh_.advertise<lidar_slam2_msgs::CargoBottomEstimate>(
+        "/cargo_avoidance/bottom_estimate", 1);
+    cargo_safety_status_pub_ = nh_.advertise<lidar_slam2_msgs::CargoSafetyStatus>(
+        "/cargo_avoidance/safety_status", 1);
+    cargo_fused_box_marker_pub_ = nh_.advertise<visualization_msgs::Marker>(
+        "/cargo_avoidance/fused_box_marker", 2);
 
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
@@ -295,6 +326,15 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     ROS_INFO("[CargoBoxEstimator] initialized: enabled=%d, use_crane_axis_obb=%d",
              cargo_box_estimator_config_.enabled ? 1 : 0, cargo_box_estimator_config_.use_crane_axis_obb);
 
+    // Runtime diagnostics: configure and log startup
+    if (runtime_diag_config_.enabled) {
+        runtime_diag_.configure(runtime_diag_config_, diag_output_dir_);
+        logStartupConfig();
+        logBuildId();
+    }
+
+    // Start callbacks only after all publishers, maps, algorithms and
+    // diagnostics are fully configured.
     shutdown_ = false;
     running_ = true;
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
@@ -304,29 +344,20 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     ROS_INFO("NdtSlamNode initialized with NDT_OMP");
     ROS_INFO("Config file: %s", config_file_path.c_str());
     ROS_INFO("Services: reset, set_pose, relocalize, save_map, load_map, rebuild_map");
-
-    // Runtime diagnostics: configure and log startup
-    if (runtime_diag_config_.enabled) {
-        runtime_diag_.configure(runtime_diag_config_, diag_output_dir_);
-        logStartupConfig();
-        logBuildId();
-    }
 }
 
 NdtSlamNode::~NdtSlamNode() {
-    ROS_WARN("[Shutdown] Final flush dirty tiles...");
-    if (persistent_map_enabled_ && !dirty_tiles_.empty()) {
-        flushDirtyTiles();
-    }
-    writeRuntimeStatus();
-
+    pointcloud_sub_.shutdown();
+    timer_.stop();
     shutdown_ = true;
     queue_cv_.notify_all();
     tracking_cv_.notify_all();
-    running_ = false;
 
     if (process_thread_.joinable()) {
         process_thread_.join();
+    }
+    if (icp_thread_.joinable()) {
+        icp_thread_.join();
     }
     if (rebuild_thread_.joinable()) {
         rebuild_thread_.join();
@@ -334,6 +365,18 @@ NdtSlamNode::~NdtSlamNode() {
     if (clean_rebuild_thread_.joinable()) {
         clean_rebuild_thread_.join();
     }
+    running_ = false;
+
+    ROS_WARN("[Shutdown] Final flush dirty tiles...");
+    if (persistent_map_enabled_ && !dirty_tiles_.empty()) {
+        flushDirtyTiles();
+    }
+    writeRuntimeStatus();
+    if (diag_pending_ndt_record_valid_) {
+        runtime_diag_.writeNdtFrame(diag_pending_ndt_record_);
+        diag_pending_ndt_record_valid_ = false;
+    }
+    runtime_diag_.flushCsv();
     ROS_WARN("[Shutdown] Complete");
 }
 
@@ -397,6 +440,17 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         }
         if (config["current_cloud_topic"]) {
             current_cloud_topic_ = config["current_cloud_topic"].as<std::string>();
+        }
+        if (config["processing_queue"]) {
+            const int configured_capacity =
+                config["processing_queue"]["capacity"].as<int>(1);
+            const int bounded_capacity = std::clamp(configured_capacity, 1, 4);
+            localization_queue_capacity_ =
+                static_cast<std::size_t>(bounded_capacity);
+            if (configured_capacity != bounded_capacity) {
+                ROS_WARN("[ProcessingQueue] capacity=%d out of range; clamped to %d",
+                         configured_capacity, bounded_capacity);
+            }
         }
 
         if (config["max_range"]) {
@@ -913,6 +967,39 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         }
 
         // v8-stable-r3: SoftYawFilter 参数
+        // ICP is disabled in the production profile. Parse every field so
+        // `enabled: false` is an executable gate, not documentation.
+        if (config["icp_refine"]) {
+            const auto n = config["icp_refine"];
+            icp_refine_cfg_.enabled = n["enabled"].as<bool>(false);
+            icp_refine_cfg_.run_after_ndt = n["run_after_ndt"].as<bool>(true);
+            icp_refine_cfg_.use_objects_only = n["use_objects_only"].as<bool>(true);
+            icp_refine_cfg_.max_iterations =
+                std::max(1, n["max_iterations"].as<int>(8));
+            icp_refine_cfg_.max_correspondence_distance =
+                std::max(0.01, n["max_correspondence_distance"].as<double>(0.20));
+            icp_refine_cfg_.transformation_epsilon =
+                std::max(1e-8, n["transformation_epsilon"].as<double>(0.002));
+            icp_refine_cfg_.min_object_points =
+                std::max(10, n["min_object_points"].as<int>(800));
+            icp_refine_cfg_.max_icp_ms =
+                std::max(1.0, n["max_icp_ms"].as<double>(15.0));
+            icp_refine_cfg_.max_fitness =
+                std::max(0.0, n["max_fitness"].as<double>(0.50));
+        }
+        ROS_INFO("[ICPConfig] enabled=%d run_after_ndt=%d objects_only=%d "
+                 "min_points=%d iterations=%d max_corr=%.3f epsilon=%.6f "
+                 "max_ms=%.1f max_fitness=%.3f",
+                 icp_refine_cfg_.enabled ? 1 : 0,
+                 icp_refine_cfg_.run_after_ndt ? 1 : 0,
+                 icp_refine_cfg_.use_objects_only ? 1 : 0,
+                 icp_refine_cfg_.min_object_points,
+                 icp_refine_cfg_.max_iterations,
+                 icp_refine_cfg_.max_correspondence_distance,
+                 icp_refine_cfg_.transformation_epsilon,
+                 icp_refine_cfg_.max_icp_ms,
+                 icp_refine_cfg_.max_fitness);
+
         if (config["soft_yaw_filter"]) {
             const auto n = config["soft_yaw_filter"];
             soft_yaw_enabled_ = n["enabled"].as<bool>(true);
@@ -1244,6 +1331,42 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                      runtime_diag_config_.csv_flush_period_sec);
         }
 
+        CargoBottomFusionConfig bottom_fusion_config;
+        bottom_fusion_config.points_min_points = static_cast<std::size_t>(
+            std::max(20, hook_fixed_config_.bottom_min_points));
+        bottom_fusion_config.points_min_bottom_band_points =
+            static_cast<std::size_t>(
+                std::max(5, hook_fixed_config_.bottom_band_min_points));
+        bottom_fusion_config.points_min_bottom_band_xy_cells =
+            static_cast<std::size_t>(
+                std::max(2, hook_fixed_config_.bottom_band_min_xy_cells));
+        bottom_fusion_config.bottom_band_height =
+            std::max(0.05F, hook_fixed_config_.bottom_band_height);
+        bottom_fusion_config.xy_cell_size =
+            std::max(0.05F, hook_fixed_config_.bottom_xy_cell_size);
+        cargo_bottom_fusion_.setConfig(bottom_fusion_config);
+
+        CargoSafetyConfig safety_config;
+        safety_config.level1_distance_m =
+            odom_anchor_config_.cargo_warning.level1_distance_m;
+        safety_config.level2_distance_m =
+            odom_anchor_config_.cargo_warning.level2_distance_m;
+        safety_config.minimum_vertical_clearance_m =
+            odom_anchor_config_.cargo_warning.min_vertical_clearance_m;
+        safety_config.cargo_bottom_extra_margin_m =
+            odom_anchor_config_.cargo_warning.cargo_bottom_extra_margin_m;
+        safety_config.maximum_height_age_sec = 0.80;
+        safety_config.obstacle_top_percentile =
+            odom_anchor_config_.cargo_warning.obstacle_top_percentile;
+        safety_config.obstacle_cluster_tolerance_m =
+            odom_anchor_config_.cargo_warning.obstacle_cluster_tolerance_m;
+        safety_config.obstacle_min_cluster_points =
+            static_cast<std::size_t>(std::max(
+                1, odom_anchor_config_.cargo_warning.obstacle_min_points));
+        safety_config.exclude_self_cargo =
+            odom_anchor_config_.cargo_warning.exclude_self_cargo;
+        cargo_safety_evaluator_.setConfig(safety_config);
+
     } catch (const YAML::Exception& e) {
         ROS_ERROR("YAML parse error: %s", e.what());
     }
@@ -1255,17 +1378,22 @@ void NdtSlamNode::initializeParameters() {
 
 void NdtSlamNode::pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg) {
     cloud_callback_count_.fetch_add(1, std::memory_order_relaxed);
+    if (runtime_diag_.isEnabled()) {
+        runtime_diag_.recordCallback(msg->header.stamp.toSec());
+    }
     last_pointcloud_time_ = ros::Time::now();
     pointcloud_stale_ = false;
 
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         // 只保留最新帧，丢弃旧帧，避免处理积压
-        queue_overwrite_drop_count_.fetch_add(
-            static_cast<uint64_t>(cloud_queue_.size()),
-            std::memory_order_relaxed);
-        cloud_queue_ = std::queue<sensor_msgs::PointCloud2::ConstPtr>();
-        cloud_queue_.push(msg);
+        while (cloud_queue_.size() >= localization_queue_capacity_) {
+            cloud_queue_.pop_front();
+            queue_overwrite_drop_count_.fetch_add(
+                1U, std::memory_order_relaxed);
+        }
+        cloud_queue_.push_back(
+            CloudQueueEntry{msg, std::chrono::steady_clock::now()});
     }
     queue_cv_.notify_one();
 }
@@ -1277,9 +1405,21 @@ void NdtSlamNode::processCloudThread() {
     int total_frames = 0;
     int success_frames = 0;
     ros::Time last_log_time = ros::Time::now();
+    Sophus::SE3d diag_previous_raw_ndt_pose;
+    Sophus::SE3d diag_previous_published_pose;
+    ros::Time diag_previous_published_stamp;
+    bool diag_have_previous_raw_ndt_pose = false;
+    bool diag_have_previous_published_pose = false;
+
+    using DiagClock = std::chrono::steady_clock;
+    const auto elapsedMs = [](const DiagClock::time_point& begin) {
+        return std::chrono::duration<double, std::milli>(
+            DiagClock::now() - begin).count();
+    };
 
     while (ros::ok() && !shutdown_) {
         sensor_msgs::PointCloud2::ConstPtr msg;
+        double diag_queue_age_ms = 0.0;
 
         if (tracking_lost_) {
             ROS_WARN("Tracking lost, waiting for relocalization...");
@@ -1293,8 +1433,11 @@ void NdtSlamNode::processCloudThread() {
             std::unique_lock<std::mutex> lock(queue_mutex_);
             queue_cv_.wait(lock, [this]() { return !cloud_queue_.empty() || shutdown_; });
             if (shutdown_) break;
-            msg = cloud_queue_.front();
-            cloud_queue_.pop();
+            CloudQueueEntry entry = std::move(cloud_queue_.front());
+            cloud_queue_.pop_front();
+            msg = std::move(entry.message);
+            diag_queue_age_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - entry.enqueued_at).count();
         }
 
         if (!msg) continue;
@@ -1303,13 +1446,36 @@ void NdtSlamNode::processCloudThread() {
         total_frames++;
         auto start_time = std::chrono::steady_clock::now();
         last_ndt_converged_ = false;
+        RuntimeStageTimes diag_stage;
+        const int diag_raw_points =
+            static_cast<int>(msg->width * msg->height);
+        Sophus::SE3d diag_initial_guess_pose = current_pose_;
+        Sophus::SE3d diag_raw_ndt_pose = current_pose_;
+        Sophus::SE3d diag_ekf_pose = current_pose_;
+        Sophus::SE3d diag_output_pose = current_pose_;
+        bool diag_have_initial_guess = false;
+        bool diag_have_raw_ndt_pose = false;
+        bool diag_have_output_pose = false;
+        const int diag_set_input_target_count_before = setInputTarget_count_;
+        bool diag_map_commit_allowed = false;
+        bool diag_motion_gate_blocked = false;
+        std::string diag_map_commit_reason = "registration_not_published";
+        double diag_transformation_probability = 0.0;
+        double diag_raw_ndt_step_from_previous = 0.0;
+        double diag_output_dx = 0.0;
+        double diag_output_dy = 0.0;
+        double diag_output_step = 0.0;
+        double diag_output_yaw_step_deg = 0.0;
+        double diag_output_speed_mps = 0.0;
 
         // 保存消息时间戳，供 publishCurrentCloud 使用
         last_stamp_ = msg->header.stamp;
 
         // ========== 阶段 1：解析点云 ==========
+        const auto ros_to_pcl_start = DiagClock::now();
         pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::fromROSMsg(*msg, *input_cloud);
+        diag_stage.ros_to_pcl_ms = elapsedMs(ros_to_pcl_start);
 
         if (input_cloud->empty()) {
             empty_cloud_skip_count_.fetch_add(1, std::memory_order_relaxed);
@@ -1364,8 +1530,10 @@ void NdtSlamNode::processCloudThread() {
         last_processed_frame_stamp_ = msg->header.stamp;
         last_processed_frame_size_ = input_cloud->size();
         last_processed_frame_hash_ = cloud_hash;
+        const uint64_t processing_frame_index = ++runtime_frame_index_;
 
         // ========== 阶段 1.5：近场过滤（去除起重机抓臂、吊具等固定结构）==========
+        const auto near_filter_start = DiagClock::now();
         pcl::PointCloud<pcl::PointXYZ>::Ptr near_filtered(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr near_removed(new pcl::PointCloud<pcl::PointXYZ>);
         for (const auto& p : input_cloud->points) {
@@ -1396,6 +1564,8 @@ void NdtSlamNode::processCloudThread() {
         }
 
         // ========== 阶段 2：预处理（范围过滤 + 降采样）==========
+        diag_stage.near_filter_ms = elapsedMs(near_filter_start);
+        const auto hook_prepare_start = DiagClock::now();
         pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr hook_input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
         for (const auto& p : input_cloud->points) {
@@ -1421,6 +1591,8 @@ void NdtSlamNode::processCloudThread() {
         }
 
         // ========== HookFixedCargoDetector（每帧都执行，在 NDT 和 MapCommit 之前）==========
+        diag_stage.hook_prepare_ms = elapsedMs(hook_prepare_start);
+        const auto cargo_detect_start = DiagClock::now();
         ROS_DEBUG_THROTTLE(2.0,
             "[HookFrame] frame=%d before_detect hook_input=%zu longterm=%d enabled=%d",
             total_frames,
@@ -1474,7 +1646,7 @@ void NdtSlamNode::processCloudThread() {
             }
 
             // marker 发布（降频执行）
-            if (shouldPublishOdomAnchorMarker(msg->header.stamp)) {
+            if (false && shouldPublishOdomAnchorMarker(msg->header.stamp)) {
                 if (cargo_state_.state == CargoState::LOCKED ||
                     cargo_state_.state == CargoState::LOST) {
                     publishPayloadTrackInfoFromOdomAnchorBox(msg->header.stamp);
@@ -1482,6 +1654,7 @@ void NdtSlamNode::processCloudThread() {
                     // Cargo Warning 计算和发布（使用 CargoState）
                     if (odom_anchor_config_.cargo_warning.enabled &&
                         cargo_state_.valid_geometry && cargo_state_.valid_height) {
+                        const auto cargo_warning_start = DiagClock::now();
                         CargoWarningData warning = computeCargoWarning(
                             hook_input_cloud,
                             cargo_state_.center_base,
@@ -1496,6 +1669,8 @@ void NdtSlamNode::processCloudThread() {
                             cargo_state_.size,
                             warning,
                             msg->header.stamp);
+                        diag_stage.cargo_warning_ms +=
+                            elapsedMs(cargo_warning_start);
                     }
                 } else {
                     publishPayloadTrackInfoInvalid("not_locked");
@@ -1509,6 +1684,8 @@ void NdtSlamNode::processCloudThread() {
         }
 
         // 体素降采样（0.2m，比 merger 的 0.15m 略粗，实现有效降采样）
+        diag_stage.cargo_detect_ms = elapsedMs(cargo_detect_start);
+        const auto slam_voxel_start = DiagClock::now();
         size_t pre_voxel_size = filtered_cloud->size();
         if (filtered_cloud->size() > 5000) {
             pcl::VoxelGrid<pcl::PointXYZ> vf;
@@ -1519,20 +1696,32 @@ void NdtSlamNode::processCloudThread() {
             filtered_cloud = downsampled;
             ROS_DEBUG("SLAM voxel: %lu -> %lu", pre_voxel_size, filtered_cloud->size());
         }
+        diag_stage.slam_voxel_ms = elapsedMs(slam_voxel_start);
 
         if (filtered_cloud->size() < 100) {
+            too_few_points_skip_count_.fetch_add(
+                1U, std::memory_order_relaxed);
             ROS_WARN("Too few points after filter: %lu", filtered_cloud->size());
             continue;
         }
+        if (runtime_diag_.isEnabled()) {
+            // "processed" means a unique frame with enough valid points to
+            // enter registration. Successful odometry remains a separate
+            // odom_publish_count_; invalid/too-small inputs are skip counters.
+            runtime_diag_.recordProcessed(msg->header.stamp.toSec());
+        }
 
         // ========== 阶段 3：特征提取（网格局部地面分割 + 非地面点加权）==========
+        const auto ground_split_start = DiagClock::now();
         pcl::PointCloud<pcl::PointXYZ>::Ptr feature_cloud(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr ground_cloud(new pcl::PointCloud<pcl::PointXYZ>);
 
         // 使用 XY 网格局部地面模型分割（处理倾斜地面和局部高度变化）
         separateGroundByGrid(*filtered_cloud, *ground_cloud, *feature_cloud);
+        diag_stage.ground_split_ms = elapsedMs(ground_split_start);
 
         // ========== 阶段 3.5：BasePayloadChannelFilter（base_link 下吊货候选筛选）==========
+        const auto channel_filter_start = DiagClock::now();
         pcl::PointCloud<pcl::PointXYZ>::Ptr safe_objects(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr payload_candidates(new pcl::PointCloud<pcl::PointXYZ>);
 
@@ -1589,6 +1778,8 @@ void NdtSlamNode::processCloudThread() {
         }
 
         // ========== 阶段 3.6：HumanObjectDynamicFilter（人体动态过滤）==========
+        diag_stage.channel_filter_ms = elapsedMs(channel_filter_start);
+        const auto human_filter_start = DiagClock::now();
         pcl::PointCloud<pcl::PointXYZ>::Ptr human_safe_objects(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr human_candidates(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr human_dynamic(new pcl::PointCloud<pcl::PointXYZ>);
@@ -1645,6 +1836,8 @@ void NdtSlamNode::processCloudThread() {
 
         // v8-stable-r3: 构建配准用点云（NDT 输入减负）
         // 使用 buildRegistrationCloud 替代原来的 objects x4 + ground full
+        diag_stage.human_filter_ms = elapsedMs(human_filter_start);
+        const auto registration_build_start = DiagClock::now();
         pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud =
             buildRegistrationCloud(human_safe_objects, ground_cloud);
 
@@ -1694,6 +1887,7 @@ void NdtSlamNode::processCloudThread() {
 
         // ========== 地面法向量诊断 ==========
         // 初始化时和每 100 帧输出一次，用于检测外参 roll/pitch 误差
+        diag_stage.registration_build_ms = elapsedMs(registration_build_start);
         static int ground_diag_count = 0;
         ground_diag_count++;
         if ((ground_diag_count <= 3 || ground_diag_count % 100 == 0) && ground_cloud->size() > 100) {
@@ -1827,6 +2021,7 @@ void NdtSlamNode::processCloudThread() {
                 // Bind one immutable target for this alignment.  The
                 // configured minimum applies after every crop/downsample
                 // stage; an undersized target falls back immediately.
+                const auto target_bind_start = DiagClock::now();
                 pcl::PointCloud<pcl::PointXYZ>::ConstPtr selected_target = local_map_;
                 std::string selected_source = "bootstrap_local_map";
                 std::string selected_reason = "target_not_ready";
@@ -1877,6 +2072,7 @@ void NdtSlamNode::processCloudThread() {
                 bindNdtInputTarget(selected_target, selected_source,
                                    selected_version, selected_reason);
                 ndt_->setInputSource(registration_cloud);
+                diag_stage.target_bind_ms = elapsedMs(target_bind_start);
 
                 pcl::PointCloud<pcl::PointXYZ> aligned;
 
@@ -1889,6 +2085,9 @@ void NdtSlamNode::processCloudThread() {
                 } else {
                     initial_guess = current_pose_.matrix().cast<float>();
                 }
+                diag_initial_guess_pose =
+                    Sophus::SE3d(initial_guess.cast<double>());
+                diag_have_initial_guess = true;
 
                 last_source_points_ = static_cast<int>(registration_cloud->size());
 
@@ -1902,6 +2101,7 @@ void NdtSlamNode::processCloudThread() {
                 ndt_->align(aligned, initial_guess);
                 auto ndt_end = std::chrono::steady_clock::now();
                 double ndt_time_ms = std::chrono::duration<double, std::milli>(ndt_end - ndt_start).count();
+                diag_stage.ndt_ms = ndt_time_ms;
                 last_ndt_time_ms_ = ndt_time_ms;
                 last_ndt_converged_ = ndt_->hasConverged();
                 if (last_ndt_converged_) {
@@ -1926,7 +2126,7 @@ void NdtSlamNode::processCloudThread() {
                     ndt_time_ms > crane_motion_ekf_cfg_.slow_frame_warn_ms) {
                     ndt_warn_count++;
                     // 静止时不输出，运动时每 100 次输出一次
-                    if (!is_stationary_ && (ndt_warn_count <= 3 || ndt_warn_count % 100 == 0)) {
+                    if (ndt_warn_count <= 3 || ndt_warn_count % 100 == 0) {
                         ROS_WARN("[NDT-guard] time=%.1fms (count=%d)", ndt_time_ms, ndt_warn_count);
                     }
                 }
@@ -1935,6 +2135,7 @@ void NdtSlamNode::processCloudThread() {
                     Eigen::Matrix4f result = ndt_->getFinalTransformation();
                     double fitness_score = ndt_->getFitnessScore();
                     double trans_prob = ndt_->getTransformationProbability();
+                    diag_transformation_probability = trans_prob;
                     last_ndt_iterations_ = ndt_->getFinalNumIteration();
                     ROS_DEBUG("NDT: converged, fitness=%.4f, prob=%.6f", fitness_score, trans_prob);
                     if (fitness_score > 5.0) {
@@ -1968,6 +2169,15 @@ void NdtSlamNode::processCloudThread() {
                         result_ortho.block<3,1>(0,3) = result.block<3,1>(0,3).cast<double>();
 
                         new_pose = Sophus::SE3d(result_ortho);
+                        diag_raw_ndt_pose = new_pose;
+                        diag_have_raw_ndt_pose = true;
+                        if (diag_have_previous_raw_ndt_pose) {
+                            diag_raw_ndt_step_from_previous =
+                                (new_pose.translation().head<2>() -
+                                 diag_previous_raw_ndt_pose.translation().head<2>()).norm();
+                        }
+                        diag_previous_raw_ndt_pose = new_pose;
+                        diag_have_previous_raw_ndt_pose = true;
 
                         // P0-3: 保存 raw pose for MapCommit evidence
                         // Note: This is ONLY used for MapCommit evidence, NOT for odom/TF/runtime_path
@@ -1992,6 +2202,7 @@ void NdtSlamNode::processCloudThread() {
                             }
                         }
 
+                        const auto ekf_start = DiagClock::now();
                         if (crane_motion_ekf_enabled_) {
                             if (!crane_motion_ekf_.initialized()) {
                                 crane_motion_ekf_.initialize(new_pose, msg->header.stamp);
@@ -2045,7 +2256,9 @@ void NdtSlamNode::processCloudThread() {
                         }
 
                         // v8-stable-r3: 使用 EKF 输出作为 new_pose
+                        diag_stage.ekf_ms += elapsedMs(ekf_start);
                         new_pose = ekf_pose;
+                        diag_ekf_pose = ekf_pose;
 
                         // NDT 健康日志（每秒一次）
                         if (debug_cfg_.debug_ndt_health) {
@@ -2078,9 +2291,6 @@ void NdtSlamNode::processCloudThread() {
                         // the persistent map or the runtime registration map.
                         if (!ndt_accepted) {
                             ROS_DEBUG("[LocalMap] skipped rejected/prediction-only frame");
-                        } else if (longterm_mapping_enabled_ && is_stationary_) {
-                            // 静止：不更新 local_map
-                            ROS_DEBUG("[LocalMap] Stationary, skipping local_map update");
                         } else if (move_dist > 0.5 || move_rot > 0.08 || frames_since_last_update > 15) {
                             // 用配准点云更新局部地图
                             pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZ>);
@@ -2119,6 +2329,7 @@ void NdtSlamNode::processCloudThread() {
                         }
                     } else if (crane_motion_ekf_enabled_ &&
                                crane_motion_ekf_.initialized()) {
+                        const auto ekf_start = DiagClock::now();
                         ROS_WARN_THROTTLE(
                             1.0,
                             "NDT returned an invalid transformation; advancing EKF prediction");
@@ -2127,6 +2338,8 @@ void NdtSlamNode::processCloudThread() {
                             "NDT_INVALID_TRANSFORM");
                         registration_success = true;
                         ekf_reject_count_.fetch_add(1, std::memory_order_relaxed);
+                        diag_stage.ekf_ms += elapsedMs(ekf_start);
+                        diag_ekf_pose = new_pose;
                     }
                 } else {
                     static int no_converge_count = 0;
@@ -2137,11 +2350,14 @@ void NdtSlamNode::processCloudThread() {
                     last_ndt_fitness_ = std::numeric_limits<double>::infinity();
                     last_raw_step_ = 0.0;
                     if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
+                        const auto ekf_start = DiagClock::now();
                         new_pose = crane_motion_ekf_.predictWithoutMeasurement(
                             current_pose_, msg->header.stamp,
                             "NDT_NOT_CONVERGED");
                         registration_success = true;
                         ekf_reject_count_.fetch_add(1, std::memory_order_relaxed);
+                        diag_stage.ekf_ms += elapsedMs(ekf_start);
+                        diag_ekf_pose = new_pose;
                     }
                 }
             }
@@ -2155,16 +2371,12 @@ void NdtSlamNode::processCloudThread() {
         if (registration_success && crane_constraint_enabled_) {
             const auto& ekf_status = crane_motion_ekf_.status();
             double speed_xy = ekf_status.velocity.norm();
-            constrained_pose = applyCraneOutputConstraint(new_pose, is_stationary_, speed_xy);
-        }
-
-        // fix/588-runtime-localization-stable: MotionGate 只控制 MapCommit，不冻结定位输出
-        // 只做零速约束，不重置 EKF 位置，不覆写 constrained_pose
-        if (registration_success && motion_gate_stationary_ && crane_motion_ekf_enabled_) {
-            crane_motion_ekf_.applyZeroVelocityConstraint();
-
-            ROS_DEBUG_THROTTLE(1.0,
-                "[MotionGateEKF] stationary_zero_velocity=1 pose_override=0 map_commit_only=1");
+            // Soft-yaw low-motion behavior is derived from the EKF velocity,
+            // never from MotionGate's map-commit state.
+            const bool runtime_low_motion =
+                speed_xy < motion_gate_moving_min_velocity_;
+            constrained_pose = applyCraneOutputConstraint(
+                new_pose, runtime_low_motion, speed_xy);
         }
 
         if (registration_success) {
@@ -2184,6 +2396,7 @@ void NdtSlamNode::processCloudThread() {
                 crane_motion_ekf_.status().ndt_accepted;
 
             // v8-stable-r3-hotfix-minimal: selectPublishedPose 已透传
+            const auto publish_odom_start = DiagClock::now();
             Sophus::SE3d final_pose = selectPublishedPose(constrained_pose, publish_time);
             publishOdometry(publish_time, msg->header.frame_id, final_pose);
             odom_publish_count_.fetch_add(1, std::memory_order_relaxed);
@@ -2192,103 +2405,112 @@ void NdtSlamNode::processCloudThread() {
             if (debug_cfg_.publish_runtime_path) {
                 publishRuntimePath(final_pose, publish_time);
             }
+            diag_stage.publish_odom_ms = elapsedMs(publish_odom_start);
+            diag_output_pose = final_pose;
+            diag_have_output_pose = true;
 
-            // ICP 精配准移到后台线程，不阻塞主处理
-            // NDT 结果直接用于地图插入，ICP 完成后更新位姿
-            Sophus::SE3d refined_pose = new_pose;
-            if (runtime_ndt_accepted &&
-                local_map_->size() > 500 && feature_cloud->size() > 100) {
-                // 克隆数据用于后台 ICP
-                pcl::PointCloud<pcl::PointXYZ>::Ptr icp_source(new pcl::PointCloud<pcl::PointXYZ>(*feature_cloud));
-                pcl::PointCloud<pcl::PointXYZ>::Ptr icp_target(new pcl::PointCloud<pcl::PointXYZ>(*local_map_));
-                Sophus::SE3d icp_initial = new_pose;
+            if (diag_have_previous_published_pose) {
+                const Eigen::Vector3d delta =
+                    final_pose.translation() -
+                    diag_previous_published_pose.translation();
+                diag_output_dx = delta.x();
+                diag_output_dy = delta.y();
+                diag_output_step = delta.head<2>().norm();
 
-                // 如果上一轮 ICP 还在运行，跳过本轮
-                if (!rebuild_running_.load()) {
-                    if (rebuild_thread_.joinable()) rebuild_thread_.join();
-                    rebuild_running_.store(true);
-                    rebuild_thread_ = std::thread([this, icp_source, icp_target, icp_initial]() {
-                        try {
-                            pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
-                            icp.setInputSource(icp_source);
-                            icp.setInputTarget(icp_target);
-                            icp.setMaximumIterations(15);  // 减少迭代次数，加速
-                            icp.setTransformationEpsilon(1e-6);
-                            icp.setMaxCorrespondenceDistance(0.3);
+                double prev_roll = 0.0, prev_pitch = 0.0, prev_yaw = 0.0;
+                double out_roll = 0.0, out_pitch = 0.0, out_yaw = 0.0;
+                so3ToRpy(diag_previous_published_pose.so3(),
+                         prev_roll, prev_pitch, prev_yaw);
+                so3ToRpy(final_pose.so3(), out_roll, out_pitch, out_yaw);
+                const double yaw_delta =
+                    std::atan2(std::sin(out_yaw - prev_yaw),
+                               std::cos(out_yaw - prev_yaw));
+                diag_output_yaw_step_deg = yaw_delta * 180.0 / M_PI;
 
-                            pcl::PointCloud<pcl::PointXYZ> icp_aligned;
-                            icp.align(icp_aligned, icp_initial.matrix().cast<float>());
-
-                            if (icp.hasConverged()) {
-                                double icp_fitness = icp.getFitnessScore();
-                                if (icp_fitness < 0.5) {
-                                    Eigen::Matrix4f icp_result = icp.getFinalTransformation();
-                                    Eigen::Matrix3d R = icp_result.block<3,3>(0,0).cast<double>();
-                                    Eigen::JacobiSVD<Eigen::Matrix3d> svd(R, Eigen::ComputeFullU | Eigen::ComputeFullV);
-                                    Eigen::Matrix3d R_ortho = svd.matrixU() * svd.matrixV().transpose();
-                                    if (R_ortho.determinant() < 0) R_ortho.col(0) *= -1;
-                                    Eigen::Matrix4d result_ortho = Eigen::Matrix4d::Identity();
-                                    result_ortho.block<3,3>(0,0) = R_ortho;
-                                    result_ortho.block<3,1>(0,3) = icp_result.block<3,1>(0,3).cast<double>();
-                                    Sophus::SE3d refined = Sophus::SE3d(result_ortho);
-
-                                    Sophus::SE3d ndt_to_icp = icp_initial.inverse() * refined;
-                                    double pos_diff = ndt_to_icp.translation().norm();
-                                    double rot_diff = ndt_to_icp.so3().log().norm() * 180.0 / M_PI;
-
-                                    // 转弯时放宽阈值：直线0.08m/0.3°，转弯0.15m/1.0°
-                                    double pos_thresh = 0.08;
-                                    double rot_thresh = 0.3;
-                                    if (rot_diff > 0.15) {
-                                        // 检测到转弯，放宽阈值
-                                        pos_thresh = 0.15;
-                                        rot_thresh = 1.0;
-                                    }
-
-                                    if (pos_diff <= pos_thresh && rot_diff <= rot_thresh) {
-                                        // ICP 结果合理，更新精炼位姿（用于地图插入，不影响实时 odom）
-                                        std::lock_guard<std::mutex> lock(cloud_mutex_);
-                                        refined_pose_ = refined;
-                                        has_refined_pose_ = true;
-
-                                        // 高质量标志：满足更严格条件时才用于 clean map 入图
-                                        refined_pose_high_quality_ = (icp_fitness < 0.015 &&
-                                                                      pos_diff < 0.03 &&
-                                                                      rot_diff < 0.15);
-
-                                        // 每 50 帧输出一次，减少日志
-                                        static int icp_refined_count = 0;
-                                        icp_refined_count++;
-                                        if (icp_refined_count % 50 == 1) {
-                                            ROS_DEBUG("[ICP-async] refined(%d): fitness=%.4f, pos_diff=%.4fm, rot_diff=%.2f°, high_quality=%d",
-                                                     icp_refined_count, icp_fitness, pos_diff, rot_diff, refined_pose_high_quality_.load() ? 1 : 0);
-                                        }
-                                    } else {
-                                        // 拒绝时改为 DEBUG，不输出到终端
-                                        ROS_DEBUG("[ICP-async] rejected: pos_diff=%.4fm rot_diff=%.2f° too large",
-                                                 pos_diff, rot_diff);
-                                    }
-                                }
-                            }
-                        } catch (const std::exception& e) {
-                            ROS_DEBUG("[ICP-async] exception: %s", e.what());
-                        }
-                        rebuild_running_.store(false);
-                    });
+                const double output_dt =
+                    (publish_time - diag_previous_published_stamp).toSec();
+                if (std::isfinite(output_dt) && output_dt > 1e-6) {
+                    diag_output_speed_mps = diag_output_step / output_dt;
                 }
-
             }
+            diag_previous_published_pose = final_pose;
+            diag_previous_published_stamp = publish_time;
+            diag_have_previous_published_pose = true;
 
-            // 建图使用约束后的 pose（和 current_pose_ 一致）
-            // 这样 local_map、keyframe、publish 都使用同一个约束 pose
+            // Formal cargo chain: same-stamp tracked points + final odometry
+            // pose -> fused bottom -> conservative per-cluster safety status.
+            // The heartbeat node is the only producer of the PLC alarm topic.
+            updateAndPublishCargoSafetyPipeline(
+                feature_cloud, filtered_cloud, final_pose, publish_time);
+
+            // ICP never changes odom/TF. When explicitly enabled, a bounded
+            // asynchronous refinement may assist only the current map cloud.
+            // Optional ICP refinement is strictly gated before any cloud copy,
+            // job creation or thread activity. A result is frame/map scoped and
+            // is invalidated after one consume attempt.
+            const auto icp_prepare_start = DiagClock::now();
             Sophus::SE3d map_pose = constrained_pose;
-            {
-                std::lock_guard<std::mutex> lock(cloud_mutex_);
-                if (runtime_ndt_accepted && has_refined_pose_.load()) {
-                    map_pose = applyCraneMotionConstraint(refined_pose_, "refined");
+            if (icp_refine_cfg_.enabled &&
+                icp_refine_cfg_.run_after_ndt &&
+                runtime_ndt_accepted) {
+                Sophus::SE3d frame_refined_pose;
+                if (consumeIcpRefineResult(
+                        processing_frame_index, publish_time,
+                        local_map_version_, frame_refined_pose)) {
+                    map_pose = applyCraneMotionConstraint(
+                        frame_refined_pose, "icp_frame_scoped");
+                }
+
+                const pcl::PointCloud<pcl::PointXYZ>::Ptr& icp_input =
+                    icp_refine_cfg_.use_objects_only
+                        ? human_safe_objects
+                        : registration_cloud;
+
+                if (!icp_running_.load(std::memory_order_acquire) &&
+                    icp_input &&
+                    static_cast<int>(icp_input->size()) >=
+                        icp_refine_cfg_.min_object_points &&
+                    local_map_ && local_map_->size() > 500) {
+                    if (icp_thread_.joinable()) {
+                        icp_thread_.join();
+                    }
+
+                    IcpRefineJob job;
+                    job.frame_index = processing_frame_index;
+                    job.stamp = publish_time;
+                    job.local_map_version = local_map_version_;
+                    job.ndt_pose = new_pose;
+                    job.source.reset(
+                        new pcl::PointCloud<pcl::PointXYZ>(*icp_input));
+                    job.target.reset(
+                        new pcl::PointCloud<pcl::PointXYZ>(*local_map_));
+                    icp_cloud_copy_count_.fetch_add(
+                        2, std::memory_order_relaxed);
+                    startIcpRefineJob(std::move(job));
                 }
             }
+            diag_stage.icp_prepare_ms = elapsedMs(icp_prepare_start);
+
+            ROS_INFO_THROTTLE(
+                1.0,
+                "[ICP_FLOW] enabled=%d running=%d copies=%llu jobs=%llu "
+                "threads=%llu used=%llu stale_drop=%llu",
+                icp_refine_cfg_.enabled ? 1 : 0,
+                icp_running_.load(std::memory_order_relaxed) ? 1 : 0,
+                static_cast<unsigned long long>(
+                    icp_cloud_copy_count_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    icp_job_count_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    icp_thread_count_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    icp_result_use_count_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    icp_stale_drop_count_.load(std::memory_order_relaxed)));
+
+            const auto current_cloud_start = DiagClock::now();
             addFrameToMap(filtered_cloud, map_pose, publish_time);
+            diag_stage.current_cloud_ms = elapsedMs(current_cloud_start);
 
             // v8-stable-r3: MapCommit 只允许在 ndt_accepted=true 且 fitness 合格时执行
             // EKF prediction-only 帧可以发布 TF/odom，但不能写地图
@@ -2300,21 +2522,50 @@ void NdtSlamNode::processCloudThread() {
             const bool commit_accept_ok = ndt_accepted_for_commit;
             const bool commit_fitness_ok = std::isfinite(last_ndt_fitness_) &&
                 last_ndt_fitness_ <= map_commit_max_fitness_;
-            bool allow_map_commit = commit_accept_ok && commit_fitness_ok;
+            bool motion_gate_allows_commit = true;
+            if (commit_accept_ok && commit_fitness_ok &&
+                motion_gate_enabled_) {
+                motion_gate_allows_commit =
+                    evaluateMotionGateForMapCommit(final_pose, publish_time);
+            }
+            const bool allow_map_commit =
+                commit_accept_ok && commit_fitness_ok &&
+                motion_gate_allows_commit;
+            diag_map_commit_allowed = allow_map_commit;
+            diag_motion_gate_blocked =
+                commit_accept_ok && commit_fitness_ok &&
+                !motion_gate_allows_commit;
+            if (allow_map_commit) {
+                diag_map_commit_reason = "accepted";
+            } else if (!commit_accept_ok) {
+                diag_map_commit_reason = "ndt_rejected_or_prediction_only";
+            } else if (!commit_fitness_ok) {
+                diag_map_commit_reason = "fitness_rejected";
+            } else {
+                diag_map_commit_reason = "motion_gate_blocked";
+            }
 
             if (allow_map_commit) {
+                const auto map_commit_start = DiagClock::now();
                 commitKeyFrameWithDynamicFiltering(filtered_cloud, final_pose, publish_time);
+                diag_stage.map_commit_ms = elapsedMs(map_commit_start);
+                diag_stage.clean_map_ms = last_commit_clean_map_ms_;
+                diag_stage.display_map_ms = last_commit_display_map_ms_;
 
                 // V3: 更新 Localization Target（只在 accepted keyframe 时更新）
                 if (localization_target_enabled_) {
+                    const auto shadow_target_start = DiagClock::now();
                     updateLocalizationTarget(objects_clean_map_, final_pose);
                     swapLocalizationTargetBuffers();
+                    diag_stage.shadow_target_ms =
+                        elapsedMs(shadow_target_start);
                 }
             } else {
-                ROS_DEBUG("[MapCommit] skipped: ndt_accepted=%d require_accept=%d fitness=%.3f max_fitness=%.3f",
+                ROS_DEBUG("[MapCommit] skipped: ndt_accepted=%d require_accept=%d fitness=%.3f max_fitness=%.3f motion_gate=%d",
                          ndt_accepted_for_commit ? 1 : 0,
                          map_commit_requires_ndt_accept_ ? 1 : 0,
-                         last_ndt_fitness_, map_commit_max_fitness_);
+                         last_ndt_fitness_, map_commit_max_fitness_,
+                         motion_gate_allows_commit ? 1 : 0);
             }
             success_frames++;
         }
@@ -2362,8 +2613,9 @@ void NdtSlamNode::processCloudThread() {
         }
 
         // CSV 输出：每帧记录到 /tmp/588_ndt_profile.csv
+        const auto csv_log_start = DiagClock::now();
         {
-            static bool csv_header_written = false;
+            static auto last_legacy_csv_flush = DiagClock::now();
             if (!csv_initialized_) {
                 csv_file_.open("/tmp/588_ndt_profile.csv", std::ios::out | std::ios::trunc);
                 if (csv_file_.is_open()) {
@@ -2374,8 +2626,7 @@ void NdtSlamNode::processCloudThread() {
                               << "init_to_result_dist,raw_step,innovation,nis,"
                               << "output_step,max_allowed_step,prediction_only,step_limited,"
                               << "target_source_type,target_reason,"
-                              << "ekf_accept,reject_reason" << std::endl;
-                    csv_header_written = true;
+                              << "ekf_accept,reject_reason\n";
                     csv_initialized_ = true;
                 }
             }
@@ -2430,38 +2681,63 @@ void NdtSlamNode::processCloudThread() {
                           << last_actual_target_source_ << ","
                           << last_target_reason_ << ","
                           << (ekf_accept ? 1 : 0) << ","
-                          << reject_reason << std::endl;
+                          << reject_reason << '\n';
+                if (std::chrono::duration<double>(
+                        DiagClock::now() - last_legacy_csv_flush).count() >= 1.0) {
+                    csv_file_.flush();
+                    last_legacy_csv_flush = DiagClock::now();
+                }
             }
+        }
+        diag_stage.csv_log_ms = elapsedMs(csv_log_start);
+        // Preliminary total after legacy CSV. The final value is refreshed
+        // after synchronous diagnostics and stored for next-cycle CSV output.
+        average_process_time_ms_ = elapsedMs(start_time);
+        last_total_ms_ = average_process_time_ms_;
+
+        if (runtime_diag_.isEnabled() && diag_pending_ndt_record_valid_) {
+            runtime_diag_.writeNdtFrame(diag_pending_ndt_record_);
+            diag_pending_ndt_record_valid_ = false;
         }
 
         // ========== Runtime Diagnostics 输出 ==========
         if (runtime_diag_.isEnabled()) {
             // 从 EKF 获取状态（安全访问）
             double diag_innovation = 0.0;
-            double diag_output_step = 0.0;
             double diag_max_allowed_step = 0.0;
             bool diag_prediction_only = false;
             std::string diag_reject_reason = "NONE";
-            bool diag_allow_map_commit = false;
             try {
                 if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
                     const auto& ekf_status = crane_motion_ekf_.status();
                     diag_innovation = ekf_status.innovation_norm;
-                    diag_output_step = ekf_status.output_step;
                     diag_max_allowed_step = ekf_status.max_allowed_step;
                     diag_prediction_only = ekf_status.prediction_only;
                     diag_reject_reason = ekf_status.reject_reason;
-                    diag_allow_map_commit = ekf_status.ndt_accepted;
-                }
-                // 重新计算 allow_map_commit
-                {
-                    const bool commit_fitness_ok = std::isfinite(last_ndt_fitness_) && last_ndt_fitness_ <= map_commit_max_fitness_;
-                    diag_allow_map_commit = diag_allow_map_commit && commit_fitness_ok;
                 }
             } catch (...) {
                 // 如果EKF状态访问失败，使用默认值
-                diag_allow_map_commit = false;
+                diag_prediction_only = true;
+                diag_reject_reason = "EKF_STATUS_UNAVAILABLE";
             }
+
+            const PipelineRateSnapshot pipeline_rate =
+                runtime_diag_.pipelineRateSnapshot(
+                    queue_overwrite_drop_count_.load(std::memory_order_relaxed));
+            size_t diag_queue_size = 0;
+            double diag_oldest_queue_age_ms = 0.0;
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex_);
+                diag_queue_size = cloud_queue_.size();
+                if (!cloud_queue_.empty()) {
+                    diag_oldest_queue_age_ms =
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            cloud_queue_.front().enqueued_at).count();
+                }
+            }
+            runtime_diag_.logPipelineRate(
+                pipeline_rate, diag_queue_size, diag_oldest_queue_age_ms);
 
             diag_frame_index_++;
             diag_last_cloud_stamp_ = last_stamp_.toSec();
@@ -2473,26 +2749,116 @@ void NdtSlamNode::processCloudThread() {
             ndt_rec.frame_index = diag_frame_index_;
             ndt_rec.cloud_stamp = diag_last_cloud_stamp_;
             ndt_rec.sensor_dt_ms = last_sensor_dt_ * 1000.0;
-            ndt_rec.raw_points = last_source_points_;
+            ndt_rec.wall_interarrival_ms =
+                pipeline_rate.processed_wall_dt_last_ms;
+            ndt_rec.callback_sensor_dt_ms =
+                pipeline_rate.callback_sensor_dt_last_ms;
+            ndt_rec.callback_wall_dt_ms =
+                pipeline_rate.callback_wall_dt_last_ms;
+            ndt_rec.processed_sensor_dt_ms =
+                pipeline_rate.processed_sensor_dt_last_ms;
+            ndt_rec.processed_wall_dt_ms =
+                pipeline_rate.processed_wall_dt_last_ms;
+            ndt_rec.queue_age_ms = diag_queue_age_ms;
+            ndt_rec.queue_degraded =
+                diag_queue_age_ms > pipeline_rate.frame_budget_ms;
+            ndt_rec.raw_points = diag_raw_points;
+            ndt_rec.merged_points = diag_raw_points;
+            ndt_rec.filtered_points =
+                static_cast<int>(filtered_cloud->size());
             ndt_rec.registration_points = last_source_points_;
             ndt_rec.target_points = last_target_points_;
             ndt_rec.target_source = last_actual_target_source_;
             ndt_rec.target_version = target_version_;
+            ndt_rec.target_fallback =
+                last_actual_target_source_.find("fallback") != std::string::npos;
+            ndt_rec.target_reused = last_target_points_ > 0 &&
+                setInputTarget_count_ ==
+                    diag_set_input_target_count_before;
+            ndt_rec.preprocess_ms =
+                diag_stage.ros_to_pcl_ms + diag_stage.near_filter_ms +
+                diag_stage.hook_prepare_ms + diag_stage.cargo_detect_ms +
+                diag_stage.slam_voxel_ms + diag_stage.ground_split_ms +
+                diag_stage.channel_filter_ms + diag_stage.human_filter_ms +
+                diag_stage.registration_build_ms;
+            ndt_rec.target_prepare_ms = diag_stage.target_bind_ms;
+            ndt_rec.set_input_target_ms = diag_stage.target_bind_ms;
             ndt_rec.ndt_align_ms = last_ndt_time_ms_;
+            ndt_rec.ekf_ms = diag_stage.ekf_ms;
+            ndt_rec.map_commit_ms = diag_stage.map_commit_ms;
             ndt_rec.total_ms = average_process_time_ms_;
+            ndt_rec.stage = diag_stage;
             ndt_rec.ndt_converged = last_ndt_converged_;
             ndt_rec.ndt_iterations = last_ndt_iterations_;
             ndt_rec.fitness = last_ndt_fitness_;
+            ndt_rec.transformation_probability =
+                diag_transformation_probability;
             ndt_rec.raw_step_m = last_raw_step_;
             ndt_rec.output_step_m = diag_output_step;
             ndt_rec.allowed_step_m = diag_max_allowed_step;
             ndt_rec.innovation_m = diag_innovation;
             ndt_rec.prediction_only = diag_prediction_only;
             ndt_rec.prediction_reason = diag_reject_reason;
-            ndt_rec.map_commit_allowed = diag_allow_map_commit;
-            ndt_rec.map_commit_reason = diag_allow_map_commit ? "accepted" : "blocked";
-            runtime_diag_.writeNdtFrame(ndt_rec);
-
+            ndt_rec.map_commit_allowed = diag_map_commit_allowed;
+            ndt_rec.map_commit_reason = diag_map_commit_reason;
+            auto fillPose = [this](const Sophus::SE3d& pose,
+                               double* x, double* y, double* z,
+                               double* yaw_deg) {
+                *x = pose.translation().x();
+                *y = pose.translation().y();
+                if (z != nullptr) *z = pose.translation().z();
+                double roll = 0.0, pitch = 0.0, yaw = 0.0;
+                so3ToRpy(pose.so3(), roll, pitch, yaw);
+                *yaw_deg = yaw * 180.0 / M_PI;
+            };
+            double ignored_z = 0.0;
+            if (diag_have_initial_guess) {
+                fillPose(diag_initial_guess_pose,
+                         &ndt_rec.initial_guess_x,
+                         &ndt_rec.initial_guess_y, &ignored_z,
+                         &ndt_rec.initial_guess_yaw_deg);
+            }
+            if (diag_have_raw_ndt_pose) {
+                fillPose(diag_raw_ndt_pose,
+                         &ndt_rec.raw_x, &ndt_rec.raw_y, &ndt_rec.raw_z,
+                         &ndt_rec.raw_yaw_deg);
+            }
+            double ignored_ekf_yaw = 0.0;
+            fillPose(diag_ekf_pose,
+                     &ndt_rec.ekf_x, &ndt_rec.ekf_y, &ignored_z,
+                     &ignored_ekf_yaw);
+            if (diag_have_output_pose) {
+                fillPose(diag_output_pose,
+                         &ndt_rec.output_x, &ndt_rec.output_y,
+                         &ndt_rec.output_z, &ndt_rec.output_yaw_deg);
+            }
+            ndt_rec.raw_ndt_step_from_previous_m =
+                diag_raw_ndt_step_from_previous;
+            ndt_rec.ndt_correction_from_initial_guess_m = last_raw_step_;
+            ndt_rec.output_dx = diag_output_dx;
+            ndt_rec.output_dy = diag_output_dy;
+            ndt_rec.output_yaw_step_deg = diag_output_yaw_step_deg;
+            ndt_rec.output_speed_mps = diag_output_speed_mps;
+            ndt_rec.motion_gate_stationary = motion_gate_stationary_;
+            ndt_rec.motion_gate_velocity_modified = false;
+            ndt_rec.motion_gate_map_commit_blocked =
+                diag_motion_gate_blocked;
+            ndt_rec.motion_gate_check_count =
+                motion_gate_invariant_check_count_.load(
+                    std::memory_order_relaxed);
+            ndt_rec.motion_gate_block_count =
+                motion_gate_map_commit_block_count_.load(
+                    std::memory_order_relaxed);
+            ndt_rec.motion_gate_violation_count =
+                motion_gate_invariant_violation_count_.load(
+                    std::memory_order_relaxed);
+            ndt_rec.icp_config_enabled = icp_refine_cfg_.enabled;
+            ndt_rec.icp_job_count =
+                icp_job_count_.load(std::memory_order_relaxed);
+            ndt_rec.icp_stale_drop_count =
+                icp_stale_drop_count_.load(std::memory_order_relaxed);
+            ndt_rec.icp_map_use_count =
+                icp_result_use_count_.load(std::memory_order_relaxed);
             // NDT 风险检测
             if (!last_ndt_converged_) {
                 runtime_diag_.logNdtRiskNotConverged(
@@ -2513,25 +2879,8 @@ void NdtSlamNode::processCloudThread() {
             }
 
             // Frame overrun 检测
-            double frame_budget_ms = 100.0;  // 默认 10Hz
-            if (last_sensor_dt_ > 0.01) {
-                frame_budget_ms = last_sensor_dt_ * 1000.0;
-            }
-            if (average_process_time_ms_ > frame_budget_ms) {
-                runtime_diag_.incrementFrameOverrun();
-                runtime_diag_.logPipelineRiskFrameOverrun(
-                    diag_frame_index_, diag_last_cloud_stamp_, 1.0, frame_budget_ms,
-                    average_process_time_ms_, 0, 0, last_ndt_time_ms_, 0, 0,
-                    runtime_diag_.consecutiveOverruns());
-
-                if (runtime_diag_.consecutiveOverruns() >= 3) {
-                    runtime_diag_.logPipelineRiskSustainedOverrun(
-                        runtime_diag_.consecutiveOverruns(), 0, 0, 0);
-                }
-            } else {
-                runtime_diag_.resetConsecutiveOverruns();
-            }
-
+            // The budget comes from callback sensor cadence. Processed sensor
+            // dt is already distorted after drops and must never define PASS.
             // Prediction-only 检测
             if (diag_prediction_only) {
                 runtime_diag_.incrementPredictionOnly();
@@ -2553,19 +2902,26 @@ void NdtSlamNode::processCloudThread() {
             }
 
             // Raw step exceeded 检测
-            if (last_raw_step_ > diag_max_allowed_step + 0.001) {
+            if (diag_max_allowed_step > 0.0 &&
+                diag_raw_ndt_step_from_previous >
+                    diag_max_allowed_step + 0.001) {
                 runtime_diag_.incrementRawStepExceeded();
                 runtime_diag_.logOdomRiskRawStepExceeded(
-                    diag_frame_index_, diag_last_cloud_stamp_, last_sensor_dt_ * 1000.0,
-                    0, 0, 0, last_raw_step_, diag_max_allowed_step, last_ndt_fitness_,
+                    diag_frame_index_, diag_last_cloud_stamp_,
+                    pipeline_rate.callback_sensor_dt_last_ms,
+                    diag_output_dx, diag_output_dy, 0.0,
+                    diag_raw_ndt_step_from_previous,
+                    diag_max_allowed_step, last_ndt_fitness_,
                     last_ndt_converged_);
             }
 
             // Output step violation 检测
-            if (diag_output_step > diag_max_allowed_step + 0.0001) {
+            if (diag_max_allowed_step > 0.0 &&
+                diag_output_step > diag_max_allowed_step + 0.0001) {
                 runtime_diag_.incrementOutputStepViolation();
                 runtime_diag_.logOdomRiskOutputStepViolation(
-                    diag_frame_index_, diag_last_cloud_stamp_, 0, 0, 0,
+                    diag_frame_index_, diag_last_cloud_stamp_,
+                    diag_output_dx, diag_output_dy, 0.0,
                     diag_output_step, diag_max_allowed_step);
             }
 
@@ -2582,14 +2938,23 @@ void NdtSlamNode::processCloudThread() {
                 logCargoHealthPeriodic();
                 last_cargo_health_time = ros::Time::now();
             }
+
+            // Create the pending record now; total_ms is finalized at the true
+            // loop tail after periodic maintenance and risk output.
+            average_process_time_ms_ = elapsedMs(start_time);
+            last_total_ms_ = average_process_time_ms_;
+            ndt_rec.total_ms = average_process_time_ms_;
+            diag_pending_ndt_record_ = std::move(ndt_rec);
+            diag_pending_ndt_record_valid_ = true;
         }
 
         ROS_INFO_THROTTLE(2.0,
-            "[PipelineCounters] callback=%llu queue_drop=%llu dequeued=%llu empty=%llu duplicate=%llu invalid_dt=%llu ndt_attempt=%llu converged=%llu nonconverged=%llu ekf_accept=%llu ekf_reject=%llu odom=%llu",
+            "[PipelineCounters] callback=%llu queue_drop=%llu dequeued=%llu empty=%llu too_few=%llu duplicate=%llu invalid_dt=%llu ndt_attempt=%llu converged=%llu nonconverged=%llu ekf_accept=%llu ekf_reject=%llu odom=%llu",
             static_cast<unsigned long long>(cloud_callback_count_.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(queue_overwrite_drop_count_.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(cloud_dequeue_count_.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(empty_cloud_skip_count_.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(too_few_points_skip_count_.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(duplicate_cloud_skip_count_.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(invalid_sensor_dt_count_.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(ndt_attempt_count_.load(std::memory_order_relaxed)),
@@ -2600,7 +2965,7 @@ void NdtSlamNode::processCloudThread() {
             static_cast<unsigned long long>(odom_publish_count_.load(std::memory_order_relaxed)));
 
         // Status 只在运动时报告，每 30 秒一次
-        if (!is_stationary_ && (ros::Time::now() - last_log_time).toSec() > 30.0) {
+        if ((ros::Time::now() - last_log_time).toSec() > 30.0) {
             Eigen::Vector3d pos = current_pose_.translation();
             ROS_INFO("[Status] frames=%d/%d, pose=(%.2f, %.2f, %.2f), "
                      "keyframes=%d, tiles_flushed=%d, "
@@ -2655,6 +3020,48 @@ void NdtSlamNode::processCloudThread() {
                 }
             }
 
+        }
+
+        if (runtime_diag_.isEnabled() && diag_pending_ndt_record_valid_) {
+            average_process_time_ms_ = elapsedMs(start_time);
+            last_total_ms_ = average_process_time_ms_;
+            diag_pending_ndt_record_.total_ms = average_process_time_ms_;
+
+            const PipelineRateSnapshot final_rate =
+                runtime_diag_.pipelineRateSnapshot(
+                    queue_overwrite_drop_count_.load(
+                        std::memory_order_relaxed));
+            const double frame_budget_ms = final_rate.frame_budget_ms;
+            if (frame_budget_ms > 0.0 &&
+                average_process_time_ms_ > frame_budget_ms) {
+                std::size_t final_queue_size = 0U;
+                {
+                    std::lock_guard<std::mutex> lock(queue_mutex_);
+                    final_queue_size = cloud_queue_.size();
+                }
+                runtime_diag_.incrementFrameOverrun();
+                runtime_diag_.logPipelineRiskFrameOverrun(
+                    diag_pending_ndt_record_.frame_index,
+                    diag_pending_ndt_record_.cloud_stamp, 1.0,
+                    frame_budget_ms, average_process_time_ms_,
+                    diag_pending_ndt_record_.preprocess_ms,
+                    diag_pending_ndt_record_.target_prepare_ms,
+                    diag_pending_ndt_record_.ndt_align_ms,
+                    diag_pending_ndt_record_.ekf_ms,
+                    diag_pending_ndt_record_.map_commit_ms,
+                    runtime_diag_.consecutiveOverruns());
+                if (runtime_diag_.consecutiveOverruns() >= 3) {
+                    runtime_diag_.logPipelineRiskSustainedOverrun(
+                        runtime_diag_.consecutiveOverruns(),
+                        static_cast<double>(final_queue_size),
+                        final_rate.processed_hz, final_rate.callback_hz);
+                }
+            } else {
+                runtime_diag_.resetConsecutiveOverruns();
+            }
+            average_process_time_ms_ = elapsedMs(start_time);
+            last_total_ms_ = average_process_time_ms_;
+            diag_pending_ndt_record_.total_ms = average_process_time_ms_;
         }
     }
 
@@ -2954,6 +3361,193 @@ void NdtSlamNode::publishTF(const ros::Time& stamp) {
     transform.transform.rotation.w = ori.w();
 
     tf_broadcaster_->sendTransform(transform);
+}
+
+void NdtSlamNode::startIcpRefineJob(IcpRefineJob job) {
+    // This guard is intentionally inside the helper as well as at the call
+    // site. A disabled configuration can never create an ICP worker.
+    if (!icp_refine_cfg_.enabled || !icp_refine_cfg_.run_after_ndt) {
+        ROS_ERROR_THROTTLE(
+            1.0, "[ICPInvariant] rejected job while ICP is disabled");
+        return;
+    }
+
+    bool expected = false;
+    if (!icp_running_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    icp_job_count_.fetch_add(1, std::memory_order_relaxed);
+    icp_thread_count_.fetch_add(1, std::memory_order_relaxed);
+    icp_thread_ = std::thread([this, job]() mutable {
+        const auto start = std::chrono::steady_clock::now();
+        try {
+            pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+            icp.setInputSource(job.source);
+            icp.setInputTarget(job.target);
+            icp.setMaximumIterations(icp_refine_cfg_.max_iterations);
+            icp.setTransformationEpsilon(
+                icp_refine_cfg_.transformation_epsilon);
+            icp.setMaxCorrespondenceDistance(
+                icp_refine_cfg_.max_correspondence_distance);
+
+            pcl::PointCloud<pcl::PointXYZ> aligned;
+            icp.align(aligned, job.ndt_pose.matrix().cast<float>());
+
+            const double elapsed_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count();
+
+            if (!icp.hasConverged()) {
+                ROS_DEBUG("[ICPResult] frame=%llu rejected=not_converged",
+                          static_cast<unsigned long long>(job.frame_index));
+            } else if (elapsed_ms > icp_refine_cfg_.max_icp_ms) {
+                ROS_WARN_THROTTLE(
+                    1.0,
+                    "[ICPResult] frame=%llu rejected=deadline elapsed_ms=%.1f max_ms=%.1f",
+                    static_cast<unsigned long long>(job.frame_index),
+                    elapsed_ms, icp_refine_cfg_.max_icp_ms);
+            } else {
+                const double fitness = icp.getFitnessScore();
+                if (std::isfinite(fitness) &&
+                    fitness <= icp_refine_cfg_.max_fitness) {
+                    const Eigen::Matrix4f raw =
+                        icp.getFinalTransformation();
+                    Eigen::Matrix3d rotation =
+                        raw.block<3, 3>(0, 0).cast<double>();
+                    Eigen::JacobiSVD<Eigen::Matrix3d> svd(
+                        rotation,
+                        Eigen::ComputeFullU | Eigen::ComputeFullV);
+                    Eigen::Matrix3d orthogonal =
+                        svd.matrixU() * svd.matrixV().transpose();
+                    if (orthogonal.determinant() < 0.0) {
+                        orthogonal.col(0) *= -1.0;
+                    }
+
+                    Eigen::Matrix4d refined_matrix =
+                        Eigen::Matrix4d::Identity();
+                    refined_matrix.block<3, 3>(0, 0) = orthogonal;
+                    refined_matrix.block<3, 1>(0, 3) =
+                        raw.block<3, 1>(0, 3).cast<double>();
+                    const Sophus::SE3d refined(refined_matrix);
+
+                    const Sophus::SE3d correction =
+                        job.ndt_pose.inverse() * refined;
+                    const double position_delta =
+                        correction.translation().norm();
+                    const double rotation_delta_deg =
+                        correction.so3().log().norm() * 180.0 / M_PI;
+
+                    // Keep ICP as a small refinement only; it must not become
+                    // an unbounded second localization source.
+                    const bool plausible =
+                        position_delta <= 0.15 &&
+                        rotation_delta_deg <= 1.0;
+                    if (plausible) {
+                        IcpRefineResult result;
+                        result.valid = true;
+                        result.frame_index = job.frame_index;
+                        result.stamp = job.stamp;
+                        result.local_map_version =
+                            job.local_map_version;
+                        result.pose = refined;
+                        result.fitness = fitness;
+                        result.elapsed_ms = elapsed_ms;
+                        {
+                            std::lock_guard<std::mutex> lock(
+                                icp_result_mutex_);
+                            icp_result_ = result;
+                        }
+                        ROS_DEBUG(
+                            "[ICPResult] frame=%llu stamp=%.6f map_version=%llu "
+                            "fitness=%.4f elapsed_ms=%.1f",
+                            static_cast<unsigned long long>(
+                                job.frame_index),
+                            job.stamp.toSec(),
+                            static_cast<unsigned long long>(
+                                job.local_map_version),
+                            fitness, elapsed_ms);
+                    } else {
+                        ROS_DEBUG(
+                            "[ICPResult] frame=%llu rejected=large_correction "
+                            "position=%.3f rotation_deg=%.3f",
+                            static_cast<unsigned long long>(
+                                job.frame_index),
+                            position_delta, rotation_delta_deg);
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            ROS_WARN_THROTTLE(
+                1.0, "[ICPResult] frame=%llu exception=%s",
+                static_cast<unsigned long long>(job.frame_index),
+                e.what());
+        }
+        icp_running_.store(false, std::memory_order_release);
+    });
+}
+
+bool NdtSlamNode::consumeIcpRefineResult(
+    uint64_t current_frame,
+    const ros::Time& current_stamp,
+    uint64_t current_map_version,
+    Sophus::SE3d& refined_pose) {
+    std::lock_guard<std::mutex> lock(icp_result_mutex_);
+    if (!icp_result_.valid) {
+        return false;
+    }
+
+    const bool future_frame =
+        icp_result_.frame_index > current_frame;
+    const uint64_t age_frames = future_frame
+        ? std::numeric_limits<uint64_t>::max()
+        : current_frame - icp_result_.frame_index;
+    const double age_sensor_sec =
+        (current_stamp - icp_result_.stamp).toSec();
+
+    const char* stale_reason = nullptr;
+    if (future_frame || age_sensor_sec < -1e-6) {
+        stale_reason = "future_identity";
+    } else if (age_frames > 1) {
+        stale_reason = "age_frames";
+    } else if (age_sensor_sec > 1.0) {
+        stale_reason = "age_sensor_sec";
+    } else if (icp_result_.local_map_version != current_map_version) {
+        stale_reason = "map_version";
+    }
+
+    if (stale_reason != nullptr) {
+        icp_stale_drop_count_.fetch_add(1, std::memory_order_relaxed);
+        ROS_WARN(
+            "[ICP_STALE_DROP] job_frame=%llu current_frame=%llu age_frames=%llu "
+            "job_stamp=%.6f current_stamp=%.6f age_sensor_sec=%.3f "
+            "job_map_version=%llu current_map_version=%llu reason=%s",
+            static_cast<unsigned long long>(icp_result_.frame_index),
+            static_cast<unsigned long long>(current_frame),
+            static_cast<unsigned long long>(age_frames),
+            icp_result_.stamp.toSec(), current_stamp.toSec(),
+            age_sensor_sec,
+            static_cast<unsigned long long>(
+                icp_result_.local_map_version),
+            static_cast<unsigned long long>(current_map_version),
+            stale_reason);
+        icp_result_.valid = false;
+        return false;
+    }
+
+    refined_pose = icp_result_.pose;
+    icp_result_.valid = false;  // exactly-once consumption
+    icp_result_use_count_.fetch_add(1, std::memory_order_relaxed);
+    ROS_DEBUG(
+        "[ICP_USE] job_frame=%llu current_frame=%llu age_frames=%llu "
+        "map_version=%llu fitness=%.4f",
+        static_cast<unsigned long long>(icp_result_.frame_index),
+        static_cast<unsigned long long>(current_frame),
+        static_cast<unsigned long long>(age_frames),
+        static_cast<unsigned long long>(current_map_version),
+        icp_result_.fitness);
+    return true;
 }
 
 void NdtSlamNode::addFrameToMap(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
@@ -4001,7 +4595,7 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
 
     // ========== MotionGate：静止时不添加关键帧 ==========
     if (longterm_mapping_enabled_ && motion_gate_enabled_) {
-        if (!shouldCommitKeyframe(pose, stamp)) {
+        if (!evaluateMotionGateForMapCommit(pose, stamp)) {
             ROS_DEBUG("[MotionGate] Stationary, skipping keyframe commit");
             return;
         }
@@ -4767,6 +5361,15 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     frame_count_ = 0;
     keyframe_count_ = 0;
     processed_loops_.clear();
+    clearHookLock();
+    cargo_state_ = CargoState{};
+    cargo_bottom_fusion_.reset();
+    cargo_fusion_track_active_ = false;
+    cargo_origin_height_valid_ = false;
+    cargo_origin_height_m_ = 0.0F;
+    cargo_origin_height_track_id_ = 0U;
+    last_cargo_bottom_result_ = CargoBottomResult{};
+    last_cargo_safety_result_ = CargoSafetyResult{};
 
     ROS_INFO("SLAM system reset complete");
     return true;
@@ -5408,6 +6011,73 @@ Sophus::SE3d NdtSlamNode::selectPublishedPose(
 // MotionGate controls MapCommit only.
 // raw_ndt_pose is allowed only as MapCommit evidence.
 // Do NOT route raw_pose/tracking_pose to odom/TF/runtime_path/current_cloud.
+bool NdtSlamNode::evaluateMotionGateForMapCommit(
+    const Sophus::SE3d& pose,
+    const ros::Time& stamp) {
+    const Sophus::SE3d runtime_pose_before = current_pose_;
+    const bool ekf_initialized =
+        crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized();
+    Eigen::Vector4d ekf_before = Eigen::Vector4d::Zero();
+    if (ekf_initialized) {
+        ekf_before = crane_motion_ekf_.state();
+    }
+
+    const bool map_commit_allowed = shouldCommitKeyframe(pose, stamp);
+
+    Eigen::Vector4d ekf_after = Eigen::Vector4d::Zero();
+    if (ekf_initialized) {
+        ekf_after = crane_motion_ekf_.state();
+    }
+    const double runtime_pose_delta =
+        (runtime_pose_before.inverse() * current_pose_).log().norm();
+    const bool pose_modified = runtime_pose_delta > 1e-12;
+    const bool position_modified =
+        (ekf_after.head<2>() - ekf_before.head<2>()).norm() > 1e-12;
+    const bool velocity_modified =
+        (ekf_after.tail<2>() - ekf_before.tail<2>()).norm() > 1e-12;
+    const bool violated =
+        pose_modified || position_modified || velocity_modified;
+
+    motion_gate_invariant_check_count_.fetch_add(
+        1, std::memory_order_relaxed);
+    if (!map_commit_allowed) {
+        motion_gate_map_commit_block_count_.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+    if (violated) {
+        motion_gate_invariant_violation_count_.fetch_add(
+            1, std::memory_order_relaxed);
+        ROS_ERROR(
+            "[MOTION_GATE_INVARIANT_VIOLATION] pose_modified=%d "
+            "position_modified=%d velocity_modified=%d",
+            pose_modified ? 1 : 0,
+            position_modified ? 1 : 0,
+            velocity_modified ? 1 : 0);
+    }
+
+    ROS_INFO_THROTTLE(
+        1.0,
+        "[MOTION_GATE_INVARIANT] stationary=%d pose_modified=%d "
+        "position_modified=%d velocity_modified=%d map_commit_allowed=%d "
+        "checks=%llu blocked=%llu violations=%llu",
+        motion_gate_stationary_ ? 1 : 0,
+        pose_modified ? 1 : 0,
+        position_modified ? 1 : 0,
+        velocity_modified ? 1 : 0,
+        map_commit_allowed ? 1 : 0,
+        static_cast<unsigned long long>(
+            motion_gate_invariant_check_count_.load(
+                std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            motion_gate_map_commit_block_count_.load(
+                std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            motion_gate_invariant_violation_count_.load(
+                std::memory_order_relaxed)));
+
+    return map_commit_allowed;
+}
+
 bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const ros::Time& current_time) {
     if (!motion_gate_enabled_) {
         return true;  // 未启用 MotionGate，始终允许
@@ -6392,6 +7062,46 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
         return false;
     }
 
+    if (hook_lock_.has_locked_size) {
+        const float detected_sx = det.size_visible.x();
+        const float detected_sy = det.size_visible.y();
+        const float locked_sx = hook_lock_.locked_size.x();
+        const float locked_sy = hook_lock_.locked_size.y();
+        if (!std::isfinite(detected_sx) || !std::isfinite(detected_sy) ||
+            !std::isfinite(locked_sx) || !std::isfinite(locked_sy) ||
+            detected_sx <= 0.0F || detected_sy <= 0.0F ||
+            locked_sx <= 0.0F || locked_sy <= 0.0F) {
+            *reject_reason = "invalid_association_geometry";
+            return false;
+        }
+        const Eigen::Vector2f detected_min = det.center_base.head<2>() -
+            0.5F * Eigen::Vector2f(detected_sx, detected_sy);
+        const Eigen::Vector2f detected_max = det.center_base.head<2>() +
+            0.5F * Eigen::Vector2f(detected_sx, detected_sy);
+        const Eigen::Vector2f locked_center =
+            hook_lock_.locked_center_base.head<2>();
+        const Eigen::Vector2f locked_min = locked_center -
+            0.5F * Eigen::Vector2f(locked_sx, locked_sy);
+        const Eigen::Vector2f locked_max = locked_center +
+            0.5F * Eigen::Vector2f(locked_sx, locked_sy);
+        const Eigen::Vector2f overlap_size =
+            detected_max.cwiseMin(locked_max) -
+            detected_min.cwiseMax(locked_min);
+        const float intersection_area =
+            std::max(0.0F, overlap_size.x()) *
+            std::max(0.0F, overlap_size.y());
+        const float reference_area = std::min(
+            detected_sx * detected_sy, locked_sx * locked_sy);
+        const float overlap_ratio = reference_area > 1.0e-6F
+            ? intersection_area / reference_area
+            : 0.0F;
+        if (overlap_ratio <
+            hook_lock_config_.locked_update_min_overlap_ratio) {
+            *reject_reason = "footprint_overlap_too_small";
+            return false;
+        }
+    }
+
     // 检查高度跳变
     if (bottom.valid && hook_lock_.has_good_height) {
         float bottom_jump = std::fabs(bottom.bottom_z_base - hook_lock_.stable_bottom_z);
@@ -6523,12 +7233,16 @@ void NdtSlamNode::growUncertainty() {
 void NdtSlamNode::clearHookLock() {
     hook_lock_.state = HookCargoLockState::EMPTY;
     hook_lock_.confirm_count = 0;
+    hook_lock_.weak_count = 0;
     hook_lock_.lost_count = 0;
     hook_lock_.has_locked_size = false;
     hook_lock_.has_good_height = false;
     hook_lock_.size_update_count = 0;
     hook_lock_.init_size_buffer.clear();
     hook_lock_.size_candidate_buffer.clear();
+    hook_lock_.last_accepted_core_points.reset();
+    hook_lock_.last_accepted_center.setZero();
+    hook_lock_.has_last_accepted = false;
 }
 
 void NdtSlamNode::updateHookCargoLock(
@@ -6536,7 +7250,10 @@ void NdtSlamNode::updateHookCargoLock(
     const HookCargoBottomEstimate& bottom,
     const ros::Time& stamp) {
 
+    hook_observation_associated_current_ = false;
+    hook_observation_association_stamp_ = stamp;
     if (!hook_lock_config_.enabled) return;
+    bool observation_associated = false;
 
     // LOCKED 阶段使用普通 strong（association gate 会过滤）
     bool strong = isStrongDetection(det, bottom);
@@ -6580,12 +7297,20 @@ void NdtSlamNode::updateHookCargoLock(
 
             if (hook_lock_.confirm_count >= hook_lock_config_.lock_confirm_frames) {
                 hook_lock_.state = HookCargoLockState::LOCKED;
+                observation_associated = true;
                 hook_lock_.locked_size = medianSize(hook_lock_.init_size_buffer);
                 hook_lock_.has_locked_size = true;
                 hook_lock_.locked_stamp = stamp;
 
                 // 使用 odom anchor 作为中心
                 auto anchor = getCargoAnchorXY();
+                hook_lock_.locked_center_base = Eigen::Vector3f(
+                    anchor.x(), anchor.y(), det.center_base.z());
+                hook_lock_.last_accepted_core_points = det.core_points_base;
+                hook_lock_.last_accepted_center = det.center_base;
+                hook_lock_.has_last_accepted =
+                    static_cast<bool>(det.core_points_base) &&
+                    !det.core_points_base->empty();
                 ROS_WARN("[CargoCenterLock] mode=odom_anchor anchor=(%.2f,%.2f)",
                          anchor.x(), anchor.y());
 
@@ -6616,13 +7341,13 @@ void NdtSlamNode::updateHookCargoLock(
 
     case HookCargoLockState::LOCKED:
         if (strong || weak) {
-            hook_lock_.last_seen_stamp = stamp;
-
             // Association gate：检查检测是否与 locked box 一致
             std::string reject_reason;
             bool accepted = isDetectionConsistentWithLockedBox(det, bottom, &reject_reason);
 
             if (accepted) {
+                observation_associated = true;
+                hook_lock_.last_seen_stamp = stamp;
                 // 更新高度和尺寸
                 if (bottom.valid) updateLockedHeight(bottom, stamp, false);
                 if (strong) maybeUpdateLockedSize(det, bottom);
@@ -6651,6 +7376,16 @@ void NdtSlamNode::updateHookCargoLock(
                     det.center_base.x(), det.center_base.y(), det.center_base.z(),
                     anchor.x(), anchor.y(),
                     det.core_points_base ? det.core_points_base->size() : 0);
+                const double lost_age =
+                    (stamp - hook_lock_.last_seen_stamp).toSec();
+                if (lost_age >= hook_lock_config_.lost_hold_sec) {
+                    hook_lock_.state = HookCargoLockState::LOST_HOLD;
+                    ROS_WARN_THROTTLE(
+                        2.0,
+                        "[CargoLock] association rejected for %.2fs; "
+                        "entering LOST_HOLD reason=%s",
+                        lost_age, reject_reason.c_str());
+                }
             }
         } else {
             // 无检测
@@ -6665,11 +7400,28 @@ void NdtSlamNode::updateHookCargoLock(
 
     case HookCargoLockState::LOST_HOLD:
         if (strong || weak) {
-            hook_lock_.state = HookCargoLockState::LOCKED;
-            hook_lock_.last_seen_stamp = stamp;
-            if (bottom.valid) updateLockedHeight(bottom, stamp, false);
-            if (strong) maybeUpdateLockedSize(det, bottom);
-            ROS_INFO("[CargoLock] LOST_HOLD->LOCKED (recovered)");
+            std::string reject_reason;
+            const bool accepted =
+                isDetectionConsistentWithLockedBox(det, bottom, &reject_reason);
+            if (accepted) {
+                observation_associated = true;
+                hook_lock_.state = HookCargoLockState::LOCKED;
+                hook_lock_.last_seen_stamp = stamp;
+                if (bottom.valid) updateLockedHeight(bottom, stamp, false);
+                if (strong) maybeUpdateLockedSize(det, bottom);
+                ROS_INFO("[CargoLock] LOST_HOLD->LOCKED (associated recovery)");
+            } else {
+                growUncertainty();
+                const double lost_age =
+                    (stamp - hook_lock_.last_seen_stamp).toSec();
+                ROS_WARN_THROTTLE(
+                    2.0,
+                    "[CargoLock] LOST_HOLD recovery rejected age=%.2f reason=%s",
+                    lost_age, reject_reason.c_str());
+                if (lost_age > hook_lock_config_.lost_clear_sec) {
+                    clearHookLock();
+                }
+            }
         } else {
             double lost_age = (stamp - hook_lock_.last_seen_stamp).toSec();
             growUncertainty();
@@ -6683,7 +7435,18 @@ void NdtSlamNode::updateHookCargoLock(
 
     // ========== 更新 CargoState ==========
     // 将 HookCargoLock 状态同步到统一的 CargoState
-    updateCargoState(det, bottom, stamp);
+    hook_observation_associated_current_ = observation_associated;
+    HookCargoDetection associated_detection = det;
+    HookCargoBottomEstimate associated_bottom = bottom;
+    if (!observation_associated) {
+        associated_detection.valid = false;
+        associated_detection.core_points_base.reset();
+        associated_bottom.valid = false;
+    }
+
+    // Only an observation accepted by the lock association gate may update
+    // CargoState geometry or height. Rejected clutter ages the prior track out.
+    updateCargoState(associated_detection, associated_bottom, stamp);
 }
 
 void NdtSlamNode::updateCargoState(
@@ -6849,6 +7612,353 @@ void NdtSlamNode::updateCargoState(
                          cargo_state_.valid_height ? 1 : 0,
                          cargo_state_.source.c_str());
     }
+}
+
+void NdtSlamNode::publishCargoFusionMarker(
+    const CargoBottomResult& bottom, const ros::Time& stamp) {
+    if (cargo_fused_box_marker_pub_.getNumSubscribers() == 0U) return;
+
+    visualization_msgs::Marker marker;
+    marker.header.stamp = stamp;
+    marker.header.frame_id = map_frame_;
+    marker.ns = "cargo_fused_box";
+    marker.id = 0;
+    marker.action = bottom.valid
+        ? visualization_msgs::Marker::ADD
+        : visualization_msgs::Marker::DELETE;
+    marker.type = visualization_msgs::Marker::LINE_LIST;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = 0.04;
+    marker.color.r = bottom.source == CargoBottomSource::POINTS ? 0.1F : 1.0F;
+    marker.color.g = bottom.source == CargoBottomSource::POINTS ? 1.0F : 0.7F;
+    marker.color.b = 0.1F;
+    marker.color.a = 0.95F;
+    if (bottom.valid) {
+        constexpr int kEdges[12][2] = {
+            {0, 1}, {1, 3}, {3, 2}, {2, 0},
+            {4, 5}, {5, 7}, {7, 6}, {6, 4},
+            {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+        marker.points.reserve(24U);
+        for (const auto& edge : kEdges) {
+            for (int endpoint : edge) {
+                geometry_msgs::Point point;
+                const Eigen::Vector3f& corner =
+                    bottom.geometry.corners_map[static_cast<std::size_t>(endpoint)];
+                point.x = corner.x();
+                point.y = corner.y();
+                point.z = corner.z();
+                marker.points.push_back(point);
+            }
+        }
+    }
+    cargo_fused_box_marker_pub_.publish(marker);
+}
+
+void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
+    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
+    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
+    const Sophus::SE3d& pose_map_base,
+    const ros::Time& stamp) {
+    const bool active_track =
+        (cargo_state_.state == CargoState::LOCKED ||
+         cargo_state_.state == CargoState::LOST) &&
+        cargo_state_.valid_geometry;
+    if (active_track && !cargo_fusion_track_active_) {
+        ++cargo_fusion_track_id_;
+        if (cargo_fusion_track_id_ == 0U) ++cargo_fusion_track_id_;
+        cargo_bottom_fusion_.reset();
+        cargo_origin_height_valid_ = false;
+        cargo_origin_height_m_ = 0.0F;
+        cargo_origin_height_track_id_ = cargo_fusion_track_id_;
+    } else if (!active_track && cargo_fusion_track_active_) {
+        cargo_bottom_fusion_.reset();
+        cargo_origin_height_valid_ = false;
+    }
+    cargo_fusion_track_active_ = active_track;
+
+    CargoBottomObservation observation;
+    observation.track_valid = active_track;
+    observation.track_id = cargo_fusion_track_id_;
+    observation.stamp_sec = stamp.toSec();
+    observation.transform_stamp_sec = stamp.toSec();
+    observation.T_map_base = Eigen::Isometry3f::Identity();
+    observation.T_map_base.matrix() = pose_map_base.matrix().cast<float>();
+
+    const bool detection_is_current = hook_fixed_cargo_.valid &&
+        hook_observation_associated_current_ &&
+        hook_observation_association_stamp_ == stamp &&
+        !last_anchor_detect_stamp_.isZero() &&
+        std::abs((last_anchor_detect_stamp_ - stamp).toSec()) <= 1.0e-4;
+    if (detection_is_current && hook_fixed_cargo_.core_points_base) {
+        observation.points_base.reserve(
+            hook_fixed_cargo_.core_points_base->size());
+        for (const auto& point : hook_fixed_cargo_.core_points_base->points) {
+            if (std::isfinite(point.x) && std::isfinite(point.y) &&
+                std::isfinite(point.z)) {
+                observation.points_base.emplace_back(point.x, point.y, point.z);
+            }
+        }
+        observation.current_top_valid = std::isfinite(hook_fixed_cargo_.z95);
+        observation.current_top_z_base = hook_fixed_cargo_.z95;
+    }
+    if (active_track) {
+        observation.footprint_valid = cargo_state_.size.x() > 0.0F &&
+                                      cargo_state_.size.y() > 0.0F;
+        observation.footprint_center_base = cargo_state_.center_base.head<2>();
+        observation.footprint_size_xy = cargo_state_.size.head<2>();
+        observation.track_center_valid = cargo_state_.center_base.allFinite();
+        observation.track_center_base = cargo_state_.center_base;
+        const bool origin_height_matches_track = cargo_origin_height_valid_ &&
+            cargo_origin_height_track_id_ == cargo_fusion_track_id_;
+        observation.prior_height_valid = origin_height_matches_track;
+        observation.prior_height_m = cargo_origin_height_m_;
+        observation.origin_height_valid = origin_height_matches_track;
+        observation.origin_height_m = cargo_origin_height_m_;
+    }
+
+    last_cargo_bottom_result_ = cargo_bottom_fusion_.update(observation);
+    last_cargo_pipeline_stamp_ = stamp;
+    if (last_cargo_bottom_result_.valid) {
+        if (!cargo_origin_height_valid_ &&
+            last_cargo_bottom_result_.source == CargoBottomSource::POINTS) {
+            cargo_origin_height_valid_ = true;
+            cargo_origin_height_m_ = last_cargo_bottom_result_.height;
+            cargo_origin_height_track_id_ = cargo_fusion_track_id_;
+        }
+        cargo_state_.valid_height = true;
+        cargo_state_.bottom_z =
+            last_cargo_bottom_result_.geometry.bottom_z_base;
+        cargo_state_.top_z = last_cargo_bottom_result_.geometry.top_z_base;
+        cargo_state_.bottom_unc = last_cargo_bottom_result_.uncertainty;
+        cargo_state_.bottom_safe_z = cargo_state_.bottom_z -
+            cargo_state_.bottom_unc - 0.05F;
+        cargo_state_.source =
+            std::string("fusion:") + last_cargo_bottom_result_.source_name;
+    } else {
+        // Never let the compatibility topics or legacy warning path keep a
+        // stale height after the formal fusion has rejected current evidence.
+        cargo_state_.valid_height = false;
+        cargo_state_.bottom_unc =
+            cargo_bottom_fusion_.config().invalid_uncertainty;
+        cargo_state_.source = "fusion:INVALID";
+    }
+
+    lidar_slam2_msgs::CargoBottomEstimate bottom_msg;
+    bottom_msg.header.stamp = stamp;
+    bottom_msg.header.frame_id = map_frame_;
+    bottom_msg.schema_version =
+        lidar_slam2_msgs::CargoBottomEstimate::SCHEMA_VERSION;
+    bottom_msg.valid = last_cargo_bottom_result_.valid;
+    bottom_msg.track_id = static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(cargo_fusion_track_id_,
+                               std::numeric_limits<std::uint32_t>::max()));
+    bottom_msg.track_state = static_cast<std::uint8_t>(cargo_state_.state);
+    bottom_msg.source = static_cast<std::uint8_t>(
+        last_cargo_bottom_result_.source);
+    bottom_msg.source_detail = last_cargo_bottom_result_.source_name;
+    bottom_msg.invalid_reason = last_cargo_bottom_result_.valid
+        ? std::string() : last_cargo_bottom_result_.reason;
+    if (last_cargo_bottom_result_.geometry_valid) {
+        const auto& geometry = last_cargo_bottom_result_.geometry;
+        bottom_msg.bottom_z_base = geometry.bottom_z_base;
+        bottom_msg.top_z_base = geometry.top_z_base;
+        bottom_msg.bottom_z_map = geometry.bottom_z_map;
+        bottom_msg.top_z_map = geometry.top_z_map;
+        for (std::size_t i = 0; i < geometry.corners_base.size(); ++i) {
+            bottom_msg.corners_base[i].x = geometry.corners_base[i].x();
+            bottom_msg.corners_base[i].y = geometry.corners_base[i].y();
+            bottom_msg.corners_base[i].z = geometry.corners_base[i].z();
+            bottom_msg.corners_map[i].x = geometry.corners_map[i].x();
+            bottom_msg.corners_map[i].y = geometry.corners_map[i].y();
+            bottom_msg.corners_map[i].z = geometry.corners_map[i].z();
+        }
+    }
+    bottom_msg.height_m = last_cargo_bottom_result_.height;
+    bottom_msg.uncertainty_m = last_cargo_bottom_result_.uncertainty;
+    bottom_msg.confidence = last_cargo_bottom_result_.confidence;
+    bottom_msg.z02_base = last_cargo_bottom_result_.selected_stats.z02;
+    bottom_msg.z05_base = last_cargo_bottom_result_.selected_stats.z05;
+    bottom_msg.z50_base = last_cargo_bottom_result_.selected_stats.z50;
+    bottom_msg.z95_base = last_cargo_bottom_result_.selected_stats.z95;
+    bottom_msg.sample_count = static_cast<std::uint32_t>(
+        std::min<std::size_t>(last_cargo_bottom_result_.selected_stats.finite_points,
+                              std::numeric_limits<std::uint32_t>::max()));
+    bottom_msg.support_point_count = static_cast<std::uint32_t>(
+        std::min<std::size_t>(
+            last_cargo_bottom_result_.selected_stats.bottom_band_points,
+            std::numeric_limits<std::uint32_t>::max()));
+    bottom_msg.support_ratio =
+        last_cargo_bottom_result_.selected_stats.bottom_band_point_ratio;
+    cargo_bottom_estimate_pub_.publish(bottom_msg);
+    publishCargoFusionMarker(last_cargo_bottom_result_, stamp);
+
+    CargoSafetyInput safety_input;
+    safety_input.evaluation_time_sec = stamp.toSec();
+    safety_input.height.valid = last_cargo_bottom_result_.valid;
+    safety_input.height.stale = false;
+    safety_input.height.stamp_sec = last_cargo_bottom_result_.stamp_sec;
+    safety_input.height.bottom_z =
+        last_cargo_bottom_result_.geometry.bottom_z_base;
+    safety_input.height.bottom_uncertainty_m =
+        last_cargo_bottom_result_.uncertainty;
+    if (last_cargo_bottom_result_.geometry_valid) {
+        safety_input.footprint_base.min_x =
+            last_cargo_bottom_result_.geometry.corners_base[0].x();
+        safety_input.footprint_base.max_x =
+            last_cargo_bottom_result_.geometry.corners_base[3].x();
+        safety_input.footprint_base.min_y =
+            last_cargo_bottom_result_.geometry.corners_base[0].y();
+        safety_input.footprint_base.max_y =
+            last_cargo_bottom_result_.geometry.corners_base[3].y();
+        safety_input.footprint_base.min_z =
+            last_cargo_bottom_result_.geometry.bottom_z_base;
+        safety_input.footprint_base.max_z =
+            last_cargo_bottom_result_.geometry.top_z_base;
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr obstacle_roi(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    std::set<std::pair<int, int>> observed_cells;
+    std::size_t roi_finite_points = 0U;
+    float coverage_ratio = 0.0F;
+    if (last_cargo_bottom_result_.geometry_valid) {
+        const float radius = cargo_safety_evaluator_.config().level2_distance_m;
+        const float min_x = safety_input.footprint_base.min_x - radius;
+        const float max_x = safety_input.footprint_base.max_x + radius;
+        const float min_y = safety_input.footprint_base.min_y - radius;
+        const float max_y = safety_input.footprint_base.max_y + radius;
+        constexpr float kCoverageCell = 0.50F;
+        if (obstacle_cloud_base) {
+            obstacle_roi->reserve(obstacle_cloud_base->size());
+            for (const auto& point : obstacle_cloud_base->points) {
+                if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+                    !std::isfinite(point.z) || point.x < min_x ||
+                    point.x > max_x || point.y < min_y || point.y > max_y) {
+                    continue;
+                }
+                obstacle_roi->push_back(point);
+            }
+        }
+        if (observation_cloud_base) {
+            for (const auto& point : observation_cloud_base->points) {
+                if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+                    !std::isfinite(point.z) || point.x < min_x ||
+                    point.x > max_x || point.y < min_y || point.y > max_y) {
+                    continue;
+                }
+                ++roi_finite_points;
+                observed_cells.emplace(
+                    static_cast<int>(
+                        std::floor((point.x - min_x) / kCoverageCell)),
+                    static_cast<int>(
+                        std::floor((point.y - min_y) / kCoverageCell)));
+            }
+        }
+        const std::size_t cells_x = static_cast<std::size_t>(
+            std::max(1.0, std::ceil(
+                static_cast<double>((max_x - min_x) / kCoverageCell))));
+        const std::size_t cells_y = static_cast<std::size_t>(
+            std::max(1.0, std::ceil(
+                static_cast<double>((max_y - min_y) / kCoverageCell))));
+        const std::size_t expected_cells = cells_x * cells_y;
+        coverage_ratio = expected_cells > 0U
+            ? static_cast<float>(observed_cells.size()) /
+                  static_cast<float>(expected_cells)
+            : 0.0F;
+    }
+    safety_input.obstacle_cloud_base = obstacle_roi;
+    safety_input.obstacle_observation_valid =
+        static_cast<bool>(obstacle_cloud_base) &&
+        static_cast<bool>(observation_cloud_base) &&
+        last_cargo_bottom_result_.geometry_valid;
+    safety_input.obstacle_cloud_age_sec = 0.0;
+    safety_input.obstacle_roi_finite_points = roi_finite_points;
+    safety_input.obstacle_roi_coverage_ratio = coverage_ratio;
+    last_cargo_safety_result_ = cargo_safety_evaluator_.evaluate(safety_input);
+
+    lidar_slam2_msgs::CargoSafetyStatus safety_msg;
+    safety_msg.header.stamp = stamp;
+    safety_msg.header.frame_id = map_frame_;
+    safety_msg.schema_version =
+        lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION;
+    safety_msg.valid = last_cargo_bottom_result_.valid &&
+                       last_cargo_safety_result_.input_valid;
+    safety_msg.cargo_valid = last_cargo_bottom_result_.valid;
+    safety_msg.cargo_track_id = bottom_msg.track_id;
+    safety_msg.cargo_source = bottom_msg.source;
+    safety_msg.requested_alarm_code =
+        static_cast<std::int32_t>(last_cargo_safety_result_.raw_code);
+    safety_msg.cargo_bottom_z_map = bottom_msg.bottom_z_map;
+    safety_msg.cargo_bottom_uncertainty_m = bottom_msg.uncertainty_m;
+    safety_msg.obstacle_valid =
+        last_cargo_safety_result_.has_cluster_evidence;
+    safety_msg.obstacle_count = static_cast<std::uint32_t>(
+        std::min<std::size_t>(
+            last_cargo_safety_result_.evaluated_cluster_count,
+            std::numeric_limits<std::uint32_t>::max()));
+    if (last_cargo_safety_result_.has_cluster_evidence) {
+        const auto& evidence =
+            last_cargo_safety_result_.most_dangerous_cluster;
+        safety_msg.nearest_obstacle_distance_m = evidence.footprint_distance_m;
+        Eigen::Vector3d obstacle_base(
+            evidence.nearest_point_base.x, evidence.nearest_point_base.y,
+            evidence.obstacle_top_z95_m);
+        const Eigen::Vector3d obstacle_map = pose_map_base * obstacle_base;
+        safety_msg.obstacle_top_z_map = static_cast<float>(obstacle_map.z());
+        safety_msg.obstacle_uncertainty_m = evidence.obstacle_uncertainty_m;
+        safety_msg.conservative_vertical_clearance_m =
+            evidence.conservative_clearance_m;
+    }
+    safety_msg.confidence = safety_msg.valid
+        ? last_cargo_bottom_result_.confidence : 0.0F;
+    safety_msg.reason = last_cargo_bottom_result_.valid
+        ? last_cargo_safety_result_.reason
+        : std::string("cargo_bottom_invalid:") +
+              last_cargo_bottom_result_.reason;
+    cargo_safety_status_pub_.publish(safety_msg);
+    publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_, stamp);
+}
+
+void NdtSlamNode::publishPayloadTrackInfoFromFusion(
+    const CargoBottomResult& bottom,
+    const ros::Time& stamp) {
+    (void)stamp;
+    if (!bottom.valid || !bottom.geometry_valid) {
+        publishPayloadTrackInfoInvalid(
+            bottom.reason.empty() ? "fusion_invalid" : bottom.reason);
+        return;
+    }
+
+    const CargoBoxGeometry& geometry = bottom.geometry;
+    Eigen::Vector3f minimum = geometry.corners_base.front();
+    Eigen::Vector3f maximum = geometry.corners_base.front();
+    for (const Eigen::Vector3f& corner : geometry.corners_base) {
+        minimum = minimum.cwiseMin(corner);
+        maximum = maximum.cwiseMax(corner);
+    }
+
+    // Preserve the legacy box_source contract: 1 means direct physical point
+    // evidence, 2 means a guarded fallback. The typed CargoBottomEstimate
+    // carries the complete source enum and must be used by new consumers.
+    const float compatibility_source =
+        bottom.source == CargoBottomSource::POINTS ? 1.0F : 2.0F;
+    std_msgs::Float32MultiArray message;
+    message.data = {
+        1.0F,
+        static_cast<float>(bottom.track_id),
+        static_cast<float>(cargo_state_.state),
+        geometry.center_base.x(), geometry.center_base.y(),
+        geometry.center_base.z(),
+        0.0F, 0.0F, 0.0F,
+        minimum.x(), minimum.y(), minimum.z(),
+        maximum.x(), maximum.y(), maximum.z(),
+        static_cast<float>(bottom.selected_stats.finite_points),
+        bottom.confidence,
+        geometry.bottom_z_base,
+        bottom.selected_stats.bottom_band_point_ratio,
+        compatibility_source
+    };
+    payload_track_info_pub_.publish(message);
 }
 
 NdtSlamNode::HookCargoBottomEstimate NdtSlamNode::estimateCargoBottom(const HookCargoDetection& detection) {
@@ -7944,6 +9054,8 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     const Sophus::SE3d& pose,
     const ros::Time& stamp)
 {
+    last_commit_clean_map_ms_ = 0.0;
+    last_commit_display_map_ms_ = 0.0;
     // ------------------------------------------------------------------------
     // 0. 基础准备 + DuplicateFrameGuard（内容指纹）+ MotionGate
     // ------------------------------------------------------------------------
@@ -7975,16 +9087,8 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
             pose.translation().x(), pose.translation().y(), pose.translation().z());
     }
 
-    // MotionGate：静止时不跑完整 pipeline
-    bool should_commit = true;
-    if (motion_gate_enabled_) {
-        should_commit = shouldCommitKeyframe(pose, stamp);
-    }
-
-    if (!should_commit) {
-        ROS_DEBUG("[MotionGate] frame=%lu stationary, skip commit pipeline", frame_seq_);
-        return;
-    }
+    // MotionGate was evaluated by the caller before entering this expensive
+    // MapCommit pipeline. It is never consulted by the runtime pose chain.
 
     const Eigen::Matrix4d T_map_base = pose.matrix();
 
@@ -8132,1581 +9236,4 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                             if (track.has_last_core_box) {
                                 float max_ratio = std::max({
                                     core_box.size.x() / std::max(track.last_core_box.size.x(), 0.1f),
-                                    core_box.size.y() / std::max(track.last_core_box.size.y(), 0.1f),
-                                    core_box.size.z() / std::max(track.last_core_box.size.z(), 0.1f)});
-                                if (max_ratio <= 1.5f) {
-                                    can_reinit = true;
-                                    reinit_reason = "accepted";
-                                } else {
-                                    reinit_reason = "size_too_large";
-                                    track.consecutive_box_rejects++;
-                                }
-                            } else {
-                                reinit_reason = "no_previous_box";
-                            }
-                        } else if (track.state == TrackState::SUSPENDED_STATIC) {
-                            reinit_reason = "suspended_static_no_reinit";
-                        }
-
-                        // [CargoBoxReinitCheck] 日志（DEBUG，减少刷屏）
-                        ROS_DEBUG("[CargoBoxReinitCheck] kf=%d track=%d count=%d core_pts=%d state=%d accepted=%d reason=%s",
-                                  keyframe_count_ + 1,
-                                  track.track_id,
-                                  track.size_jump_count,
-                                  core_box.suspended_points,
-                                  static_cast<int>(track.state),
-                                  can_reinit ? 1 : 0,
-                                  reinit_reason.c_str());
-
-                        if (can_reinit) {
-                            track.last_core_box = core_box;
-                            track.last_core_size = core_box.size;
-                            track.has_last_core_box = true;
-                            track.has_last_size = true;
-                            track.size_jump_count = 0;
-                            track.consecutive_box_rejects = 0;
-
-                            // 更新 last_good_box
-                            track.last_good_core_box = core_box;
-                            track.last_good_remove_box = remove_box;
-                            track.has_last_good_box = true;
-                            track.last_good_box_time = stamp.toSec();
-
-                            // reinit 后允许用于删除（v8: 移到统一后处理）
-                            // active_cargo_remove_boxes_base.push_back(remove_box);
-                        }
-
-                        // v6: size_too_large 时使用 last_good_box fallback
-                        if (!can_reinit && reinit_reason == "size_too_large" &&
-                            track.has_last_good_box) {
-                            double age = stamp.toSec() - track.last_good_box_time;
-                            if (age < 2.0) {  // hold_time = 2.0s
-                                // 使用 last_good_remove_box 做当前帧删除（v8: 移到统一后处理）
-                                track.using_last_good_box = true;
-
-                                ROS_INFO("[CargoFallbackActive] kf=%d track=%d reason=USE_LAST_GOOD_BOX age=%.2f reject_count=%d",
-                                         keyframe_count_ + 1,
-                                         track.track_id,
-                                         age,
-                                         track.consecutive_box_rejects);
-                            }
-                        }
-
-                        // v6: 僵尸 track 清理
-                        if (track.consecutive_box_rejects > 8) {
-                            ROS_WARN("[TrackCleanup] expire zombie cargo track=%d reject_count=%d reason=SIZE_TOO_LARGE_ZOMBIE",
-                                     track.track_id,
-                                     track.consecutive_box_rejects);
-                            track.state = TrackState::EXPIRED;
-                        }
-                    }
-                }
-
-                if (!size_jump) {
-                    // 正常更新
-                    track.last_core_box = core_box;
-                    track.last_core_size = core_box.size;
-                    track.has_last_core_box = true;
-                    track.has_last_size = true;
-                    track.size_jump_count = 0;
-                    track.consecutive_box_rejects = 0;
-
-                    // v6: 更新 last_good_box
-                    track.last_good_core_box = core_box;
-                    track.last_good_remove_box = remove_box;
-                    track.has_last_good_box = true;
-                    track.last_good_box_time = stamp.toSec();
-                    track.using_last_good_box = false;
-
-                    // [CargoBoxV2] 日志（DEBUG）
-                    ROS_DEBUG("[CargoBoxV2] seq=%d track=%d valid=%d core_pts=%d bottom_hag=%.2f "
-                              "size=(%.2f,%.2f,%.2f) remove_size=(%.2f,%.2f,%.2f)",
-                              keyframe_count_ + 1,
-                              track.track_id,
-                              1,
-                              core_box.suspended_points,
-                              core_box.bottom_hag,
-                              core_box.size.x(), core_box.size.y(), core_box.size.z(),
-                              remove_box.size.x(), remove_box.size.y(), remove_box.size.z());
-
-                    // P3: 当前帧删除条件（包含 SUSPENDED_STATIC）
-                    bool should_use_for_remove =
-                        track.has_last_core_box &&
-                        (track.state == TrackState::DYNAMIC_PAYLOAD ||
-                         track.state == TrackState::SUSPENDED_MOVING ||
-                         track.state == TrackState::SUSPENDED_STATIC);
-
-                    // [CargoActiveBox] 日志（DEBUG，减少刷屏）
-                    ROS_DEBUG("[CargoActiveBox] kf=%d track=%d state=%d has_core=%d active_remove=%d",
-                              keyframe_count_ + 1,
-                              track.track_id,
-                              static_cast<int>(track.state),
-                              track.has_last_core_box ? 1 : 0,
-                              should_use_for_remove ? 1 : 0);
-
-                    // v8: 移到统一后处理
-                    // if (should_use_for_remove) {
-                    //     active_cargo_remove_boxes_base.push_back(remove_box);
-                    // }
-
-                    // v6: SWING_FOLLOW - 吊物摆动跟随
-                    {
-                        float alpha_center = is_stationary_ ? 0.18f : 0.35f;
-                        float alpha_size = 0.10f;
-
-                        if (!track.has_swing_anchor) {
-                            track.swing_anchor_base = core_box.center;
-                            track.has_swing_anchor = true;
-                            track.display_center_base = core_box.center;
-                            track.display_size = core_box.size;
-                        } else {
-                            // 检查摆动范围
-                            float swing_radius = (core_box.center.head<2>() -
-                                                  track.swing_anchor_base.head<2>()).norm();
-                            float dz = std::abs(core_box.center.z() - track.swing_anchor_base.z());
-
-                            if (is_stationary_ &&
-                                (swing_radius > 0.80f || dz > 0.30f)) {
-                                // 摆动过大，可能是 track 跳变，不跟随
-                                ROS_WARN_THROTTLE(1.0,
-                                    "[BoxFollowReject] track=%d reason=SWING_TOO_LARGE swing=%.2f dz=%.2f",
-                                    track.track_id, swing_radius, dz);
-                            } else {
-                                // 正常跟随摆动
-                                track.display_center_base =
-                                    alpha_center * core_box.center +
-                                    (1.0f - alpha_center) * track.display_center_base;
-                                track.display_size =
-                                    alpha_size * core_box.size +
-                                    (1.0f - alpha_size) * track.display_size;
-                            }
-                        }
-
-                        // [BoxFollow] 日志（INFO_THROTTLE）
-                        ROS_INFO_THROTTLE(1.0,
-                            "[BoxFollow] mode=%s stopped=%d track=%d center_base=(%.2f,%.2f,%.2f) size=(%.2f,%.2f,%.2f)",
-                            is_stationary_ ? "SWING_FOLLOW" : "MOVING_TRACK",
-                            is_stationary_ ? 1 : 0,
-                            track.track_id,
-                            track.display_center_base.x(),
-                            track.display_center_base.y(),
-                            track.display_center_base.z(),
-                            track.display_size.x(),
-                            track.display_size.y(),
-                            track.display_size.z());
-
-                        // Commit B: 保存 selected payload track
-                        selected_payload_track_id_ = track.track_id;
-                        has_selected_payload_track_ = true;
-                        selected_payload_stamp_ = stamp;
-                    }
-
-                    // 发布调试点云（每 20 帧一次）
-                    static int cargo_debug_count = 0;
-                    cargo_debug_count++;
-                    if (cargo_debug_count % 20 == 1) {
-                        auto core_pts = cargo_box_estimator_.getCorePointsCloud();
-                        if (core_pts && !core_pts->empty()) {
-                            sensor_msgs::PointCloud2 msg;
-                            pcl::toROSMsg(*core_pts, msg);
-                            msg.header.stamp = stamp;
-                            msg.header.frame_id = "base_link";
-                            cargo_core_points_pub_.publish(msg);
-                        }
-
-                        auto hag_cloud = cargo_box_estimator_.getHagFilteredCloud();
-                        if (hag_cloud && !hag_cloud->empty()) {
-                            sensor_msgs::PointCloud2 msg;
-                            pcl::toROSMsg(*hag_cloud, msg);
-                            msg.header.stamp = stamp;
-                            msg.header.frame_id = "base_link";
-                            cargo_hag_filtered_pub_.publish(msg);
-                        }
-                    }
-                }
-            }
-        }
-
-        // [PayloadTrack] 日志
-        int dynamic_count = 0, suspended_moving_count = 0, suspended_static_count = 0, pending_count = 0;
-        for (const auto& t : payload_tracker_.getTracks()) {
-            if (t.state == TrackState::DYNAMIC_PAYLOAD) dynamic_count++;
-            else if (t.state == TrackState::SUSPENDED_MOVING) suspended_moving_count++;
-            else if (t.state == TrackState::SUSPENDED_STATIC) suspended_static_count++;
-            else if (t.state == TrackState::PENDING_STATIC) pending_count++;
-        }
-
-        // [PayloadTrack] 日志（DEBUG）
-        ROS_DEBUG("[PayloadTrack] seq=%d tracks=%d dynamic=%d suspended_moving=%d suspended_static=%d pending=%d",
-                  keyframe_count_ + 1,
-                  (int)payload_tracker_.getTracks().size(),
-                  dynamic_count,
-                  suspended_moving_count,
-                  suspended_static_count,
-                  pending_count);
-
-        // 发布 payload track 调试信息
-        static int track_debug_count = 0;
-        track_debug_count++;
-        if (track_debug_count % 5 == 1) {
-            if (!payload_track_result.dynamic_payload->empty()) {
-                sensor_msgs::PointCloud2 dyn_msg;
-                pcl::toROSMsg(*payload_track_result.dynamic_payload, dyn_msg);
-                dyn_msg.header.stamp = stamp;
-                dyn_msg.header.frame_id = "base_link";
-                payload_dynamic_pub_.publish(dyn_msg);
-            }
-
-            if (!payload_candidates->empty()) {
-                sensor_msgs::PointCloud2 cand_msg;
-                pcl::toROSMsg(*payload_candidates, cand_msg);
-                cand_msg.header.stamp = stamp;
-                cand_msg.header.frame_id = "base_link";
-                payload_candidate_pub_.publish(cand_msg);
-            }
-        }
-
-        publishPayloadTrackInfo(stamp);
-
-        // P1: 清理过期的 SUSPENDED_STATIC track
-        payload_tracker_.cleanupStaleSuspendedStaticTracks(stamp.toSec());
-    }
-
-    // ------------------------------------------------------------------------
-    // v8: 统一 active remove box 生成（从 CargoBoxV2 循环抽出）
-    // ------------------------------------------------------------------------
-    std::vector<CargoBox> active_cargo_remove_boxes_base;
-    int moving_tracks = 0, static_tracks = 0;
-    int current_valid_count = 0, last_good_count = 0, core_fallback_count = 0;
-    int skipped_no_box = 0, skipped_no_overlap = 0, skipped_state = 0;
-    int overlap_total = 0;
-
-    for (const auto& track : payload_tracker_.getTracks()) {
-        if (track.state == TrackState::SUSPENDED_MOVING ||
-            track.state == TrackState::DYNAMIC_PAYLOAD) {
-            moving_tracks++;
-        }
-        if (track.state == TrackState::SUSPENDED_STATIC) {
-            static_tracks++;
-        }
-
-        auto decision = buildActiveRemoveBoxForTrack(track, objects_base, stamp.toSec());
-
-        if (decision.active) {
-            active_cargo_remove_boxes_base.push_back(decision.box);
-            overlap_total += decision.overlap;
-
-            if (decision.source == "CURRENT_VALID") current_valid_count++;
-            else if (decision.source == "LAST_GOOD") last_good_count++;
-            else if (decision.source == "CORE_FALLBACK") core_fallback_count++;
-        } else {
-            if (decision.reason == "NO_BOX") skipped_no_box++;
-            else if (decision.reason == "NO_OVERLAP") skipped_no_overlap++;
-            else if (decision.reason == "STATE_NOT_ACTIVE") skipped_state++;
-        }
-    }
-
-    // v8-stable-r3: [Cargo] 日志（每 2 秒一次，DEBUG）
-    if (run_legacy_cargo) {
-        ROS_DEBUG_THROTTLE(2.0,
-                 "[Cargo] tracks=%zu moving=%d static=%d active=%zu removed=%zu weak_skip=%d fallback=%d",
-                 payload_tracker_.getTracks().size(),
-                 moving_tracks, static_tracks,
-                 active_cargo_remove_boxes_base.size(),
-                 cargo_removed_base->size(),
-                 skipped_no_box + skipped_no_overlap + skipped_state,
-                 last_good_count + core_fallback_count);
-    } else {
-        ROS_DEBUG_THROTTLE(5.0, "[CargoLegacy] skipped reason=odom_anchor_mode");
-    }
-
-    // ------------------------------------------------------------------------
-    // 4. CargoCommit：当前帧吊货点删除（必须在 MapCommit 前）
-    // ------------------------------------------------------------------------
-    pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_cargo_base(new pcl::PointCloud<pcl::PointXYZ>);
-
-    removePointsInsideCargoRemoveBoxesBase(
-        objects_base,
-        active_cargo_remove_boxes_base,
-        objects_after_cargo_base,
-        cargo_removed_base);
-
-    // ========== Hook locked box 剔除（必须在 MapCommit 前）==========
-    // 使用 CargoState 统一状态
-    if (isHookCargoRemovalEnabled() &&
-        cargo_state_.state == CargoState::LOCKED &&
-        cargo_state_.valid_geometry && cargo_state_.valid_height) {
-        // 使用 CargoState 的中心和尺寸
-        Eigen::Vector3f center = cargo_state_.center_base;
-        Eigen::Vector3f size = cargo_state_.size;
-        float zmin = cargo_state_.bottom_z - 0.10f;
-        float zmax = cargo_state_.top_z + 0.10f;
-
-        // 构建 Hook locked box
-        Eigen::Vector3f hook_bbox_min(center.x() - size.x() * 0.5f, center.y() - size.y() * 0.5f, zmin);
-        Eigen::Vector3f hook_bbox_max(center.x() + size.x() * 0.5f, center.y() + size.y() * 0.5f, zmax);
-
-        // 从 objects_after_cargo_base 中剔除 Hook locked box 内的点
-        pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_hook_base(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::PointCloud<pcl::PointXYZ>::Ptr hook_cargo_removed_base(new pcl::PointCloud<pcl::PointXYZ>);
-
-        for (const auto& p : objects_after_cargo_base->points) {
-            if (p.x >= hook_bbox_min.x() && p.x <= hook_bbox_max.x() &&
-                p.y >= hook_bbox_min.y() && p.y <= hook_bbox_max.y() &&
-                p.z >= hook_bbox_min.z() && p.z <= hook_bbox_max.z()) {
-                hook_cargo_removed_base->push_back(p);
-            } else {
-                objects_after_hook_base->push_back(p);
-            }
-        }
-
-        // 更新 objects_after_cargo_base
-        objects_after_cargo_base = objects_after_hook_base;
-
-        // 合并到 cargo_removed_base
-        *cargo_removed_base += *hook_cargo_removed_base;
-
-        ROS_DEBUG_THROTTLE(2.0, "[HookCargoRemoval] source=cargo_state state=LOCKED removed_commit=%zu center=(%.2f,%.2f) size=(%.2f,%.2f,%.2f) z=[%.2f,%.2f]",
-                 hook_cargo_removed_base->size(),
-                 center.x(), center.y(),
-                 size.x(), size.y(), size.z(),
-                 zmin, zmax);
-    }
-
-    // [CargoCommit] 日志
-    // v8-stable-r3: 降为 DEBUG
-    ROS_DEBUG("[CargoCommit] seq=%d source=objects_base before=%zu active_boxes=%zu removed=%zu after=%zu",
-             keyframe_count_ + 1,
-             objects_base->size(),
-             active_cargo_remove_boxes_base.size(),
-             cargo_removed_base->size(),
-             objects_after_cargo_base->size());
-
-    // 发布被删除的吊货点
-    if (cargo_removed_base && !cargo_removed_base->empty()) {
-        sensor_msgs::PointCloud2 removed_msg;
-        pcl::toROSMsg(*cargo_removed_base, removed_msg);
-        removed_msg.header.stamp = stamp;
-        removed_msg.header.frame_id = "base_link";
-        cargo_dynamic_removed_pub_.publish(removed_msg);
-    }
-
-    // v6: 构建 swept volumes 用于历史反删
-    new_cargo_volumes_this_frame_.clear();
-    for (const auto& box_base : active_cargo_remove_boxes_base) {
-        SweptVolumeMap vol;
-        // 将 base_link 坐标系的 box 转换到 map 坐标系
-        Eigen::Vector4d min_base(box_base.bbox_min.x(), box_base.bbox_min.y(), box_base.bbox_min.z(), 1.0);
-        Eigen::Vector4d max_base(box_base.bbox_max.x(), box_base.bbox_max.y(), box_base.bbox_max.z(), 1.0);
-        Eigen::Vector4d min_map = T_map_base * min_base;
-        Eigen::Vector4d max_map = T_map_base * max_base;
-
-        // z_down_expand <= 0.03，禁止向下吃掉下方静态货物
-        vol.min_map = Eigen::Vector3f(
-            std::min(min_map.x(), max_map.x()) - 0.15f,
-            std::min(min_map.y(), max_map.y()) - 0.15f,
-            std::min(min_map.z(), max_map.z()) - 0.03f);
-        vol.max_map = Eigen::Vector3f(
-            std::max(min_map.x(), max_map.x()) + 0.15f,
-            std::max(min_map.y(), max_map.y()) + 0.15f,
-            std::max(min_map.z(), max_map.z()) + 0.10f);
-        vol.stamp = stamp.toSec();
-        vol.track_id = -1;  // 当前帧不关联特定 track
-        vol.from_fallback = false;
-
-        new_cargo_volumes_this_frame_.push_back(vol);
-        cargo_swept_history_.push_back(vol);
-
-        // v8-stable-r3: 降为 DEBUG
-        ROS_DEBUG("[CargoHistoryAdd] kf=%d volume=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f) fallback=%d history_size=%zu",
-                 keyframe_count_ + 1,
-                 vol.min_map.x(), vol.min_map.y(), vol.min_map.z(),
-                 vol.max_map.x(), vol.max_map.y(), vol.max_map.z(),
-                 vol.from_fallback ? 1 : 0,
-                 cargo_swept_history_.size());
-    }
-
-    // 清理过期的 swept volume
-    cleanupExpiredSweptVolumes(stamp.toSec());
-
-    // ------------------------------------------------------------------------
-    // 5. HumanFilter（必须在 MapCommit 前）
-    // ------------------------------------------------------------------------
-    pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_human_base(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr human_candidates_base(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr human_dynamic_base(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr human_pending_base(new pcl::PointCloud<pcl::PointXYZ>);
-
-    size_t rejected_as_human_count = 0;
-
-    if (human_filter_config_.enabled) {
-        human_filter_.processFrame(
-            objects_after_cargo_base, T_map_base, stamp.toSec(),
-            objects_after_human_base, human_candidates_base,
-            human_dynamic_base, human_pending_base);
-
-        rejected_as_human_count = objects_after_cargo_base->size() - objects_after_human_base->size();
-
-        // DynamicEventManager：人体动态事件（带人形几何约束）
-        if (dynamic_event_config_.enabled && !human_dynamic_base->empty()) {
-            auto dynamic_count = human_filter_.getDynamicHumanCount();
-            if (dynamic_count > 0) {
-                // 计算 bbox
-                float z_min = 1e9, z_max = -1e9;
-                float x_min = 1e9, x_max = -1e9;
-                float y_min = 1e9, y_max = -1e9;
-                for (const auto& pt : human_dynamic_base->points) {
-                    if (pt.z < z_min) z_min = pt.z;
-                    if (pt.z > z_max) z_max = pt.z;
-                    if (pt.x < x_min) x_min = pt.x;
-                    if (pt.x > x_max) x_max = pt.x;
-                    if (pt.y < y_min) y_min = pt.y;
-                    if (pt.y > y_max) y_max = pt.y;
-                }
-
-                float length = x_max - x_min;
-                float width = y_max - y_min;
-                float height = z_max - z_min;
-                size_t points = human_dynamic_base->size();
-
-                // 人形几何约束检查
-                bool valid_human = (length < 1.2f) && (width < 1.2f) &&
-                                   (height > 0.5f) && (height < 2.2f) &&
-                                   (points < 250);
-
-                if (valid_human) {
-                    Eigen::Vector4f centroid_4f;
-                    pcl::compute3DCentroid(*human_dynamic_base, centroid_4f);
-                    Eigen::Vector3d centroid = centroid_4f.head<3>().cast<double>();
-
-                    std::deque<Eigen::Vector3d> history;
-                    history.push_back(centroid);
-
-                    int event_id = dynamic_event_manager_.createHumanEvent(
-                        stamp.toSec(), stamp.toSec(), history, z_min, z_max);
-                    ROS_DEBUG("[DynamicEvent] HumanEvent created: id=%d, points=%zu",
-                             event_id, points);
-                } else {
-                    ROS_DEBUG("[HumanFilter] rejected human event: points=%zu "
-                              "bbox=(%.2f,%.2f,%.2f) - exceeds human geometry limits",
-                              points, length, width, height);
-                }
-            }
-        }
-
-        // [HumanFilter] 日志（DEBUG）
-        ROS_DEBUG("[HumanFilter] seq=%d input=%zu safe=%zu human_dynamic=%zu human_pending=%zu rejected_as_human=%zu",
-                  keyframe_count_ + 1,
-                  objects_after_cargo_base->size(),
-                  objects_after_human_base->size(),
-                  human_dynamic_base->size(),
-                  human_pending_base->size(),
-                  rejected_as_human_count);
-
-        // 发布人体过滤调试话题
-        static int hf_debug_count = 0;
-        hf_debug_count++;
-        if (hf_debug_count % 5 == 1) {
-            if (!human_candidates_base->empty()) {
-                sensor_msgs::PointCloud2 cand_msg;
-                pcl::toROSMsg(*human_candidates_base, cand_msg);
-                cand_msg.header.stamp = stamp;
-                cand_msg.header.frame_id = "base_link";
-                human_candidate_pub_.publish(cand_msg);
-            }
-
-            if (!human_dynamic_base->empty()) {
-                sensor_msgs::PointCloud2 dyn_msg;
-                pcl::toROSMsg(*human_dynamic_base, dyn_msg);
-                dyn_msg.header.stamp = stamp;
-                dyn_msg.header.frame_id = "map";
-                human_dynamic_pub_.publish(dyn_msg);
-            }
-        }
-    } else {
-        objects_after_human_base = objects_after_cargo_base;
-    }
-
-    // ------------------------------------------------------------------------
-    // 6. 组装最终提交点云（ground + filtered objects）
-    // ------------------------------------------------------------------------
-    pcl::PointCloud<pcl::PointXYZ>::Ptr commit_cloud_base(new pcl::PointCloud<pcl::PointXYZ>);
-    *commit_cloud_base += *ground_base;
-    *commit_cloud_base += *objects_after_human_base;
-
-    // [MapCommitInput] 日志（要求的格式）
-    // v8-stable-r3: 降为 DEBUG
-    ROS_DEBUG("[MapCommitInput] seq=%d raw=%zu ground=%zu raw_objects=%zu commit_objects=%zu commit_total=%zu cargo_removed=%zu human_removed=%zu",
-             keyframe_count_ + 1,
-             cloud->size(),
-             ground_base->size(),
-             objects_base->size(),
-             objects_after_human_base->size(),
-             commit_cloud_base->size(),
-             cargo_removed_base->size(),
-             human_dynamic_base->size());
-
-    // ------------------------------------------------------------------------
-    // 7. 最后才 addKeyFrame（MapCommit）
-    // ------------------------------------------------------------------------
-    const size_t prev_keyframe_count = loop_closure_detector_.getKeyFrames().size();
-    loop_closure_detector_.addKeyFrame(pose, commit_cloud_base, stamp);
-    const size_t new_keyframe_count = loop_closure_detector_.getKeyFrames().size();
-
-    if (new_keyframe_count <= prev_keyframe_count) {
-        return;
-    }
-
-    keyframe_count_++;
-
-    // [MapCommit] 日志（要求的格式）
-    ROS_INFO("[MapCommit] seq=%d keyframe=%d commit_total=%zu commit_objects=%zu cargo_removed=%zu human_removed=%zu",
-             keyframe_count_,
-             keyframe_count_,
-             commit_cloud_base->size(),
-             objects_after_human_base->size(),
-             cargo_removed_base->size(),
-             human_dynamic_base->size());
-
-    // ------------------------------------------------------------------------
-    // 8. Map / Tile / Display 更新（只允许使用过滤后的点云）
-    // ------------------------------------------------------------------------
-    // 保存到 keyframe
-    auto& kf_deque = const_cast<std::deque<KeyFrame>&>(loop_closure_detector_.getKeyFrames());
-    if (!kf_deque.empty()) {
-        auto& kf = kf_deque.back();
-        kf.objects_raw = objects_base;
-        kf.objects_filtered = objects_after_human_base;
-        kf.ground_points = ground_base;
-        kf.dirty_dynamic = false;
-    }
-
-    // 变换到 map 坐标系
-    pcl::PointCloud<pcl::PointXYZ> commit_transformed, objects_transformed, ground_transformed;
-    pcl::transformPointCloud(*commit_cloud_base, commit_transformed, T_map_base.cast<float>());
-    pcl::transformPointCloud(*objects_after_human_base, objects_transformed, T_map_base.cast<float>());
-    pcl::transformPointCloud(*ground_base, ground_transformed, T_map_base.cast<float>());
-
-    // 范围裁剪并加入各层地图
-    auto addInRange = [&](const pcl::PointCloud<pcl::PointXYZ>& src,
-                          pcl::PointCloud<pcl::PointXYZ>::Ptr dst) {
-        for (const auto& p : src.points) {
-            if (std::abs(p.x) <= max_map_size_ &&
-                std::abs(p.y) <= max_map_size_ &&
-                std::abs(p.z) <= max_map_size_ &&
-                std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) {
-                dst->push_back(p);
-            }
-        }
-    };
-
-    size_t registration_added = 0, ground_added = 0, objects_added = 0, display_added = 0;
-
-    {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        size_t before_reg = global_map_->size();
-        addInRange(commit_transformed, global_map_);
-        registration_added = global_map_->size() - before_reg;
-
-        size_t before_display = display_map_->size();
-        addInRange(commit_transformed, display_map_);
-        addInRange(ground_transformed, display_map_);
-        display_added = display_map_->size() - before_display;
-
-        size_t before_ground = ground_map_->size();
-        addInRange(ground_transformed, ground_map_);
-        ground_added = ground_map_->size() - before_ground;
-
-        size_t before_objects = objects_map_->size();
-        addInRange(objects_transformed, objects_map_);
-        objects_added = objects_map_->size() - before_objects;
-    }
-
-    // [MapWrite] 日志：debug_map_commit 开启时输出
-    if (debug_cfg_.debug_map_commit) {
-        ROS_INFO("[MapWrite] seq=%d registration_added=%zu ground_added=%zu objects_added=%zu display_added=%zu",
-                 keyframe_count_,
-                 registration_added,
-                 ground_added,
-                 objects_added,
-                 display_added);
-    }
-
-    // v6: DynamicHistoryEraser - 用 swept volume 反删 objects_map/display_map
-    if (!new_cargo_volumes_this_frame_.empty()) {
-        size_t erased_objects = eraseDynamicPointsFromCloud(objects_map_, new_cargo_volumes_this_frame_);
-        size_t erased_display = eraseDynamicPointsFromCloud(display_map_, new_cargo_volumes_this_frame_);
-
-        ROS_INFO("[DynamicHistoryEraser] kf=%d new_volumes=%zu erased_objects=%zu erased_display=%zu objects_left=%zu display_left=%zu",
-                 keyframe_count_,
-                 new_cargo_volumes_this_frame_.size(),
-                 erased_objects,
-                 erased_display,
-                 objects_map_->size(),
-                 display_map_->size());
-    }
-
-    // P1: 更新 BEV 观测计数（CleanMap 依赖此数据）
-    // 只用过滤后的 objects_commit_map，每个 BEV cell 只加一次
-    {
-        const double clean_bev_cell = 0.15;
-        std::set<BevKey> seen_cells;
-
-        for (const auto& p : objects_transformed.points) {
-            if (!std::isfinite(p.x) || !std::isfinite(p.y)) continue;
-
-            BevKey bk;
-            bk.x = static_cast<int>(std::floor(p.x / clean_bev_cell));
-            bk.y = static_cast<int>(std::floor(p.y / clean_bev_cell));
-            seen_cells.insert(bk);
-        }
-
-        for (const auto& bk : seen_cells) {
-            bev_observation_count_[bk]++;
-        }
-
-        ROS_DEBUG("[BevObsUpdate] seq=%d object_points=%zu unique_cells=%zu total_obs_cells=%zu",
-                  keyframe_count_,
-                  objects_transformed.size(),
-                  seen_cells.size(),
-                  bev_observation_count_.size());
-    }
-
-    // 长期建图：写入 tiles
-    if (longterm_mapping_enabled_ && persistent_map_enabled_ && canCommit()) {
-        Eigen::Vector3d kf_pos = pose.translation();
-        int tile_x = std::floor(kf_pos.x() / tile_size_m_);
-        int tile_y = std::floor(kf_pos.y() / tile_size_m_);
-        std::string tile_key = "x" + std::to_string(tile_x) + "_y" + std::to_string(tile_y);
-
-        if (dirty_tiles_.find(tile_key) == dirty_tiles_.end()) {
-            dirty_tiles_[tile_key].registration.reset(new pcl::PointCloud<pcl::PointXYZ>);
-            dirty_tiles_[tile_key].display.reset(new pcl::PointCloud<pcl::PointXYZ>);
-            dirty_tiles_[tile_key].ground.reset(new pcl::PointCloud<pcl::PointXYZ>);
-            dirty_tiles_[tile_key].objects.reset(new pcl::PointCloud<pcl::PointXYZ>);
-        }
-
-        *dirty_tiles_[tile_key].registration += commit_transformed;
-        *dirty_tiles_[tile_key].display += commit_transformed;
-        *dirty_tiles_[tile_key].display += ground_transformed;
-        *dirty_tiles_[tile_key].ground += ground_transformed;
-        *dirty_tiles_[tile_key].objects += objects_transformed;
-
-        dirty_tile_count_ = dirty_tiles_.size();
-    }
-
-    // ------------------------------------------------------------------------
-    // 9. Cargo deny history（只有 confirmed moving 且 valid box 时才写入）
-    //    使用 3D deny volume，不用 2D BEV cell
-    // ------------------------------------------------------------------------
-    for (const auto& track : payload_tracker_.getTracks()) {
-        if (track.state == TrackState::DYNAMIC_PAYLOAD ||
-            track.state == TrackState::SUSPENDED_MOVING) {
-            // 只有明确移动的吊货才写 deny history
-            if (track.map_displacement < 0.8 || track.velocity < 0.10) {
-                continue;
-            }
-
-            // 使用 track 的 bbox 作为 deny 区域
-            Eigen::Vector3d bbox_min = track.bbox_min_map.cast<double>();
-            Eigen::Vector3d bbox_max = track.bbox_max_map.cast<double>();
-
-            // 转换为 CargoBox 格式
-            CargoBox deny_box;
-            deny_box.bbox_min = bbox_min.cast<float>();
-            deny_box.bbox_max = bbox_max.cast<float>();
-
-            addCargoDenyVolume3D(deny_box, stamp.toSec(), track.track_id);
-        }
-    }
-
-    cleanupExpiredCargoDenyVolumes3D(stamp.toSec());
-
-    // DynamicEventManager：吊货动态事件
-    if (dynamic_event_config_.enabled) {
-        for (const auto& track : payload_tracker_.getTracks()) {
-            if (track.state == TrackState::DYNAMIC_PAYLOAD ||
-                track.state == TrackState::PENDING_STATIC) {
-                Box3D bbox;
-                bbox.min_pt = track.bbox_min_map.cast<double>();
-                bbox.max_pt = track.bbox_max_map.cast<double>();
-                Eigen::Vector3d centroid_d = track.centroid_map.cast<double>();
-
-                if (dynamic_event_manager_.shouldSuppressNewSession(centroid_d, bbox)) {
-                    continue;
-                }
-
-                int event_id = dynamic_event_manager_.findOrCreatePayloadSession(
-                    track.track_id, stamp.toSec(), centroid_d, bbox, track.velocity);
-
-                if (event_id >= 0 && track.state == TrackState::DYNAMIC_PAYLOAD) {
-                    dynamic_event_manager_.updatePayloadSession(
-                        event_id, stamp.toSec(), centroid_d, bbox,
-                        track.velocity, track.map_displacement);
-                    dynamic_event_manager_.confirmPayloadSession(event_id, stamp.toSec());
-                }
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------------
-    // 10. 触发 CleanMap 重建
-    // ------------------------------------------------------------------------
-    static int commit_count = 0;
-    commit_count++;
-    // 每 3 次 commit 重建一次 CleanMap（确保测试时能触发）
-    if (commit_count % 3 == 0) {
-        rebuildCleanMap();
-    }
-    // 始终更新 clean_points
-    last_clean_points_ = objects_clean_map_ ? objects_clean_map_->size() : 0;
-
-    // 修复：增量 commit 后立即发布 RViz 显示层
-    publishDisplayMap();
-    publishGroundMap();
-    publishObjectsMap();
-
-    // P0-3: gate reference 只能在 MapCommit 成功后更新
-    if (has_last_raw_ndt_pose_) {
-        last_commit_raw_pose_ = last_raw_ndt_pose_;
-    }
-    last_commit_refined_pose_ = current_pose_;
-    last_commit_runtime_pose_ = current_pose_;
-    has_commit_gate_reference_ = true;
-
-    // 添加 DisplayMapPublish 日志
-    ROS_INFO(
-        "[DisplayMapPublish] keyframe=%zu display_points=%zu subs=%d reason=map_commit",
-        loop_closure_detector_.getKeyFrames().size(),
-        display_map_ ? display_map_->size() : 0,
-        display_map_pub_.getNumSubscribers());
-
-    // 闭环检测
-    if (keyframe_count_ % loop_detection_interval_ == 0) {
-        ROS_DEBUG("Performing loop closure detection...");
-        processLoopClosure();
-    }
-
-    // [PipelineSummary] 单行摘要（INFO，关键验收点）
-    {
-        int moving = 0, statik = 0, pend = 0;
-        for (const auto& t : payload_tracker_.getTracks()) {
-            if (t.state == TrackState::SUSPENDED_MOVING || t.state == TrackState::DYNAMIC_PAYLOAD) moving++;
-            else if (t.state == TrackState::SUSPENDED_STATIC) statik++;
-            else if (t.state == TrackState::PENDING_STATIC) pend++;
-        }
-
-        if (debug_cfg_.debug_map_commit) {
-            ROS_INFO("[PipelineSummary] "
-                     "frame=%lu kf=%d stamp=%.3f "
-                     "raw=%zu ground=%zu raw_obj=%zu candidates=%zu "
-                     "tracks=%zu moving=%d static=%d pending=%d "
-                     "active_boxes=%zu cargo_removed=%zu human_removed=%zu "
-                     "commit_obj=%zu clean_points=%zu",
-                     frame_seq_,
-                     keyframe_count_,
-                     stamp.toSec(),
-                     cloud->size(),
-                 ground_base->size(),
-                 objects_base->size(),
-                 payload_candidates->size(),
-                 payload_tracker_.getTracks().size(),
-                 moving, statik, pend,
-                 active_cargo_remove_boxes_base.size(),
-                 cargo_removed_base->size(),
-                 human_dynamic_base->size(),
-                 objects_after_human_base->size(),
-                 last_clean_points_);
-        }
-    }
-}
-
-// ============================================================================
-// 从 objects 中删除吊货 remove_box 内的点（3D 检查）
-// ============================================================================
-
-void NdtSlamNode::removePointsInsideCargoRemoveBoxes3D(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& input_base,
-    const std::vector<Box3D>& remove_boxes_map,
-    const Eigen::Matrix4d& T_map_base,
-    pcl::PointCloud<pcl::PointXYZ>::Ptr& output_base,
-    pcl::PointCloud<pcl::PointXYZ>::Ptr& removed_base)
-{
-    output_base->clear();
-    removed_base->clear();
-
-    if (!input_base || input_base->empty()) {
-        return;
-    }
-
-    if (remove_boxes_map.empty()) {
-        *output_base = *input_base;
-        return;
-    }
-
-    for (const auto& p_base : input_base->points) {
-        // 变换到 map 坐标系
-        Eigen::Vector4d pb(p_base.x, p_base.y, p_base.z, 1.0);
-        Eigen::Vector4d pm = T_map_base * pb;
-
-        bool inside = false;
-        for (const auto& box : remove_boxes_map) {
-            if (pm.x() >= box.min_pt.x() && pm.x() <= box.max_pt.x() &&
-                pm.y() >= box.min_pt.y() && pm.y() <= box.max_pt.y() &&
-                pm.z() >= box.min_pt.z() && pm.z() <= box.max_pt.z()) {
-                inside = true;
-                break;
-            }
-        }
-
-        if (inside) {
-            removed_base->push_back(p_base);
-        } else {
-            output_base->push_back(p_base);
-        }
-    }
-
-    output_base->width = output_base->size();
-    output_base->height = 1;
-    output_base->is_dense = false;
-
-    removed_base->width = removed_base->size();
-    removed_base->height = 1;
-    removed_base->is_dense = false;
-}
-
-// ============================================================================
-// P2: 在 base_link 坐标系下删除吊货点（不用变换到 map）
-// ============================================================================
-
-void NdtSlamNode::removePointsInsideCargoRemoveBoxesBase(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& input_base,
-    const std::vector<CargoBox>& remove_boxes_base,
-    pcl::PointCloud<pcl::PointXYZ>::Ptr& output_base,
-    pcl::PointCloud<pcl::PointXYZ>::Ptr& removed_base)
-{
-    output_base->clear();
-    removed_base->clear();
-
-    if (!input_base || input_base->empty()) {
-        return;
-    }
-
-    if (remove_boxes_base.empty()) {
-        *output_base = *input_base;
-        return;
-    }
-
-    for (const auto& p : input_base->points) {
-        bool inside = false;
-
-        for (const auto& box : remove_boxes_base) {
-            if (p.x >= box.bbox_min.x() && p.x <= box.bbox_max.x() &&
-                p.y >= box.bbox_min.y() && p.y <= box.bbox_max.y() &&
-                p.z >= box.bbox_min.z() && p.z <= box.bbox_max.z()) {
-                inside = true;
-                break;
-            }
-        }
-
-        if (inside) {
-            removed_base->push_back(p);
-        } else {
-            output_base->push_back(p);
-        }
-    }
-
-    output_base->width = output_base->size();
-    output_base->height = 1;
-    output_base->is_dense = false;
-
-    removed_base->width = removed_base->size();
-    removed_base->height = 1;
-    removed_base->is_dense = false;
-}
-
-// ============================================================================
-// v8: 统一 active remove box 生成
-// ============================================================================
-
-int NdtSlamNode::countPointsInsideBoxBase(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-    const CargoBox& box)
-{
-    if (!cloud || cloud->empty()) return 0;
-
-    int count = 0;
-    for (const auto& p : cloud->points) {
-        if (p.x >= box.bbox_min.x() && p.x <= box.bbox_max.x() &&
-            p.y >= box.bbox_min.y() && p.y <= box.bbox_max.y() &&
-            p.z >= box.bbox_min.z() && p.z <= box.bbox_max.z()) {
-            count++;
-        }
-    }
-    return count;
-}
-
-CargoBox NdtSlamNode::expandCoreToRemoveBox(const CargoBox& core_box)
-{
-    CargoBox remove_box = core_box;
-    remove_box.bbox_min.x() -= 0.25f;
-    remove_box.bbox_min.y() -= 0.25f;
-    remove_box.bbox_min.z() -= 0.05f;
-    remove_box.bbox_max.x() += 0.25f;
-    remove_box.bbox_max.y() += 0.25f;
-    remove_box.bbox_max.z() += 0.15f;
-    return remove_box;
-}
-
-NdtSlamNode::ActiveRemoveDecision NdtSlamNode::buildActiveRemoveBoxForTrack(
-    const ObjectTrack& track,
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_base,
-    double stamp)
-{
-    ActiveRemoveDecision d;
-
-    // 检查状态
-    const bool state_ok =
-        track.state == TrackState::DYNAMIC_PAYLOAD ||
-        track.state == TrackState::SUSPENDED_MOVING ||
-        track.state == TrackState::SUSPENDED_STATIC;
-
-    if (!state_ok) {
-        d.reason = "STATE_NOT_ACTIVE";
-        return d;
-    }
-
-    // 选择候选 box
-    CargoBox candidate;
-    bool has_candidate = false;
-
-    if (track.has_last_good_box && !track.using_last_good_box) {
-        // 当前帧有效测量（不是 fallback）
-        candidate = track.last_good_remove_box;
-        d.source = "CURRENT_VALID";
-        has_candidate = true;
-    } else if (track.has_last_good_box &&
-               stamp - track.last_good_box_time < 2.0) {
-        // last_good fallback
-        candidate = track.last_good_remove_box;
-        d.source = "LAST_GOOD";
-        has_candidate = true;
-    } else if (track.has_last_core_box) {
-        // core fallback
-        candidate = expandCoreToRemoveBox(track.last_core_box);
-        d.source = "CORE_FALLBACK";
-        has_candidate = true;
-    }
-
-    if (!has_candidate) {
-        d.reason = "NO_BOX";
-        return d;
-    }
-
-    // 检查 overlap
-    d.overlap = countPointsInsideBoxBase(objects_base, candidate);
-    if (d.overlap < 5) {  // min_remove_overlap_points
-        d.reason = "NO_OVERLAP";
-        return d;
-    }
-
-    d.active = true;
-    d.box = candidate;
-    d.reason = "OK";
-    return d;
-}
-
-// ============================================================================
-// v6: DynamicHistoryEraser 增量反删
-// ============================================================================
-
-size_t NdtSlamNode::eraseDynamicPointsFromCloud(
-    pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-    const std::vector<SweptVolumeMap>& volumes)
-{
-    if (!cloud || cloud->empty() || volumes.empty()) {
-        return 0;
-    }
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr kept(new pcl::PointCloud<pcl::PointXYZ>);
-    kept->reserve(cloud->size());
-
-    size_t removed = 0;
-
-    for (const auto& p : cloud->points) {
-        bool inside = false;
-
-        for (const auto& v : volumes) {
-            if (p.x >= v.min_map.x() && p.x <= v.max_map.x() &&
-                p.y >= v.min_map.y() && p.y <= v.max_map.y() &&
-                p.z >= v.min_map.z() && p.z <= v.max_map.z()) {
-                inside = true;
-                break;
-            }
-        }
-
-        if (inside) {
-            removed++;
-        } else {
-            kept->push_back(p);
-        }
-    }
-
-    kept->width = kept->size();
-    kept->height = 1;
-    kept->is_dense = false;
-
-    cloud.swap(kept);
-    return removed;
-}
-
-void NdtSlamNode::cleanupExpiredSweptVolumes(double current_time)
-{
-    cargo_swept_history_.erase(
-        std::remove_if(
-            cargo_swept_history_.begin(),
-            cargo_swept_history_.end(),
-            [current_time, this](const SweptVolumeMap& v) {
-                return (current_time - v.stamp) >= cargo_swept_ttl_;
-            }),
-        cargo_swept_history_.end());
-}
-
-// ============================================================================
-// P0-3: 3D Dynamic Deny Volume（替代 2D BEV deny）
-// ============================================================================
-
-void NdtSlamNode::addCargoDenyVolume3D(const CargoBox& remove_box, double current_time, int track_id)
-{
-    // 计算 BEV cell 范围
-    int x_min = std::floor(remove_box.bbox_min.x() / dynamic_deny_resolution_);
-    int x_max = std::floor(remove_box.bbox_max.x() / dynamic_deny_resolution_);
-    int y_min = std::floor(remove_box.bbox_min.y() / dynamic_deny_resolution_);
-    int y_max = std::floor(remove_box.bbox_max.y() / dynamic_deny_resolution_);
-
-    float z_min = remove_box.bbox_min.z() - 0.05;  // z_margin_down
-    float z_max = remove_box.bbox_max.z() + 0.15;  // z_margin_up
-
-    for (int ix = x_min; ix <= x_max; ix++) {
-        for (int iy = y_min; iy <= y_max; iy++) {
-            auto key = std::make_pair(ix, iy);
-
-            DynamicDenyVolume3D volume;
-            volume.ix = ix;
-            volume.iy = iy;
-            volume.z_min = z_min;
-            volume.z_max = z_max;
-            volume.stamp = current_time;
-            volume.source = 0;  // cargo
-            volume.track_id = track_id;
-
-            dynamic_deny_volume_map_[key].push_back(volume);
-        }
-    }
-}
-
-void NdtSlamNode::cleanupExpiredCargoDenyVolumes3D(double current_time)
-{
-    for (auto it = dynamic_deny_volume_map_.begin(); it != dynamic_deny_volume_map_.end(); ) {
-        auto& volumes = it->second;
-        volumes.erase(
-            std::remove_if(volumes.begin(), volumes.end(),
-                [current_time, this](const DynamicDenyVolume3D& v) {
-                    return (current_time - v.stamp) >= dynamic_deny_ttl_;
-                }),
-            volumes.end());
-
-        if (volumes.empty()) {
-            it = dynamic_deny_volume_map_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-bool NdtSlamNode::isPointDeniedBy3DHistory(float x, float y, float z) const
-{
-    int ix = static_cast<int>(std::floor(x / dynamic_deny_resolution_));
-    int iy = static_cast<int>(std::floor(y / dynamic_deny_resolution_));
-
-    auto it = dynamic_deny_volume_map_.find(std::make_pair(ix, iy));
-    if (it == dynamic_deny_volume_map_.end()) {
-        return false;
-    }
-
-    for (const auto& volume : it->second) {
-        if (z >= volume.z_min && z <= volume.z_max) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-// ============================================================================
-// Cargo Warning 函数
-// ============================================================================
-
-NdtSlamNode::CargoWarningData NdtSlamNode::computeCargoWarning(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
-    const Eigen::Vector3f& cargo_center,
-    const Eigen::Vector3f& cargo_size,
-    float cargo_bottom_z,
-    float cargo_bottom_uncertainty,
-    const ros::Time& stamp) {
-
-    CargoWarningData warning;
-    warning.valid = false;
-    warning.level = 0;
-    warning.alarm_code = 0;
-    warning.source = "tight_box";
-    warning.reason = "no_obstacle";
-
-    if (!odom_anchor_config_.cargo_warning.enabled) {
-        return warning;
-    }
-
-    if (!cloud_base || cloud_base->empty()) {
-        return warning;
-    }
-
-    const auto& config = odom_anchor_config_.cargo_warning;
-
-    // 计算货物底部安全高度
-    float cargo_bottom_safe = cargo_bottom_z;
-    if (config.cargo_bottom_use_uncertainty) {
-        cargo_bottom_safe -= cargo_bottom_uncertainty;
-    }
-    cargo_bottom_safe -= config.cargo_bottom_extra_margin_m;
-
-    warning.cargo_bottom_z = cargo_bottom_z;
-    warning.cargo_bottom_safe_z = cargo_bottom_safe;
-    warning.cargo_top_z = cargo_bottom_z + cargo_size.z();
-    warning.cargo_bottom_uncertainty = cargo_bottom_uncertainty;
-    warning.cargo_center = cargo_center;
-    warning.cargo_size = cargo_size;
-
-    // 提取障碍物点（排除货物自身、地面和高处结构）
-    pcl::PointCloud<pcl::PointXYZ>::Ptr obstacle_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-
-    float half_x = cargo_size.x() * 0.5f;
-    float half_y = cargo_size.y() * 0.5f;
-    float margin_xy = config.self_cargo_margin_xy_m;
-    float margin_z = config.self_cargo_margin_z_m;
-    float cargo_top_z = cargo_bottom_z + cargo_size.z();
-
-    // 估算地面高度
-    float ground_z = cloud_base->points[0].z;
-    for (const auto& p : cloud_base->points) {
-        if (p.z < ground_z) ground_z = p.z;
-    }
-
-    size_t before_count = cloud_base->size();
-    size_t ground_filtered = 0;
-    size_t self_filtered = 0;
-    size_t high_filtered = 0;
-
-    for (const auto& p : cloud_base->points) {
-        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
-
-        // 排除地面点
-        if (config.exclude_ground) {
-            float hag = p.z - ground_z;
-            if (hag < config.ground_hag_min_m) {
-                ground_filtered++;
-                continue;
-            }
-        }
-
-        // 排除货物自身点（tight box 外扩 margin）
-        if (config.exclude_self_cargo) {
-            float dx = std::abs(p.x - cargo_center.x()) - (half_x + margin_xy);
-            float dy = std::abs(p.y - cargo_center.y()) - (half_y + margin_xy);
-            float dz_low = cargo_bottom_z - margin_z;
-            float dz_high = cargo_top_z + margin_z;
-
-            if (dx < 0 && dy < 0 && p.z >= dz_low && p.z <= dz_high) {
-                self_filtered++;
-                continue;  // 在货物区域内
-            }
-        }
-
-        // 排除高处吊具/绳索/上方结构
-        if (p.z > cargo_top_z + 0.30f) {
-            high_filtered++;
-            continue;
-        }
-
-        obstacle_cloud->push_back(p);
-    }
-
-    if (obstacle_cloud->size() < static_cast<size_t>(config.obstacle_min_points)) {
-        warning.reason = "few_obstacles";
-        warning.valid = true;
-        return warning;
-    }
-
-    // 聚类障碍物点
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
-    tree->setInputCloud(obstacle_cloud);
-
-    std::vector<pcl::PointIndices> cluster_indices;
-    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-    ec.setClusterTolerance(config.obstacle_cluster_tolerance_m);
-    ec.setMinClusterSize(config.obstacle_min_points);
-    ec.setMaxClusterSize(10000);
-    ec.setSearchMethod(tree);
-    ec.setInputCloud(obstacle_cloud);
-    ec.extract(cluster_indices);
-
-    if (cluster_indices.empty()) {
-        warning.reason = "no_obstacle_clusters";
-        warning.valid = true;
-        return warning;
-    }
-
-    // 找到最近的危险障碍物
-    float min_distance = std::numeric_limits<float>::max();
-    float max_obstacle_top_z = -std::numeric_limits<float>::max();
-    Eigen::Vector3f nearest_point = Eigen::Vector3f::Zero();
-    uint32_t total_obstacle_points = 0;
-
-    for (const auto& cluster : cluster_indices) {
-        // 计算簇的 z95
-        std::vector<float> cluster_z;
-        Eigen::Vector3f cluster_center = Eigen::Vector3f::Zero();
-        for (int idx : cluster.indices) {
-            const auto& p = obstacle_cloud->points[idx];
-            cluster_z.push_back(p.z);
-            cluster_center += p.getVector3fMap();
-        }
-        cluster_center /= static_cast<float>(cluster.indices.size());
-
-        std::sort(cluster_z.begin(), cluster_z.end());
-        float z95 = cluster_z[static_cast<int>(cluster_z.size() * config.obstacle_top_percentile)];
-
-        // 计算到货物 footprint 边界的距离
-        float dx = std::max(std::abs(cluster_center.x() - cargo_center.x()) - half_x, 0.0f);
-        float dy = std::max(std::abs(cluster_center.y() - cargo_center.y()) - half_y, 0.0f);
-        float distance = std::sqrt(dx * dx + dy * dy);
-
-        // 检查是否在预警范围内
-        if (distance <= config.level2_distance_m) {
-            total_obstacle_points += cluster.indices.size();
-
-            if (distance < min_distance) {
-                min_distance = distance;
-                nearest_point = cluster_center;
-            }
-
-            if (z95 > max_obstacle_top_z) {
-                max_obstacle_top_z = z95;
-            }
-        }
-    }
-
-    if (total_obstacle_points == 0) {
-        warning.reason = "no_nearby_obstacles";
-        warning.valid = true;
-        return warning;
-    }
-
-    // 计算净空
-    float clearance = cargo_bottom_safe - max_obstacle_top_z;
-
-    warning.distance_to_footprint_m = min_distance;
-    warning.clearance_m = clearance;
-    warning.obstacle_top_z = max_obstacle_top_z;
-    warning.obstacle_point_count = total_obstacle_points;
-    warning.obstacle_nearest_point = nearest_point;
-    warning.valid = true;
-
-    // 判断报警等级
-    if (min_distance <= config.level1_distance_m && clearance < config.min_vertical_clearance_m) {
-        warning.level = 1;
-        warning.alarm_code = config.level1_alarm_code;
-        warning.reason = "level1_clearance_lt_0.80";
-    } else if (min_distance <= config.level2_distance_m && clearance < config.min_vertical_clearance_m) {
-        warning.level = 2;
-        warning.alarm_code = config.level2_alarm_code;
-        warning.reason = "level2_clearance_lt_0.80";
-    } else {
-        warning.level = 0;
-        warning.alarm_code = config.clear_alarm_code;
-        warning.reason = "clear";
-    }
-
-    // CargoWarningDebug 日志：debug_cargo_warning 开启时输出
-    if (debug_cfg_.debug_cargo_warning) {
-        ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec, "[CargoWarningDebug] before=%zu ground_filtered=%zu self_filtered=%zu high_filtered=%zu candidate=%zu clusters=%zu selected_dist=%.2f selected_top=%.2f clearance=%.2f level=%d",
-                         before_count, ground_filtered, self_filtered, high_filtered,
-                         obstacle_cloud->size(), cluster_indices.size(),
-                         min_distance, max_obstacle_top_z, clearance, warning.level);
-    }
-
-    return warning;
-}
-
-void NdtSlamNode::publishCargoWarning(const CargoWarningData& warning, const ros::Time& stamp) {
-    if (!odom_anchor_config_.cargo_warning.enabled) return;
-
-    // Debounce 逻辑
-    if (warning.level > 0) {
-        cargo_warning_debounce_count_++;
-        if (cargo_warning_debounce_count_ < odom_anchor_config_.cargo_warning.debounce_frames) {
-            return;
-        }
-    } else {
-        // 检查 clear_hold_sec
-        if (last_cargo_warning_.level > 0 &&
-            (stamp - last_cargo_warning_stamp_).toSec() < odom_anchor_config_.cargo_warning.clear_hold_sec) {
-            return;
-        }
-        cargo_warning_debounce_count_ = 0;
-    }
-
-    last_cargo_warning_ = warning;
-    last_cargo_warning_stamp_ = stamp;
-
-    // 只有 publish_alarm_msg=true 时才发布正式报警消息
-    if (odom_anchor_config_.cargo_warning.publish_alarm_msg) {
-        std_msgs::String msg;
-        std::ostringstream oss;
-        oss << "{"
-            << "\"valid\":" << (warning.valid ? "true" : "false") << ","
-            << "\"level\":" << static_cast<int>(warning.level) << ","
-            << "\"alarm_code\":" << warning.alarm_code << ","
-            << "\"distance_to_footprint_m\":" << std::fixed << std::setprecision(2) << warning.distance_to_footprint_m << ","
-            << "\"clearance_m\":" << std::fixed << std::setprecision(2) << warning.clearance_m << ","
-            << "\"cargo_bottom_z\":" << std::fixed << std::setprecision(2) << warning.cargo_bottom_z << ","
-            << "\"cargo_bottom_safe_z\":" << std::fixed << std::setprecision(2) << warning.cargo_bottom_safe_z << ","
-            << "\"cargo_top_z\":" << std::fixed << std::setprecision(2) << warning.cargo_top_z << ","
-            << "\"obstacle_top_z\":" << std::fixed << std::setprecision(2) << warning.obstacle_top_z << ","
-            << "\"obstacle_point_count\":" << warning.obstacle_point_count << ","
-            << "\"source\":\"" << warning.source << "\","
-            << "\"reason\":\"" << warning.reason << "\""
-            << "}";
-        msg.data = oss.str();
-        cargo_warning_pub_.publish(msg);
-    }
-
-    // 日志（始终输出，用于调试）
-    if (warning.level > 0) {
-        ROS_WARN_THROTTLE(1.0, "[CargoWarning] level=%d alarm=%d dist=%.2f clearance=%.2f cargo_bottom=%.2f obstacle_top=%.2f reason=%s",
-                          warning.level, warning.alarm_code,
-                          warning.distance_to_footprint_m, warning.clearance_m,
-                          warning.cargo_bottom_z, warning.obstacle_top_z,
-                          warning.reason.c_str());
-    } else {
-        ROS_INFO_THROTTLE(2.0, "[CargoWarning] level=0 reason=%s", warning.reason.c_str());
-    }
-}
-
-void NdtSlamNode::publishCargoWarningMarkers(
-    const Eigen::Vector3f& cargo_center,
-    const Eigen::Vector3f& cargo_size,
-    const CargoWarningData& warning,
-    const ros::Time& stamp) {
-
-    if (!odom_anchor_config_.cargo_warning.enabled) return;
-    if (!odom_anchor_config_.cargo_warning.publish_debug_marker) return;
-
-    const auto& config = odom_anchor_config_.cargo_warning;
-
-    // 绿色 tight box marker
-    visualization_msgs::Marker tight_box_marker;
-    tight_box_marker.header.frame_id = "map";
-    tight_box_marker.header.stamp = stamp;
-    tight_box_marker.ns = "cargo_tight_box";
-    tight_box_marker.id = 0;
-    tight_box_marker.type = visualization_msgs::Marker::CUBE;
-    tight_box_marker.action = visualization_msgs::Marker::ADD;
-    tight_box_marker.pose.position.x = cargo_center.x();
-    tight_box_marker.pose.position.y = cargo_center.y();
-    tight_box_marker.pose.position.z = cargo_center.z();
-    tight_box_marker.pose.orientation.w = 1.0;
-    tight_box_marker.scale.x = cargo_size.x();
-    tight_box_marker.scale.y = cargo_size.y();
-    tight_box_marker.scale.z = cargo_size.z();
-    tight_box_marker.color.r = 0.0;
-    tight_box_marker.color.g = 1.0;
-    tight_box_marker.color.b = 0.0;
-    tight_box_marker.color.a = 0.3;
-    tight_box_marker.lifetime = ros::Duration(0.5);
-    cargo_tight_box_marker_pub_.publish(tight_box_marker);
-
-    // 黄色/红色预警范围 marker（只画水平 footprint）
-    visualization_msgs::MarkerArray zone_markers;
-
-    // 黄色 5m footprint
-    visualization_msgs::Marker yellow_marker;
-    yellow_marker.header.frame_id = "map";
-    yellow_marker.header.stamp = stamp;
-    yellow_marker.ns = "cargo_warning_zone";
-    yellow_marker.id = 1;
-    yellow_marker.type = visualization_msgs::Marker::CUBE;
-    yellow_marker.action = visualization_msgs::Marker::ADD;
-    yellow_marker.pose.position.x = cargo_center.x();
-    yellow_marker.pose.position.y = cargo_center.y();
-    yellow_marker.pose.position.z = cargo_center.z() - cargo_size.z() * 0.5f + 0.01;
-    yellow_marker.pose.orientation.w = 1.0;
-    yellow_marker.scale.x = cargo_size.x() + 2.0f * config.level2_distance_m;
-    yellow_marker.scale.y = cargo_size.y() + 2.0f * config.level2_distance_m;
-    yellow_marker.scale.z = 0.02;
-    yellow_marker.color.r = 1.0;
-    yellow_marker.color.g = 1.0;
-    yellow_marker.color.b = 0.0;
-    yellow_marker.color.a = 0.15;
-    yellow_marker.lifetime = ros::Duration(0.5);
-    zone_markers.markers.push_back(yellow_marker);
-
-    // 红色 3m footprint
-    visualization_msgs::Marker red_marker;
-    red_marker.header.frame_id = "map";
-    red_marker.header.stamp = stamp;
-    red_marker.ns = "cargo_warning_zone";
-    red_marker.id = 2;
-    red_marker.type = visualization_msgs::Marker::CUBE;
-    red_marker.action = visualization_msgs::Marker::ADD;
-    red_marker.pose.position.x = cargo_center.x();
-    red_marker.pose.position.y = cargo_center.y();
-    red_marker.pose.position.z = cargo_center.z() - cargo_size.z() * 0.5f + 0.02;
-    red_marker.pose.orientation.w = 1.0;
-    red_marker.scale.x = cargo_size.x() + 2.0f * config.level1_distance_m;
-    red_marker.scale.y = cargo_size.y() + 2.0f * config.level1_distance_m;
-    red_marker.scale.z = 0.02;
-    red_marker.color.r = 1.0;
-    red_marker.color.g = 0.0;
-    red_marker.color.b = 0.0;
-    red_marker.color.a = 0.2;
-    red_marker.lifetime = ros::Duration(0.5);
-    zone_markers.markers.push_back(red_marker);
-
-    cargo_warning_zone_marker_pub_.publish(zone_markers);
-
-    // 白色最近危险障碍物点 marker
-    if (warning.level > 0) {
-        visualization_msgs::Marker obstacle_marker;
-        obstacle_marker.header.frame_id = "map";
-        obstacle_marker.header.stamp = stamp;
-        obstacle_marker.ns = "cargo_warning_obstacle";
-        obstacle_marker.id = 0;
-        obstacle_marker.type = visualization_msgs::Marker::SPHERE;
-        obstacle_marker.action = visualization_msgs::Marker::ADD;
-        obstacle_marker.pose.position.x = warning.obstacle_nearest_point.x();
-        obstacle_marker.pose.position.y = warning.obstacle_nearest_point.y();
-        obstacle_marker.pose.position.z = warning.obstacle_nearest_point.z();
-        obstacle_marker.pose.orientation.w = 1.0;
-        obstacle_marker.scale.x = 0.3;
-        obstacle_marker.scale.y = 0.3;
-        obstacle_marker.scale.z = 0.3;
-        obstacle_marker.color.r = 1.0;
-        obstacle_marker.color.g = 1.0;
-        obstacle_marker.color.b = 1.0;
-        obstacle_marker.color.a = 0.8;
-        obstacle_marker.lifetime = ros::Duration(0.5);
-        cargo_warning_obstacle_marker_pub_.publish(obstacle_marker);
-    }
-}
-
-// ========== Runtime Diagnostics 辅助函数 ==========
-
-void NdtSlamNode::logStartupConfig() {
-    if (!runtime_diag_.isEnabled()) return;
-
-    std::map<std::string, std::string> params;
-    params["git_sha"] = "3f7283d2cb0de8612adff31ac51fdf127effac11";
-    params["config_path"] = diag_output_dir_;
-    params["mapping_mode"] = "longterm_mapping";
-    params["cloud_topic"] = pointcloud_topic_;
-    params["subscriber_queue"] = "10";
-    params["ndt_resolution"] = std::to_string(ndt_resolution_);
-    params["ndt_step_size"] = std::to_string(ndt_step_size_);
-    params["ndt_epsilon"] = std::to_string(ndt_transformation_epsilon_);
-    params["ndt_max_iterations"] = std::to_string(ndt_max_iterations_);
-    params["reject_high_fitness"] = "false";
-    params["fitness_threshold"] = "2.00";
-    params["map_commit_max_fitness"] = std::to_string(map_commit_max_fitness_);
-    params["max_speed_mps"] = "2.00";
-    params["max_step_safety_factor"] = "1.10";
-    params["max_step_min_m"] = "0.05";
-    params["max_step_max_m"] = "0.25";
-    params["innovation_gate_m"] = "0.35";
-    params["innovation_reject_m"] = "1.00";
-    params["target_min_points"] = std::to_string(localization_target_min_points_);
-    params["merger_max_pair_dt_sec"] = "0.060";
-    params["merger_stale_timeout_sec"] = "0.120";
-    params["alarm_14_17_18_enabled"] = "0";
-    runtime_diag_.logRunConfig(params);
-}
-
-void NdtSlamNode::logBuildId() {
-    if (!runtime_diag_.isEnabled()) return;
-
-    std::map<std::string, std::string> params;
-    params["git_sha"] = "3f7283d2cb0de8612adff31ac51fdf127effac11";
-    params["git_branch"] = "fix/588-production-localization-cargo-fusion-v4";
-    params["build_time"] = __DATE__ " " __TIME__;
-    params["source_root"] = "/home/ydkj/NDT-slam-ws/src/ndt_slam";
-    params["executable_path"] = "/home/ydkj/NDT-slam-ws/devel/lib/ndt_slam/ndt_slam_node";
-    runtime_diag_.logBuildId(params);
-}
-
-void NdtSlamNode::logNdtHealthPeriodic() {
-    if (!runtime_diag_.isEnabled()) return;
-
-    double input_hz = diag_input_frame_count_ > 0 ?
-        diag_input_frame_count_ / debug_cfg_.summary_interval_sec : 0.0;
-    double processed_hz = diag_processed_frame_count_ > 0 ?
-        diag_processed_frame_count_ / debug_cfg_.summary_interval_sec : 0.0;
-    double converged_ratio = diag_processed_frame_count_ > 0 ?
-        static_cast<double>(diag_converged_count_) / diag_processed_frame_count_ : 0.0;
-
-    runtime_diag_.logNdtHealth(
-        diag_frame_index_, diag_last_cloud_stamp_,
-        input_hz, processed_hz, last_sensor_dt_,
-        last_total_ms_, last_ndt_time_ms_,
-        last_actual_target_source_, last_target_points_,
-        converged_ratio, last_ndt_fitness_,
-        runtime_diag_.predictionOnlyCount(), diag_consecutive_prediction_only_,
-        last_raw_step_, 0.0, 0.0);  // output_step 在 odom 发布时更新
-
-    // 重置计数
-    diag_input_frame_count_ = 0;
-    diag_processed_frame_count_ = 0;
-    diag_converged_count_ = 0;
-}
-
-void NdtSlamNode::logCargoHealthPeriodic() {
-    if (!runtime_diag_.isEnabled()) return;
-
-    CargoFrameRecord rec;
-    rec.stamp = cargo_state_.stamp.toSec();
-    rec.track_id = selected_payload_track_id_;
-    rec.center_x = cargo_state_.center_base.x();
-    rec.center_y = cargo_state_.center_base.y();
-    rec.center_z = cargo_state_.center_base.z();
-    rec.size_x = cargo_state_.size.x();
-    rec.size_y = cargo_state_.size.y();
-    rec.size_z = cargo_state_.size.z();
-    rec.raw_bottom_z = cargo_state_.bottom_z;
-    rec.filtered_bottom_z = cargo_state_.bottom_z;
-    rec.stable_bottom_z = cargo_state_.bottom_safe_z;
-    rec.top_z = cargo_state_.top_z;
-    rec.height_m = cargo_state_.top_z - cargo_state_.bottom_z;
-    rec.bottom_valid = cargo_state_.valid_height;
-    rec.height_valid = cargo_state_.valid_height;
-    rec.observation_valid = cargo_state_.valid_geometry;
-
-    switch (cargo_state_.state) {
-        case CargoState::EMPTY: rec.track_state = "EMPTY"; break;
-        case CargoState::CANDIDATE: rec.track_state = "CANDIDATE"; break;
-        case CargoState::LOCKED: rec.track_state = "LOCKED"; break;
-        case CargoState::LOST: rec.track_state = "LOST"; break;
-    }
-
-    runtime_diag_.logCargoHealth(rec);
-    runtime_diag_.writeCargoFrame(rec);
-}
-
-} // namespace ndt_slam
+                                    core_box.size.y() / std::max(track.last_core_box.si

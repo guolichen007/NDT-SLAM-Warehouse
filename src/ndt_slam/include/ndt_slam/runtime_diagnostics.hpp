@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <vector>
+#include <cstdint>
 
 namespace ndt_slam {
 
@@ -26,6 +28,51 @@ struct RuntimeDiagnosticsConfig {
   int warn_target_fallback_frames = 3;
   double warn_cargo_bottom_jump_m = 0.20;
   double warn_cargo_height_jump_m = 0.20;
+};
+
+struct PipelineRateSnapshot {
+  uint64_t callback_total = 0;
+  uint64_t processed_total = 0;
+  uint64_t queue_drop_total = 0;
+  double callback_sensor_dt_p50_ms = 0.0;
+  double callback_sensor_dt_p95_ms = 0.0;
+  double callback_wall_dt_p50_ms = 0.0;
+  double processed_sensor_dt_p50_ms = 0.0;
+  double processed_sensor_dt_p95_ms = 0.0;
+  double processed_wall_dt_p50_ms = 0.0;
+  double callback_sensor_dt_last_ms = 0.0;
+  double callback_wall_dt_last_ms = 0.0;
+  double processed_sensor_dt_last_ms = 0.0;
+  double processed_wall_dt_last_ms = 0.0;
+  double callback_hz = 0.0;
+  double processed_hz = 0.0;
+  double processed_ratio = 0.0;
+  double drop_ratio = 0.0;
+  double frame_budget_ms = 100.0;
+};
+
+struct RuntimeStageTimes {
+  double ros_to_pcl_ms = 0.0;
+  double near_filter_ms = 0.0;
+  double hook_prepare_ms = 0.0;
+  double cargo_detect_ms = 0.0;
+  double cargo_warning_ms = 0.0;
+  double slam_voxel_ms = 0.0;
+  double ground_split_ms = 0.0;
+  double channel_filter_ms = 0.0;
+  double human_filter_ms = 0.0;
+  double registration_build_ms = 0.0;
+  double target_bind_ms = 0.0;
+  double ndt_ms = 0.0;
+  double ekf_ms = 0.0;
+  double publish_odom_ms = 0.0;
+  double current_cloud_ms = 0.0;
+  double icp_prepare_ms = 0.0;
+  double map_commit_ms = 0.0;
+  double clean_map_ms = 0.0;
+  double display_map_ms = 0.0;
+  double shadow_target_ms = 0.0;
+  double csv_log_ms = 0.0;
 };
 
 // Rolling statistics with fixed window to avoid unbounded memory growth.
@@ -91,6 +138,12 @@ struct NdtFrameRecord {
   double cloud_stamp = 0.0;
   double sensor_dt_ms = 0.0;
   double wall_interarrival_ms = 0.0;
+  double callback_sensor_dt_ms = 0.0;
+  double callback_wall_dt_ms = 0.0;
+  double processed_sensor_dt_ms = 0.0;
+  double processed_wall_dt_ms = 0.0;
+  double queue_age_ms = 0.0;
+  bool queue_degraded = false;
   int raw_points = 0;
   int merged_points = 0;
   int filtered_points = 0;
@@ -107,12 +160,22 @@ struct NdtFrameRecord {
   double ekf_ms = 0.0;
   double map_commit_ms = 0.0;
   double total_ms = 0.0;
+  RuntimeStageTimes stage;
   bool ndt_converged = false;
   int ndt_iterations = 0;
   double fitness = 0.0;
   double transformation_probability = 0.0;
   double raw_x = 0.0, raw_y = 0.0, raw_z = 0.0;
+  double initial_guess_x = 0.0, initial_guess_y = 0.0, initial_guess_yaw_deg = 0.0;
+  double raw_yaw_deg = 0.0;
+  double ekf_x = 0.0, ekf_y = 0.0;
   double output_x = 0.0, output_y = 0.0, output_z = 0.0;
+  double output_yaw_deg = 0.0;
+  double raw_ndt_step_from_previous_m = 0.0;
+  double ndt_correction_from_initial_guess_m = 0.0;
+  double output_dx = 0.0, output_dy = 0.0;
+  double output_yaw_step_deg = 0.0;
+  double output_speed_mps = 0.0;
   double raw_step_m = 0.0;
   double output_step_m = 0.0;
   double allowed_step_m = 0.0;
@@ -121,6 +184,16 @@ struct NdtFrameRecord {
   std::string prediction_reason;
   bool map_commit_allowed = false;
   std::string map_commit_reason;
+  bool motion_gate_stationary = false;
+  bool motion_gate_velocity_modified = false;
+  bool motion_gate_map_commit_blocked = false;
+  uint64_t motion_gate_check_count = 0;
+  uint64_t motion_gate_block_count = 0;
+  uint64_t motion_gate_violation_count = 0;
+  bool icp_config_enabled = false;
+  uint64_t icp_job_count = 0;
+  uint64_t icp_stale_drop_count = 0;
+  uint64_t icp_map_use_count = 0;
 };
 
 // Cargo per-frame record for CSV output.
@@ -153,6 +226,16 @@ public:
   ~RuntimeDiagnostics();
 
   void configure(const RuntimeDiagnosticsConfig& cfg, const std::string& output_dir);
+
+  // Callback and processing rates are deliberately tracked separately.
+  // Acceptance frame budget comes from callback sensor time, never from the
+  // already-dropped processed stream.
+  void recordCallback(double sensor_stamp_sec);
+  void recordProcessed(double sensor_stamp_sec);
+  PipelineRateSnapshot pipelineRateSnapshot(uint64_t queue_drop_total) const;
+  void logPipelineRate(const PipelineRateSnapshot& rate,
+                       size_t queue_size,
+                       double oldest_age_ms);
 
   // ---- startup parameter dump (once) ----
   void logRunConfig(const std::map<std::string, std::string>& params);
@@ -313,6 +396,24 @@ private:
 
   std::chrono::steady_clock::time_point last_csv_flush_;
   std::chrono::steady_clock::time_point last_health_console_;
+  std::chrono::steady_clock::time_point last_pipeline_console_;
+  uint64_t last_pipeline_queue_drop_total_ = 0;
+
+  mutable std::mutex rate_mutex_;
+  uint64_t callback_total_ = 0;
+  uint64_t processed_total_ = 0;
+  double last_callback_sensor_stamp_ = 0.0;
+  double last_processed_sensor_stamp_ = 0.0;
+  double callback_sensor_dt_last_ms_ = 0.0;
+  double callback_wall_dt_last_ms_ = 0.0;
+  double processed_sensor_dt_last_ms_ = 0.0;
+  double processed_wall_dt_last_ms_ = 0.0;
+  std::chrono::steady_clock::time_point last_callback_wall_;
+  std::chrono::steady_clock::time_point last_processed_wall_;
+  RollingStats callback_sensor_dt_ms_{500};
+  RollingStats callback_wall_dt_ms_{500};
+  RollingStats processed_sensor_dt_ms_{500};
+  RollingStats processed_wall_dt_ms_{500};
 };
 
 }  // namespace ndt_slam

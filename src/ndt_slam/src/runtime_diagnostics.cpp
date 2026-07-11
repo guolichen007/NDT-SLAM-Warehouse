@@ -8,7 +8,10 @@ namespace ndt_slam {
 
 RuntimeDiagnostics::RuntimeDiagnostics()
     : last_csv_flush_(std::chrono::steady_clock::now()),
-      last_health_console_(std::chrono::steady_clock::now()) {}
+      last_health_console_(std::chrono::steady_clock::now()),
+      last_pipeline_console_(std::chrono::steady_clock::now()),
+      last_callback_wall_(std::chrono::steady_clock::now()),
+      last_processed_wall_(std::chrono::steady_clock::now()) {}
 
 RuntimeDiagnostics::~RuntimeDiagnostics() {
   // 确保CSV文件被正确关闭
@@ -32,13 +35,29 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
     std::lock_guard<std::mutex> lock(csv_mutex_);
     ndt_csv_.open(output_dir_ + "/runtime_frames.csv");
     ndt_csv_ << "frame_index,cloud_stamp,sensor_dt_ms,wall_interarrival_ms,"
+             << "callback_sensor_dt_ms,callback_wall_dt_ms,processed_sensor_dt_ms,"
+             << "processed_wall_dt_ms,queue_age_ms,queue_degraded,"
              << "raw_points,merged_points,filtered_points,registration_points,"
              << "target_points,target_source,target_version,target_reused,target_fallback,"
              << "preprocess_ms,target_prepare_ms,set_input_target_ms,ndt_align_ms,"
-             << "ekf_ms,map_commit_ms,total_ms,ndt_converged,ndt_iterations,fitness,"
-             << "transformation_probability,raw_x,raw_y,raw_z,output_x,output_y,output_z,"
-             << "raw_step_m,output_step_m,allowed_step_m,innovation_m,"
-             << "prediction_only,prediction_reason,map_commit_allowed,map_commit_reason\n";
+             << "ekf_ms,map_commit_ms,total_ms,ros_to_pcl_ms,near_filter_ms,hook_prepare_ms,"
+             << "cargo_detect_ms,cargo_warning_ms,slam_voxel_ms,ground_split_ms,"
+             << "channel_filter_ms,human_filter_ms,registration_build_ms,target_bind_ms,"
+             << "publish_odom_ms,current_cloud_ms,icp_prepare_ms,clean_map_ms,"
+             << "display_map_ms,shadow_target_ms,csv_log_ms,"
+             << "ndt_converged,ndt_iterations,fitness,transformation_probability,"
+             << "initial_guess_x,initial_guess_y,initial_guess_yaw_deg,"
+             << "raw_x,raw_y,raw_z,raw_yaw_deg,ekf_x,ekf_y,"
+             << "output_x,output_y,output_z,output_yaw_deg,"
+             << "ndt_correction_from_initial_guess_m,raw_ndt_step_from_previous_m,"
+             << "raw_step_m,output_dx,output_dy,output_step_m,output_speed_mps,"
+             << "output_yaw_step_deg,allowed_step_m,innovation_m,"
+             << "prediction_only,prediction_reason,map_commit_allowed,map_commit_reason,"
+             << "motion_gate_stationary,motion_gate_velocity_modified,"
+             << "motion_gate_map_commit_blocked,motion_gate_check_count,"
+             << "motion_gate_block_count,motion_gate_violation_count,"
+             << "icp_config_enabled,icp_job_count,"
+             << "icp_stale_drop_count,icp_map_use_count\n";
 
     cargo_csv_.open(output_dir_ + "/cargo_frames.csv");
     cargo_csv_ << "stamp,track_state,track_id,lock_state,observation_valid,"
@@ -50,6 +69,117 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
 
   last_csv_flush_ = std::chrono::steady_clock::now();
   last_health_console_ = std::chrono::steady_clock::now();
+  last_pipeline_console_ = std::chrono::steady_clock::now();
+  last_pipeline_queue_drop_total_ = 0;
+}
+
+void RuntimeDiagnostics::recordCallback(double sensor_stamp_sec) {
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(rate_mutex_);
+  ++callback_total_;
+  if (last_callback_sensor_stamp_ > 0.0) {
+    const double dt_ms = (sensor_stamp_sec - last_callback_sensor_stamp_) * 1000.0;
+    if (std::isfinite(dt_ms) && dt_ms > 0.01 && dt_ms < 2000.0) {
+      callback_sensor_dt_ms_.add(dt_ms);
+      callback_sensor_dt_last_ms_ = dt_ms;
+    }
+    const double wall_ms =
+        std::chrono::duration<double, std::milli>(now - last_callback_wall_).count();
+    if (std::isfinite(wall_ms) && wall_ms > 0.0 && wall_ms < 5000.0) {
+      callback_wall_dt_ms_.add(wall_ms);
+      callback_wall_dt_last_ms_ = wall_ms;
+    }
+  }
+  last_callback_sensor_stamp_ = sensor_stamp_sec;
+  last_callback_wall_ = now;
+}
+
+void RuntimeDiagnostics::recordProcessed(double sensor_stamp_sec) {
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(rate_mutex_);
+  ++processed_total_;
+  if (last_processed_sensor_stamp_ > 0.0) {
+    const double dt_ms = (sensor_stamp_sec - last_processed_sensor_stamp_) * 1000.0;
+    if (std::isfinite(dt_ms) && dt_ms > 0.01 && dt_ms < 5000.0) {
+      processed_sensor_dt_ms_.add(dt_ms);
+      processed_sensor_dt_last_ms_ = dt_ms;
+    }
+    const double wall_ms =
+        std::chrono::duration<double, std::milli>(now - last_processed_wall_).count();
+    if (std::isfinite(wall_ms) && wall_ms > 0.0 && wall_ms < 10000.0) {
+      processed_wall_dt_ms_.add(wall_ms);
+      processed_wall_dt_last_ms_ = wall_ms;
+    }
+  }
+  last_processed_sensor_stamp_ = sensor_stamp_sec;
+  last_processed_wall_ = now;
+}
+
+PipelineRateSnapshot RuntimeDiagnostics::pipelineRateSnapshot(
+    uint64_t queue_drop_total) const {
+  std::lock_guard<std::mutex> lock(rate_mutex_);
+  PipelineRateSnapshot rate;
+  rate.callback_total = callback_total_;
+  rate.processed_total = processed_total_;
+  rate.queue_drop_total = queue_drop_total;
+  rate.callback_sensor_dt_p50_ms = callback_sensor_dt_ms_.median();
+  rate.callback_sensor_dt_p95_ms = callback_sensor_dt_ms_.p95();
+  rate.callback_wall_dt_p50_ms = callback_wall_dt_ms_.median();
+  rate.processed_sensor_dt_p50_ms = processed_sensor_dt_ms_.median();
+  rate.processed_sensor_dt_p95_ms = processed_sensor_dt_ms_.p95();
+  rate.processed_wall_dt_p50_ms = processed_wall_dt_ms_.median();
+  rate.callback_sensor_dt_last_ms = callback_sensor_dt_last_ms_;
+  rate.callback_wall_dt_last_ms = callback_wall_dt_last_ms_;
+  rate.processed_sensor_dt_last_ms = processed_sensor_dt_last_ms_;
+  rate.processed_wall_dt_last_ms = processed_wall_dt_last_ms_;
+  if (rate.callback_sensor_dt_p50_ms > 1e-6) {
+    rate.callback_hz = 1000.0 / rate.callback_sensor_dt_p50_ms;
+    rate.frame_budget_ms = rate.callback_sensor_dt_p50_ms;
+  }
+  if (rate.processed_sensor_dt_p50_ms > 1e-6) {
+    rate.processed_hz = 1000.0 / rate.processed_sensor_dt_p50_ms;
+  }
+  if (rate.callback_total > 0) {
+    rate.processed_ratio = static_cast<double>(rate.processed_total) /
+                           static_cast<double>(rate.callback_total);
+    rate.drop_ratio = static_cast<double>(queue_drop_total) /
+                      static_cast<double>(rate.callback_total);
+  }
+  return rate;
+}
+
+void RuntimeDiagnostics::logPipelineRate(
+    const PipelineRateSnapshot& rate,
+    size_t queue_size,
+    double oldest_age_ms) {
+  if (!cfg_.enabled) return;
+  const auto now = std::chrono::steady_clock::now();
+  if (std::chrono::duration<double>(now - last_pipeline_console_).count() <
+      cfg_.console_period_sec) {
+    return;
+  }
+  last_pipeline_console_ = now;
+  const bool queue_dropped_since_last_report =
+      rate.queue_drop_total > last_pipeline_queue_drop_total_;
+  last_pipeline_queue_drop_total_ = rate.queue_drop_total;
+  std::cout << "[PIPELINE_RATE] callback=" << rate.callback_total
+            << " processed=" << rate.processed_total
+            << " queue_drop=" << rate.queue_drop_total
+            << " callback_hz=" << std::fixed << std::setprecision(2)
+            << rate.callback_hz
+            << " processed_hz=" << rate.processed_hz
+            << " processed_ratio=" << rate.processed_ratio
+            << " drop_ratio=" << rate.drop_ratio
+            << " callback_sensor_dt_p50_ms=" << rate.callback_sensor_dt_p50_ms
+            << " callback_sensor_dt_p95_ms=" << rate.callback_sensor_dt_p95_ms
+            << " processed_sensor_dt_p50_ms=" << rate.processed_sensor_dt_p50_ms
+            << " processed_sensor_dt_p95_ms=" << rate.processed_sensor_dt_p95_ms
+            << " frame_budget_ms=" << rate.frame_budget_ms
+            << " queue_size=" << queue_size
+            << " oldest_age_ms=" << oldest_age_ms
+            << " last_drop_reason="
+            << (queue_dropped_since_last_report ? "overwrite_latest" : "none")
+            << '\n';
 }
 
 std::string RuntimeDiagnostics::timestamp() const {
@@ -88,15 +218,20 @@ void RuntimeDiagnostics::logBuildId(const std::map<std::string, std::string>& pa
 }
 
 void RuntimeDiagnostics::writeNdtFrame(const NdtFrameRecord& rec) {
-  if (!cfg_.enabled || !cfg_.csv_enabled) return;
+  if (!cfg_.enabled) return;
 
-  // CSV writes are counted outside NDT processing time
   std::lock_guard<std::mutex> lock(csv_mutex_);
-  if (ndt_csv_.is_open()) {
+  if (cfg_.csv_enabled && ndt_csv_.is_open()) {
     ndt_csv_ << rec.frame_index << ","
              << std::fixed << std::setprecision(6) << rec.cloud_stamp << ","
              << std::setprecision(1) << rec.sensor_dt_ms << ","
              << rec.wall_interarrival_ms << ","
+             << rec.callback_sensor_dt_ms << ","
+             << rec.callback_wall_dt_ms << ","
+             << rec.processed_sensor_dt_ms << ","
+             << rec.processed_wall_dt_ms << ","
+             << rec.queue_age_ms << ","
+             << (rec.queue_degraded ? 1 : 0) << ","
              << rec.raw_points << "," << rec.merged_points << ","
              << rec.filtered_points << "," << rec.registration_points << ","
              << rec.target_points << "," << rec.target_source << ","
@@ -108,18 +243,56 @@ void RuntimeDiagnostics::writeNdtFrame(const NdtFrameRecord& rec) {
              << rec.set_input_target_ms << "," << rec.ndt_align_ms << ","
              << rec.ekf_ms << "," << rec.map_commit_ms << ","
              << rec.total_ms << ","
+             << rec.stage.ros_to_pcl_ms << ","
+             << rec.stage.near_filter_ms << ","
+             << rec.stage.hook_prepare_ms << ","
+             << rec.stage.cargo_detect_ms << ","
+             << rec.stage.cargo_warning_ms << ","
+             << rec.stage.slam_voxel_ms << ","
+             << rec.stage.ground_split_ms << ","
+             << rec.stage.channel_filter_ms << ","
+             << rec.stage.human_filter_ms << ","
+             << rec.stage.registration_build_ms << ","
+             << rec.stage.target_bind_ms << ","
+             << rec.stage.publish_odom_ms << ","
+             << rec.stage.current_cloud_ms << ","
+             << rec.stage.icp_prepare_ms << ","
+             << rec.stage.clean_map_ms << ","
+             << rec.stage.display_map_ms << ","
+             << rec.stage.shadow_target_ms << ","
+             << rec.stage.csv_log_ms << ","
              << (rec.ndt_converged ? 1 : 0) << "," << rec.ndt_iterations << ","
              << std::setprecision(6) << rec.fitness << ","
              << rec.transformation_probability << ","
+             << rec.initial_guess_x << "," << rec.initial_guess_y << ","
+             << rec.initial_guess_yaw_deg << ","
              << rec.raw_x << "," << rec.raw_y << "," << rec.raw_z << ","
+             << rec.raw_yaw_deg << ","
+             << rec.ekf_x << "," << rec.ekf_y << ","
              << rec.output_x << "," << rec.output_y << "," << rec.output_z << ","
+             << rec.output_yaw_deg << ","
              << std::setprecision(4)
-             << rec.raw_step_m << "," << rec.output_step_m << ","
+             << rec.ndt_correction_from_initial_guess_m << ","
+             << rec.raw_ndt_step_from_previous_m << ","
+             << rec.raw_step_m << ","
+             << rec.output_dx << "," << rec.output_dy << ","
+             << rec.output_step_m << "," << rec.output_speed_mps << ","
+             << rec.output_yaw_step_deg << ","
              << rec.allowed_step_m << "," << rec.innovation_m << ","
              << (rec.prediction_only ? 1 : 0) << ","
              << rec.prediction_reason << ","
              << (rec.map_commit_allowed ? 1 : 0) << ","
-             << rec.map_commit_reason << "\n";
+             << rec.map_commit_reason << ","
+             << (rec.motion_gate_stationary ? 1 : 0) << ","
+             << (rec.motion_gate_velocity_modified ? 1 : 0) << ","
+             << (rec.motion_gate_map_commit_blocked ? 1 : 0) << ","
+             << rec.motion_gate_check_count << ","
+             << rec.motion_gate_block_count << ","
+             << rec.motion_gate_violation_count << ","
+             << (rec.icp_config_enabled ? 1 : 0) << ","
+             << rec.icp_job_count << ","
+             << rec.icp_stale_drop_count << ","
+             << rec.icp_map_use_count << "\n";
   }
 
   // Update rolling stats
@@ -127,7 +300,7 @@ void RuntimeDiagnostics::writeNdtFrame(const NdtFrameRecord& rec) {
   ndt_ms_stats_.add(rec.ndt_align_ms);
   fitness_stats_.add(rec.fitness);
 
-  maybeFlushCsv();
+  if (cfg_.csv_enabled) maybeFlushCsv();
 }
 
 void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {

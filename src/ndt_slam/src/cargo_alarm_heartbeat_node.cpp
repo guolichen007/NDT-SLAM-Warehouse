@@ -17,7 +17,7 @@ public:
     };
 
     AlarmStateMachine(double stale_timeout_sec, double clear_delay_sec)
-        : stale_timeout_sec_(sanitizePositive(stale_timeout_sec, 0.5)),
+        : stale_timeout_sec_(sanitizePositive(stale_timeout_sec, 0.8)),
           clear_delay_sec_(sanitizeNonNegative(clear_delay_sec, 0.5)) {}
 
     int currentCode() const { return current_code_; }
@@ -37,10 +37,23 @@ public:
             return forceFailSafe("invalid_source_stamp");
         }
         if (has_source_stamp_ && source_stamp_sec + kTimeEpsilonSec < last_source_stamp_sec_) {
+            // Establish a new epoch after the one-shot fail-safe so bag loops or
+            // a restarted upstream clock can recover on the next advancing stamp.
+            last_source_stamp_sec_ = source_stamp_sec;
+            last_source_progress_wall_sec_ = wall_now_sec;
             return forceFailSafe("source_time_rollback");
         }
+        if (!has_source_stamp_ ||
+            source_stamp_sec > last_source_stamp_sec_ + kTimeEpsilonSec) {
+            last_source_stamp_sec_ = source_stamp_sec;
+            last_source_progress_wall_sec_ = wall_now_sec;
+        }
         has_source_stamp_ = true;
-        last_source_stamp_sec_ = source_stamp_sec;
+
+        if (wall_now_sec - last_source_progress_wall_sec_ + kTimeEpsilonSec >=
+            stale_timeout_sec_) {
+            return forceFailSafe("source_stamp_stale");
+        }
 
         if (!evidence_valid) {
             return forceFailSafe("invalid_evidence");
@@ -64,6 +77,10 @@ public:
         if (wall_now_sec - last_receipt_wall_sec_ + kTimeEpsilonSec >= stale_timeout_sec_) {
             return forceFailSafe("status_stale");
         }
+        if (wall_now_sec - last_source_progress_wall_sec_ + kTimeEpsilonSec >=
+            stale_timeout_sec_) {
+            return forceFailSafe("source_stamp_stale");
+        }
         return applyCandidate(last_candidate_code_, wall_now_sec, "heartbeat");
     }
 
@@ -83,10 +100,10 @@ private:
     }
 
     static int severity(int code) {
-        if (code == kOuterOrInvalid) {
+        if (code == kInnerWarning) {
             return 2;
         }
-        if (code == kInnerWarning) {
+        if (code == kOuterOrInvalid) {
             return 1;
         }
         return 0;
@@ -158,6 +175,7 @@ private:
     double last_receipt_wall_sec_ = 0.0;
     double last_observed_wall_sec_ = 0.0;
     double last_source_stamp_sec_ = 0.0;
+    double last_source_progress_wall_sec_ = 0.0;
     double clear_pending_since_wall_sec_ = 0.0;
 };
 
@@ -178,7 +196,7 @@ public:
         : nh_(),
           pnh_("~"),
           heartbeat_hz_(readPositiveParam("heartbeat_hz", 5.0)),
-          stale_timeout_sec_(readPositiveParam("stale_timeout_sec", 0.5)),
+          stale_timeout_sec_(readPositiveParam("stale_timeout_sec", 0.8)),
           clear_delay_sec_(readNonNegativeParam("clear_delay_sec", 0.5)),
           state_machine_(stale_timeout_sec_, clear_delay_sec_) {
         pnh_.param<std::string>("status_topic", status_topic_,
@@ -186,12 +204,12 @@ public:
         pnh_.param<std::string>("alarm_topic", alarm_topic_,
                                 "/cargo_avoidance/alarm_code");
 
-        int status_queue_size = 10;
+        int status_queue_size = 1;
         pnh_.param("status_queue_size", status_queue_size, status_queue_size);
-        if (status_queue_size < 1) {
-            ROS_WARN("[CargoAlarmHeartbeat] status_queue_size=%d is invalid; using 10",
+        if (status_queue_size != 1) {
+            ROS_WARN("[CargoAlarmHeartbeat] status_queue_size=%d is unsafe; using 1",
                      status_queue_size);
-            status_queue_size = 10;
+            status_queue_size = 1;
         }
 
         alarm_pub_ = nh_.advertise<std_msgs::Int32>(alarm_topic_, 1, true);
@@ -254,34 +272,3 @@ private:
         publishAlarm(result.code, result.reason);
     }
 
-    void publishAlarm(int code, const char* reason) {
-        std_msgs::Int32 msg;
-        msg.data = code;
-        alarm_pub_.publish(msg);
-        ROS_INFO_THROTTLE(1.0, "[CargoAlarmHeartbeat] alarm=%d reason=%s",
-                          code, reason);
-    }
-
-    ros::NodeHandle nh_;
-    ros::NodeHandle pnh_;
-    ros::Subscriber status_sub_;
-    ros::Publisher alarm_pub_;
-    ros::WallTimer heartbeat_timer_;
-    std::string status_topic_;
-    std::string alarm_topic_;
-    const double heartbeat_hz_;
-    const double stale_timeout_sec_;
-    const double clear_delay_sec_;
-    AlarmStateMachine state_machine_;
-};
-
-}  // namespace cargo_alarm
-
-int main(int argc, char** argv) {
-    ros::init(argc, argv, "cargo_alarm_heartbeat");
-    cargo_alarm::AlarmHeartbeatNode node;
-    ros::spin();
-    return 0;
-}
-
-#endif  // CARGO_ALARM_HEARTBEAT_STATE_MACHINE_ONLY

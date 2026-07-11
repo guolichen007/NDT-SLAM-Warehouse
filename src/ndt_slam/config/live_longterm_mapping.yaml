@@ -44,6 +44,11 @@ pose_topic: "/current_pose"
 map_topic: "/map"
 current_cloud_topic: "/mapping_current_cloud"
 
+# Main localization queue. Capacity 1 is the production latest-frame policy:
+# an old frame is overwritten instead of building latency under load.
+processing_queue:
+  capacity: 1
+
 # 坐标系
 odom_frame: "odom"
 base_frame: "base_link"
@@ -503,6 +508,7 @@ icp_refine:
   transformation_epsilon: 0.002
   min_object_points: 800
   max_icp_ms: 15.0
+  max_fitness: 0.50
 
 # ========== v8-stable-r3-final: Debug Publish ==========
 debug_publish:
@@ -706,33 +712,4 @@ odom_anchored_cargo_box:
     sub_cluster_min_points: 20
 
   # ========== Cargo Warning 配置 ==========
-  # 注意：当前版本为 tightbox baseline，正式避障报警仍在开发中
-  cargo_warning:
-    enabled: true
-    publish_alarm_msg: false  # 不向外发布正式报警，只发布 debug marker
-    publish_debug_marker: true
-
-    level1_distance_m: 3.0
-    level2_distance_m: 5.0
-    min_vertical_clearance_m: 0.80
-
-    cargo_bottom_use_uncertainty: true
-    cargo_bottom_extra_margin_m: 0.05
-
-    obstacle_top_percentile: 0.95
-    obstacle_min_points: 5
-    obstacle_cluster_tolerance_m: 0.25
-
-    exclude_ground: true
-    ground_hag_min_m: 0.20
-
-    exclude_self_cargo: true
-    self_cargo_margin_xy_m: 0.45
-    self_cargo_margin_z_m: 0.35
-
-    debounce_frames: 2
-    clear_hold_sec: 0.5
-
-    level1_alarm_code: 17
-    level2_alarm_code: 18
-    clear_alarm_code: 0
+  # 注意：当前版本为 tightbox baseline，正�

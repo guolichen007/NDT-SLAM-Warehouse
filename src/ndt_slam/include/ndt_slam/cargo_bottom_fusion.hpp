@@ -13,14 +13,18 @@
 
 namespace ndt_slam {
 
-// Ordered by neither confidence nor fallback priority. Use sourcePriority() when
-// comparing candidates; the numeric values are kept stable for ROS messages.
+// Ordered by neither confidence nor fallback priority. Use
+// cargoBottomSourcePriority() when comparing candidates; numeric values are
+// kept stable for ROS messages.
 enum class CargoBottomSource : std::uint8_t {
     INVALID = 0,
     POINTS = 1,
     MAP_DIFF = 2,
     MAP_STATIC = 3,
     RECENT_STABLE = 4,
+    // Height learned from the first strongly supported POINTS estimate of the
+    // current track. This is deliberately distinct from map-derived evidence.
+    ORIGIN_HEIGHT = 5,
 };
 
 const char* cargoBottomSourceName(CargoBottomSource source) noexcept;
@@ -40,6 +44,12 @@ struct CargoVerticalStats {
     std::size_t bottom_band_xy_cells = 0;
     float bottom_band_point_ratio = 0.0F;
     float bottom_band_xy_cell_ratio = 0.0F;
+    float bottom_band_span_x = 0.0F;
+    float bottom_band_span_y = 0.0F;
+    float bottom_band_span_x_ratio = 0.0F;
+    float bottom_band_span_y_ratio = 0.0F;
+    std::size_t occupied_vertical_bins = 0;
+    float max_vertical_gap = 0.0F;
     std::string reject_reason;
 };
 
@@ -76,6 +86,11 @@ struct CargoBottomFusionConfig {
     std::size_t points_min_bottom_band_xy_cells = 3;
     float points_min_bottom_band_point_ratio = 0.06F;
     float points_min_bottom_band_xy_cell_ratio = 0.10F;
+    float points_min_bottom_span_ratio = 0.30F;
+    std::size_t points_min_vertical_bins = 4;
+    float points_vertical_bin_size = 0.10F;
+    float points_max_vertical_gap = 0.30F;
+    float prior_height_tolerance = 0.30F;
 
     std::size_t map_diff_min_points = 20;
     std::size_t map_static_min_points = 24;
@@ -94,6 +109,7 @@ struct CargoBottomFusionConfig {
     float points_uncertainty_min = 0.035F;
     float map_diff_uncertainty_min = 0.070F;
     float map_static_uncertainty_min = 0.120F;
+    float origin_height_uncertainty_min = 0.100F;
     float recent_stable_uncertainty_min = 0.100F;
     float invalid_uncertainty = 1.0F;
     float tail_uncertainty_gain = 1.5F;
@@ -103,8 +119,21 @@ struct CargoBottomFusionConfig {
     float points_confidence_base = 0.82F;
     float map_diff_confidence_base = 0.67F;
     float map_static_confidence_base = 0.52F;
+    float origin_height_confidence_base = 0.58F;
     float recent_stable_confidence_base = 0.45F;
     float ema_alpha = 0.35F;
+
+    // The final output filter is source-independent.  It prevents a source
+    // switch from bypassing the per-source EMA and creating an instantaneous
+    // bottom jump.
+    float direct_update_max_jump = 0.15F;
+    float soft_update_max_jump = 0.40F;
+    float soft_update_alpha = 0.15F;
+    std::size_t large_jump_confirm_frames = 3;
+    float large_jump_confirmation_tolerance = 0.10F;
+
+    float minimum_prior_height = 0.10F;
+    float maximum_prior_height = 5.00F;
 };
 
 struct CargoBottomObservation {
@@ -121,8 +150,21 @@ struct CargoBottomObservation {
     // PCL conversion at the call site is intentionally lightweight:
     //   points.emplace_back(p.x, p.y, p.z);
     std::vector<Eigen::Vector3f> points_base;
-    std::vector<Eigen::Vector3f> map_diff_points_map;
-    std::vector<Eigen::Vector3f> map_static_points_map;
+
+    // Map-derived evidence is a height prior captured at the lift origin, not
+    // an old point cloud cropped by the cargo's current footprint.  Both
+    // priors require a current top observation from the same sensor stamp.
+    bool current_top_valid = false;
+    float current_top_z_base = 0.0F;
+    bool map_diff_height_valid = false;
+    float map_diff_height_m = 0.0F;
+    bool map_static_height_valid = false;
+    float map_static_height_m = 0.0F;
+    bool origin_height_valid = false;
+    float origin_height_m = 0.0F;
+
+    bool prior_height_valid = false;
+    float prior_height_m = 0.0F;
 
     // If supplied, this tracked footprint is used for XY geometry and to reject
     // old accumulated points outside the current cargo box. Otherwise robust XY
@@ -130,6 +172,13 @@ struct CargoBottomObservation {
     bool footprint_valid = false;
     Eigen::Vector2f footprint_center_base = Eigen::Vector2f::Zero();
     Eigen::Vector2f footprint_size_xy = Eigen::Vector2f::Zero();
+
+    // Optional center of the same tracked cargo at stamp_sec.  When present it
+    // lets the accumulator compensate cargo translation (including hoisting in
+    // Z), rather than compensating only crane/base motion.  It must come from
+    // the same detection and same timestamp as points_base.
+    bool track_center_valid = false;
+    Eigen::Vector3f track_center_base = Eigen::Vector3f::Zero();
 };
 
 struct CargoBottomResult {
@@ -152,6 +201,7 @@ struct CargoBottomResult {
     CargoVerticalStats points_stats;
     CargoVerticalStats map_diff_stats;
     CargoVerticalStats map_static_stats;
+    CargoVerticalStats origin_height_stats;
     CargoBoxGeometry geometry;
 };
 
@@ -166,65 +216,4 @@ public:
     void reset();
     void setConfig(const CargoBottomFusionConfig& config);
 
-    const CargoBottomFusionConfig& config() const noexcept { return config_; }
-    std::size_t accumulatedPointCount() const noexcept { return accumulated_point_count_; }
-    bool hasTrack() const noexcept { return has_track_; }
-    std::uint64_t trackId() const noexcept { return track_id_; }
-
-private:
-    struct AccumulatedFrame {
-        double stamp_sec = 0.0;
-        std::vector<Eigen::Vector3f> points_map;
-    };
-
-    struct StableEstimate {
-        bool valid = false;
-        std::uint64_t track_id = 0;
-        double stamp_sec = 0.0;
-        CargoBottomSource original_source = CargoBottomSource::INVALID;
-        float bottom_z_base = 0.0F;
-        float top_z_base = 0.0F;
-        float uncertainty = 1.0F;
-        float confidence = 0.0F;
-        Eigen::Vector2f center_base = Eigen::Vector2f::Zero();
-        Eigen::Vector2f size_xy = Eigen::Vector2f::Zero();
-        CargoVerticalStats stats;
-    };
-
-    struct SelectedCandidate {
-        bool valid = false;
-        CargoBottomSource source = CargoBottomSource::INVALID;
-        std::string reason;
-        std::vector<Eigen::Vector3f> points_base;
-        CargoVerticalStats stats;
-        float bottom_z_base = 0.0F;
-        float top_z_base = 0.0F;
-        float uncertainty = 1.0F;
-        float confidence = 0.0F;
-        double age_sec = 0.0;
-        Eigen::Vector2f memory_center_base = Eigen::Vector2f::Zero();
-        Eigen::Vector2f memory_size_xy = Eigen::Vector2f::Zero();
-    };
-
-    CargoBottomFusionConfig config_;
-    bool has_track_ = false;
-    std::uint64_t track_id_ = 0;
-    double last_stamp_sec_ = 0.0;
-    double newest_points_stamp_sec_ = 0.0;
-    std::deque<AccumulatedFrame> accumulated_frames_;
-    std::size_t accumulated_point_count_ = 0;
-
-    bool ema_valid_ = false;
-    CargoBottomSource ema_source_ = CargoBottomSource::INVALID;
-    float ema_bottom_z_base_ = 0.0F;
-    float ema_top_z_base_ = 0.0F;
-    StableEstimate stable_;
-
-    void resetTemporalState();
-    void purgeAccumulation(double stamp_sec);
-    void appendPoints(const CargoBottomObservation& observation);
-    std::vector<Eigen::Vector3f> alignedAccumulatedPoints(
-        const CargoBottomObservation& observation) const;
-};
-
-}  // namespace ndt_slam
+    const CargoBottomFusionConfig& config() const noexce
