@@ -19,6 +19,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <utility>
 
 // g2o
 #include <g2o/core/sparse_optimizer.h>
@@ -52,6 +53,8 @@ public:
 
     Eigen::MatrixXd generate(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const Eigen::Vector3d& origin);
     double calculateSimilarity(const Eigen::MatrixXd& sc1, const Eigen::MatrixXd& sc2);
+    std::pair<double, int> calculateSimilarityWithShift(
+        const Eigen::MatrixXd& query, const Eigen::MatrixXd& candidate);
     int findBestMatch(const Eigen::MatrixXd& current_sc, const std::vector<Eigen::MatrixXd>& sc_list);
 
 private:
@@ -68,6 +71,13 @@ struct LoopCandidate {
     double similarity;
 };
 
+struct RelocalizationHint {
+    Sophus::SE3d pose;
+    int keyframe_id = -1;
+    double similarity = 0.0;
+    double yaw_offset_rad = 0.0;
+};
+
 // 闭环检测器类
 class LoopClosureDetector {
 public:
@@ -82,6 +92,11 @@ public:
     LoopCandidate detectLoop();
     bool checkConsistency(const Sophus::SE3d& loop_pose, const Sophus::SE3d& odometry_pose);
     Sophus::SE3d globalRelocalization(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
+    std::vector<RelocalizationHint> findRelocalizationHints(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        std::size_t max_candidates,
+        double min_similarity = 0.55);
+    void rebuildScanContexts();
 
     const std::deque<KeyFrame>& getKeyFrames() const { return keyframe_manager_.getKeyFrames(); }
     KeyFrameManager& getKeyFrameManager() { return keyframe_manager_; }
@@ -149,22 +164,4 @@ private:
     ros::Publisher relocalization_pub_;
 
     LoopClosureDetector loop_closure_detector_;
-    PoseGraphOptimizer pose_graph_optimizer_;
-
-    std::string odom_topic_ = "/odom";
-    std::string pointcloud_topic_ = "/points_raw";
-    std::string relocalization_topic_ = "/relocalization";
-
-    Sophus::SE3d last_pose_;
-    ros::Time last_stamp_;
-    bool initialized_ = false;
-
-    int loop_detection_interval_ = 5;
-    int keyframe_count_ = 0;
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr last_cloud_;
-    bool tracking_lost_ = false;
-    Sophus::SE3d relocalized_pose_;
-};
-
-} // namespace ndt_slam
+    Po

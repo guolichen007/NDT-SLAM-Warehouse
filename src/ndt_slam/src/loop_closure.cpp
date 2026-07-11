@@ -1,7 +1,10 @@
 #include "ndt_slam/loop_closure.hpp"
+#include <pcl/common/transforms.h>
 #include <pcl/registration/icp.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <Eigen/Geometry>
 #include <yaml-cpp/yaml.h>
+#include <algorithm>
 #include <cmath>
 #include <g2o/core/optimization_algorithm_levenberg.h>
 
@@ -51,10 +54,36 @@ Eigen::MatrixXd ScanContext::generate(const pcl::PointCloud<pcl::PointXYZ>::Ptr&
 }
 
 double ScanContext::calculateSimilarity(const Eigen::MatrixXd& sc1, const Eigen::MatrixXd& sc2) {
-    double diff = (sc1 - sc2).norm();
-    double max_diff = std::sqrt(sc1.rows() * sc1.cols()) * 5.0;
-    double similarity = 1.0 - std::min(diff / max_diff, 1.0);
-    return similarity;
+    return calculateSimilarityWithShift(sc1, sc2).first;
+}
+
+std::pair<double, int> ScanContext::calculateSimilarityWithShift(
+    const Eigen::MatrixXd& query, const Eigen::MatrixXd& candidate) {
+    if (query.rows() != candidate.rows() ||
+        query.cols() != candidate.cols() || query.size() == 0) {
+        return {0.0, 0};
+    }
+    const double query_norm = query.norm();
+    const double candidate_norm = candidate.norm();
+    if (query_norm < 1.0e-12 || candidate_norm < 1.0e-12) {
+        return {0.0, 0};
+    }
+
+    double best_similarity = -1.0;
+    int best_shift = 0;
+    for (int shift = 0; shift < query.cols(); ++shift) {
+        double dot = 0.0;
+        for (int sector = 0; sector < query.cols(); ++sector) {
+            const int candidate_sector = (sector + shift) % query.cols();
+            dot += query.col(sector).dot(candidate.col(candidate_sector));
+        }
+        const double similarity = dot / (query_norm * candidate_norm);
+        if (similarity > best_similarity) {
+            best_similarity = similarity;
+            best_shift = shift;
+        }
+    }
+    return {std::clamp(best_similarity, 0.0, 1.0), best_shift};
 }
 
 int ScanContext::findBestMatch(const Eigen::MatrixXd& current_sc, const std::vector<Eigen::MatrixXd>& sc_list) {
@@ -250,7 +279,11 @@ void LoopClosureDetector::addKeyFrame(const Sophus::SE3d& pose, const pcl::Point
                 return;
             }
             KeyFrame& last_keyframe = const_cast<KeyFrame&>(keyframes.back());
-            last_keyframe.scan_context_ = scan_context_.generate(cloud, pose.translation());
+            // Keyframe clouds are stored in base_link coordinates. Their scan
+            // contexts must therefore use the sensor origin, exactly like a
+            // live relocalization query.
+            last_keyframe.scan_context_ =
+                scan_context_.generate(cloud, Eigen::Vector3d::Zero());
 
             scan_context_list_.push_back(last_keyframe.scan_context_);
         }
@@ -374,48 +407,82 @@ Sophus::SE3d LoopClosureDetector::refinePose(const pcl::PointCloud<pcl::PointXYZ
 }
 
 Sophus::SE3d LoopClosureDetector::globalRelocalization(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
+    const auto hints = findRelocalizationHints(cloud, 1, 0.70);
+    if (hints.empty()) return Sophus::SE3d();
+
     const auto& keyframes = keyframe_manager_.getKeyFrames();
-    if (keyframes.empty()) {
+    const auto it = std::find_if(
+        keyframes.begin(), keyframes.end(), [&hints](const KeyFrame& keyframe) {
+            return keyframe.id_ == hints.front().keyframe_id;
+        });
+    if (it == keyframes.end() || !it->cloud_ || it->cloud_->empty()) {
         return Sophus::SE3d();
     }
 
-    Eigen::MatrixXd current_sc = scan_context_.generate(cloud, Eigen::Vector3d::Zero());
+    // Keyframe clouds are base-frame observations. Transform the candidate
+    // target into map coordinates before using an absolute map pose as ICP's
+    // initial guess. The old implementation mixed these frames and then
+    // multiplied the keyframe pose twice.
+    auto target_map = pcl::PointCloud<pcl::PointXYZ>::Ptr(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::transformPointCloud(*it->cloud_, *target_map,
+                             hints.front().pose.matrix().cast<float>());
+    const Eigen::Matrix3d hint_rotation = hints.front().pose.so3().matrix();
+    const double hint_yaw = std::atan2(hint_rotation(1, 0),
+                                       hint_rotation(0, 0));
+    const Sophus::SE3d initial_guess(
+        Eigen::AngleAxisd(hint_yaw + hints.front().yaw_offset_rad,
+                          Eigen::Vector3d::UnitZ()).toRotationMatrix(),
+        hints.front().pose.translation());
+    return refinePose(cloud, target_map, initial_guess);
+}
 
-    double best_similarity = -1.0;
-    int best_keyframe_idx = -1;
+std::vector<RelocalizationHint> LoopClosureDetector::findRelocalizationHints(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    std::size_t max_candidates, double min_similarity) {
+    std::vector<RelocalizationHint> hints;
+    if (!cloud || cloud->empty() || max_candidates == 0U) return hints;
 
-    for (size_t i = 0; i < keyframes.size(); ++i) {
-        const KeyFrame& keyframe = keyframes[i];
-        double similarity = scan_context_.calculateSimilarity(current_sc, keyframe.scan_context_);
-        if (similarity > best_similarity) {
-            best_similarity = similarity;
-            best_keyframe_idx = i;
-        }
+    const auto& keyframes = keyframe_manager_.getKeyFrames();
+    if (keyframes.empty()) return hints;
+    const Eigen::MatrixXd query =
+        scan_context_.generate(cloud, Eigen::Vector3d::Zero());
+    if (query.squaredNorm() < 1.0e-12) return hints;
+
+    hints.reserve(keyframes.size());
+    for (const auto& keyframe : keyframes) {
+        if (keyframe.scan_context_.rows() != query.rows() ||
+            keyframe.scan_context_.cols() != query.cols()) continue;
+        if (keyframe.scan_context_.squaredNorm() < 1.0e-12) continue;
+        const auto similarity_shift = scan_context_.calculateSimilarityWithShift(
+            query, keyframe.scan_context_);
+        const double similarity = similarity_shift.first;
+        if (!std::isfinite(similarity) || similarity < min_similarity) continue;
+        int signed_shift = similarity_shift.second;
+        if (signed_shift > query.cols() / 2) signed_shift -= query.cols();
+        const double yaw_offset = static_cast<double>(signed_shift) *
+            2.0 * M_PI / static_cast<double>(query.cols());
+        hints.push_back(
+            {keyframe.pose_, keyframe.id_, similarity, yaw_offset});
     }
+    std::stable_sort(hints.begin(), hints.end(),
+        [](const RelocalizationHint& lhs, const RelocalizationHint& rhs) {
+            return lhs.similarity > rhs.similarity;
+        });
+    if (hints.size() > max_candidates) hints.resize(max_candidates);
+    return hints;
+}
 
-    if (best_keyframe_idx == -1 || best_similarity < 0.7) {
-        ROS_WARN("Global relocalization: best_similarity=%.3f < 0.7", best_similarity);
-        return Sophus::SE3d();
+void LoopClosureDetector::rebuildScanContexts() {
+    auto& keyframes = const_cast<std::deque<KeyFrame>&>(
+        keyframe_manager_.getKeyFrames());
+    scan_context_list_.clear();
+    scan_context_list_.reserve(keyframes.size());
+    for (auto& keyframe : keyframes) {
+        keyframe.scan_context_ = scan_context_.generate(
+            keyframe.cloud_, Eigen::Vector3d::Zero());
+        scan_context_list_.push_back(keyframe.scan_context_);
     }
-
-    const KeyFrame& best_keyframe = keyframes[best_keyframe_idx];
-
-    Sophus::SE3d initial_guess = best_keyframe.pose_;
-    Sophus::SE3d relative_transform = refinePose(cloud, best_keyframe.cloud_, initial_guess);
-
-    Sophus::SE3d refined_pose = initial_guess * relative_transform;
-
-    Eigen::Matrix3d R = refined_pose.so3().matrix();
-    Eigen::JacobiSVD<Eigen::Matrix3d> svd(R, Eigen::ComputeFullU | Eigen::ComputeFullV);
-    Eigen::Matrix3d R_ortho = svd.matrixU() * svd.matrixV().transpose();
-
-    if (R_ortho.determinant() < 0) {
-        R_ortho.col(0) *= -1;
-    }
-
-    Sophus::SE3d ortho_pose(R_ortho, refined_pose.translation());
-
-    return ortho_pose;
 }
 
 void LoopClosureDetector::updateKeyFramePoses(const std::vector<KeyFrame>& updated_keyframes) {
@@ -538,82 +605,4 @@ void LoopClosureNode::pointCloudCallback(const sensor_msgs::PointCloud2::ConstPt
 }
 
 void LoopClosureNode::processLoopClosure() {
-    LoopCandidate candidate = loop_closure_detector_.detectLoop();
-
-    if (candidate.current_keyframe_id != -1 && candidate.candidate_keyframe_id != -1) {
-        ROS_INFO("Loop found: %d <-> %d, similarity: %.3f",
-                    candidate.current_keyframe_id, candidate.candidate_keyframe_id, candidate.similarity);
-
-        const auto& keyframes = loop_closure_detector_.getKeyFrames();
-
-        for (const auto& keyframe : keyframes) {
-            pose_graph_optimizer_.addKeyFrame(keyframe);
-        }
-
-        for (size_t i = 0; i < keyframes.size() - 1; ++i) {
-            const KeyFrame& kf1 = keyframes[i];
-            const KeyFrame& kf2 = keyframes[i + 1];
-            Sophus::SE3d relative_pose = kf1.pose_.inverse() * kf2.pose_;
-            Eigen::Matrix<double, 6, 6> information = Eigen::Matrix<double, 6, 6>::Identity();
-            pose_graph_optimizer_.addOdometryEdge(kf1.id_, kf2.id_, relative_pose, information);
-        }
-
-        Eigen::Matrix<double, 6, 6> loop_information = Eigen::Matrix<double, 6, 6>::Identity();
-        pose_graph_optimizer_.addLoopEdge(candidate.candidate_keyframe_id, candidate.current_keyframe_id,
-                                          candidate.relative_pose, loop_information);
-
-        if (pose_graph_optimizer_.optimize(10)) {
-            ROS_INFO("Pose graph optimization successful");
-
-            std::vector<KeyFrame> updated_keyframes(keyframes.begin(), keyframes.end());
-            pose_graph_optimizer_.updateKeyFramePoses(updated_keyframes);
-        }
-    }
-}
-
-bool LoopClosureNode::relocalizeService(std_srvs::Empty::Request& request,
-                                      std_srvs::Empty::Response& response) {
-    ROS_INFO("Received relocalization request!");
-
-    if (last_cloud_->empty()) {
-        ROS_WARN("No pointCloud data available");
-        return true;
-    }
-
-    Sophus::SE3d relocalized_pose = loop_closure_detector_.globalRelocalization(last_cloud_);
-
-    if (relocalized_pose.so3().matrix().allFinite()) {
-        ROS_INFO("Global relocalization successful: (%.3f, %.3f, %.3f)",
-                    relocalized_pose.translation().x(),
-                    relocalized_pose.translation().y(),
-                    relocalized_pose.translation().z());
-
-        relocalized_pose_ = relocalized_pose;
-
-        nav_msgs::Odometry relocalization_msg;
-        relocalization_msg.header.stamp = ros::Time::now();
-        relocalization_msg.header.frame_id = "odom";
-        relocalization_msg.child_frame_id = "base_link";
-
-        relocalization_msg.pose.pose.position.x = relocalized_pose.translation().x();
-        relocalization_msg.pose.pose.position.y = relocalized_pose.translation().y();
-        relocalization_msg.pose.pose.position.z = relocalized_pose.translation().z();
-
-        Eigen::Quaterniond quat = relocalized_pose.so3().unit_quaternion();
-        relocalization_msg.pose.pose.orientation.x = quat.x();
-        relocalization_msg.pose.pose.orientation.y = quat.y();
-        relocalization_msg.pose.pose.orientation.z = quat.z();
-        relocalization_msg.pose.pose.orientation.w = quat.w();
-
-        for (int i = 0; i < 6; ++i) {
-            relocalization_msg.pose.covariance[i * 6 + i] = 0.1;
-        }
-
-        relocalization_pub_.publish(relocalization_msg);
-    } else {
-        ROS_WARN("Global relocalization failed");
-    }
-    return true;
-}
-
-} // namespace ndt_slam
+    LoopCandidate candidate = loop_closure_detector_.detec

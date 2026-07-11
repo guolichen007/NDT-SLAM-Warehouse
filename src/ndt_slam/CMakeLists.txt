@@ -78,8 +78,13 @@ set(LIBRARY_SOURCES
   src/cargo_box_estimator.cpp
   # v8-stable-r3: CraneMotionEKF
   src/crane_motion_ekf.cpp
+  # Asynchronous local/global NDT relocalization
+  src/ndt_relocalizer.cpp
   # Runtime diagnostics (1.0x/1.5x acceptance testing)
   src/runtime_diagnostics.cpp
+  # Formal cargo bottom and fail-safe safety pipeline
+  src/cargo_bottom_fusion.cpp
+  src/cargo_safety_evaluator.cpp
 )
 
 add_library(ndt_slam_lib SHARED
@@ -134,20 +139,4 @@ target_link_libraries(cargo_forbidden_zone_node
   yaml-cpp
 )
 
-install(TARGETS ndt_slam_lib ndt_slam_node
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin
-)
-
-install(DIRECTORY include/
-  DESTINATION include
-)
-
-install(DIRECTORY launch
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-)
-
-install(DIRECTORY config
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-)
+# Independent wall-clock fail-safe heartbeat. This is the sole publis

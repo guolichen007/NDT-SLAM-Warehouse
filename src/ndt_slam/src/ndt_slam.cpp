@@ -1,7 +1,9 @@
 #include "ndt_slam/ndt_slam.hpp"
 #include "ndt_slam/point_cloud_processing.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <sophus/se3.hpp>
 #include <vector>
@@ -138,6 +140,8 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     current_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(current_cloud_topic_, 10);
     path_pub_ = nh_.advertise<nav_msgs::Path>("/path", 10);
     runtime_path_pub_ = nh_.advertise<nav_msgs::Path>("/ndt_slam/runtime_path", 1, true);
+    relocalization_status_pub_ = nh_.advertise<std_msgs::String>(
+        "/ndt_slam/relocalization_status", 1, true);
 
     // 初始化轨迹
     path_msg_.header.frame_id = "map";
@@ -195,6 +199,8 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
              ndt_resolution_, ndt_step_size_, ndt_max_iterations_, ndt_num_threads_,
              ndt_neighbor_search_method_.c_str());
 
+    relocalizer_.configure(relocalization_cfg_);
+    relocalizer_.start();
     shutdown_ = false;
     running_ = true;
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
@@ -250,6 +256,8 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     current_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(current_cloud_topic_, 10);
     path_pub_ = nh_.advertise<nav_msgs::Path>("/path", 10);
     runtime_path_pub_ = nh_.advertise<nav_msgs::Path>("/ndt_slam/runtime_path", 1, true);
+    relocalization_status_pub_ = nh_.advertise<std_msgs::String>(
+        "/ndt_slam/relocalization_status", 1, true);
 
     // 初始化轨迹
     path_msg_.header.frame_id = "map";
@@ -335,6 +343,8 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
 
     // Start callbacks only after all publishers, maps, algorithms and
     // diagnostics are fully configured.
+    relocalizer_.configure(relocalization_cfg_);
+    relocalizer_.start();
     shutdown_ = false;
     running_ = true;
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
@@ -356,6 +366,7 @@ NdtSlamNode::~NdtSlamNode() {
     if (process_thread_.joinable()) {
         process_thread_.join();
     }
+    relocalizer_.stop();
     if (icp_thread_.joinable()) {
         icp_thread_.join();
     }
@@ -1331,6 +1342,78 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                      runtime_diag_config_.csv_flush_period_sec);
         }
 
+        if (config["relocalization"]) {
+            const auto r = config["relocalization"];
+            relocalization_enabled_ = r["enabled"].as<bool>(true);
+            relocalization_trigger_frames_ =
+                std::max(2, r["trigger_frames"].as<int>(5));
+            relocalization_global_trigger_frames_ = std::max(
+                relocalization_trigger_frames_,
+                r["global_trigger_frames"].as<int>(15));
+            relocalization_confirm_frames_ = std::clamp(
+                r["confirm_frames"].as<int>(2), 2, 5);
+            relocalization_request_interval_frames_ = std::max(
+                1, r["request_interval_frames"].as<int>(3));
+            relocalization_result_max_age_frames_ = std::max(
+                2, r["result_max_age_frames"].as<int>(8));
+            relocalization_result_max_age_sec_ = std::max(
+                0.10, r["result_max_age_sec"].as<double>(0.50));
+            relocalization_cooldown_frames_ = std::max(
+                1, r["cooldown_frames"].as<int>(12));
+            relocalization_global_hint_count_ = std::clamp(
+                r["global_hint_count"].as<int>(4), 1, 12);
+            relocalization_global_min_similarity_ =
+                r["global_min_similarity"].as<double>(0.55);
+            relocalization_local_xy_window_m_ =
+                r["local_xy_window_m"].as<double>(1.5);
+            relocalization_local_xy_step_m_ = std::max(
+                0.25, r["local_xy_step_m"].as<double>(1.5));
+            relocalization_local_yaw_window_deg_ =
+                r["local_yaw_window_deg"].as<double>(12.0);
+            relocalization_local_yaw_step_deg_ = std::max(
+                1.0, r["local_yaw_step_deg"].as<double>(12.0));
+            relocalization_confirm_translation_m_ =
+                r["confirm_translation_m"].as<double>(0.35);
+            relocalization_confirm_yaw_deg_ =
+                r["confirm_yaw_deg"].as<double>(5.0);
+
+            relocalization_cfg_.enabled = relocalization_enabled_;
+            relocalization_cfg_.min_source_points =
+                r["min_source_points"].as<int>(800);
+            relocalization_cfg_.min_target_points =
+                r["min_target_points"].as<int>(1200);
+            relocalization_cfg_.max_candidates =
+                r["max_candidates"].as<int>(12);
+            relocalization_cfg_.max_iterations =
+                r["max_iterations"].as<int>(35);
+            relocalization_cfg_.num_threads =
+                r["num_threads"].as<int>(2);
+            relocalization_cfg_.resolution =
+                r["resolution"].as<double>(ndt_resolution_);
+            relocalization_cfg_.step_size =
+                r["step_size"].as<double>(0.20);
+            relocalization_cfg_.transformation_epsilon =
+                r["transformation_epsilon"].as<double>(0.01);
+            relocalization_cfg_.target_crop_radius_m =
+                r["target_crop_radius_m"].as<double>(18.0);
+            relocalization_cfg_.source_voxel_m =
+                r["source_voxel_m"].as<double>(0.30);
+            relocalization_cfg_.target_voxel_m =
+                r["target_voxel_m"].as<double>(0.40);
+            relocalization_cfg_.max_fitness =
+                r["max_fitness"].as<double>(2.0);
+            relocalization_cfg_.min_probability =
+                r["min_probability"].as<double>(0.0);
+            relocalization_cfg_.max_local_seed_correction_m =
+                r["max_local_seed_correction_m"].as<double>(3.0);
+            relocalization_cfg_.max_local_seed_yaw_correction_deg =
+                r["max_local_seed_yaw_correction_deg"].as<double>(20.0);
+            relocalization_cfg_.max_roll_pitch_deg =
+                r["max_roll_pitch_deg"].as<double>(3.0);
+            relocalization_cfg_.max_z_correction_m =
+                r["max_z_correction_m"].as<double>(0.50);
+        }
+
         CargoBottomFusionConfig bottom_fusion_config;
         bottom_fusion_config.points_min_points = static_cast<std::size_t>(
             std::max(20, hook_fixed_config_.bottom_min_points));
@@ -1420,14 +1503,6 @@ void NdtSlamNode::processCloudThread() {
     while (ros::ok() && !shutdown_) {
         sensor_msgs::PointCloud2::ConstPtr msg;
         double diag_queue_age_ms = 0.0;
-
-        if (tracking_lost_) {
-            ROS_WARN("Tracking lost, waiting for relocalization...");
-            std::unique_lock<std::mutex> lock(cloud_mutex_);
-            tracking_cv_.wait(lock, [this]() { return !tracking_lost_ || shutdown_; });
-            if (shutdown_) break;
-            ROS_INFO("Relocalization completed, resuming processing");
-        }
 
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
@@ -1999,8 +2074,13 @@ void NdtSlamNode::processCloudThread() {
         }
 
         // ========== 阶段 5：NDT_OMP 配准 ==========
+        // Apply only a twice-confirmed asynchronous recovery result before the
+        // current NDT prediction so this frame immediately refines it.
+        consumeRelocalizationResult(processing_frame_index, msg->header.stamp);
+
         Sophus::SE3d new_pose = current_pose_;
         bool registration_success = false;
+        bool ndt_attempted_this_frame = false;
         static Sophus::SE3d last_local_map_pose = Sophus::SE3d();
         static int frames_since_last_update = 0;
 
@@ -2098,6 +2178,7 @@ void NdtSlamNode::processCloudThread() {
 
                 auto ndt_start = std::chrono::steady_clock::now();
                 ndt_attempt_count_.fetch_add(1, std::memory_order_relaxed);
+                ndt_attempted_this_frame = true;
                 ndt_->align(aligned, initial_guess);
                 auto ndt_end = std::chrono::steady_clock::now();
                 double ndt_time_ms = std::chrono::duration<double, std::milli>(ndt_end - ndt_start).count();
@@ -2289,7 +2370,7 @@ void NdtSlamNode::processCloudThread() {
 
                         // Prediction-only/rejected poses must not feed either
                         // the persistent map or the runtime registration map.
-                        if (!ndt_accepted) {
+                        if (!ndt_accepted || !relocalization_pose_reliable_) {
                             ROS_DEBUG("[LocalMap] skipped rejected/prediction-only frame");
                         } else if (move_dist > 0.5 || move_rot > 0.08 || frames_since_last_update > 15) {
                             // 用配准点云更新局部地图
@@ -2384,8 +2465,17 @@ void NdtSlamNode::processCloudThread() {
             current_pose_ = constrained_pose;  // 发布约束后的 pose
         }
 
+        if (ndt_attempted_this_frame) {
+            const bool frame_ndt_healthy =
+                last_ndt_converged_ && std::isfinite(last_ndt_fitness_) &&
+                (!crane_motion_ekf_enabled_ ||
+                 crane_motion_ekf_.status().ndt_accepted);
+            updateRelocalization(processing_frame_index, msg->header.stamp,
+                                 registration_cloud, frame_ndt_healthy);
+        }
+
         // ========== 阶段 7：发布结果（用完整点云建图）==========
-        if (registration_success && !tracking_lost_) {
+        if (registration_success) {
             // Keep the complete frame context on the sensor timestamp.  The
             // callback already rejects duplicate sensor frames.
             ros::Time publish_time = msg->header.stamp.isZero()
@@ -2440,8 +2530,15 @@ void NdtSlamNode::processCloudThread() {
             // Formal cargo chain: same-stamp tracked points + final odometry
             // pose -> fused bottom -> conservative per-cluster safety status.
             // The heartbeat node is the only producer of the PLC alarm topic.
-            updateAndPublishCargoSafetyPipeline(
-                feature_cloud, filtered_cloud, final_pose, publish_time);
+            if (relocalization_pose_reliable_) {
+                updateAndPublishCargoSafetyPipeline(
+                    feature_cloud, filtered_cloud, final_pose, publish_time);
+                relocalization_invalid_safety_published_ = false;
+            } else if (!relocalization_invalid_safety_published_) {
+                publishRelocalizationSafetyInvalid(
+                    publish_time, "localization_degraded");
+                relocalization_invalid_safety_published_ = true;
+            }
 
             // ICP never changes odom/TF. When explicitly enabled, a bounded
             // asynchronous refinement may assist only the current map cloud.
@@ -2528,9 +2625,15 @@ void NdtSlamNode::processCloudThread() {
                 motion_gate_allows_commit =
                     evaluateMotionGateForMapCommit(final_pose, publish_time);
             }
+            const bool relocalization_commit_ok =
+                relocalization_pose_reliable_ &&
+                processing_frame_index >= relocalization_cooldown_until_frame_ &&
+                relocalization_state_ != RelocalizationState::SEARCHING_LOCAL &&
+                relocalization_state_ != RelocalizationState::SEARCHING_GLOBAL &&
+                relocalization_state_ != RelocalizationState::CONFIRMING;
             const bool allow_map_commit =
                 commit_accept_ok && commit_fitness_ok &&
-                motion_gate_allows_commit;
+                motion_gate_allows_commit && relocalization_commit_ok;
             diag_map_commit_allowed = allow_map_commit;
             diag_motion_gate_blocked =
                 commit_accept_ok && commit_fitness_ok &&
@@ -2541,6 +2644,8 @@ void NdtSlamNode::processCloudThread() {
                 diag_map_commit_reason = "ndt_rejected_or_prediction_only";
             } else if (!commit_fitness_ok) {
                 diag_map_commit_reason = "fitness_rejected";
+            } else if (!relocalization_commit_ok) {
+                diag_map_commit_reason = "relocalization_guard";
             } else {
                 diag_map_commit_reason = "motion_gate_blocked";
             }
@@ -5370,6 +5475,14 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     cargo_origin_height_track_id_ = 0U;
     last_cargo_bottom_result_ = CargoBottomResult{};
     last_cargo_safety_result_ = CargoSafetyResult{};
+    relocalization_force_global_.store(false, std::memory_order_release);
+    relocalization_state_ = RelocalizationState::IDLE;
+    relocalization_pose_reliable_ = true;
+    relocalization_invalid_safety_published_ = false;
+    relocalization_bad_frames_ = 0;
+    relocalization_good_frames_ = 0;
+    relocalization_confirmation_count_ = 0;
+    relocalization_cooldown_until_frame_ = 0;
 
     ROS_INFO("SLAM system reset complete");
     return true;
@@ -5381,17 +5494,16 @@ bool NdtSlamNode::setPoseService(std_srvs::Empty::Request& request, std_srvs::Em
 }
 
 bool NdtSlamNode::relocalizeService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
-    ROS_INFO("Relocalize service called");
-
-    {
-        std::lock_guard<std::mutex> lock(cloud_mutex_);
-        current_pose_ = Sophus::SE3d();
-        tracking_lost_ = false;
+    (void)request;
+    (void)response;
+    if (!relocalization_enabled_) {
+        ROS_WARN("[Relocalization] manual request ignored: disabled");
+        return true;
     }
-
-    tracking_cv_.notify_all();
-
-    ROS_INFO("Relocalization complete");
+    // Non-blocking and fail-safe: never reset pose to the map origin. The
+    // next usable cloud launches a forced global search.
+    relocalization_force_global_.store(true, std::memory_order_release);
+    ROS_WARN("[Relocalization] manual global search queued");
     return true;
 }
 
@@ -5508,6 +5620,7 @@ bool NdtSlamNode::rebuildMapService(std_srvs::Empty::Request& request, std_srvs:
             ROS_ERROR("Failed to load keyframe database");
             return false;
         }
+        loop_closure_detector_.rebuildScanContexts();
         ROS_INFO("Loaded %zu keyframes", keyframe_manager.getKeyFrames().size());
     }
 
@@ -5863,17 +5976,394 @@ void NdtSlamNode::rebuildMapFromKeyframes(const std::string& session_dir) {
 }
 
 void NdtSlamNode::performRelocalization() {
-    ROS_WARN("Performing relocalization...");
+    if (!relocalization_enabled_) return;
+    relocalization_force_global_.store(true, std::memory_order_release);
 
     // 简单的重定位：重置位姿
-    {
-        std::lock_guard<std::mutex> lock(cloud_mutex_);
-        current_pose_ = Sophus::SE3d();
-        tracking_lost_ = false;
+}
+
+std::vector<RelocalizationSeed> NdtSlamNode::buildLocalRelocalizationSeeds(
+    const Sophus::SE3d& center) const {
+    std::vector<RelocalizationSeed> seeds;
+    const Eigen::Matrix3d rotation = center.so3().matrix();
+    const double base_yaw = std::atan2(rotation(1, 0), rotation(0, 0));
+    const auto make_seed = [&](double dx, double dy, double dyaw_deg) {
+        Eigen::Vector3d translation = center.translation();
+        translation.x() += dx;
+        translation.y() += dy;
+        const double yaw = base_yaw + dyaw_deg * M_PI / 180.0;
+        RelocalizationSeed seed;
+        seed.pose = Sophus::SE3d(
+            Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix(),
+            translation);
+        seed.source = "local_grid";
+        seeds.push_back(std::move(seed));
+    };
+
+    make_seed(0.0, 0.0, 0.0);
+    for (double dx = -relocalization_local_xy_window_m_;
+         dx <= relocalization_local_xy_window_m_ + 1.0e-6;
+         dx += relocalization_local_xy_step_m_) {
+        for (double dy = -relocalization_local_xy_window_m_;
+             dy <= relocalization_local_xy_window_m_ + 1.0e-6;
+             dy += relocalization_local_xy_step_m_) {
+            for (double dyaw = -relocalization_local_yaw_window_deg_;
+                 dyaw <= relocalization_local_yaw_window_deg_ + 1.0e-6;
+                 dyaw += relocalization_local_yaw_step_deg_) {
+                if (std::abs(dx) < 1.0e-6 && std::abs(dy) < 1.0e-6 &&
+                    std::abs(dyaw) < 1.0e-6) continue;
+                make_seed(dx, dy, dyaw);
+            }
+        }
+    }
+    std::stable_sort(seeds.begin() + 1, seeds.end(),
+        [&center](const RelocalizationSeed& lhs,
+                  const RelocalizationSeed& rhs) {
+            return (lhs.pose.translation().head<2>() -
+                    center.translation().head<2>()).squaredNorm() <
+                   (rhs.pose.translation().head<2>() -
+                    center.translation().head<2>()).squaredNorm();
+        });
+    return seeds;
+}
+
+std::vector<RelocalizationSeed> NdtSlamNode::buildGlobalRelocalizationSeeds(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
+    std::vector<RelocalizationSeed> seeds;
+    const auto hints = loop_closure_detector_.findRelocalizationHints(
+        cloud, static_cast<std::size_t>(relocalization_global_hint_count_),
+        relocalization_global_min_similarity_);
+    for (const auto& hint : hints) {
+        const Eigen::Matrix3d rotation = hint.pose.so3().matrix();
+        const double yaw = std::atan2(rotation(1, 0), rotation(0, 0)) +
+            hint.yaw_offset_rad;
+        for (const double delta_deg : {0.0, -12.0, 12.0}) {
+            RelocalizationSeed seed;
+            seed.pose = Sophus::SE3d(
+                Eigen::AngleAxisd(yaw + delta_deg * M_PI / 180.0,
+                                  Eigen::Vector3d::UnitZ()).toRotationMatrix(),
+                hint.pose.translation());
+            seed.source = "scan_context";
+            seed.keyframe_id = hint.keyframe_id;
+            seed.descriptor_similarity = hint.similarity;
+            seeds.push_back(std::move(seed));
+        }
+    }
+    return seeds;
+}
+
+void NdtSlamNode::consumeRelocalizationResult(
+    std::uint64_t frame_index, const ros::Time& stamp) {
+    if (!relocalization_enabled_) return;
+    RelocalizationResult result;
+    if (!relocalizer_.takeResult(result)) return;
+    if (relocalization_state_ == RelocalizationState::IDLE &&
+        relocalization_pose_reliable_ &&
+        !relocalization_force_global_.load(std::memory_order_acquire)) return;
+    if (result.frame_index <= relocalization_last_result_frame_) return;
+    relocalization_last_result_frame_ = result.frame_index;
+
+    const double result_age_sec = stamp.toSec() - result.stamp_sec;
+    if (frame_index > result.frame_index +
+            static_cast<std::uint64_t>(relocalization_result_max_age_frames_) ||
+        !std::isfinite(result_age_sec) || result_age_sec < -0.05 ||
+        result_age_sec > relocalization_result_max_age_sec_) {
+        relocalization_confirmation_count_ = 0;
+        publishRelocalizationStatus("DEGRADED", "stale_result_discarded");
+        return;
+    }
+    if (!result.valid) {
+        relocalization_confirmation_count_ = 0;
+        relocalization_state_ = RelocalizationState::DEGRADED;
+        publishRelocalizationStatus("DEGRADED", result.reason);
+        return;
     }
 
+    const auto yaw_of = [](const Sophus::SE3d& pose) {
+        const Eigen::Matrix3d r = pose.so3().matrix();
+        return std::atan2(r(1, 0), r(0, 0));
+    };
+    const Sophus::SE3d correction =
+        result.pose * result.reference_pose.inverse();
+    bool consistent = false;
+    if (relocalization_confirmation_count_ > 0) {
+        const double translation =
+            (correction.translation().head<2>() -
+             relocalization_confirmation_pose_.translation().head<2>()).norm();
+        const double yaw_delta_deg = std::abs(std::atan2(
+            std::sin(yaw_of(correction) - yaw_of(relocalization_confirmation_pose_)),
+            std::cos(yaw_of(correction) - yaw_of(relocalization_confirmation_pose_)))) *
+            180.0 / M_PI;
+        consistent = translation <= relocalization_confirm_translation_m_ &&
+                     yaw_delta_deg <= relocalization_confirm_yaw_deg_;
+    }
+
+    relocalization_confirmation_pose_ = correction;
+    relocalization_confirmation_count_ = consistent
+        ? relocalization_confirmation_count_ + 1 : 1;
+    relocalization_state_ = RelocalizationState::CONFIRMING;
+    publishRelocalizationStatus(
+        "CONFIRMING", "count=" +
+        std::to_string(relocalization_confirmation_count_) +
+        " fitness=" + std::to_string(result.fitness));
+
+    if (relocalization_confirmation_count_ >= relocalization_confirm_frames_) {
+        // The worker result belongs to an earlier sensor frame. Preserve the
+        // short-term motion observed since that job so a fast diagonal move
+        // is not pulled backwards to a stale absolute pose.
+        const Sophus::SE3d motion_since_job =
+            result.reference_pose.inverse() * current_pose_;
+        const Sophus::SE3d recovered_at_current_stamp =
+            result.pose * motion_since_job;
+        applyRelocalizedPose(recovered_at_current_stamp, stamp, result);
+        relocalization_confirmation_count_ = 0;
+        relocalization_bad_frames_ = 0;
+        relocalization_good_frames_ = 0;
+        relocalization_force_global_ = false;
+        relocalization_pose_reliable_ = true;
+        relocalization_state_ = RelocalizationState::COOLDOWN;
+        relocalization_cooldown_until_frame_ =
+            frame_index + static_cast<std::uint64_t>(
+                relocalization_cooldown_frames_);
+    }
+}
+
+void NdtSlamNode::updateRelocalization(
+    std::uint64_t frame_index, const ros::Time& stamp,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& registration_cloud,
+    bool ndt_healthy) {
+    if (!relocalization_enabled_) return;
+
+    if (ndt_healthy && relocalization_pose_reliable_ &&
+        relocalization_state_ == RelocalizationState::COOLDOWN) {
+        relocalization_bad_frames_ = 0;
+        relocalization_good_frames_ = 0;
+        if (frame_index >= relocalization_cooldown_until_frame_) {
+            relocalization_state_ = RelocalizationState::IDLE;
+            publishRelocalizationStatus("IDLE", "cooldown_complete");
+        }
+        return;
+    }
+
+    if (ndt_healthy && !relocalization_force_global_) {
+        ++relocalization_good_frames_;
+        if (relocalization_state_ == RelocalizationState::IDLE) {
+            relocalization_bad_frames_ = 0;
+            return;
+        }
+        // Natural NDT recovery is accepted only after three consecutive
+        // healthy frames; a single intermittent acceptance is not enough.
+        if (relocalization_good_frames_ >= 3) {
+            relocalization_bad_frames_ = 0;
+            relocalization_confirmation_count_ = 0;
+            resetCargoAfterPoseDiscontinuity();
+            relocalization_pose_reliable_ = true;
+            relocalization_state_ = RelocalizationState::COOLDOWN;
+            relocalization_cooldown_until_frame_ =
+                frame_index + static_cast<std::uint64_t>(
+                    relocalization_cooldown_frames_);
+            relocalization_good_frames_ = 0;
+            publishRelocalizationStatus("COOLDOWN", "ndt_self_recovered");
+            return;
+        }
+    } else {
+        relocalization_good_frames_ = 0;
+        ++relocalization_bad_frames_;
+    }
+
+    if (!relocalization_force_global_ &&
+        relocalization_bad_frames_ < relocalization_trigger_frames_) return;
+
+    if (relocalization_pose_reliable_) {
+        relocalization_pose_reliable_ = false;
+        resetCargoAfterPoseDiscontinuity();
+        publishRelocalizationSafetyInvalid(stamp, "localization_degraded");
+        relocalization_invalid_safety_published_ = true;
+    }
+    relocalization_state_ = RelocalizationState::DEGRADED;
+
+    if (relocalizer_.busy() ||
+        frame_index < relocalization_last_submit_frame_ +
+            static_cast<std::uint64_t>(
+                relocalization_request_interval_frames_)) return;
+
+    const bool global = relocalization_force_global_ ||
+        relocalization_bad_frames_ >= relocalization_global_trigger_frames_;
+    RelocalizationJob job;
+    job.frame_index = frame_index;
+    job.stamp_sec = stamp.toSec();
+    job.mode = global ? RelocalizationMode::GLOBAL : RelocalizationMode::LOCAL;
+    job.reference_pose = current_pose_;
+    job.source.reset(new pcl::PointCloud<pcl::PointXYZ>(*registration_cloud));
+
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        const auto& selected_map = global && global_map_ && !global_map_->empty()
+            ? global_map_ : local_map_;
+        if (!selected_map || selected_map->empty()) {
+            publishRelocalizationStatus("DEGRADED", "map_unavailable");
+            return;
+        }
+        job.map.reset(new pcl::PointCloud<pcl::PointXYZ>(*selected_map));
+    }
+
+    job.seeds = global
+        ? buildGlobalRelocalizationSeeds(job.source)
+        : buildLocalRelocalizationSeeds(current_pose_);
+
+    // A loaded PCD may not have a keyframe database. Fall back to a bounded
+    // coarse map grid instead of pretending global recovery succeeded.
+    if (global && job.seeds.empty() && job.map && !job.map->empty()) {
+        float min_x = std::numeric_limits<float>::max();
+        float max_x = std::numeric_limits<float>::lowest();
+        float min_y = std::numeric_limits<float>::max();
+        float max_y = std::numeric_limits<float>::lowest();
+        for (const auto& p : job.map->points) {
+            if (!std::isfinite(p.x) || !std::isfinite(p.y)) continue;
+            min_x = std::min(min_x, p.x); max_x = std::max(max_x, p.x);
+            min_y = std::min(min_y, p.y); max_y = std::max(max_y, p.y);
+        }
+        const double grid = std::max(6.0,
+            relocalization_cfg_.target_crop_radius_m * 0.75);
+        const double z = current_pose_.translation().z();
+        for (double x = min_x; x <= max_x &&
+             static_cast<int>(job.seeds.size()) <
+                 relocalization_cfg_.max_candidates; x += grid) {
+            for (double y = min_y; y <= max_y &&
+                 static_cast<int>(job.seeds.size()) <
+                     relocalization_cfg_.max_candidates; y += grid) {
+                for (const double yaw : {0.0, M_PI_2, M_PI, -M_PI_2}) {
+                    RelocalizationSeed seed;
+                    seed.pose = Sophus::SE3d(
+                        Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ())
+                            .toRotationMatrix(),
+                        Eigen::Vector3d(x, y, z));
+                    seed.source = "coarse_map_grid";
+                    job.seeds.push_back(std::move(seed));
+                    if (static_cast<int>(job.seeds.size()) >=
+                        relocalization_cfg_.max_candidates) break;
+                }
+            }
+        }
+    }
+
+    if (job.seeds.empty() || !relocalizer_.submit(std::move(job))) {
+        publishRelocalizationStatus("DEGRADED", "no_search_candidates");
+        return;
+    }
+    relocalization_last_submit_frame_ = frame_index;
+    relocalization_state_ = global
+        ? RelocalizationState::SEARCHING_GLOBAL
+        : RelocalizationState::SEARCHING_LOCAL;
+    publishRelocalizationStatus(
+        global ? "SEARCHING_GLOBAL" : "SEARCHING_LOCAL",
+        "bad_frames=" + std::to_string(relocalization_bad_frames_));
+}
+
+void NdtSlamNode::applyRelocalizedPose(
+    const Sophus::SE3d& pose, const ros::Time& stamp,
+    const RelocalizationResult& result) {
+    Sophus::SE3d recovered = crane_constraint_enabled_
+        ? applyCraneMotionConstraint(pose, "relocalization") : pose;
+    {
+        std::lock_guard<std::mutex> lock(cloud_mutex_);
+        current_pose_ = recovered;
+        relocalized_pose_ = recovered;
+        tracking_lost_ = false;
+    }
+    if (crane_motion_ekf_enabled_) {
+        crane_motion_ekf_.initialize(recovered, stamp);
+    }
+    const Eigen::Matrix3d rotation = recovered.so3().matrix();
+    filtered_yaw_rad_ = std::atan2(rotation(1, 0), rotation(0, 0));
+    filtered_yaw_initialized_ = true;
+
+    // Recenter the runtime map without changing the persistent global map.
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        if (global_map_ && !global_map_->empty()) {
+            pcl::PointCloud<pcl::PointXYZ>::Ptr recentered(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            const Eigen::Vector3d center = recovered.translation();
+            const double radius_sq =
+                relocalization_cfg_.target_crop_radius_m *
+                relocalization_cfg_.target_crop_radius_m;
+            for (const auto& p : global_map_->points) {
+                const double dx = p.x - center.x();
+                const double dy = p.y - center.y();
+                if (dx * dx + dy * dy <= radius_sq) recentered->push_back(p);
+            }
+            if (static_cast<int>(recentered->size()) >=
+                relocalization_cfg_.min_target_points) {
+                local_map_ = recentered;
+                ++local_map_version_;
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(localization_target_mutex_);
+        cached_target_valid_ = false;
+        cached_target_version_ = 0;
+        cached_target_points_ = 0;
+        crop_frames_since_update_ = crop_update_min_interval_frames_;
+        last_bound_ndt_target_.reset();
+        last_bound_ndt_target_version_ = 0;
+        last_bound_ndt_target_source_ = "none";
+        last_target_reason_ = "relocalized_rebind";
+    }
+
+    path_msg_.poses.clear();
+    runtime_path_msg_.poses.clear();
+    has_last_path_pose_ = false;
+    resetCargoAfterPoseDiscontinuity();
+    publishRelocalizationStatus(
+        "COOLDOWN", "accepted mode=" +
+        std::string(result.mode == RelocalizationMode::GLOBAL
+                        ? "global" : "local") +
+        " fitness=" + std::to_string(result.fitness) +
+        " seed=" + result.seed_source);
     tracking_cv_.notify_all();
-    ROS_INFO("Relocalization complete");
+}
+
+void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
+    clearHookLock();
+    payload_tracker_.reset();
+    cargo_state_ = CargoState{};
+    selected_payload_track_id_ = -1;
+    cargo_bottom_fusion_.reset();
+    cargo_fusion_track_id_ = 0;
+    cargo_fusion_track_active_ = false;
+    cargo_origin_height_valid_ = false;
+    cargo_origin_height_m_ = 0.0F;
+    cargo_origin_height_track_id_ = 0;
+    last_cargo_bottom_result_ = CargoBottomResult{};
+    last_cargo_safety_result_ = CargoSafetyResult{};
+}
+
+void NdtSlamNode::publishRelocalizationStatus(
+    const std::string& state, const std::string& detail) {
+    std_msgs::String message;
+    message.data = "state=" + state + " detail=" + detail +
+        " bad_frames=" + std::to_string(relocalization_bad_frames_);
+    relocalization_status_pub_.publish(message);
+    ROS_WARN_THROTTLE(1.0, "[Relocalization] %s", message.data.c_str());
+}
+
+void NdtSlamNode::publishRelocalizationSafetyInvalid(
+    const ros::Time& stamp, const std::string& reason) {
+    lidar_slam2_msgs::CargoSafetyStatus status;
+    status.header.stamp = stamp;
+    status.header.frame_id = map_frame_;
+    status.schema_version = lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION;
+    status.valid = false;
+    status.cargo_valid = false;
+    status.cargo_source =
+        lidar_slam2_msgs::CargoBottomEstimate::SOURCE_INVALID;
+    status.requested_alarm_code =
+        lidar_slam2_msgs::CargoSafetyStatus::ALARM_OUTER_OR_INVALID;
+    status.obstacle_valid = false;
+    status.reason = "relocalization:" + reason;
+    cargo_safety_status_pub_.publish(status);
 }
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::filterDynamicPoints(
@@ -8685,555 +9175,4 @@ void NdtSlamNode::updateLocalizationTarget(
     localization_target_state_ = LocalizationTargetState::BUILDING_TARGET;
     last_target_reason_ = "candidate_ready_to_swap";
 }
-
-bool NdtSlamNode::swapLocalizationTargetBuffers() {
-    std::lock_guard<std::mutex> lock(localization_target_mutex_);
-
-    if (!localization_target_back_ ||
-        static_cast<int>(localization_target_back_->size()) <
-            localization_target_min_points_) {
-        localization_target_ready_ = false;
-        localization_target_state_ = localization_target_snapshot_->empty()
-            ? LocalizationTargetState::BUILDING_TARGET
-            : LocalizationTargetState::TARGET_DEGRADED;
-        cached_target_valid_ = false;
-        last_target_reason_ = "swap_below_min_points";
-        return false;
-    }
-
-    localization_target_front_ = localization_target_back_;
-    localization_target_back_.reset(new pcl::PointCloud<pcl::PointXYZ>);
-
-    localization_target_snapshot_ = localization_target_front_;
-    localization_target_version_++;
-    localization_target_snapshot_version_ = localization_target_version_;
-    localization_target_ready_ = true;
-    localization_target_state_ = LocalizationTargetState::TARGET_READY;
-    cached_target_valid_ = false;
-    cached_target_points_ = 0;
-    last_target_reason_ = "snapshot_swapped";
-
-    ROS_INFO("[LocTarget] READY: version=%llu points=%zu min=%d",
-             static_cast<unsigned long long>(localization_target_version_),
-             localization_target_snapshot_->size(),
-             localization_target_min_points_);
-    return true;
-}
-
-bool NdtSlamNode::updateCroppedCachedTarget(const Sophus::SE3d& predicted_pose) {
-    crop_frames_since_update_++;
-
-    const Eigen::Vector3d pred_pos = predicted_pose.translation();
-    const double pred_yaw = predicted_pose.so3().log().z();
-
-    const double dist =
-        (pred_pos.head<2>() - cached_center_xy_.head<2>()).norm();
-    double yaw_diff = std::abs(pred_yaw - cached_yaw_);
-    if (yaw_diff > M_PI) yaw_diff = 2 * M_PI - yaw_diff;
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr target_snapshot;
-    uint64_t snapshot_version = 0;
-    {
-        std::lock_guard<std::mutex> lock(localization_target_mutex_);
-        target_snapshot = localization_target_snapshot_;
-        snapshot_version = localization_target_snapshot_version_;
-    }
-
-    const bool version_changed = snapshot_version != cached_target_version_;
-    const bool moved = dist > crop_update_distance_m_ ||
-        yaw_diff > (crop_update_yaw_deg_ * M_PI / 180.0);
-    const bool interval_elapsed =
-        crop_frames_since_update_ >= crop_update_min_interval_frames_;
-    const bool need_rebuild = !cached_target_valid_ || version_changed ||
-        (interval_elapsed && moved);
-
-    if (!need_rebuild) {
-        return cached_target_valid_;
-    }
-
-    if (!target_snapshot ||
-        static_cast<int>(target_snapshot->size()) <
-            localization_target_min_points_) {
-        cached_target_valid_ = false;
-        cached_target_points_ = 0;
-        localization_target_ready_ = false;
-        localization_target_state_ = LocalizationTargetState::TARGET_DEGRADED;
-        last_target_reason_ = "snapshot_below_min_points";
-        return false;
-    }
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cropped(new pcl::PointCloud<pcl::PointXYZ>);
-    cropped->reserve(target_snapshot->size());
-    for (const auto& p : target_snapshot->points) {
-        const double dx = p.x - pred_pos.x();
-        const double dy = p.y - pred_pos.y();
-        if (std::abs(dx) < crop_radius_x_ && std::abs(dy) < crop_radius_y_) {
-            cropped->push_back(p);
-        }
-    }
-
-    if (static_cast<int>(cropped->size()) < localization_target_min_points_) {
-        cached_target_valid_ = false;
-        cached_target_points_ = static_cast<int>(cropped->size());
-        localization_target_ready_ = false;
-        localization_target_state_ = LocalizationTargetState::TARGET_DEGRADED;
-        last_target_reason_ = "crop_below_min_points";
-        ROS_WARN_THROTTLE(
-            2.0,
-            "[LocTarget] crop invalidated: points=%zu min=%d; using local_map",
-            cropped->size(), localization_target_min_points_);
-        return false;
-    }
-
-    pcl::VoxelGrid<pcl::PointXYZ> vf;
-    vf.setInputCloud(cropped);
-    vf.setLeafSize(localization_target_voxel_size_,
-                   localization_target_voxel_size_,
-                   localization_target_voxel_size_);
-    pcl::PointCloud<pcl::PointXYZ> filtered;
-    vf.filter(filtered);
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_ptr(new pcl::PointCloud<pcl::PointXYZ>(filtered));
-    if (static_cast<int>(filtered_ptr->size()) > localization_target_max_points_) {
-        limitCloudUniformInPlace(filtered_ptr, localization_target_max_points_);
-    }
-
-    if (static_cast<int>(filtered_ptr->size()) < localization_target_min_points_) {
-        cached_target_valid_ = false;
-        cached_target_points_ = static_cast<int>(filtered_ptr->size());
-        localization_target_ready_ = false;
-        localization_target_state_ = LocalizationTargetState::TARGET_DEGRADED;
-        last_target_reason_ = "crop_voxel_below_min_points";
-        ROS_WARN_THROTTLE(
-            2.0,
-            "[LocTarget] voxelized crop invalidated: points=%zu min=%d; using local_map",
-            filtered_ptr->size(), localization_target_min_points_);
-        return false;
-    }
-
-    cached_target_ = filtered_ptr;
-    cached_center_xy_ = pred_pos;
-    cached_yaw_ = pred_yaw;
-    cached_target_version_ = snapshot_version;
-    cached_target_points_ = static_cast<int>(cached_target_->size());
-    cached_target_valid_ = true;
-    crop_frames_since_update_ = 0;
-    localization_target_state_ = LocalizationTargetState::TARGET_READY;
-    last_target_reason_ = "crop_ready";
-    return true;
-}
-
-void NdtSlamNode::bindNdtInputTarget(
-    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& target,
-    const std::string& source,
-    uint64_t content_version,
-    const std::string& reason) {
-    if (!target || target->empty()) {
-        last_target_points_ = 0;
-        last_actual_target_source_ = "invalid";
-        last_target_reason_ = "empty_target";
-        ROS_ERROR_THROTTLE(1.0, "[LocTarget] refusing to bind an empty NDT target");
-        return;
-    }
-
-    const bool changed = !last_bound_ndt_target_ ||
-        last_bound_ndt_target_.get() != target.get() ||
-        last_bound_ndt_target_version_ != content_version ||
-        last_bound_ndt_target_source_ != source;
-
-    if (changed) {
-        ndt_->setInputTarget(target);
-        last_bound_ndt_target_ = target;
-        last_bound_ndt_target_version_ = content_version;
-        last_bound_ndt_target_source_ = source;
-        ++setInputTarget_count_;
-        ++target_rebuild_count_;
-        ROS_INFO("[LocTarget] bind source=%s version=%llu points=%zu reason=%s setInput=%d",
-                 source.c_str(),
-                 static_cast<unsigned long long>(content_version),
-                 target->size(), reason.c_str(), setInputTarget_count_);
-    }
-
-    target_version_ = content_version;
-    last_target_points_ = static_cast<int>(target->size());
-    last_actual_target_source_ = source;
-    last_target_reason_ = reason;
-}
-
-pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::buildRegistrationCloud(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& human_safe_objects,
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_cloud) {
-    auto registration_cloud =
-        boost::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-
-    int repeat = object_weight_repeat_;
-    if (static_cast<int>(human_safe_objects->size()) <
-        min_objects_for_weighting_) {
-        repeat = 1;
-    }
-
-    // V3: object 点优先
-    for (int i = 0; i < repeat; ++i) {
-        *registration_cloud += *human_safe_objects;
-    }
-
-    // V3: ground 只保留指定比例（默认 5%）
-    auto ground_sampled = sampleCloudByRatio(
-        ground_cloud,
-        ground_sample_ratio_);
-
-    *registration_cloud += *ground_sampled;
-
-    voxelDownsampleInPlace(registration_cloud, ndt_input_voxel_size_);
-
-    // V3: 检查最小点数，不足时回退到旧模式
-    if (static_cast<int>(registration_cloud->size()) < min_registration_points_) {
-        ROS_WARN_THROTTLE(5.0, "[RegistrationInput] points=%zu < min=%d, fallback to full ground",
-                          registration_cloud->size(), min_registration_points_);
-        // 回退：使用完整 ground
-        registration_cloud->clear();
-        for (int i = 0; i < repeat; ++i) {
-            *registration_cloud += *human_safe_objects;
-        }
-        *registration_cloud += *ground_cloud;
-        voxelDownsampleInPlace(registration_cloud, ndt_input_voxel_size_);
-    }
-
-    limitCloudUniformInPlace(registration_cloud, max_ndt_points_);
-
-    return registration_cloud;
-}
-
-// ============================================================================
-// P4: 从 ground_base 构建局部地面模型
-// ============================================================================
-
-static SimpleGroundModel buildGroundModelFromGroundBase(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_base,
-    float resolution = 1.0f)
-{
-    SimpleGroundModel model;
-    model.resolution = resolution;
-    model.global_z_min = 0.0f;
-
-    if (!ground_base || ground_base->empty()) {
-        return model;
-    }
-
-    // 按 cell 收集 z 值
-    std::map<std::pair<int,int>, std::vector<float>> cell_zs;
-
-    for (const auto& p : ground_base->points) {
-        if (!std::isfinite(p.x) || !std::isfinite(p.y)) continue;
-
-        int cx = static_cast<int>(std::floor(p.x / resolution));
-        int cy = static_cast<int>(std::floor(p.y / resolution));
-        cell_zs[{cx, cy}].push_back(p.z);
-    }
-
-    // 对每个 cell 取 20% 分位数作为地面高度
-    for (auto& kv : cell_zs) {
-        auto& v = kv.second;
-        std::sort(v.begin(), v.end());
-        size_t idx = std::min<size_t>(v.size() * 0.2, v.size() - 1);
-        model.cell_z[kv.first] = v[idx];
-    }
-
-    return model;
-}
-
-// ============================================================================
-// P0: DuplicateFrameGuard 内容指纹
-// ============================================================================
-
-NdtSlamNode::FrameSignature NdtSlamNode::computeFrameSignature(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-    const ros::Time& stamp,
-    const Sophus::SE3d& pose)
-{
-    FrameSignature sig;
-    sig.cloud_size = cloud ? cloud->size() : 0;
-    sig.stamp = stamp.toSec();
-    sig.pose_xyz = pose.translation();
-
-    if (!cloud || cloud->empty()) {
-        return sig;
-    }
-
-    const size_t n = cloud->size();
-
-    auto toVec = [](const pcl::PointXYZ& p) {
-        return Eigen::Vector3f(p.x, p.y, p.z);
-    };
-
-    sig.first_pt = toVec(cloud->points.front());
-    sig.mid_pt = toVec(cloud->points[n / 2]);
-    sig.last_pt = toVec(cloud->points.back());
-
-    // 采样计算 centroid
-    Eigen::Vector3f sum = Eigen::Vector3f::Zero();
-    int cnt = 0;
-    const size_t step = std::max<size_t>(1, n / 64);
-
-    for (size_t i = 0; i < n; i += step) {
-        const auto& p = cloud->points[i];
-        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
-            continue;
-        }
-        sum += Eigen::Vector3f(p.x, p.y, p.z);
-        cnt++;
-    }
-
-    if (cnt > 0) {
-        sig.centroid_sample = sum / static_cast<float>(cnt);
-    }
-
-    // 计算轻量 hash
-    auto quant = [](float v) -> int64_t {
-        return static_cast<int64_t>(std::round(v * 1000.0f));  // 1mm quant
-    };
-
-    uint64_t h = 1469598103934665603ULL;  // FNV-1a offset basis
-    auto mix = [&](int64_t x) {
-        h ^= static_cast<uint64_t>(x + 0x9e3779b97f4a7c15ULL);
-        h *= 1099511628211ULL;  // FNV-1a prime
-    };
-
-    mix(static_cast<int64_t>(sig.cloud_size));
-    for (const auto& v : {sig.first_pt, sig.mid_pt, sig.last_pt, sig.centroid_sample}) {
-        mix(quant(v.x()));
-        mix(quant(v.y()));
-        mix(quant(v.z()));
-    }
-
-    sig.hash = h;
-    return sig;
-}
-
-bool NdtSlamNode::isDuplicateFrameBySignature(const FrameSignature& cur) const
-{
-    if (last_frame_signature_.cloud_size == 0) {
-        return false;
-    }
-
-    const bool same_stamp = cur.stamp <= last_processed_stamp_ + 1e-6;
-
-    const bool same_cloud =
-        cur.cloud_size == last_frame_signature_.cloud_size &&
-        cur.hash == last_frame_signature_.hash;
-
-    const bool same_pose =
-        (cur.pose_xyz - last_frame_signature_.pose_xyz).norm() < 1e-4;
-
-    // 情况 A：时间戳重复
-    if (same_stamp) {
-        return true;
-    }
-
-    // 情况 B：时间戳变化，但点云内容和 pose 基本相同
-    if (same_cloud && same_pose) {
-        return true;
-    }
-
-    return false;
-}
-
-// ============================================================================
-// P0-1: 新的关键帧提交流程
-// 正确顺序：ground/objects 分割 → CargoBoxV2 → 吊货删除 → HumanFilter → MapCommit
-// ============================================================================
-
-// CRITICAL RUNTIME CHAIN - DO NOT MODIFY
-// a7be4bf runtime pose chain must stay unchanged:
-// NDT/refined/EKF -> publishOdometry -> TF -> publishRuntimePath.
-// MotionGate controls MapCommit only.
-// raw_ndt_pose is allowed only as MapCommit evidence.
-// Do NOT route raw_pose/tracking_pose to odom/TF/runtime_path/current_cloud.
-void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-    const Sophus::SE3d& pose,
-    const ros::Time& stamp)
-{
-    last_commit_clean_map_ms_ = 0.0;
-    last_commit_display_map_ms_ = 0.0;
-    // ------------------------------------------------------------------------
-    // 0. 基础准备 + DuplicateFrameGuard（内容指纹）+ MotionGate
-    // ------------------------------------------------------------------------
-    if (!cloud || cloud->empty()) {
-        ROS_WARN_THROTTLE(1.0, "[KeyFrameCommit] empty cloud, skip");
-        return;
-    }
-
-    // P0: DuplicateFrameGuard 使用内容指纹（在 NDT 之前拦截）
-    auto sig = computeFrameSignature(cloud, stamp, pose);
-
-    if (isDuplicateFrameBySignature(sig)) {
-        skipped_duplicate_frames_++;
-        ROS_WARN_THROTTLE(2.0,
-            "[DuplicateFrameGuard] skip duplicate frame stamp=%.3f cloud_size=%zu hash=%lu skipped=%lu",
-            sig.stamp, sig.cloud_size, sig.hash, skipped_duplicate_frames_);
-        return;
-    }
-
-    last_frame_signature_ = sig;
-    last_processed_stamp_ = stamp.toSec();
-    frame_seq_++;
-
-    // [FrameStart] 日志：debug_frame_start 开启时输出
-    if (debug_cfg_.debug_frame_start) {
-        ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec,
-            "[FrameStart] frame=%lu stamp=%.3f raw=%zu pose=(%.2f,%.2f,%.2f)",
-            frame_seq_, stamp.toSec(), cloud->size(),
-            pose.translation().x(), pose.translation().y(), pose.translation().z());
-    }
-
-    // MotionGate was evaluated by the caller before entering this expensive
-    // MapCommit pipeline. It is never consulted by the runtime pose chain.
-
-    const Eigen::Matrix4d T_map_base = pose.matrix();
-
-    // 保存 last_cloud
-    *last_cloud_ = *cloud;
-
-    // ------------------------------------------------------------------------
-    // 1. base_link 坐标系下做 ground / objects 分割
-    // ------------------------------------------------------------------------
-    pcl::PointCloud<pcl::PointXYZ>::Ptr ground_base(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr objects_base(new pcl::PointCloud<pcl::PointXYZ>);
-
-    {
-        pcl::PointCloud<pcl::PointXYZ> tmp_ground, tmp_objects;
-        separateGroundByGrid(*cloud, tmp_ground, tmp_objects);
-        *ground_base = tmp_ground;
-        *objects_base = tmp_objects;
-    }
-
-    // [GroundSplit] 日志（DEBUG）
-    ROS_DEBUG("[GroundSplit] seq=%d ground=%zu objects=%zu total=%zu",
-              keyframe_count_ + 1,
-              ground_base->size(),
-              objects_base->size(),
-              ground_base->size() + objects_base->size());
-
-    // ------------------------------------------------------------------------
-    // 2. BasePayloadChannelFilter：提取吊货候选
-    // ------------------------------------------------------------------------
-    pcl::PointCloud<pcl::PointXYZ>::Ptr objects_channel_safe(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr payload_candidates(new pcl::PointCloud<pcl::PointXYZ>);
-
-    ChannelFilterResult channel_result;
-
-    if (channel_filter_config_.enabled) {
-        std::map<CellKey, float> empty_ground_model;
-        channel_result = channel_filter_.filter(objects_base, empty_ground_model);
-
-        objects_channel_safe = channel_result.safe_objects;
-        payload_candidates = channel_result.payload_candidates;
-    } else {
-        objects_channel_safe = objects_base;
-    }
-
-    // [ChannelFilter] 日志（DEBUG）
-    ROS_DEBUG("[ChannelFilter] seq=%d enabled=%d safe=%zu payload_candidates=%zu raw_objects=%zu",
-              keyframe_count_ + 1,
-              channel_filter_config_.enabled ? 1 : 0,
-              objects_channel_safe->size(),
-              payload_candidates->size(),
-              objects_base->size());
-
-    // ------------------------------------------------------------------------
-    // 3. CargoBoxV2 + PayloadTracker（必须在 MapCommit 前）
-    // ------------------------------------------------------------------------
-    TrackResult payload_track_result;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cargo_removed_base(new pcl::PointCloud<pcl::PointXYZ>);
-
-    // Gate: 旧 global cargo 链路（OdomAnchorBox 模式下默认关闭）
-    bool run_legacy_cargo = payload_tracker_config_.enabled &&
-                            channel_filter_config_.enabled &&
-                            payload_candidates && !payload_candidates->empty() &&
-                            (!odom_anchor_config_.enabled || odom_anchor_config_.use_global_payload_tracker);
-
-    if (run_legacy_cargo)
-    {
-        // 3.1 先更新 PayloadTracker
-        std::map<CellKey, float> empty_ground_model;
-        payload_track_result = payload_tracker_.update(
-            payload_candidates, T_map_base, stamp.toSec(), empty_ground_model);
-
-        // 3.2 再对每个 track 估计 CargoBoxV2
-        if (cargo_box_estimator_config_.enabled && odom_anchor_config_.use_cargobox_v2) {
-            // P4: 从 ground_base 构建局部地面模型
-            SimpleGroundModel ground_model = buildGroundModelFromGroundBase(ground_base, 1.0f);
-
-            auto& tracks = payload_tracker_.getMutableTracks();
-
-            for (auto& track : tracks) {
-                if (track.state == TrackState::EXPIRED) continue;
-                if (track.cloud_history.empty()) continue;
-
-                const auto& cluster_base = track.cloud_history.back();
-                if (!cluster_base || cluster_base->empty()) continue;
-
-                const CargoBox* prev_core_box = track.has_last_core_box ? &track.last_core_box : nullptr;
-
-                CargoBox core_box, remove_box, forbidden_box;
-                // P0-6: 计算 is_locked_track
-                bool is_locked_track = track.observed_frames >= 3 ||
-                                       track.has_last_core_box;
-                bool box_valid = cargo_box_estimator_.estimateCargoBox(
-                    cluster_base, ground_model,
-                    core_box, remove_box, forbidden_box,
-                    prev_core_box, is_locked_track);
-
-                if (!box_valid) {
-                    // [CargoBoxReject] 日志（DEBUG）
-                    ROS_DEBUG("[CargoBoxReject] seq=%d track=%d reason=%d action=%s",
-                              keyframe_count_ + 1,
-                              track.track_id,
-                              static_cast<int>(core_box.reject_reason),
-                              "DELETE_OR_PREDICT_ONLY");
-                    continue;
-                }
-
-                // 3.3 per-track size jump 软处理
-                bool size_jump = false;
-
-                if (track.has_last_size && track.observed_frames > 2) {
-                    const Eigen::Vector3f& prev_size = track.last_core_size;
-                    const Eigen::Vector3f& new_size = core_box.size;
-
-                    const float gx = new_size.x() / std::max(prev_size.x(), 0.10f);
-                    const float gy = new_size.y() / std::max(prev_size.y(), 0.10f);
-                    const float gz = new_size.z() / std::max(prev_size.z(), 0.10f);
-                    const float max_growth = std::max({gx, gy, gz});
-
-                    if (max_growth > cargo_box_estimator_config_.max_size_growth_ratio) {
-                        size_jump = true;
-                        track.size_jump_count++;
-
-                        // [CargoBoxV2SizeGate] 日志（DEBUG）
-                        ROS_DEBUG("[CargoBoxV2SizeGate] seq=%d track=%d growth=%.2f threshold=%.2f count=%d action=%s",
-                                  keyframe_count_ + 1,
-                                  track.track_id,
-                                  max_growth,
-                                  cargo_box_estimator_config_.max_size_growth_ratio,
-                                  track.size_jump_count,
-                                  "CENTER_ONLY_NO_REMOVE");
-
-                        // 软拒绝：更新 center，不更新 size，不用于删除
-                        if (track.has_last_core_box) {
-                            track.last_core_box.center = core_box.center;
-                        }
-
-                        // P4: 严格 reinit 条件（禁止无条件 reinit）
-                        bool can_reinit = false;
-                        std::string reinit_reason = "conditions_not_met";
-
-                        if (track.size_jump_count >= 3 &&
-                            core_box.suspended_points >= cargo_box_estimator_config_.min_confirm_core_points &&
-                            (track.state == TrackState::SUSPENDED_MOVING ||
-                             track.state == TrackState::DYNAMIC_PAYLOAD)) {
-                            if (track.has_last_core_box) {
-                                float max_ratio = std::max({
-                                    core_box.size.x() / std::max(track.last_core_box.size.x(), 0.1f),
-                                    core_box.size.y() / std::max(track.last_core_box.si
+

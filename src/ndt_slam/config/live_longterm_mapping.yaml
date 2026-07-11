@@ -83,6 +83,44 @@ ndt_omp:
   num_threads: 4              # V3: NDT_OMP 多线程加速
   neighbor_search_method: DIRECT7  # V3: DIRECT7 比 KDTREE 快，搜索相同相邻体素集合
 
+# Asynchronous local/global recovery. The live NDT/EKF path continues while a
+# latest-only worker searches; two independent results must agree before the
+# pose, EKF and Cargo state are switched.
+relocalization:
+  enabled: true
+  trigger_frames: 5
+  global_trigger_frames: 15
+  confirm_frames: 2
+  request_interval_frames: 3
+  result_max_age_frames: 8
+  result_max_age_sec: 0.50
+  cooldown_frames: 12
+  local_xy_window_m: 1.5
+  local_xy_step_m: 1.5
+  local_yaw_window_deg: 12.0
+  local_yaw_step_deg: 12.0
+  global_hint_count: 4
+  global_min_similarity: 0.55
+  confirm_translation_m: 0.35
+  confirm_yaw_deg: 5.0
+  min_source_points: 800
+  min_target_points: 1200
+  max_candidates: 12
+  max_iterations: 35
+  num_threads: 2
+  resolution: 1.0
+  step_size: 0.20
+  transformation_epsilon: 0.01
+  target_crop_radius_m: 18.0
+  source_voxel_m: 0.30
+  target_voxel_m: 0.40
+  max_fitness: 2.0
+  min_probability: 0.0
+  max_local_seed_correction_m: 3.0
+  max_local_seed_yaw_correction_deg: 20.0
+  max_roll_pitch_deg: 3.0
+  max_z_correction_m: 0.50
+
 # 动态点过滤
 dynamic_filter:
   enabled: true
@@ -675,41 +713,4 @@ odom_anchored_cargo_box:
 
   bottom_alpha_points: 0.25
   bottom_alpha_hold: 0.05
-  bottom_max_uncertainty: 0.35
-
-  lost_hold_sec: 5.0
-  lost_clear_sec: 15.0
-
-  # ========== Tight Box 配置 ==========
-  tight_box:
-    enabled: true
-
-    # 软对称模式，避免一侧杂点把整框撑大
-    anchor_symmetry_mode: "soft"     # strict / soft / off
-    max_center_offset_m: 0.35
-
-    # HAG 预过滤，过滤地面反射和高处吊具/绳索
-    hag_filter_enabled: true
-    hag_min_m: 0.15
-    hag_max_m: 2.50
-
-    # 分位数参数，比原 p05/p95 稍微收紧
-    percentile_low: 0.08
-    percentile_high: 0.92
-
-    # 框扩展 margin
-    margin_xy_m: 0.05
-    margin_z_m: 0.03
-
-    # LOCKED 后仍允许尺寸自适应
-    size_update_mode: "adaptive"     # locked / adaptive
-    size_update_alpha: 0.30
-    max_size_change_per_frame_m: 0.10
-
-    # 子簇重聚类，尽量把吊具/绳索/货物分开
-    sub_cluster_enabled: true
-    sub_cluster_tolerance_m: 0.10
-    sub_cluster_min_points: 20
-
-  # ========== Cargo Warning 配置 ==========
-  # 注意：当前版本为 tightbox baseline，正�
+  bottom_max_uncertainty: 

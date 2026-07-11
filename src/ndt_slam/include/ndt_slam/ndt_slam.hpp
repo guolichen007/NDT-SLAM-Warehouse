@@ -48,6 +48,7 @@
 
 // v8-stable-r3: CraneMotionEKF
 #include <ndt_slam/crane_motion_ekf.hpp>
+#include <ndt_slam/ndt_relocalizer.hpp>
 
 // NDT_OMP
 #include <pclomp/ndt_omp.h>
@@ -202,6 +203,24 @@ private:
 
     void performRelocalization();
     void updatePoseFromLoopClosure(const Sophus::SE3d& new_pose);
+    void consumeRelocalizationResult(std::uint64_t frame_index,
+                                     const ros::Time& stamp);
+    void updateRelocalization(
+        std::uint64_t frame_index, const ros::Time& stamp,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& registration_cloud,
+        bool ndt_healthy);
+    std::vector<RelocalizationSeed> buildLocalRelocalizationSeeds(
+        const Sophus::SE3d& center) const;
+    std::vector<RelocalizationSeed> buildGlobalRelocalizationSeeds(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
+    void applyRelocalizedPose(const Sophus::SE3d& pose,
+                              const ros::Time& stamp,
+                              const RelocalizationResult& result);
+    void resetCargoAfterPoseDiscontinuity();
+    void publishRelocalizationStatus(const std::string& state,
+                                     const std::string& detail);
+    void publishRelocalizationSafetyInvalid(const ros::Time& stamp,
+                                             const std::string& reason);
 
     // 动态点过滤（统计离群点去除）
     pcl::PointCloud<pcl::PointXYZ>::Ptr filterDynamicPoints(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
@@ -220,6 +239,7 @@ private:
     ros::Publisher current_cloud_pub_;
     ros::Publisher path_pub_;
     ros::Publisher runtime_path_pub_;
+    ros::Publisher relocalization_status_pub_;
 
     // 轨迹历史
     nav_msgs::Path path_msg_;
@@ -348,6 +368,45 @@ private:
     Sophus::SO3d rpyToSO3(double roll, double pitch, double yaw);
     ros::Time last_stamp_;
     std::atomic<bool> tracking_lost_{false};
+
+    enum class RelocalizationState : std::uint8_t {
+        IDLE = 0,
+        DEGRADED = 1,
+        SEARCHING_LOCAL = 2,
+        SEARCHING_GLOBAL = 3,
+        CONFIRMING = 4,
+        COOLDOWN = 5
+    };
+
+    NdtRelocalizer relocalizer_;
+    RelocalizationConfig relocalization_cfg_;
+    RelocalizationState relocalization_state_ = RelocalizationState::IDLE;
+    bool relocalization_enabled_ = true;
+    int relocalization_trigger_frames_ = 5;
+    int relocalization_global_trigger_frames_ = 15;
+    int relocalization_confirm_frames_ = 2;
+    int relocalization_request_interval_frames_ = 3;
+    int relocalization_result_max_age_frames_ = 8;
+    double relocalization_result_max_age_sec_ = 0.50;
+    int relocalization_cooldown_frames_ = 12;
+    int relocalization_global_hint_count_ = 4;
+    double relocalization_global_min_similarity_ = 0.55;
+    double relocalization_local_xy_window_m_ = 1.5;
+    double relocalization_local_xy_step_m_ = 1.5;
+    double relocalization_local_yaw_window_deg_ = 12.0;
+    double relocalization_local_yaw_step_deg_ = 12.0;
+    double relocalization_confirm_translation_m_ = 0.35;
+    double relocalization_confirm_yaw_deg_ = 5.0;
+    int relocalization_bad_frames_ = 0;
+    int relocalization_good_frames_ = 0;
+    int relocalization_confirmation_count_ = 0;
+    std::uint64_t relocalization_last_submit_frame_ = 0;
+    std::uint64_t relocalization_cooldown_until_frame_ = 0;
+    std::uint64_t relocalization_last_result_frame_ = 0;
+    std::atomic<bool> relocalization_force_global_{false};
+    bool relocalization_pose_reliable_ = true;
+    bool relocalization_invalid_safety_published_ = false;
+    Sophus::SE3d relocalization_confirmation_pose_;
 
     // ========== 调试配置 ==========
     struct DebugConfig {
@@ -1297,6 +1356,7 @@ private:
         std::string source = "tight_box";
     };
 
+
     struct CargoState {
         enum State { EMPTY, CANDIDATE, LOCKED, LOST };
 
@@ -1386,4 +1446,124 @@ private:
         // 障碍物信息
         float obstacle_top_z = 0.0f;
         uint32_t obstacle_point_count = 0;
-        Eigen::Vecto
+        Eigen::Vector3f obstacle_nearest_point = Eigen::Vector3f::Zero();
+
+        // 货物框
+        Eigen::Vector3f cargo_center = Eigen::Vector3f::Zero();
+        Eigen::Vector3f cargo_size = Eigen::Vector3f::Zero();
+
+        // 元信息
+        std::string source;
+        std::string reason;
+    };
+
+    // Cargo Warning 状态
+    int cargo_warning_debounce_count_ = 0;
+    CargoWarningData last_cargo_warning_;
+    ros::Time last_cargo_warning_stamp_;
+
+    // Cargo Warning publisher
+    ros::Publisher cargo_warning_pub_;
+    ros::Publisher cargo_warning_text_pub_;
+    ros::Publisher cargo_tight_box_marker_pub_;
+    ros::Publisher cargo_warning_zone_marker_pub_;
+    ros::Publisher cargo_warning_obstacle_marker_pub_;
+    ros::Publisher cargo_bottom_estimate_pub_;
+    ros::Publisher cargo_safety_status_pub_;
+    ros::Publisher cargo_fused_box_marker_pub_;
+
+    CargoBottomFusion cargo_bottom_fusion_;
+    CargoSafetyEvaluator cargo_safety_evaluator_;
+    CargoBottomResult last_cargo_bottom_result_;
+    CargoSafetyResult last_cargo_safety_result_;
+    std::uint64_t cargo_fusion_track_id_ = 0;
+    bool cargo_fusion_track_active_ = false;
+    bool cargo_origin_height_valid_ = false;
+    float cargo_origin_height_m_ = 0.0F;
+    std::uint64_t cargo_origin_height_track_id_ = 0;
+    ros::Time last_cargo_pipeline_stamp_;
+
+    // OdomAnchorBox 新函数
+    HookCargoDetection detectCargoAroundOdomAnchor(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
+        const ros::Time& stamp);
+    // Legacy implementation retained until the engineering cleanup commit.
+    // It has no runtime call site.
+    void publishPayloadTrackInfoFromOdomAnchorBox(const ros::Time& stamp);
+    void publishPayloadTrackInfoFromFusion(
+        const CargoBottomResult& bottom,
+        const ros::Time& stamp);
+
+    void updateHookCargoLock(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
+    bool isStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    bool isWeakDetection(const HookCargoDetection& det);
+    bool isLockStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    bool isBodyStrongCandidate(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    bool isDetectionConsistentWithLockedBox(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, std::string* reject_reason);
+    Eigen::Vector3f computeFixedCenterSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    Eigen::Vector3f medianSize(const std::deque<Eigen::Vector3f>& buffer);
+    void updateLockedHeight(const HookCargoBottomEstimate& bottom, const ros::Time& stamp, bool initialize);
+    void maybeUpdateLockedSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    void growUncertainty();
+    void clearHookLock();
+    uint64_t computeCloudHash(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
+
+    // CargoState 更新函数
+    void updateCargoState(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
+
+    // Cargo Warning 函数
+    CargoWarningData computeCargoWarning(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
+        const Eigen::Vector3f& cargo_center,
+        const Eigen::Vector3f& cargo_size,
+        float cargo_bottom_z,
+        float cargo_bottom_uncertainty,
+        const ros::Time& stamp);
+    void publishCargoWarning(const CargoWarningData& warning, const ros::Time& stamp);
+    void publishCargoWarningMarkers(
+        const Eigen::Vector3f& cargo_center,
+        const Eigen::Vector3f& cargo_size,
+        const CargoWarningData& warning,
+        const ros::Time& stamp);
+    void updateAndPublishCargoSafetyPipeline(
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
+        const Sophus::SE3d& pose_map_base,
+        const ros::Time& stamp);
+    void publishCargoFusionMarker(const CargoBottomResult& bottom,
+                                  const ros::Time& stamp);
+
+    // ========== Runtime Diagnostics (1.0x/1.5x acceptance testing) ==========
+    RuntimeDiagnostics runtime_diag_;
+    RuntimeDiagnosticsConfig runtime_diag_config_;
+    std::string diag_output_dir_;
+    // Write each record on the next processing cycle so synchronous CSV work
+    // is represented in the following frame's end-to-end latency measurement.
+    bool diag_pending_ndt_record_valid_ = false;
+    NdtFrameRecord diag_pending_ndt_record_;
+
+    // 用于健康状态统计
+    int diag_frame_index_ = 0;
+    double diag_last_cloud_stamp_ = 0.0;
+    double diag_last_wall_time_ = 0.0;
+    int diag_consecutive_overruns_ = 0;
+    int diag_consecutive_prediction_only_ = 0;
+    int diag_consecutive_target_fallback_ = 0;
+    int diag_processed_frame_count_ = 0;
+    int diag_converged_count_ = 0;
+    double diag_last_valid_ndt_stamp_ = 0.0;
+
+    // 用于cargo风险检测
+    float diag_last_bottom_z_ = 0.0f;
+    float diag_last_height_m_ = 0.0f;
+    int diag_cargo_lost_frames_ = 0;
+    int diag_last_track_id_ = -1;
+    std::string diag_last_cargo_state_ = "EMPTY";
+
+    void logStartupConfig();
+    void logBuildId();
+    void logNdtHealthPeriodic();
+    void logCargoHealthPeriodic();
+};
+
+} // namespace ndt_slam
