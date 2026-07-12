@@ -29,6 +29,12 @@ bool isValidConfig(const CargoSafetyConfig& config) {
            isFinite(config.maximum_height_age_sec) && config.maximum_height_age_sec >= 0.0 &&
            isFinite(config.future_stamp_tolerance_sec) &&
            config.future_stamp_tolerance_sec >= 0.0 &&
+           isFinite(config.maximum_obstacle_cloud_age_sec) &&
+           config.maximum_obstacle_cloud_age_sec >= 0.0 &&
+           config.minimum_roi_finite_points > 0U &&
+           isFinite(config.minimum_roi_coverage_ratio) &&
+           config.minimum_roi_coverage_ratio >= 0.0F &&
+           config.minimum_roi_coverage_ratio <= 1.0F &&
            isFinite(config.obstacle_top_percentile) &&
            config.obstacle_top_percentile >= 0.0f &&
            config.obstacle_top_percentile <= 1.0f &&
@@ -51,9 +57,9 @@ bool isValidFootprint(const CargoBaseFootprint& footprint) {
     return isFinite(footprint.min_x) && isFinite(footprint.max_x) &&
            isFinite(footprint.min_y) && isFinite(footprint.max_y) &&
            isFinite(footprint.min_z) && isFinite(footprint.max_z) &&
-           footprint.min_x <= footprint.max_x &&
-           footprint.min_y <= footprint.max_y &&
-           footprint.min_z <= footprint.max_z;
+           footprint.min_x < footprint.max_x &&
+           footprint.min_y < footprint.max_y &&
+           footprint.min_z < footprint.max_z;
 }
 
 bool isFinitePoint(const pcl::PointXYZ& point) {
@@ -62,12 +68,15 @@ bool isFinitePoint(const pcl::PointXYZ& point) {
 
 bool isInsideExpandedCargo(const pcl::PointXYZ& point,
                            const CargoBaseFootprint& footprint,
-                           const CargoSafetyConfig& config) {
+                           const CargoSafetyConfig& config,
+                           float fused_bottom_z) {
+    const float exclusion_min_z = std::max(
+        footprint.min_z - config.self_cargo_margin_z_m, fused_bottom_z);
     return point.x >= footprint.min_x - config.self_cargo_margin_x_m &&
            point.x <= footprint.max_x + config.self_cargo_margin_x_m &&
            point.y >= footprint.min_y - config.self_cargo_margin_y_m &&
            point.y <= footprint.max_y + config.self_cargo_margin_y_m &&
-           point.z >= footprint.min_z - config.self_cargo_margin_z_m &&
+           point.z >= exclusion_min_z &&
            point.z <= footprint.max_z + config.self_cargo_margin_z_m;
 }
 
@@ -164,6 +173,17 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         return result;
     }
 
+    if (!input.obstacle_observation_valid ||
+        !isFinite(input.obstacle_cloud_age_sec) ||
+        input.obstacle_cloud_age_sec < -config_.future_stamp_tolerance_sec ||
+        input.obstacle_cloud_age_sec > config_.maximum_obstacle_cloud_age_sec ||
+        input.obstacle_roi_finite_points < config_.minimum_roi_finite_points ||
+        !isFinite(input.obstacle_roi_coverage_ratio) ||
+        input.obstacle_roi_coverage_ratio < config_.minimum_roi_coverage_ratio) {
+        result.reason = "obstacle_observation_insufficient";
+        return result;
+    }
+
     result.input_valid = true;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr obstacle_candidates(
@@ -175,16 +195,23 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         }
         ++result.finite_input_points;
         if (config_.exclude_self_cargo &&
-            isInsideExpandedCargo(point, input.footprint_base, config_)) {
+            isInsideExpandedCargo(point, input.footprint_base, config_,
+                                  input.height.bottom_z)) {
             ++result.self_cargo_points_removed;
             continue;
         }
         obstacle_candidates->push_back(point);
     }
 
-    if (obstacle_candidates->size() < config_.obstacle_min_cluster_points) {
+    if (obstacle_candidates->empty()) {
         result.raw_code = kSafeCode;
         result.reason = "no_obstacle_clusters";
+        return result;
+    }
+    if (obstacle_candidates->size() < config_.obstacle_min_cluster_points) {
+        result.input_valid = false;
+        result.raw_code = kLevel2OrFailSafeCode;
+        result.reason = "sparse_obstacle_returns";
         return result;
     }
 
@@ -198,8 +225,9 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         extraction.setClusterTolerance(config_.obstacle_cluster_tolerance_m);
         extraction.setMinClusterSize(
             static_cast<int>(config_.obstacle_min_cluster_points));
-        extraction.setMaxClusterSize(
-            static_cast<int>(config_.obstacle_max_cluster_points));
+        // The ROI is already bounded. Never discard a wall or a large cargo
+        // stack merely because it exceeds a tuning-oriented cluster limit.
+        extraction.setMaxClusterSize(std::numeric_limits<int>::max());
         extraction.setSearchMethod(tree);
         extraction.setInputCloud(obstacle_candidates);
         extraction.extract(cluster_indices);
@@ -276,8 +304,9 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
     }
 
     if (!result.has_cluster_evidence) {
-        result.raw_code = kSafeCode;
-        result.reason = "no_obstacle_clusters";
+        result.input_valid = false;
+        result.raw_code = kLevel2OrFailSafeCode;
+        result.reason = "obstacle_clustering_rejected_all_candidates";
         return result;
     }
 

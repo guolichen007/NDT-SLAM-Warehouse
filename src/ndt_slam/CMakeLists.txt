@@ -51,7 +51,6 @@ include_directories(
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
   ${SOPHUS_INCLUDE_DIR}
-  /home/ydkj/.local/include
   ${OpenCV_INCLUDE_DIRS}
   ${ndt_omp_INCLUDE_DIRS}
 )
@@ -85,11 +84,13 @@ set(LIBRARY_SOURCES
   # Formal cargo bottom and fail-safe safety pipeline
   src/cargo_bottom_fusion.cpp
   src/cargo_safety_evaluator.cpp
+  src/hook_load_state_filter.cpp
 )
 
 add_library(ndt_slam_lib SHARED
   ${LIBRARY_SOURCES}
 )
+add_dependencies(ndt_slam_lib ${catkin_EXPORTED_TARGETS})
 
 target_link_libraries(ndt_slam_lib
   ${catkin_LIBRARIES}
@@ -104,11 +105,11 @@ target_link_libraries(ndt_slam_lib
   Boost::filesystem
   pthread
   dl
-  usb-1.0
 )
 
 # 主节点可执行文件
 add_executable(ndt_slam_node src/main.cpp)
+add_dependencies(ndt_slam_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(ndt_slam_node
   ndt_slam_lib
   ${catkin_LIBRARIES}
@@ -139,4 +140,73 @@ target_link_libraries(cargo_forbidden_zone_node
   yaml-cpp
 )
 
-# Independent wall-clock fail-safe heartbeat. This is the sole publis
+# Independent wall-clock fail-safe heartbeat. This is the sole publisher of
+# the 14/17/18 PLC alarm contract.
+add_executable(cargo_alarm_heartbeat_node src/cargo_alarm_heartbeat_node.cpp)
+add_dependencies(cargo_alarm_heartbeat_node ${catkin_EXPORTED_TARGETS})
+target_link_libraries(cargo_alarm_heartbeat_node ${catkin_LIBRARIES})
+
+add_executable(hook_load_state_node src/hook_load_state_node.cpp)
+add_dependencies(hook_load_state_node ${catkin_EXPORTED_TARGETS})
+target_link_libraries(hook_load_state_node
+  ndt_slam_lib
+  ${catkin_LIBRARIES}
+  yaml-cpp
+)
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(cargo_bottom_fusion_test
+    test/cargo_bottom_fusion_test.cpp)
+  if(TARGET cargo_bottom_fusion_test)
+    target_link_libraries(cargo_bottom_fusion_test
+      ndt_slam_lib ${catkin_LIBRARIES})
+  endif()
+
+  catkin_add_gtest(cargo_safety_evaluator_test
+    test/cargo_safety_evaluator_test.cpp)
+  if(TARGET cargo_safety_evaluator_test)
+    target_link_libraries(cargo_safety_evaluator_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+  endif()
+
+  catkin_add_gtest(cargo_alarm_heartbeat_state_machine_test
+    test/cargo_alarm_heartbeat_state_machine_test.cpp)
+  if(TARGET cargo_alarm_heartbeat_state_machine_test)
+    target_link_libraries(cargo_alarm_heartbeat_state_machine_test
+      ${catkin_LIBRARIES})
+  endif()
+
+  catkin_add_gtest(relocalization_scan_context_test
+    test/relocalization_scan_context_test.cpp)
+  if(TARGET relocalization_scan_context_test)
+    target_link_libraries(relocalization_scan_context_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+  endif()
+
+  catkin_add_gtest(hook_load_state_filter_test
+    test/hook_load_state_filter_test.cpp)
+  if(TARGET hook_load_state_filter_test)
+    target_link_libraries(hook_load_state_filter_test
+      ndt_slam_lib ${catkin_LIBRARIES})
+  endif()
+endif()
+
+install(TARGETS ndt_slam_lib ndt_slam_node pointcloud_merger cloud_diagnostics
+                cargo_forbidden_zone_node cargo_alarm_heartbeat_node
+                hook_load_state_node
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+install(DIRECTORY include/
+  DESTINATION include
+)
+
+install(DIRECTORY launch
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+
+install(DIRECTORY config
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)

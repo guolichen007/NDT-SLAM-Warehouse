@@ -1,11 +1,12 @@
 # Versioned, frame-explicit cargo bottom estimate.
-uint16 SCHEMA_VERSION=1
+uint16 SCHEMA_VERSION=2
 
 uint8 SOURCE_INVALID=0
 uint8 SOURCE_POINTS=1
 uint8 SOURCE_MAP_DIFF=2
 uint8 SOURCE_MAP_STATIC=3
 uint8 SOURCE_RECENT_STABLE=4
+uint8 SOURCE_ORIGIN_HEIGHT=5
 
 std_msgs/Header header
 uint16 schema_version

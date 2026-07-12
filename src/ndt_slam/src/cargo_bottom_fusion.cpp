@@ -649,7 +649,7 @@ int cargoBottomSourcePriority(CargoBottomSource source) noexcept {
                           result.origin_height_stats,
                           config_.origin_height_uncertainty_min,
                           config_.origin_height_confidence_base,
-                          "track_origin_points_height_prior");
+                          "pre_lift_frozen_height_prior");
 
     if (!selected.valid && stable_.valid &&
         stable_.track_id == observation.track_id) {

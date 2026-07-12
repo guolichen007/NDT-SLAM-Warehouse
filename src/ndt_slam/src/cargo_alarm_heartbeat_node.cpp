@@ -254,7 +254,20 @@ private:
     void statusCallback(const lidar_slam2_msgs::CargoSafetyStatus::ConstPtr& msg) {
         const bool schema_valid =
             msg->schema_version == lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION;
-        const bool evidence_valid = msg->valid && msg->cargo_valid && schema_valid;
+        const bool safe_empty =
+            msg->hook_signal_valid &&
+            msg->hook_load_state ==
+                lidar_slam2_msgs::CargoSafetyStatus::HOOK_EMPTY &&
+            msg->no_cargo_confirmed && !msg->cargo_valid && msg->valid &&
+            msg->requested_alarm_code ==
+                lidar_slam2_msgs::CargoSafetyStatus::ALARM_CLEAR;
+        const bool valid_loaded =
+            msg->hook_signal_valid &&
+            msg->hook_load_state ==
+                lidar_slam2_msgs::CargoSafetyStatus::HOOK_LOADED &&
+            !msg->no_cargo_confirmed && msg->cargo_valid && msg->valid;
+        const bool evidence_valid =
+            schema_valid && (safe_empty || valid_loaded);
         const AlarmStateMachine::Result result = state_machine_.ingest(
             evidence_valid, msg->requested_alarm_code,
             ros::WallTime::now().toSec(), msg->header.stamp.toSec());
@@ -271,4 +284,37 @@ private:
             state_machine_.tick(event.current_real.toSec());
         publishAlarm(result.code, result.reason);
     }
+
+    void publishAlarm(int code, const char* reason) {
+        std_msgs::Int32 message;
+        message.data = code;
+        alarm_pub_.publish(message);
+        ROS_INFO_THROTTLE(1.0,
+                          "[CargoAlarmHeartbeat] alarm=%d reason=%s",
+                          code, reason);
+    }
+
+    ros::NodeHandle nh_;
+    ros::NodeHandle pnh_;
+    ros::Subscriber status_sub_;
+    ros::Publisher alarm_pub_;
+    ros::WallTimer heartbeat_timer_;
+    std::string status_topic_;
+    std::string alarm_topic_;
+    const double heartbeat_hz_;
+    const double stale_timeout_sec_;
+    const double clear_delay_sec_;
+    AlarmStateMachine state_machine_;
+};
+
+}  // namespace cargo_alarm
+
+int main(int argc, char** argv) {
+    ros::init(argc, argv, "cargo_alarm_heartbeat");
+    cargo_alarm::AlarmHeartbeatNode node;
+    ros::spin();
+    return 0;
+}
+
+#endif  // CARGO_ALARM_HEARTBEAT_STATE_MACHINE_ONLY
 

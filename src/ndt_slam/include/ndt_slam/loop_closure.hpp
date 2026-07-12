@@ -164,4 +164,22 @@ private:
     ros::Publisher relocalization_pub_;
 
     LoopClosureDetector loop_closure_detector_;
-    Po
+    PoseGraphOptimizer pose_graph_optimizer_;
+
+    std::string odom_topic_ = "/odom";
+    std::string pointcloud_topic_ = "/points_raw";
+    std::string relocalization_topic_ = "/relocalization";
+
+    Sophus::SE3d last_pose_;
+    ros::Time last_stamp_;
+    bool initialized_ = false;
+
+    int loop_detection_interval_ = 5;
+    int keyframe_count_ = 0;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr last_cloud_;
+    bool tracking_lost_ = false;
+    Sophus::SE3d relocalized_pose_;
+};
+
+} // namespace ndt_slam

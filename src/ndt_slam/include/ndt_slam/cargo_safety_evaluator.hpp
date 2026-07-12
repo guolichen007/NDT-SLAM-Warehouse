@@ -39,6 +39,9 @@ struct CargoSafetyConfig {
     float cargo_bottom_extra_margin_m = 0.05f;
     double maximum_height_age_sec = 0.50;
     double future_stamp_tolerance_sec = 0.05;
+    double maximum_obstacle_cloud_age_sec = 0.50;
+    std::size_t minimum_roi_finite_points = 20;
+    float minimum_roi_coverage_ratio = 0.01f;
 
     float obstacle_top_percentile = 0.95f;
     float obstacle_uncertainty_floor_m = 0.05f;
@@ -58,6 +61,10 @@ struct CargoSafetyInput {
     CargoBaseFootprint footprint_base;
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr obstacle_cloud_base;
     double evaluation_time_sec = std::numeric_limits<double>::quiet_NaN();
+    bool obstacle_observation_valid = false;
+    double obstacle_cloud_age_sec = std::numeric_limits<double>::infinity();
+    std::size_t obstacle_roi_finite_points = 0;
+    float obstacle_roi_coverage_ratio = 0.0f;
 };
 
 /** Evidence calculated entirely from one Euclidean obstacle cluster. */

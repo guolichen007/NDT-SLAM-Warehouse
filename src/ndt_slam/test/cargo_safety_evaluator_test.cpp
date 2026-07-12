@@ -165,12 +165,47 @@ TEST(CargoSafetyEvaluator, SparseOrRejectedObstacleReturnsFailSafe) {
             2.0F + 0.001F * static_cast<float>(i), 0.0F, 1.0F));
     }
     oversized.obstacle_cloud_base = cloud;
-    CargoSafetyResult rejected = bounded.evaluate(oversized);
-    EXPECT_FALSE(rejected.input_valid);
-    EXPECT_EQ(rejected.raw_code,
+    CargoSafetyResult large_cluster = bounded.evaluate(oversized);
+    EXPECT_TRUE(large_cluster.input_valid);
+    EXPECT_TRUE(large_cluster.has_cluster_evidence);
+    EXPECT_EQ(large_cluster.evaluated_cluster_count, 1U);
+}
+
+TEST(CargoSafetyEvaluator, NeverExcludesObstacleBelowFusedBottom) {
+    CargoSafetyInput input = baseInput();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    for (int i = 0; i < 8; ++i) {
+        cloud->push_back(pcl::PointXYZ(
+            0.01F * static_cast<float>(i), 0.0F,
+            1.70F + 0.002F * static_cast<float>(i)));
+    }
+    input.obstacle_cloud_base = cloud;
+
+    CargoSafetyEvaluator evaluator;
+    const CargoSafetyResult result = evaluator.evaluate(input);
+    EXPECT_TRUE(result.input_valid);
+    EXPECT_TRUE(result.has_cluster_evidence);
+    EXPECT_EQ(result.self_cargo_points_removed, 0U);
+    EXPECT_EQ(result.raw_code, CargoSafetyEvaluator::kLevel1Code);
+}
+
+TEST(CargoSafetyEvaluator, RejectsDegenerateFootprintAndLowCoverage) {
+    CargoSafetyEvaluator evaluator;
+    CargoSafetyInput degenerate = baseInput();
+    degenerate.footprint_base.max_x = degenerate.footprint_base.min_x;
+    const CargoSafetyResult footprint_result = evaluator.evaluate(degenerate);
+    EXPECT_FALSE(footprint_result.input_valid);
+    EXPECT_EQ(footprint_result.raw_code,
               CargoSafetyEvaluator::kLevel2OrFailSafeCode);
-    EXPECT_EQ(rejected.reason,
-              "obstacle_clustering_rejected_all_candidates");
+
+    CargoSafetyInput low_coverage = baseInput();
+    low_coverage.obstacle_roi_coverage_ratio = 0.0F;
+    const CargoSafetyResult coverage_result = evaluator.evaluate(low_coverage);
+    EXPECT_FALSE(coverage_result.input_valid);
+    EXPECT_EQ(coverage_result.reason, "obstacle_observation_insufficient");
+    EXPECT_EQ(coverage_result.raw_code,
+              CargoSafetyEvaluator::kLevel2OrFailSafeCode);
 }
 
 }  // namespace

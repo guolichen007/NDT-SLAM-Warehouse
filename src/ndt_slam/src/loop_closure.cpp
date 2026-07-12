@@ -605,4 +605,96 @@ void LoopClosureNode::pointCloudCallback(const sensor_msgs::PointCloud2::ConstPt
 }
 
 void LoopClosureNode::processLoopClosure() {
-    LoopCandidate candidate = loop_closure_detector_.detec
+    LoopCandidate candidate = loop_closure_detector_.detectLoop();
+
+    if (candidate.current_keyframe_id != -1 &&
+        candidate.candidate_keyframe_id != -1) {
+        ROS_INFO("Loop found: %d <-> %d, similarity: %.3f",
+                 candidate.current_keyframe_id,
+                 candidate.candidate_keyframe_id,
+                 candidate.similarity);
+
+        const auto& keyframes = loop_closure_detector_.getKeyFrames();
+        for (const auto& keyframe : keyframes) {
+            pose_graph_optimizer_.addKeyFrame(keyframe);
+        }
+
+        for (std::size_t i = 0; i + 1 < keyframes.size(); ++i) {
+            const KeyFrame& first = keyframes[i];
+            const KeyFrame& second = keyframes[i + 1];
+            const Sophus::SE3d relative_pose =
+                first.pose_.inverse() * second.pose_;
+            const Eigen::Matrix<double, 6, 6> information =
+                Eigen::Matrix<double, 6, 6>::Identity();
+            pose_graph_optimizer_.addOdometryEdge(
+                first.id_, second.id_, relative_pose, information);
+        }
+
+        const Eigen::Matrix<double, 6, 6> loop_information =
+            Eigen::Matrix<double, 6, 6>::Identity();
+        pose_graph_optimizer_.addLoopEdge(
+            candidate.candidate_keyframe_id,
+            candidate.current_keyframe_id,
+            candidate.relative_pose,
+            loop_information);
+
+        if (pose_graph_optimizer_.optimize(10)) {
+            ROS_INFO("Pose graph optimization successful");
+            std::vector<KeyFrame> updated_keyframes(
+                keyframes.begin(), keyframes.end());
+            pose_graph_optimizer_.updateKeyFramePoses(updated_keyframes);
+        }
+    }
+}
+
+bool LoopClosureNode::relocalizeService(
+    std_srvs::Empty::Request& request,
+    std_srvs::Empty::Response& response) {
+    (void)request;
+    (void)response;
+    ROS_INFO("Received relocalization request!");
+
+    if (last_cloud_->empty()) {
+        ROS_WARN("No pointCloud data available");
+        return true;
+    }
+
+    const Sophus::SE3d relocalized_pose =
+        loop_closure_detector_.globalRelocalization(last_cloud_);
+    if (!relocalized_pose.so3().matrix().allFinite() ||
+        !relocalized_pose.translation().allFinite()) {
+        ROS_WARN("Global relocalization failed");
+        return true;
+    }
+
+    ROS_INFO("Global relocalization successful: (%.3f, %.3f, %.3f)",
+             relocalized_pose.translation().x(),
+             relocalized_pose.translation().y(),
+             relocalized_pose.translation().z());
+    relocalized_pose_ = relocalized_pose;
+
+    nav_msgs::Odometry relocalization_msg;
+    relocalization_msg.header.stamp = ros::Time::now();
+    relocalization_msg.header.frame_id = "odom";
+    relocalization_msg.child_frame_id = "base_link";
+    relocalization_msg.pose.pose.position.x =
+        relocalized_pose.translation().x();
+    relocalization_msg.pose.pose.position.y =
+        relocalized_pose.translation().y();
+    relocalization_msg.pose.pose.position.z =
+        relocalized_pose.translation().z();
+
+    const Eigen::Quaterniond quaternion =
+        relocalized_pose.so3().unit_quaternion();
+    relocalization_msg.pose.pose.orientation.x = quaternion.x();
+    relocalization_msg.pose.pose.orientation.y = quaternion.y();
+    relocalization_msg.pose.pose.orientation.z = quaternion.z();
+    relocalization_msg.pose.pose.orientation.w = quaternion.w();
+    for (int i = 0; i < 6; ++i) {
+        relocalization_msg.pose.covariance[i * 6 + i] = 0.1;
+    }
+    relocalization_pub_.publish(relocalization_msg);
+    return true;
+}
+
+}  // namespace ndt_slam

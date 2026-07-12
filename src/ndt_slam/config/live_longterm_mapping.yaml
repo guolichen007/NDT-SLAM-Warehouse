@@ -560,6 +560,24 @@ rviz_publish:
   current_cloud_rate_hz: 3.0
 
 # ========== HookFixedCargoDetector ==========
+# Hook load voltage is classified by hook_load_state_node and consumed by the
+# SLAM cargo lifecycle through the typed /hook/load_state topic.
+hook_load_signal:
+  enabled: true
+  required: true
+  topic: "/grawity"
+  state_topic: "/hook/load_state"
+  publish_hz: 10.0
+  low_threshold_v: 1.90
+  high_threshold_v: 2.10
+  hysteresis_v: 0.03
+  confirm_samples: 3
+  stale_timeout_sec: 0.50
+  consumer_stale_timeout_sec: 0.80
+  valid_voltage_min_v: 0.0
+  valid_voltage_max_v: 5.0
+  origin_history_samples: 10
+
 hook_fixed_cargo_detector:
   enabled: true
 
@@ -713,4 +731,51 @@ odom_anchored_cargo_box:
 
   bottom_alpha_points: 0.25
   bottom_alpha_hold: 0.05
-  bottom_max_uncertainty: 
+  bottom_max_uncertainty: 0.35
+
+  lost_hold_sec: 5.0
+  lost_clear_sec: 15.0
+
+  tight_box:
+    enabled: true
+    anchor_symmetry_mode: "soft"
+    max_center_offset_m: 0.35
+    hag_filter_enabled: true
+    hag_min_m: 0.15
+    hag_max_m: 2.50
+    percentile_low: 0.08
+    percentile_high: 0.92
+    margin_xy_m: 0.05
+    margin_z_m: 0.03
+    size_update_mode: "adaptive"
+    size_update_alpha: 0.30
+    max_size_change_per_frame_m: 0.10
+    sub_cluster_enabled: true
+    sub_cluster_tolerance_m: 0.10
+    sub_cluster_min_points: 20
+
+  cargo_warning:
+    enabled: true
+    publish_alarm_msg: false
+    publish_debug_marker: true
+    level1_distance_m: 3.0
+    level2_distance_m: 5.0
+    min_vertical_clearance_m: 0.80
+    cargo_bottom_use_uncertainty: true
+    cargo_bottom_extra_margin_m: 0.05
+    obstacle_top_percentile: 0.95
+    obstacle_min_points: 5
+    obstacle_cluster_tolerance_m: 0.25
+    maximum_obstacle_cloud_age_sec: 0.50
+    minimum_roi_finite_points: 20
+    minimum_roi_coverage_ratio: 0.01
+    exclude_ground: true
+    ground_hag_min_m: 0.20
+    exclude_self_cargo: true
+    self_cargo_margin_xy_m: 0.45
+    self_cargo_margin_z_m: 0.35
+    debounce_frames: 2
+    clear_hold_sec: 0.5
+    level1_alarm_code: 17
+    level2_alarm_code: 18
+    clear_alarm_code: 0
