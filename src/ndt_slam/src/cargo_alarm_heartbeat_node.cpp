@@ -254,21 +254,35 @@ private:
     void statusCallback(const lidar_slam2_msgs::CargoSafetyStatus::ConstPtr& msg) {
         const bool schema_valid =
             msg->schema_version == lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION;
-        const bool evidence_valid = msg->valid && msg->cargo_valid && schema_valid;
-        const AlarmStateMachine::Result result = state_machine_.ingest(
-            evidence_valid, msg->requested_alarm_code,
-            ros::WallTime::now().toSec(), msg->header.stamp.toSec());
-
-        // Escalation and invalid evidence are published in this callback, without
-        // waiting for the periodic heartbeat.
-        if (result.changed || result.code == AlarmStateMachine::kOuterOrInvalid) {
-            publishAlarm(result.code, result.reason);
-        }
+        const bool safe_empty =
+            msg->hook_signal_valid &&
+            msg->hook_load_state ==
+                lidar_slam2_msgs::CargoSafetyStatus::HOOK_EMPTY &&
+            msg->no_cargo_confirmed && !msg->cargo_valid && msg->valid &&
+            msg->requested_alarm_code ==
+                lidar_slam2_msgs::CargoSafetyStatus::ALARM_CLEAR;
+        const bool valid_loaded =
+            msg->hook_signal_valid &&
+            msg->hook_load_state ==
+                lidar_slam2_msgs::CargoSafetyStatus::HOOK_LOADED &&
+            !
+    void publishAlarm(std::uint16_t code, const std::string& reason) {
+        std_msgs::Int32 msg;
+        msg.data = static_cast<int>(code);
+        alarm_pub_.publish(msg);
+        ROS_INFO_THROTTLE(1.0, "[CargoAlarmHeartbeat] alarm=%d reason=%s",
+                          code, reason.c_str());
     }
 
-    void heartbeatCallback(const ros::WallTimerEvent& event) {
-        const AlarmStateMachine::Result result =
-            state_machine_.tick(event.current_real.toSec());
-        publishAlarm(result.code, result.reason);
-    }
+};  // class AlarmHeartbeatNode
 
+}  // namespace cargo_alarm
+
+#endif  // CARGO_ALARM_HEARTBEAT_STATE_MACHINE_ONLY
+
+int main(int argc, char** argv) {
+    ros::init(argc, argv, "cargo_alarm_heartbeat");
+    cargo_alarm::AlarmHeartbeatNode node;
+    ros::spin();
+    return 0;
+}

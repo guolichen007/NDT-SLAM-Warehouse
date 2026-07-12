@@ -165,13 +165,7 @@ TEST(CargoSafetyEvaluator, SparseOrRejectedObstacleReturnsFailSafe) {
             2.0F + 0.001F * static_cast<float>(i), 0.0F, 1.0F));
     }
     oversized.obstacle_cloud_base = cloud;
-    CargoSafetyResult rejected = bounded.evaluate(oversized);
-    EXPECT_FALSE(rejected.input_valid);
-    EXPECT_EQ(rejected.raw_code,
-              CargoSafetyEvaluator::kLevel2OrFailSafeCode);
-    EXPECT_EQ(rejected.reason,
-              "obstacle_clustering_rejected_all_candidates");
-}
-
-}  // namespace
-}  // namespace ndt_slam
+    CargoSafetyResult large_cluster = bounded.evaluate(oversized);
+    EXPECT_TRUE(large_cluster.input_valid);
+    EXPECT_TRUE(large_cluster.has_cluster_evidence);
+  

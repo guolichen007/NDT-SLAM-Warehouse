@@ -22,8 +22,9 @@ enum class CargoBottomSource : std::uint8_t {
     MAP_DIFF = 2,
     MAP_STATIC = 3,
     RECENT_STABLE = 4,
-    // Height learned from the first strongly supported POINTS estimate of the
-    // current track. This is deliberately distinct from map-derived evidence.
+    // Height frozen from stable pre-lift observations on the confirmed
+    // EMPTY->LOADED hook transition. It is never learned from a post-lift
+    // fallback result of the current track.
     ORIGIN_HEIGHT = 5,
 };
 
@@ -210,10 +211,4 @@ struct CargoBottomResult {
 // all temporal state so height/EMA never leaks between cargoes.
 class CargoBottomFusion {
 public:
-    explicit CargoBottomFusion(const CargoBottomFusionConfig& config = {});
-
-    CargoBottomResult update(const CargoBottomObservation& observation);
-    void reset();
-    void setConfig(const CargoBottomFusionConfig& config);
-
-    const CargoBottomFusionConfig& config() const noexce
+    explicit CargoBottomFusion(const Car

@@ -560,6 +560,24 @@ rviz_publish:
   current_cloud_rate_hz: 3.0
 
 # ========== HookFixedCargoDetector ==========
+# Hook load voltage is classified by hook_load_state_node and consumed by the
+# SLAM cargo lifecycle through the typed /hook/load_state topic.
+hook_load_signal:
+  enabled: true
+  required: true
+  topic: "/grawity"
+  state_topic: "/hook/load_state"
+  publish_hz: 10.0
+  low_threshold_v: 1.90
+  high_threshold_v: 2.10
+  hysteresis_v: 0.03
+  confirm_samples: 3
+  stale_timeout_sec: 0.50
+  consumer_stale_timeout_sec: 0.80
+  valid_voltage_min_v: 0.0
+  valid_voltage_max_v: 5.0
+  origin_history_samples: 10
+
 hook_fixed_cargo_detector:
   enabled: true
 
@@ -690,27 +708,4 @@ odom_anchored_cargo_box:
   default_size_y: 0.35
   default_size_z: 0.25
 
-  # 检测到货物后的尺寸范围
-  min_size_x: 0.60
-  min_size_y: 0.40
-  min_size_z: 0.20
-  max_size_x: 2.50
-  max_size_y: 1.60
-  max_size_z: 2.00
-
-  size_margin_x: 0.10
-  size_margin_y: 0.10
-  size_margin_z: 0.05
-
-  lock_confirm_frames: 2
-  strong_min_points: 50
-  weak_min_points: 10
-
-  size_update_confirm_frames: 5
-  size_change_min_ratio: 0.20
-  size_change_max_ratio: 0.60
-  size_update_alpha: 0.15
-
-  bottom_alpha_points: 0.25
-  bottom_alpha_hold: 0.05
-  bottom_max_uncertainty: 
+  # 检测�

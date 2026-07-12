@@ -649,7 +649,7 @@ int cargoBottomSourcePriority(CargoBottomSource source) noexcept {
                           result.origin_height_stats,
                           config_.origin_height_uncertainty_min,
                           config_.origin_height_confidence_base,
-                          "track_origin_points_height_prior");
+                          "pre_lift_frozen_height_prior");
 
     if (!selected.valid && stable_.valid &&
         stable_.track_id == observation.track_id) {
@@ -854,25 +854,4 @@ int cargoBottomSourcePriority(CargoBottomSource source) noexcept {
         stable_.bottom_z_base = selected.bottom_z_base;
         stable_.top_z_base = selected.top_z_base;
         stable_.uncertainty = selected.uncertainty;
-        stable_.confidence = selected.confidence;
-        stable_.center_base = result.geometry.center_base.head<2>();
-        stable_.size_xy = (
-            result.geometry.size_base.head<2>().array() -
-            2.0F * std::max(0.0F, config_.footprint_margin)).max(
-                config_.min_footprint_size).matrix();
-        stable_.track_center_valid = observation.track_center_valid;
-        if (stable_.track_center_valid) {
-            stable_.bottom_offset_from_track_center =
-                selected.bottom_z_base - observation.track_center_base.z();
-            stable_.top_offset_from_track_center =
-                selected.top_z_base - observation.track_center_base.z();
-        }
-        stable_.stats = selected.stats;
-    }
-    if (!result.valid) {
-        result.reason += ";geometry_invalid";
-    }
-    return result;
-}
-
-}  // namespace ndt_slam
+        stable_.con

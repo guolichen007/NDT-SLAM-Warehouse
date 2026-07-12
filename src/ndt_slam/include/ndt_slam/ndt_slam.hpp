@@ -35,6 +35,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <limits>
@@ -65,6 +66,7 @@
 #include "lidar_slam2_msgs/LoadMap.h"
 #include "lidar_slam2_msgs/CargoBottomEstimate.h"
 #include "lidar_slam2_msgs/CargoSafetyStatus.h"
+#include "lidar_slam2_msgs/HookLoadState.h"
 
 // KISS-ICP config struct (保留用于兼容)
 namespace kiss_icp { namespace pipeline {
@@ -124,6 +126,8 @@ public:
 
 private:
     void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg);
+    void hookLoadStateCallback(
+        const lidar_slam2_msgs::HookLoadState::ConstPtr& msg);
 
     void processCloudThread();
 
@@ -228,6 +232,7 @@ private:
     ros::NodeHandle nh_;
 
     ros::Subscriber pointcloud_sub_;
+    ros::Subscriber hook_load_state_sub_;
 
     ros::Publisher odom_pub_;
     ros::Publisher pose_pub_;
@@ -1200,6 +1205,9 @@ private:
             float obstacle_top_percentile = 0.95f;
             int obstacle_min_points = 5;
             float obstacle_cluster_tolerance_m = 0.25f;
+            float maximum_obstacle_cloud_age_sec = 0.50f;
+            int minimum_roi_finite_points = 20;
+            float minimum_roi_coverage_ratio = 0.01f;
 
             bool exclude_ground = true;
             float ground_hag_min_m = 0.20f;
@@ -1346,6 +1354,7 @@ private:
     struct CargoBoxObservation {
         bool valid = false;
 
+
         Eigen::Vector3f center_base = Eigen::Vector3f::Zero();   // tight box center in base_link
         Eigen::Vector3f size = Eigen::Vector3f::Zero();          // tight box size
         float z_min = 0.0f;
@@ -1385,9 +1394,7 @@ private:
     int high_bottom_reject_count_ = 0;
 
     // 统一配置 getter
-    bool isHookCargoRemovalEnabled() const {
-        return hook_lock_config_.enable_hook_cargo_removal;
-    }
+    bool isHookCargoRemovalEnabled() const;
 
     struct HookCargoLock {
         HookCargoLockState state = HookCargoLockState::EMPTY;
@@ -1483,6 +1490,29 @@ private:
     std::uint64_t cargo_origin_height_track_id_ = 0;
     ros::Time last_cargo_pipeline_stamp_;
 
+    struct HookLoadSnapshot {
+        bool valid = false;
+        std::uint8_t state = lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN;
+        float voltage = std::numeric_limits<float>::quiet_NaN();
+        std::uint32_t stable_samples = 0;
+        ros::Time source_stamp;
+        double receipt_wall_sec = 0.0;
+        double source_progress_wall_sec = 0.0;
+        std::string reason = "no_signal";
+    };
+    bool hook_load_signal_enabled_ = true;
+    bool hook_load_signal_required_ = true;
+    std::string hook_load_state_topic_ = "/hook/load_state";
+    double hook_load_state_stale_timeout_sec_ = 0.80;
+    mutable std::mutex hook_load_state_mutex_;
+    HookLoadSnapshot hook_load_snapshot_;
+    std::uint8_t last_processed_hook_load_state_ =
+        lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN;
+    std::deque<float> empty_hook_height_history_;
+    std::size_t empty_hook_height_history_max_samples_ = 10U;
+    bool pending_origin_height_valid_ = false;
+    float pending_origin_height_m_ = 0.0F;
+
     // OdomAnchorBox 新函数
     HookCargoDetection detectCargoAroundOdomAnchor(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
@@ -1532,6 +1562,14 @@ private:
         const ros::Time& stamp);
     void publishCargoFusionMarker(const CargoBottomResult& bottom,
                                   const ros::Time& stamp);
+    HookLoadSnapshot currentHookLoadSnapshot() const;
+    void publishHookOnlySafetyStatus(const HookLoadSnapshot& hook,
+                                     const ros::Time& stamp,
+                                     bool visual_conflict,
+                                     const std::string& reason);
+    void resetCargoForHookState(bool preserve_origin_height);
+    bool hookAllowsMapCommit() const;
+    void recordEmptyHookOriginHeight(float height_m);
 
     // ========== Runtime Diagnostics (1.0x/1.5x acceptance testing) ==========
     RuntimeDiagnostics runtime_diag_;

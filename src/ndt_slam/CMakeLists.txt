@@ -51,7 +51,6 @@ include_directories(
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
   ${SOPHUS_INCLUDE_DIR}
-  /home/ydkj/.local/include
   ${OpenCV_INCLUDE_DIRS}
   ${ndt_omp_INCLUDE_DIRS}
 )
@@ -85,11 +84,13 @@ set(LIBRARY_SOURCES
   # Formal cargo bottom and fail-safe safety pipeline
   src/cargo_bottom_fusion.cpp
   src/cargo_safety_evaluator.cpp
+  src/hook_load_state_filter.cpp
 )
 
 add_library(ndt_slam_lib SHARED
   ${LIBRARY_SOURCES}
 )
+add_dependencies(ndt_slam_lib ${catkin_EXPORTED_TARGETS})
 
 target_link_libraries(ndt_slam_lib
   ${catkin_LIBRARIES}
@@ -104,11 +105,11 @@ target_link_libraries(ndt_slam_lib
   Boost::filesystem
   pthread
   dl
-  usb-1.0
 )
 
 # 主节点可执行文件
 add_executable(ndt_slam_node src/main.cpp)
+add_dependencies(ndt_slam_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(ndt_slam_node
   ndt_slam_lib
   ${catkin_LIBRARIES}
@@ -135,8 +136,3 @@ target_link_libraries(cloud_diagnostics
 add_executable(cargo_forbidden_zone_node src/cargo_forbidden_zone_node.cpp)
 target_link_libraries(cargo_forbidden_zone_node
   ${catkin_LIBRARIES}
-  ${PCL_LIBRARIES}
-  yaml-cpp
-)
-
-# Independent wall-clock fail-safe heartbeat. This is the sole publis
