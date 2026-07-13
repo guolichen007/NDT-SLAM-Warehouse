@@ -695,6 +695,12 @@ hook_cargo_lock:
   lock_min_visible_height: 0.50
   lock_min_xy_area: 0.40
   lock_max_center_step_m: 0.30
+  compact_lock_enabled: true
+  compact_min_points: 40
+  compact_min_visible_height: 0.18
+  compact_min_xy_area: 0.12
+  compact_confirm_frames: 5
+  compact_max_size_relative_step: 0.25
 
   # locked search margin
   locked_search_margin_x: 0.30
@@ -776,6 +782,12 @@ odom_anchored_cargo_box:
     hag_filter_enabled: true
     hag_min_m: 0.15
     hag_max_m: 2.50
+    # Never use the payload ROI minimum as ground. Ground is accepted only
+    # from a spatially distributed ring outside the payload crop.
+    ground_ring_width_m: 2.0
+    ground_cell_size_m: 0.50
+    ground_min_cells: 4
+    ground_max_range_m: 0.15
     percentile_low: 0.08
     percentile_high: 0.92
     margin_xy_m: 0.05

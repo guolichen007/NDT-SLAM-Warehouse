@@ -167,11 +167,8 @@ private:
         uint64_t content_version,
         const std::string& reason);
 
-    void rebuildGlobalMap();
-    void rebuildGlobalMapFiltered();  // 使用 filtered keyframes + dynamic mask 重建地图
-    void rebuildDisplayMap();     // 重建细体素显示地图
+    void rebuildGlobalMapFromSnapshot(std::uint64_t expected_generation);
     void publishDisplayMap();     // 发布显示地图
-    void rebuildGroundAndObjectsMap();  // 重建地面/非地面分层地图
     void rebuildCleanMap();             // 异步重建 clean map（带时间一致性）
     void publishGroundMap();
     void publishObjectsMap();
@@ -191,6 +188,7 @@ private:
     void publishCurrentCloud();
 
     void processLoopClosure();
+    void consumeLoopClosureResult(const ros::Time& stamp);
 
     bool resetService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response);
     bool setPoseService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response);
@@ -207,7 +205,8 @@ private:
     void timerCallback(const ros::TimerEvent&);
 
     void performRelocalization();
-    void updatePoseFromLoopClosure(const Sophus::SE3d& new_pose);
+    void updatePoseFromLoopClosure(const Sophus::SE3d& new_pose,
+                                   const ros::Time& stamp);
     void consumeRelocalizationResult(std::uint64_t frame_index,
                                      const ros::Time& stamp);
     void updateRelocalization(
@@ -648,19 +647,20 @@ private:
     std::map<BevKey, int> bev_observation_count_;
     int clean_min_observations_ = 2;  // 至少被 2 个关键帧观测到
 
-    // Map maintenance is kept on the single map-writer thread. When localization
-    // input is queued, expensive clean-map rebuild and RViz serialization are
-    // deferred instead of extending the localization backlog.
-    bool map_maintenance_pending_ = false;
-    bool clean_map_rebuild_pending_ = false;
+    // Stateful maintenance remains on the localization owner thread. Pure map
+    // reconstruction runs from immutable keyframe snapshots and only swaps
+    // completed cloud pointers under map_mutex_.
+    std::atomic<bool> map_maintenance_pending_{false};
+    std::atomic<bool> clean_map_rebuild_pending_{false};
     bool map_maintenance_has_run_ = false;
-    bool loop_closure_pending_ = false;
+    std::atomic<bool> loop_closure_pending_{false};
     bool shadow_target_pending_ = false;
     bool release_keyframes_pending_ = false;
     bool flush_tiles_pending_ = false;
     bool runtime_status_pending_ = false;
     bool memory_guard_pending_ = false;
     bool active_map_rebuild_pending_ = false;
+    std::atomic<bool> clean_rebuild_requested_from_worker_{false};
     std::uint64_t clean_map_content_version_ = 0U;
     std::uint64_t shadow_target_source_version_ = 0U;
     Sophus::SE3d shadow_target_pose_;
@@ -675,9 +675,26 @@ private:
     Eigen::Quaterniond last_orientation_;
 
     LoopClosureDetector loop_closure_detector_;
-    PoseGraphOptimizer pose_graph_optimizer_;
+    bool loop_closure_enabled_ = false;
     int loop_detection_interval_ = 10;
     int keyframe_count_ = 0;
+
+    struct LoopClosureResult {
+        bool valid = false;
+        std::uint64_t pose_version = 0U;
+        std::uint64_t snapshot_last_id = 0U;
+        Sophus::SE3d snapshot_last_pose;
+        Sophus::SE3d optimized_last_pose;
+        LoopCandidate candidate;
+        std::vector<KeyFrame> optimized_keyframes;
+        std::string reason;
+    };
+    std::thread loop_closure_thread_;
+    std::atomic<bool> loop_closure_running_{false};
+    std::atomic<bool> loop_closure_result_ready_{false};
+    std::atomic<std::uint64_t> keyframe_pose_version_{0U};
+    std::mutex loop_closure_result_mutex_;
+    LoopClosureResult loop_closure_result_;
 
     // P0: DuplicateFrameGuard 内容指纹
     struct FrameSignature {
@@ -714,12 +731,15 @@ private:
     ros::Timer timer_;
 
     // Loop closure deduplication
+    std::mutex processed_loops_mutex_;
     std::set<std::pair<int, int>> processed_loops_;
 
     // 异步地图重建
     std::thread rebuild_thread_;
+    std::mutex map_rebuild_execution_mutex_;
     std::atomic<bool> rebuild_pending_{false};
     std::atomic<bool> rebuild_running_{false};
+    std::atomic<std::uint64_t> map_rebuild_generation_{0U};
     void asyncRebuildGlobalMap();
 
     // 动态点过滤参数
@@ -946,6 +966,10 @@ private:
     std::atomic<uint64_t> motion_gate_invariant_check_count_{0};
     std::atomic<uint64_t> motion_gate_invariant_violation_count_{0};
     std::atomic<uint64_t> motion_gate_map_commit_block_count_{0};
+    std::atomic<std::uint64_t> channel_candidate_points_{0U};
+    std::atomic<std::uint64_t> candidate_removed_before_auth_{0U};
+    std::atomic<std::uint64_t> candidate_kept_before_auth_{0U};
+    std::atomic<std::uint64_t> formal_box_removed_points_{0U};
 
     // 关键帧 active window
     int max_active_keyframes_ = 80;
@@ -1075,7 +1099,6 @@ private:
     void saveMultiLayerMaps(const std::string& session_dir);
 
     // 从关键帧重建地图（不叠加旧 PCD）
-    void rebuildMapFromKeyframes(const std::string& session_dir);
 
     // ========== Commit B: cargo target 一致性 ==========
     int selected_payload_track_id_ = -1;
@@ -1099,6 +1122,10 @@ private:
         float visible_height = 0.0f;
         float xy_area = 0.0f;  // XY 面积
         pcl::PointCloud<pcl::PointXYZ>::Ptr core_points_base;
+        float raw_roi_min_z = std::numeric_limits<float>::quiet_NaN();
+        float hag_filtered_min_z = std::numeric_limits<float>::quiet_NaN();
+        float ground_z = std::numeric_limits<float>::quiet_NaN();
+        bool ground_reference_valid = false;
         float score = 0.0f;
         std::string reject_reason;
     };
@@ -1192,6 +1219,10 @@ private:
             bool hag_filter_enabled = true;
             float hag_min_m = 0.15f;
             float hag_max_m = 2.50f;
+            float ground_ring_width_m = 2.0f;
+            float ground_cell_size_m = 0.50f;
+            int ground_min_cells = 4;
+            float ground_max_range_m = 0.15f;
 
             // 分位数参数
             float percentile_low = 0.08f;
@@ -1365,6 +1396,12 @@ private:
         float lock_min_visible_height = 0.50f;
         float lock_min_xy_area = 0.40f;
         float lock_max_center_step_m = 0.30F;
+        bool compact_lock_enabled = true;
+        int compact_min_points = 40;
+        float compact_min_visible_height = 0.18F;
+        float compact_min_xy_area = 0.12F;
+        int compact_confirm_frames = 5;
+        float compact_max_size_relative_step = 0.25F;
 
         // locked search margin
         float locked_search_margin_x = 0.30f;
@@ -1452,6 +1489,8 @@ private:
         pcl::PointCloud<pcl::PointXYZ>::Ptr last_accepted_core_points;
         Eigen::Vector3f last_accepted_center = Eigen::Vector3f::Zero();
         bool has_last_accepted = false;
+        Eigen::Vector3f last_accepted_size = Eigen::Vector3f::Zero();
+        bool candidate_compact_profile = false;
     };
 
     HookCargoLockConfig hook_lock_config_;
@@ -1572,6 +1611,7 @@ private:
     bool isStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
     bool isWeakDetection(const HookCargoDetection& det);
     bool isLockStrongDetection(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
+    bool isCompactLockStrongDetection(const HookCargoDetection& det) const;
     bool isBodyStrongCandidate(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
     bool isDetectionConsistentWithLockedBox(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom, std::string* reject_reason);
     Eigen::Vector3f computeFixedCenterSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);

@@ -220,6 +220,13 @@ if(CATKIN_ENABLE_TESTING)
     target_link_libraries(hook_load_state_filter_test
       ndt_slam_lib ${catkin_LIBRARIES})
   endif()
+
+  catkin_add_gtest(cargo_observation_policy_test
+    test/cargo_observation_policy_test.cpp)
+  if(TARGET cargo_observation_policy_test)
+    target_link_libraries(cargo_observation_policy_test
+      ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+  endif()
 endif()
 
 install(TARGETS ndt_slam_lib ndt_slam_node pointcloud_merger cloud_diagnostics

@@ -267,4 +267,12 @@ void KeyFrameManager::updateKeyFramePose(uint64_t id, const Sophus::SE3d& new_po
     }
 }
 
+void KeyFrameManager::clear() {
+    keyframes_.clear();
+    spatial_index_.clear();
+    last_keyframe_id_ = 0U;
+    last_keyframe_time_ = ros::Time(0);
+    last_keyframe_pose_ = Sophus::SE3d();
+}
+
 } // namespace ndt_slam

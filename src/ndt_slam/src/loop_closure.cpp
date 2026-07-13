@@ -47,18 +47,19 @@ Eigen::MatrixXd ScanContext::generate(const pcl::PointCloud<pcl::PointXYZ>::Ptr&
             }
         }
     } catch (const std::exception& e) {
-        // 捕获异常，避免程序崩溃
+        ROS_ERROR_THROTTLE(1.0, "[KeyFrame] add failed: %s", e.what());
     }
 
     return sc;
 }
 
-double ScanContext::calculateSimilarity(const Eigen::MatrixXd& sc1, const Eigen::MatrixXd& sc2) {
+double ScanContext::calculateSimilarity(
+    const Eigen::MatrixXd& sc1, const Eigen::MatrixXd& sc2) const {
     return calculateSimilarityWithShift(sc1, sc2).first;
 }
 
 std::pair<double, int> ScanContext::calculateSimilarityWithShift(
-    const Eigen::MatrixXd& query, const Eigen::MatrixXd& candidate) {
+    const Eigen::MatrixXd& query, const Eigen::MatrixXd& candidate) const {
     if (query.rows() != candidate.rows() ||
         query.cols() != candidate.cols() || query.size() == 0) {
         return {0.0, 0};
@@ -86,7 +87,9 @@ std::pair<double, int> ScanContext::calculateSimilarityWithShift(
     return {std::clamp(best_similarity, 0.0, 1.0), best_shift};
 }
 
-int ScanContext::findBestMatch(const Eigen::MatrixXd& current_sc, const std::vector<Eigen::MatrixXd>& sc_list) {
+int ScanContext::findBestMatch(
+    const Eigen::MatrixXd& current_sc,
+    const std::vector<Eigen::MatrixXd>& sc_list) const {
     if (sc_list.empty()) return -1;
 
     double best_similarity = -1.0;
@@ -280,14 +283,18 @@ void LoopClosureDetector::configure(int num_rings, int num_sectors, double max_r
     rotation_threshold_ = rotation_threshold;
 }
 
-void LoopClosureDetector::addKeyFrame(const Sophus::SE3d& pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const ros::Time& stamp) {
+bool LoopClosureDetector::addKeyFrame(
+    const Sophus::SE3d& pose,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    const ros::Time& stamp) {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
     try {
         if (keyframe_manager_.isKeyFrame(pose, stamp)) {
             keyframe_manager_.addKeyFrame(pose, cloud, stamp);
 
             const auto& keyframes = keyframe_manager_.getKeyFrames();
             if (keyframes.empty()) {
-                return;
+                return false;
             }
             KeyFrame& last_keyframe = const_cast<KeyFrame&>(keyframes.back());
             // Keyframe clouds are stored in base_link coordinates. Their scan
@@ -297,27 +304,37 @@ void LoopClosureDetector::addKeyFrame(const Sophus::SE3d& pose, const pcl::Point
                 scan_context_.generate(cloud, Eigen::Vector3d::Zero());
 
             scan_context_list_.push_back(last_keyframe.scan_context_);
+            return true;
         }
     } catch (const std::exception& e) {
         // 捕获异常，避免程序崩溃
     }
+    return false;
 }
 
 LoopCandidate LoopClosureDetector::detectLoop() {
+    return detectLoop(getKeyFramesSnapshot());
+}
+
+LoopCandidate LoopClosureDetector::detectLoop(
+    const std::deque<KeyFrame>& keyframes) const {
     LoopCandidate candidate;
     candidate.current_keyframe_id = -1;
     candidate.candidate_keyframe_id = -1;
 
-    const auto& keyframes = keyframe_manager_.getKeyFrames();
     if (keyframes.size() < 30) return candidate;
 
     const KeyFrame& current_keyframe = keyframes.back();
+    if (!current_keyframe.cloud_ || current_keyframe.cloud_->empty()) {
+        return candidate;
+    }
 
     const int min_keyframe_gap = 25;
     const double min_loop_distance = 5.0;
     std::vector<int> spatial_candidates;
     for (size_t i = 0; i < keyframes.size() - min_keyframe_gap; ++i) {
         const KeyFrame& kf = keyframes[i];
+        if (!kf.cloud_ || kf.cloud_->empty()) continue;
         double distance = (current_keyframe.pose_.translation() - kf.pose_.translation()).norm();
         if (distance < spatial_search_radius_ && distance > min_loop_distance) {
             spatial_candidates.push_back(i);
@@ -357,7 +374,9 @@ LoopCandidate LoopClosureDetector::detectLoop() {
     return candidate;
 }
 
-bool LoopClosureDetector::checkConsistency(const Sophus::SE3d& loop_pose, const Sophus::SE3d& odometry_pose) {
+bool LoopClosureDetector::checkConsistency(
+    const Sophus::SE3d& loop_pose,
+    const Sophus::SE3d& odometry_pose) const {
     double translation_diff = (loop_pose.translation() - odometry_pose.translation()).norm();
 
     Sophus::SO3d rotation_diff = odometry_pose.so3().inverse() * loop_pose.so3();
@@ -387,7 +406,10 @@ std::optional<Sophus::SE3d> LoopClosureDetector::refinePose(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
     const Sophus::SE3d& initial_guess,
-    bool global_relocalization) {
+    bool global_relocalization) const {
+    if (!source || !target || source->empty() || target->empty()) {
+        return std::nullopt;
+    }
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_source = filterInvalidPoints(source);
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_target = filterInvalidPoints(target);
 
@@ -456,7 +478,7 @@ std::optional<Sophus::SE3d> LoopClosureDetector::globalRelocalization(
     const auto hints = findRelocalizationHints(cloud, 1, 0.70);
     if (hints.empty()) return std::nullopt;
 
-    const auto& keyframes = keyframe_manager_.getKeyFrames();
+    const auto keyframes = getKeyFramesSnapshot();
     const auto it = std::find_if(
         keyframes.begin(), keyframes.end(), [&hints](const KeyFrame& keyframe) {
             return keyframe.id_ == hints.front().keyframe_id;
@@ -489,7 +511,7 @@ std::vector<RelocalizationHint> LoopClosureDetector::findRelocalizationHints(
     std::vector<RelocalizationHint> hints;
     if (!cloud || cloud->empty() || max_candidates == 0U) return hints;
 
-    const auto& keyframes = keyframe_manager_.getKeyFrames();
+    const auto keyframes = getKeyFramesSnapshot();
     if (keyframes.empty()) return hints;
     const Eigen::MatrixXd query =
         scan_context_.generate(cloud, Eigen::Vector3d::Zero());
@@ -520,6 +542,7 @@ std::vector<RelocalizationHint> LoopClosureDetector::findRelocalizationHints(
 }
 
 void LoopClosureDetector::rebuildScanContexts() {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
     auto& keyframes = const_cast<std::deque<KeyFrame>&>(
         keyframe_manager_.getKeyFrames());
     scan_context_list_.clear();
@@ -532,6 +555,7 @@ void LoopClosureDetector::rebuildScanContexts() {
 }
 
 void LoopClosureDetector::updateKeyFramePoses(const std::vector<KeyFrame>& updated_keyframes) {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
     auto& keyframes = const_cast<std::deque<KeyFrame>&>(keyframe_manager_.getKeyFrames());
 
     for (const auto& updated_kf : updated_keyframes) {
@@ -544,7 +568,117 @@ void LoopClosureDetector::updateKeyFramePoses(const std::vector<KeyFrame>& updat
     }
 }
 
-// ========== LoopClosureNode 实现 ==========
+// ========== Thread-safe keyframe snapshot and commit APIs ==========
+
+std::deque<KeyFrame> LoopClosureDetector::getKeyFramesSnapshot() const {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    return keyframe_manager_.getKeyFrames();
+}
+
+std::size_t LoopClosureDetector::getKeyFrameCount() const {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    return keyframe_manager_.getKeyFrameCount();
+}
+
+void LoopClosureDetector::clear() {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    keyframe_manager_.clear();
+    scan_context_list_.clear();
+}
+
+bool LoopClosureDetector::saveKeyFrameDatabase(
+    const std::string& session_dir) const {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    return keyframe_manager_.saveKeyFrameDatabase(session_dir);
+}
+
+bool LoopClosureDetector::loadKeyFrameDatabase(
+    const std::string& session_dir) {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    if (!keyframe_manager_.loadKeyFrameDatabase(session_dir)) return false;
+    auto& keyframes = keyframe_manager_.getKeyFramesNonConst();
+    scan_context_list_.clear();
+    scan_context_list_.reserve(keyframes.size());
+    for (auto& keyframe : keyframes) {
+        if (!keyframe.cloud_ || keyframe.cloud_->empty()) continue;
+        keyframe.scan_context_ = scan_context_.generate(
+            keyframe.cloud_, Eigen::Vector3d::Zero());
+        scan_context_list_.push_back(keyframe.scan_context_);
+    }
+    return true;
+}
+
+void LoopClosureDetector::applyKeyFrameMetrics(
+    const std::vector<std::pair<std::uint64_t, KeyFrameMetrics>>& metrics) {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    std::map<std::uint64_t, KeyFrameMetrics> by_id(
+        metrics.begin(), metrics.end());
+    for (auto& keyframe : keyframe_manager_.getKeyFramesNonConst()) {
+        const auto found = by_id.find(keyframe.id_);
+        if (found != by_id.end()) keyframe.metrics_ = found->second;
+    }
+}
+
+bool LoopClosureDetector::setLastKeyFrameLayers(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_raw,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_filtered,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_points) {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    auto& keyframes = keyframe_manager_.getKeyFramesNonConst();
+    if (keyframes.empty()) return false;
+    auto& keyframe = keyframes.back();
+    keyframe.objects_raw = objects_raw;
+    keyframe.objects_filtered = objects_filtered;
+    keyframe.ground_points = ground_points;
+    keyframe.dirty_dynamic = false;
+    return true;
+}
+
+std::size_t LoopClosureDetector::releaseCloudsBeforeActiveWindow(
+    std::size_t max_active) {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    auto& keyframes = keyframe_manager_.getKeyFramesNonConst();
+    if (keyframes.size() <= max_active) return 0U;
+    std::size_t released = 0U;
+    const std::size_t end = keyframes.size() - max_active;
+    for (std::size_t i = 0; i < end; ++i) {
+        if (keyframes[i].cloud_ && !keyframes[i].cloud_->empty()) {
+            keyframes[i].cloud_.reset();
+            ++released;
+        }
+    }
+    return released;
+}
+
+void LoopClosureDetector::applyOptimizedPoses(
+    const std::vector<KeyFrame>& optimized,
+    std::uint64_t snapshot_last_id,
+    const Sophus::SE3d& correction_for_newer_frames) {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    auto& keyframes = keyframe_manager_.getKeyFramesNonConst();
+    std::map<std::uint64_t, Sophus::SE3d> optimized_by_id;
+    for (const auto& keyframe : optimized) {
+        optimized_by_id.emplace(keyframe.id_, keyframe.pose_);
+    }
+    for (auto& keyframe : keyframes) {
+        const auto found = optimized_by_id.find(keyframe.id_);
+        if (found != optimized_by_id.end()) {
+            keyframe.pose_ = found->second;
+            keyframe.pose_refined_ = found->second;
+            keyframe.has_refined_pose_ = true;
+            keyframe.dirty_pose = false;
+        } else if (keyframe.id_ > snapshot_last_id) {
+            keyframe.pose_ = correction_for_newer_frames * keyframe.pose_;
+            if (keyframe.has_refined_pose_) {
+                keyframe.pose_refined_ =
+                    correction_for_newer_frames * keyframe.pose_refined_;
+            }
+            keyframe.dirty_pose = false;
+        }
+    }
+}
+
+// ========== LoopClosureNode implementation ==========
 
 LoopClosureNode::LoopClosureNode(const ros::NodeHandle& nh)
     : nh_(nh) {
@@ -610,7 +744,7 @@ void LoopClosureNode::initializeParameters() {
 
 void LoopClosureNode::timerCallback(const ros::TimerEvent&) {
     ROS_INFO("[Timer] keyframes=%zu, cloud=%zu, init=%d",
-                loop_closure_detector_.getKeyFrames().size(),
+                loop_closure_detector_.getKeyFrameCount(),
                 last_cloud_->size(),
                 initialized_);
 }
@@ -641,8 +775,9 @@ void LoopClosureNode::pointCloudCallback(const sensor_msgs::PointCloud2::ConstPt
 
         loop_closure_detector_.addKeyFrame(last_pose_, cloud, msg->header.stamp);
 
-        const auto& keyframes = loop_closure_detector_.getKeyFrames();
-        if (keyframes.size() > 0 && keyframes.size() % loop_detection_interval_ == 0) {
+        const auto keyframes = loop_closure_detector_.getKeyFramesSnapshot();
+        if (!keyframes.empty() &&
+            keyframes.size() % loop_detection_interval_ == 0) {
             processLoopClosure();
         }
     } catch (const std::exception& e) {
@@ -660,7 +795,7 @@ void LoopClosureNode::processLoopClosure() {
                  candidate.candidate_keyframe_id,
                  candidate.similarity);
 
-        const auto& keyframes = loop_closure_detector_.getKeyFrames();
+        const auto keyframes = loop_closure_detector_.getKeyFramesSnapshot();
         for (const auto& keyframe : keyframes) {
             pose_graph_optimizer_.addKeyFrame(keyframe);
         }

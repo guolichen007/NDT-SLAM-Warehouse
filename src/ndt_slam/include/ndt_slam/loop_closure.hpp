@@ -14,11 +14,13 @@
 #include <pcl/registration/icp.h>
 
 #include <Eigen/Core>
+#include <cstdint>
 #include <vector>
 #include <string>
 #include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <utility>
 
@@ -53,10 +55,12 @@ public:
     }
 
     Eigen::MatrixXd generate(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const Eigen::Vector3d& origin);
-    double calculateSimilarity(const Eigen::MatrixXd& sc1, const Eigen::MatrixXd& sc2);
+    double calculateSimilarity(const Eigen::MatrixXd& sc1,
+                               const Eigen::MatrixXd& sc2) const;
     std::pair<double, int> calculateSimilarityWithShift(
-        const Eigen::MatrixXd& query, const Eigen::MatrixXd& candidate);
-    int findBestMatch(const Eigen::MatrixXd& current_sc, const std::vector<Eigen::MatrixXd>& sc_list);
+        const Eigen::MatrixXd& query, const Eigen::MatrixXd& candidate) const;
+    int findBestMatch(const Eigen::MatrixXd& current_sc,
+                      const std::vector<Eigen::MatrixXd>& sc_list) const;
 
 private:
     int num_rings_;
@@ -89,9 +93,14 @@ public:
                    double spatial_search_radius, double similarity_threshold,
                    double translation_threshold, double rotation_threshold);
 
-    void addKeyFrame(const Sophus::SE3d& pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const ros::Time& stamp);
+    bool addKeyFrame(const Sophus::SE3d& pose,
+                     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+                     const ros::Time& stamp);
     LoopCandidate detectLoop();
-    bool checkConsistency(const Sophus::SE3d& loop_pose, const Sophus::SE3d& odometry_pose);
+    LoopCandidate detectLoop(
+        const std::deque<KeyFrame>& immutable_keyframes) const;
+    bool checkConsistency(const Sophus::SE3d& loop_pose,
+                          const Sophus::SE3d& odometry_pose) const;
     std::optional<Sophus::SE3d> globalRelocalization(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
     std::vector<RelocalizationHint> findRelocalizationHints(
@@ -100,12 +109,28 @@ public:
         double min_similarity = 0.55);
     void rebuildScanContexts();
 
-    const std::deque<KeyFrame>& getKeyFrames() const { return keyframe_manager_.getKeyFrames(); }
+    std::deque<KeyFrame> getKeyFramesSnapshot() const;
+    std::size_t getKeyFrameCount() const;
+    void clear();
+    bool saveKeyFrameDatabase(const std::string& session_dir) const;
+    bool loadKeyFrameDatabase(const std::string& session_dir);
+    void applyKeyFrameMetrics(
+        const std::vector<std::pair<std::uint64_t, KeyFrameMetrics>>& metrics);
+    bool setLastKeyFrameLayers(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_raw,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_filtered,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_points);
+    std::size_t releaseCloudsBeforeActiveWindow(std::size_t max_active);
+    void applyOptimizedPoses(
+        const std::vector<KeyFrame>& optimized,
+        std::uint64_t snapshot_last_id,
+        const Sophus::SE3d& correction_for_newer_frames);
     KeyFrameManager& getKeyFrameManager() { return keyframe_manager_; }
     const KeyFrameManager& getKeyFrameManager() const { return keyframe_manager_; }
     void updateKeyFramePoses(const std::vector<KeyFrame>& updated_keyframes);
 
 private:
+    mutable std::mutex keyframes_mutex_;
     ScanContext scan_context_;
     KeyFrameManager keyframe_manager_;
     std::vector<Eigen::MatrixXd> scan_context_list_;
@@ -128,7 +153,7 @@ private:
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
         const Sophus::SE3d& initial_guess,
-        bool global_relocalization);
+        bool global_relocalization) const;
 };
 
 // 位姿图优化器类

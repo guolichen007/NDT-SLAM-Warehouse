@@ -66,6 +66,24 @@ TEST(RelocalizationScanContext, MissingCandidateIsExplicitFailure) {
     EXPECT_FALSE(result.has_value());
 }
 
+TEST(RelocalizationScanContext, WorkerSnapshotSurvivesLiveCloudRelease) {
+    LoopClosureDetector detector;
+    detector.configure(20, 60, 80.0, 8.0, 0.8, 1.0, 0.2);
+    const auto cloud = makeAsymmetricCloud();
+    ASSERT_TRUE(detector.addKeyFrame(
+        Sophus::SE3d(), cloud, ros::Time(1, 0)));
+    const auto snapshot = detector.getKeyFramesSnapshot();
+    ASSERT_EQ(snapshot.size(), 1U);
+    ASSERT_TRUE(snapshot.front().cloud_);
+
+    EXPECT_EQ(detector.releaseCloudsBeforeActiveWindow(0U), 1U);
+    EXPECT_TRUE(snapshot.front().cloud_);
+    EXPECT_FALSE(snapshot.front().cloud_->empty());
+    detector.clear();
+    EXPECT_EQ(detector.getKeyFrameCount(), 0U);
+    EXPECT_FALSE(snapshot.front().cloud_->empty());
+}
+
 TEST(NdtRelocalizerLifecycle, RejectsIncompleteJobsWithoutBlocking) {
     NdtRelocalizer relocalizer;
     RelocalizationConfig config;
