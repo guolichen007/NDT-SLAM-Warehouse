@@ -5,6 +5,11 @@
 namespace ndt_slam {
 namespace {
 
+TEST(CargoSafetyConfig, DefaultsToFivePercentRoiCoverage) {
+    const CargoSafetyConfig config;
+    EXPECT_FLOAT_EQ(config.minimum_roi_coverage_ratio, 0.05F);
+}
+
 CargoSafetyInput baseInput() {
     CargoSafetyInput input;
     input.height.valid = true;

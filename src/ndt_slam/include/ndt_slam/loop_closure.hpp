@@ -115,10 +115,20 @@ private:
     double translation_threshold_ = 1.0;
     double rotation_threshold_ = 10.0 * M_PI / 180.0;
 
+    double loop_icp_max_correspondence_m_ = 1.0;
+    double loop_icp_max_fitness_ = 0.50;
+    double loop_icp_max_correction_translation_m_ = 1.0;
+    double loop_icp_max_correction_rotation_rad_ = 15.0 * M_PI / 180.0;
+    double global_icp_max_correspondence_m_ = 1.5;
+    double global_icp_max_fitness_ = 0.80;
+    double global_icp_max_correction_translation_m_ = 1.5;
+    double global_icp_max_correction_rotation_rad_ = 20.0 * M_PI / 180.0;
+
     std::optional<Sophus::SE3d> refinePose(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
-        const Sophus::SE3d& initial_guess);
+        const Sophus::SE3d& initial_guess,
+        bool global_relocalization);
 };
 
 // 位姿图优化器类

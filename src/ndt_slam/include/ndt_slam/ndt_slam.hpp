@@ -156,8 +156,9 @@ private:
                        const ros::Time& stamp);
 
     // V3: Localization Target 管理
-    void updateLocalizationTarget(const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud,
-                                   const Sophus::SE3d& pose);
+    bool updateLocalizationTarget(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud,
+        const Sophus::SE3d& pose);
     bool swapLocalizationTargetBuffers();
     bool updateCroppedCachedTarget(const Sophus::SE3d& predicted_pose);
     void bindNdtInputTarget(
@@ -651,8 +652,18 @@ private:
     // input is queued, expensive clean-map rebuild and RViz serialization are
     // deferred instead of extending the localization backlog.
     bool map_maintenance_pending_ = false;
+    bool clean_map_rebuild_pending_ = false;
     bool map_maintenance_has_run_ = false;
     bool loop_closure_pending_ = false;
+    bool shadow_target_pending_ = false;
+    bool release_keyframes_pending_ = false;
+    bool flush_tiles_pending_ = false;
+    bool runtime_status_pending_ = false;
+    bool memory_guard_pending_ = false;
+    bool active_map_rebuild_pending_ = false;
+    std::uint64_t clean_map_content_version_ = 0U;
+    std::uint64_t shadow_target_source_version_ = 0U;
+    Sophus::SE3d shadow_target_pose_;
     int map_maintenance_commit_count_ = 0;
     int map_maintenance_interval_commits_ = 3;
     bool localizationInputPending();
@@ -960,6 +971,10 @@ private:
         pcl::PointCloud<pcl::PointXYZ>::Ptr objects;
     };
     std::map<std::string, TileLayers> dirty_tiles_;
+    std::thread tile_flush_thread_;
+    std::atomic<bool> tile_flush_running_{false};
+    std::mutex failed_tile_flush_mutex_;
+    std::map<std::string, TileLayers> failed_tile_flush_batch_;
     ros::Time last_flush_time_;
 
     // tile 体素大小配置
@@ -973,7 +988,7 @@ private:
     int total_keyframes_ = 0;
     int active_keyframes_ = 0;
     int dirty_tile_count_ = 0;
-    int flushed_tile_count_ = 0;
+    std::atomic<int> flushed_tile_count_{0};
     double delta_translation_ = 0.0;
     double delta_yaw_ = 0.0;
     double average_process_time_ms_ = 0.0;
@@ -1215,7 +1230,7 @@ private:
             float obstacle_cluster_tolerance_m = 0.25f;
             float maximum_obstacle_cloud_age_sec = 0.50f;
             int minimum_roi_finite_points = 20;
-            float minimum_roi_coverage_ratio = 0.01f;
+            float minimum_roi_coverage_ratio = 0.05F;
 
             bool exclude_ground = true;
             float ground_hag_min_m = 0.20f;
@@ -1349,6 +1364,7 @@ private:
         int lock_strong_min_points = 80;
         float lock_min_visible_height = 0.50f;
         float lock_min_xy_area = 0.40f;
+        float lock_max_center_step_m = 0.30F;
 
         // locked search margin
         float locked_search_margin_x = 0.30f;
@@ -1492,6 +1508,10 @@ private:
     CargoSafetyResult last_cargo_safety_result_;
     std::uint64_t cargo_fusion_track_id_ = 0;
     bool cargo_fusion_track_active_ = false;
+    bool formal_cargo_removal_authorized_ = false;
+    std::uint64_t formal_cargo_removal_track_id_ = 0;
+    ros::Time formal_cargo_removal_stamp_;
+    double formal_cargo_removal_max_age_sec_ = 0.80;
     bool cargo_origin_height_valid_ = false;
     float cargo_origin_height_m_ = 0.0F;
     std::uint64_t cargo_origin_height_track_id_ = 0;
@@ -1519,6 +1539,8 @@ private:
         float height_m = 0.0F;
         Eigen::Vector2f center_base = Eigen::Vector2f::Zero();
         Eigen::Vector2f center_map = Eigen::Vector2f::Zero();
+        Eigen::Vector2f size_xy = Eigen::Vector2f::Zero();
+        float confidence = 0.0F;
         ros::Time stamp;
     };
     std::deque<OriginHeightSample> empty_hook_height_history_;
@@ -1526,6 +1548,10 @@ private:
     double origin_history_max_age_sec_ = 2.0;
     float origin_history_max_position_spread_m_ = 0.35F;
     float origin_match_max_distance_m_ = 0.50F;
+    float origin_height_max_mad_m_ = 0.10F;
+    float origin_height_max_range_m_ = 0.25F;
+    float origin_size_max_relative_deviation_ = 0.30F;
+    float origin_min_confidence_ = 0.50F;
     bool pending_origin_height_valid_ = false;
     float pending_origin_height_m_ = 0.0F;
     Eigen::Vector2f pending_origin_center_base_ = Eigen::Vector2f::Zero();
@@ -1578,7 +1604,8 @@ private:
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
         const Sophus::SE3d& pose_map_base,
         const ros::Time& stamp,
-        const ros::Time& obstacle_cloud_stamp);
+        const ros::Time& obstacle_cloud_stamp,
+        double processing_age_sec);
     void publishCargoFusionMarker(const CargoBottomResult& bottom,
                                   const ros::Time& stamp);
     HookLoadSnapshot currentHookLoadSnapshot() const;
@@ -1591,6 +1618,8 @@ private:
     void recordEmptyHookOriginHeight(float height_m,
                                      const Eigen::Vector2f& center_base,
                                      const Eigen::Vector2f& center_map,
+                                     const Eigen::Vector2f& size_xy,
+                                     float confidence,
                                      const ros::Time& stamp);
 
     // ========== Runtime Diagnostics (1.0x/1.5x acceptance testing) ==========

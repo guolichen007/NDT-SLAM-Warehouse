@@ -385,11 +385,17 @@ NdtSlamNode::~NdtSlamNode() {
     if (rebuild_thread_.joinable()) {
         rebuild_thread_.join();
     }
+    if (tile_flush_thread_.joinable()) {
+        tile_flush_thread_.join();
+    }
     running_ = false;
 
     ROS_WARN("[Shutdown] Final flush dirty tiles...");
     if (persistent_map_enabled_ && !dirty_tiles_.empty()) {
         flushDirtyTiles();
+    }
+    if (tile_flush_thread_.joinable()) {
+        tile_flush_thread_.join();
     }
     writeRuntimeStatus();
     if (diag_pending_ndt_record_valid_) {
@@ -1162,6 +1168,21 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             origin_match_max_distance_m_ = std::clamp(
                 hls["origin_match_max_distance_m"].as<float>(0.50F),
                 0.05F, 3.0F);
+            origin_height_max_mad_m_ = std::clamp(
+                hls["origin_height_max_mad_m"].as<float>(0.10F),
+                0.01F, 0.50F);
+            origin_height_max_range_m_ = std::clamp(
+                hls["origin_height_max_range_m"].as<float>(0.25F),
+                0.02F, 1.0F);
+            origin_size_max_relative_deviation_ = std::clamp(
+                hls["origin_size_max_relative_deviation"].as<float>(0.30F),
+                0.05F, 1.0F);
+            origin_min_confidence_ = std::clamp(
+                hls["origin_min_confidence"].as<float>(0.50F),
+                0.0F, 1.0F);
+            formal_cargo_removal_max_age_sec_ = std::clamp(
+                hls["formal_removal_max_age_sec"].as<double>(0.80),
+                0.10, 3.0);
             ROS_INFO(
                 "[HookLoadSignal] enabled=%d required=%d state_topic=%s "
                 "consumer_stale=%.2fs origin_samples=%zu origin_age=%.2fs "
@@ -1213,6 +1234,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.lock_strong_min_points = hcl["lock_strong_min_points"].as<int>(80);
             hook_lock_config_.lock_min_visible_height = hcl["lock_min_visible_height"].as<float>(0.50f);
             hook_lock_config_.lock_min_xy_area = hcl["lock_min_xy_area"].as<float>(0.40f);
+            hook_lock_config_.lock_max_center_step_m = std::clamp(
+                hcl["lock_max_center_step_m"].as<float>(0.30F),
+                0.05F, 1.0F);
 
             // locked search margin
             hook_lock_config_.locked_search_margin_x = hcl["locked_search_margin_x"].as<float>(0.30f);
@@ -1344,7 +1368,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 odom_anchor_config_.cargo_warning.minimum_roi_finite_points =
                     std::max(1, cw["minimum_roi_finite_points"].as<int>(20));
                 odom_anchor_config_.cargo_warning.minimum_roi_coverage_ratio =
-                    std::clamp(cw["minimum_roi_coverage_ratio"].as<float>(0.01f),
+                    std::clamp(cw["minimum_roi_coverage_ratio"].as<float>(0.05F),
                                0.0f, 1.0f);
                 odom_anchor_config_.cargo_warning.exclude_ground = cw["exclude_ground"].as<bool>(true);
                 odom_anchor_config_.cargo_warning.ground_hag_min_m = cw["ground_hag_min_m"].as<float>(0.20f);
@@ -1579,7 +1603,11 @@ void NdtSlamNode::hookLoadStateCallback(
         for (const auto& sample : empty_hook_height_history_) {
             const double age = (msg->header.stamp - sample.stamp).toSec();
             if (std::isfinite(age) && age >= 0.0 &&
-                age <= origin_history_max_age_sec_) {
+                age <= origin_history_max_age_sec_ &&
+                std::isfinite(sample.confidence) &&
+                sample.confidence >= origin_min_confidence_ &&
+                sample.size_xy.allFinite() &&
+                sample.size_xy.minCoeff() > 0.0F) {
                 recent.push_back(sample);
             }
         }
@@ -1605,10 +1633,40 @@ void NdtSlamNode::hookLoadStateCallback(
                 static_cast<std::ptrdiff_t>(heights.size() / 2U);
             std::nth_element(heights.begin(), middle, heights.end());
             pending_origin_height_m_ = *middle;
+            const auto [height_min, height_max] =
+                std::minmax_element(heights.begin(), heights.end());
+            std::vector<float> absolute_deviations;
+            absolute_deviations.reserve(heights.size());
+            for (const float height : heights) {
+                absolute_deviations.push_back(
+                    std::abs(height - pending_origin_height_m_));
+            }
+            const auto deviation_middle = absolute_deviations.begin() +
+                static_cast<std::ptrdiff_t>(absolute_deviations.size() / 2U);
+            std::nth_element(absolute_deviations.begin(), deviation_middle,
+                             absolute_deviations.end());
+            const float height_mad = *deviation_middle;
+
+            Eigen::Vector2f size_mean = Eigen::Vector2f::Zero();
+            for (const auto& sample : recent) size_mean += sample.size_xy;
+            size_mean /= static_cast<float>(recent.size());
+            float maximum_size_relative_deviation = 0.0F;
+            for (const auto& sample : recent) {
+                const Eigen::Array2f relative =
+                    (sample.size_xy - size_mean).cwiseAbs().array() /
+                    size_mean.cwiseMax(
+                        Eigen::Vector2f::Constant(0.05F)).array();
+                maximum_size_relative_deviation = std::max(
+                    maximum_size_relative_deviation, relative.maxCoeff());
+            }
             pending_origin_center_base_ = center_base_mean;
             pending_origin_stamp_ = msg->header.stamp;
             pending_origin_height_valid_ =
                 maximum_spread <= origin_history_max_position_spread_m_ &&
+                height_mad <= origin_height_max_mad_m_ &&
+                (*height_max - *height_min) <= origin_height_max_range_m_ &&
+                maximum_size_relative_deviation <=
+                    origin_size_max_relative_deviation_ &&
                 std::isfinite(pending_origin_height_m_) &&
                 pending_origin_height_m_ >=
                     cargo_bottom_fusion_.config().minimum_prior_height &&
@@ -1684,8 +1742,15 @@ NdtSlamNode::HookLoadSnapshot NdtSlamNode::currentHookLoadSnapshot() const {
 bool NdtSlamNode::shouldRemoveHookCargo() const {
     if (!hook_lock_config_.enable_hook_cargo_removal) return false;
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
+    const double authorization_age =
+        (ros::Time::now() - formal_cargo_removal_stamp_).toSec();
     return hook.valid &&
            hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED &&
+           formal_cargo_removal_authorized_ &&
+           relocalization_pose_reliable_ &&
+           formal_cargo_removal_track_id_ == cargo_fusion_track_id_ &&
+           std::isfinite(authorization_age) && authorization_age >= 0.0 &&
+           authorization_age <= formal_cargo_removal_max_age_sec_ &&
            cargo_state_.state == CargoState::LOCKED &&
            cargo_state_.valid_geometry && cargo_state_.valid_height &&
            cargo_state_.center_base.allFinite() && cargo_state_.size.allFinite() &&
@@ -1702,16 +1767,19 @@ bool NdtSlamNode::hookAllowsMapCommit() const {
     if (!hook.valid) return false;
     if (hook.state == lidar_slam2_msgs::HookLoadState::STATE_EMPTY) return true;
     if (hook.state != lidar_slam2_msgs::HookLoadState::STATE_LOADED) return false;
-    return cargo_state_.state == CargoState::LOCKED &&
-           cargo_state_.valid_geometry && cargo_state_.valid_height;
+    return shouldRemoveHookCargo();
 }
 
 void NdtSlamNode::recordEmptyHookOriginHeight(
     float height_m, const Eigen::Vector2f& center_base,
     const Eigen::Vector2f& center_map,
+    const Eigen::Vector2f& size_xy, float confidence,
     const ros::Time& stamp) {
     if (!std::isfinite(height_m) ||
-        !center_base.allFinite() || !center_map.allFinite() || stamp.isZero() ||
+        !center_base.allFinite() || !center_map.allFinite() ||
+        !size_xy.allFinite() || size_xy.minCoeff() <= 0.0F ||
+        !std::isfinite(confidence) || confidence < 0.0F || confidence > 1.0F ||
+        stamp.isZero() ||
         height_m < cargo_bottom_fusion_.config().minimum_prior_height ||
         height_m > cargo_bottom_fusion_.config().maximum_prior_height) {
         return;
@@ -1727,7 +1795,8 @@ void NdtSlamNode::recordEmptyHookOriginHeight(
         empty_hook_height_history_.clear();
     }
     empty_hook_height_history_.push_back(
-        OriginHeightSample{height_m, center_base, center_map, stamp});
+        OriginHeightSample{
+            height_m, center_base, center_map, size_xy, confidence, stamp});
     while (empty_hook_height_history_.size() >
            empty_hook_height_history_max_samples_) {
         empty_hook_height_history_.pop_front();
@@ -1742,6 +1811,9 @@ void NdtSlamNode::resetCargoForHookState(bool preserve_origin_height) {
     hook_observation_associated_current_ = false;
     cargo_bottom_fusion_.reset();
     cargo_fusion_track_active_ = false;
+    formal_cargo_removal_authorized_ = false;
+    formal_cargo_removal_track_id_ = 0U;
+    formal_cargo_removal_stamp_ = ros::Time();
     cargo_origin_height_valid_ = false;
     cargo_origin_height_m_ = 0.0F;
     cargo_origin_height_track_id_ = 0U;
@@ -1791,6 +1863,7 @@ void NdtSlamNode::requestMapMaintenance() {
         map_maintenance_commit_count_ >= map_maintenance_interval_commits_) {
         map_maintenance_commit_count_ = 0;
         map_maintenance_pending_ = true;
+        clean_map_rebuild_pending_ = true;
         queue_cv_.notify_one();
     }
 }
@@ -1799,27 +1872,51 @@ void NdtSlamNode::runMapMaintenanceIfIdle() {
     if (!map_maintenance_pending_ || localizationInputPending()) return;
 
     map_maintenance_pending_ = false;
-    const auto clean_map_start = std::chrono::steady_clock::now();
-    rebuildCleanMap();
-    last_commit_clean_map_ms_ =
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - clean_map_start).count();
+    const bool clean_rebuild_requested = clean_map_rebuild_pending_;
+    const std::uint64_t clean_version_before = clean_map_content_version_;
+    if (clean_map_rebuild_pending_) {
+        clean_map_rebuild_pending_ = false;
+        const auto clean_map_start = std::chrono::steady_clock::now();
+        rebuildCleanMap();
+        last_commit_clean_map_ms_ =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - clean_map_start).count();
+    }
 
     // If a localization frame arrived during the rebuild, leave RViz
     // serialization pending and process that frame first.
     if (localizationInputPending()) {
         map_maintenance_pending_ = true;
+        if (clean_rebuild_requested &&
+            clean_map_content_version_ == clean_version_before) {
+            clean_map_rebuild_pending_ = true;
+        }
         return;
     }
 
-    const auto publish_start = std::chrono::steady_clock::now();
-    publishDisplayMap();
-    publishGroundMap();
-    publishObjectsMap();
-    last_commit_display_map_ms_ =
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - publish_start).count();
-    map_maintenance_has_run_ = true;
+    if (localization_target_enabled_ && shadow_target_pending_ &&
+        clean_map_content_version_ != shadow_target_source_version_) {
+        if (updateLocalizationTarget(objects_clean_map_, shadow_target_pose_)) {
+            swapLocalizationTargetBuffers();
+            shadow_target_source_version_ = clean_map_content_version_;
+            shadow_target_pending_ = false;
+        } else {
+            map_maintenance_pending_ = true;
+            return;
+        }
+    }
+
+    if (clean_rebuild_requested) {
+        const auto publish_start = std::chrono::steady_clock::now();
+        publishDisplayMap();
+        publishGroundMap();
+        publishObjectsMap();
+        publishObjectsCleanMap();
+        last_commit_display_map_ms_ =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - publish_start).count();
+        map_maintenance_has_run_ = true;
+    }
 
     if (loop_closure_pending_) {
         if (localizationInputPending()) {
@@ -1828,6 +1925,37 @@ void NdtSlamNode::runMapMaintenanceIfIdle() {
         }
         loop_closure_pending_ = false;
         processLoopClosure();
+    }
+
+    const auto yield_if_localization_waiting = [this]() {
+        if (!localizationInputPending()) return false;
+        map_maintenance_pending_ = true;
+        return true;
+    };
+    if (yield_if_localization_waiting()) return;
+    if (release_keyframes_pending_) {
+        release_keyframes_pending_ = false;
+        releaseOldKeyframeClouds();
+    }
+    if (yield_if_localization_waiting()) return;
+    if (flush_tiles_pending_) {
+        flush_tiles_pending_ = false;
+        flushDirtyTiles();
+    }
+    if (yield_if_localization_waiting()) return;
+    if (runtime_status_pending_) {
+        runtime_status_pending_ = false;
+        writeRuntimeStatus();
+    }
+    if (yield_if_localization_waiting()) return;
+    if (memory_guard_pending_) {
+        memory_guard_pending_ = false;
+        checkMemoryGuard();
+    }
+    if (yield_if_localization_waiting()) return;
+    if (active_map_rebuild_pending_) {
+        active_map_rebuild_pending_ = false;
+        rebuildActiveMapFromRecentKeyframes();
     }
 
     ROS_DEBUG("[MapMaintenance] clean_ms=%.1f publish_ms=%.1f clean_points=%zu",
@@ -2023,17 +2151,8 @@ void NdtSlamNode::processCloudThread() {
             }
         }
 
-        // 为 HookFixedCargoDetector 创建 0.05m 细节点云（用于吊货检测）
-        if (hook_detection_due && !hook_input_cloud->empty()) {
-            pcl::VoxelGrid<pcl::PointXYZ> hook_vf;
-            hook_vf.setInputCloud(hook_input_cloud);
-            hook_vf.setLeafSize(0.05f, 0.05f, 0.05f);
-            pcl::PointCloud<pcl::PointXYZ>::Ptr hook_downsampled(new pcl::PointCloud<pcl::PointXYZ>);
-            hook_vf.filter(*hook_downsampled);
-            hook_input_cloud = hook_downsampled;
-            ROS_DEBUG_THROTTLE(1.0, "[HookInput] source=fine_base_before_ndt_voxel frame=base_link raw_before_voxel=%zu hook_input=%zu leaf=0.05",
-                              filtered_cloud->size(), hook_input_cloud->size());
-        }
+        // Keep the due-frame input unvoxelized here. The detector crops its ROI
+        // first and performs the single 0.05 m voxel pass on the much smaller ROI.
 
         // ========== HookFixedCargoDetector（每帧都执行，在 NDT 和 MapCommit 之前）==========
         diag_stage.hook_prepare_ms = elapsedMs(hook_prepare_start);
@@ -2085,8 +2204,7 @@ void NdtSlamNode::processCloudThread() {
         // OdomAnchorBox 检测（降频执行）
         if (!skip_hook_this_frame && hook_detection_due &&
             hook_input_cloud && !hook_input_cloud->empty()) {
-            if (shouldRunOdomAnchorDetect(msg->header.stamp)) {
-                hook_fixed_cargo_ = detectCargoAroundOdomAnchor(hook_input_cloud, msg->header.stamp);
+            hook_fixed_cargo_ = detectCargoAroundOdomAnchor(hook_input_cloud, msg->header.stamp);
                 hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
                 if (hook_allows_tracking) {
                     updateHookCargoLock(
@@ -2099,6 +2217,7 @@ void NdtSlamNode::processCloudThread() {
                         current_pose_.translation().allFinite() &&
                         current_pose_.so3().matrix().allFinite() &&
                         hook_fixed_bottom_.valid &&
+                        hook_fixed_cargo_.core_points_base &&
                         hook_fixed_bottom_.source == "points_visible_side") {
                         const Eigen::Vector3d origin_center_map =
                             current_pose_ *
@@ -2107,6 +2226,13 @@ void NdtSlamNode::processCloudThread() {
                             hook_fixed_bottom_.height,
                             hook_fixed_cargo_.center_base.head<2>(),
                             origin_center_map.head<2>().cast<float>(),
+                            hook_fixed_cargo_.size_visible.head<2>(),
+                            std::min(
+                                1.0F,
+                                static_cast<float>(
+                                    hook_fixed_cargo_.core_points_base->size()) /
+                                    static_cast<float>(std::max(
+                                        1, hook_lock_config_.lock_strong_min_points))),
                             msg->header.stamp);
                     }
                 }
@@ -2129,8 +2255,6 @@ void NdtSlamNode::processCloudThread() {
                              odom_anchor_config_.publish_debug_points ? 1 : 0);
                     last_anchor_summary_stamp_ = msg->header.stamp;
                 }
-            }
-
             // marker 发布（降频执行）
             if (false && shouldPublishOdomAnchorMarker(msg->header.stamp)) {
                 if (cargo_state_.state == CargoState::LOCKED ||
@@ -2163,7 +2287,10 @@ void NdtSlamNode::processCloudThread() {
                 }
                 last_anchor_marker_stamp_ = msg->header.stamp;
             }
-        } else if (!skip_hook_this_frame) {
+        } else if (!skip_hook_this_frame && hook_detection_due) {
+            // This is a real due-frame empty observation. A rate-limited frame
+            // is deliberately ignored and must not age the cargo lock.
+            last_anchor_detect_stamp_ = msg->header.stamp;
             hook_fixed_cargo_.valid = false;
             hook_fixed_bottom_.valid = false;
             if (hook_allows_tracking) {
@@ -2948,7 +3075,9 @@ void NdtSlamNode::processCloudThread() {
             if (relocalization_pose_reliable_) {
                 updateAndPublishCargoSafetyPipeline(
                     feature_cloud, filtered_cloud, final_pose, publish_time,
-                    msg->header.stamp);
+                    msg->header.stamp,
+                    diag_queue_age_ms * 0.001 +
+                        elapsedMs(start_time) * 0.001);
                 relocalization_invalid_safety_published_ = false;
             } else if (!relocalization_invalid_safety_published_) {
                 publishRelocalizationSafetyInvalid(
@@ -3079,11 +3208,8 @@ void NdtSlamNode::processCloudThread() {
 
                 // V3: 更新 Localization Target（只在 accepted keyframe 时更新）
                 if (localization_target_enabled_) {
-                    const auto shadow_target_start = DiagClock::now();
-                    updateLocalizationTarget(objects_clean_map_, final_pose);
-                    swapLocalizationTargetBuffers();
-                    diag_stage.shadow_target_ms =
-                        elapsedMs(shadow_target_start);
+                    shadow_target_pose_ = final_pose;
+                    shadow_target_pending_ = true;
                 }
             } else {
                 ROS_DEBUG("[MapCommit] skipped: ndt_accepted=%d require_accept=%d fitness=%.3f max_fitness=%.3f motion_gate=%d",
@@ -3496,7 +3622,8 @@ void NdtSlamNode::processCloudThread() {
                      "keyframes=%d, tiles_flushed=%d, "
                      "local_map=%zu, active_map=%zu, process=%.2fs",
                      success_frames, total_frames, pos.x(), pos.y(), pos.z(),
-                     keyframe_count_, flushed_tile_count_,
+                     keyframe_count_,
+                     flushed_tile_count_.load(std::memory_order_relaxed),
                      local_map_->size(), global_map_->size(), elapsed);
             last_log_time = ros::Time::now();
 
@@ -3510,7 +3637,8 @@ void NdtSlamNode::processCloudThread() {
                 static int release_check_count = 0;
                 release_check_count++;
                 if (release_check_count >= keyframe_release_interval_) {
-                    releaseOldKeyframeClouds();
+                    release_keyframes_pending_ = true;
+                    map_maintenance_pending_ = true;
                     release_check_count = 0;
                 }
 
@@ -3518,14 +3646,16 @@ void NdtSlamNode::processCloudThread() {
                 if (persistent_map_enabled_) {
                     double time_since_flush = (ros::Time::now() - last_flush_time_).toSec();
                     if (time_since_flush >= flush_interval_sec_ || dirty_tile_count_ >= max_dirty_tiles_) {
-                        flushDirtyTiles();
+                        flush_tiles_pending_ = true;
+                        map_maintenance_pending_ = true;
                     }
 
                     // 定期写入 runtime status（每 5 秒）
                     static ros::Time last_status_write_time;
                     double time_since_status = (ros::Time::now() - last_status_write_time).toSec();
                     if (time_since_status >= 5.0) {
-                        writeRuntimeStatus();
+                        runtime_status_pending_ = true;
+                        map_maintenance_pending_ = true;
                         last_status_write_time = ros::Time::now();
                     }
                 }
@@ -3534,15 +3664,18 @@ void NdtSlamNode::processCloudThread() {
                 if (memory_guard_enabled_) {
                     double time_since_check = (ros::Time::now() - last_memory_check_time_).toSec();
                     if (time_since_check >= memory_check_interval_sec_) {
-                        checkMemoryGuard();
+                        memory_guard_pending_ = true;
+                        map_maintenance_pending_ = true;
                         last_memory_check_time_ = ros::Time::now();
                     }
                 }
 
                 // 定期重建 active map（每 10 个关键帧）
                 if (longterm_mapping_enabled_ && keyframe_count_ > 0 && keyframe_count_ % rebuild_every_keyframes_ == 0) {
-                    rebuildActiveMapFromRecentKeyframes();
+                    active_map_rebuild_pending_ = true;
+                    map_maintenance_pending_ = true;
                 }
+                if (map_maintenance_pending_) queue_cv_.notify_one();
             }
 
         }
@@ -4354,6 +4487,7 @@ void NdtSlamNode::rebuildGlobalMapFiltered() {
     rebuildCleanMap();
 
     publishMap();
+    publishObjectsCleanMap();
 
     auto end_time = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(end_time - start_time).count();
@@ -4639,6 +4773,12 @@ void NdtSlamNode::publishObjectsCleanMap() {
 }
 
 void NdtSlamNode::rebuildCleanMap() {
+    std::size_t cooperative_work_count = 0U;
+    const auto should_yield_to_localization = [this, &cooperative_work_count]() {
+        ++cooperative_work_count;
+        return cooperative_work_count % 2048U == 0U &&
+               localizationInputPending();
+    };
     // 使用持久化的 BEV 观测计数做时间一致性过滤
     // 只有被 >= clean_min_observations_ 个关键帧观测到的 cell 才进入 clean map
     // 自适应：远处点云稀疏，放宽高度和时间一致性要求
@@ -4692,6 +4832,10 @@ void NdtSlamNode::rebuildCleanMap() {
     std::map<BevKey, std::vector<int>> payload_cand_bev_indices;
     if (!protect_cells.empty() && rebuild_payload_candidate_ && !rebuild_payload_candidate_->empty()) {
         for (int i = 0; i < (int)rebuild_payload_candidate_->size(); ++i) {
+            if (should_yield_to_localization()) {
+                ROS_DEBUG("[CleanMap] aborted for queued localization frame");
+                return;
+            }
             const auto& p = rebuild_payload_candidate_->points[i];
             BevKey bk{(int)std::floor(p.x / clean_bev_cell), (int)std::floor(p.y / clean_bev_cell)};
             payload_cand_bev_indices[bk].push_back(i);
@@ -4702,6 +4846,10 @@ void NdtSlamNode::rebuildCleanMap() {
     // 使用 objects_map_ 的全局 z 最小值作为地面参考
     float obj_z_min = 1e9;
     for (const auto& p : objects_map_->points) {
+        if (should_yield_to_localization()) {
+            ROS_DEBUG("[CleanMap] aborted for queued localization frame");
+            return;
+        }
         if (p.z < obj_z_min) obj_z_min = p.z;
     }
 
@@ -4712,6 +4860,10 @@ void NdtSlamNode::rebuildCleanMap() {
     std::map<BevKey, std::vector<int>> bev_indices;
 
     for (int i = 0; i < (int)objects_map_->size(); ++i) {
+        if (should_yield_to_localization()) {
+            ROS_DEBUG("[CleanMap] aborted for queued localization frame");
+            return;
+        }
         const auto& p = objects_map_->points[i];
         BevKey bk{(int)std::floor(p.x / clean_bev_cell), (int)std::floor(p.y / clean_bev_cell)};
         bev_indices[bk].push_back(i);
@@ -4773,6 +4925,10 @@ void NdtSlamNode::rebuildCleanMap() {
     }
 
     for (auto& [bk, indices] : bev_indices) {
+        if (should_yield_to_localization()) {
+            ROS_DEBUG("[CleanMap] aborted for queued localization frame");
+            return;
+        }
         total_cells++;
 
         std::pair<int,int> bk_pair = {bk.x, bk.y};
@@ -4874,9 +5030,9 @@ void NdtSlamNode::rebuildCleanMap() {
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
         *objects_clean_map_ = *new_clean;
+        ++clean_map_content_version_;
+        if (clean_map_content_version_ == 0U) ++clean_map_content_version_;
     }
-
-    publishObjectsCleanMap();
 
     // [CleanMapDynamicGate3D] 日志
     ROS_INFO("[CleanMapDynamicGate3D] cargo_volumes=%zu human_volumes=%zu cargo_3d_denied_points=%d human_3d_denied_points=%d protected_static_points=%d clean_points=%zu",
@@ -5144,7 +5300,8 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
         keyframe_count_++;
         Eigen::Vector3d pos = pose.translation();
         ROS_INFO("[MapCommit] keyframe #%d added | pos=(%.1f, %.1f, %.1f) | tiles=%d",
-                 keyframe_count_, pos.x(), pos.y(), pos.z(), flushed_tile_count_);
+                 keyframe_count_, pos.x(), pos.y(), pos.z(),
+                 flushed_tile_count_.load(std::memory_order_relaxed));
 
         std::lock_guard<std::mutex> lock(map_mutex_);
         Eigen::Matrix4d transform = pose.matrix();
@@ -7212,13 +7369,47 @@ void NdtSlamNode::releaseOldKeyframeClouds() {
 }
 
 void NdtSlamNode::flushDirtyTiles() {
-    if (!persistent_map_enabled_ || dirty_tiles_.empty()) return;
+    if (!persistent_map_enabled_) return;
+    {
+        std::lock_guard<std::mutex> lock(failed_tile_flush_mutex_);
+        for (auto& [tile_key, failed] : failed_tile_flush_batch_) {
+            auto& target = dirty_tiles_[tile_key];
+            const auto merge_cloud = [](auto& destination, const auto& source) {
+                if (!source || source->empty()) return;
+                if (!destination) {
+                    destination.reset(new pcl::PointCloud<pcl::PointXYZ>);
+                }
+                *destination += *source;
+            };
+            merge_cloud(target.registration, failed.registration);
+            merge_cloud(target.display, failed.display);
+            merge_cloud(target.ground, failed.ground);
+            merge_cloud(target.objects, failed.objects);
+        }
+        failed_tile_flush_batch_.clear();
+        dirty_tile_count_ = dirty_tiles_.size();
+    }
+    if (dirty_tiles_.empty()) return;
+    if (tile_flush_running_.load(std::memory_order_acquire)) return;
 
     // 检查磁盘保护
     if (!checkDiskGuard()) {
         ROS_WARN_THROTTLE(60, "[DiskGuard] Skipping flush, disk low");
         return;
     }
+
+    if (tile_flush_thread_.joinable()) tile_flush_thread_.join();
+
+    std::map<std::string, TileLayers> flush_batch;
+    flush_batch.swap(dirty_tiles_);
+    dirty_tile_count_ = 0;
+    last_flush_time_ = ros::Time::now();
+    last_flush_time_local_ = last_flush_time_;
+    tile_flush_running_.store(true, std::memory_order_release);
+
+    tile_flush_thread_ = std::thread(
+        [this, flush_batch = std::move(flush_batch)]() mutable {
+    try {
 
     // 创建目录
     std::string reg_dir = persistent_map_root_dir_ + "/tiles_registration";
@@ -7272,7 +7463,7 @@ void NdtSlamNode::flushDirtyTiles() {
     };
 
     int flushed = 0;
-    for (auto& [tile_key, tile_layers] : dirty_tiles_) {
+    for (auto& [tile_key, tile_layers] : flush_batch) {
         // 写入 registration layer
         if (tile_layers.registration && !tile_layers.registration->empty()) {
             std::string filepath = reg_dir + "/" + tile_key + ".pcd";
@@ -7300,14 +7491,19 @@ void NdtSlamNode::flushDirtyTiles() {
         flushed++;
     }
 
-    flushed_tile_count_ += flushed;
-    dirty_tiles_.clear();
-    dirty_tile_count_ = 0;
-    last_flush_time_ = ros::Time::now();
-    last_flush_time_local_ = ros::Time::now();
+    const int total_flushed =
+        flushed_tile_count_.fetch_add(flushed, std::memory_order_relaxed) +
+        flushed;
 
     ROS_INFO("[TileFlush] %d tiles flushed to disk | total_flushed=%d",
-             flushed, flushed_tile_count_);
+             flushed, total_flushed);
+    } catch (const std::exception& error) {
+        ROS_ERROR("[TileFlush] worker failed: %s", error.what());
+        std::lock_guard<std::mutex> lock(failed_tile_flush_mutex_);
+        failed_tile_flush_batch_ = std::move(flush_batch);
+    }
+    tile_flush_running_.store(false, std::memory_order_release);
+        });
 }
 
 void NdtSlamNode::writeRuntimeStatus() {
@@ -7355,7 +7551,8 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"objects_map_points\": " << objects_pts << ",\n";
     f << "  \"local_map_points\": " << local_pts << ",\n";
     f << "  \"dirty_tile_count\": " << dirty_tile_count_ << ",\n";
-    f << "  \"flushed_tile_count\": " << flushed_tile_count_ << ",\n";
+    f << "  \"flushed_tile_count\": "
+      << flushed_tile_count_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"memory_mb\": " << mem_mb << ",\n";
     f << "  \"memory_guard_triggered\": " << (memory_guard_triggered_ ? "true" : "false") << ",\n";
     f << "  \"disk_free_gb\": " << disk_free_gb << ",\n";
@@ -7553,6 +7750,12 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
     // 收集最近 80 个有 cloud 的关键帧
     std::vector<const KeyFrame*> recent_kfs;
     for (auto it = keyframes.rbegin(); it != keyframes.rend() && recent_kfs.size() < max_active_keyframes_; ++it) {
+        if (localizationInputPending()) {
+            active_map_rebuild_running_ = false;
+            active_map_rebuild_pending_ = true;
+            map_maintenance_pending_ = true;
+            return;
+        }
         if (it->cloud_ && !it->cloud_->empty()) {
             recent_kfs.push_back(&(*it));
         }
@@ -7572,6 +7775,12 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
     pcl::PointCloud<pcl::PointXYZ>::Ptr new_objects(new pcl::PointCloud<pcl::PointXYZ>);
 
     for (const auto* kf : recent_kfs) {
+        if (localizationInputPending()) {
+            active_map_rebuild_running_ = false;
+            active_map_rebuild_pending_ = true;
+            map_maintenance_pending_ = true;
+            return;
+        }
         // 应用天车运动约束到 keyframe pose
         Sophus::SE3d constrained_kf_pose = applyCraneMotionConstraint(kf->pose_, "active_rebuild");
         Eigen::Matrix4d transform = constrained_kf_pose.matrix();
@@ -8173,11 +8382,12 @@ void NdtSlamNode::updateHookCargoLock(
     case HookCargoLockState::EMPTY:
         if (isStrongDetection(det, bottom)) {
             hook_lock_.state = HookCargoLockState::CANDIDATE;
-            hook_lock_.confirm_count = 1;
+            hook_lock_.confirm_count = 0;
             hook_lock_.init_size_buffer.clear();
-            hook_lock_.init_size_buffer.push_back(computeFixedCenterSize(det, bottom));
+            hook_lock_.last_accepted_center = det.center_base;
+            hook_lock_.has_last_accepted = true;
             hook_lock_.last_seen_stamp = stamp;
-            ROS_INFO("[CargoLock] EMPTY->CANDIDATE confirm=1 points=%zu bottom=%.2f top=%.2f",
+            ROS_INFO("[CargoLock] EMPTY->CANDIDATE confirm=0 points=%zu bottom=%.2f top=%.2f",
                      det.core_points_base ? det.core_points_base->size() : 0,
                      bottom.valid ? bottom.bottom_z_base : -1.0f,
                      bottom.valid ? bottom.top_z_base : -1.0f);
@@ -8185,10 +8395,17 @@ void NdtSlamNode::updateHookCargoLock(
         break;
 
     case HookCargoLockState::CANDIDATE:
-        if (isStrongDetection(det, bottom)) {
+        if (isLockStrongDetection(det, bottom) &&
+            (hook_lock_.confirm_count == 0 ||
+             !hook_lock_.has_last_accepted ||
+             (det.center_base.head<2>() -
+              hook_lock_.last_accepted_center.head<2>()).norm() <=
+                 hook_lock_config_.lock_max_center_step_m)) {
             hook_lock_.confirm_count++;
             hook_lock_.weak_count = 0;
             hook_lock_.init_size_buffer.push_back(computeFixedCenterSize(det, bottom));
+            hook_lock_.last_accepted_center = det.center_base;
+            hook_lock_.has_last_accepted = true;
             hook_lock_.last_seen_stamp = stamp;
             ROS_INFO("[CargoLock] CANDIDATE confirm=%d points=%zu visible_h=%.2f xy_area=%.2f bottom=%.2f top=%.2f",
                      hook_lock_.confirm_count,
@@ -8223,11 +8440,22 @@ void NdtSlamNode::updateHookCargoLock(
                          anchor.x(), anchor.y());
             }
         } else if (weak) {
-            // 弱检测保持 CANDIDATE，不清零
+            // A weak observation may keep the candidate alive briefly, but it
+            // breaks the strict-consecutive confirmation sequence.
             hook_lock_.weak_count++;
+            hook_lock_.confirm_count = 0;
+            hook_lock_.init_size_buffer.clear();
+            hook_lock_.has_last_accepted = false;
             hook_lock_.last_seen_stamp = stamp;
-            ROS_INFO("[CargoLock] CANDIDATE weak_hold confirm=%d weak=%d",
-                     hook_lock_.confirm_count, hook_lock_.weak_count);
+            if (hook_lock_.weak_count >
+                hook_lock_config_.candidate_max_weak_frames) {
+                hook_lock_.state = HookCargoLockState::EMPTY;
+                hook_lock_.weak_count = 0;
+                ROS_INFO("[CargoLock] CANDIDATE->EMPTY reason=weak_limit");
+            } else {
+                ROS_INFO("[CargoLock] CANDIDATE weak_hold confirm=%d weak=%d",
+                         hook_lock_.confirm_count, hook_lock_.weak_count);
+            }
         } else {
             // 无检测，检查超时
             double age = (stamp - hook_lock_.last_seen_stamp).toSec();
@@ -8473,12 +8701,13 @@ void NdtSlamNode::updateCargoState(
 
             cargo_state_.valid_height = true;
         } else if (det.valid && !cargo_state_.valid_height) {
-            // CargoBottom invalid 但 TightBox z 有效，使用 fallback
+            // TightBox z is geometry-only evidence. It must never become an
+            // authorized physical bottom before CargoBottomFusion accepts it.
             cargo_state_.bottom_z = det.z05;
             cargo_state_.top_z = det.z95;
             cargo_state_.bottom_unc = 0.18f;
-            cargo_state_.valid_height = true;
-            cargo_state_.source = "tight_box_z_fallback";
+            cargo_state_.valid_height = false;
+            cargo_state_.source = "tight_box_z_unverified";
         }
 
         // 计算 bottom_safe_z
@@ -8603,7 +8832,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
     const Sophus::SE3d& pose_map_base,
     const ros::Time& stamp,
-    const ros::Time& obstacle_cloud_stamp) {
+    const ros::Time& obstacle_cloud_stamp,
+    double processing_age_sec) {
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
     const bool visual_conflict = hook_fixed_cargo_.valid;
     if (!hook.valid ||
@@ -8657,6 +8887,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     } else if (!active_track && cargo_fusion_track_active_) {
         cargo_bottom_fusion_.reset();
         cargo_origin_height_valid_ = false;
+        formal_cargo_removal_authorized_ = false;
     }
     cargo_fusion_track_active_ = active_track;
 
@@ -8716,6 +8947,10 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             cargo_state_.bottom_unc - 0.05F;
         cargo_state_.source =
             std::string("fusion:") + last_cargo_bottom_result_.source_name;
+        formal_cargo_removal_authorized_ = active_track &&
+            last_cargo_bottom_result_.geometry_valid;
+        formal_cargo_removal_track_id_ = cargo_fusion_track_id_;
+        formal_cargo_removal_stamp_ = stamp;
     } else {
         // Never let the compatibility topics or legacy warning path keep a
         // stale height after the formal fusion has rejected current evidence.
@@ -8723,6 +8958,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_state_.bottom_unc =
             cargo_bottom_fusion_.config().invalid_uncertainty;
         cargo_state_.source = "fusion:INVALID";
+        formal_cargo_removal_authorized_ = false;
     }
 
     lidar_slam2_msgs::CargoBottomEstimate bottom_msg;
@@ -8853,12 +9089,23 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         static_cast<bool>(obstacle_cloud_base) &&
         static_cast<bool>(observation_cloud_base) &&
         last_cargo_bottom_result_.geometry_valid;
-    const double obstacle_age =
+    const double stamp_delta =
         (stamp - obstacle_cloud_stamp).toSec();
-    safety_input.obstacle_cloud_age_sec =
-        std::isfinite(obstacle_age) && obstacle_age >= 0.0
-            ? obstacle_age
-            : std::numeric_limits<double>::infinity();
+    const double sensor_age =
+        (ros::Time::now() - obstacle_cloud_stamp).toSec();
+    constexpr double kFutureStampToleranceSec = 0.05;
+    if (!std::isfinite(stamp_delta) ||
+        stamp_delta < -kFutureStampToleranceSec ||
+        !std::isfinite(sensor_age) ||
+        sensor_age < -kFutureStampToleranceSec ||
+        !std::isfinite(processing_age_sec) || processing_age_sec < 0.0) {
+        safety_input.obstacle_cloud_age_sec =
+            std::numeric_limits<double>::infinity();
+    } else {
+        safety_input.obstacle_cloud_age_sec = std::max(
+            {std::max(0.0, stamp_delta), std::max(0.0, sensor_age),
+             processing_age_sec});
+    }
     safety_input.obstacle_roi_finite_points = roi_finite_points;
     safety_input.obstacle_roi_coverage_ratio = coverage_ratio;
     last_cargo_safety_result_ = cargo_safety_evaluator_.evaluate(safety_input);
@@ -9619,7 +9866,7 @@ void NdtSlamNode::limitCloudUniformInPlace(
 // V3: Localization Target 管理
 // ============================================================================
 
-void NdtSlamNode::updateLocalizationTarget(
+bool NdtSlamNode::updateLocalizationTarget(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud,
     const Sophus::SE3d& pose) {
     pcl::PointCloud<pcl::PointXYZ>::Ptr candidate(
@@ -9628,7 +9875,11 @@ void NdtSlamNode::updateLocalizationTarget(
     if (objects_cloud) {
         const Eigen::Vector3d center = pose.translation();
         candidate->reserve(objects_cloud->size());
+        std::size_t processed = 0U;
         for (const auto& p : objects_cloud->points) {
+            if (++processed % 2048U == 0U && localizationInputPending()) {
+                return false;
+            }
             const double dx = p.x - center.x();
             const double dy = p.y - center.y();
             if (dx * dx + dy * dy < 900.0) {
@@ -9640,6 +9891,7 @@ void NdtSlamNode::updateLocalizationTarget(
     // The source is a map-frame snapshot, not a per-keyframe delta.  Rebuild
     // from it instead of repeatedly appending the complete map to itself.
     if (!candidate->empty()) {
+        if (localizationInputPending()) return false;
         pcl::VoxelGrid<pcl::PointXYZ> vf;
         vf.setInputCloud(candidate);
         vf.setLeafSize(localization_target_voxel_size_,
@@ -9669,12 +9921,13 @@ void NdtSlamNode::updateLocalizationTarget(
             2.0,
             "[LocTarget] candidate rejected after crop/voxel: points=%zu min=%d; using local_map",
             candidate->size(), localization_target_min_points_);
-        return;
+        return true;
     }
 
     localization_target_back_ = candidate;
     localization_target_state_ = LocalizationTargetState::BUILDING_TARGET;
     last_target_reason_ = "candidate_ready_to_swap";
+    return true;
 }
 bool NdtSlamNode::swapLocalizationTargetBuffers() {
     std::lock_guard<std::mutex> lock(localization_target_mutex_);
@@ -10476,8 +10729,11 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     int current_valid_count = 0, last_good_count = 0, core_fallback_count = 0;
     int skipped_no_box = 0, skipped_no_overlap = 0, skipped_state = 0;
     int overlap_total = 0;
+    const bool legacy_removal_authorized =
+        run_legacy_cargo && shouldRemoveHookCargo();
 
     for (const auto& track : payload_tracker_.getTracks()) {
+        if (!legacy_removal_authorized) break;
         if (track.state == TrackState::SUSPENDED_MOVING ||
             track.state == TrackState::DYNAMIC_PAYLOAD) {
             moving_tracks++;
@@ -10500,6 +10756,10 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
             else if (decision.reason == "NO_OVERLAP") skipped_no_overlap++;
             else if (decision.reason == "STATE_NOT_ACTIVE") skipped_state++;
         }
+    }
+
+    if (!legacy_removal_authorized) {
+        active_cargo_remove_boxes_base.clear();
     }
 
     // v8-stable-r3: [Cargo] 日志（每 2 秒一次，DEBUG）

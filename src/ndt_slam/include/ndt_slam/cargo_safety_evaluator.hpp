@@ -41,7 +41,7 @@ struct CargoSafetyConfig {
     double future_stamp_tolerance_sec = 0.05;
     double maximum_obstacle_cloud_age_sec = 0.50;
     std::size_t minimum_roi_finite_points = 20;
-    float minimum_roi_coverage_ratio = 0.01f;
+    float minimum_roi_coverage_ratio = 0.05F;
 
     float obstacle_top_percentile = 0.95f;
     float obstacle_uncertainty_floor_m = 0.05f;

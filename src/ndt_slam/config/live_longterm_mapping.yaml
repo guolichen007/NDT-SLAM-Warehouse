@@ -139,6 +139,23 @@ loop_closure:
   enabled: true
   detection_interval: 20
 
+scan_context:
+  num_rings: 20
+  num_sectors: 60
+  max_range: 80.0
+  spatial_search_radius: 8.0
+  similarity_threshold: 0.80
+  translation_threshold: 1.0
+  rotation_threshold: 10.0
+  loop_icp_max_correspondence_m: 1.0
+  loop_icp_max_fitness: 0.50
+  loop_icp_max_correction_translation_m: 1.0
+  loop_icp_max_correction_yaw_deg: 15.0
+  global_icp_max_correspondence_m: 1.5
+  global_icp_max_fitness: 0.80
+  global_icp_max_correction_translation_m: 1.5
+  global_icp_max_correction_yaw_deg: 20.0
+
 # ========== 长期建图配置 ==========
 
 # 长期建图模式
@@ -582,6 +599,11 @@ hook_load_signal:
   origin_history_max_age_sec: 2.0
   origin_history_max_position_spread_m: 0.35
   origin_match_max_distance_m: 0.50
+  origin_height_max_mad_m: 0.10
+  origin_height_max_range_m: 0.25
+  origin_size_max_relative_deviation: 0.30
+  origin_min_confidence: 0.50
+  formal_removal_max_age_sec: 0.80
 
 # Heavy clean-map rebuild, RViz serialization and loop detection are run only
 # while the localization input queue is empty.
@@ -672,6 +694,7 @@ hook_cargo_lock:
   lock_strong_min_points: 80
   lock_min_visible_height: 0.50
   lock_min_xy_area: 0.40
+  lock_max_center_step_m: 0.30
 
   # locked search margin
   locked_search_margin_x: 0.30

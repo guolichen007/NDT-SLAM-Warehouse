@@ -247,6 +247,17 @@ void LoopClosureDetector::configureFromYaml(const std::string& config_file_path)
             translation_threshold_ = sc["translation_threshold"] ? sc["translation_threshold"].as<double>() : 1.0;
             double rotation_deg = sc["rotation_threshold"] ? sc["rotation_threshold"].as<double>() : 10.0;
             rotation_threshold_ = rotation_deg * M_PI / 180.0;
+
+            loop_icp_max_correspondence_m_ = std::clamp(sc["loop_icp_max_correspondence_m"].as<double>(1.0), 0.10, 5.0);
+            loop_icp_max_fitness_ = std::clamp(sc["loop_icp_max_fitness"].as<double>(0.50), 0.01, 5.0);
+            loop_icp_max_correction_translation_m_ = std::clamp(sc["loop_icp_max_correction_translation_m"].as<double>(1.0), 0.05, 5.0);
+            loop_icp_max_correction_rotation_rad_ =
+                std::clamp(sc["loop_icp_max_correction_yaw_deg"].as<double>(15.0), 1.0, 90.0) * M_PI / 180.0;
+            global_icp_max_correspondence_m_ = std::clamp(sc["global_icp_max_correspondence_m"].as<double>(1.5), 0.10, 5.0);
+            global_icp_max_fitness_ = std::clamp(sc["global_icp_max_fitness"].as<double>(0.80), 0.01, 5.0);
+            global_icp_max_correction_translation_m_ = std::clamp(sc["global_icp_max_correction_translation_m"].as<double>(1.5), 0.05, 5.0);
+            global_icp_max_correction_rotation_rad_ =
+                std::clamp(sc["global_icp_max_correction_yaw_deg"].as<double>(20.0), 1.0, 90.0) * M_PI / 180.0;
         }
 
         if (config["keyframe"]) {
@@ -331,7 +342,8 @@ LoopCandidate LoopClosureDetector::detectLoop() {
 
     Sophus::SE3d initial_guess = candidate_keyframe.pose_.inverse() * current_keyframe.pose_;
     const auto refined_pose = refinePose(
-        current_keyframe.cloud_, candidate_keyframe.cloud_, initial_guess);
+        current_keyframe.cloud_, candidate_keyframe.cloud_, initial_guess,
+        false);
     if (!refined_pose) return candidate;
 
     Sophus::SE3d odometry_pose = candidate_keyframe.pose_.inverse() * current_keyframe.pose_;
@@ -374,7 +386,8 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr filterInvalidPoints(const pcl::PointCloud<pc
 std::optional<Sophus::SE3d> LoopClosureDetector::refinePose(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
-    const Sophus::SE3d& initial_guess) {
+    const Sophus::SE3d& initial_guess,
+    bool global_relocalization) {
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_source = filterInvalidPoints(source);
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_target = filterInvalidPoints(target);
 
@@ -387,17 +400,27 @@ std::optional<Sophus::SE3d> LoopClosureDetector::refinePose(
     icp.setInputTarget(filtered_target);
 
     icp.setMaximumIterations(50);
-    icp.setMaxCorrespondenceDistance(2.0);
+    const double maximum_correspondence = global_relocalization
+        ? global_icp_max_correspondence_m_
+        : loop_icp_max_correspondence_m_;
+    const double maximum_fitness = global_relocalization
+        ? global_icp_max_fitness_ : loop_icp_max_fitness_;
+    const double maximum_translation = global_relocalization
+        ? global_icp_max_correction_translation_m_
+        : loop_icp_max_correction_translation_m_;
+    const double maximum_rotation = global_relocalization
+        ? global_icp_max_correction_rotation_rad_
+        : loop_icp_max_correction_rotation_rad_;
+    icp.setMaxCorrespondenceDistance(maximum_correspondence);
     icp.setTransformationEpsilon(1e-6);
     icp.setEuclideanFitnessEpsilon(1e-6);
 
     pcl::PointCloud<pcl::PointXYZ> aligned;
     icp.align(aligned, initial_guess.matrix().cast<float>());
 
-    constexpr double kMaximumAcceptedFitness = 2.0;
     if (!icp.hasConverged()) return std::nullopt;
     const double fitness = icp.getFitnessScore();
-    if (!std::isfinite(fitness) || fitness > kMaximumAcceptedFitness) {
+    if (!std::isfinite(fitness) || fitness > maximum_fitness) {
         return std::nullopt;
     }
 
@@ -421,10 +444,8 @@ std::optional<Sophus::SE3d> LoopClosureDetector::refinePose(
         return std::nullopt;
     }
     const Sophus::SE3d correction = initial_guess.inverse() * refined;
-    constexpr double kMaximumCorrectionTranslationM = 3.0;
-    constexpr double kMaximumCorrectionRotationRad = M_PI / 4.0;
-    if (correction.translation().norm() > kMaximumCorrectionTranslationM ||
-        correction.so3().log().norm() > kMaximumCorrectionRotationRad) {
+    if (correction.translation().norm() > maximum_translation ||
+        correction.so3().log().norm() > maximum_rotation) {
         return std::nullopt;
     }
     return refined;
@@ -459,7 +480,7 @@ std::optional<Sophus::SE3d> LoopClosureDetector::globalRelocalization(
         Eigen::AngleAxisd(hint_yaw + hints.front().yaw_offset_rad,
                           Eigen::Vector3d::UnitZ()).toRotationMatrix(),
         hints.front().pose.translation());
-    return refinePose(cloud, target_map, initial_guess);
+    return refinePose(cloud, target_map, initial_guess, true);
 }
 
 std::vector<RelocalizationHint> LoopClosureDetector::findRelocalizationHints(
@@ -695,21 +716,22 @@ bool LoopClosureNode::relocalizeService(
              relocalized_pose->translation().x(),
              relocalized_pose->translation().y(),
              relocalized_pose->translation().z());
-    relocalized_pose_ = *relocalized_pose;
+    const Sophus::SE3d& pose = *relocalized_pose;
+    relocalized_pose_ = pose;
 
     nav_msgs::Odometry relocalization_msg;
     relocalization_msg.header.stamp = ros::Time::now();
     relocalization_msg.header.frame_id = "odom";
     relocalization_msg.child_frame_id = "base_link";
     relocalization_msg.pose.pose.position.x =
-        relocalized_pose.translation().x();
+        pose.translation().x();
     relocalization_msg.pose.pose.position.y =
-        relocalized_pose.translation().y();
+        pose.translation().y();
     relocalization_msg.pose.pose.position.z =
-        relocalized_pose.translation().z();
+        pose.translation().z();
 
     const Eigen::Quaterniond quaternion =
-        relocalized_pose.so3().unit_quaternion();
+        pose.so3().unit_quaternion();
     relocalization_msg.pose.pose.orientation.x = quaternion.x();
     relocalization_msg.pose.pose.orientation.y = quaternion.y();
     relocalization_msg.pose.pose.orientation.z = quaternion.z();
