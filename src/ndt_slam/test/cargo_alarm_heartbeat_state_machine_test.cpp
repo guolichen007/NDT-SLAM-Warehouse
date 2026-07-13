@@ -21,6 +21,15 @@ StatusContractInput loadedWarning(int code) {
     input.hook_load_state = AlarmStateMachine::kHookLoaded;
     input.cargo_valid = true;
     input.obstacle_valid = true;
+    if (code == AlarmStateMachine::kLevel1Warning ||
+        code == AlarmStateMachine::kLevel2Warning) {
+        input.obstacle_count = 1U;
+        input.nearest_obstacle_distance_m =
+            code == AlarmStateMachine::kLevel1Warning ? 2.0 : 4.0;
+        input.obstacle_top_z_map = 1.0;
+        input.obstacle_uncertainty_m = 0.05;
+        input.conservative_vertical_clearance_m = 0.70;
+    }
     return input;
 }
 
@@ -172,7 +181,45 @@ TEST(CargoAlarmHeartbeat, EmptyHookClearIsExplicitlyAllowed) {
     empty.obstacle_valid = false;
     const auto result = validateStatusContract(empty);
     EXPECT_EQ(AlarmStateMachine::kClear, result.code);
-    EXPECT_TRUE(result.confirmed_empty);
+    EXPECT_TRUE(result.clear_without_obstacle_geometry);
+}
+
+TEST(CargoAlarmHeartbeat, LoadedClearAllowsValidObservationWithNoObstacle) {
+    StatusContractInput clear = loadedWarning(AlarmStateMachine::kClear);
+    clear.obstacle_count = 0U;
+    const auto result = validateStatusContract(clear);
+    EXPECT_TRUE(result.valid);
+    EXPECT_EQ(AlarmStateMachine::kClear, result.code);
+    EXPECT_TRUE(result.clear_without_obstacle_geometry);
+}
+
+TEST(CargoAlarmHeartbeat, NoObstacleClearReleasesWarningAfterClearDelay) {
+    AlarmStateMachine state(2.0);
+    state.ingest(AlarmStateMachine::kLevel1Warning,
+                 1.0, 10.0, 2.0, 0.49);
+    ASSERT_EQ(AlarmStateMachine::kLevel1Warning, state.currentCode());
+
+    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
+              state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
+                           std::numeric_limits<double>::infinity(),
+                           std::numeric_limits<double>::infinity(), true).code);
+    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.599).code);
+    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(1.6).code);
+}
+
+TEST(CargoAlarmHeartbeat, HazardRequiresAtLeastOneFiniteObstacle) {
+    StatusContractInput no_obstacle = loadedWarning(
+        AlarmStateMachine::kLevel1Warning);
+    no_obstacle.obstacle_count = 0U;
+    EXPECT_EQ(AlarmStateMachine::kInternalError,
+              validateStatusContract(no_obstacle).code);
+
+    StatusContractInput non_finite = loadedWarning(
+        AlarmStateMachine::kLevel2Warning);
+    non_finite.nearest_obstacle_distance_m =
+        std::numeric_limits<double>::quiet_NaN();
+    EXPECT_EQ(AlarmStateMachine::kInternalError,
+              validateStatusContract(non_finite).code);
 }
 
 }  // namespace

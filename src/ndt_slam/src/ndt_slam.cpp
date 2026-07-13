@@ -9184,7 +9184,7 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
         (status.cargo_valid &&
          (!std::isfinite(status.cargo_bottom_z_map) ||
           !std::isfinite(status.cargo_bottom_uncertainty_m))) ||
-        (status.obstacle_valid &&
+        (status.obstacle_valid && status.obstacle_count > 0U &&
          (!std::isfinite(status.nearest_obstacle_distance_m) ||
           !std::isfinite(status.obstacle_top_z_map) ||
           !std::isfinite(status.obstacle_uncertainty_m) ||
@@ -9593,7 +9593,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     safety_msg.cargo_bottom_z_map = bottom_msg.bottom_z_map;
     safety_msg.cargo_bottom_uncertainty_m = bottom_msg.uncertainty_m;
     safety_msg.obstacle_valid =
-        last_cargo_safety_result_.has_cluster_evidence;
+        last_cargo_safety_result_.input_valid &&
+        last_cargo_safety_result_.fault == CargoSafetyFault::NONE;
     safety_msg.obstacle_count = static_cast<std::uint32_t>(
         std::min<std::size_t>(
             last_cargo_safety_result_.evaluated_cluster_count,

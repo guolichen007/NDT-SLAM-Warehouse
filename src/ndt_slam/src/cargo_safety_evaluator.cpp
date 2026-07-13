@@ -286,9 +286,10 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
     }
 
     if (obstacle_candidates->empty()) {
-        result.input_valid = false;
-        result.fault = CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
-        result.reason = "no_obstacle_clusters";
+        result.warning_valid = true;
+        result.warning_code = kSafeCode;
+        result.fault = CargoSafetyFault::NONE;
+        result.reason = "clear_no_external_obstacle";
         return result;
     }
     if (obstacle_candidates->size() < config_.obstacle_min_cluster_points) {

@@ -74,6 +74,18 @@ def main() -> int:
             "forceFailSafe" not in heartbeat,
             "physical warnings remain coupled to fail-safe semantics",
             failures)
+    require('result.reason = "clear_no_external_obstacle"' in
+            safety_evaluator and
+            "result.warning_code = kSafeCode" in safety_evaluator,
+            "valid empty obstacle ROI is not classified CLEAR", failures)
+    require("last_cargo_safety_result_.input_valid &&" in node and
+            "last_cargo_safety_result_.fault == CargoSafetyFault::NONE" in node and
+            "status.obstacle_count > 0U" in node,
+            "obstacle validity is still coupled to cluster presence", failures)
+    require("input.obstacle_count == 0U" in heartbeat and
+            "input.obstacle_count == 0U ||" in heartbeat,
+            "heartbeat does not distinguish clear empty ROI from hazards",
+            failures)
     require("updateAndPublishCargoSafetyPipeline(" in node,
             "formal Cargo pipeline has no runtime call site", failures)
     require("publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_" in node,

@@ -20,12 +20,20 @@ struct StatusContractInput {
     bool no_cargo_confirmed = false;
     bool cargo_valid = false;
     bool obstacle_valid = false;
+    std::uint32_t obstacle_count = 0U;
+    double nearest_obstacle_distance_m =
+        std::numeric_limits<double>::quiet_NaN();
+    double obstacle_top_z_map = std::numeric_limits<double>::quiet_NaN();
+    double obstacle_uncertainty_m =
+        std::numeric_limits<double>::quiet_NaN();
+    double conservative_vertical_clearance_m =
+        std::numeric_limits<double>::quiet_NaN();
 };
 
 struct StatusContractResult {
     int code = 35;
     bool valid = false;
-    bool confirmed_empty = false;
+    bool clear_without_obstacle_geometry = false;
     const char* reason = "schema_mismatch";
 };
 
@@ -80,7 +88,7 @@ public:
                   double source_stamp_sec,
                   double distance_m = std::numeric_limits<double>::infinity(),
                   double clearance_m = std::numeric_limits<double>::infinity(),
-                  bool confirmed_empty = false) {
+                  bool clear_without_obstacle_geometry = false) {
         if (!observeWallClock(wall_now_sec)) {
             return forceCode(kSystemNotReady, "wall_time_rollback");
         }
@@ -115,9 +123,11 @@ public:
         last_candidate_code_ = requested_code;
         last_distance_m_ = distance_m;
         last_clearance_m_ = clearance_m;
-        last_confirmed_empty_ = confirmed_empty;
+        last_clear_without_obstacle_geometry_ =
+            clear_without_obstacle_geometry;
         return applyCandidate(requested_code, wall_now_sec, distance_m,
-                              clearance_m, confirmed_empty, true,
+                              clearance_m, clear_without_obstacle_geometry,
+                              true,
                               "fresh_status");
     }
 
@@ -138,7 +148,8 @@ public:
         }
         return applyCandidate(last_candidate_code_, wall_now_sec,
                               last_distance_m_, last_clearance_m_,
-                              last_confirmed_empty_, false, "heartbeat");
+                              last_clear_without_obstacle_geometry_, false,
+                              "heartbeat");
     }
 
     static bool isAllowedCode(int code) {
@@ -203,7 +214,7 @@ private:
                           double wall_now_sec,
                           double distance_m,
                           double clearance_m,
-                          bool confirmed_empty,
+                          bool clear_without_obstacle_geometry,
                           bool new_evidence,
                           const char* reason) {
         if (isFaultCode(candidate)) {
@@ -242,8 +253,10 @@ private:
         }
 
         if (candidate == kClear && current_code_ != kClear) {
-            bool geometry_exited = confirmed_empty || isFaultCode(current_code_);
-            if (current_code_ == kLevel1Warning) {
+            bool geometry_exited = clear_without_obstacle_geometry ||
+                isFaultCode(current_code_);
+            if (current_code_ == kLevel1Warning &&
+                !clear_without_obstacle_geometry) {
                 geometry_exited =
                     (std::isfinite(distance_m) &&
                      distance_m > level1_exit_distance_m_) ||
@@ -254,7 +267,8 @@ private:
                      !candidateConfirmed(candidate, new_evidence))) {
                     return {current_code_, false, "level1_clear_pending"};
                 }
-            } else if (current_code_ == kLevel2Warning) {
+            } else if (current_code_ == kLevel2Warning &&
+                       !clear_without_obstacle_geometry) {
                 geometry_exited =
                     (std::isfinite(distance_m) &&
                      distance_m > level2_exit_distance_m_) ||
@@ -300,7 +314,7 @@ private:
     bool has_wall_observation_ = false;
     bool has_source_stamp_ = false;
     bool clear_pending_ = false;
-    bool last_confirmed_empty_ = false;
+    bool last_clear_without_obstacle_geometry_ = false;
     double last_receipt_wall_sec_ = 0.0;
     double last_observed_wall_sec_ = 0.0;
     double last_source_stamp_sec_ = 0.0;
@@ -363,15 +377,23 @@ StatusContractResult validateStatusContract(const StatusContractInput& input) {
         input.hook_signal_valid &&
         input.hook_load_state == State::kHookLoaded &&
         !input.no_cargo_confirmed && input.cargo_valid && input.obstacle_valid;
+    const bool cluster_geometry_valid = input.obstacle_count == 0U ||
+        (std::isfinite(input.nearest_obstacle_distance_m) &&
+         std::isfinite(input.obstacle_top_z_map) &&
+         std::isfinite(input.obstacle_uncertainty_m) &&
+         std::isfinite(input.conservative_vertical_clearance_m));
 
     if (input.warning_code == State::kClear) {
-        if (!safe_empty && !valid_loaded) {
+        if (!safe_empty && (!valid_loaded || !cluster_geometry_valid)) {
             return {State::kInternalError, false, false,
                     "clear_contract_mismatch"};
         }
-        return {State::kClear, true, safe_empty, "clear_status"};
+        const bool clear_without_geometry = safe_empty ||
+            (valid_loaded && input.obstacle_count == 0U);
+        return {State::kClear, true, clear_without_geometry, "clear_status"};
     }
-    if (!valid_loaded) {
+    if (!valid_loaded || input.obstacle_count == 0U ||
+        !cluster_geometry_valid) {
         return {State::kInternalError, false, false,
                 "hazard_contract_mismatch"};
     }
@@ -504,6 +526,13 @@ private:
         input.no_cargo_confirmed = msg->no_cargo_confirmed;
         input.cargo_valid = msg->cargo_valid;
         input.obstacle_valid = msg->obstacle_valid;
+        input.obstacle_count = msg->obstacle_count;
+        input.nearest_obstacle_distance_m =
+            msg->nearest_obstacle_distance_m;
+        input.obstacle_top_z_map = msg->obstacle_top_z_map;
+        input.obstacle_uncertainty_m = msg->obstacle_uncertainty_m;
+        input.conservative_vertical_clearance_m =
+            msg->conservative_vertical_clearance_m;
         const StatusContractResult contract = validateStatusContract(input);
 
         last_status_ = *msg;
@@ -513,7 +542,7 @@ private:
             contract.code, ros::WallTime::now().toSec(),
             msg->header.stamp.toSec(), msg->nearest_obstacle_distance_m,
             msg->conservative_vertical_clearance_m,
-            contract.confirmed_empty);
+            contract.clear_without_obstacle_geometry);
         if (result.changed) publishCode(result.code, result.reason, true);
     }
 
