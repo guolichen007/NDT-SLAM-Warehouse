@@ -112,7 +112,7 @@ set(LIBRARY_SOURCES
   src/ndt_relocalizer.cpp
   # Runtime diagnostics (1.0x/1.5x acceptance testing)
   src/runtime_diagnostics.cpp
-  # Formal cargo bottom and fail-safe safety pipeline
+  # Formal cargo bottom and structured safety-status pipeline
   src/cargo_bottom_fusion.cpp
   src/cargo_safety_evaluator.cpp
   src/hook_load_state_filter.cpp
@@ -171,8 +171,8 @@ target_link_libraries(cargo_forbidden_zone_node
   yaml-cpp
 )
 
-# Independent wall-clock fail-safe heartbeat. This is the sole publisher of
-# the 14/17/18 PLC alarm contract.
+# Independent wall-clock status heartbeat. This is the sole publisher of the
+# simple 14/17/18/30-35 status-code interface.
 add_executable(cargo_alarm_heartbeat_node src/cargo_alarm_heartbeat_node.cpp)
 add_dependencies(cargo_alarm_heartbeat_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(cargo_alarm_heartbeat_node ${catkin_LIBRARIES})

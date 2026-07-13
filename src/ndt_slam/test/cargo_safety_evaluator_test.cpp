@@ -5,11 +5,6 @@
 namespace ndt_slam {
 namespace {
 
-TEST(CargoSafetyConfig, DefaultsToFivePercentRoiCoverage) {
-    const CargoSafetyConfig config;
-    EXPECT_FLOAT_EQ(config.minimum_roi_coverage_ratio, 0.05F);
-}
-
 CargoSafetyInput baseInput() {
     CargoSafetyInput input;
     input.height.valid = true;
@@ -38,9 +33,7 @@ void addCluster(CargoSafetyInput* input,
                 float y = 0.0F) {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
-    if (input->obstacle_cloud_base) {
-        *cloud = *input->obstacle_cloud_base;
-    }
+    if (input->obstacle_cloud_base) *cloud = *input->obstacle_cloud_base;
     const float x = 0.5F + footprint_distance;
     for (int i = 0; i < 8; ++i) {
         cloud->push_back(pcl::PointXYZ(
@@ -51,166 +44,223 @@ void addCluster(CargoSafetyInput* input,
     input->obstacle_cloud_base = cloud;
 }
 
-TEST(CargoSafetyEvaluator, DistanceBoundariesUseSingleClusterEvidence) {
+TEST(CargoSafetyConfig, ProductionDefaultsMatchContract) {
+    const CargoSafetyConfig config;
+    EXPECT_FLOAT_EQ(config.level1_distance_m, 3.0F);
+    EXPECT_FLOAT_EQ(config.level2_distance_m, 5.0F);
+    EXPECT_FLOAT_EQ(config.minimum_vertical_clearance_m, 0.80F);
+    EXPECT_FLOAT_EQ(config.minimum_roi_coverage_ratio, 0.05F);
+    EXPECT_DOUBLE_EQ(config.maximum_height_age_sec, 0.50);
+    EXPECT_DOUBLE_EQ(config.maximum_obstacle_cloud_age_sec, 0.50);
+}
+
+CargoSafetyDecisionInput validLoadedDecision(std::uint16_t warning_code) {
+    CargoSafetyDecisionInput input;
+    input.system_ready = true;
+    input.localization_valid = true;
+    input.gravity_valid = true;
+    input.hook_loaded = true;
+    input.warning_valid = true;
+    input.warning_code = warning_code;
+    input.evidence_reason = "test_evidence";
+    return input;
+}
+
+TEST(CargoSafetyDecision, EndToEndStatusCodePriorityAndFaultMask) {
+    CargoSafetyDecisionInput empty;
+    empty.system_ready = true;
+    empty.localization_valid = true;
+    empty.gravity_valid = true;
+    empty.safe_empty = true;
+    EXPECT_EQ(composeCargoSafetyDecision(empty).requested_code,
+              CargoSafetyProtocol::kClear);
+
+    for (std::uint16_t warning : {
+             static_cast<std::uint16_t>(CargoSafetyProtocol::kClear),
+             static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel1Warning),
+             static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel2Warning)}) {
+        const CargoSafetyDecision result =
+            composeCargoSafetyDecision(validLoadedDecision(warning));
+        EXPECT_TRUE(result.valid);
+        EXPECT_EQ(result.requested_code, warning);
+        EXPECT_EQ(result.fault_code, 0);
+    }
+
+    CargoSafetyDecisionInput multiple = validLoadedDecision(
+        CargoSafetyProtocol::kClear);
+    multiple.localization_valid = false;
+    multiple.gravity_valid = false;
+    const CargoSafetyDecision localization =
+        composeCargoSafetyDecision(multiple);
+    EXPECT_EQ(localization.requested_code,
+              CargoSafetyProtocol::kLocalizationInvalid);
+    EXPECT_NE(localization.fault_mask &
+                  CargoSafetyProtocol::kFaultLocalization, 0U);
+    EXPECT_NE(localization.fault_mask &
+                  CargoSafetyProtocol::kFaultGravity, 0U);
+
+    CargoSafetyDecisionInput cargo = validLoadedDecision(
+        CargoSafetyProtocol::kClear);
+    cargo.cargo_fault = true;
+    EXPECT_EQ(composeCargoSafetyDecision(cargo).requested_code,
+              CargoSafetyProtocol::kCargoInvalid);
+
+    CargoSafetyDecisionInput obstacle = validLoadedDecision(
+        CargoSafetyProtocol::kClear);
+    obstacle.obstacle_fault = true;
+    EXPECT_EQ(composeCargoSafetyDecision(obstacle).requested_code,
+              CargoSafetyProtocol::kObstacleInvalid);
+
+    CargoSafetyDecisionInput internal = validLoadedDecision(
+        CargoSafetyProtocol::kLevel2Warning);
+    internal.internal_fault = true;
+    EXPECT_EQ(composeCargoSafetyDecision(internal).requested_code,
+              CargoSafetyProtocol::kInternalError);
+}
+
+TEST(CargoSafetyDecision, SystemAndGravityFaultsNeverBecomeLevel2Warning) {
+    CargoSafetyDecisionInput startup = validLoadedDecision(
+        CargoSafetyProtocol::kLevel2Warning);
+    startup.system_ready = false;
+    EXPECT_EQ(composeCargoSafetyDecision(startup).requested_code,
+              CargoSafetyProtocol::kSystemNotReady);
+
+    CargoSafetyDecisionInput gravity = validLoadedDecision(
+        CargoSafetyProtocol::kLevel2Warning);
+    gravity.gravity_valid = false;
+    EXPECT_EQ(composeCargoSafetyDecision(gravity).requested_code,
+              CargoSafetyProtocol::kGravityInvalid);
+}
+
+TEST(CargoSafetyEvaluator, ExactDistanceAndClearanceBoundaries) {
     CargoSafetyEvaluator evaluator;
-    struct Case { float distance; std::uint16_t expected; };
+    struct Case {
+        float distance;
+        float obstacle_top;
+        std::uint16_t expected;
+    };
     const Case cases[] = {
-        {2.9F, CargoSafetyEvaluator::kLevel1Code},
-        {3.1F, CargoSafetyEvaluator::kLevel2OrFailSafeCode},
-        {4.9F, CargoSafetyEvaluator::kLevel2OrFailSafeCode},
-        {5.1F, CargoSafetyEvaluator::kSafeCode},
+        {2.99F, 1.01F, CargoSafetyEvaluator::kLevel1Code},
+        {3.00F, 1.01F, CargoSafetyEvaluator::kLevel1Code},
+        {3.01F, 1.01F, CargoSafetyEvaluator::kLevel2Code},
+        {5.00F, 1.01F, CargoSafetyEvaluator::kLevel2Code},
+        {5.01F, 1.01F, CargoSafetyEvaluator::kSafeCode},
+        {2.00F, 1.00F, CargoSafetyEvaluator::kSafeCode},
+        {2.00F, 0.99F, CargoSafetyEvaluator::kSafeCode},
+        {4.00F, 1.30F, CargoSafetyEvaluator::kLevel2Code},
     };
     for (const auto& test_case : cases) {
         CargoSafetyInput input = baseInput();
-        addCluster(&input, test_case.distance, 1.10F);
+        addCluster(&input, test_case.distance, test_case.obstacle_top);
         const CargoSafetyResult result = evaluator.evaluate(input);
         ASSERT_TRUE(result.input_valid) << result.reason;
-        EXPECT_EQ(result.raw_code, test_case.expected) << test_case.distance;
+        ASSERT_TRUE(result.warning_valid) << result.reason;
+        EXPECT_EQ(result.fault, CargoSafetyFault::NONE);
+        EXPECT_EQ(result.warning_code, test_case.expected)
+            << test_case.distance << " " << test_case.obstacle_top;
     }
 }
 
-TEST(CargoSafetyEvaluator, ClearanceBoundaryIsConservative) {
-    CargoSafetyEvaluator evaluator;
-    CargoSafetyInput exactly_safe = baseInput();
-    // conservative bottom=1.85, obstacle safe top=1.00+0.05 => clearance=0.80
-    addCluster(&exactly_safe, 2.0F, 1.00F);
-    CargoSafetyResult safe = evaluator.evaluate(exactly_safe);
-    ASSERT_TRUE(safe.has_cluster_evidence);
-    EXPECT_NEAR(safe.most_dangerous_cluster.conservative_clearance_m, 0.80F, 0.02F);
-    EXPECT_EQ(safe.raw_code, CargoSafetyEvaluator::kSafeCode);
-
-    CargoSafetyInput unsafe = baseInput();
-    addCluster(&unsafe, 2.0F, 1.02F);
-    CargoSafetyResult hazard = evaluator.evaluate(unsafe);
-    ASSERT_TRUE(hazard.has_cluster_evidence);
-    EXPECT_LT(hazard.most_dangerous_cluster.conservative_clearance_m, 0.80F);
-    EXPECT_EQ(hazard.raw_code, CargoSafetyEvaluator::kLevel1Code);
-}
-
-TEST(CargoSafetyEvaluator, NeverCombinesDistanceAndHeightAcrossClusters) {
-    CargoSafetyInput input = baseInput();
-    // A close but vertically safe cluster.
-    addCluster(&input, 1.0F, 0.20F, -1.0F);
-    // A farther, high cluster that independently produces level 2.
-    addCluster(&input, 4.0F, 1.30F, 1.0F);
-
-    CargoSafetyEvaluator evaluator;
-    const CargoSafetyResult result = evaluator.evaluate(input);
-    ASSERT_EQ(result.evaluated_cluster_count, 2U);
-    ASSERT_TRUE(result.has_cluster_evidence);
-    EXPECT_EQ(result.raw_code, CargoSafetyEvaluator::kLevel2OrFailSafeCode);
-    EXPECT_GT(result.most_dangerous_cluster.footprint_distance_m, 3.0F);
-    EXPECT_GT(result.most_dangerous_cluster.obstacle_top_z95_m, 1.0F);
-}
-
-TEST(CargoSafetyEvaluator, InvalidAndStaleHeightFailSafe) {
+TEST(CargoSafetyEvaluator, InvalidHeightNeverBecomesLevel2Warning) {
     CargoSafetyEvaluator evaluator;
     CargoSafetyInput invalid = baseInput();
     invalid.height.valid = false;
-    EXPECT_EQ(evaluator.evaluate(invalid).raw_code,
-              CargoSafetyEvaluator::kLevel2OrFailSafeCode);
+    const CargoSafetyResult invalid_result = evaluator.evaluate(invalid);
+    EXPECT_FALSE(invalid_result.warning_valid);
+    EXPECT_EQ(invalid_result.warning_code, 0U);
+    EXPECT_EQ(invalid_result.fault, CargoSafetyFault::CARGO_HEIGHT_INVALID);
 
     CargoSafetyInput stale = baseInput();
     stale.evaluation_time_sec = 11.0;
-    const CargoSafetyResult result = evaluator.evaluate(stale);
-    EXPECT_TRUE(result.height_stale);
-    EXPECT_EQ(result.raw_code, CargoSafetyEvaluator::kLevel2OrFailSafeCode);
+    const CargoSafetyResult stale_result = evaluator.evaluate(stale);
+    EXPECT_TRUE(stale_result.height_stale);
+    EXPECT_FALSE(stale_result.warning_valid);
+    EXPECT_EQ(stale_result.warning_code, 0U);
+    EXPECT_EQ(stale_result.fault, CargoSafetyFault::CARGO_HEIGHT_INVALID);
 }
 
-TEST(CargoSafetyEvaluator, CompleteValidObservationWithoutObstacleIsClear) {
+TEST(CargoSafetyEvaluator, InvalidObstacleEvidenceNeverBecomesLevel2Warning) {
     CargoSafetyEvaluator evaluator;
-    CargoSafetyInput input = baseInput();
-    const CargoSafetyResult result = evaluator.evaluate(input);
-    EXPECT_TRUE(result.input_valid);
-    EXPECT_EQ(result.raw_code, CargoSafetyEvaluator::kSafeCode);
-}
 
-TEST(CargoSafetyEvaluator, InsufficientObstacleObservationFailsSafe) {
-    CargoSafetyEvaluator evaluator;
-    CargoSafetyInput input = baseInput();
-    input.obstacle_roi_finite_points = 3;
-    const CargoSafetyResult sparse = evaluator.evaluate(input);
-    EXPECT_FALSE(sparse.input_valid);
-    EXPECT_EQ(sparse.raw_code,
-              CargoSafetyEvaluator::kLevel2OrFailSafeCode);
-    EXPECT_EQ(sparse.reason, "obstacle_observation_insufficient");
+    CargoSafetyInput stale = baseInput();
+    stale.obstacle_cloud_age_sec = 1.0;
+    const CargoSafetyResult stale_result = evaluator.evaluate(stale);
+    EXPECT_EQ(stale_result.warning_code, 0U);
+    EXPECT_EQ(stale_result.fault,
+              CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
 
-    input = baseInput();
-    input.obstacle_cloud_age_sec = 1.0;
-    const CargoSafetyResult stale = evaluator.evaluate(input);
-    EXPECT_EQ(stale.raw_code,
-              CargoSafetyEvaluator::kLevel2OrFailSafeCode);
-    EXPECT_EQ(stale.reason, "obstacle_observation_insufficient");
-}
+    CargoSafetyInput coverage = baseInput();
+    coverage.obstacle_roi_coverage_ratio = 0.0F;
+    const CargoSafetyResult coverage_result = evaluator.evaluate(coverage);
+    EXPECT_EQ(coverage_result.warning_code, 0U);
+    EXPECT_EQ(coverage_result.fault,
+              CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
 
-TEST(CargoSafetyEvaluator, SparseOrRejectedObstacleReturnsFailSafe) {
-    CargoSafetyEvaluator evaluator;
     CargoSafetyInput sparse = baseInput();
     for (int i = 0; i < 3; ++i) {
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
-            new pcl::PointCloud<pcl::PointXYZ>);
-        if (sparse.obstacle_cloud_base) *cloud = *sparse.obstacle_cloud_base;
-        cloud->push_back(pcl::PointXYZ(2.0F + 0.01F * i, 0.0F, 1.0F));
-        sparse.obstacle_cloud_base = cloud;
+        sparse.obstacle_cloud_base->push_back(
+            pcl::PointXYZ(2.0F + 0.01F * i, 0.0F, 1.0F));
     }
-    CargoSafetyResult sparse_result = evaluator.evaluate(sparse);
-    EXPECT_FALSE(sparse_result.input_valid);
-    EXPECT_EQ(sparse_result.raw_code,
-              CargoSafetyEvaluator::kLevel2OrFailSafeCode);
-    EXPECT_EQ(sparse_result.reason, "sparse_obstacle_returns");
+    const CargoSafetyResult sparse_result = evaluator.evaluate(sparse);
+    EXPECT_EQ(sparse_result.warning_code, 0U);
+    EXPECT_EQ(sparse_result.fault,
+              CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
 
-    CargoSafetyConfig config;
-    config.obstacle_max_cluster_points = 10;
-    CargoSafetyEvaluator bounded(config);
-    CargoSafetyInput oversized = baseInput();
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    for (int i = 0; i < 20; ++i) {
-        cloud->push_back(pcl::PointXYZ(
-            2.0F + 0.001F * static_cast<float>(i), 0.0F, 1.0F));
-    }
-    oversized.obstacle_cloud_base = cloud;
-    CargoSafetyResult large_cluster = bounded.evaluate(oversized);
-    EXPECT_TRUE(large_cluster.input_valid);
-    EXPECT_TRUE(large_cluster.has_cluster_evidence);
-    EXPECT_EQ(large_cluster.evaluated_cluster_count, 1U);
+    CargoSafetyInput empty = baseInput();
+    const CargoSafetyResult empty_result = evaluator.evaluate(empty);
+    EXPECT_EQ(empty_result.warning_code, 0U);
+    EXPECT_EQ(empty_result.fault,
+              CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
+}
+
+TEST(CargoSafetyEvaluator, InvalidConfigAndInputAreInternalErrors) {
+    CargoSafetyConfig invalid_config;
+    invalid_config.level2_distance_m = 2.0F;
+    CargoSafetyEvaluator invalid_evaluator(invalid_config);
+    const CargoSafetyResult config_result = invalid_evaluator.evaluate(baseInput());
+    EXPECT_EQ(config_result.warning_code, 0U);
+    EXPECT_EQ(config_result.fault, CargoSafetyFault::INTERNAL_ERROR);
+
+    CargoSafetyEvaluator evaluator;
+    CargoSafetyInput invalid_input = baseInput();
+    invalid_input.footprint_base.max_x = invalid_input.footprint_base.min_x;
+    const CargoSafetyResult input_result = evaluator.evaluate(invalid_input);
+    EXPECT_EQ(input_result.warning_code, 0U);
+    EXPECT_EQ(input_result.fault, CargoSafetyFault::INTERNAL_ERROR);
+}
+
+TEST(CargoSafetyEvaluator, Level1HasPriorityAcrossClusters) {
+    CargoSafetyInput mixed = baseInput();
+    addCluster(&mixed, 4.0F, 1.20F, 0.0F);
+    addCluster(&mixed, 2.0F, 1.20F, 0.5F);
+    const CargoSafetyResult mixed_result =
+        CargoSafetyEvaluator().evaluate(mixed);
+    ASSERT_EQ(mixed_result.evaluated_cluster_count, 2U);
+    EXPECT_EQ(mixed_result.warning_code, CargoSafetyEvaluator::kLevel1Code);
+
+    CargoSafetyInput outer = baseInput();
+    addCluster(&outer, 4.0F, 1.20F);
+    EXPECT_EQ(CargoSafetyEvaluator().evaluate(outer).warning_code,
+              CargoSafetyEvaluator::kLevel2Code);
+
+    CargoSafetyInput clear = baseInput();
+    addCluster(&clear, 2.0F, 0.20F, 0.0F);
+    addCluster(&clear, 4.0F, 0.20F, 0.5F);
+    EXPECT_EQ(CargoSafetyEvaluator().evaluate(clear).warning_code,
+              CargoSafetyEvaluator::kSafeCode);
 }
 
 TEST(CargoSafetyEvaluator, NeverExcludesObstacleBelowFusedBottom) {
     CargoSafetyInput input = baseInput();
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
-        new pcl::PointCloud<pcl::PointXYZ>);
     for (int i = 0; i < 8; ++i) {
-        cloud->push_back(pcl::PointXYZ(
+        input.obstacle_cloud_base->push_back(pcl::PointXYZ(
             0.01F * static_cast<float>(i), 0.0F,
             1.70F + 0.002F * static_cast<float>(i)));
     }
-    input.obstacle_cloud_base = cloud;
-
-    CargoSafetyEvaluator evaluator;
-    const CargoSafetyResult result = evaluator.evaluate(input);
-    EXPECT_TRUE(result.input_valid);
-    EXPECT_TRUE(result.has_cluster_evidence);
+    const CargoSafetyResult result = CargoSafetyEvaluator().evaluate(input);
+    EXPECT_TRUE(result.warning_valid);
     EXPECT_EQ(result.self_cargo_points_removed, 0U);
-    EXPECT_EQ(result.raw_code, CargoSafetyEvaluator::kLevel1Code);
-}
-
-TEST(CargoSafetyEvaluator, RejectsDegenerateFootprintAndLowCoverage) {
-    CargoSafetyEvaluator evaluator;
-    CargoSafetyInput degenerate = baseInput();
-    degenerate.footprint_base.max_x = degenerate.footprint_base.min_x;
-    const CargoSafetyResult footprint_result = evaluator.evaluate(degenerate);
-    EXPECT_FALSE(footprint_result.input_valid);
-    EXPECT_EQ(footprint_result.raw_code,
-              CargoSafetyEvaluator::kLevel2OrFailSafeCode);
-
-    CargoSafetyInput low_coverage = baseInput();
-    low_coverage.obstacle_roi_coverage_ratio = 0.0F;
-    const CargoSafetyResult coverage_result = evaluator.evaluate(low_coverage);
-    EXPECT_FALSE(coverage_result.input_valid);
-    EXPECT_EQ(coverage_result.reason, "obstacle_observation_insufficient");
-    EXPECT_EQ(coverage_result.raw_code,
-              CargoSafetyEvaluator::kLevel2OrFailSafeCode);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel1Code);
 }
 
 }  // namespace

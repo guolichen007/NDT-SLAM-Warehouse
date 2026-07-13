@@ -25,9 +25,14 @@ def main() -> int:
     node = read("src/ndt_slam/src/ndt_slam.cpp")
     header = read("src/ndt_slam/include/ndt_slam/ndt_slam.hpp")
     heartbeat = read("src/ndt_slam/src/cargo_alarm_heartbeat_node.cpp")
+    hook_node = read("src/ndt_slam/src/hook_load_state_node.cpp")
+    safety_header = read(
+        "src/ndt_slam/include/ndt_slam/cargo_safety_evaluator.hpp")
+    safety_evaluator = read("src/ndt_slam/src/cargo_safety_evaluator.cpp")
     launch = read("src/ndt_slam/launch/warehouse_live_longterm_mapping.launch")
     messages = read("src/lidar_slam2_msgs/CMakeLists.txt")
     bottom_message = read("src/lidar_slam2_msgs/msg/CargoBottomEstimate.msg")
+    safety_message = read("src/lidar_slam2_msgs/msg/CargoSafetyStatus.msg")
     merger = read("src/ndt_slam/config/merger_params.yaml")
     live_config = read("src/ndt_slam/config/live_longterm_mapping.yaml")
     rviz = read("src/ndt_slam/launch/rviz.rviz")
@@ -39,6 +44,13 @@ def main() -> int:
     require("CargoBottomEstimate.msg" in messages and
             "CargoSafetyStatus.msg" in messages,
             "typed Cargo messages are not generated", failures)
+    require("SCHEMA_VERSION=3" in safety_message and
+            all(f"CODE_{name}" in safety_message for name in (
+                "CLEAR", "LEVEL1_WARNING", "LEVEL2_WARNING",
+                "SYSTEM_NOT_READY", "LOCALIZATION_INVALID",
+                "GRAVITY_INVALID", "CARGO_INVALID", "OBSTACLE_INVALID",
+                "INTERNAL_ERROR")),
+            "CargoSafetyStatus v3 code contract is incomplete", failures)
 
     for include in ("cargo_bottom_fusion.hpp", "cargo_safety_evaluator.hpp",
                     "CargoBottomEstimate.h", "CargoSafetyStatus.h"):
@@ -52,6 +64,16 @@ def main() -> int:
             "CargoBottomFusion is not invoked by the runtime", failures)
     require("cargo_safety_evaluator_.evaluate(safety_input)" in node,
             "CargoSafetyEvaluator is not invoked by the runtime", failures)
+    require("composeCargoSafetyStatus(" in node and
+            node.count("status.requested_alarm_code =") == 1,
+            "final status code is not composed at one authoritative site",
+            failures)
+    require("CargoSafetyFault" in safety_header and
+            "kLevel2OrFailSafeCode" not in safety_header and
+            "raw_code" not in safety_header + safety_evaluator and
+            "forceFailSafe" not in heartbeat,
+            "physical warnings remain coupled to fail-safe semantics",
+            failures)
     require("updateAndPublishCargoSafetyPipeline(" in node,
             "formal Cargo pipeline has no runtime call site", failures)
     require("publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_" in node,
@@ -98,23 +120,32 @@ def main() -> int:
     require("cargo_alarm_heartbeat_node" in launch,
             "production launch does not start heartbeat", failures)
     for value in ("/cargo_avoidance/safety_status",
-                  "/cargo_avoidance/alarm_code",
+                  "/cargo_avoidance/status_code",
+                  'publish_legacy_alarm_topic" value="false',
                   'stale_timeout_sec" value="0.8'):
         require(value in launch, f"launch contract missing {value}", failures)
 
-    alarm_advertisers = []
+    status_code_advertisers = []
     for path in (ROOT / "src/ndt_slam/src").glob("*.cpp"):
         text = path.read_text(encoding="utf-8", errors="replace")
-        if '"/cargo_avoidance/alarm_code"' in text:
-            alarm_advertisers.append(path.name)
-    require(alarm_advertisers == ["cargo_alarm_heartbeat_node.cpp"],
-            "formal alarm topic must have exactly one source; found " +
-            repr(alarm_advertisers), failures)
-
-    motion_block = merger.split("motion_compensation:", 1)[-1].split("lidars:", 1)[0]
-    require("enabled: false" in motion_block,
-            "unvalidated odom-feedback motion compensation must default OFF",
+        if '"/cargo_avoidance/status_code"' in text:
+            status_code_advertisers.append(path.name)
+    require(status_code_advertisers == ["cargo_alarm_heartbeat_node.cpp"],
+            "simple status topic must have exactly one source; found " +
+            repr(status_code_advertisers), failures)
+    require('topic: "/gravity"' in live_config,
+            "gravity input topic is not the production /gravity spelling",
             failures)
+    require('as<std::string>("/gravity")' in hook_node and
+            "std_msgs::Float32" in hook_node,
+            "gravity node default topic/type contract is incorrect", failures)
+
+    if "motion_compensation:" in merger:
+        motion_block = merger.split("motion_compensation:", 1)[1].split(
+            "lidars:", 1)[0]
+        require("enabled: false" in motion_block,
+                "unvalidated odom-feedback motion compensation must default OFF",
+                failures)
 
     for obsolete in ("map_diff_points_map", "map_static_points_map",
                      "diag_allow_map_commit"):
@@ -125,7 +156,7 @@ def main() -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("PASS: Cargo bottom -> safety status -> heartbeat alarm chain is wired")
+    print("PASS: Cargo bottom -> safety status -> heartbeat status-code chain is wired")
     return 0
 
 

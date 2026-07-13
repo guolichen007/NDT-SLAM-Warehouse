@@ -34,8 +34,8 @@
         <param name="ndt_publish_cargo_markers" value="$(arg ndt_publish_cargo_markers)"/>
     </node>
 
-    <!-- Formal fail-safe output. This node is the sole publisher of the
-         14/17/18 PLC alarm contract. -->
+    <!-- Formal status heartbeat. safety_status is authoritative; status_code
+         is the optional simple-code interface. -->
     <node name="cargo_alarm_heartbeat"
           pkg="ndt_slam"
           type="cargo_alarm_heartbeat_node"
@@ -43,9 +43,16 @@
           if="$(arg use_cargo_alarm_heartbeat)">
         <param name="status_topic" value="/cargo_avoidance/safety_status"/>
         <param name="status_queue_size" value="1"/>
-        <param name="alarm_topic" value="/cargo_avoidance/alarm_code"/>
+        <param name="status_code_topic" value="/cargo_avoidance/status_code"/>
+        <param name="publish_legacy_alarm_topic" value="false"/>
+        <param name="legacy_alarm_topic" value="/cargo_avoidance/alarm_code"/>
         <param name="heartbeat_hz" value="5.0"/>
         <param name="stale_timeout_sec" value="0.8"/>
+        <param name="confirm_frames" value="2"/>
+        <param name="level1_exit_distance_m" value="3.20"/>
+        <param name="level2_exit_distance_m" value="5.20"/>
+        <param name="clearance_exit_m" value="0.90"/>
+        <param name="immediate_clearance_m" value="0.50"/>
         <param name="clear_delay_sec" value="0.5"/>
     </node>
 

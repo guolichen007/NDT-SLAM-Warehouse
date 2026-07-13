@@ -99,11 +99,11 @@ float nearestRankPercentile(std::vector<float>* values, float percentile) {
     return (*values)[index];
 }
 
-int alarmPriority(std::uint16_t raw_code) {
-    if (raw_code == CargoSafetyEvaluator::kLevel1Code) {
+int warningPriority(std::uint16_t warning_code) {
+    if (warning_code == CargoSafetyEvaluator::kLevel1Code) {
         return 3;
     }
-    if (raw_code == CargoSafetyEvaluator::kLevel2OrFailSafeCode) {
+    if (warning_code == CargoSafetyEvaluator::kLevel2Code) {
         return 2;
     }
     return 1;
@@ -111,8 +111,8 @@ int alarmPriority(std::uint16_t raw_code) {
 
 bool isMoreDangerous(const CargoSafetyClusterEvidence& candidate,
                      const CargoSafetyClusterEvidence& current) {
-    const int candidate_priority = alarmPriority(candidate.raw_code);
-    const int current_priority = alarmPriority(current.raw_code);
+    const int candidate_priority = warningPriority(candidate.warning_code);
+    const int current_priority = warningPriority(current.warning_code);
     if (candidate_priority != current_priority) {
         return candidate_priority > current_priority;
     }
@@ -138,19 +138,92 @@ const CargoSafetyConfig& CargoSafetyEvaluator::config() const {
     return config_;
 }
 
+CargoSafetyDecision composeCargoSafetyDecision(
+    const CargoSafetyDecisionInput& input) {
+    CargoSafetyDecision decision;
+    decision.fault_mask = 0U;
+    if (!input.system_ready) {
+        decision.fault_mask |= CargoSafetyProtocol::kFaultStatusStale;
+    }
+    if (!input.localization_valid) {
+        decision.fault_mask |= CargoSafetyProtocol::kFaultLocalization;
+    }
+    if (!input.gravity_valid) {
+        decision.fault_mask |= CargoSafetyProtocol::kFaultGravity;
+    }
+    if (input.cargo_fault) {
+        decision.fault_mask |= CargoSafetyProtocol::kFaultCargo;
+    }
+    if (input.obstacle_fault) {
+        decision.fault_mask |= CargoSafetyProtocol::kFaultObstacle;
+    }
+    if (input.internal_fault) {
+        decision.fault_mask |= CargoSafetyProtocol::kFaultInternal;
+    }
+
+    if (input.internal_fault) {
+        decision.fault_code = CargoSafetyProtocol::kInternalError;
+        decision.reason = input.evidence_reason.empty()
+            ? "internal_contract_error" : input.evidence_reason;
+    } else if (!input.system_ready) {
+        decision.fault_code = CargoSafetyProtocol::kSystemNotReady;
+        decision.reason = "system_not_ready";
+    } else if (!input.localization_valid) {
+        decision.fault_code = CargoSafetyProtocol::kLocalizationInvalid;
+        decision.reason = input.evidence_reason.empty()
+            ? "localization_unreliable" : input.evidence_reason;
+    } else if (!input.gravity_valid) {
+        decision.fault_code = CargoSafetyProtocol::kGravityInvalid;
+        decision.reason = input.evidence_reason.empty()
+            ? "gravity_signal_invalid" : input.evidence_reason;
+    } else if (input.cargo_fault) {
+        decision.fault_code = CargoSafetyProtocol::kCargoInvalid;
+        decision.reason = input.evidence_reason.empty()
+            ? "cargo_estimate_invalid" : input.evidence_reason;
+    } else if (input.obstacle_fault) {
+        decision.fault_code = CargoSafetyProtocol::kObstacleInvalid;
+        decision.reason = input.evidence_reason.empty()
+            ? "obstacle_evidence_invalid" : input.evidence_reason;
+    } else if (input.safe_empty) {
+        decision.fault_code = 0;
+        decision.warning_code = CargoSafetyProtocol::kClear;
+        decision.reason = input.evidence_reason.empty()
+            ? "empty_hook_no_cargo_confirmed" : input.evidence_reason;
+    } else if (input.hook_loaded && input.warning_valid &&
+               (input.warning_code == CargoSafetyProtocol::kClear ||
+                input.warning_code == CargoSafetyProtocol::kLevel1Warning ||
+                input.warning_code == CargoSafetyProtocol::kLevel2Warning)) {
+        decision.fault_code = 0;
+        decision.warning_code = input.warning_code;
+        decision.reason = input.evidence_reason;
+    } else {
+        decision.fault_code = CargoSafetyProtocol::kInternalError;
+        decision.fault_mask |= CargoSafetyProtocol::kFaultInternal;
+        decision.reason = "unhandled_safety_state";
+    }
+
+    decision.warning_valid = decision.fault_code == 0;
+    decision.valid = decision.warning_valid;
+    decision.requested_code = decision.fault_code != 0
+        ? decision.fault_code : decision.warning_code;
+    return decision;
+}
+
 CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) const {
     CargoSafetyResult result;
 
     if (!isValidConfig(config_)) {
+        result.fault = CargoSafetyFault::INTERNAL_ERROR;
         result.reason = "invalid_config";
         return result;
     }
-    if (!isFinite(input.evaluation_time_sec) || !isValidFootprint(input.footprint_base) ||
-        !input.obstacle_cloud_base) {
+    if (!isFinite(input.evaluation_time_sec) || !input.obstacle_cloud_base) {
+        result.fault = CargoSafetyFault::INTERNAL_ERROR;
         result.reason = "invalid_input";
         return result;
     }
     if (!input.height.valid) {
+        result.fault = CargoSafetyFault::CARGO_HEIGHT_INVALID;
         result.reason = "height_invalid";
         return result;
     }
@@ -158,17 +231,20 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         !isFinite(input.height.bottom_uncertainty_m) ||
         input.height.bottom_uncertainty_m < 0.0f ||
         !isFinite(input.height.stamp_sec)) {
+        result.fault = CargoSafetyFault::CARGO_HEIGHT_INVALID;
         result.reason = "invalid_height_values";
         return result;
     }
 
     result.height_age_sec = input.evaluation_time_sec - input.height.stamp_sec;
     if (result.height_age_sec < -config_.future_stamp_tolerance_sec) {
+        result.fault = CargoSafetyFault::CARGO_HEIGHT_INVALID;
         result.reason = "height_timestamp_in_future";
         return result;
     }
     if (input.height.stale || result.height_age_sec > config_.maximum_height_age_sec) {
         result.height_stale = true;
+        result.fault = CargoSafetyFault::CARGO_HEIGHT_INVALID;
         result.reason = "height_stale";
         return result;
     }
@@ -180,7 +256,13 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         input.obstacle_roi_finite_points < config_.minimum_roi_finite_points ||
         !isFinite(input.obstacle_roi_coverage_ratio) ||
         input.obstacle_roi_coverage_ratio < config_.minimum_roi_coverage_ratio) {
+        result.fault = CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
         result.reason = "obstacle_observation_insufficient";
+        return result;
+    }
+    if (!isValidFootprint(input.footprint_base)) {
+        result.fault = CargoSafetyFault::INTERNAL_ERROR;
+        result.reason = "invalid_input";
         return result;
     }
 
@@ -204,13 +286,14 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
     }
 
     if (obstacle_candidates->empty()) {
-        result.raw_code = kSafeCode;
+        result.input_valid = false;
+        result.fault = CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
         result.reason = "no_obstacle_clusters";
         return result;
     }
     if (obstacle_candidates->size() < config_.obstacle_min_cluster_points) {
         result.input_valid = false;
-        result.raw_code = kLevel2OrFailSafeCode;
+        result.fault = CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
         result.reason = "sparse_obstacle_returns";
         return result;
     }
@@ -232,7 +315,8 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         extraction.setInputCloud(obstacle_candidates);
         extraction.extract(cluster_indices);
     } catch (const std::exception&) {
-        result.raw_code = kLevel2OrFailSafeCode;
+        result.input_valid = false;
+        result.fault = CargoSafetyFault::INTERNAL_ERROR;
         result.reason = "clustering_failed";
         return result;
     }
@@ -283,16 +367,27 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
             conservative_bottom -
             (evidence.obstacle_top_z95_m + evidence.obstacle_uncertainty_m);
 
+        if (!isFinite(evidence.footprint_distance_m) ||
+            !isFinite(evidence.obstacle_top_z95_m) ||
+            !isFinite(evidence.obstacle_uncertainty_m) ||
+            !isFinite(evidence.conservative_clearance_m)) {
+            result.input_valid = false;
+            result.fault = CargoSafetyFault::INTERNAL_ERROR;
+            result.reason = "non_finite_cluster_result";
+            return result;
+        }
+
         const bool low_clearance = evidence.conservative_clearance_m <
                                    config_.minimum_vertical_clearance_m;
         if (low_clearance &&
             evidence.footprint_distance_m <= config_.level1_distance_m) {
-            evidence.raw_code = kLevel1Code;
+            evidence.warning_code = kLevel1Code;
         } else if (low_clearance &&
+                   evidence.footprint_distance_m > config_.level1_distance_m &&
                    evidence.footprint_distance_m <= config_.level2_distance_m) {
-            evidence.raw_code = kLevel2OrFailSafeCode;
+            evidence.warning_code = kLevel2Code;
         } else {
-            evidence.raw_code = kSafeCode;
+            evidence.warning_code = kSafeCode;
         }
 
         ++result.evaluated_cluster_count;
@@ -305,15 +400,17 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
 
     if (!result.has_cluster_evidence) {
         result.input_valid = false;
-        result.raw_code = kLevel2OrFailSafeCode;
+        result.fault = CargoSafetyFault::INTERNAL_ERROR;
         result.reason = "obstacle_clustering_rejected_all_candidates";
         return result;
     }
 
-    result.raw_code = result.most_dangerous_cluster.raw_code;
-    if (result.raw_code == kLevel1Code) {
+    result.warning_valid = true;
+    result.warning_code = result.most_dangerous_cluster.warning_code;
+    result.fault = CargoSafetyFault::NONE;
+    if (result.warning_code == kLevel1Code) {
         result.reason = "level1_low_clearance";
-    } else if (result.raw_code == kLevel2OrFailSafeCode) {
+    } else if (result.warning_code == kLevel2Code) {
         result.reason = "level2_low_clearance";
     } else {
         result.reason = "clear";

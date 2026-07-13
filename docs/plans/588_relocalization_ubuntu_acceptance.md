@@ -63,7 +63,8 @@ pose. A recovered pose is committed only after two independent results agree.
   within 0.35 m and 5 degrees.
 - No persistent-map commit in DEGRADED, SEARCHING, CONFIRMING or cooldown.
 - Cargo state is cleared on pose discontinuity and reacquired after recovery;
-  alarm output stays fail-safe (18) until fresh valid evidence returns.
+  status output remains localization-invalid (31) until fresh valid evidence
+  returns; code 18 is reserved for a real 3--5 m low-clearance hazard.
 - Existing 1.0x NDT timing, step and jump acceptance must be reported together
   with recovery latency and success count. A recovery event does not erase an
   earlier odometry jump from the report.

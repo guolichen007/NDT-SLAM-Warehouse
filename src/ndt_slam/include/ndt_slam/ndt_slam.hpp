@@ -1558,6 +1558,7 @@ private:
     CargoSafetyEvaluator cargo_safety_evaluator_;
     CargoBottomResult last_cargo_bottom_result_;
     CargoSafetyResult last_cargo_safety_result_;
+    bool cargo_safety_config_error_ = false;
     std::uint64_t cargo_fusion_track_id_ = 0;
     bool cargo_fusion_track_active_ = false;
     bool formal_cargo_removal_authorized_ = false;
@@ -1662,6 +1663,13 @@ private:
     void publishCargoFusionMarker(const CargoBottomResult& bottom,
                                   const ros::Time& stamp);
     HookLoadSnapshot currentHookLoadSnapshot() const;
+    lidar_slam2_msgs::CargoSafetyStatus composeCargoSafetyStatus(
+        lidar_slam2_msgs::CargoSafetyStatus status,
+        bool visual_conflict,
+        CargoSafetyFault evaluator_fault,
+        std::uint16_t warning_code,
+        bool warning_valid,
+        const std::string& evidence_reason) const;
     void publishHookOnlySafetyStatus(const HookLoadSnapshot& hook,
                                      const ros::Time& stamp,
                                      bool visual_conflict,

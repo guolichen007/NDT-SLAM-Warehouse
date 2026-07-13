@@ -72,7 +72,7 @@ struct CargoSafetyClusterEvidence {
     bool valid = false;
     std::size_t cluster_index = 0;
     std::size_t point_count = 0;
-    std::uint16_t raw_code = 14;
+    std::uint16_t warning_code = 14;
 
     float footprint_distance_m = std::numeric_limits<float>::infinity();
     float obstacle_top_z95_m = std::numeric_limits<float>::quiet_NaN();
@@ -85,10 +85,64 @@ struct CargoSafetyClusterEvidence {
     std::string uncertainty_reason;
 };
 
+enum class CargoSafetyFault : std::uint8_t {
+    NONE = 0,
+    CARGO_HEIGHT_INVALID,
+    OBSTACLE_EVIDENCE_INVALID,
+    INTERNAL_ERROR
+};
+
+struct CargoSafetyProtocol {
+    static constexpr std::int32_t kClear = 14;
+    static constexpr std::int32_t kLevel1Warning = 17;
+    static constexpr std::int32_t kLevel2Warning = 18;
+    static constexpr std::int32_t kSystemNotReady = 30;
+    static constexpr std::int32_t kLocalizationInvalid = 31;
+    static constexpr std::int32_t kGravityInvalid = 32;
+    static constexpr std::int32_t kCargoInvalid = 33;
+    static constexpr std::int32_t kObstacleInvalid = 34;
+    static constexpr std::int32_t kInternalError = 35;
+
+    static constexpr std::uint32_t kFaultStatusStale = 1U;
+    static constexpr std::uint32_t kFaultLocalization = 2U;
+    static constexpr std::uint32_t kFaultGravity = 4U;
+    static constexpr std::uint32_t kFaultCargo = 8U;
+    static constexpr std::uint32_t kFaultObstacle = 16U;
+    static constexpr std::uint32_t kFaultInternal = 32U;
+};
+
+struct CargoSafetyDecisionInput {
+    bool system_ready = false;
+    bool localization_valid = false;
+    bool gravity_valid = false;
+    bool safe_empty = false;
+    bool hook_loaded = false;
+    bool cargo_fault = false;
+    bool obstacle_fault = false;
+    bool internal_fault = false;
+    bool warning_valid = false;
+    std::uint16_t warning_code = 0;
+    std::string evidence_reason;
+};
+
+struct CargoSafetyDecision {
+    bool valid = false;
+    bool warning_valid = false;
+    std::int32_t requested_code = CargoSafetyProtocol::kSystemNotReady;
+    std::int32_t warning_code = 0;
+    std::int32_t fault_code = CargoSafetyProtocol::kSystemNotReady;
+    std::uint32_t fault_mask = CargoSafetyProtocol::kFaultStatusStale;
+    std::string reason = "system_not_ready";
+};
+
+CargoSafetyDecision composeCargoSafetyDecision(
+    const CargoSafetyDecisionInput& input);
+
 struct CargoSafetyResult {
-    // Raw PLC contract: 14=safe, 17=hazard within level 1, 18=level 2/fail-safe.
-    std::uint16_t raw_code = 18;
     bool input_valid = false;
+    bool warning_valid = false;
+    std::uint16_t warning_code = 0;
+    CargoSafetyFault fault = CargoSafetyFault::NONE;
     bool height_stale = false;
     bool has_cluster_evidence = false;
     double height_age_sec = std::numeric_limits<double>::quiet_NaN();
@@ -111,7 +165,7 @@ class CargoSafetyEvaluator {
 public:
     static constexpr std::uint16_t kSafeCode = 14;
     static constexpr std::uint16_t kLevel1Code = 17;
-    static constexpr std::uint16_t kLevel2OrFailSafeCode = 18;
+    static constexpr std::uint16_t kLevel2Code = 18;
 
     explicit CargoSafetyEvaluator(const CargoSafetyConfig& config = CargoSafetyConfig());
 

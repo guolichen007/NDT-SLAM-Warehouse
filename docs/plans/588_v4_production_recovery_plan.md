@@ -48,9 +48,9 @@ The runtime is split into four ownership domains.
    timestamp. Cargo-bottom temporal state is reset on track change, stale time
    or time rollback. Its typed output is the only height evidence accepted by
    the formal safety evaluator.
-4. **Alarm heartbeat** is independent of SLAM scheduling. It starts at and
-   returns to fail-safe code 18 when evidence is invalid or stale, and emits
-   only the PLC contract 14/17/18.
+4. **Status heartbeat** is independent of SLAM scheduling. It starts at and
+   returns to system-not-ready code 30 when evidence is stale, preserves
+   faults 31--35, and reserves 17/18 for physical hazards only.
 
 MotionGate is map-admission evidence only. It must never modify EKF velocity,
 the localization map, the published pose or Cargo state. Optional ICP is a
@@ -69,7 +69,7 @@ map-only aid and performs zero copies/jobs/threads when disabled.
 | P1-B | Validate local-map and path geometry | no diagonal drift or discontinuity; published step is measured from actual odom |
 | P1-C | Publish fused cargo bottom and map geometry | typed, same-stamp base/map result; uncertainty and source populated |
 | P1-D | Evaluate every obstacle cluster independently | 2.9/3.1/4.9/5.1 m and vertical-clearance boundary tests pass |
-| P1-E | Continuous fail-safe alarm | startup/stale/invalid = 18; healthy clear = 14; inner/outer = 17/18 |
+| P1-E | Continuous structured status | startup/stale = 30; faults = 31--35; healthy clear = 14; inner/outer hazards = 17/18 |
 
 ## Runtime acceptance contract
 
@@ -85,7 +85,8 @@ A full `调运大件.bag` run at 1.0x must satisfy all hard gates:
   passes point-count, geometry and A/B trajectory tests.
 - Cargo messages never reuse height across track IDs or across a stale/time
   rollback boundary.
-- missing, stale or invalid Cargo evidence continuously produces alarm 18.
+- missing, stale or invalid evidence continuously produces the matching
+  system-fault code (30--35), never a physical hazard code 17 or 18.
 
 If a required CSV field is absent, the corresponding gate is
 `UNVERIFIABLE` and the overall result is FAIL. Processed sensor dt must never

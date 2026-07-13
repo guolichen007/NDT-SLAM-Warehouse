@@ -28,7 +28,7 @@ public:
         }
         filter_.setConfig(readConfig());
 
-        input_topic_ = hook_config_["topic"].as<std::string>("/grawity");
+        input_topic_ = hook_config_["topic"].as<std::string>("/gravity");
         output_topic_ =
             hook_config_["state_topic"].as<std::string>("/hook/load_state");
         pnh_.param<std::string>("input_topic", input_topic_, input_topic_);
@@ -45,8 +45,14 @@ public:
             ros::WallDuration(1.0 / publish_hz),
             &HookLoadStateNode::timerCallback, this);
         publish(filter_.tick(ros::WallTime::now().toSec()), ros::Time::now());
-        ROS_INFO("[HookLoadState] input=%s output=%s publish=%.1fHz",
-                 input_topic_.c_str(), output_topic_.c_str(), publish_hz);
+        const HookLoadStateConfig& active = filter_.config();
+        ROS_INFO("[GRAVITY] topic=%s type=std_msgs/Float32 "
+                 "thresholds=(%.2f,%.2f) hysteresis=%.2f confirm=%u",
+                 input_topic_.c_str(), active.low_threshold_v,
+                 active.high_threshold_v, active.hysteresis_v,
+                 active.confirm_samples);
+        ROS_INFO("[HookLoadState] output=%s publish=%.1fHz",
+                 output_topic_.c_str(), publish_hz);
     }
 
 private:

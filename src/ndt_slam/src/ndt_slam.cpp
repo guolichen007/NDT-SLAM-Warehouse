@@ -1186,7 +1186,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         // HookCargoLock 配置
         // The voltage classifier runs in a small independent node. The SLAM
         // node consumes only its typed, debounced state and applies lifecycle
-        // and fail-safe policy here.
+        // and structured safety-status policy here.
         if (config["hook_load_signal"]) {
             const auto hls = config["hook_load_signal"];
             hook_load_signal_enabled_ = hls["enabled"].as<bool>(true);
@@ -1194,7 +1194,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_load_state_topic_ =
                 hls["state_topic"].as<std::string>("/hook/load_state");
             hook_load_state_stale_timeout_sec_ = std::max(
-                0.10, hls["consumer_stale_timeout_sec"].as<double>(0.80));
+                0.10, hls["consumer_timeout_sec"].as<double>(0.80));
             const int history_samples = std::clamp(
                 hls["origin_history_samples"].as<int>(10), 3, 200);
             empty_hook_height_history_max_samples_ =
@@ -1453,18 +1453,19 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 odom_anchor_config_.cargo_warning.level2_alarm_code = cw["level2_alarm_code"].as<int>(18);
                 odom_anchor_config_.cargo_warning.clear_alarm_code = cw["clear_alarm_code"].as<int>(14);
                 if (odom_anchor_config_.cargo_warning.clear_alarm_code !=
-                        lidar_slam2_msgs::CargoSafetyStatus::ALARM_CLEAR ||
+                        lidar_slam2_msgs::CargoSafetyStatus::CODE_CLEAR ||
                     odom_anchor_config_.cargo_warning.level1_alarm_code !=
-                        lidar_slam2_msgs::CargoSafetyStatus::ALARM_INNER_WARNING ||
+                        lidar_slam2_msgs::CargoSafetyStatus::CODE_LEVEL1_WARNING ||
                     odom_anchor_config_.cargo_warning.level2_alarm_code !=
-                        lidar_slam2_msgs::CargoSafetyStatus::ALARM_OUTER_OR_INVALID) {
-                    ROS_WARN("[CargoWarningConfig] invalid PLC codes; forcing 14/17/18 contract");
+                        lidar_slam2_msgs::CargoSafetyStatus::CODE_LEVEL2_WARNING) {
+                    ROS_ERROR("[CargoWarningConfig] invalid status codes; forcing 14/17/18 contract");
+                    cargo_safety_config_error_ = true;
                     odom_anchor_config_.cargo_warning.clear_alarm_code =
-                        lidar_slam2_msgs::CargoSafetyStatus::ALARM_CLEAR;
+                        lidar_slam2_msgs::CargoSafetyStatus::CODE_CLEAR;
                     odom_anchor_config_.cargo_warning.level1_alarm_code =
-                        lidar_slam2_msgs::CargoSafetyStatus::ALARM_INNER_WARNING;
+                        lidar_slam2_msgs::CargoSafetyStatus::CODE_LEVEL1_WARNING;
                     odom_anchor_config_.cargo_warning.level2_alarm_code =
-                        lidar_slam2_msgs::CargoSafetyStatus::ALARM_OUTER_OR_INVALID;
+                        lidar_slam2_msgs::CargoSafetyStatus::CODE_LEVEL2_WARNING;
                 }
 
                 ROS_INFO("[CargoWarningConfig] enabled=%d publish_alarm=%d debug_marker=%d level1_dist=%.1f level2_dist=%.1f clearance=%.2f",
@@ -1601,15 +1602,18 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         cargo_bottom_fusion_.setConfig(bottom_fusion_config);
 
         CargoSafetyConfig safety_config;
-        safety_config.level1_distance_m =
-            odom_anchor_config_.cargo_warning.level1_distance_m;
-        safety_config.level2_distance_m =
-            odom_anchor_config_.cargo_warning.level2_distance_m;
-        safety_config.minimum_vertical_clearance_m =
-            odom_anchor_config_.cargo_warning.min_vertical_clearance_m;
+        const YAML::Node cargo_safety = config["cargo_safety"];
+        safety_config.level1_distance_m = cargo_safety
+            ? cargo_safety["level1_distance_m"].as<float>(3.0F) : 3.0F;
+        safety_config.level2_distance_m = cargo_safety
+            ? cargo_safety["level2_distance_m"].as<float>(5.0F) : 5.0F;
+        safety_config.minimum_vertical_clearance_m = cargo_safety
+            ? cargo_safety["minimum_vertical_clearance_m"].as<float>(0.80F)
+            : 0.80F;
         safety_config.cargo_bottom_extra_margin_m =
             odom_anchor_config_.cargo_warning.cargo_bottom_extra_margin_m;
-        safety_config.maximum_height_age_sec = 0.80;
+        safety_config.maximum_height_age_sec = cargo_safety
+            ? cargo_safety["maximum_height_age_sec"].as<double>(0.50) : 0.50;
         safety_config.obstacle_top_percentile =
             odom_anchor_config_.cargo_warning.obstacle_top_percentile;
         safety_config.obstacle_cluster_tolerance_m =
@@ -1617,19 +1621,70 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         safety_config.obstacle_min_cluster_points =
             static_cast<std::size_t>(std::max(
                 1, odom_anchor_config_.cargo_warning.obstacle_min_points));
-        safety_config.maximum_obstacle_cloud_age_sec =
-            odom_anchor_config_.cargo_warning.maximum_obstacle_cloud_age_sec;
+        safety_config.maximum_obstacle_cloud_age_sec = cargo_safety
+            ? cargo_safety["maximum_obstacle_cloud_age_sec"].as<double>(0.50)
+            : 0.50;
         safety_config.minimum_roi_finite_points =
             static_cast<std::size_t>(
                 odom_anchor_config_.cargo_warning.minimum_roi_finite_points);
-        safety_config.minimum_roi_coverage_ratio =
-            odom_anchor_config_.cargo_warning.minimum_roi_coverage_ratio;
+        safety_config.minimum_roi_coverage_ratio = cargo_safety
+            ? cargo_safety["minimum_roi_coverage_ratio"].as<float>(0.05F)
+            : 0.05F;
         safety_config.exclude_self_cargo =
             odom_anchor_config_.cargo_warning.exclude_self_cargo;
+
+        const auto nearly_equal = [](double lhs, double rhs) {
+            return std::isfinite(lhs) && std::abs(lhs - rhs) <= 1.0e-6;
+        };
+        bool contract_valid =
+            nearly_equal(safety_config.level1_distance_m, 3.0) &&
+            nearly_equal(safety_config.level2_distance_m, 5.0) &&
+            nearly_equal(safety_config.minimum_vertical_clearance_m, 0.80) &&
+            nearly_equal(safety_config.minimum_roi_coverage_ratio, 0.05) &&
+            nearly_equal(safety_config.maximum_height_age_sec, 0.50) &&
+            nearly_equal(safety_config.maximum_obstacle_cloud_age_sec, 0.50);
+
+        const YAML::Node status_codes = config["status_codes"];
+        if (status_codes) {
+            contract_valid = contract_valid &&
+                status_codes["clear"].as<int>(14) == 14 &&
+                status_codes["level1"].as<int>(17) == 17 &&
+                status_codes["level2"].as<int>(18) == 18 &&
+                status_codes["system_not_ready"].as<int>(30) == 30 &&
+                status_codes["localization_invalid"].as<int>(31) == 31 &&
+                status_codes["gravity_invalid"].as<int>(32) == 32 &&
+                status_codes["cargo_invalid"].as<int>(33) == 33 &&
+                status_codes["obstacle_invalid"].as<int>(34) == 34 &&
+                status_codes["internal_error"].as<int>(35) == 35;
+        }
+
+        const YAML::Node warning_state = config["warning_state"];
+        if (warning_state) {
+            contract_valid = contract_valid &&
+                warning_state["confirm_frames"].as<int>(2) == 2 &&
+                nearly_equal(warning_state["level1_exit_distance_m"].as<double>(3.20), 3.20) &&
+                nearly_equal(warning_state["level2_exit_distance_m"].as<double>(5.20), 5.20) &&
+                nearly_equal(warning_state["clearance_exit_m"].as<double>(0.90), 0.90) &&
+                nearly_equal(warning_state["immediate_clearance_m"].as<double>(0.50), 0.50) &&
+                nearly_equal(warning_state["clear_delay_sec"].as<double>(0.50), 0.50);
+        }
+
+        if (!contract_valid) {
+            ROS_ERROR("[CargoSafetyConfig] invalid safety/status contract; "
+                      "restoring 3.0/5.0/0.80 and status codes 14/17/18/30-35");
+            cargo_safety_config_error_ = true;
+            safety_config.level1_distance_m = 3.0F;
+            safety_config.level2_distance_m = 5.0F;
+            safety_config.minimum_vertical_clearance_m = 0.80F;
+            safety_config.minimum_roi_coverage_ratio = 0.05F;
+            safety_config.maximum_height_age_sec = 0.50;
+            safety_config.maximum_obstacle_cloud_age_sec = 0.50;
+        }
         cargo_safety_evaluator_.setConfig(safety_config);
 
     } catch (const YAML::Exception& e) {
         ROS_ERROR("YAML parse error: %s", e.what());
+        cargo_safety_config_error_ = true;
     }
 }
 
@@ -6996,18 +7051,17 @@ void NdtSlamNode::publishRelocalizationSafetyInvalid(
     status.header.stamp = stamp;
     status.header.frame_id = map_frame_;
     status.schema_version = lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION;
-    status.valid = false;
     status.cargo_valid = false;
     status.cargo_source =
         lidar_slam2_msgs::CargoBottomEstimate::SOURCE_INVALID;
-    status.requested_alarm_code =
-        lidar_slam2_msgs::CargoSafetyStatus::ALARM_OUTER_OR_INVALID;
     status.hook_signal_valid = hook.valid;
     status.hook_load_state = hook.state;
     status.hook_voltage = hook.voltage;
     status.no_cargo_confirmed = false;
     status.obstacle_valid = false;
-    status.reason = "relocalization:" + reason;
+    status = composeCargoSafetyStatus(
+        status, false, CargoSafetyFault::NONE, 0U, false,
+        "relocalization:" + reason);
     cargo_safety_status_pub_.publish(status);
 }
 
@@ -9087,6 +9141,120 @@ void NdtSlamNode::publishCargoFusionMarker(
     cargo_fused_box_marker_pub_.publish(marker);
 }
 
+lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
+    lidar_slam2_msgs::CargoSafetyStatus status,
+    bool visual_conflict,
+    CargoSafetyFault evaluator_fault,
+    std::uint16_t warning_code,
+    bool warning_valid,
+    const std::string& evidence_reason) const {
+    using Status = lidar_slam2_msgs::CargoSafetyStatus;
+
+    const bool system_ready = running_.load() && !status.header.stamp.isZero();
+    const bool localization_valid =
+        !tracking_lost_.load() && relocalization_pose_reliable_ &&
+        (relocalization_state_ == RelocalizationState::IDLE ||
+         !relocalization_enabled_);
+    const bool gravity_valid = status.hook_signal_valid &&
+        std::isfinite(status.hook_voltage) &&
+        (status.hook_load_state == Status::HOOK_EMPTY ||
+         status.hook_load_state == Status::HOOK_LOADED);
+    const bool hook_empty = gravity_valid &&
+        status.hook_load_state == Status::HOOK_EMPTY;
+    const bool hook_loaded = gravity_valid &&
+        status.hook_load_state == Status::HOOK_LOADED;
+    const bool safe_empty = hook_empty && status.no_cargo_confirmed &&
+        !visual_conflict;
+
+    const bool cargo_fault =
+        (hook_empty && visual_conflict) ||
+        (hook_loaded && !status.cargo_valid) ||
+        evaluator_fault == CargoSafetyFault::CARGO_HEIGHT_INVALID;
+    const bool obstacle_fault = hook_loaded &&
+        (!status.obstacle_valid ||
+         evaluator_fault == CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
+    const bool warning_code_valid =
+        warning_code == CargoSafetyEvaluator::kSafeCode ||
+        warning_code == CargoSafetyEvaluator::kLevel1Code ||
+        warning_code == CargoSafetyEvaluator::kLevel2Code;
+    const bool warning_contract_error = hook_loaded &&
+        evaluator_fault == CargoSafetyFault::NONE &&
+        (!warning_valid || !warning_code_valid);
+    const bool finite_contract_error =
+        (status.cargo_valid &&
+         (!std::isfinite(status.cargo_bottom_z_map) ||
+          !std::isfinite(status.cargo_bottom_uncertainty_m))) ||
+        (status.obstacle_valid &&
+         (!std::isfinite(status.nearest_obstacle_distance_m) ||
+          !std::isfinite(status.obstacle_top_z_map) ||
+          !std::isfinite(status.obstacle_uncertainty_m) ||
+          !std::isfinite(status.conservative_vertical_clearance_m)));
+    const bool internal_fault = cargo_safety_config_error_ ||
+        evaluator_fault == CargoSafetyFault::INTERNAL_ERROR ||
+        warning_contract_error || finite_contract_error;
+
+    static_assert(Status::CODE_CLEAR == CargoSafetyProtocol::kClear,
+                  "Cargo safety clear-code mismatch");
+    static_assert(Status::CODE_LEVEL1_WARNING ==
+                      CargoSafetyProtocol::kLevel1Warning &&
+                  Status::CODE_LEVEL2_WARNING ==
+                      CargoSafetyProtocol::kLevel2Warning &&
+                  Status::CODE_SYSTEM_NOT_READY ==
+                      CargoSafetyProtocol::kSystemNotReady &&
+                  Status::CODE_LOCALIZATION_INVALID ==
+                      CargoSafetyProtocol::kLocalizationInvalid &&
+                  Status::CODE_GRAVITY_INVALID ==
+                      CargoSafetyProtocol::kGravityInvalid &&
+                  Status::CODE_CARGO_INVALID ==
+                      CargoSafetyProtocol::kCargoInvalid &&
+                  Status::CODE_OBSTACLE_INVALID ==
+                      CargoSafetyProtocol::kObstacleInvalid &&
+                  Status::CODE_INTERNAL_ERROR ==
+                      CargoSafetyProtocol::kInternalError,
+                  "Cargo safety status-code mismatch");
+    static_assert(Status::FAULT_STATUS_STALE ==
+                      CargoSafetyProtocol::kFaultStatusStale &&
+                  Status::FAULT_LOCALIZATION ==
+                      CargoSafetyProtocol::kFaultLocalization &&
+                  Status::FAULT_GRAVITY ==
+                      CargoSafetyProtocol::kFaultGravity &&
+                  Status::FAULT_CARGO == CargoSafetyProtocol::kFaultCargo &&
+                  Status::FAULT_OBSTACLE ==
+                      CargoSafetyProtocol::kFaultObstacle &&
+                  Status::FAULT_INTERNAL ==
+                      CargoSafetyProtocol::kFaultInternal,
+                  "Cargo safety fault-mask mismatch");
+
+    CargoSafetyDecisionInput decision_input;
+    decision_input.system_ready = system_ready;
+    decision_input.localization_valid = localization_valid;
+    decision_input.gravity_valid = gravity_valid;
+    decision_input.safe_empty = safe_empty;
+    decision_input.hook_loaded = hook_loaded;
+    decision_input.cargo_fault = cargo_fault;
+    decision_input.obstacle_fault = obstacle_fault;
+    decision_input.internal_fault = internal_fault;
+    decision_input.warning_valid = warning_valid && warning_code_valid;
+    decision_input.warning_code = warning_code;
+    decision_input.evidence_reason = cargo_safety_config_error_
+        ? "cargo_safety_config_invalid" :
+          (warning_contract_error ? "warning_contract_invalid" :
+           (finite_contract_error ? "non_finite_safety_status" :
+            evidence_reason));
+    const CargoSafetyDecision decision =
+        composeCargoSafetyDecision(decision_input);
+
+    status.localization_valid = localization_valid;
+    status.valid = decision.valid;
+    status.warning_valid = decision.warning_valid;
+    status.requested_alarm_code = decision.requested_code;
+    status.warning_code = decision.warning_code;
+    status.fault_code = decision.fault_code;
+    status.fault_mask = decision.fault_mask;
+    status.reason = decision.reason;
+    return status;
+}
+
 void NdtSlamNode::publishHookOnlySafetyStatus(
     const HookLoadSnapshot& hook, const ros::Time& stamp,
     bool visual_conflict, const std::string& reason) {
@@ -9098,20 +9266,19 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
     status.header.stamp = stamp;
     status.header.frame_id = map_frame_;
     status.schema_version = lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION;
-    status.valid = safe_empty;
     status.cargo_valid = false;
     status.cargo_source =
         lidar_slam2_msgs::CargoBottomEstimate::SOURCE_INVALID;
-    status.requested_alarm_code = safe_empty
-        ? lidar_slam2_msgs::CargoSafetyStatus::ALARM_CLEAR
-        : lidar_slam2_msgs::CargoSafetyStatus::ALARM_OUTER_OR_INVALID;
     status.hook_signal_valid = hook.valid;
     status.hook_load_state = hook.state;
     status.hook_voltage = hook.voltage;
     status.no_cargo_confirmed = safe_empty;
     status.obstacle_valid = false;
     status.confidence = safe_empty ? 1.0F : 0.0F;
-    status.reason = reason.empty() ? hook.reason : reason;
+    status = composeCargoSafetyStatus(
+        status, visual_conflict, CargoSafetyFault::NONE,
+        safe_empty ? CargoSafetyEvaluator::kSafeCode : 0U,
+        safe_empty, reason.empty() ? hook.reason : reason);
     cargo_safety_status_pub_.publish(status);
 
     lidar_slam2_msgs::CargoBottomEstimate bottom;
@@ -9154,7 +9321,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     }
 
     // LOST geometry may be retained for short-term association, but it is not
-    // current enough to drive bottom height or a non-fail-safe alarm.
+    // current enough to drive bottom height or a valid spatial warning.
     const bool active_track =
         cargo_state_.state == CargoState::LOCKED &&
         cargo_state_.valid_geometry;
@@ -9416,8 +9583,6 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     safety_msg.header.frame_id = map_frame_;
     safety_msg.schema_version =
         lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION;
-    safety_msg.valid = last_cargo_bottom_result_.valid &&
-                       last_cargo_safety_result_.input_valid;
     safety_msg.cargo_valid = last_cargo_bottom_result_.valid;
     safety_msg.cargo_track_id = bottom_msg.track_id;
     safety_msg.cargo_source = bottom_msg.source;
@@ -9425,8 +9590,6 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     safety_msg.hook_load_state = hook.state;
     safety_msg.hook_voltage = hook.voltage;
     safety_msg.no_cargo_confirmed = false;
-    safety_msg.requested_alarm_code =
-        static_cast<std::int32_t>(last_cargo_safety_result_.raw_code);
     safety_msg.cargo_bottom_z_map = bottom_msg.bottom_z_map;
     safety_msg.cargo_bottom_uncertainty_m = bottom_msg.uncertainty_m;
     safety_msg.obstacle_valid =
@@ -9448,12 +9611,17 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         safety_msg.conservative_vertical_clearance_m =
             evidence.conservative_clearance_m;
     }
-    safety_msg.confidence = safety_msg.valid
+    safety_msg.confidence = last_cargo_bottom_result_.valid &&
+                            last_cargo_safety_result_.input_valid
         ? last_cargo_bottom_result_.confidence : 0.0F;
-    safety_msg.reason = last_cargo_bottom_result_.valid
+    const std::string evidence_reason = last_cargo_bottom_result_.valid
         ? last_cargo_safety_result_.reason
         : std::string("cargo_bottom_invalid:") +
               last_cargo_bottom_result_.reason;
+    safety_msg = composeCargoSafetyStatus(
+        safety_msg, false, last_cargo_safety_result_.fault,
+        last_cargo_safety_result_.warning_code,
+        last_cargo_safety_result_.warning_valid, evidence_reason);
     cargo_safety_status_pub_.publish(safety_msg);
     publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_, stamp);
 }

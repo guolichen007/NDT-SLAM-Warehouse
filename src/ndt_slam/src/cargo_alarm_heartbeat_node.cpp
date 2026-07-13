@@ -1,47 +1,101 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 
 namespace cargo_alarm {
 
+struct StatusContractInput {
+    bool schema_valid = false;
+    bool valid = false;
+    bool warning_valid = false;
+    int requested_code = 0;
+    int warning_code = 0;
+    int fault_code = 0;
+    std::uint32_t fault_mask = 0U;
+    bool localization_valid = false;
+    bool hook_signal_valid = false;
+    int hook_load_state = 0;
+    bool no_cargo_confirmed = false;
+    bool cargo_valid = false;
+    bool obstacle_valid = false;
+};
+
+struct StatusContractResult {
+    int code = 35;
+    bool valid = false;
+    bool confirmed_empty = false;
+    const char* reason = "schema_mismatch";
+};
+
 class AlarmStateMachine {
 public:
     static constexpr int kClear = 14;
-    static constexpr int kInnerWarning = 17;
-    static constexpr int kOuterOrInvalid = 18;
+    static constexpr int kLevel1Warning = 17;
+    static constexpr int kLevel2Warning = 18;
+    static constexpr int kSystemNotReady = 30;
+    static constexpr int kLocalizationInvalid = 31;
+    static constexpr int kGravityInvalid = 32;
+    static constexpr int kCargoInvalid = 33;
+    static constexpr int kObstacleInvalid = 34;
+    static constexpr int kInternalError = 35;
+    static constexpr int kHookEmpty = 2;
+    static constexpr int kHookLoaded = 3;
 
-    struct Result {
-        int code = kOuterOrInvalid;
-        bool changed = false;
-        const char* reason = "startup_fail_safe";
+    struct Config {
+        int confirm_frames = 2;
+        double level1_exit_distance_m = 3.20;
+        double level2_exit_distance_m = 5.20;
+        double clearance_exit_m = 0.90;
+        double immediate_clearance_m = 0.50;
+        double clear_delay_sec = 0.50;
     };
 
-    AlarmStateMachine(double stale_timeout_sec, double clear_delay_sec)
+    struct Result {
+        int code = kSystemNotReady;
+        bool changed = false;
+        const char* reason = "startup_not_ready";
+    };
+
+    explicit AlarmStateMachine(double stale_timeout_sec)
+        : AlarmStateMachine(stale_timeout_sec, Config{}) {}
+
+    AlarmStateMachine(double stale_timeout_sec, const Config& config)
         : stale_timeout_sec_(sanitizePositive(stale_timeout_sec, 0.8)),
-          clear_delay_sec_(sanitizeNonNegative(clear_delay_sec, 0.5)) {}
+          confirm_frames_(std::max(1, config.confirm_frames)),
+          level1_exit_distance_m_(sanitizePositive(
+              config.level1_exit_distance_m, 3.20)),
+          level2_exit_distance_m_(sanitizePositive(
+              config.level2_exit_distance_m, 5.20)),
+          clearance_exit_m_(sanitizePositive(config.clearance_exit_m, 0.90)),
+          immediate_clearance_m_(sanitizeNonNegative(
+              config.immediate_clearance_m, 0.50)),
+          clear_delay_sec_(sanitizeNonNegative(config.clear_delay_sec, 0.50)) {}
 
     int currentCode() const { return current_code_; }
 
-    Result ingest(bool evidence_valid,
-                  int requested_code,
+    Result ingest(int requested_code,
                   double wall_now_sec,
-                  double source_stamp_sec) {
+                  double source_stamp_sec,
+                  double distance_m = std::numeric_limits<double>::infinity(),
+                  double clearance_m = std::numeric_limits<double>::infinity(),
+                  bool confirmed_empty = false) {
         if (!observeWallClock(wall_now_sec)) {
-            return forceFailSafe("wall_time_rollback");
+            return forceCode(kSystemNotReady, "wall_time_rollback");
         }
 
         has_status_ = true;
         last_receipt_wall_sec_ = wall_now_sec;
 
         if (!std::isfinite(source_stamp_sec) || source_stamp_sec <= 0.0) {
-            return forceFailSafe("invalid_source_stamp");
+            return forceCode(kInternalError, "invalid_source_stamp");
         }
-        if (has_source_stamp_ && source_stamp_sec + kTimeEpsilonSec < last_source_stamp_sec_) {
-            // Establish a new epoch after the one-shot fail-safe so bag loops or
-            // a restarted upstream clock can recover on the next advancing stamp.
+        if (has_source_stamp_ &&
+            source_stamp_sec + kTimeEpsilonSec < last_source_stamp_sec_) {
             last_source_stamp_sec_ = source_stamp_sec;
             last_source_progress_wall_sec_ = wall_now_sec;
-            return forceFailSafe("source_time_rollback");
+            return forceCode(kSystemNotReady, "source_time_rollback");
         }
         if (!has_source_stamp_ ||
             source_stamp_sec > last_source_stamp_sec_ + kTimeEpsilonSec) {
@@ -52,36 +106,45 @@ public:
 
         if (wall_now_sec - last_source_progress_wall_sec_ + kTimeEpsilonSec >=
             stale_timeout_sec_) {
-            return forceFailSafe("source_stamp_stale");
-        }
-
-        if (!evidence_valid) {
-            return forceFailSafe("invalid_evidence");
+            return forceCode(kSystemNotReady, "source_stamp_stale");
         }
         if (!isAllowedCode(requested_code)) {
-            return forceFailSafe("invalid_alarm_code");
+            return forceCode(kInternalError, "unknown_status_code");
         }
 
-        evidence_healthy_ = true;
         last_candidate_code_ = requested_code;
-        return applyCandidate(requested_code, wall_now_sec, "fresh_status");
+        last_distance_m_ = distance_m;
+        last_clearance_m_ = clearance_m;
+        last_confirmed_empty_ = confirmed_empty;
+        return applyCandidate(requested_code, wall_now_sec, distance_m,
+                              clearance_m, confirmed_empty, true,
+                              "fresh_status");
     }
 
     Result tick(double wall_now_sec) {
         if (!observeWallClock(wall_now_sec)) {
-            return forceFailSafe("wall_time_rollback");
+            return forceCode(kSystemNotReady, "wall_time_rollback");
         }
-        if (!has_status_ || !evidence_healthy_) {
-            return forceFailSafe(has_status_ ? "invalid_evidence" : "startup_fail_safe");
+        if (!has_status_) {
+            return forceCode(kSystemNotReady, "no_status");
         }
-        if (wall_now_sec - last_receipt_wall_sec_ + kTimeEpsilonSec >= stale_timeout_sec_) {
-            return forceFailSafe("status_stale");
+        if (wall_now_sec - last_receipt_wall_sec_ + kTimeEpsilonSec >=
+            stale_timeout_sec_) {
+            return forceCode(kSystemNotReady, "status_stale");
         }
         if (wall_now_sec - last_source_progress_wall_sec_ + kTimeEpsilonSec >=
             stale_timeout_sec_) {
-            return forceFailSafe("source_stamp_stale");
+            return forceCode(kSystemNotReady, "source_stamp_stale");
         }
-        return applyCandidate(last_candidate_code_, wall_now_sec, "heartbeat");
+        return applyCandidate(last_candidate_code_, wall_now_sec,
+                              last_distance_m_, last_clearance_m_,
+                              last_confirmed_empty_, false, "heartbeat");
+    }
+
+    static bool isAllowedCode(int code) {
+        return code == kClear || code == kLevel1Warning ||
+               code == kLevel2Warning ||
+               (code >= kSystemNotReady && code <= kInternalError);
     }
 
 private:
@@ -95,24 +158,12 @@ private:
         return std::isfinite(value) && value >= 0.0 ? value : fallback;
     }
 
-    static bool isAllowedCode(int code) {
-        return code == kClear || code == kInnerWarning || code == kOuterOrInvalid;
-    }
-
-    static int severity(int code) {
-        if (code == kInnerWarning) {
-            return 2;
-        }
-        if (code == kOuterOrInvalid) {
-            return 1;
-        }
-        return 0;
+    static bool isFaultCode(int code) {
+        return code >= kSystemNotReady && code <= kInternalError;
     }
 
     bool observeWallClock(double wall_now_sec) {
-        if (!std::isfinite(wall_now_sec) || wall_now_sec < 0.0) {
-            return false;
-        }
+        if (!std::isfinite(wall_now_sec) || wall_now_sec < 0.0) return false;
         if (has_wall_observation_ &&
             wall_now_sec + kTimeEpsilonSec < last_observed_wall_sec_) {
             last_observed_wall_sec_ = wall_now_sec;
@@ -123,61 +174,209 @@ private:
         return true;
     }
 
-    Result forceFailSafe(const char* reason) {
-        const bool changed = current_code_ != kOuterOrInvalid;
-        current_code_ = kOuterOrInvalid;
-        evidence_healthy_ = false;
+    Result forceCode(int code, const char* reason) {
+        const bool changed = current_code_ != code;
+        current_code_ = code;
+        last_candidate_code_ = code;
+        pending_candidate_code_ = 0;
+        pending_candidate_frames_ = 0;
         clear_pending_ = false;
-        last_candidate_code_ = kOuterOrInvalid;
         return {current_code_, changed, reason};
     }
 
-    Result applyCandidate(int candidate, double wall_now_sec, const char* reason) {
-        if (severity(candidate) > severity(current_code_)) {
-            const bool changed = candidate != current_code_;
-            current_code_ = candidate;
+    bool candidateConfirmed(int candidate, bool new_evidence) {
+        if (pending_candidate_code_ != candidate) {
+            pending_candidate_code_ = candidate;
+            pending_candidate_frames_ = new_evidence ? 1 : 0;
+        } else if (new_evidence) {
+            ++pending_candidate_frames_;
+        }
+        return pending_candidate_frames_ >= confirm_frames_;
+    }
+
+    void resetCandidateConfirmation() {
+        pending_candidate_code_ = 0;
+        pending_candidate_frames_ = 0;
+    }
+
+    Result applyCandidate(int candidate,
+                          double wall_now_sec,
+                          double distance_m,
+                          double clearance_m,
+                          bool confirmed_empty,
+                          bool new_evidence,
+                          const char* reason) {
+        if (isFaultCode(candidate)) {
+            return forceCode(candidate, reason);
+        }
+
+        if (candidate == kLevel1Warning || candidate == kLevel2Warning) {
             clear_pending_ = false;
-            return {current_code_, changed, reason};
+            const bool severe = std::isfinite(clearance_m) &&
+                clearance_m < immediate_clearance_m_;
+            const bool level2_to_level1 =
+                current_code_ == kLevel2Warning && candidate == kLevel1Warning;
+            if (candidate == current_code_) {
+                resetCandidateConfirmation();
+                return {current_code_, false, reason};
+            }
+
+            if (current_code_ == kLevel1Warning &&
+                candidate == kLevel2Warning) {
+                const bool exited_level1 = std::isfinite(distance_m) &&
+                    distance_m > level1_exit_distance_m_;
+                if (!exited_level1 ||
+                    !candidateConfirmed(candidate, new_evidence)) {
+                    return {current_code_, false, "level1_exit_pending"};
+                }
+            } else if (!severe && !level2_to_level1 &&
+                       !candidateConfirmed(candidate, new_evidence)) {
+                return {current_code_, false, "warning_confirm_pending"};
+            }
+
+            resetCandidateConfirmation();
+            const bool changed = current_code_ != candidate;
+            current_code_ = candidate;
+            return {current_code_, changed, severe
+                ? "immediate_low_clearance" : reason};
         }
 
         if (candidate == kClear && current_code_ != kClear) {
+            bool geometry_exited = confirmed_empty || isFaultCode(current_code_);
+            if (current_code_ == kLevel1Warning) {
+                geometry_exited =
+                    (std::isfinite(distance_m) &&
+                     distance_m > level1_exit_distance_m_) ||
+                    (std::isfinite(clearance_m) &&
+                     clearance_m >= clearance_exit_m_);
+                if (!geometry_exited ||
+                    (!clear_pending_ &&
+                     !candidateConfirmed(candidate, new_evidence))) {
+                    return {current_code_, false, "level1_clear_pending"};
+                }
+            } else if (current_code_ == kLevel2Warning) {
+                geometry_exited =
+                    (std::isfinite(distance_m) &&
+                     distance_m > level2_exit_distance_m_) ||
+                    (std::isfinite(clearance_m) &&
+                     clearance_m >= clearance_exit_m_);
+            }
+            if (!geometry_exited) {
+                clear_pending_ = false;
+                return {current_code_, false, "clear_hysteresis_hold"};
+            }
+            resetCandidateConfirmation();
             if (!clear_pending_) {
                 clear_pending_ = true;
                 clear_pending_since_wall_sec_ = wall_now_sec;
                 return {current_code_, false, "clear_delay_started"};
             }
-            if (wall_now_sec - clear_pending_since_wall_sec_ + kTimeEpsilonSec >=
+            if (wall_now_sec - clear_pending_since_wall_sec_ + kTimeEpsilonSec <
                 clear_delay_sec_) {
-                current_code_ = kClear;
-                clear_pending_ = false;
-                return {current_code_, true, "clear_delay_satisfied"};
+                return {current_code_, false, "clear_delay_pending"};
             }
-            return {current_code_, false, "clear_delay_pending"};
+            current_code_ = kClear;
+            clear_pending_ = false;
+            return {current_code_, true, "clear_delay_satisfied"};
         }
 
+        resetCandidateConfirmation();
         clear_pending_ = false;
-        if (candidate != current_code_) {
-            current_code_ = candidate;
-            return {current_code_, true, reason};
-        }
         return {current_code_, false, reason};
     }
 
     const double stale_timeout_sec_;
+    const int confirm_frames_;
+    const double level1_exit_distance_m_;
+    const double level2_exit_distance_m_;
+    const double clearance_exit_m_;
+    const double immediate_clearance_m_;
     const double clear_delay_sec_;
-    int current_code_ = kOuterOrInvalid;
-    int last_candidate_code_ = kOuterOrInvalid;
+    int current_code_ = kSystemNotReady;
+    int last_candidate_code_ = kSystemNotReady;
+    int pending_candidate_code_ = 0;
+    int pending_candidate_frames_ = 0;
     bool has_status_ = false;
-    bool evidence_healthy_ = false;
     bool has_wall_observation_ = false;
     bool has_source_stamp_ = false;
     bool clear_pending_ = false;
+    bool last_confirmed_empty_ = false;
     double last_receipt_wall_sec_ = 0.0;
     double last_observed_wall_sec_ = 0.0;
     double last_source_stamp_sec_ = 0.0;
     double last_source_progress_wall_sec_ = 0.0;
     double clear_pending_since_wall_sec_ = 0.0;
+    double last_distance_m_ = std::numeric_limits<double>::infinity();
+    double last_clearance_m_ = std::numeric_limits<double>::infinity();
 };
+
+StatusContractResult validateStatusContract(const StatusContractInput& input) {
+    using State = AlarmStateMachine;
+    if (!input.schema_valid) {
+        return {State::kInternalError, false, false, "schema_mismatch"};
+    }
+    const bool warning_code_valid = input.warning_code == 0 ||
+        input.warning_code == State::kClear ||
+        input.warning_code == State::kLevel1Warning ||
+        input.warning_code == State::kLevel2Warning;
+    const bool fault_code_valid = input.fault_code == 0 ||
+        (input.fault_code >= State::kSystemNotReady &&
+         input.fault_code <= State::kInternalError);
+    if (!warning_code_valid || !fault_code_valid ||
+        !State::isAllowedCode(input.requested_code)) {
+        return {State::kInternalError, false, false, "unknown_status_code"};
+    }
+
+    if (input.fault_code != 0) {
+        std::uint32_t required_mask = 0U;
+        switch (input.fault_code) {
+            case State::kSystemNotReady: required_mask = 1U; break;
+            case State::kLocalizationInvalid: required_mask = 2U; break;
+            case State::kGravityInvalid: required_mask = 4U; break;
+            case State::kCargoInvalid: required_mask = 8U; break;
+            case State::kObstacleInvalid: required_mask = 16U; break;
+            case State::kInternalError: required_mask = 32U; break;
+            default: break;
+        }
+        if (input.requested_code != input.fault_code ||
+            input.warning_valid || input.warning_code != 0 ||
+            required_mask == 0U ||
+            (input.fault_mask & required_mask) == 0U) {
+            return {State::kInternalError, false, false,
+                    "fault_contract_mismatch"};
+        }
+        return {input.fault_code, true, false, "fault_status"};
+    }
+
+    if (input.fault_mask != 0U || !input.warning_valid || !input.valid ||
+        input.requested_code != input.warning_code ||
+        input.warning_code == 0) {
+        return {State::kInternalError, false, false,
+                "warning_contract_mismatch"};
+    }
+
+    const bool safe_empty = input.localization_valid &&
+        input.hook_signal_valid &&
+        input.hook_load_state == State::kHookEmpty &&
+        input.no_cargo_confirmed && !input.cargo_valid;
+    const bool valid_loaded = input.localization_valid &&
+        input.hook_signal_valid &&
+        input.hook_load_state == State::kHookLoaded &&
+        !input.no_cargo_confirmed && input.cargo_valid && input.obstacle_valid;
+
+    if (input.warning_code == State::kClear) {
+        if (!safe_empty && !valid_loaded) {
+            return {State::kInternalError, false, false,
+                    "clear_contract_mismatch"};
+        }
+        return {State::kClear, true, safe_empty, "clear_status"};
+    }
+    if (!valid_loaded) {
+        return {State::kInternalError, false, false,
+                "hazard_contract_mismatch"};
+    }
+    return {input.warning_code, true, false, "hazard_status"};
+}
 
 }  // namespace cargo_alarm
 
@@ -197,11 +396,15 @@ public:
           pnh_("~"),
           heartbeat_hz_(readPositiveParam("heartbeat_hz", 5.0)),
           stale_timeout_sec_(readPositiveParam("stale_timeout_sec", 0.8)),
-          clear_delay_sec_(readNonNegativeParam("clear_delay_sec", 0.5)),
-          state_machine_(stale_timeout_sec_, clear_delay_sec_) {
+          warning_config_(readWarningConfig()),
+          state_machine_(stale_timeout_sec_, warning_config_) {
         pnh_.param<std::string>("status_topic", status_topic_,
                                 "/cargo_avoidance/safety_status");
-        pnh_.param<std::string>("alarm_topic", alarm_topic_,
+        pnh_.param<std::string>("status_code_topic", status_code_topic_,
+                                "/cargo_avoidance/status_code");
+        pnh_.param("publish_legacy_alarm_topic", publish_legacy_alarm_topic_,
+                   false);
+        pnh_.param<std::string>("legacy_alarm_topic", legacy_alarm_topic_,
                                 "/cargo_avoidance/alarm_code");
 
         int status_queue_size = 1;
@@ -212,20 +415,26 @@ public:
             status_queue_size = 1;
         }
 
-        alarm_pub_ = nh_.advertise<std_msgs::Int32>(alarm_topic_, 1, true);
+        status_code_pub_ = nh_.advertise<std_msgs::Int32>(
+            status_code_topic_, 1, true);
+        if (publish_legacy_alarm_topic_) {
+            legacy_alarm_pub_ = nh_.advertise<std_msgs::Int32>(
+                legacy_alarm_topic_, 1, true);
+        }
         status_sub_ = nh_.subscribe(status_topic_, status_queue_size,
                                     &AlarmHeartbeatNode::statusCallback, this);
 
-        // The latched topic is fail-safe from the moment this node starts.
-        publishAlarm(AlarmStateMachine::kOuterOrInvalid, "startup_fail_safe");
+        publishCode(AlarmStateMachine::kSystemNotReady,
+                    "startup_not_ready", true);
         heartbeat_timer_ = nh_.createWallTimer(
             ros::WallDuration(1.0 / heartbeat_hz_),
             &AlarmHeartbeatNode::heartbeatCallback, this);
 
-        ROS_INFO("[CargoAlarmHeartbeat] status=%s alarm=%s heartbeat=%.2fHz "
-                 "stale=%.3fs clear_delay=%.3fs",
-                 status_topic_.c_str(), alarm_topic_.c_str(), heartbeat_hz_,
-                 stale_timeout_sec_, clear_delay_sec_);
+        ROS_INFO("[CargoAlarmHeartbeat] status=%s status_code=%s "
+                 "heartbeat=%.2fHz stale=%.3fs legacy=%d",
+                 status_topic_.c_str(), status_code_topic_.c_str(),
+                 heartbeat_hz_, stale_timeout_sec_,
+                 publish_legacy_alarm_topic_ ? 1 : 0);
     }
 
 private:
@@ -233,8 +442,8 @@ private:
         double value = fallback;
         pnh_.param(name, value, fallback);
         if (!std::isfinite(value) || value <= 0.0) {
-            ROS_WARN("[CargoAlarmHeartbeat] ~%s=%.6f is invalid; using %.6f",
-                     name.c_str(), value, fallback);
+            ROS_ERROR("[CargoAlarmHeartbeat] ~%s=%.6f invalid; using %.6f",
+                      name.c_str(), value, fallback);
             return fallback;
         }
         return value;
@@ -244,67 +453,132 @@ private:
         double value = fallback;
         pnh_.param(name, value, fallback);
         if (!std::isfinite(value) || value < 0.0) {
-            ROS_WARN("[CargoAlarmHeartbeat] ~%s=%.6f is invalid; using %.6f",
-                     name.c_str(), value, fallback);
+            ROS_ERROR("[CargoAlarmHeartbeat] ~%s=%.6f invalid; using %.6f",
+                      name.c_str(), value, fallback);
             return fallback;
         }
         return value;
     }
 
-    void statusCallback(const lidar_slam2_msgs::CargoSafetyStatus::ConstPtr& msg) {
-        const bool schema_valid =
-            msg->schema_version == lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION;
-        const bool safe_empty =
-            msg->hook_signal_valid &&
-            msg->hook_load_state ==
-                lidar_slam2_msgs::CargoSafetyStatus::HOOK_EMPTY &&
-            msg->no_cargo_confirmed && !msg->cargo_valid && msg->valid &&
-            msg->requested_alarm_code ==
-                lidar_slam2_msgs::CargoSafetyStatus::ALARM_CLEAR;
-        const bool valid_loaded =
-            msg->hook_signal_valid &&
-            msg->hook_load_state ==
-                lidar_slam2_msgs::CargoSafetyStatus::HOOK_LOADED &&
-            !msg->no_cargo_confirmed && msg->cargo_valid && msg->valid;
-        const bool evidence_valid =
-            schema_valid && (safe_empty || valid_loaded);
-        const AlarmStateMachine::Result result = state_machine_.ingest(
-            evidence_valid, msg->requested_alarm_code,
-            ros::WallTime::now().toSec(), msg->header.stamp.toSec());
-
-        // Escalation and invalid evidence are published in this callback, without
-        // waiting for the periodic heartbeat.
-        if (result.changed || result.code == AlarmStateMachine::kOuterOrInvalid) {
-            publishAlarm(result.code, result.reason);
+    AlarmStateMachine::Config readWarningConfig() {
+        AlarmStateMachine::Config config;
+        pnh_.param("confirm_frames", config.confirm_frames, 2);
+        config.level1_exit_distance_m =
+            readPositiveParam("level1_exit_distance_m", 3.20);
+        config.level2_exit_distance_m =
+            readPositiveParam("level2_exit_distance_m", 5.20);
+        config.clearance_exit_m =
+            readPositiveParam("clearance_exit_m", 0.90);
+        config.immediate_clearance_m =
+            readNonNegativeParam("immediate_clearance_m", 0.50);
+        config.clear_delay_sec =
+            readNonNegativeParam("clear_delay_sec", 0.50);
+        const bool valid = config.confirm_frames == 2 &&
+            std::abs(config.level1_exit_distance_m - 3.20) <= 1.0e-6 &&
+            std::abs(config.level2_exit_distance_m - 5.20) <= 1.0e-6 &&
+            std::abs(config.clearance_exit_m - 0.90) <= 1.0e-6 &&
+            std::abs(config.immediate_clearance_m - 0.50) <= 1.0e-6 &&
+            std::abs(config.clear_delay_sec - 0.50) <= 1.0e-6;
+        if (!valid) {
+            ROS_ERROR("[CargoAlarmHeartbeat] invalid warning_state; "
+                      "restoring confirm=2 exit=(3.20,5.20,0.90) "
+                      "immediate=0.50 clear_delay=0.50");
+            config = AlarmStateMachine::Config();
         }
+        return config;
+    }
+
+    void statusCallback(const lidar_slam2_msgs::CargoSafetyStatus::ConstPtr& msg) {
+        StatusContractInput input;
+        input.schema_valid = msg->schema_version ==
+            lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION;
+        input.valid = msg->valid;
+        input.warning_valid = msg->warning_valid;
+        input.requested_code = msg->requested_alarm_code;
+        input.warning_code = msg->warning_code;
+        input.fault_code = msg->fault_code;
+        input.fault_mask = msg->fault_mask;
+        input.localization_valid = msg->localization_valid;
+        input.hook_signal_valid = msg->hook_signal_valid;
+        input.hook_load_state = msg->hook_load_state;
+        input.no_cargo_confirmed = msg->no_cargo_confirmed;
+        input.cargo_valid = msg->cargo_valid;
+        input.obstacle_valid = msg->obstacle_valid;
+        const StatusContractResult contract = validateStatusContract(input);
+
+        last_status_ = *msg;
+        if (!contract.valid) last_status_.reason = contract.reason;
+        has_last_status_ = true;
+        const AlarmStateMachine::Result result = state_machine_.ingest(
+            contract.code, ros::WallTime::now().toSec(),
+            msg->header.stamp.toSec(), msg->nearest_obstacle_distance_m,
+            msg->conservative_vertical_clearance_m,
+            contract.confirmed_empty);
+        if (result.changed) publishCode(result.code, result.reason, true);
     }
 
     void heartbeatCallback(const ros::WallTimerEvent& event) {
         const AlarmStateMachine::Result result =
             state_machine_.tick(event.current_real.toSec());
-        publishAlarm(result.code, result.reason);
+        publishCode(result.code, result.reason, result.changed);
     }
 
-    void publishAlarm(int code, const char* reason) {
+    void publishCode(int code, const char* reason, bool log_change) {
         std_msgs::Int32 message;
         message.data = code;
-        alarm_pub_.publish(message);
-        ROS_INFO_THROTTLE(1.0,
-                          "[CargoAlarmHeartbeat] alarm=%d reason=%s",
-                          code, reason);
+        status_code_pub_.publish(message);
+        if (publish_legacy_alarm_topic_) legacy_alarm_pub_.publish(message);
+
+        if (!log_change) {
+            ROS_DEBUG("[CargoAlarmHeartbeat] code=%d reason=%s", code, reason);
+            return;
+        }
+        if (code == AlarmStateMachine::kClear) {
+            ROS_INFO("[SAFETY] code=14 state=CLEAR "
+                     "localization_valid=%d gravity_valid=%d "
+                     "cargo_valid=%d obstacle_valid=%d",
+                     has_last_status_ && last_status_.localization_valid,
+                     has_last_status_ && last_status_.hook_signal_valid,
+                     has_last_status_ && last_status_.cargo_valid,
+                     has_last_status_ && last_status_.obstacle_valid);
+        } else if (code == AlarmStateMachine::kLevel1Warning ||
+                   code == AlarmStateMachine::kLevel2Warning) {
+            ROS_WARN("[SAFETY_WARN] code=%d level=%d distance=%.2f "
+                     "clearance=%.2f cargo_bottom=%.2f obstacle_top=%.2f "
+                     "track=%u confidence=%.2f reason=%s",
+                     code, code == AlarmStateMachine::kLevel1Warning ? 1 : 2,
+                     last_status_.nearest_obstacle_distance_m,
+                     last_status_.conservative_vertical_clearance_m,
+                     last_status_.cargo_bottom_z_map,
+                     last_status_.obstacle_top_z_map,
+                     last_status_.cargo_track_id, last_status_.confidence,
+                     last_status_.reason.c_str());
+        } else {
+            const bool message_reason = std::string(reason) == "fresh_status" ||
+                std::string(reason) == "heartbeat";
+            const std::string fault_reason = has_last_status_ && message_reason
+                ? last_status_.reason : std::string(reason);
+            ROS_ERROR("[SAFETY_FAULT] code=%d reason=%s",
+                      code, fault_reason.c_str());
+        }
     }
 
     ros::NodeHandle nh_;
     ros::NodeHandle pnh_;
     ros::Subscriber status_sub_;
-    ros::Publisher alarm_pub_;
+    ros::Publisher status_code_pub_;
+    ros::Publisher legacy_alarm_pub_;
     ros::WallTimer heartbeat_timer_;
     std::string status_topic_;
-    std::string alarm_topic_;
+    std::string status_code_topic_;
+    std::string legacy_alarm_topic_;
+    bool publish_legacy_alarm_topic_ = false;
     const double heartbeat_hz_;
     const double stale_timeout_sec_;
-    const double clear_delay_sec_;
+    const AlarmStateMachine::Config warning_config_;
     AlarmStateMachine state_machine_;
+    lidar_slam2_msgs::CargoSafetyStatus last_status_;
+    bool has_last_status_ = false;
 };
 
 }  // namespace cargo_alarm
@@ -317,4 +591,3 @@ int main(int argc, char** argv) {
 }
 
 #endif  // CARGO_ALARM_HEARTBEAT_STATE_MACHINE_ONLY
-
