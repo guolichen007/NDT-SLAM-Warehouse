@@ -49,6 +49,9 @@
         <param name="heartbeat_hz" value="5.0"/>
         <param name="stale_timeout_sec" value="0.8"/>
         <param name="confirm_frames" value="2"/>
+        <param name="level1_distance_m" value="3.0"/>
+        <param name="level2_distance_m" value="5.0"/>
+        <param name="minimum_vertical_clearance_m" value="0.80"/>
         <param name="level1_exit_distance_m" value="3.20"/>
         <param name="level2_exit_distance_m" value="5.20"/>
         <param name="clearance_exit_m" value="0.90"/>

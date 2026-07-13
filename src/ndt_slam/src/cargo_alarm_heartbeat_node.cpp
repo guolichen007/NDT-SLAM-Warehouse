@@ -37,6 +37,21 @@ struct StatusContractResult {
     const char* reason = "schema_mismatch";
 };
 
+struct StatusContractConfig {
+    double level1_distance_m = 3.0;
+    double level2_distance_m = 5.0;
+    double minimum_vertical_clearance_m = 0.80;
+};
+
+bool isValidStatusContractConfig(const StatusContractConfig& config) {
+    return std::isfinite(config.level1_distance_m) &&
+        std::isfinite(config.level2_distance_m) &&
+        std::isfinite(config.minimum_vertical_clearance_m) &&
+        config.level1_distance_m > 0.0 &&
+        config.level2_distance_m > config.level1_distance_m &&
+        config.minimum_vertical_clearance_m >= 0.0;
+}
+
 class AlarmStateMachine {
 public:
     static constexpr int kClear = 14;
@@ -326,8 +341,14 @@ private:
     double last_clearance_m_ = std::numeric_limits<double>::infinity();
 };
 
-StatusContractResult validateStatusContract(const StatusContractInput& input) {
+StatusContractResult validateStatusContract(
+    const StatusContractInput& input,
+    const StatusContractConfig& config = StatusContractConfig()) {
     using State = AlarmStateMachine;
+    if (!isValidStatusContractConfig(config)) {
+        return {State::kInternalError, false, false,
+                "status_contract_config_invalid"};
+    }
     if (!input.schema_valid) {
         return {State::kInternalError, false, false, "schema_mismatch"};
     }
@@ -379,25 +400,53 @@ StatusContractResult validateStatusContract(const StatusContractInput& input) {
         input.hook_signal_valid &&
         input.hook_load_state == State::kHookLoaded &&
         !input.no_cargo_confirmed && input.cargo_valid && input.obstacle_valid;
-    const bool cluster_geometry_valid = input.obstacle_count == 0U ||
-        (std::isfinite(input.nearest_obstacle_distance_m) &&
-         std::isfinite(input.obstacle_top_z_map) &&
-         std::isfinite(input.obstacle_uncertainty_m) &&
-         std::isfinite(input.conservative_vertical_clearance_m));
+    const bool cluster_geometry_valid = input.obstacle_count > 0U &&
+        std::isfinite(input.nearest_obstacle_distance_m) &&
+        input.nearest_obstacle_distance_m >= 0.0 &&
+        std::isfinite(input.obstacle_top_z_map) &&
+        std::isfinite(input.obstacle_uncertainty_m) &&
+        input.obstacle_uncertainty_m >= 0.0 &&
+        std::isfinite(input.conservative_vertical_clearance_m);
 
     if (input.warning_code == State::kClear) {
-        if (!safe_empty && (!valid_loaded || !cluster_geometry_valid)) {
+        if (safe_empty) {
+            return {State::kClear, true, true, "clear_status"};
+        }
+        if (!valid_loaded) {
             return {State::kInternalError, false, false,
                     "clear_contract_mismatch"};
         }
-        const bool clear_without_geometry = safe_empty ||
-            (valid_loaded && input.obstacle_count == 0U);
-        return {State::kClear, true, clear_without_geometry, "clear_status"};
+        if (input.obstacle_count == 0U) {
+            return {State::kClear, true, true, "clear_status"};
+        }
+        if (!cluster_geometry_valid) {
+            return {State::kInternalError, false, false,
+                    "clear_contract_mismatch"};
+        }
+        const bool safe_geometry =
+            input.conservative_vertical_clearance_m >=
+                config.minimum_vertical_clearance_m ||
+            input.nearest_obstacle_distance_m > config.level2_distance_m;
+        if (!safe_geometry) {
+            return {State::kInternalError, false, false,
+                    "clear_geometry_mismatch"};
+        }
+        return {State::kClear, true, false, "clear_status"};
     }
-    if (!valid_loaded || input.obstacle_count == 0U ||
-        !cluster_geometry_valid) {
+    const bool level1_geometry =
+        input.nearest_obstacle_distance_m <= config.level1_distance_m &&
+        input.conservative_vertical_clearance_m <
+            config.minimum_vertical_clearance_m;
+    const bool level2_geometry =
+        input.nearest_obstacle_distance_m > config.level1_distance_m &&
+        input.nearest_obstacle_distance_m <= config.level2_distance_m &&
+        input.conservative_vertical_clearance_m <
+            config.minimum_vertical_clearance_m;
+    if (!valid_loaded || !cluster_geometry_valid ||
+        (input.warning_code == State::kLevel1Warning && !level1_geometry) ||
+        (input.warning_code == State::kLevel2Warning && !level2_geometry)) {
         return {State::kInternalError, false, false,
-                "hazard_contract_mismatch"};
+                "warning_geometry_mismatch"};
     }
     return {input.warning_code, true, false, "hazard_status"};
 }
@@ -421,6 +470,7 @@ public:
           heartbeat_hz_(readPositiveParam("heartbeat_hz", 5.0)),
           stale_timeout_sec_(readPositiveParam("stale_timeout_sec", 0.8)),
           warning_config_(readWarningConfig()),
+          contract_config_(readStatusContractConfig()),
           state_machine_(stale_timeout_sec_, warning_config_) {
         pnh_.param<std::string>("status_topic", status_topic_,
                                 "/cargo_avoidance/safety_status");
@@ -512,6 +562,22 @@ private:
         return config;
     }
 
+    StatusContractConfig readStatusContractConfig() {
+        StatusContractConfig config;
+        pnh_.param("level1_distance_m", config.level1_distance_m, 3.0);
+        pnh_.param("level2_distance_m", config.level2_distance_m, 5.0);
+        pnh_.param("minimum_vertical_clearance_m",
+                   config.minimum_vertical_clearance_m, 0.80);
+        if (!isValidStatusContractConfig(config)) {
+            ROS_ERROR("[CargoAlarmHeartbeat] invalid status contract "
+                      "entry=(%.6f,%.6f,%.6f); restoring (3.0,5.0,0.80)",
+                      config.level1_distance_m, config.level2_distance_m,
+                      config.minimum_vertical_clearance_m);
+            config = StatusContractConfig();
+        }
+        return config;
+    }
+
     void statusCallback(const lidar_slam2_msgs::CargoSafetyStatus::ConstPtr& msg) {
         StatusContractInput input;
         input.schema_valid = msg->schema_version ==
@@ -535,7 +601,8 @@ private:
         input.obstacle_uncertainty_m = msg->obstacle_uncertainty_m;
         input.conservative_vertical_clearance_m =
             msg->conservative_vertical_clearance_m;
-        const StatusContractResult contract = validateStatusContract(input);
+        const StatusContractResult contract =
+            validateStatusContract(input, contract_config_);
 
         last_status_ = *msg;
         if (!contract.valid) last_status_.reason = contract.reason;
@@ -607,6 +674,7 @@ private:
     const double heartbeat_hz_;
     const double stale_timeout_sec_;
     const AlarmStateMachine::Config warning_config_;
+    const StatusContractConfig contract_config_;
     AlarmStateMachine state_machine_;
     lidar_slam2_msgs::CargoSafetyStatus last_status_;
     bool has_last_status_ = false;

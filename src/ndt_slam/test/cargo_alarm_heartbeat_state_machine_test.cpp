@@ -33,6 +33,16 @@ StatusContractInput loadedWarning(int code) {
     return input;
 }
 
+StatusContractInput loadedClusterClear(double distance, double clearance) {
+    StatusContractInput input = loadedWarning(AlarmStateMachine::kClear);
+    input.obstacle_count = 1U;
+    input.nearest_obstacle_distance_m = distance;
+    input.obstacle_top_z_map = 1.0;
+    input.obstacle_uncertainty_m = 0.05;
+    input.conservative_vertical_clearance_m = clearance;
+    return input;
+}
+
 StatusContractInput faultStatus(int code, std::uint32_t mask) {
     StatusContractInput input;
     input.schema_valid = true;
@@ -381,19 +391,134 @@ TEST(CargoAlarmHeartbeat, ConfirmFramesThreeRequiresThreeFreshClears) {
     EXPECT_EQ(AlarmStateMachine::kClear, state.tick(2.0).code);
 }
 
-TEST(CargoAlarmHeartbeat, HazardRequiresAtLeastOneFiniteObstacle) {
-    StatusContractInput no_obstacle = loadedWarning(
+TEST(CargoAlarmHeartbeat, Level1GeometryContractUsesEntryThresholds) {
+    StatusContractInput valid = loadedWarning(
         AlarmStateMachine::kLevel1Warning);
-    no_obstacle.obstacle_count = 0U;
-    EXPECT_EQ(AlarmStateMachine::kInternalError,
-              validateStatusContract(no_obstacle).code);
+    valid.nearest_obstacle_distance_m = 3.0;
+    valid.conservative_vertical_clearance_m = 0.79;
+    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
+              validateStatusContract(valid).code);
 
-    StatusContractInput non_finite = loadedWarning(
+    StatusContractInput too_far = valid;
+    too_far.nearest_obstacle_distance_m = 3.5;
+    const auto distance_result = validateStatusContract(too_far);
+    EXPECT_EQ(AlarmStateMachine::kInternalError, distance_result.code);
+    EXPECT_STREQ("warning_geometry_mismatch", distance_result.reason);
+
+    StatusContractInput enough_clearance = valid;
+    enough_clearance.nearest_obstacle_distance_m = 2.0;
+    enough_clearance.conservative_vertical_clearance_m = 0.80;
+    const auto clearance_result = validateStatusContract(enough_clearance);
+    EXPECT_EQ(AlarmStateMachine::kInternalError, clearance_result.code);
+    EXPECT_STREQ("warning_geometry_mismatch", clearance_result.reason);
+}
+
+TEST(CargoAlarmHeartbeat, Level2GeometryContractUsesEntryThresholds) {
+    StatusContractInput valid = loadedWarning(
         AlarmStateMachine::kLevel2Warning);
-    non_finite.nearest_obstacle_distance_m =
-        std::numeric_limits<double>::quiet_NaN();
+    valid.nearest_obstacle_distance_m = 4.0;
+    valid.conservative_vertical_clearance_m = 0.70;
+    EXPECT_EQ(AlarmStateMachine::kLevel2Warning,
+              validateStatusContract(valid).code);
+
+    StatusContractInput too_near = valid;
+    too_near.nearest_obstacle_distance_m = 2.0;
     EXPECT_EQ(AlarmStateMachine::kInternalError,
-              validateStatusContract(non_finite).code);
+              validateStatusContract(too_near).code);
+
+    StatusContractInput too_far = valid;
+    too_far.nearest_obstacle_distance_m = 5.1;
+    EXPECT_EQ(AlarmStateMachine::kInternalError,
+              validateStatusContract(too_far).code);
+}
+
+TEST(CargoAlarmHeartbeat, HazardsRequireAtLeastOneObstacle) {
+    for (int code : {AlarmStateMachine::kLevel1Warning,
+                     AlarmStateMachine::kLevel2Warning}) {
+        StatusContractInput input = loadedWarning(code);
+        input.obstacle_count = 0U;
+        const auto result = validateStatusContract(input);
+        EXPECT_EQ(AlarmStateMachine::kInternalError, result.code);
+        EXPECT_STREQ("warning_geometry_mismatch", result.reason);
+    }
+}
+
+TEST(CargoAlarmHeartbeat, HazardsRejectEveryNonFiniteGeometryField) {
+    for (int code : {AlarmStateMachine::kLevel1Warning,
+                     AlarmStateMachine::kLevel2Warning}) {
+        StatusContractInput distance = loadedWarning(code);
+        distance.nearest_obstacle_distance_m =
+            std::numeric_limits<double>::quiet_NaN();
+        EXPECT_EQ(AlarmStateMachine::kInternalError,
+                  validateStatusContract(distance).code);
+
+        StatusContractInput top = loadedWarning(code);
+        top.obstacle_top_z_map = std::numeric_limits<double>::quiet_NaN();
+        EXPECT_EQ(AlarmStateMachine::kInternalError,
+                  validateStatusContract(top).code);
+
+        StatusContractInput uncertainty = loadedWarning(code);
+        uncertainty.obstacle_uncertainty_m =
+            std::numeric_limits<double>::quiet_NaN();
+        EXPECT_EQ(AlarmStateMachine::kInternalError,
+                  validateStatusContract(uncertainty).code);
+
+        StatusContractInput clearance = loadedWarning(code);
+        clearance.conservative_vertical_clearance_m =
+            std::numeric_limits<double>::quiet_NaN();
+        EXPECT_EQ(AlarmStateMachine::kInternalError,
+                  validateStatusContract(clearance).code);
+    }
+}
+
+TEST(CargoAlarmHeartbeat, HazardGeometryRejectsNegativePhysicalValues) {
+    StatusContractInput distance = loadedWarning(
+        AlarmStateMachine::kLevel1Warning);
+    distance.nearest_obstacle_distance_m = -0.01;
+    EXPECT_EQ(AlarmStateMachine::kInternalError,
+              validateStatusContract(distance).code);
+
+    StatusContractInput uncertainty = loadedWarning(
+        AlarmStateMachine::kLevel2Warning);
+    uncertainty.obstacle_uncertainty_m = -0.01;
+    EXPECT_EQ(AlarmStateMachine::kInternalError,
+              validateStatusContract(uncertainty).code);
+}
+
+TEST(CargoAlarmHeartbeat, ClearWithClusterRejectsDangerousGeometry) {
+    const auto result = validateStatusContract(loadedClusterClear(2.0, 0.20));
+    EXPECT_EQ(AlarmStateMachine::kInternalError, result.code);
+    EXPECT_STREQ("clear_geometry_mismatch", result.reason);
+}
+
+TEST(CargoAlarmHeartbeat, ClearWithClusterAcceptsSafeGeometry) {
+    EXPECT_EQ(AlarmStateMachine::kClear,
+              validateStatusContract(loadedClusterClear(2.0, 1.0)).code);
+    EXPECT_EQ(AlarmStateMachine::kClear,
+              validateStatusContract(loadedClusterClear(6.0, 0.50)).code);
+}
+
+TEST(CargoAlarmHeartbeat, NoObstacleClearStillAllowsNanGeometry) {
+    StatusContractInput clear = loadedWarning(AlarmStateMachine::kClear);
+    clear.obstacle_count = 0U;
+    clear.nearest_obstacle_distance_m =
+        std::numeric_limits<double>::quiet_NaN();
+    clear.obstacle_top_z_map = std::numeric_limits<double>::quiet_NaN();
+    clear.obstacle_uncertainty_m =
+        std::numeric_limits<double>::quiet_NaN();
+    clear.conservative_vertical_clearance_m =
+        std::numeric_limits<double>::quiet_NaN();
+    EXPECT_EQ(AlarmStateMachine::kClear,
+              validateStatusContract(clear).code);
+}
+
+TEST(CargoAlarmHeartbeat, InvalidStatusContractConfigIsRejected) {
+    cargo_alarm::StatusContractConfig config;
+    config.level2_distance_m = config.level1_distance_m;
+    EXPECT_EQ(AlarmStateMachine::kInternalError,
+              validateStatusContract(
+                  loadedWarning(AlarmStateMachine::kLevel1Warning),
+                  config).code);
 }
 
 }  // namespace
