@@ -101,12 +101,11 @@ public:
         }
         if (has_source_stamp_ &&
             source_stamp_sec + kTimeEpsilonSec < last_source_stamp_sec_) {
-            last_source_stamp_sec_ = source_stamp_sec;
-            last_source_progress_wall_sec_ = wall_now_sec;
             return forceCode(kSystemNotReady, "source_time_rollback");
         }
-        if (!has_source_stamp_ ||
-            source_stamp_sec > last_source_stamp_sec_ + kTimeEpsilonSec) {
+        const bool source_stamp_advanced = !has_source_stamp_ ||
+            source_stamp_sec > last_source_stamp_sec_ + kTimeEpsilonSec;
+        if (source_stamp_advanced) {
             last_source_stamp_sec_ = source_stamp_sec;
             last_source_progress_wall_sec_ = wall_now_sec;
         }
@@ -127,7 +126,7 @@ public:
             clear_without_obstacle_geometry;
         return applyCandidate(requested_code, wall_now_sec, distance_m,
                               clearance_m, clear_without_obstacle_geometry,
-                              true,
+                              source_stamp_advanced,
                               "fresh_status");
     }
 
@@ -195,11 +194,11 @@ private:
         return {current_code_, changed, reason};
     }
 
-    bool candidateConfirmed(int candidate, bool new_evidence) {
+    bool candidateConfirmed(int candidate, bool fresh_source_evidence) {
         if (pending_candidate_code_ != candidate) {
             pending_candidate_code_ = candidate;
-            pending_candidate_frames_ = new_evidence ? 1 : 0;
-        } else if (new_evidence) {
+            pending_candidate_frames_ = fresh_source_evidence ? 1 : 0;
+        } else if (fresh_source_evidence) {
             ++pending_candidate_frames_;
         }
         return pending_candidate_frames_ >= confirm_frames_;
@@ -215,7 +214,7 @@ private:
                           double distance_m,
                           double clearance_m,
                           bool clear_without_obstacle_geometry,
-                          bool new_evidence,
+                          bool fresh_source_evidence,
                           const char* reason) {
         if (isFaultCode(candidate)) {
             return forceCode(candidate, reason);
@@ -237,11 +236,11 @@ private:
                 const bool exited_level1 = std::isfinite(distance_m) &&
                     distance_m > level1_exit_distance_m_;
                 if (!exited_level1 ||
-                    !candidateConfirmed(candidate, new_evidence)) {
+                    !candidateConfirmed(candidate, fresh_source_evidence)) {
                     return {current_code_, false, "level1_exit_pending"};
                 }
             } else if (!severe && !level2_to_level1 &&
-                       !candidateConfirmed(candidate, new_evidence)) {
+                       !candidateConfirmed(candidate, fresh_source_evidence)) {
                 return {current_code_, false, "warning_confirm_pending"};
             }
 
@@ -253,6 +252,9 @@ private:
         }
 
         if (candidate == kClear && current_code_ != kClear) {
+            const bool leaving_warning =
+                current_code_ == kLevel1Warning ||
+                current_code_ == kLevel2Warning;
             bool geometry_exited = clear_without_obstacle_geometry ||
                 isFaultCode(current_code_);
             if (current_code_ == kLevel1Warning &&
@@ -262,11 +264,6 @@ private:
                      distance_m > level1_exit_distance_m_) ||
                     (std::isfinite(clearance_m) &&
                      clearance_m >= clearance_exit_m_);
-                if (!geometry_exited ||
-                    (!clear_pending_ &&
-                     !candidateConfirmed(candidate, new_evidence))) {
-                    return {current_code_, false, "level1_clear_pending"};
-                }
             } else if (current_code_ == kLevel2Warning &&
                        !clear_without_obstacle_geometry) {
                 geometry_exited =
@@ -277,10 +274,15 @@ private:
             }
             if (!geometry_exited) {
                 clear_pending_ = false;
+                resetCandidateConfirmation();
                 return {current_code_, false, "clear_hysteresis_hold"};
             }
-            resetCandidateConfirmation();
+            if (leaving_warning && !clear_pending_ &&
+                !candidateConfirmed(kClear, fresh_source_evidence)) {
+                return {current_code_, false, "clear_confirm_pending"};
+            }
             if (!clear_pending_) {
+                resetCandidateConfirmation();
                 clear_pending_ = true;
                 clear_pending_since_wall_sec_ = wall_now_sec;
                 return {current_code_, false, "clear_delay_started"};
