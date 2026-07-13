@@ -647,9 +647,17 @@ private:
     std::map<BevKey, int> bev_observation_count_;
     int clean_min_observations_ = 2;  // 至少被 2 个关键帧观测到
 
-    // clean map 异步构建
-    std::thread clean_rebuild_thread_;
-    std::atomic<bool> clean_rebuild_running_{false};
+    // Map maintenance is kept on the single map-writer thread. When localization
+    // input is queued, expensive clean-map rebuild and RViz serialization are
+    // deferred instead of extending the localization backlog.
+    bool map_maintenance_pending_ = false;
+    bool map_maintenance_has_run_ = false;
+    bool loop_closure_pending_ = false;
+    int map_maintenance_commit_count_ = 0;
+    int map_maintenance_interval_commits_ = 3;
+    bool localizationInputPending();
+    void requestMapMaintenance();
+    void runMapMaintenanceIfIdle();
 
     bool has_first_odom_ = false;
     Eigen::Vector3d last_position_;
@@ -1221,7 +1229,7 @@ private:
 
             int level1_alarm_code = 17;
             int level2_alarm_code = 18;
-            int clear_alarm_code = 0;
+            int clear_alarm_code = 14;
         } cargo_warning;
     };
 
@@ -1392,8 +1400,8 @@ private:
     int low_bottom_reject_count_ = 0;
     int high_bottom_reject_count_ = 0;
 
-    // 统一配置 getter
-    bool isHookCargoRemovalEnabled() const;
+    // One fail-closed contract shared by NDT input and MapCommit removal.
+    bool shouldRemoveHookCargo() const;
 
     struct HookCargoLock {
         HookCargoLockState state = HookCargoLockState::EMPTY;
@@ -1507,10 +1515,21 @@ private:
     HookLoadSnapshot hook_load_snapshot_;
     std::uint8_t last_processed_hook_load_state_ =
         lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN;
-    std::deque<float> empty_hook_height_history_;
+    struct OriginHeightSample {
+        float height_m = 0.0F;
+        Eigen::Vector2f center_base = Eigen::Vector2f::Zero();
+        Eigen::Vector2f center_map = Eigen::Vector2f::Zero();
+        ros::Time stamp;
+    };
+    std::deque<OriginHeightSample> empty_hook_height_history_;
     std::size_t empty_hook_height_history_max_samples_ = 10U;
+    double origin_history_max_age_sec_ = 2.0;
+    float origin_history_max_position_spread_m_ = 0.35F;
+    float origin_match_max_distance_m_ = 0.50F;
     bool pending_origin_height_valid_ = false;
     float pending_origin_height_m_ = 0.0F;
+    Eigen::Vector2f pending_origin_center_base_ = Eigen::Vector2f::Zero();
+    ros::Time pending_origin_stamp_;
 
     // OdomAnchorBox 新函数
     HookCargoDetection detectCargoAroundOdomAnchor(
@@ -1558,7 +1577,8 @@ private:
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
         const Sophus::SE3d& pose_map_base,
-        const ros::Time& stamp);
+        const ros::Time& stamp,
+        const ros::Time& obstacle_cloud_stamp);
     void publishCargoFusionMarker(const CargoBottomResult& bottom,
                                   const ros::Time& stamp);
     HookLoadSnapshot currentHookLoadSnapshot() const;
@@ -1568,7 +1588,10 @@ private:
                                      const std::string& reason);
     void resetCargoForHookState(bool preserve_origin_height);
     bool hookAllowsMapCommit() const;
-    void recordEmptyHookOriginHeight(float height_m);
+    void recordEmptyHookOriginHeight(float height_m,
+                                     const Eigen::Vector2f& center_base,
+                                     const Eigen::Vector2f& center_map,
+                                     const ros::Time& stamp);
 
     // ========== Runtime Diagnostics (1.0x/1.5x acceptance testing) ==========
     RuntimeDiagnostics runtime_diag_;

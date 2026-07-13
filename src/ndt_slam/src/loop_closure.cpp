@@ -330,14 +330,16 @@ LoopCandidate LoopClosureDetector::detectLoop() {
     if (similarity < similarity_threshold_) return candidate;
 
     Sophus::SE3d initial_guess = candidate_keyframe.pose_.inverse() * current_keyframe.pose_;
-    Sophus::SE3d refined_pose = refinePose(current_keyframe.cloud_, candidate_keyframe.cloud_, initial_guess);
+    const auto refined_pose = refinePose(
+        current_keyframe.cloud_, candidate_keyframe.cloud_, initial_guess);
+    if (!refined_pose) return candidate;
 
     Sophus::SE3d odometry_pose = candidate_keyframe.pose_.inverse() * current_keyframe.pose_;
-    if (!checkConsistency(refined_pose, odometry_pose)) return candidate;
+    if (!checkConsistency(*refined_pose, odometry_pose)) return candidate;
 
     candidate.current_keyframe_id = current_keyframe.id_;
     candidate.candidate_keyframe_id = candidate_keyframe.id_;
-    candidate.relative_pose = refined_pose;
+    candidate.relative_pose = *refined_pose;
     candidate.similarity = similarity;
 
     return candidate;
@@ -369,14 +371,15 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr filterInvalidPoints(const pcl::PointCloud<pc
     return filtered_cloud;
 }
 
-Sophus::SE3d LoopClosureDetector::refinePose(const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
-                                             const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
-                                             const Sophus::SE3d& initial_guess) {
+std::optional<Sophus::SE3d> LoopClosureDetector::refinePose(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
+    const Sophus::SE3d& initial_guess) {
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_source = filterInvalidPoints(source);
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_target = filterInvalidPoints(target);
 
     if (filtered_source->empty() || filtered_target->empty()) {
-        return initial_guess;
+        return std::nullopt;
     }
 
     pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
@@ -384,13 +387,22 @@ Sophus::SE3d LoopClosureDetector::refinePose(const pcl::PointCloud<pcl::PointXYZ
     icp.setInputTarget(filtered_target);
 
     icp.setMaximumIterations(50);
+    icp.setMaxCorrespondenceDistance(2.0);
     icp.setTransformationEpsilon(1e-6);
     icp.setEuclideanFitnessEpsilon(1e-6);
 
     pcl::PointCloud<pcl::PointXYZ> aligned;
     icp.align(aligned, initial_guess.matrix().cast<float>());
 
+    constexpr double kMaximumAcceptedFitness = 2.0;
+    if (!icp.hasConverged()) return std::nullopt;
+    const double fitness = icp.getFitnessScore();
+    if (!std::isfinite(fitness) || fitness > kMaximumAcceptedFitness) {
+        return std::nullopt;
+    }
+
     Eigen::Matrix4f transformation = icp.getFinalTransformation();
+    if (!transformation.allFinite()) return std::nullopt;
     Eigen::Matrix4d transformation_double = transformation.cast<double>();
 
     Eigen::Matrix3d R = transformation_double.block<3, 3>(0, 0);
@@ -403,12 +415,25 @@ Sophus::SE3d LoopClosureDetector::refinePose(const pcl::PointCloud<pcl::PointXYZ
 
     transformation_double.block<3, 3>(0, 0) = R_ortho;
 
-    return Sophus::SE3d(transformation_double);
+    const Sophus::SE3d refined(transformation_double);
+    if (!refined.so3().matrix().allFinite() ||
+        !refined.translation().allFinite()) {
+        return std::nullopt;
+    }
+    const Sophus::SE3d correction = initial_guess.inverse() * refined;
+    constexpr double kMaximumCorrectionTranslationM = 3.0;
+    constexpr double kMaximumCorrectionRotationRad = M_PI / 4.0;
+    if (correction.translation().norm() > kMaximumCorrectionTranslationM ||
+        correction.so3().log().norm() > kMaximumCorrectionRotationRad) {
+        return std::nullopt;
+    }
+    return refined;
 }
 
-Sophus::SE3d LoopClosureDetector::globalRelocalization(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
+std::optional<Sophus::SE3d> LoopClosureDetector::globalRelocalization(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
     const auto hints = findRelocalizationHints(cloud, 1, 0.70);
-    if (hints.empty()) return Sophus::SE3d();
+    if (hints.empty()) return std::nullopt;
 
     const auto& keyframes = keyframe_manager_.getKeyFrames();
     const auto it = std::find_if(
@@ -416,7 +441,7 @@ Sophus::SE3d LoopClosureDetector::globalRelocalization(const pcl::PointCloud<pcl
             return keyframe.id_ == hints.front().keyframe_id;
         });
     if (it == keyframes.end() || !it->cloud_ || it->cloud_->empty()) {
-        return Sophus::SE3d();
+        return std::nullopt;
     }
 
     // Keyframe clouds are base-frame observations. Transform the candidate
@@ -656,22 +681,21 @@ bool LoopClosureNode::relocalizeService(
 
     if (last_cloud_->empty()) {
         ROS_WARN("No pointCloud data available");
-        return true;
+        return false;
     }
 
-    const Sophus::SE3d relocalized_pose =
+    const auto relocalized_pose =
         loop_closure_detector_.globalRelocalization(last_cloud_);
-    if (!relocalized_pose.so3().matrix().allFinite() ||
-        !relocalized_pose.translation().allFinite()) {
+    if (!relocalized_pose) {
         ROS_WARN("Global relocalization failed");
-        return true;
+        return false;
     }
 
     ROS_INFO("Global relocalization successful: (%.3f, %.3f, %.3f)",
-             relocalized_pose.translation().x(),
-             relocalized_pose.translation().y(),
-             relocalized_pose.translation().z());
-    relocalized_pose_ = relocalized_pose;
+             relocalized_pose->translation().x(),
+             relocalized_pose->translation().y(),
+             relocalized_pose->translation().z());
+    relocalized_pose_ = *relocalized_pose;
 
     nav_msgs::Odometry relocalization_msg;
     relocalization_msg.header.stamp = ros::Time::now();

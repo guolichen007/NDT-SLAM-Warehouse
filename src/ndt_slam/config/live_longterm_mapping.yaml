@@ -577,6 +577,16 @@ hook_load_signal:
   valid_voltage_min_v: 0.0
   valid_voltage_max_v: 5.0
   origin_history_samples: 10
+  # Origin-height evidence is accepted only from a recent, spatially stable
+  # EMPTY interval and may be consumed by one EMPTY->LOADED lifecycle.
+  origin_history_max_age_sec: 2.0
+  origin_history_max_position_spread_m: 0.35
+  origin_match_max_distance_m: 0.50
+
+# Heavy clean-map rebuild, RViz serialization and loop detection are run only
+# while the localization input queue is empty.
+map_maintenance:
+  interval_commits: 3
 
 hook_fixed_cargo_detector:
   enabled: true
@@ -768,7 +778,7 @@ odom_anchored_cargo_box:
     obstacle_cluster_tolerance_m: 0.25
     maximum_obstacle_cloud_age_sec: 0.50
     minimum_roi_finite_points: 20
-    minimum_roi_coverage_ratio: 0.01
+    minimum_roi_coverage_ratio: 0.05
     exclude_ground: true
     ground_hag_min_m: 0.20
     exclude_self_cargo: true
@@ -778,4 +788,4 @@ odom_anchored_cargo_box:
     clear_hold_sec: 0.5
     level1_alarm_code: 17
     level2_alarm_code: 18
-    clear_alarm_code: 0
+    clear_alarm_code: 14

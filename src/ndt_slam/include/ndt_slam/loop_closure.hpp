@@ -19,6 +19,7 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <optional>
 #include <utility>
 
 // g2o
@@ -91,7 +92,8 @@ public:
     void addKeyFrame(const Sophus::SE3d& pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const ros::Time& stamp);
     LoopCandidate detectLoop();
     bool checkConsistency(const Sophus::SE3d& loop_pose, const Sophus::SE3d& odometry_pose);
-    Sophus::SE3d globalRelocalization(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
+    std::optional<Sophus::SE3d> globalRelocalization(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
     std::vector<RelocalizationHint> findRelocalizationHints(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
         std::size_t max_candidates,
@@ -113,9 +115,10 @@ private:
     double translation_threshold_ = 1.0;
     double rotation_threshold_ = 10.0 * M_PI / 180.0;
 
-    Sophus::SE3d refinePose(const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
-                            const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
-                            const Sophus::SE3d& initial_guess);
+    std::optional<Sophus::SE3d> refinePose(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
+        const Sophus::SE3d& initial_guess);
 };
 
 // 位姿图优化器类

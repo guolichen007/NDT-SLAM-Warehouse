@@ -1,6 +1,36 @@
 cmake_minimum_required(VERSION 3.8)
 project(ndt_slam)
 
+set(NDT_SLAM_GIT_SHA "unknown")
+set(NDT_SLAM_GIT_BRANCH "unknown")
+find_package(Git QUIET)
+if(GIT_FOUND)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE NDT_SLAM_GIT_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE NDT_SLAM_GIT_SHA_RESULT
+    ERROR_QUIET)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --abbrev-ref HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE NDT_SLAM_GIT_BRANCH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE NDT_SLAM_GIT_BRANCH_RESULT
+    ERROR_QUIET)
+  if(NOT NDT_SLAM_GIT_SHA_RESULT EQUAL 0 OR NDT_SLAM_GIT_SHA STREQUAL "")
+    set(NDT_SLAM_GIT_SHA "unknown")
+  endif()
+  if(NOT NDT_SLAM_GIT_BRANCH_RESULT EQUAL 0 OR NDT_SLAM_GIT_BRANCH STREQUAL "")
+    set(NDT_SLAM_GIT_BRANCH "unknown")
+  endif()
+endif()
+configure_file(
+  cmake/build_info.hpp.in
+  ${CMAKE_CURRENT_BINARY_DIR}/generated/ndt_slam/build_info.hpp
+  @ONLY)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -46,6 +76,7 @@ include(3rdparty/tsl_robin/tsl_robin.cmake)
 
 include_directories(
   include
+  ${CMAKE_CURRENT_BINARY_DIR}/generated
   ${catkin_INCLUDE_DIRS}
   ${lidar_slam2_msgs_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}

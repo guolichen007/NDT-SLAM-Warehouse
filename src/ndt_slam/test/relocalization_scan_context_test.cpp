@@ -59,6 +59,13 @@ TEST(RelocalizationScanContext, BaseFrameDescriptorIsTranslationIndependent) {
     EXPECT_NEAR(hints.front().pose.translation().y(), -12.0, 1.0e-9);
 }
 
+TEST(RelocalizationScanContext, MissingCandidateIsExplicitFailure) {
+    LoopClosureDetector detector;
+    detector.configure(20, 60, 80.0, 8.0, 0.8, 1.0, 0.2);
+    const auto result = detector.globalRelocalization(makeAsymmetricCloud());
+    EXPECT_FALSE(result.has_value());
+}
+
 TEST(NdtRelocalizerLifecycle, RejectsIncompleteJobsWithoutBlocking) {
     NdtRelocalizer relocalizer;
     RelocalizationConfig config;
