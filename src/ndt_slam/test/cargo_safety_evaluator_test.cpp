@@ -202,9 +202,29 @@ TEST(CargoSafetyEvaluator, InvalidObstacleEvidenceNeverBecomesLevel2Warning) {
             pcl::PointXYZ(2.0F + 0.01F * i, 0.0F, 1.0F));
     }
     const CargoSafetyResult sparse_result = evaluator.evaluate(sparse);
+    EXPECT_FALSE(sparse_result.input_valid);
+    EXPECT_FALSE(sparse_result.warning_valid);
     EXPECT_EQ(sparse_result.warning_code, 0U);
     EXPECT_EQ(sparse_result.fault,
               CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
+    EXPECT_EQ(sparse_result.reason, "sparse_obstacle_returns");
+}
+
+TEST(CargoSafetyEvaluator, SufficientScatteredCandidatesAreInvalidEvidence) {
+    CargoSafetyInput input = baseInput();
+    for (int i = 0; i < 5; ++i) {
+        input.obstacle_cloud_base->push_back(pcl::PointXYZ(
+            1.0F + 0.50F * static_cast<float>(i), 0.0F, 1.0F));
+    }
+
+    const CargoSafetyResult result = CargoSafetyEvaluator().evaluate(input);
+    EXPECT_FALSE(result.input_valid);
+    EXPECT_FALSE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, 0U);
+    EXPECT_EQ(result.fault, CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
+    EXPECT_EQ(result.reason, "obstacle_clusters_insufficient");
+    EXPECT_FALSE(result.has_cluster_evidence);
+    EXPECT_EQ(result.evaluated_cluster_count, 0U);
 }
 
 TEST(CargoSafetyEvaluator, ValidObservationWithNoObstacleIsClear) {

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 
 
@@ -83,9 +84,43 @@ def main() -> int:
             "status.obstacle_count > 0U" in node,
             "obstacle validity is still coupled to cluster presence", failures)
     require("input.obstacle_count == 0U" in heartbeat and
-            "input.obstacle_count == 0U ||" in heartbeat,
+            "input.obstacle_count > 0U" in heartbeat,
             "heartbeat does not distinguish clear empty ROI from hazards",
             failures)
+    for token in (
+            "source_stamp_advanced", "fresh_source_evidence",
+            "clear_confirm_pending", "clear_delay_started",
+            "warning_geometry_mismatch", "clear_geometry_mismatch"):
+        require(token in heartbeat,
+                f"heartbeat safety contract is missing {token}", failures)
+    require(not re.search(
+                r"applyCandidate\s*\([^;]*?\btrue\s*,\s*\"fresh_status\"",
+                heartbeat, re.DOTALL),
+            "heartbeat treats every received status as fresh evidence",
+            failures)
+    clear_confirmation_calls = re.findall(
+        r"candidateConfirmed\s*\(\s*kClear\s*,\s*"
+        r"fresh_source_evidence\s*\)", heartbeat)
+    require(len(clear_confirmation_calls) == 1,
+            "CLEAR confirmation must have exactly one common counting entry",
+            failures)
+    require(re.search(
+                r"!result\.has_cluster_evidence.*?"
+                r"CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID.*?"
+                r"obstacle_clusters_insufficient",
+                safety_evaluator, re.DOTALL) is not None,
+            "rejected obstacle clusters are not invalid evidence", failures)
+    for token in (
+            "obstacle_clusters_insufficient",
+            "CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID"):
+        require(token in safety_evaluator,
+                f"evaluator safety contract is missing {token}", failures)
+    for value in (
+            'level1_distance_m" value="3.0',
+            'level2_distance_m" value="5.0',
+            'minimum_vertical_clearance_m" value="0.80'):
+        require(value in launch,
+                f"launch status contract missing {value}", failures)
     require("updateAndPublishCargoSafetyPipeline(" in node,
             "formal Cargo pipeline has no runtime call site", failures)
     require("publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_" in node,

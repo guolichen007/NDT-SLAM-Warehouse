@@ -401,8 +401,10 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
 
     if (!result.has_cluster_evidence) {
         result.input_valid = false;
-        result.fault = CargoSafetyFault::INTERNAL_ERROR;
-        result.reason = "obstacle_clustering_rejected_all_candidates";
+        result.warning_valid = false;
+        result.warning_code = 0;
+        result.fault = CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
+        result.reason = "obstacle_clusters_insufficient";
         return result;
     }
 
