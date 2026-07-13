@@ -237,6 +237,9 @@ private:
 
         if (candidate == kLevel1Warning || candidate == kLevel2Warning) {
             clear_pending_ = false;
+            if (pending_candidate_code_ == kClear) {
+                resetCandidateConfirmation();
+            }
             const bool severe = std::isfinite(clearance_m) &&
                 clearance_m < immediate_clearance_m_;
             const bool level2_to_level1 =

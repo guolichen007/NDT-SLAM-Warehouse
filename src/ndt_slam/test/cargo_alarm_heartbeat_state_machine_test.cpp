@@ -343,11 +343,12 @@ TEST(CargoAlarmHeartbeat, NewRiskCancelsPendingClearConfirmation) {
                       std::numeric_limits<double>::infinity(),
                       std::numeric_limits<double>::infinity(), true);
     escalation.ingest(AlarmStateMachine::kLevel2Warning,
-                      3.2, 30.2, 4.0, 0.70);
+                      3.2, 30.2, 3.10, 0.70);
     escalation.ingest(AlarmStateMachine::kClear, 3.3, 30.3,
                       std::numeric_limits<double>::infinity(),
                       std::numeric_limits<double>::infinity(), true);
     EXPECT_EQ(AlarmStateMachine::kLevel1Warning, escalation.tick(3.4).code);
+    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, escalation.tick(3.8).code);
 }
 
 TEST(CargoAlarmHeartbeat, FaultCancelsPendingClearConfirmation) {
