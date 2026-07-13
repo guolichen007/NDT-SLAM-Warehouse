@@ -787,7 +787,17 @@ odom_anchored_cargo_box:
     ground_ring_width_m: 2.0
     ground_cell_size_m: 0.50
     ground_min_cells: 4
+    ground_min_points_per_cell: 3
+    # Reject a geometrically one-sided ring. Three quadrants are preferred;
+    # two directly opposite sides are also sufficient in narrow aisles.
+    ground_min_quadrants: 3
+    ground_allow_opposite_sides: true
     ground_max_range_m: 0.15
+    # base_link is ground-referenced in this deployment. Reject a coherent
+    # raised shelf/platform that would otherwise look like flat ground.
+    ground_expected_height_enabled: true
+    ground_expected_height_m: 0.0
+    ground_max_expected_height_delta_m: 0.30
     percentile_low: 0.08
     percentile_high: 0.92
     margin_xy_m: 0.05

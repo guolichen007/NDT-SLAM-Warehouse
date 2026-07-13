@@ -4,6 +4,15 @@
 
 namespace ndt_slam {
 
+void CraneMotionEKF::reset() {
+    x_.setZero();
+    P_.setIdentity();
+    initialized_ = false;
+    last_stamp_ = ros::Time();
+    last_good_fitness_ = 0.05;
+    status_ = CraneMotionEKFStatus{};
+}
+
 void CraneMotionEKF::initialize(const Sophus::SE3d& first_pose,
                                 const ros::Time& stamp) {
     x_ << first_pose.translation().x(),

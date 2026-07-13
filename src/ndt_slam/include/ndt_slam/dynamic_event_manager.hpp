@@ -218,11 +218,13 @@ public:
 
     // ========== 查询接口 ==========
 
-    const std::vector<PayloadSession>& getPayloadSessions() const { return payload_sessions_; }
-    const std::vector<HumanEvent>& getHumanEvents() const { return human_events_; }
+    std::vector<PayloadSession> getPayloadSessions() const;
+    std::vector<HumanEvent> getHumanEvents() const;
 
-    std::vector<const PayloadSession*> getActivePayloadSessions() const;
-    std::vector<const PayloadSession*> getPlacedSessions() const;
+    // Return value snapshots. Returning pointers into the internal vectors
+    // after releasing mutex_ would leave callers exposed to reallocation.
+    std::vector<PayloadSession> getActivePayloadSessions() const;
+    std::vector<PayloadSession> getPlacedSessions() const;
 
     // ========== PlacedCargoSuppressor ==========
 
@@ -249,6 +251,7 @@ public:
 
     void finalizeActiveEvents(double current_time);
     void cleanupExpiredEvents(double current_time, double max_age_sec = 300.0);
+    void reset();
 
     int getActiveCount() const;
     int getPlacedCount() const;

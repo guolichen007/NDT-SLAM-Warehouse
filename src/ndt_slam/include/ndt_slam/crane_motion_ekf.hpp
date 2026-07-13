@@ -102,6 +102,8 @@ public:
 
     bool initialized() const { return initialized_; }
 
+    void reset();
+
     void initialize(const Sophus::SE3d& first_pose, const ros::Time& stamp);
 
     Sophus::SE3d predictPose(const Sophus::SE3d& pose_template,

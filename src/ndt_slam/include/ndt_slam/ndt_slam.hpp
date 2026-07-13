@@ -478,7 +478,8 @@ private:
     void limitCloudUniformInPlace(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, int max_points);
     pcl::PointCloud<pcl::PointXYZ>::Ptr buildRegistrationCloud(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& human_safe_objects,
-        const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_cloud);
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_cloud,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& uncertain_candidates);
 
     // ========== V3: NDT 诊断 ==========
     uint64_t target_version_ = 0;
@@ -588,6 +589,9 @@ private:
     std::condition_variable tracking_cv_;
     bool shutdown_ = false;
     std::thread process_thread_;
+    // Serializes destructive lifecycle transitions against a complete
+    // localization-frame transaction.
+    std::mutex runtime_state_mutex_;
 
     // NDT_OMP 配准器
     pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>::Ptr ndt_;
@@ -659,7 +663,7 @@ private:
     bool flush_tiles_pending_ = false;
     bool runtime_status_pending_ = false;
     bool memory_guard_pending_ = false;
-    bool active_map_rebuild_pending_ = false;
+    std::atomic<bool> active_map_rebuild_pending_{false};
     std::atomic<bool> clean_rebuild_requested_from_worker_{false};
     std::uint64_t clean_map_content_version_ = 0U;
     std::uint64_t shadow_target_source_version_ = 0U;
@@ -969,6 +973,7 @@ private:
     std::atomic<std::uint64_t> channel_candidate_points_{0U};
     std::atomic<std::uint64_t> candidate_removed_before_auth_{0U};
     std::atomic<std::uint64_t> candidate_kept_before_auth_{0U};
+    std::atomic<std::uint64_t> candidate_human_filtered_points_{0U};
     std::atomic<std::uint64_t> formal_box_removed_points_{0U};
 
     // 关键帧 active window
@@ -1021,7 +1026,7 @@ private:
     bool memory_guard_triggered_ = false;
     bool disk_guard_triggered_ = false;
     ros::Time last_flush_time_local_;
-    ros::Time last_active_map_rebuild_time_;
+    std::atomic<double> last_active_map_rebuild_time_sec_{0.0};
 
     void writeRuntimeStatus();
     void flushDirtyTiles();
@@ -1070,6 +1075,8 @@ private:
     // ========== Active Map 重建（非阻塞） ==========
     int rebuild_every_keyframes_ = 10;
     std::atomic<bool> active_map_rebuild_running_{false};
+    std::atomic<bool> active_map_rebuild_dirty_{false};
+    std::thread active_map_rebuild_thread_;
 
     // 边缘保留点云融合
     struct VoxelData {
@@ -1222,7 +1229,13 @@ private:
             float ground_ring_width_m = 2.0f;
             float ground_cell_size_m = 0.50f;
             int ground_min_cells = 4;
+            int ground_min_points_per_cell = 3;
+            int ground_min_quadrants = 3;
+            bool ground_allow_opposite_sides = true;
             float ground_max_range_m = 0.15f;
+            bool ground_expected_height_enabled = true;
+            float ground_expected_height_m = 0.0f;
+            float ground_max_expected_height_delta_m = 0.30f;
 
             // 分位数参数
             float percentile_low = 0.08f;

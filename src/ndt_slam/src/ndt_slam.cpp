@@ -2,6 +2,7 @@
 #include "ndt_slam/point_cloud_processing.hpp"
 #include "ndt_slam/build_info.hpp"
 #include "ndt_slam/cargo_observation_policy.hpp"
+#include "ndt_slam/registration_input_policy.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -390,6 +391,9 @@ NdtSlamNode::~NdtSlamNode() {
     }
     if (rebuild_thread_.joinable()) {
         rebuild_thread_.join();
+    }
+    if (active_map_rebuild_thread_.joinable()) {
+        active_map_rebuild_thread_.join();
     }
     if (tile_flush_thread_.joinable()) {
         tile_flush_thread_.join();
@@ -1383,8 +1387,20 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     tb["ground_cell_size_m"].as<float>(0.50f);
                 odom_anchor_config_.tight_box.ground_min_cells =
                     tb["ground_min_cells"].as<int>(4);
+                odom_anchor_config_.tight_box.ground_min_points_per_cell =
+                    tb["ground_min_points_per_cell"].as<int>(3);
+                odom_anchor_config_.tight_box.ground_min_quadrants =
+                    tb["ground_min_quadrants"].as<int>(3);
+                odom_anchor_config_.tight_box.ground_allow_opposite_sides =
+                    tb["ground_allow_opposite_sides"].as<bool>(true);
                 odom_anchor_config_.tight_box.ground_max_range_m =
                     tb["ground_max_range_m"].as<float>(0.15f);
+                odom_anchor_config_.tight_box.ground_expected_height_enabled =
+                    tb["ground_expected_height_enabled"].as<bool>(true);
+                odom_anchor_config_.tight_box.ground_expected_height_m =
+                    tb["ground_expected_height_m"].as<float>(0.0f);
+                odom_anchor_config_.tight_box.ground_max_expected_height_delta_m =
+                    tb["ground_max_expected_height_delta_m"].as<float>(0.30f);
                 odom_anchor_config_.tight_box.percentile_low = tb["percentile_low"].as<float>(0.08f);
                 odom_anchor_config_.tight_box.percentile_high = tb["percentile_high"].as<float>(0.92f);
                 odom_anchor_config_.tight_box.margin_xy_m = tb["margin_xy_m"].as<float>(0.05f);
@@ -2017,8 +2033,8 @@ void NdtSlamNode::runMapMaintenanceIfIdle() {
         checkMemoryGuard();
     }
     if (yield_if_localization_waiting()) return;
-    if (active_map_rebuild_pending_) {
-        active_map_rebuild_pending_ = false;
+    if (active_map_rebuild_pending_.exchange(
+            false, std::memory_order_acq_rel)) {
         rebuildActiveMapFromRecentKeyframes();
     }
 
@@ -2076,6 +2092,8 @@ void NdtSlamNode::processCloudThread() {
             }
         }
 
+        std::unique_lock<std::mutex> runtime_state_lock(
+            runtime_state_mutex_);
         if (run_map_maintenance) {
             consumeLoopClosureResult(last_stamp_);
             runMapMaintenanceIfIdle();
@@ -2477,6 +2495,15 @@ void NdtSlamNode::processCloudThread() {
         pcl::PointCloud<pcl::PointXYZ>::Ptr human_dynamic(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr human_pending(new pcl::PointCloud<pcl::PointXYZ>);
 
+        // Human/dynamic classification must see both channel-safe points and
+        // uncertain payload candidates. Channel classification alone cannot
+        // allow a person in the work channel to bypass the human filter.
+        pcl::PointCloud<pcl::PointXYZ>::Ptr human_filter_input(
+            new pcl::PointCloud<pcl::PointXYZ>(*safe_objects));
+        if (payload_candidates && !payload_candidates->empty()) {
+            *human_filter_input += *payload_candidates;
+        }
+
         if (human_filter_config_.enabled) {
             // 获取 T_map_base（当前位姿）
             Eigen::Matrix4d T_map_base = current_pose_.matrix();
@@ -2485,7 +2512,7 @@ void NdtSlamNode::processCloudThread() {
             double timestamp = msg->header.stamp.toSec();
 
             // 处理人体过滤
-            human_filter_.processFrame(safe_objects, T_map_base, timestamp,
+            human_filter_.processFrame(human_filter_input, T_map_base, timestamp,
                                        human_safe_objects, human_candidates,
                                        human_dynamic, human_pending);
 
@@ -2494,7 +2521,7 @@ void NdtSlamNode::processCloudThread() {
             hf_debug_count++;
             if (hf_debug_count % 10 == 1) {
                 ROS_DEBUG("[HumanFilter] input=%lu, safe=%lu, candidate=%lu, dynamic=%lu, pending=%lu",
-                         safe_objects->size(), human_safe_objects->size(),
+                         human_filter_input->size(), human_safe_objects->size(),
                          human_candidates->size(), human_dynamic->size(), human_pending->size());
 
                 if (!human_candidates->empty()) {
@@ -2522,30 +2549,38 @@ void NdtSlamNode::processCloudThread() {
                 }
             }
         } else {
-            // 人体过滤未启用，所有 safe_objects 都是安全的
-            human_safe_objects = safe_objects;
+            // 人体过滤未启用时仍保留完整的通道输入；后续会恢复通道
+            // 分区，以确保不确定候选只按低权重进入 NDT。
+            human_safe_objects = human_filter_input;
         }
 
         // v8-stable-r3: 构建配准用点云（NDT 输入减负）
         // 使用 buildRegistrationCloud 替代原来的 objects x4 + ground full
         diag_stage.human_filter_ms = elapsedMs(human_filter_start);
         const auto registration_build_start = DiagClock::now();
-        // Channel classification alone is not cargo-removal authorization.
-        // Keep uncertain candidates in NDT until the formal fused cargo
-        // contract authorizes the explicit box removal below.
-        pcl::PointCloud<pcl::PointXYZ>::Ptr registration_objects(
-            new pcl::PointCloud<pcl::PointXYZ>(*human_safe_objects));
+        // Restore the channel partition only after human filtering. Static
+        // objects retain normal object weighting; surviving uncertain cargo
+        // candidates enter exactly once and are never silently removed before
+        // formal fused-cargo authorization.
+        const RegistrationObjectPartition registration_partition =
+            partitionRegistrationObjects(
+                *human_safe_objects, *payload_candidates);
         if (payload_candidates && !payload_candidates->empty()) {
-            *registration_objects += *payload_candidates;
             channel_candidate_points_.fetch_add(
                 payload_candidates->size(), std::memory_order_relaxed);
+            candidate_human_filtered_points_.fetch_add(
+                registration_partition.candidate_human_filtered_points,
+                std::memory_order_relaxed);
             if (!shouldRemoveHookCargo()) {
                 candidate_kept_before_auth_.fetch_add(
-                    payload_candidates->size(), std::memory_order_relaxed);
+                    registration_partition.candidate_survivor_points,
+                    std::memory_order_relaxed);
             }
         }
         pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud =
-            buildRegistrationCloud(registration_objects, ground_cloud);
+            buildRegistrationCloud(
+                registration_partition.static_objects, ground_cloud,
+                registration_partition.uncertain_candidates);
 
         // ========== Hook locked box 剔除（NDT 输入）==========
         // 使用 CargoState 统一状态
@@ -3913,10 +3948,6 @@ void NdtSlamNode::applyLidar2BaseTransform(pcl::PointCloud<pcl::PointXYZ>::Ptr& 
 }
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::filterOutlierPoints(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
-    result.raw_roi_min_z = std::numeric_limits<float>::infinity();
-    for (const auto& point : crop_cloud->points) {
-        result.raw_roi_min_z = std::min(result.raw_roi_min_z, point.z);
-    }
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
 
     pcl::PassThrough<pcl::PointXYZ> pass_x;
@@ -4340,10 +4371,13 @@ void NdtSlamNode::asyncRebuildGlobalMap() {
     rebuild_running_.store(true);
     rebuild_pending_.store(false);
 
-    rebuild_thread_ = std::thread([this]() {
+    // Capture before launching. If reset/load advances the generation before
+    // this worker starts running, the old request must remain stale instead of
+    // adopting the replacement map's generation.
+    const std::uint64_t generation =
+        map_rebuild_generation_.load(std::memory_order_acquire);
+    rebuild_thread_ = std::thread([this, generation]() {
         auto start = std::chrono::steady_clock::now();
-        const std::uint64_t generation =
-            map_rebuild_generation_.load(std::memory_order_acquire);
         bool succeeded = false;
         try {
             rebuildGlobalMapFromSnapshot(generation);
@@ -5879,12 +5913,15 @@ void NdtSlamNode::updatePoseFromLoopClosure(
 
 bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
     ROS_INFO("Resetting SLAM system...");
+    std::lock_guard<std::mutex> runtime_state_lock(runtime_state_mutex_);
     keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
     loop_closure_result_ready_.store(false, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> lock(cloud_mutex_);
         current_pose_ = Sophus::SE3d();
+        relocalized_pose_ = Sophus::SE3d();
+        published_pose_ = Sophus::SE3d();
         initialized_ = false;
         tracking_lost_ = false;
     }
@@ -5897,6 +5934,13 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         ground_map_->clear();
         objects_map_->clear();
         objects_clean_map_->clear();
+        rebuild_objects_filtered_->clear();
+        rebuild_payload_candidate_->clear();
+        rebuild_payload_dynamic_->clear();
+        rebuild_human_candidate_->clear();
+        rebuild_human_dynamic_->clear();
+        rebuild_human_pending_->clear();
+        rebuild_ground_raw_->clear();
         current_cloud_->clear();
         local_map_->clear();
         local_map_version_ = 0;
@@ -5945,6 +5989,32 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
 
     frame_count_ = 0;
     keyframe_count_ = 0;
+    crane_motion_ekf_.reset();
+    filtered_yaw_initialized_ = false;
+    path_msg_.poses.clear();
+    runtime_path_msg_.poses.clear();
+    has_last_path_pose_ = false;
+    last_processed_frame_stamp_ = ros::Time();
+    last_processed_frame_size_ = 0U;
+    last_processed_frame_hash_ = 0U;
+    has_last_raw_ndt_pose_ = false;
+    has_commit_gate_reference_ = false;
+    is_stationary_ = false;
+    motion_gate_stationary_ = false;
+    stationary_anchor_valid_ = false;
+    stationary_raw_anchor_valid_ = false;
+    stationary_frame_count_ = 0;
+    moving_confirm_frames_ = 0;
+    moving_confirm_count_ = 0;
+    last_keyframe_pose_for_gate_ = Sophus::SE3d();
+    last_keyframe_time_for_gate_ = ros::Time();
+    last_frame_stamp_for_gate_ = 0.0;
+    last_frame_pos_for_gate_.setZero();
+    moved_frame_count_ = 0;
+    delta_translation_ = 0.0;
+    delta_yaw_ = 0.0;
+    last_stamp_ = ros::Time();
+    last_tf_stamp_ = ros::Time();
     rebuild_pending_.store(false, std::memory_order_release);
     clean_rebuild_requested_from_worker_.store(
         false, std::memory_order_release);
@@ -5955,12 +6025,25 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         clean_map_rebuild_pending_ = false;
         loop_closure_pending_ = false;
     }
+    active_map_rebuild_pending_.store(false, std::memory_order_release);
+    active_map_rebuild_dirty_.store(false, std::memory_order_release);
+    last_active_map_rebuild_time_sec_.store(0.0, std::memory_order_release);
     loop_closure_detector_.clear();
     {
         std::lock_guard<std::mutex> lock(processed_loops_mutex_);
         processed_loops_.clear();
     }
     resetCargoForHookState(false);
+    payload_tracker_.reset();
+    selected_payload_track_id_ = -1;
+    has_selected_payload_track_ = false;
+    selected_payload_stamp_ = ros::Time();
+    human_filter_.reset();
+    dynamic_event_manager_.reset();
+    cargo_swept_history_.clear();
+    new_cargo_volumes_this_frame_.clear();
+    cargo_deny_history_.clear();
+    bev_observation_count_.clear();
     cargo_fusion_track_id_ = 0U;
     relocalization_force_global_.store(false, std::memory_order_release);
     relocalization_state_ = RelocalizationState::IDLE;
@@ -5969,6 +6052,9 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     relocalization_bad_frames_ = 0;
     relocalization_good_frames_ = 0;
     relocalization_confirmation_count_ = 0;
+    relocalization_confirmation_pose_ = Sophus::SE3d();
+    relocalization_last_submit_frame_ = 0;
+    relocalization_last_result_frame_ = 0;
     relocalization_cooldown_until_frame_ = 0;
 
     ROS_INFO("SLAM system reset complete");
@@ -6076,26 +6162,183 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
             return true;
         }
 
+        std::lock_guard<std::mutex> runtime_state_lock(runtime_state_mutex_);
+
+        const ros::Time load_stamp = ros::Time::now();
         keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
         loop_closure_result_ready_.store(false, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(cloud_mutex_);
+            current_pose_ = Sophus::SE3d();
+            relocalized_pose_ = Sophus::SE3d();
+            published_pose_ = Sophus::SE3d();
+            initialized_ = false;
+            tracking_lost_ = false;
+        }
         {
             std::lock_guard<std::mutex> lock(map_mutex_);
             map_rebuild_generation_.fetch_add(
                 1U, std::memory_order_acq_rel);
             global_map_ = loaded_cloud;
+            display_map_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>(*loaded_cloud));
+            ground_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+            objects_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+            objects_clean_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+            current_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+            local_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+            rebuild_objects_filtered_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            rebuild_payload_candidate_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            rebuild_payload_dynamic_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            rebuild_human_candidate_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            rebuild_human_dynamic_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            rebuild_human_pending_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            rebuild_ground_raw_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            local_map_version_ = 0;
         }
+        {
+            std::lock_guard<std::mutex> lock(localization_target_mutex_);
+            localization_target_front_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            localization_target_back_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            localization_target_snapshot_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            ++localization_target_version_;
+            localization_target_snapshot_version_ = 0;
+            localization_target_ready_ = false;
+            localization_target_state_ =
+                LocalizationTargetState::BOOTSTRAP_LOCAL_MAP;
+            cached_target_valid_ = false;
+            cached_target_version_ = 0;
+            cached_target_points_ = 0;
+            crop_frames_since_update_ = 0;
+            last_bound_ndt_target_.reset();
+            last_bound_ndt_target_version_ = 0;
+            last_bound_ndt_target_source_ = "none";
+            last_actual_target_source_ = "bootstrap_local_map";
+            last_target_reason_ = "map_loaded";
+            target_version_ = 0;
+            target_rebuild_count_ = 0;
+            setInputTarget_count_ = 0;
+        }
+
+        // The matcher may retain a target shared_ptr internally. Recreate it
+        // so no old-map target can survive the generation transition.
+        ndt_.reset(new pclomp::NormalDistributionsTransform<
+                   pcl::PointXYZ, pcl::PointXYZ>());
+        ndt_->setResolution(ndt_resolution_);
+        ndt_->setStepSize(ndt_step_size_);
+        ndt_->setTransformationEpsilon(ndt_transformation_epsilon_);
+        ndt_->setMaximumIterations(ndt_max_iterations_);
+        ndt_->setNumThreads(ndt_num_threads_);
+        if (ndt_neighbor_search_method_ == "DIRECT7") {
+            ndt_->setNeighborhoodSearchMethod(pclomp::DIRECT7);
+        } else if (ndt_neighbor_search_method_ == "DIRECT1") {
+            ndt_->setNeighborhoodSearchMethod(pclomp::DIRECT1);
+        } else {
+            ndt_->setNeighborhoodSearchMethod(pclomp::KDTREE);
+        }
+
+        crane_motion_ekf_.reset();
+        frame_count_ = 0;
+        filtered_yaw_initialized_ = false;
+        path_msg_.poses.clear();
+        runtime_path_msg_.poses.clear();
+        has_last_path_pose_ = false;
+        last_processed_frame_stamp_ = ros::Time();
+        last_processed_frame_size_ = 0U;
+        last_processed_frame_hash_ = 0U;
+        has_last_raw_ndt_pose_ = false;
+        has_commit_gate_reference_ = false;
+        is_stationary_ = false;
+        motion_gate_stationary_ = false;
+        stationary_anchor_valid_ = false;
+        stationary_raw_anchor_valid_ = false;
+        stationary_frame_count_ = 0;
+        moving_confirm_frames_ = 0;
+        moving_confirm_count_ = 0;
+        last_keyframe_pose_for_gate_ = Sophus::SE3d();
+        last_keyframe_time_for_gate_ = ros::Time();
+        last_frame_stamp_for_gate_ = 0.0;
+        last_frame_pos_for_gate_.setZero();
+        moved_frame_count_ = 0;
+        delta_translation_ = 0.0;
+        delta_yaw_ = 0.0;
+        last_stamp_ = ros::Time();
+        last_tf_stamp_ = ros::Time();
+
         loop_closure_detector_.clear();
         keyframe_count_ = 0;
         {
             std::lock_guard<std::mutex> lock(processed_loops_mutex_);
             processed_loops_.clear();
         }
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            cloud_queue_.clear();
+            map_maintenance_pending_ = false;
+            clean_map_rebuild_pending_ = false;
+            loop_closure_pending_ = false;
+        }
+        rebuild_pending_.store(false, std::memory_order_release);
+        clean_rebuild_requested_from_worker_.store(
+            false, std::memory_order_release);
+        active_map_rebuild_pending_.store(false, std::memory_order_release);
+        active_map_rebuild_dirty_.store(false, std::memory_order_release);
+        last_active_map_rebuild_time_sec_.store(
+            0.0, std::memory_order_release);
+
+        human_filter_.reset();
+        dynamic_event_manager_.reset();
+        payload_tracker_.reset();
+        selected_payload_track_id_ = -1;
+        has_selected_payload_track_ = false;
+        selected_payload_stamp_ = ros::Time();
+        resetCargoForHookState(false);
+        cargo_fusion_track_id_ = 0U;
+        cargo_swept_history_.clear();
+        new_cargo_volumes_this_frame_.clear();
+        cargo_deny_history_.clear();
+        bev_observation_count_.clear();
+
+        relocalization_confirmation_count_ = 0;
+        relocalization_confirmation_pose_ = Sophus::SE3d();
+        relocalization_last_submit_frame_ = 0;
+        relocalization_last_result_frame_ = 0;
+        relocalization_bad_frames_ = relocalization_enabled_
+            ? relocalization_global_trigger_frames_ : 0;
+        relocalization_good_frames_ = 0;
+        relocalization_cooldown_until_frame_ = 0;
+        relocalization_force_global_.store(
+            relocalization_enabled_, std::memory_order_release);
+        relocalization_pose_reliable_ = !relocalization_enabled_;
+        relocalization_state_ = relocalization_enabled_
+            ? RelocalizationState::DEGRADED
+            : RelocalizationState::IDLE;
+        relocalization_invalid_safety_published_ = relocalization_enabled_;
+        if (relocalization_enabled_) {
+            publishRelocalizationSafetyInvalid(
+                load_stamp, "runtime_map_replaced");
+            publishRelocalizationStatus(
+                "DEGRADED", "runtime_map_replaced_global_search_required");
+        }
 
         response.success = true;
-        response.message = "Map loaded";
+        response.message = relocalization_enabled_
+            ? "Map loaded; global relocalization required"
+            : "Map loaded; runtime state reset";
         response.num_points = loaded_cloud->size();
 
         publishMap();
+        publishDisplayMap();
 
         ROS_INFO("Map loaded: %s, points: %lu", file_path.c_str(), loaded_cloud->size());
     } catch (const std::exception& e) {
@@ -6109,6 +6352,7 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
 
 bool NdtSlamNode::rebuildMapService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
     ROS_INFO("Rebuilding map from keyframes with edge-preserving fusion...");
+    std::lock_guard<std::mutex> runtime_state_lock(runtime_state_mutex_);
     keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
     loop_closure_result_ready_.store(false, std::memory_order_release);
     map_rebuild_generation_.fetch_add(1U, std::memory_order_acq_rel);
@@ -6207,54 +6451,101 @@ void NdtSlamNode::saveMultiLayerMaps(const std::string& session_dir) {
         // 创建目录
         std::filesystem::create_directories(session_path);
 
+        // Capture one coherent generation of every map pointer. PCD I/O can
+        // take seconds and must not race background pointer swaps or hold the
+        // live map mutex for the duration of disk writes.
+        pcl::PointCloud<pcl::PointXYZ>::Ptr global_snapshot;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr display_snapshot;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr ground_snapshot;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr objects_snapshot;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr clean_snapshot;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_snapshot;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr payload_candidate_snapshot;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr payload_dynamic_snapshot;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr human_candidate_snapshot;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr human_dynamic_snapshot;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr human_pending_snapshot;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr ground_raw_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(map_mutex_);
+            const auto clone = [](const pcl::PointCloud<pcl::PointXYZ>::Ptr& map) {
+                return map
+                    ? pcl::PointCloud<pcl::PointXYZ>::Ptr(
+                          new pcl::PointCloud<pcl::PointXYZ>(*map))
+                    : pcl::PointCloud<pcl::PointXYZ>::Ptr(
+                          new pcl::PointCloud<pcl::PointXYZ>);
+            };
+            // Deep copies are required here: the live map-commit path appends
+            // to the current cloud objects in place. A shared_ptr-only snapshot
+            // would keep storage alive but would still race those mutations.
+            global_snapshot = clone(global_map_);
+            display_snapshot = clone(display_map_);
+            ground_snapshot = clone(ground_map_);
+            objects_snapshot = clone(objects_map_);
+            clean_snapshot = clone(objects_clean_map_);
+            filtered_snapshot = clone(rebuild_objects_filtered_);
+            payload_candidate_snapshot = clone(rebuild_payload_candidate_);
+            payload_dynamic_snapshot = clone(rebuild_payload_dynamic_);
+            human_candidate_snapshot = clone(rebuild_human_candidate_);
+            human_dynamic_snapshot = clone(rebuild_human_dynamic_);
+            human_pending_snapshot = clone(rebuild_human_pending_);
+            ground_raw_snapshot = clone(rebuild_ground_raw_);
+        }
+
         // 保存各层地图
         auto saveMap = [&](const pcl::PointCloud<pcl::PointXYZ>::Ptr& map, const std::string& filename) {
             if (map && !map->empty()) {
                 std::string filepath = session_path / filename;
-                pcl::io::savePCDFileBinary(filepath, *map);
-                ROS_INFO("Saved %s: %zu points", filename.c_str(), map->size());
+                const int status = pcl::io::savePCDFileBinary(filepath, *map);
+                if (status < 0) {
+                    ROS_ERROR("Failed to save %s (status=%d)",
+                              filename.c_str(), status);
+                } else {
+                    ROS_INFO("Saved %s: %zu points",
+                             filename.c_str(), map->size());
+                }
             }
         };
 
         // ========== 正式地图层 ==========
-        saveMap(global_map_, "map_registration.pcd");
-        saveMap(display_map_, "map_display.pcd");
-        saveMap(ground_map_, "map_ground.pcd");
-        saveMap(objects_map_, "map_objects_raw.pcd");
-        saveMap(objects_clean_map_, "map_objects_clean.pcd");
+        saveMap(global_snapshot, "map_registration.pcd");
+        saveMap(display_snapshot, "map_display.pcd");
+        saveMap(ground_snapshot, "map_ground.pcd");
+        saveMap(objects_snapshot, "map_objects_raw.pcd");
+        saveMap(clean_snapshot, "map_objects_clean.pcd");
 
         // ========== 调试/检测用 PCD ==========
-        saveMap(rebuild_objects_filtered_, "map_objects_filtered.pcd");
-        saveMap(rebuild_payload_candidate_, "map_payload_candidate.pcd");
-        saveMap(rebuild_payload_dynamic_, "map_payload_dynamic.pcd");
-        saveMap(rebuild_human_candidate_, "map_human_candidate.pcd");
-        saveMap(rebuild_human_dynamic_, "map_human_dynamic.pcd");
-        saveMap(rebuild_human_pending_, "map_human_pending.pcd");
-        saveMap(rebuild_ground_raw_, "map_ground_raw.pcd");
+        saveMap(filtered_snapshot, "map_objects_filtered.pcd");
+        saveMap(payload_candidate_snapshot, "map_payload_candidate.pcd");
+        saveMap(payload_dynamic_snapshot, "map_payload_dynamic.pcd");
+        saveMap(human_candidate_snapshot, "map_human_candidate.pcd");
+        saveMap(human_dynamic_snapshot, "map_human_dynamic.pcd");
+        saveMap(human_pending_snapshot, "map_human_pending.pcd");
+        saveMap(ground_raw_snapshot, "map_ground_raw.pcd");
 
         // 全量显示地图（ground + filtered_objects）
         pcl::PointCloud<pcl::PointXYZ>::Ptr display_full(new pcl::PointCloud<pcl::PointXYZ>);
-        if (rebuild_ground_raw_ && !rebuild_ground_raw_->empty()) {
-            *display_full += *rebuild_ground_raw_;
+        if (ground_raw_snapshot && !ground_raw_snapshot->empty()) {
+            *display_full += *ground_raw_snapshot;
         }
-        if (rebuild_objects_filtered_ && !rebuild_objects_filtered_->empty()) {
-            *display_full += *rebuild_objects_filtered_;
+        if (filtered_snapshot && !filtered_snapshot->empty()) {
+            *display_full += *filtered_snapshot;
         }
         saveMap(display_full, "map_display_full.pcd");
 
         int total_saved = 0;
-        if (global_map_ && !global_map_->empty()) total_saved++;
-        if (display_map_ && !display_map_->empty()) total_saved++;
-        if (ground_map_ && !ground_map_->empty()) total_saved++;
-        if (objects_map_ && !objects_map_->empty()) total_saved++;
-        if (objects_clean_map_ && !objects_clean_map_->empty()) total_saved++;
-        if (rebuild_objects_filtered_ && !rebuild_objects_filtered_->empty()) total_saved++;
-        if (rebuild_payload_candidate_ && !rebuild_payload_candidate_->empty()) total_saved++;
-        if (rebuild_payload_dynamic_ && !rebuild_payload_dynamic_->empty()) total_saved++;
-        if (rebuild_human_candidate_ && !rebuild_human_candidate_->empty()) total_saved++;
-        if (rebuild_human_dynamic_ && !rebuild_human_dynamic_->empty()) total_saved++;
-        if (rebuild_human_pending_ && !rebuild_human_pending_->empty()) total_saved++;
-        if (rebuild_ground_raw_ && !rebuild_ground_raw_->empty()) total_saved++;
+        if (global_snapshot && !global_snapshot->empty()) total_saved++;
+        if (display_snapshot && !display_snapshot->empty()) total_saved++;
+        if (ground_snapshot && !ground_snapshot->empty()) total_saved++;
+        if (objects_snapshot && !objects_snapshot->empty()) total_saved++;
+        if (clean_snapshot && !clean_snapshot->empty()) total_saved++;
+        if (filtered_snapshot && !filtered_snapshot->empty()) total_saved++;
+        if (payload_candidate_snapshot && !payload_candidate_snapshot->empty()) total_saved++;
+        if (payload_dynamic_snapshot && !payload_dynamic_snapshot->empty()) total_saved++;
+        if (human_candidate_snapshot && !human_candidate_snapshot->empty()) total_saved++;
+        if (human_dynamic_snapshot && !human_dynamic_snapshot->empty()) total_saved++;
+        if (human_pending_snapshot && !human_pending_snapshot->empty()) total_saved++;
+        if (ground_raw_snapshot && !ground_raw_snapshot->empty()) total_saved++;
         if (display_full && !display_full->empty()) total_saved++;
 
         ROS_INFO("Saved %d multi-layer maps to %s", total_saved, session_dir.c_str());
@@ -6268,43 +6559,43 @@ void NdtSlamNode::saveMultiLayerMaps(const std::string& session_dir) {
 
             if (!placed_sessions.empty()) {
                 ROS_INFO("[SaveMapMaskConfirm] placed cargo protected in objects_clean and display_map:");
-                for (const auto* session : placed_sessions) {
+                for (const auto& session : placed_sessions) {
                     ROS_INFO("[SaveMapMaskConfirm]   session=%d, bbox=(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f), placed_time=%.2f",
-                             session->id,
-                             session->placed_bbox.min_pt.x(), session->placed_bbox.min_pt.y(), session->placed_bbox.min_pt.z(),
-                             session->placed_bbox.max_pt.x(), session->placed_bbox.max_pt.y(), session->placed_bbox.max_pt.z(),
-                             session->placed_time);
+                             session.id,
+                             session.placed_bbox.min_pt.x(), session.placed_bbox.min_pt.y(), session.placed_bbox.min_pt.z(),
+                             session.placed_bbox.max_pt.x(), session.placed_bbox.max_pt.y(), session.placed_bbox.max_pt.z(),
+                             session.placed_time);
                 }
             }
 
             // 检查 objects_clean_map 是否包含 placed cargo 点
-            if (objects_clean_map_ && !objects_clean_map_->empty()) {
+            if (clean_snapshot && !clean_snapshot->empty()) {
                 int placed_points = 0;
-                for (const auto& p : objects_clean_map_->points) {
-                    for (const auto* session : placed_sessions) {
-                        if (session->placed_bbox.contains(p)) {
+                for (const auto& p : clean_snapshot->points) {
+                    for (const auto& session : placed_sessions) {
+                        if (session.placed_bbox.contains(p)) {
                             placed_points++;
                             break;
                         }
                     }
                 }
                 ROS_INFO("[SaveMapMaskConfirm] objects_clean_map contains %d placed cargo points out of %zu total",
-                         placed_points, objects_clean_map_->size());
+                         placed_points, clean_snapshot->size());
             }
 
             // 检查 display_map 是否包含 placed cargo 点
-            if (display_map_ && !display_map_->empty()) {
+            if (display_snapshot && !display_snapshot->empty()) {
                 int placed_points = 0;
-                for (const auto& p : display_map_->points) {
-                    for (const auto* session : placed_sessions) {
-                        if (session->placed_bbox.contains(p)) {
+                for (const auto& p : display_snapshot->points) {
+                    for (const auto& session : placed_sessions) {
+                        if (session.placed_bbox.contains(p)) {
                             placed_points++;
                             break;
                         }
                     }
                 }
                 ROS_INFO("[SaveMapMaskConfirm] display_map contains %d placed cargo points out of %zu total",
-                         placed_points, display_map_->size());
+                         placed_points, display_snapshot->size());
             }
         } else {
             ROS_INFO("[SaveMapMaskConfirm] dynamic_events disabled, no mask applied");
@@ -6396,6 +6687,15 @@ void NdtSlamNode::consumeRelocalizationResult(
     if (!relocalization_enabled_) return;
     RelocalizationResult result;
     if (!relocalizer_.takeResult(result)) return;
+    if (result.map_generation !=
+            map_rebuild_generation_.load(std::memory_order_acquire) ||
+        result.pose_version !=
+            keyframe_pose_version_.load(std::memory_order_acquire)) {
+        relocalization_confirmation_count_ = 0;
+        publishRelocalizationStatus(
+            "DEGRADED", "stale_map_or_pose_generation_discarded");
+        return;
+    }
     if (relocalization_state_ == RelocalizationState::IDLE &&
         relocalization_pose_reliable_ &&
         !relocalization_force_global_.load(std::memory_order_acquire)) return;
@@ -6530,6 +6830,10 @@ void NdtSlamNode::updateRelocalization(
         relocalization_bad_frames_ >= relocalization_global_trigger_frames_;
     RelocalizationJob job;
     job.frame_index = frame_index;
+    job.map_generation =
+        map_rebuild_generation_.load(std::memory_order_acquire);
+    job.pose_version =
+        keyframe_pose_version_.load(std::memory_order_acquire);
     job.stamp_sec = stamp.toSec();
     job.mode = global ? RelocalizationMode::GLOBAL : RelocalizationMode::LOCAL;
     job.reference_pose = current_pose_;
@@ -6667,6 +6971,8 @@ void NdtSlamNode::applyRelocalizedPose(
 void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
     payload_tracker_.reset();
     selected_payload_track_id_ = -1;
+    has_selected_payload_track_ = false;
+    selected_payload_stamp_ = ros::Time();
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
     const bool preserve_origin = hook.valid &&
         hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED;
@@ -7385,6 +7691,9 @@ void NdtSlamNode::writeRuntimeStatus() {
       << ",\n";
     f << "  \"candidate_kept_before_auth\": "
       << candidate_kept_before_auth_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"candidate_human_filtered_points\": "
+      << candidate_human_filtered_points_.load(std::memory_order_relaxed)
+      << ",\n";
     f << "  \"formal_box_removed_points\": "
       << formal_box_removed_points_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"memory_mb\": " << mem_mb << ",\n";
@@ -7399,7 +7708,9 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"average_process_time_ms\": " << average_process_time_ms_ << ",\n";
     f << "  \"average_ndt_time_ms\": " << average_ndt_time_ms_ << ",\n";
     f << "  \"last_flush_time\": \"" << last_flush_time_local_ << "\",\n";
-    f << "  \"last_active_map_rebuild\": \"" << last_active_map_rebuild_time_ << "\",\n";
+    f << "  \"last_active_map_rebuild_sec\": "
+      << last_active_map_rebuild_time_sec_.load(std::memory_order_relaxed)
+      << ",\n";
     f << "  \"last_update\": \"" << ros::Time::now() << "\"\n";
     f << "}\n";
     f.close();
@@ -7569,114 +7880,170 @@ bool NdtSlamNode::checkDiskGuard() {
 void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
     if (!longterm_mapping_enabled_) return;
 
-    // 防止重入
-    if (active_map_rebuild_running_.exchange(true)) {
+    if (active_map_rebuild_running_.exchange(
+            true, std::memory_order_acq_rel)) {
         ROS_WARN_THROTTLE(10, "[ActiveMap] rebuild already running, skip");
         return;
     }
-
-    const auto keyframes = loop_closure_detector_.getKeyFramesSnapshot();
-    if (keyframes.empty()) {
-        active_map_rebuild_running_ = false;
-        return;
+    if (active_map_rebuild_thread_.joinable()) {
+        active_map_rebuild_thread_.join();
     }
+    const std::uint64_t expected_generation =
+        map_rebuild_generation_.load(std::memory_order_acquire);
+    active_map_rebuild_thread_ = std::thread(
+        [this, expected_generation]() {
+        try {
+            std::lock_guard<std::mutex> rebuild_lock(
+                map_rebuild_execution_mutex_);
+            const auto voxel_filter = [](
+                const pcl::PointCloud<pcl::PointXYZ>::Ptr& input,
+                double leaf) {
+                auto output = pcl::PointCloud<pcl::PointXYZ>::Ptr(
+                    new pcl::PointCloud<pcl::PointXYZ>);
+                if (input->size() <= 100U) {
+                    *output = *input;
+                    return output;
+                }
+                pcl::VoxelGrid<pcl::PointXYZ> filter;
+                filter.setInputCloud(input);
+                filter.setLeafSize(leaf, leaf, leaf);
+                filter.filter(*output);
+                return output;
+            };
 
-    // 收集最近 80 个有 cloud 的关键帧
-    std::vector<const KeyFrame*> recent_kfs;
-    for (auto it = keyframes.rbegin(); it != keyframes.rend() && recent_kfs.size() < max_active_keyframes_; ++it) {
-        if (localizationInputPending()) {
-            active_map_rebuild_running_ = false;
-            active_map_rebuild_pending_ = true;
-            map_maintenance_pending_ = true;
-            return;
-        }
-        if (it->cloud_ && !it->cloud_->empty()) {
-            recent_kfs.push_back(&(*it));
-        }
-    }
+            for (;;) {
+                if (expected_generation != map_rebuild_generation_.load(
+                        std::memory_order_acquire)) break;
+                active_map_rebuild_dirty_.store(
+                    false, std::memory_order_release);
+                const auto keyframes =
+                    loop_closure_detector_.getKeyFramesSnapshot();
+                const std::size_t active_limit = static_cast<std::size_t>(
+                    std::max(1, max_active_keyframes_));
+                std::vector<KeyFrame> recent;
+                recent.reserve(std::min(
+                    keyframes.size(), active_limit));
+                for (auto it = keyframes.rbegin();
+                     it != keyframes.rend() &&
+                     recent.size() < active_limit; ++it) {
+                    const bool has_layers =
+                        (it->ground_points && !it->ground_points->empty()) ||
+                        (it->objects_filtered &&
+                         !it->objects_filtered->empty());
+                    const bool has_raw = it->cloud_ && !it->cloud_->empty();
+                    if (has_layers || has_raw) recent.push_back(*it);
+                }
+                if (recent.empty()) break;
 
-    if (recent_kfs.empty()) {
-        active_map_rebuild_running_ = false;
-        return;
-    }
+                auto new_global = pcl::PointCloud<pcl::PointXYZ>::Ptr(
+                    new pcl::PointCloud<pcl::PointXYZ>);
+                auto new_display = pcl::PointCloud<pcl::PointXYZ>::Ptr(
+                    new pcl::PointCloud<pcl::PointXYZ>);
+                auto new_ground = pcl::PointCloud<pcl::PointXYZ>::Ptr(
+                    new pcl::PointCloud<pcl::PointXYZ>);
+                auto new_objects = pcl::PointCloud<pcl::PointXYZ>::Ptr(
+                    new pcl::PointCloud<pcl::PointXYZ>);
+                const auto append_in_range = [this](
+                    const pcl::PointCloud<pcl::PointXYZ>& source,
+                    const pcl::PointCloud<pcl::PointXYZ>::Ptr& destination) {
+                    for (const auto& point : source.points) {
+                        if (std::isfinite(point.x) &&
+                            std::isfinite(point.y) &&
+                            std::isfinite(point.z) &&
+                            std::abs(point.x) <= max_map_size_ &&
+                            std::abs(point.y) <= max_map_size_ &&
+                            std::abs(point.z) <= max_map_size_) {
+                            destination->push_back(point);
+                        }
+                    }
+                };
 
-    ROS_INFO("[ActiveMap] Rebuilding from %zu recent keyframes", recent_kfs.size());
+                std::size_t legacy_splits = 0U;
+                for (const auto& keyframe : recent) {
+                    const Sophus::SE3d pose = keyframe.has_refined_pose_
+                        ? keyframe.pose_refined_ : keyframe.pose_;
+                    const Eigen::Matrix4f transform =
+                        pose.matrix().cast<float>();
+                    pcl::PointCloud<pcl::PointXYZ> ground_map;
+                    pcl::PointCloud<pcl::PointXYZ> objects_map;
+                    if (keyframe.ground_points &&
+                        keyframe.objects_filtered &&
+                        (!keyframe.ground_points->empty() ||
+                         !keyframe.objects_filtered->empty())) {
+                        pcl::transformPointCloud(
+                            *keyframe.ground_points, ground_map, transform);
+                        pcl::transformPointCloud(
+                            *keyframe.objects_filtered, objects_map, transform);
+                    } else if (keyframe.cloud_ &&
+                               !keyframe.cloud_->empty()) {
+                        pcl::PointCloud<pcl::PointXYZ> ground_base;
+                        pcl::PointCloud<pcl::PointXYZ> objects_base;
+                        separateGroundByGrid(
+                            *keyframe.cloud_, ground_base, objects_base);
+                        pcl::transformPointCloud(
+                            ground_base, ground_map, transform);
+                        pcl::transformPointCloud(
+                            objects_base, objects_map, transform);
+                        ++legacy_splits;
+                    } else {
+                        continue;
+                    }
+                    append_in_range(ground_map, new_ground);
+                    append_in_range(objects_map, new_objects);
+                    append_in_range(ground_map, new_global);
+                    append_in_range(objects_map, new_global);
+                    append_in_range(ground_map, new_display);
+                    append_in_range(objects_map, new_display);
+                }
 
-    // 构建新地图（不加锁）
-    pcl::PointCloud<pcl::PointXYZ>::Ptr new_global(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr new_display(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr new_ground(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr new_objects(new pcl::PointCloud<pcl::PointXYZ>);
+                new_global = voxel_filter(new_global, voxel_size_);
+                new_display = voxel_filter(
+                    new_display, display_voxel_size_);
+                new_ground = voxel_filter(new_ground, ground_voxel_size_);
+                new_objects = voxel_filter(
+                    new_objects, objects_voxel_size_);
+                const std::size_t global_size = new_global->size();
+                const std::size_t display_size = new_display->size();
+                const std::size_t ground_size = new_ground->size();
+                const std::size_t objects_size = new_objects->size();
 
-    for (const auto* kf : recent_kfs) {
-        if (localizationInputPending()) {
-            active_map_rebuild_running_ = false;
-            active_map_rebuild_pending_ = true;
-            map_maintenance_pending_ = true;
-            return;
-        }
-        // 应用天车运动约束到 keyframe pose
-        Sophus::SE3d constrained_kf_pose = applyCraneMotionConstraint(kf->pose_, "active_rebuild");
-        Eigen::Matrix4d transform = constrained_kf_pose.matrix();
+                bool retry = false;
+                {
+                    std::lock_guard<std::mutex> lock(map_mutex_);
+                    if (expected_generation !=
+                        map_rebuild_generation_.load(
+                            std::memory_order_acquire)) break;
+                    retry = active_map_rebuild_dirty_.exchange(
+                        false, std::memory_order_acq_rel);
+                    if (!retry) {
+                        global_map_.swap(new_global);
+                        display_map_.swap(new_display);
+                        ground_map_.swap(new_ground);
+                        objects_map_.swap(new_objects);
+                        rebuild_objects_filtered_.reset(
+                            new pcl::PointCloud<pcl::PointXYZ>(*objects_map_));
+                    }
+                }
+                if (retry) continue;
 
-        // 变换到 map 坐标系
-        pcl::PointCloud<pcl::PointXYZ> transformed;
-        pcl::transformPointCloud(*kf->cloud_, transformed, transform.cast<float>());
-
-        // ground/object 分离
-        pcl::PointCloud<pcl::PointXYZ> kf_ground, kf_objects;
-        separateGroundByGrid(transformed, kf_ground, kf_objects);
-
-        // 添加到各层地图
-        for (const auto& p : transformed.points) {
-            if (std::abs(p.x) <= max_map_size_ && std::abs(p.y) <= max_map_size_ &&
-                std::abs(p.z) <= max_map_size_ && std::isfinite(p.x)) {
-                new_global->push_back(p);
-                new_display->push_back(p);
+                last_active_map_rebuild_time_sec_.store(
+                    ros::Time::now().toSec(), std::memory_order_release);
+                clean_rebuild_requested_from_worker_.store(
+                    true, std::memory_order_release);
+                queue_cv_.notify_one();
+                ROS_INFO("[ActiveMap] keyframes=%zu legacy=%zu "
+                         "registration=%zu display=%zu ground=%zu objects=%zu",
+                         recent.size(), legacy_splits, global_size,
+                         display_size, ground_size, objects_size);
+                break;
             }
+        } catch (const std::exception& error) {
+            ROS_ERROR("[ActiveMap] worker exception: %s", error.what());
+        } catch (...) {
+            ROS_ERROR("[ActiveMap] worker exception: unknown");
         }
-        for (const auto& p : kf_ground.points) {
-            if (std::isfinite(p.x)) new_ground->push_back(p);
-        }
-        for (const auto& p : kf_objects.points) {
-            if (std::isfinite(p.x)) new_objects->push_back(p);
-        }
-    }
-
-    // 体素滤波
-    auto voxelFilter = [](const pcl::PointCloud<pcl::PointXYZ>::Ptr& input, double voxel_size) {
-        pcl::PointCloud<pcl::PointXYZ>::Ptr output(new pcl::PointCloud<pcl::PointXYZ>);
-        if (input->size() > 100) {
-            pcl::VoxelGrid<pcl::PointXYZ> vf;
-            vf.setInputCloud(input);
-            vf.setLeafSize(voxel_size, voxel_size, voxel_size);
-            vf.filter(*output);
-        } else {
-            *output = *input;
-        }
-        return output;
-    };
-
-    new_global = voxelFilter(new_global, voxel_size_);
-    new_display = voxelFilter(new_display, display_voxel_size_);
-    new_ground = voxelFilter(new_ground, ground_voxel_size_);
-    new_objects = voxelFilter(new_objects, objects_voxel_size_);
-
-    // swap 指针（持锁时间最短）
-    {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        global_map_ = new_global;
-        display_map_ = new_display;
-        ground_map_ = new_ground;
-        objects_map_ = new_objects;
-    }
-
-    last_active_map_rebuild_time_ = ros::Time::now();
-
-    ROS_INFO("[ActiveMap] Rebuilt: global=%zu, display=%zu, ground=%zu, objects=%zu",
-             global_map_->size(), display_map_->size(), ground_map_->size(), objects_map_->size());
-
-    active_map_rebuild_running_ = false;
+        active_map_rebuild_running_.store(false, std::memory_order_release);
+    });
 }
 
 // ========== HookFixedCargoDetector ==========
@@ -7732,16 +8099,32 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         return result;
     }
 
+    result.raw_roi_min_z = minimumFiniteZ(*crop_cloud);
+    if (!std::isfinite(result.raw_roi_min_z)) {
+        result.reject_reason = "raw_roi_no_finite_z";
+        return result;
+    }
+
     // HAG 预过滤（如果启用）
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     if (odom_anchor_config_.tight_box.hag_filter_enabled) {
-        // 估算地面高度（使用 crop_cloud 的最低点作为地面参考）
+        // Ground is estimated only from a spatially distributed external ring.
         const auto& tight = odom_anchor_config_.tight_box;
         ExternalGroundConfig ground_config;
         ground_config.ring_width_m = tight.ground_ring_width_m;
         ground_config.cell_size_m = tight.ground_cell_size_m;
         ground_config.minimum_cells = tight.ground_min_cells;
+        ground_config.minimum_points_per_cell =
+            tight.ground_min_points_per_cell;
+        ground_config.minimum_quadrants = tight.ground_min_quadrants;
+        ground_config.allow_opposite_sides =
+            tight.ground_allow_opposite_sides;
         ground_config.maximum_range_m = tight.ground_max_range_m;
+        ground_config.expected_height_enabled =
+            tight.ground_expected_height_enabled;
+        ground_config.expected_height_m = tight.ground_expected_height_m;
+        ground_config.maximum_expected_height_delta_m =
+            tight.ground_max_expected_height_delta_m;
         const ExternalGroundEstimate ground = estimateExternalGround(
             *cloud_base, cx, cy,
             odom_anchor_config_.search_half_x,
@@ -7766,17 +8149,20 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     }
 
     if (!filtered_cloud->empty()) {
-        result.hag_filtered_min_z = std::numeric_limits<float>::infinity();
-        for (const auto& point : filtered_cloud->points) {
-            result.hag_filtered_min_z = std::min(
-                result.hag_filtered_min_z, point.z);
+        result.hag_filtered_min_z = minimumFiniteZ(*filtered_cloud);
+        const float bottom_input_delta =
+            result.hag_filtered_min_z - result.raw_roi_min_z;
+        if (!std::isfinite(result.hag_filtered_min_z) ||
+            !std::isfinite(bottom_input_delta)) {
+            result.reject_reason = "hag_no_finite_z";
+            return result;
         }
         ROS_DEBUG_THROTTLE(
             1.0, "[CargoBottomInput] raw_min=%.3f hag_min=%.3f "
             "ground_valid=%d ground_z=%.3f delta=%.3f",
             result.raw_roi_min_z, result.hag_filtered_min_z,
             result.ground_reference_valid ? 1 : 0, result.ground_z,
-            result.hag_filtered_min_z - result.raw_roi_min_z);
+            bottom_input_delta);
     }
 
     if (filtered_cloud->empty()) {
@@ -10020,7 +10406,8 @@ void NdtSlamNode::bindNdtInputTarget(
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::buildRegistrationCloud(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& human_safe_objects,
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_cloud) {
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_cloud,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& uncertain_candidates) {
     auto registration_cloud =
         boost::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
 
@@ -10033,6 +10420,13 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::buildRegistrationCloud(
     // V3: object 点优先
     for (int i = 0; i < repeat; ++i) {
         *registration_cloud += *human_safe_objects;
+    }
+
+    // Uncertain channel candidates are deliberately kept at unit weight. They
+    // remain available for matching before formal cargo authorization without
+    // being amplified like confirmed static structure.
+    if (uncertain_candidates && !uncertain_candidates->empty()) {
+        *registration_cloud += *uncertain_candidates;
     }
 
     // V3: ground 只保留指定比例（默认 5%）
@@ -10052,6 +10446,9 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::buildRegistrationCloud(
         registration_cloud->clear();
         for (int i = 0; i < repeat; ++i) {
             *registration_cloud += *human_safe_objects;
+        }
+        if (uncertain_candidates && !uncertain_candidates->empty()) {
+            *registration_cloud += *uncertain_candidates;
         }
         *registration_cloud += *ground_cloud;
         voxelDownsampleInPlace(registration_cloud, ndt_input_voxel_size_);
@@ -10941,9 +11338,14 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     loop_closure_detector_.setLastKeyFrameLayers(
         objects_base, objects_after_human_base, ground_base);
     if (rebuild_running_.load(std::memory_order_acquire)) {
-        // The rebuild worker checks this while holding map_mutex_ immediately
-        // before its atomic swap, so this keyframe cannot be overwritten.
+        // The full-map worker checks this under map_mutex_ immediately before
+        // its atomic swap, so this keyframe cannot be overwritten.
         rebuild_pending_.store(true, std::memory_order_release);
+    }
+    if (active_map_rebuild_running_.load(std::memory_order_acquire)) {
+        // Active and full rebuilds are serialized but keep independent dirty
+        // flags so one scheduler cannot clear the other's retry request.
+        active_map_rebuild_dirty_.store(true, std::memory_order_release);
     }
 
     // 变换到 map 坐标系

@@ -172,6 +172,8 @@ RelocalizationResult NdtRelocalizer::run(const RelocalizationJob& job) const {
     const auto started = std::chrono::steady_clock::now();
     RelocalizationResult best;
     best.frame_index = job.frame_index;
+    best.map_generation = job.map_generation;
+    best.pose_version = job.pose_version;
     best.stamp_sec = job.stamp_sec;
     best.mode = job.mode;
     best.reference_pose = job.reference_pose;

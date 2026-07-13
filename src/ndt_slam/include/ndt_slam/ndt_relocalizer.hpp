@@ -50,6 +50,8 @@ struct RelocalizationSeed {
 
 struct RelocalizationJob {
     std::uint64_t frame_index = 0;
+    std::uint64_t map_generation = 0;
+    std::uint64_t pose_version = 0;
     double stamp_sec = 0.0;
     RelocalizationMode mode = RelocalizationMode::LOCAL;
     Sophus::SE3d reference_pose;
@@ -61,6 +63,8 @@ struct RelocalizationJob {
 struct RelocalizationResult {
     bool valid = false;
     std::uint64_t frame_index = 0;
+    std::uint64_t map_generation = 0;
+    std::uint64_t pose_version = 0;
     double stamp_sec = 0.0;
     RelocalizationMode mode = RelocalizationMode::LOCAL;
     Sophus::SE3d reference_pose;

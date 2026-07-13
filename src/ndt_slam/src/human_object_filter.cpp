@@ -17,6 +17,14 @@ void HumanObjectDynamicFilter::initialize(const HumanObjectFilterConfig& filter_
     eraser_config_ = eraser_config;
 }
 
+void HumanObjectDynamicFilter::reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_tracks_.clear();
+    trajectory_capsules_.clear();
+    human_deny_cells_.clear();
+    next_track_id_ = 0;
+}
+
 void HumanObjectDynamicFilter::processFrame(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud_base,
     const Eigen::Matrix4d& T_map_base,
