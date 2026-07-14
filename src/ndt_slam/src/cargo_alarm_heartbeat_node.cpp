@@ -116,6 +116,9 @@ public:
         }
         if (has_source_stamp_ &&
             source_stamp_sec + kTimeEpsilonSec < last_source_stamp_sec_) {
+            last_source_stamp_sec_ = source_stamp_sec;
+            last_source_progress_wall_sec_ = wall_now_sec;
+            has_source_stamp_ = true;
             return forceCode(kSystemNotReady, "source_time_rollback");
         }
         const bool source_stamp_advanced = !has_source_stamp_ ||
@@ -270,9 +273,7 @@ private:
         }
 
         if (candidate == kClear && current_code_ != kClear) {
-            const bool leaving_warning =
-                current_code_ == kLevel1Warning ||
-                current_code_ == kLevel2Warning;
+            const bool requires_clear_confirmation = current_code_ != kClear;
             bool geometry_exited = clear_without_obstacle_geometry ||
                 isFaultCode(current_code_);
             if (current_code_ == kLevel1Warning &&
@@ -295,7 +296,7 @@ private:
                 resetCandidateConfirmation();
                 return {current_code_, false, "clear_hysteresis_hold"};
             }
-            if (leaving_warning && !clear_pending_ &&
+            if (requires_clear_confirmation && !clear_pending_ &&
                 !candidateConfirmed(kClear, fresh_source_evidence)) {
                 return {current_code_, false, "clear_confirm_pending"};
             }

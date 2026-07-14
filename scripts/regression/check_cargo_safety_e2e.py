@@ -104,6 +104,23 @@ def main() -> int:
     require(len(clear_confirmation_calls) == 1,
             "CLEAR confirmation must have exactly one common counting entry",
             failures)
+    rollback_epoch = re.search(
+        r"source_stamp_sec\s*\+\s*kTimeEpsilonSec\s*<\s*"
+        r"last_source_stamp_sec_\s*\)\s*\{(?P<body>.*?)"
+        r"return\s+forceCode\s*\(\s*kSystemNotReady\s*,\s*"
+        r"\"source_time_rollback\"\s*\)", heartbeat, re.DOTALL)
+    require(rollback_epoch is not None and
+            "last_source_stamp_sec_ = source_stamp_sec" in
+            rollback_epoch.group("body") and
+            "last_source_progress_wall_sec_ = wall_now_sec" in
+            rollback_epoch.group("body"),
+            "source rollback does not establish a recoverable new epoch",
+            failures)
+    require("requires_clear_confirmation" in heartbeat and
+            "current_code_ != kClear" in heartbeat and
+            "leaving_warning" not in heartbeat,
+            "CLEAR confirmation is not required for every non-clear state",
+            failures)
     require(re.search(
                 r"!result\.has_cluster_evidence.*?"
                 r"CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID.*?"
