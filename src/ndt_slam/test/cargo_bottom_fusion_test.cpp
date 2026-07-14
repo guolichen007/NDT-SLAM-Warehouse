@@ -183,11 +183,212 @@ TEST(CargoBottomFusion, RecentStableExpiresAndNeverLeaksAcrossTrack) {
     EXPECT_EQ(new_track.source, CargoBottomSource::INVALID);
 }
 
-TEST(CargoBottomFusion, BackwardTimeClearsTemporalEvidence) {
+TEST(CargoBottomFusion, RollbackFrameIsInvalid) {
     CargoBottomFusion fusion;
     ASSERT_TRUE(fusion.update(observation(9, 5.0, boxPoints(1.0F, 2.0F))).valid);
-    CargoBottomResult rollback = fusion.update(observation(9, 4.0, {}));
+    CargoBottomResult rollback =
+        fusion.update(observation(9, 4.0, boxPoints(1.0F, 2.0F)));
     EXPECT_FALSE(rollback.valid);
+    EXPECT_EQ(rollback.reason, "time_rollback_reset");
+    EXPECT_EQ(fusion.accumulatedPointCount(), 0U);
+}
+
+TEST(CargoBottomFusion, NextEpochCanRecoverAfterRollback) {
+    CargoBottomFusion fusion;
+    ASSERT_TRUE(fusion.update(observation(10, 5.0, boxPoints(1.0F, 2.0F))).valid);
+    ASSERT_FALSE(
+        fusion.update(observation(10, 1.0, boxPoints(1.0F, 2.0F))).valid);
+
+    const CargoBottomResult recovered =
+        fusion.update(observation(10, 1.1, boxPoints(1.0F, 2.0F)));
+    ASSERT_TRUE(recovered.valid) << recovered.reason;
+    EXPECT_EQ(recovered.source, CargoBottomSource::POINTS);
+    EXPECT_GT(fusion.accumulatedPointCount(), 0U);
+}
+
+TEST(CargoBottomFusion, StaleGapFrameIsInvalid) {
+    CargoBottomFusion fusion;
+    ASSERT_TRUE(fusion.update(observation(12, 1.0, boxPoints(1.0F, 2.0F))).valid);
+
+    const CargoBottomResult stale =
+        fusion.update(observation(12, 2.0, boxPoints(1.0F, 2.0F)));
+    EXPECT_FALSE(stale.valid);
+    EXPECT_EQ(stale.reason, "stale_gap_reset");
+    EXPECT_EQ(fusion.accumulatedPointCount(), 0U);
+}
+
+TEST(CargoBottomFusion, NextFrameCanRecoverAfterStaleGap) {
+    CargoBottomFusion fusion;
+    ASSERT_TRUE(fusion.update(observation(13, 1.0, boxPoints(1.0F, 2.0F))).valid);
+    ASSERT_FALSE(
+        fusion.update(observation(13, 2.0, boxPoints(1.0F, 2.0F))).valid);
+
+    const CargoBottomResult recovered =
+        fusion.update(observation(13, 2.1, boxPoints(1.0F, 2.0F)));
+    ASSERT_TRUE(recovered.valid) << recovered.reason;
+    EXPECT_EQ(recovered.source, CargoBottomSource::POINTS);
+}
+
+TEST(CargoBottomFusion, TrackCenterTranslationCompensatesAccumulatedPoints) {
+    CargoBottomFusionConfig config;
+    config.stable_hold_sec = 0.0;
+    CargoBottomFusion fusion(config);
+    CargoBottomObservation first = observation(14, 1.0, boxPoints(1.0F, 2.0F));
+    first.track_center_valid = true;
+    first.track_center_base = Eigen::Vector3f(0.0F, 0.0F, 1.5F);
+    ASSERT_TRUE(fusion.update(first).valid);
+
+    CargoBottomObservation moved = observation(14, 1.1, {});
+    moved.track_center_valid = true;
+    moved.track_center_base = Eigen::Vector3f(2.0F, 0.0F, 1.5F);
+    moved.footprint_center_base = Eigen::Vector2f(2.0F, 0.0F);
+    const CargoBottomResult result = fusion.update(moved);
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.source, CargoBottomSource::POINTS);
+    EXPECT_EQ(result.reason, "accumulated_points_supported");
+    EXPECT_GE(result.selected_stats.finite_points, config.points_min_points);
+    EXPECT_NEAR(result.geometry.center_base.x(), 2.0F, 0.08F);
+}
+
+TEST(CargoBottomFusion, TrackCenterHoistCompensatesAccumulatedPoints) {
+    CargoBottomFusionConfig config;
+    config.stable_hold_sec = 0.0;
+    CargoBottomFusion fusion(config);
+    CargoBottomObservation first = observation(15, 1.0, boxPoints(1.0F, 2.0F));
+    first.track_center_valid = true;
+    first.track_center_base = Eigen::Vector3f(0.0F, 0.0F, 1.5F);
+    ASSERT_TRUE(fusion.update(first).valid);
+
+    CargoBottomObservation hoisted = observation(15, 1.1, {});
+    hoisted.track_center_valid = true;
+    hoisted.track_center_base = Eigen::Vector3f(0.0F, 0.0F, 2.5F);
+    const CargoBottomResult result = fusion.update(hoisted);
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.source, CargoBottomSource::POINTS);
+    EXPECT_EQ(result.reason, "accumulated_points_supported");
+    EXPECT_NEAR(result.selected_stats.z05, 2.0F, 0.08F);
+    EXPECT_NEAR(result.geometry.bottom_z_base, 2.0F, 0.08F);
+    EXPECT_NEAR(result.geometry.top_z_base, 3.0F, 0.08F);
+}
+
+TEST(CargoBottomFusion, AccumulatedPointCountNeverExceedsMaximum) {
+    CargoBottomFusionConfig config;
+    config.accumulation_window_sec = 10.0;
+    config.max_accumulated_points = 300U;
+    CargoBottomFusion fusion(config);
+
+    for (int frame = 0; frame < 5; ++frame) {
+        const CargoBottomResult result = fusion.update(observation(
+            16, 1.0 + 0.1 * static_cast<double>(frame),
+            boxPoints(1.0F, 2.0F)));
+        ASSERT_TRUE(result.valid) << result.reason;
+        EXPECT_LE(fusion.accumulatedPointCount(),
+                  config.max_accumulated_points);
+    }
+}
+
+TEST(CargoBottomFusion, OversizedSingleFrameIsBounded) {
+    CargoBottomFusionConfig config;
+    config.max_accumulated_points = 25U;
+    CargoBottomFusion fusion(config);
+
+    const CargoBottomResult result =
+        fusion.update(observation(17, 1.0, boxPoints(1.0F, 2.0F)));
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(fusion.accumulatedPointCount(), 25U);
+    EXPECT_EQ(result.accumulated_points, 25U);
+}
+
+TEST(CargoBottomFusion, DuplicateStampDoesNotIncreaseAccumulation) {
+    CargoBottomFusion fusion;
+    const CargoBottomObservation frame =
+        observation(18, 1.0, boxPoints(1.0F, 2.0F));
+    const CargoBottomResult first = fusion.update(frame);
+    ASSERT_TRUE(first.valid) << first.reason;
+    const std::size_t first_count = fusion.accumulatedPointCount();
+
+    const CargoBottomResult duplicate = fusion.update(frame);
+    ASSERT_TRUE(duplicate.valid) << duplicate.reason;
+    EXPECT_EQ(fusion.accumulatedPointCount(), first_count);
+    EXPECT_EQ(duplicate.accumulated_points, first.accumulated_points);
+    EXPECT_EQ(duplicate.selected_stats.finite_points,
+              first.selected_stats.finite_points);
+}
+
+TEST(CargoBottomFusion, ResultCarriesObservationTrackId) {
+    CargoBottomFusion fusion;
+    const CargoBottomResult result = fusion.update(observation(987654U, 1.0, {}));
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(result.track_id, 987654U);
+}
+
+TEST(CargoBottomFusion, SetConfigClearsTemporalEvidence) {
+    CargoBottomFusionConfig config;
+    CargoBottomFusion fusion(config);
+    ASSERT_TRUE(fusion.update(
+        observation(19, 1.0, boxPoints(1.0F, 2.0F))).valid);
+    ASSERT_TRUE(fusion.hasTrack());
+    ASSERT_GT(fusion.accumulatedPointCount(), 0U);
+
+    config.points_confidence_base = 0.75F;
+    fusion.setConfig(config);
+    EXPECT_FALSE(fusion.hasTrack());
+    EXPECT_EQ(fusion.trackId(), 0U);
+    EXPECT_EQ(fusion.accumulatedPointCount(), 0U);
+
+    const CargoBottomResult empty = fusion.update(observation(19, 1.1, {}));
+    EXPECT_FALSE(empty.valid);
+    EXPECT_EQ(empty.source, CargoBottomSource::INVALID);
+}
+
+TEST(CargoBottomFusion, InvalidMapSupportConfigIsRejected) {
+    const auto expect_invalid = [](const CargoBottomFusionConfig& config,
+                                   const char* expected_reason) {
+        CargoBottomFusion fusion(config);
+        const CargoBottomResult result =
+            fusion.update(observation(20, 1.0, boxPoints(1.0F, 2.0F)));
+        EXPECT_FALSE(result.valid);
+        EXPECT_EQ(result.reason, expected_reason);
+        EXPECT_FALSE(fusion.hasTrack());
+        EXPECT_EQ(fusion.accumulatedPointCount(), 0U);
+    };
+
+    CargoBottomFusionConfig config;
+    config.map_diff_min_points = 0U;
+    expect_invalid(config, "invalid_config:map_minimum_support");
+    config = CargoBottomFusionConfig{};
+    config.map_static_min_points = 0U;
+    expect_invalid(config, "invalid_config:map_minimum_support");
+    config = CargoBottomFusionConfig{};
+    config.map_min_visible_height = -0.1F;
+    expect_invalid(config, "invalid_config:map_minimum_support");
+    config = CargoBottomFusionConfig{};
+    config.map_min_bottom_band_points = 0U;
+    expect_invalid(config, "invalid_config:map_minimum_support");
+    config = CargoBottomFusionConfig{};
+    config.map_min_bottom_band_xy_cells = 0U;
+    expect_invalid(config, "invalid_config:map_minimum_support");
+    config = CargoBottomFusionConfig{};
+    config.map_min_bottom_band_point_ratio = 1.1F;
+    expect_invalid(config, "invalid_config:map_support_ratio");
+    config = CargoBottomFusionConfig{};
+    config.map_min_bottom_band_xy_cell_ratio = -0.1F;
+    expect_invalid(config, "invalid_config:map_support_ratio");
+}
+
+TEST(CargoBottomFusion, TrackCenterLossFailsClosed) {
+    CargoBottomFusion fusion;
+    CargoBottomObservation first = observation(21, 1.0, boxPoints(1.0F, 2.0F));
+    first.track_center_valid = true;
+    first.track_center_base = Eigen::Vector3f(0.0F, 0.0F, 1.5F);
+    ASSERT_TRUE(fusion.update(first).valid);
+
+    const CargoBottomResult lost =
+        fusion.update(observation(21, 1.1, boxPoints(1.0F, 2.0F)));
+    EXPECT_FALSE(lost.valid);
+    EXPECT_EQ(lost.reason, "track_center_lost");
     EXPECT_EQ(fusion.accumulatedPointCount(), 0U);
 }
 
