@@ -454,7 +454,97 @@ int cargoBottomSourcePriority(CargoBottomSource source) noexcept {
         case CargoBottomSource::MAP_DIFF: return 3;
         case CargoBottomSource::MAP_STATIC: return 2;
         case CargoBottomSource::ORIGIN_HEIGHT: return 2;
-        case CargoBottomSource::RECENT_STABLE: return…1260 tokens truncated…ation.stamp_sec;
+        case CargoBottomSource::RECENT_STABLE: return 1;
+        default: return 0;
+    }
+}
+
+CargoBottomFusion::CargoBottomFusion(const CargoBottomFusionConfig& config)
+    : config_(config) {}
+
+void CargoBottomFusion::reset() {
+    has_track_ = false;
+    track_id_ = 0;
+    last_stamp_sec_ = 0.0;
+    newest_points_stamp_sec_ = 0.0;
+    accumulated_frames_.clear();
+    accumulated_point_count_ = 0;
+    resetTemporalState();
+}
+
+void CargoBottomFusion::setConfig(const CargoBottomFusionConfig& config) {
+    config_ = config;
+}
+
+void CargoBottomFusion::resetTemporalState() {
+    ema_valid_ = false;
+    ema_source_ = CargoBottomSource::INVALID;
+    ema_uses_track_center_ = false;
+    ema_bottom_z_base_ = 0.0F;
+    ema_top_z_base_ = 0.0F;
+    stable_ = StableEstimate{};
+    final_valid_ = false;
+    final_uses_track_center_ = false;
+    final_bottom_value_ = 0.0F;
+    final_top_value_ = 0.0F;
+    final_source_ = CargoBottomSource::INVALID;
+    pending_large_jump_ = false;
+    pending_bottom_value_ = 0.0F;
+    pending_top_value_ = 0.0F;
+    pending_source_ = CargoBottomSource::INVALID;
+    pending_large_jump_count_ = 0;
+}
+
+void CargoBottomFusion::purgeAccumulation(double stamp_sec) {
+    const double cutoff = stamp_sec - config_.accumulation_window_sec;
+    while (!accumulated_frames_.empty() &&
+           accumulated_frames_.front().stamp_sec < cutoff) {
+        accumulated_point_count_ -= accumulated_frames_.front().points_map.size();
+        accumulated_frames_.pop_front();
+    }
+}
+
+void CargoBottomFusion::appendPoints(const CargoBottomObservation& observation) {
+    if (observation.points_base.empty()) {
+        return;
+    }
+    AccumulatedFrame frame;
+    frame.stamp_sec = observation.stamp_sec;
+    frame.track_center_valid = observation.track_center_valid;
+    frame.track_center_map = observation.track_center_valid
+        ? (observation.T_map_base * observation.track_center_base)
+        : Eigen::Vector3f::Zero();
+    frame.points_map.reserve(observation.points_base.size());
+    for (const auto& p : observation.points_base) {
+        if (finitePoint(p)) {
+            frame.points_map.push_back(observation.T_map_base * p);
+        }
+    }
+    if (!frame.points_map.empty()) {
+        accumulated_frames_.push_back(std::move(frame));
+        accumulated_point_count_ += accumulated_frames_.back().points_map.size();
+    }
+}
+
+std::vector<Eigen::Vector3f> CargoBottomFusion::alignedAccumulatedPoints(
+        const CargoBottomObservation& observation) const {
+    std::vector<Eigen::Vector3f> result;
+    if (accumulated_frames_.empty()) {
+        return result;
+    }
+    const Eigen::Isometry3f T_base_map = observation.T_map_base.inverse();
+    result.reserve(accumulated_point_count_);
+    for (const auto& frame : accumulated_frames_) {
+        for (const auto& p : frame.points_map) {
+            result.push_back(T_base_map * p);
+        }
+    }
+    return result;
+}
+
+CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observation) {
+    CargoBottomResult result;
+    result.stamp_sec = observation.stamp_sec;
     std::string invalid_config_field;
     if (!validConfig(config_, &invalid_config_field)) {
         reset();
@@ -526,7 +616,7 @@ int cargoBottomSourcePriority(CargoBottomSource source) noexcept {
     std::vector<Eigen::Vector3f> points = alignedAccumulatedPoints(observation);
     result.accumulated_points = points.size();
     const Eigen::Vector2f footprint_size = observation.footprint_valid
-        ? observation.footprint_size_xy.cwiseAbs()
+        ? observation.footprint_size_xy.cwiseAbs().eval()
         : Eigen::Vector2f::Zero();
     const CargoVerticalStats accumulated_points_stats = analyzeVertical(
         points, config_.bottom_band_height, config_.xy_cell_size,
