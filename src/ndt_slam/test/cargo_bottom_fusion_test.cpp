@@ -140,6 +140,52 @@ TEST(CargoBottomFusion, LargeCrossSourceJumpRequiresConfirmation) {
     EXPECT_NEAR(third.geometry.bottom_z_base, 2.0F, 0.10F);
 }
 
+TEST(CargoBottomFusion, DuplicateStampDoesNotAdvanceLargeJumpConfirmation) {
+    CargoBottomFusionConfig config;
+    config.large_jump_confirm_frames = 3;
+    config.accumulation_window_sec = 0.05;
+    CargoBottomFusion fusion(config);
+    ASSERT_TRUE(fusion.update(
+        observation(51, 1.0, boxPoints(1.0F, 2.0F))).valid);
+
+    CargoBottomObservation jump = observation(51, 1.1, {});
+    jump.current_top_valid = true;
+    jump.current_top_z_base = 3.0F;
+    jump.map_static_height_valid = true;
+    jump.map_static_height_m = 1.0F;
+
+    const CargoBottomResult first = fusion.update(jump);
+    ASSERT_TRUE(first.valid);
+    EXPECT_EQ(first.reason, "large_jump_confirmation_pending");
+    EXPECT_NEAR(first.geometry.bottom_z_base, 1.0F, 0.10F);
+
+    for (int replay = 0; replay < 5; ++replay) {
+        const CargoBottomResult duplicate = fusion.update(jump);
+        ASSERT_TRUE(duplicate.valid);
+        EXPECT_EQ(duplicate.reason, "large_jump_confirmation_pending");
+        EXPECT_NEAR(duplicate.geometry.bottom_z_base, 1.0F, 0.10F);
+        EXPECT_FLOAT_EQ(duplicate.confidence, first.confidence);
+    }
+
+    jump.stamp_sec = jump.transform_stamp_sec = 1.2;
+    const CargoBottomResult second_fresh = fusion.update(jump);
+    ASSERT_TRUE(second_fresh.valid);
+    EXPECT_EQ(second_fresh.reason, "large_jump_confirmation_pending");
+    EXPECT_NEAR(second_fresh.geometry.bottom_z_base, 1.0F, 0.10F);
+
+    for (int replay = 0; replay < 3; ++replay) {
+        const CargoBottomResult duplicate = fusion.update(jump);
+        ASSERT_TRUE(duplicate.valid);
+        EXPECT_EQ(duplicate.reason, "large_jump_confirmation_pending");
+        EXPECT_NEAR(duplicate.geometry.bottom_z_base, 1.0F, 0.10F);
+    }
+
+    jump.stamp_sec = jump.transform_stamp_sec = 1.3;
+    const CargoBottomResult third_fresh = fusion.update(jump);
+    ASSERT_TRUE(third_fresh.valid);
+    EXPECT_NEAR(third_fresh.geometry.bottom_z_base, 2.0F, 0.10F);
+}
+
 TEST(CargoBottomFusion, TopOrHeightJumpAlsoRequiresConfirmation) {
     CargoBottomFusionConfig config;
     config.accumulation_window_sec = 0.05;

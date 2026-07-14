@@ -291,6 +291,8 @@ private:
     float pending_top_value_ = 0.0F;
     CargoBottomSource pending_source_ = CargoBottomSource::INVALID;
     std::size_t pending_large_jump_count_ = 0;
+    bool last_result_available_ = false;
+    CargoBottomResult last_result_;
 
     void resetTemporalState();
     void purgeAccumulation(double stamp_sec);

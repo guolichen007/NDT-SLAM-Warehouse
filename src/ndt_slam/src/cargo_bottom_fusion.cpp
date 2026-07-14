@@ -532,6 +532,8 @@ void CargoBottomFusion::resetTemporalState() {
     pending_top_value_ = 0.0F;
     pending_source_ = CargoBottomSource::INVALID;
     pending_large_jump_count_ = 0;
+    last_result_available_ = false;
+    last_result_ = CargoBottomResult{};
 }
 
 void CargoBottomFusion::purgeAccumulation(double stamp_sec) {
@@ -690,21 +692,30 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
         resetTemporalState();
         last_stamp_sec_ = observation.stamp_sec;
         result.reason = "time_rollback_reset";
+        last_result_ = result;
+        last_result_available_ = true;
         return result;
     } else if (observation.stamp_sec - last_stamp_sec_ > config_.stale_reset_sec) {
         resetTemporalState();
         last_stamp_sec_ = observation.stamp_sec;
         result.reason = "stale_gap_reset";
+        last_result_ = result;
+        last_result_available_ = true;
         return result;
+    } else if (final_valid_ && final_uses_track_center_ &&
+               !observation.track_center_valid) {
+        resetTemporalState();
+        last_stamp_sec_ = observation.stamp_sec;
+        result.reason = "track_center_lost";
+        last_result_ = result;
+        last_result_available_ = true;
+        return result;
+    } else if (observation.stamp_sec <=
+                   last_stamp_sec_ + config_.backwards_tolerance_sec &&
+               last_result_available_) {
+        return last_result_;
     }
     last_stamp_sec_ = observation.stamp_sec;
-
-    if (final_valid_ && final_uses_track_center_ &&
-        !observation.track_center_valid) {
-        resetTemporalState();
-        result.reason = "track_center_lost";
-        return result;
-    }
 
     appendPoints(observation);
     purgeAccumulation(observation.stamp_sec);
@@ -882,6 +893,8 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
             result.map_static_stats.reject_reason + ";origin_height=" +
             result.origin_height_stats.reject_reason;
         result.source_name = cargoBottomSourceName(result.source);
+        last_result_ = result;
+        last_result_available_ = true;
         return result;
     }
 
@@ -1058,6 +1071,8 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
     if (!result.valid) {
         result.reason += ";geometry_invalid";
     }
+    last_result_ = result;
+    last_result_available_ = true;
     return result;
 }
 
