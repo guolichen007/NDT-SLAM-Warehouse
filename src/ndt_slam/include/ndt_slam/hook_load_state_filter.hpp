@@ -58,8 +58,9 @@ private:
     std::uint32_t pending_samples_ = 0;
     std::uint32_t stable_samples_ = 0;
     bool has_sample_ = false;
+    bool has_seen_source_time_ = false;
     double last_wall_time_sec_ = 0.0;
-    double last_source_time_sec_ = 0.0;
+    double last_seen_source_time_sec_ = 0.0;
     double last_sample_wall_time_sec_ = 0.0;
     float last_voltage_ = std::numeric_limits<float>::quiet_NaN();
     std::string invalid_reason_ = "startup_unknown";

@@ -596,6 +596,9 @@ hook_load_signal:
   valid_voltage_min_v: 0.0
   valid_voltage_max_v: 6.0
   diagnostic_disconnect_sec: 10.0
+  # Only independent, localization-valid LiDAR detection frames can confirm
+  # the no-cargo state. Rate-limited frames and heartbeat ticks never count.
+  lidar_empty_confirm_frames: 3
   origin_history_samples: 10
   # Origin-height evidence is accepted only from a recent, spatially stable
   # EMPTY interval and may be consumed by one EMPTY->LOADED lifecycle.

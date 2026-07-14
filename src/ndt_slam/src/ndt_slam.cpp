@@ -1235,6 +1235,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             formal_cargo_removal_max_age_sec_ = std::clamp(
                 hls["formal_removal_max_age_sec"].as<double>(0.80),
                 0.10, 3.0);
+            lidar_no_cargo_evidence_.setConfig({
+                static_cast<std::uint32_t>(std::clamp(
+                    hls["lidar_empty_confirm_frames"].as<int>(3), 2, 20))});
             ROS_INFO(
                 "[HookLoadSignal] enabled=%d role=%s role_source=%s state_topic=%s "
                 "consumer_stale=%.2fs origin_samples=%zu origin_age=%.2fs "
@@ -1942,6 +1945,7 @@ void NdtSlamNode::recordEmptyHookOriginHeight(
 
 void NdtSlamNode::resetCargoForHookState(bool preserve_origin_height) {
     clearHookLock();
+    lidar_no_cargo_evidence_.reset("cargo_lifecycle_reset");
     cargo_state_ = CargoState{};
     hook_fixed_cargo_ = HookCargoDetection{};
     hook_fixed_bottom_ = HookCargoBottomEstimate{};
@@ -2340,6 +2344,13 @@ void NdtSlamNode::processCloudThread() {
         const bool hook_is_empty = hook_load.valid &&
             hook_load.state ==
                 lidar_slam2_msgs::HookLoadState::STATE_EMPTY;
+        const bool localization_evidence_valid =
+            relocalization_pose_reliable_ &&
+            current_pose_.translation().allFinite() &&
+            current_pose_.so3().matrix().allFinite();
+        if (!localization_evidence_valid) {
+            lidar_no_cargo_evidence_.reset("localization_invalid");
+        }
 
         // Stamp guard：防止重复处理同一帧 hook cloud
         bool skip_hook_this_frame = false;
@@ -2364,19 +2375,11 @@ void NdtSlamNode::processCloudThread() {
             hook_input_cloud && !hook_input_cloud->empty()) {
             hook_fixed_cargo_ = detectCargoAroundOdomAnchor(hook_input_cloud, msg->header.stamp);
                 hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
-                if (hook_allows_tracking) {
-                    updateHookCargoLock(
-                        hook_fixed_cargo_, hook_fixed_bottom_,
-                        msg->header.stamp);
-                } else {
-                    hook_observation_associated_current_ = false;
-                    hook_observation_association_stamp_ = msg->header.stamp;
-                    if (hook_is_empty && relocalization_pose_reliable_ &&
-                        current_pose_.translation().allFinite() &&
-                        current_pose_.so3().matrix().allFinite() &&
-                        hook_fixed_bottom_.valid &&
-                        hook_fixed_cargo_.core_points_base &&
-                        hook_fixed_bottom_.source == "points_visible_side") {
+                if (hook_is_empty && localization_evidence_valid &&
+                    hook_fixed_cargo_.observation_valid &&
+                    hook_fixed_bottom_.valid &&
+                    hook_fixed_cargo_.core_points_base &&
+                    hook_fixed_bottom_.source == "points_visible_side") {
                         const Eigen::Vector3d origin_center_map =
                             current_pose_ *
                             hook_fixed_cargo_.center_base.cast<double>();
@@ -2392,8 +2395,20 @@ void NdtSlamNode::processCloudThread() {
                                     static_cast<float>(std::max(
                                         1, hook_lock_config_.lock_strong_min_points))),
                             msg->header.stamp);
-                    }
                 }
+                if (hook_allows_tracking) {
+                    updateHookCargoLock(
+                        hook_fixed_cargo_, hook_fixed_bottom_,
+                        msg->header.stamp);
+                } else {
+                    hook_observation_associated_current_ = false;
+                    hook_observation_association_stamp_ = msg->header.stamp;
+                }
+                lidar_no_cargo_evidence_.update({
+                    true, hook_fixed_cargo_.observation_valid,
+                    localization_evidence_valid, hook_fixed_cargo_.valid,
+                    hook_lock_.state != HookCargoLockState::EMPTY,
+                    msg->header.stamp.toSec()});
 
                 // 发布 selected_core_points（默认关闭）
                 if (odom_anchor_config_.publish_selected_core_points && hook_fixed_cargo_.valid) {
@@ -2458,6 +2473,10 @@ void NdtSlamNode::processCloudThread() {
                 hook_observation_associated_current_ = false;
                 hook_observation_association_stamp_ = msg->header.stamp;
             }
+            lidar_no_cargo_evidence_.update({
+                true, false, localization_evidence_valid, false,
+                hook_lock_.state != HookCargoLockState::EMPTY,
+                msg->header.stamp.toSec()});
         }
 
         // 体素降采样（0.2m，比 merger 的 0.15m 略粗，实现有效降采样）
@@ -8164,6 +8183,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
                           cloud_base->size(), cx, cy);
         return result;
     }
+    result.roi_finite_points = crop_cloud->size();
 
     result.raw_roi_min_z = minimumFiniteZ(*crop_cloud);
     if (!std::isfinite(result.raw_roi_min_z)) {
@@ -8213,6 +8233,11 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     } else {
         filtered_cloud = crop_cloud;
     }
+    result.observation_valid =
+        result.roi_finite_points >= static_cast<std::size_t>(
+            std::max(1, odom_anchor_config_.weak_min_points)) &&
+        (!odom_anchor_config_.tight_box.hag_filter_enabled ||
+         result.ground_reference_valid);
 
     if (!filtered_cloud->empty()) {
         result.hag_filtered_min_z = minimumFiniteZ(*filtered_cloud);
@@ -8464,11 +8489,6 @@ bool NdtSlamNode::isCompactLockStrongDetection(
     const HookCargoDetection& det) const {
     if (!hook_lock_config_.compact_lock_enabled || !det.valid ||
         !det.core_points_base) return false;
-    const HookLoadSnapshot hook = currentHookLoadSnapshot();
-    if (!hook.valid ||
-        hook.state != lidar_slam2_msgs::HookLoadState::STATE_LOADED) {
-        return false;
-    }
     return classifyCargoLockProfile(
         det.core_points_base->size(), det.visible_height, det.xy_area,
         true,
@@ -8710,6 +8730,18 @@ void NdtSlamNode::updateHookCargoLock(
     const bool large_lock_observation = isLockStrongDetection(det, bottom);
     const bool compact_lock_observation =
         isCompactLockStrongDetection(det);
+    const HookLoadSnapshot hook = currentHookLoadSnapshot();
+    const HookLoadState gravity_state =
+        hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED
+            ? HookLoadState::LOADED
+            : (hook.state == lidar_slam2_msgs::HookLoadState::STATE_EMPTY
+                ? HookLoadState::EMPTY
+                : (hook.state == lidar_slam2_msgs::HookLoadState::STATE_INHIBIT
+                    ? HookLoadState::INHIBIT : HookLoadState::UNKNOWN));
+    const SuspendedCargoLockDecision candidate_policy =
+        evaluateSuspendedCargoLock({
+            hook_load_signal_role_, hook.valid, gravity_state,
+            hook_lock_config_.lock_confirm_frames});
     bool compact_size_continuous = true;
     if (compact_lock_observation && hook_lock_.has_last_accepted) {
         for (int axis = 0; axis < 3; ++axis) {
@@ -8734,7 +8766,8 @@ void NdtSlamNode::updateHookCargoLock(
 
     switch (hook_lock_.state) {
     case HookCargoLockState::EMPTY:
-        if (isStrongDetection(det, bottom)) {
+        if (candidate_policy.allow_candidate &&
+            isStrongDetection(det, bottom)) {
             hook_lock_.state = HookCargoLockState::CANDIDATE;
             hook_lock_.confirm_count = 0;
             hook_lock_.init_size_buffer.clear();
@@ -8779,9 +8812,12 @@ void NdtSlamNode::updateHookCargoLock(
                      bottom.valid ? bottom.top_z_base : -1.0f);
 
             const int required_confirm_frames =
-                hook_lock_.candidate_compact_profile
-                    ? hook_lock_config_.compact_confirm_frames
-                    : hook_lock_config_.lock_confirm_frames;
+                evaluateSuspendedCargoLock({
+                    hook_load_signal_role_, hook.valid, gravity_state,
+                    hook_lock_.candidate_compact_profile
+                        ? hook_lock_config_.compact_confirm_frames
+                        : hook_lock_config_.lock_confirm_frames})
+                    .required_confirm_frames;
             if (hook_lock_.confirm_count >= required_confirm_frames) {
                 hook_lock_.state = HookCargoLockState::LOCKED;
                 observation_associated = true;
@@ -9298,7 +9334,7 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
     const HookLoadSnapshot& hook, const ros::Time& stamp,
     bool visual_conflict, const std::string& reason) {
     const bool lidar_no_cargo =
-        cargo_state_.state == CargoState::EMPTY && !visual_conflict;
+        lidar_no_cargo_evidence_.result().confirmed && !visual_conflict;
     const bool safe_empty =
         hook_load_signal_role_ == HookLoadSignalRole::REQUIRED
             ? (hook.valid &&
@@ -9368,7 +9404,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         return;
     }
     const bool lidar_no_cargo_confirmed =
-        cargo_state_.state == CargoState::EMPTY && !visual_conflict;
+        lidar_no_cargo_evidence_.result().confirmed && !visual_conflict;
     if (!required_role && lidar_no_cargo_confirmed) {
         publishHookOnlySafetyStatus(
             hook, stamp, false,
@@ -12643,4 +12679,3 @@ void NdtSlamNode::logCargoHealthPeriodic() {
 }
 
 } // namespace ndt_slam
-

@@ -115,5 +115,23 @@ TEST(HookLoadStateFilter, SourceRollbackStartsARecoverableEpoch) {
               HookLoadState::LOADED);
 }
 
+TEST(HookLoadStateFilter, StaleReplayCannotSeedASecondConfirmation) {
+    HookLoadStateFilter filter;
+    filter.ingest(5.0, 10.0, 1.0);
+    ASSERT_EQ(filter.ingest(5.0, 11.0, 2.0).state,
+              HookLoadState::LOADED);
+    ASSERT_EQ(filter.tick(4.6).reason, "signal_stale");
+
+    const auto replay = filter.ingest(5.0, 11.0, 4.7);
+    EXPECT_FALSE(replay.valid);
+    EXPECT_NE(replay.reason, "transition_pending");
+    const auto first_fresh = filter.ingest(5.0, 12.0, 5.0);
+    EXPECT_FALSE(first_fresh.valid);
+    EXPECT_EQ(first_fresh.state, HookLoadState::UNKNOWN);
+    EXPECT_EQ(first_fresh.reason, "transition_pending");
+    EXPECT_EQ(filter.ingest(5.0, 13.0, 6.0).state,
+              HookLoadState::LOADED);
+}
+
 }  // namespace
 }  // namespace ndt_slam

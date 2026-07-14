@@ -141,7 +141,7 @@ enum class CargoLockProfile { NONE, LARGE_BODY, COMPACT_BODY };
 
 inline CargoLockProfile classifyCargoLockProfile(
     std::size_t points, float visible_height_m, float xy_area_m2,
-    bool hook_loaded,
+    bool compact_profile_enabled,
     int large_points, float large_height_m, float large_area_m2,
     bool compact_enabled, int compact_points,
     float compact_height_m, float compact_area_m2) {
@@ -149,7 +149,7 @@ inline CargoLockProfile classifyCargoLockProfile(
         visible_height_m >= large_height_m && xy_area_m2 >= large_area_m2) {
         return CargoLockProfile::LARGE_BODY;
     }
-    if (compact_enabled && hook_loaded &&
+    if (compact_enabled && compact_profile_enabled &&
         points >= static_cast<std::size_t>(std::max(1, compact_points)) &&
         visible_height_m >= compact_height_m &&
         xy_area_m2 >= compact_area_m2) {

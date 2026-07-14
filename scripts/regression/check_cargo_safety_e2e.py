@@ -29,6 +29,7 @@ def main() -> int:
     hook_node = read("src/ndt_slam/src/hook_load_state_node.cpp")
     hook_policy = read(
         "src/ndt_slam/src/hook_load_evidence_policy.cpp")
+    crane_constraint = read("src/ndt_slam/src/crane_pose_constraint.cpp")
     safety_header = read(
         "src/ndt_slam/include/ndt_slam/cargo_safety_evaluator.hpp")
     safety_evaluator = read("src/ndt_slam/src/cargo_safety_evaluator.cpp")
@@ -172,6 +173,34 @@ def main() -> int:
     require("duplicate_sample_ignored" in
             read("src/ndt_slam/src/hook_load_state_filter.cpp"),
             "duplicate Gravity samples can advance confirmation", failures)
+    rotation_failure = crane_constraint.find(
+        'result.reason = "rotation_validation_failed";')
+    rotation_return = crane_constraint.find("return result;", rotation_failure)
+    rotation_failure_block = crane_constraint[rotation_failure:rotation_return]
+    require(rotation_failure >= 0 and rotation_return >= 0 and
+            "result.orthogonality_error =" not in rotation_failure_block and
+            "result.determinant =" not in rotation_failure_block,
+            "SO3 validation failure overwrites measured diagnostics", failures)
+    gravity_filter = read("src/ndt_slam/src/hook_load_state_filter.cpp")
+    require("has_seen_source_time_" in gravity_filter and
+            "last_seen_source_time_sec_" in gravity_filter,
+            "stale Gravity state forgets the last source timestamp", failures)
+    require("lidar_no_cargo_evidence_.result().confirmed" in node and
+            "cargo_state_.state == CargoState::EMPTY && !visual_conflict" not in node and
+            "lidar_empty_confirm_frames: 3" in live_config,
+            "AUXILIARY no-cargo output still trusts default CargoState EMPTY",
+            failures)
+    require("evaluateSuspendedCargoLock" in node and
+            "auxiliary_empty_delayed_confirmation" in hook_policy and
+            "auxiliary_gravity_unavailable_strict_lidar" in hook_policy,
+            "compact cargo lock is not role-aware", failures)
+    origin_capture = node.find("if (hook_is_empty && localization_evidence_valid")
+    origin_record = node.find("recordEmptyHookOriginHeight(", origin_capture)
+    tracking_update = node.find("if (hook_allows_tracking)", origin_capture)
+    require(origin_capture >= 0 and origin_record >= 0 and tracking_update >= 0 and
+            origin_record < tracking_update,
+            "AUXILIARY origin-height capture remains hidden behind tracking",
+            failures)
     require("publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_" in node,
             "legacy payload compatibility output does not consume fusion", failures)
     require("SOURCE_ORIGIN_HEIGHT=5" in bottom_message and

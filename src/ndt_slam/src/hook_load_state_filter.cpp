@@ -102,16 +102,17 @@ HookLoadStateResult HookLoadStateFilter::ingest(
         has_sample_ = true;
         return fail("wall_time_rollback", voltage);
     }
-    if (has_sample_ &&
-        source_time_sec + 1.0e-6 < last_source_time_sec_) {
-        last_source_time_sec_ = source_time_sec;
+    if (has_seen_source_time_ &&
+        source_time_sec + 1.0e-6 < last_seen_source_time_sec_) {
+        last_seen_source_time_sec_ = source_time_sec;
+        has_seen_source_time_ = true;
         last_wall_time_sec_ = wall_time_sec;
         last_sample_wall_time_sec_ = wall_time_sec;
         has_sample_ = true;
         return fail("source_time_rollback", voltage);
     }
-    if (has_sample_ &&
-        std::abs(source_time_sec - last_source_time_sec_) <= 1.0e-6) {
+    if (has_seen_source_time_ &&
+        std::abs(source_time_sec - last_seen_source_time_sec_) <= 1.0e-6) {
         if (wall_time_sec - last_sample_wall_time_sec_ + 1.0e-6 >=
             config_.stale_timeout_sec) {
             has_sample_ = false;
@@ -121,7 +122,8 @@ HookLoadStateResult HookLoadStateFilter::ingest(
             ? "duplicate_sample_ignored" : invalid_reason_);
     }
     last_wall_time_sec_ = wall_time_sec;
-    last_source_time_sec_ = source_time_sec;
+    last_seen_source_time_sec_ = source_time_sec;
+    has_seen_source_time_ = true;
     last_sample_wall_time_sec_ = wall_time_sec;
     has_sample_ = true;
 
@@ -182,8 +184,9 @@ void HookLoadStateFilter::reset(const std::string& reason) {
     pending_samples_ = 0;
     stable_samples_ = 0;
     has_sample_ = false;
+    has_seen_source_time_ = false;
     last_wall_time_sec_ = 0.0;
-    last_source_time_sec_ = 0.0;
+    last_seen_source_time_sec_ = 0.0;
     last_sample_wall_time_sec_ = 0.0;
     last_voltage_ = std::numeric_limits<float>::quiet_NaN();
     invalid_reason_ = reason;

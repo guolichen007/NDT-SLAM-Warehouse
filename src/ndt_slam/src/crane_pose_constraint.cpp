@@ -145,8 +145,6 @@ CranePoseConstraintResult applyCranePoseConstraint(
         std::abs(result.determinant - 1.0) > config.determinant_tolerance) {
         result.fallback_used = true;
         result.reason = "rotation_validation_failed";
-        result.orthogonality_error = 0.0;
-        result.determinant = 1.0;
         return result;
     }
 

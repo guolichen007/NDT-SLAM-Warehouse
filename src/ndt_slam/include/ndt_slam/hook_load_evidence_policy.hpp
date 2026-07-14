@@ -53,6 +53,63 @@ struct HookLoadEvidenceDecision {
 HookLoadEvidenceDecision evaluateHookLoadEvidence(
     const HookLoadEvidenceInput& input);
 
+struct SuspendedCargoLockInput {
+    HookLoadSignalRole role = HookLoadSignalRole::REQUIRED;
+    bool gravity_valid = false;
+    HookLoadState gravity_state = HookLoadState::UNKNOWN;
+    int base_confirm_frames = 1;
+};
+
+struct SuspendedCargoLockDecision {
+    bool allow_candidate = false;
+    bool gravity_conflict = false;
+    int required_confirm_frames = 1;
+    std::string reason = "required_gravity_unavailable";
+};
+
+SuspendedCargoLockDecision evaluateSuspendedCargoLock(
+    const SuspendedCargoLockInput& input);
+
+struct LidarNoCargoEvidenceConfig {
+    std::uint32_t confirm_frames = 3U;
+};
+
+struct LidarNoCargoEvidenceInput {
+    bool detection_executed = false;
+    bool observation_valid = false;
+    bool localization_valid = false;
+    bool cargo_detected = false;
+    bool cargo_lock_active = false;
+    double source_time_sec = 0.0;
+};
+
+struct LidarNoCargoEvidenceResult {
+    bool confirmed = false;
+    std::uint32_t confirm_count = 0U;
+    std::string reason = "startup_unconfirmed";
+};
+
+class LidarNoCargoEvidenceTracker {
+public:
+    explicit LidarNoCargoEvidenceTracker(
+        const LidarNoCargoEvidenceConfig& config =
+            LidarNoCargoEvidenceConfig());
+
+    void setConfig(const LidarNoCargoEvidenceConfig& config);
+    LidarNoCargoEvidenceResult update(
+        const LidarNoCargoEvidenceInput& input);
+    LidarNoCargoEvidenceResult result() const;
+    void reset(const std::string& reason = "reset");
+
+private:
+    LidarNoCargoEvidenceConfig config_;
+    bool confirmed_ = false;
+    std::uint32_t confirm_count_ = 0U;
+    bool has_seen_source_time_ = false;
+    double last_seen_source_time_sec_ = 0.0;
+    std::string reason_ = "startup_unconfirmed";
+};
+
 struct HookLoadMapCommitInput {
     HookLoadSignalRole role = HookLoadSignalRole::REQUIRED;
     bool gravity_valid = false;

@@ -100,6 +100,76 @@ TEST(HookLoadEvidence, RequiredAndDisabledCompatibilityIsExplicit) {
     EXPECT_FALSE(disabled.gravity_conflict);
 }
 
+TEST(SuspendedCargoLock, CompactLidarIsRoleAware) {
+    const auto auxiliary_unknown = evaluateSuspendedCargoLock(
+        {HookLoadSignalRole::AUXILIARY, false, HookLoadState::UNKNOWN, 5});
+    EXPECT_TRUE(auxiliary_unknown.allow_candidate);
+    EXPECT_EQ(auxiliary_unknown.required_confirm_frames, 6);
+
+    const auto auxiliary_loaded = evaluateSuspendedCargoLock(
+        {HookLoadSignalRole::AUXILIARY, true, HookLoadState::LOADED, 5});
+    EXPECT_TRUE(auxiliary_loaded.allow_candidate);
+    EXPECT_FALSE(auxiliary_loaded.gravity_conflict);
+    EXPECT_EQ(auxiliary_loaded.required_confirm_frames, 5);
+
+    const auto auxiliary_empty = evaluateSuspendedCargoLock(
+        {HookLoadSignalRole::AUXILIARY, true, HookLoadState::EMPTY, 5});
+    EXPECT_TRUE(auxiliary_empty.allow_candidate);
+    EXPECT_TRUE(auxiliary_empty.gravity_conflict);
+    EXPECT_EQ(auxiliary_empty.required_confirm_frames, 7);
+
+    const auto required_unknown = evaluateSuspendedCargoLock(
+        {HookLoadSignalRole::REQUIRED, false, HookLoadState::UNKNOWN, 5});
+    EXPECT_FALSE(required_unknown.allow_candidate);
+}
+
+TEST(LidarNoCargoEvidence, RequiresIndependentValidDetectionFrames) {
+    LidarNoCargoEvidenceTracker tracker({3U});
+    EXPECT_FALSE(tracker.result().confirmed);
+
+    const LidarNoCargoEvidenceInput first{
+        true, true, true, false, false, 10.0};
+    EXPECT_EQ(tracker.update(first).confirm_count, 1U);
+    EXPECT_EQ(tracker.update(first).confirm_count, 1U);
+    EXPECT_EQ(tracker.update(
+        {true, true, true, false, false, 11.0}).confirm_count, 2U);
+    EXPECT_TRUE(tracker.update(
+        {true, true, true, false, false, 12.0}).confirmed);
+}
+
+TEST(LidarNoCargoEvidence, InvalidQualityCargoAndLockFailClosed) {
+    LidarNoCargoEvidenceTracker tracker({2U});
+    tracker.update({true, true, true, false, false, 1.0});
+    EXPECT_TRUE(tracker.update(
+        {true, true, true, false, false, 2.0}).confirmed);
+
+    EXPECT_FALSE(tracker.update(
+        {true, false, true, false, false, 3.0}).confirmed);
+    tracker.update({true, true, true, false, false, 4.0});
+    EXPECT_FALSE(tracker.update(
+        {true, true, true, true, false, 5.0}).confirmed);
+    tracker.update({true, true, true, false, false, 6.0});
+    EXPECT_FALSE(tracker.update(
+        {true, true, true, false, true, 7.0}).confirmed);
+    EXPECT_FALSE(tracker.update(
+        {true, true, false, false, false, 8.0}).confirmed);
+}
+
+TEST(LidarNoCargoEvidence, RollbackStartsUnconfirmedEpoch) {
+    LidarNoCargoEvidenceTracker tracker({2U});
+    tracker.update({true, true, true, false, false, 100.0});
+    ASSERT_TRUE(tracker.update(
+        {true, true, true, false, false, 101.0}).confirmed);
+    const auto rollback = tracker.update(
+        {true, true, true, false, false, 1.0});
+    EXPECT_FALSE(rollback.confirmed);
+    EXPECT_EQ(rollback.reason, "source_time_rollback");
+    EXPECT_FALSE(tracker.update(
+        {true, true, true, false, false, 1.1}).confirmed);
+    EXPECT_TRUE(tracker.update(
+        {true, true, true, false, false, 1.2}).confirmed);
+}
+
 TEST(HookLoadMapCommit, UsesLidarAuthorizationAndConservativeCandidateExclusion) {
     const auto formal = evaluateHookLoadMapCommit(
         {HookLoadSignalRole::AUXILIARY, false, HookLoadState::UNKNOWN, true, true});

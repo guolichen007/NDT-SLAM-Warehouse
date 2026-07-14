@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <limits>
 
 namespace ndt_slam {
 
@@ -95,6 +97,116 @@ HookLoadEvidenceDecision evaluateHookLoadEvidence(
             ? "lidar_empty_gravity_support" : "lidar_empty_primary";
     }
     return decision;
+}
+
+SuspendedCargoLockDecision evaluateSuspendedCargoLock(
+    const SuspendedCargoLockInput& input) {
+    SuspendedCargoLockDecision decision;
+    const int base_frames = std::max(1, input.base_confirm_frames);
+    decision.required_confirm_frames = base_frames;
+    const bool gravity_loaded = input.gravity_valid &&
+        input.gravity_state == HookLoadState::LOADED;
+    const bool gravity_empty = input.gravity_valid &&
+        input.gravity_state == HookLoadState::EMPTY;
+
+    if (input.role == HookLoadSignalRole::REQUIRED) {
+        decision.allow_candidate = gravity_loaded;
+        decision.reason = gravity_loaded
+            ? "required_gravity_loaded" : "required_gravity_unavailable";
+        return decision;
+    }
+
+    decision.allow_candidate = true;
+    if (input.role == HookLoadSignalRole::DISABLED) {
+        decision.reason = "lidar_only";
+        return decision;
+    }
+    if (gravity_loaded) {
+        decision.reason = "auxiliary_gravity_support";
+        return decision;
+    }
+    if (gravity_empty) {
+        decision.gravity_conflict = true;
+        decision.required_confirm_frames = base_frames + 2;
+        decision.reason = "auxiliary_empty_delayed_confirmation";
+        return decision;
+    }
+    decision.required_confirm_frames = base_frames + 1;
+    decision.reason = "auxiliary_gravity_unavailable_strict_lidar";
+    return decision;
+}
+
+LidarNoCargoEvidenceTracker::LidarNoCargoEvidenceTracker(
+    const LidarNoCargoEvidenceConfig& config) : config_(config) {
+    config_.confirm_frames = std::max<std::uint32_t>(1U, config_.confirm_frames);
+}
+
+void LidarNoCargoEvidenceTracker::setConfig(
+    const LidarNoCargoEvidenceConfig& config) {
+    config_ = config;
+    config_.confirm_frames = std::max<std::uint32_t>(1U, config_.confirm_frames);
+    reset("config_changed");
+}
+
+LidarNoCargoEvidenceResult LidarNoCargoEvidenceTracker::update(
+    const LidarNoCargoEvidenceInput& input) {
+    if (!input.detection_executed) {
+        if (!confirmed_) reason_ = "detection_not_executed";
+        return result();
+    }
+    if (!std::isfinite(input.source_time_sec) || input.source_time_sec < 0.0) {
+        confirmed_ = false;
+        confirm_count_ = 0U;
+        reason_ = "invalid_source_time";
+        return result();
+    }
+    if (has_seen_source_time_ &&
+        input.source_time_sec + 1.0e-6 < last_seen_source_time_sec_) {
+        confirmed_ = false;
+        confirm_count_ = 0U;
+        last_seen_source_time_sec_ = input.source_time_sec;
+        reason_ = "source_time_rollback";
+        return result();
+    }
+    if (has_seen_source_time_ &&
+        std::abs(input.source_time_sec - last_seen_source_time_sec_) <= 1.0e-6) {
+        reason_ = "duplicate_detection_ignored";
+        return result();
+    }
+    has_seen_source_time_ = true;
+    last_seen_source_time_sec_ = input.source_time_sec;
+
+    if (!input.localization_valid) {
+        confirmed_ = false;
+        confirm_count_ = 0U;
+        reason_ = "localization_invalid";
+    } else if (!input.observation_valid) {
+        confirmed_ = false;
+        confirm_count_ = 0U;
+        reason_ = "observation_invalid";
+    } else if (input.cargo_detected || input.cargo_lock_active) {
+        confirmed_ = false;
+        confirm_count_ = 0U;
+        reason_ = input.cargo_detected ? "cargo_detected" : "cargo_lock_active";
+    } else {
+        confirm_count_ = std::min<std::uint32_t>(
+            confirm_count_ + 1U, std::numeric_limits<std::uint32_t>::max());
+        confirmed_ = confirm_count_ >= config_.confirm_frames;
+        reason_ = confirmed_ ? "no_cargo_confirmed" : "no_cargo_pending";
+    }
+    return result();
+}
+
+LidarNoCargoEvidenceResult LidarNoCargoEvidenceTracker::result() const {
+    return {confirmed_, confirm_count_, reason_};
+}
+
+void LidarNoCargoEvidenceTracker::reset(const std::string& reason) {
+    confirmed_ = false;
+    confirm_count_ = 0U;
+    has_seen_source_time_ = false;
+    last_seen_source_time_sec_ = 0.0;
+    reason_ = reason;
 }
 
 HookLoadMapCommitDecision evaluateHookLoadMapCommit(

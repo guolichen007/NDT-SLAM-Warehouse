@@ -142,16 +142,16 @@ TEST(RegistrationInputPolicy, DuplicateCandidateMultiplicityIsPreserved) {
     EXPECT_EQ(partition.candidate_human_filtered_points, 0U);
 }
 
-TEST(CargoObservationPolicy, CompactCargoRequiresLoadedHook) {
-    const auto unloaded = classifyCargoLockProfile(
+TEST(CargoObservationPolicy, CompactCargoGeometryIsIndependentOfGravity) {
+    const auto compact_disabled = classifyCargoLockProfile(
         45U, 0.22F, 0.15F, false,
         80, 0.50F, 0.40F, true, 40, 0.18F, 0.12F);
-    EXPECT_EQ(unloaded, CargoLockProfile::NONE);
+    EXPECT_EQ(compact_disabled, CargoLockProfile::NONE);
 
-    const auto loaded = classifyCargoLockProfile(
+    const auto compact_enabled = classifyCargoLockProfile(
         45U, 0.22F, 0.15F, true,
         80, 0.50F, 0.40F, true, 40, 0.18F, 0.12F);
-    EXPECT_EQ(loaded, CargoLockProfile::COMPACT_BODY);
+    EXPECT_EQ(compact_enabled, CargoLockProfile::COMPACT_BODY);
 }
 
 TEST(CargoObservationPolicy, LargeCargoDoesNotDependOnCompactMode) {

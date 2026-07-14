@@ -1123,6 +1123,8 @@ private:
     // ========== HookFixedCargoDetector ==========
     struct HookCargoDetection {
         bool valid = false;
+        bool observation_valid = false;
+        std::size_t roi_finite_points = 0U;
         int local_id = 0;
         Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f size_visible = Eigen::Vector3f::Zero();
@@ -1586,6 +1588,7 @@ private:
     bool hook_load_signal_enabled_ = true;
     HookLoadSignalRole hook_load_signal_role_ = HookLoadSignalRole::REQUIRED;
     bool hook_load_signal_role_config_valid_ = true;
+    LidarNoCargoEvidenceTracker lidar_no_cargo_evidence_;
     std::string hook_load_state_topic_ = "/hook/load_state";
     double hook_load_state_stale_timeout_sec_ = 0.80;
     mutable std::mutex hook_load_state_mutex_;
