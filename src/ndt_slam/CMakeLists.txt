@@ -190,42 +190,42 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_bottom_fusion_test.cpp)
   if(TARGET cargo_bottom_fusion_test)
     target_link_libraries(cargo_bottom_fusion_test
-      ndt_slam_lib ${catkin_LIBRARIES})
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(cargo_safety_evaluator_test
     test/cargo_safety_evaluator_test.cpp)
   if(TARGET cargo_safety_evaluator_test)
     target_link_libraries(cargo_safety_evaluator_test
-      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(cargo_alarm_heartbeat_state_machine_test
     test/cargo_alarm_heartbeat_state_machine_test.cpp)
   if(TARGET cargo_alarm_heartbeat_state_machine_test)
     target_link_libraries(cargo_alarm_heartbeat_state_machine_test
-      ${catkin_LIBRARIES})
+      ${catkin_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(relocalization_scan_context_test
     test/relocalization_scan_context_test.cpp)
   if(TARGET relocalization_scan_context_test)
     target_link_libraries(relocalization_scan_context_test
-      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(hook_load_state_filter_test
     test/hook_load_state_filter_test.cpp)
   if(TARGET hook_load_state_filter_test)
     target_link_libraries(hook_load_state_filter_test
-      ndt_slam_lib ${catkin_LIBRARIES})
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(cargo_observation_policy_test
     test/cargo_observation_policy_test.cpp)
   if(TARGET cargo_observation_policy_test)
     target_link_libraries(cargo_observation_policy_test
-      ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+      ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
   endif()
 endif()
 

@@ -27,6 +27,22 @@ CargoSafetyInput baseInput() {
     return input;
 }
 
+pcl::PointCloud<pcl::PointXYZ>::Ptr mutableObstacleCloud(
+        CargoSafetyInput* input) {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+
+    if (input != nullptr && input->obstacle_cloud_base) {
+        *cloud = *input->obstacle_cloud_base;
+    }
+
+    if (input != nullptr) {
+        input->obstacle_cloud_base = cloud;
+    }
+
+    return cloud;
+}
+
 void addCluster(CargoSafetyInput* input,
                 float footprint_distance,
                 float top_z,
@@ -197,8 +213,10 @@ TEST(CargoSafetyEvaluator, InvalidObstacleEvidenceNeverBecomesLevel2Warning) {
               CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
 
     CargoSafetyInput sparse = baseInput();
+    auto sparse_cloud = mutableObstacleCloud(&sparse);
+
     for (int i = 0; i < 3; ++i) {
-        sparse.obstacle_cloud_base->push_back(
+        sparse_cloud->push_back(
             pcl::PointXYZ(2.0F + 0.01F * i, 0.0F, 1.0F));
     }
     const CargoSafetyResult sparse_result = evaluator.evaluate(sparse);
@@ -212,8 +230,10 @@ TEST(CargoSafetyEvaluator, InvalidObstacleEvidenceNeverBecomesLevel2Warning) {
 
 TEST(CargoSafetyEvaluator, SufficientScatteredCandidatesAreInvalidEvidence) {
     CargoSafetyInput input = baseInput();
+    auto cloud = mutableObstacleCloud(&input);
+
     for (int i = 0; i < 5; ++i) {
-        input.obstacle_cloud_base->push_back(pcl::PointXYZ(
+        cloud->push_back(pcl::PointXYZ(
             1.0F + 0.50F * static_cast<float>(i), 0.0F, 1.0F));
     }
 
@@ -241,8 +261,10 @@ TEST(CargoSafetyEvaluator, ValidObservationWithNoObstacleIsClear) {
 
 TEST(CargoSafetyEvaluator, ObservationContainingOnlyCargoSelfPointsIsClear) {
     CargoSafetyInput input = baseInput();
+    auto cloud = mutableObstacleCloud(&input);
+
     for (int i = 0; i < 8; ++i) {
-        input.obstacle_cloud_base->push_back(pcl::PointXYZ(
+        cloud->push_back(pcl::PointXYZ(
             0.01F * static_cast<float>(i), 0.0F,
             2.10F + 0.002F * static_cast<float>(i)));
     }
@@ -295,8 +317,10 @@ TEST(CargoSafetyEvaluator, Level1HasPriorityAcrossClusters) {
 
 TEST(CargoSafetyEvaluator, NeverExcludesObstacleBelowFusedBottom) {
     CargoSafetyInput input = baseInput();
+    auto cloud = mutableObstacleCloud(&input);
+
     for (int i = 0; i < 8; ++i) {
-        input.obstacle_cloud_base->push_back(pcl::PointXYZ(
+        cloud->push_back(pcl::PointXYZ(
             0.01F * static_cast<float>(i), 0.0F,
             1.70F + 0.002F * static_cast<float>(i)));
     }
