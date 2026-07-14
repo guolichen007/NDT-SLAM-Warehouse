@@ -63,6 +63,15 @@ bool validConfig(const CargoBottomFusionConfig& config, std::string* reason) {
         !unitInterval(config.points_min_bottom_band_xy_cell_ratio) ||
         !unitInterval(config.points_min_bottom_span_ratio))
         return reject("bottom_support_ratio");
+    if (config.map_diff_min_points == 0U ||
+        config.map_static_min_points == 0U ||
+        !finiteNonNegative(config.map_min_visible_height) ||
+        config.map_min_bottom_band_points == 0U ||
+        config.map_min_bottom_band_xy_cells == 0U)
+        return reject("map_minimum_support");
+    if (!unitInterval(config.map_min_bottom_band_point_ratio) ||
+        !unitInterval(config.map_min_bottom_band_xy_cell_ratio))
+        return reject("map_support_ratio");
     if (!std::isfinite(config.bottom_band_height) ||
         config.bottom_band_height <= 0.0F ||
         !std::isfinite(config.xy_cell_size) || config.xy_cell_size <= 0.0F ||
@@ -140,6 +149,32 @@ std::vector<Eigen::Vector3f> finitePoints(
         }
     }
     return output;
+}
+
+void limitPointsDeterministically(std::vector<Eigen::Vector3f>* points,
+                                  std::size_t limit) {
+    if (points == nullptr || points->size() <= limit) {
+        return;
+    }
+    if (limit == 0U) {
+        points->clear();
+        return;
+    }
+    std::vector<Eigen::Vector3f> source = std::move(*points);
+    points->clear();
+    points->reserve(limit);
+    if (limit == 1U) {
+        points->push_back(source.front());
+        return;
+    }
+    const long double source_span =
+        static_cast<long double>(source.size() - 1U);
+    const long double output_span = static_cast<long double>(limit - 1U);
+    for (std::size_t i = 0; i < limit; ++i) {
+        const std::size_t index = static_cast<std::size_t>(std::floor(
+            static_cast<long double>(i) * source_span / output_span));
+        points->push_back(source[index]);
+    }
 }
 
 void filterToFootprint(std::vector<Eigen::Vector3f>* points,
@@ -474,9 +509,13 @@ void CargoBottomFusion::reset() {
 
 void CargoBottomFusion::setConfig(const CargoBottomFusionConfig& config) {
     config_ = config;
+    reset();
 }
 
 void CargoBottomFusion::resetTemporalState() {
+    newest_points_stamp_sec_ = 0.0;
+    accumulated_frames_.clear();
+    accumulated_point_count_ = 0U;
     ema_valid_ = false;
     ema_source_ = CargoBottomSource::INVALID;
     ema_uses_track_center_ = false;
@@ -502,10 +541,36 @@ void CargoBottomFusion::purgeAccumulation(double stamp_sec) {
         accumulated_point_count_ -= accumulated_frames_.front().points_map.size();
         accumulated_frames_.pop_front();
     }
+    enforceAccumulationLimit();
+}
+
+void CargoBottomFusion::enforceAccumulationLimit() {
+    while (accumulated_frames_.size() > 1U &&
+           accumulated_point_count_ > config_.max_accumulated_points) {
+        accumulated_point_count_ -=
+            accumulated_frames_.front().points_map.size();
+        accumulated_frames_.pop_front();
+    }
+    if (!accumulated_frames_.empty() &&
+        accumulated_frames_.front().points_map.size() >
+            config_.max_accumulated_points) {
+        limitPointsDeterministically(
+            &accumulated_frames_.front().points_map,
+            config_.max_accumulated_points);
+    }
+    accumulated_point_count_ = 0U;
+    for (const auto& frame : accumulated_frames_) {
+        accumulated_point_count_ += frame.points_map.size();
+    }
 }
 
 void CargoBottomFusion::appendPoints(const CargoBottomObservation& observation) {
     if (observation.points_base.empty()) {
+        return;
+    }
+    if (!accumulated_frames_.empty() &&
+        observation.stamp_sec <=
+            newest_points_stamp_sec_ + config_.backwards_tolerance_sec) {
         return;
     }
     AccumulatedFrame frame;
@@ -520,9 +585,20 @@ void CargoBottomFusion::appendPoints(const CargoBottomObservation& observation) 
             frame.points_map.push_back(observation.T_map_base * p);
         }
     }
+    limitPointsDeterministically(&frame.points_map,
+                                 config_.max_accumulated_points);
     if (!frame.points_map.empty()) {
+        while (!accumulated_frames_.empty() &&
+               accumulated_point_count_ + frame.points_map.size() >
+                   config_.max_accumulated_points) {
+            accumulated_point_count_ -=
+                accumulated_frames_.front().points_map.size();
+            accumulated_frames_.pop_front();
+        }
         accumulated_frames_.push_back(std::move(frame));
         accumulated_point_count_ += accumulated_frames_.back().points_map.size();
+        newest_points_stamp_sec_ = observation.stamp_sec;
+        enforceAccumulationLimit();
     }
 }
 
@@ -533,10 +609,17 @@ std::vector<Eigen::Vector3f> CargoBottomFusion::alignedAccumulatedPoints(
         return result;
     }
     const Eigen::Isometry3f T_base_map = observation.T_map_base.inverse();
+    const Eigen::Vector3f current_center_map = observation.track_center_valid
+        ? observation.T_map_base * observation.track_center_base
+        : Eigen::Vector3f::Zero();
     result.reserve(accumulated_point_count_);
     for (const auto& frame : accumulated_frames_) {
         for (const auto& p : frame.points_map) {
-            result.push_back(T_base_map * p);
+            Eigen::Vector3f compensated_map = p;
+            if (frame.track_center_valid && observation.track_center_valid) {
+                compensated_map += current_center_map - frame.track_center_map;
+            }
+            result.push_back(T_base_map * compensated_map);
         }
     }
     return result;
@@ -544,6 +627,7 @@ std::vector<Eigen::Vector3f> CargoBottomFusion::alignedAccumulatedPoints(
 
 CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observation) {
     CargoBottomResult result;
+    result.track_id = observation.track_id;
     result.stamp_sec = observation.stamp_sec;
     std::string invalid_config_field;
     if (!validConfig(config_, &invalid_config_field)) {
@@ -604,16 +688,28 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
     } else if (observation.stamp_sec + config_.backwards_tolerance_sec <
                last_stamp_sec_) {
         resetTemporalState();
+        last_stamp_sec_ = observation.stamp_sec;
         result.reason = "time_rollback_reset";
+        return result;
     } else if (observation.stamp_sec - last_stamp_sec_ > config_.stale_reset_sec) {
         resetTemporalState();
+        last_stamp_sec_ = observation.stamp_sec;
         result.reason = "stale_gap_reset";
+        return result;
     }
     last_stamp_sec_ = observation.stamp_sec;
+
+    if (final_valid_ && final_uses_track_center_ &&
+        !observation.track_center_valid) {
+        resetTemporalState();
+        result.reason = "track_center_lost";
+        return result;
+    }
 
     appendPoints(observation);
     purgeAccumulation(observation.stamp_sec);
     std::vector<Eigen::Vector3f> points = alignedAccumulatedPoints(observation);
+    filterToFootprint(&points, observation, config_.footprint_margin);
     result.accumulated_points = points.size();
     const Eigen::Vector2f footprint_size = observation.footprint_valid
         ? observation.footprint_size_xy.cwiseAbs().eval()

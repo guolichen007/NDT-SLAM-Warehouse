@@ -294,6 +294,7 @@ private:
 
     void resetTemporalState();
     void purgeAccumulation(double stamp_sec);
+    void enforceAccumulationLimit();
     void appendPoints(const CargoBottomObservation& observation);
     std::vector<Eigen::Vector3f> alignedAccumulatedPoints(
         const CargoBottomObservation& observation) const;
