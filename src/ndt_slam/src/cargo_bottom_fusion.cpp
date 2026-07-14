@@ -230,7 +230,6 @@ CargoVerticalStats analyzeVertical(
     std::vector<float> z_values;
     z_values.reserve(points.size());
     std::set<std::pair<int, int>> all_cells;
-    std::set<int> vertical_bins;
     Eigen::Vector2f all_min = Eigen::Vector2f::Constant(
         std::numeric_limits<float>::infinity());
     Eigen::Vector2f all_max = Eigen::Vector2f::Constant(
@@ -242,8 +241,6 @@ CargoVerticalStats analyzeVertical(
         all_cells.emplace(
             static_cast<int>(std::floor(point.x() / xy_cell_size)),
             static_cast<int>(std::floor(point.y() / xy_cell_size)));
-        vertical_bins.insert(
-            static_cast<int>(std::floor(point.z() / vertical_bin_size)));
     }
     stats.z02 = percentile(z_values, 0.02F);
     stats.z05 = percentile(z_values, 0.05F);
@@ -251,6 +248,20 @@ CargoVerticalStats analyzeVertical(
     stats.z95 = percentile(z_values, 0.95F);
     stats.visible_height = stats.z95 - stats.z05;
     stats.occupied_xy_cells = all_cells.size();
+
+    // Build vertical continuity bins only from the robust body range
+    // [z02, z95] to avoid tail outliers creating false gaps.
+    const float continuity_min_z = stats.z02 - 1.0e-4F;
+    const float continuity_max_z = stats.z95 + 1.0e-4F;
+    std::set<int> vertical_bins;
+    for (const auto& point : points) {
+        if (point.z() < continuity_min_z ||
+            point.z() > continuity_max_z) {
+            continue;
+        }
+        vertical_bins.insert(
+            static_cast<int>(std::floor(point.z() / vertical_bin_size)));
+    }
     stats.occupied_vertical_bins = vertical_bins.size();
     if (vertical_bins.size() > 1U) {
         auto previous = vertical_bins.begin();

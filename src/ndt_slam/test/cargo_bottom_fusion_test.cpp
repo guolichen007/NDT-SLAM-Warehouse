@@ -335,16 +335,79 @@ TEST(CargoBottomFusion, AccumulatedPointCountNeverExceedsMaximum) {
     }
 }
 
-TEST(CargoBottomFusion, OversizedSingleFrameIsBounded) {
+TEST(CargoBottomFusion,
+     OversizedSingleFrameBoundsHistoryButUsesCompleteCurrentFrame) {
     CargoBottomFusionConfig config;
     config.max_accumulated_points = 25U;
     CargoBottomFusion fusion(config);
 
+    const std::vector<Eigen::Vector3f> points =
+        boxPoints(1.0F, 2.0F);
+
     const CargoBottomResult result =
-        fusion.update(observation(17, 1.0, boxPoints(1.0F, 2.0F)));
-    EXPECT_FALSE(result.valid);
+        fusion.update(observation(17, 1.0, points));
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.source, CargoBottomSource::POINTS);
+    EXPECT_EQ(result.reason, "current_points_supported");
+
     EXPECT_EQ(fusion.accumulatedPointCount(), 25U);
     EXPECT_EQ(result.accumulated_points, 25U);
+
+    EXPECT_EQ(result.points_stats.finite_points, points.size());
+    EXPECT_GT(result.points_stats.finite_points,
+              config.max_accumulated_points);
+
+    EXPECT_NEAR(result.geometry.bottom_z_base, 1.0F, 0.08F);
+    EXPECT_NEAR(result.geometry.top_z_base, 2.0F, 0.08F);
+}
+
+TEST(CargoBottomFusion,
+     RobustVerticalContinuityRejectsExtremeTailOutliers) {
+    CargoBottomFusion fusion;
+
+    auto points = boxPoints(1.0F, 2.0F);
+    points.emplace_back(0.0F, 0.0F, -5.0F);
+    points.emplace_back(0.0F, 0.0F, 8.0F);
+
+    const CargoBottomResult result =
+        fusion.update(observation(101, 1.0, points));
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.source, CargoBottomSource::POINTS);
+    EXPECT_NEAR(result.geometry.bottom_z_base, 1.0F, 0.08F);
+    EXPECT_NEAR(result.geometry.top_z_base, 2.0F, 0.08F);
+    EXPECT_LE(result.selected_stats.max_vertical_gap,
+              fusion.config().points_max_vertical_gap);
+}
+
+TEST(CargoBottomFusion,
+     RobustVerticalContinuityStillRejectsInteriorGap) {
+    CargoBottomFusion fusion;
+    std::vector<Eigen::Vector3f> points;
+
+    for (int ix = 0; ix < 5; ++ix) {
+        for (int iy = 0; iy < 4; ++iy) {
+            const float x =
+                -0.4F + 0.2F * static_cast<float>(ix);
+            const float y =
+                -0.3F + 0.2F * static_cast<float>(iy);
+
+            points.emplace_back(x, y, 1.0F);
+            points.emplace_back(x, y, 1.1F);
+            points.emplace_back(x, y, 1.8F);
+            points.emplace_back(x, y, 1.9F);
+        }
+    }
+
+    const CargoBottomResult result =
+        fusion.update(observation(102, 1.0, points));
+
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(result.points_stats.reject_reason,
+              "vertical_continuity_gap");
+    EXPECT_GT(result.points_stats.max_vertical_gap,
+              fusion.config().points_max_vertical_gap);
 }
 
 TEST(CargoBottomFusion, DuplicateStampDoesNotIncreaseAccumulation) {
