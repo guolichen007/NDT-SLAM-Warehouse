@@ -10069,24 +10069,10 @@ void NdtSlamNode::cleanupExpiredCargoDenyCells(double current_time) {
 // ========== Crane Motion Constraint 实现 ==========
 
 void NdtSlamNode::so3ToRpy(const Sophus::SO3d& r, double& roll, double& pitch, double& yaw) {
-    Eigen::Matrix3d R = r.matrix();
-    // ZYX 顺序
-    pitch = std::asin(-R(2, 0));
-    if (std::cos(pitch) > 1e-6) {
-        roll = std::atan2(R(2, 1), R(2, 2));
-        yaw = std::atan2(R(1, 0), R(0, 0));
-    } else {
-        roll = std::atan2(-R(0, 1), R(1, 1));
-        yaw = 0.0;
-    }
-}
-
-Sophus::SO3d NdtSlamNode::rpyToSO3(double roll, double pitch, double yaw) {
-    Eigen::Matrix3d R;
-    R = Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) *
-        Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
-        Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX());
-    return Sophus::SO3d(R);
+    const ndt_slam::CranePoseRpy rpy = ndt_slam::cranePoseRpy(r);
+    roll = rpy.roll;
+    pitch = rpy.pitch;
+    yaw = rpy.yaw;
 }
 
 Sophus::SE3d NdtSlamNode::applyCraneMotionConstraint(const Sophus::SE3d& raw_pose, const std::string& stage) {
@@ -10095,10 +10081,19 @@ Sophus::SE3d NdtSlamNode::applyCraneMotionConstraint(const Sophus::SE3d& raw_pos
     }
 
     Eigen::Vector3d t = raw_pose.translation();
-    Sophus::SO3d r = raw_pose.so3();
+    const ndt_slam::CranePoseRpy raw_rpy =
+        ndt_slam::cranePoseRpy(raw_pose.so3());
+    if (!t.allFinite() || !raw_rpy.valid) {
+        crane_constraint_invalid_input_count_.fetch_add(1, std::memory_order_relaxed);
+        ROS_ERROR_THROTTLE(2.0,
+                           "[CraneConstraint:%s] rejected non-finite runtime pose",
+                           stage.c_str());
+        return current_pose_;
+    }
 
-    double roll, pitch, yaw;
-    so3ToRpy(r, roll, pitch, yaw);
+    double roll = raw_rpy.roll;
+    double pitch = raw_rpy.pitch;
+    double yaw = raw_rpy.yaw;
 
     const double raw_z = t.z();
     const double raw_roll = roll * 180.0 / M_PI;
@@ -10120,45 +10115,49 @@ Sophus::SE3d NdtSlamNode::applyCraneMotionConstraint(const Sophus::SE3d& raw_pos
                  fixed_z_, fixed_z_source_.c_str(), fixed_roll_, fixed_pitch_, fixed_yaw_);
     }
 
-    // 约束 z
-    if (lock_z_) {
-        t.z() = fixed_z_;
-    } else if (constrain_z_) {
-        // 限幅模式：相对 fixed_z 限幅
-        t.z() = std::max(fixed_z_ - max_abs_z_drift_,
-                         std::min(fixed_z_ + max_abs_z_drift_, t.z()));
-    }
-    // else: z 完全使用 NDT 输出，不限制
+    ndt_slam::CranePoseConstraintConfig config;
+    config.enabled = true;
+    config.lock_z = lock_z_;
+    config.fixed_z = fixed_z_;
+    config.constrain_z = constrain_z_;
+    config.max_abs_z_drift = max_abs_z_drift_;
+    config.lock_roll = lock_roll_;
+    config.fixed_roll_rad = fixed_roll_ * M_PI / 180.0;
+    config.constrain_roll = !lock_roll_;
+    config.max_abs_roll_rad = max_roll_deg_ * M_PI / 180.0;
+    config.lock_pitch = lock_pitch_;
+    config.fixed_pitch_rad = fixed_pitch_ * M_PI / 180.0;
+    config.constrain_pitch = !lock_pitch_;
+    config.max_abs_pitch_rad = max_pitch_deg_ * M_PI / 180.0;
+    config.lock_yaw = lock_yaw_;
+    config.fixed_yaw_rad = fixed_yaw_ * M_PI / 180.0;
+    config.constrain_yaw = constrain_yaw_;
+    config.max_abs_yaw_delta_rad = max_yaw_deg_ * M_PI / 180.0;
 
-    // 约束 roll
-    if (lock_roll_) {
-        roll = fixed_roll_ * M_PI / 180.0;
-    } else {
-        double max_roll_rad = max_roll_deg_ * M_PI / 180.0;
-        roll = std::max(-max_roll_rad, std::min(max_roll_rad, roll));
+    const ndt_slam::CranePoseConstraintResult result =
+        ndt_slam::applyCranePoseConstraint(raw_pose, config, {false, 0.0});
+    if (!result.valid) {
+        crane_constraint_invalid_input_count_.fetch_add(1, std::memory_order_relaxed);
+        ROS_ERROR_THROTTLE(2.0,
+                           "[CraneConstraint:%s] rejected invalid pose: %s",
+                           stage.c_str(), result.reason.c_str());
+        return current_pose_;
+    }
+    if (result.fallback_used) {
+        crane_constraint_fallback_count_.fetch_add(1, std::memory_order_relaxed);
+        ROS_ERROR_THROTTLE(
+            2.0,
+            "[CraneConstraint:%s] reconstruction fallback to raw pose: %s",
+            stage.c_str(), result.reason.c_str());
     }
 
-    // 约束 pitch
-    if (lock_pitch_) {
-        pitch = fixed_pitch_ * M_PI / 180.0;
-    } else {
-        double max_pitch_rad = max_pitch_deg_ * M_PI / 180.0;
-        pitch = std::max(-max_pitch_rad, std::min(max_pitch_rad, pitch));
-    }
-
-    // 约束 yaw
-    if (lock_yaw_) {
-        yaw = fixed_yaw_ * M_PI / 180.0;
-    } else if (constrain_yaw_) {
-        // 相对 fixed_yaw 限幅
-        double fixed_yaw_rad = fixed_yaw_ * M_PI / 180.0;
-        double max_yaw_rad = max_yaw_deg_ * M_PI / 180.0;
-        yaw = std::max(fixed_yaw_rad - max_yaw_rad,
-                       std::min(fixed_yaw_rad + max_yaw_rad, yaw));
-    }
-    // else: yaw 完全使用 NDT 输出，不限制
-
-    Sophus::SE3d constrained_pose(rpyToSO3(roll, pitch, yaw), t);
+    const Sophus::SE3d constrained_pose = result.pose;
+    t = constrained_pose.translation();
+    const ndt_slam::CranePoseRpy constrained_rpy =
+        ndt_slam::cranePoseRpy(constrained_pose.so3());
+    roll = constrained_rpy.roll;
+    pitch = constrained_rpy.pitch;
+    yaw = constrained_rpy.yaw;
 
     // 日志：debug_pose_flow 开启时输出
     if (debug_cfg_.debug_pose_flow) {
@@ -10234,25 +10233,47 @@ Sophus::SE3d NdtSlamNode::applyCraneOutputConstraint(
     const Sophus::SE3d& pose_in,
     bool is_stationary,
     double speed_xy) {
-    Sophus::SE3d out = pose_in;
+    const ndt_slam::CranePoseRpy input_rpy =
+        ndt_slam::cranePoseRpy(pose_in.so3());
+    if (!pose_in.translation().allFinite() || !input_rpy.valid ||
+        !std::isfinite(speed_xy)) {
+        crane_constraint_invalid_input_count_.fetch_add(1, std::memory_order_relaxed);
+        ROS_ERROR_THROTTLE(2.0,
+                           "[CraneConstraint:runtime] rejected non-finite pose/context");
+        return current_pose_;
+    }
 
-    Eigen::Vector3d t = out.translation();
-    t.z() = fixed_z_;   // z lock
-    out.translation() = t;
+    const double filtered_yaw =
+        updateSoftYaw(input_rpy.yaw, speed_xy, is_stationary);
+    ndt_slam::CranePoseConstraintConfig config;
+    config.enabled = true;
+    config.lock_z = true;
+    config.fixed_z = fixed_z_;
+    config.lock_roll = true;
+    config.fixed_roll_rad = 0.0;
+    config.lock_pitch = true;
+    config.fixed_pitch_rad = 0.0;
+    config.lock_yaw = true;
+    config.fixed_yaw_rad = filtered_yaw;
 
-    const Eigen::Matrix3d R = out.so3().matrix();
-
-    double roll, pitch, yaw;
-    so3ToRpy(out.so3(), roll, pitch, yaw);
-
-    roll = 0.0;
-    pitch = 0.0;
-
-    const double filtered_yaw = updateSoftYaw(yaw, speed_xy, is_stationary);
-
-    out.so3() = rpyToSO3(roll, pitch, filtered_yaw);
-
-    return out;
+    const ndt_slam::CranePoseConstraintResult result =
+        ndt_slam::applyCranePoseConstraint(
+            pose_in, config, {is_stationary, speed_xy});
+    if (!result.valid) {
+        crane_constraint_invalid_input_count_.fetch_add(1, std::memory_order_relaxed);
+        ROS_ERROR_THROTTLE(2.0,
+                           "[CraneConstraint:runtime] rejected invalid pose: %s",
+                           result.reason.c_str());
+        return current_pose_;
+    }
+    if (result.fallback_used) {
+        crane_constraint_fallback_count_.fetch_add(1, std::memory_order_relaxed);
+        ROS_ERROR_THROTTLE(
+            2.0,
+            "[CraneConstraint:runtime] reconstruction fallback to raw pose: %s",
+            result.reason.c_str());
+    }
+    return result.pose;
 }
 
 // ============================================================================

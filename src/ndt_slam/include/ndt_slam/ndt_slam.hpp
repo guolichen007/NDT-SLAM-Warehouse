@@ -49,6 +49,7 @@
 
 // v8-stable-r3: CraneMotionEKF
 #include <ndt_slam/crane_motion_ekf.hpp>
+#include <ndt_slam/crane_pose_constraint.hpp>
 #include <ndt_slam/ndt_relocalizer.hpp>
 
 // NDT_OMP
@@ -370,7 +371,6 @@ private:
     // 约束函数
     Sophus::SE3d applyCraneMotionConstraint(const Sophus::SE3d& raw_pose, const std::string& stage);
     void so3ToRpy(const Sophus::SO3d& r, double& roll, double& pitch, double& yaw);
-    Sophus::SO3d rpyToSO3(double roll, double pitch, double yaw);
     ros::Time last_stamp_;
     std::atomic<bool> tracking_lost_{false};
 
@@ -511,6 +511,8 @@ private:
     std::atomic<uint64_t> ekf_accept_count_{0};
     std::atomic<uint64_t> ekf_reject_count_{0};
     std::atomic<uint64_t> odom_publish_count_{0};
+    std::atomic<uint64_t> crane_constraint_fallback_count_{0};
+    std::atomic<uint64_t> crane_constraint_invalid_input_count_{0};
 
     // ========== V3: Localization Target (解耦自 local_map_) ==========
     pcl::PointCloud<pcl::PointXYZ>::Ptr localization_target_front_;
