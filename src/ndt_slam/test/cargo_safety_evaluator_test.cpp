@@ -148,6 +148,36 @@ TEST(CargoSafetyDecision, SystemAndGravityFaultsNeverBecomeLevel2Warning) {
               CargoSafetyProtocol::kGravityInvalid);
 }
 
+TEST(CargoSafetyDecision, AuxiliaryAndDisabledGravityDoNotCreateCode32) {
+    for (HookLoadSignalRole role : {HookLoadSignalRole::AUXILIARY,
+                                    HookLoadSignalRole::DISABLED}) {
+        for (std::uint16_t code : {
+                 static_cast<std::uint16_t>(CargoSafetyProtocol::kClear),
+                 static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel1Warning),
+                 static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel2Warning)}) {
+            CargoSafetyDecisionInput warning = validLoadedDecision(code);
+            warning.hook_signal_role = role;
+            warning.gravity_valid = false;
+            warning.gravity_conflict = true;
+            const CargoSafetyDecision result =
+                composeCargoSafetyDecision(warning);
+            EXPECT_TRUE(result.valid);
+            EXPECT_EQ(result.requested_code, code);
+            EXPECT_EQ(result.fault_mask & CargoSafetyProtocol::kFaultGravity,
+                      0U);
+        }
+
+        CargoSafetyDecisionInput empty;
+        empty.system_ready = true;
+        empty.localization_valid = true;
+        empty.hook_signal_role = role;
+        empty.gravity_valid = false;
+        empty.safe_empty = true;
+        EXPECT_EQ(composeCargoSafetyDecision(empty).requested_code,
+                  CargoSafetyProtocol::kClear);
+    }
+}
+
 TEST(CargoSafetyEvaluator, ExactDistanceAndClearanceBoundaries) {
     CargoSafetyEvaluator evaluator;
     struct Case {

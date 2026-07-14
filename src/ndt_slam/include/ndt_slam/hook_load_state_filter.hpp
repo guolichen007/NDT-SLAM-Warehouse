@@ -17,10 +17,10 @@ struct HookLoadStateConfig {
     double low_threshold_v = 1.90;
     double high_threshold_v = 2.10;
     double hysteresis_v = 0.03;
-    std::uint32_t confirm_samples = 3;
-    double stale_timeout_sec = 0.50;
+    std::uint32_t confirm_samples = 2;
+    double stale_timeout_sec = 2.50;
     double valid_voltage_min_v = 0.0;
-    double valid_voltage_max_v = 5.0;
+    double valid_voltage_max_v = 6.0;
 };
 
 struct HookLoadStateResult {
@@ -40,6 +40,9 @@ public:
     void setConfig(const HookLoadStateConfig& config);
     const HookLoadStateConfig& config() const { return config_; }
     HookLoadStateResult ingest(double voltage, double wall_time_sec);
+    HookLoadStateResult ingest(double voltage,
+                               double source_time_sec,
+                               double wall_time_sec);
     HookLoadStateResult tick(double wall_time_sec);
     void reset(const std::string& reason = "reset");
 
@@ -56,6 +59,7 @@ private:
     std::uint32_t stable_samples_ = 0;
     bool has_sample_ = false;
     double last_wall_time_sec_ = 0.0;
+    double last_source_time_sec_ = 0.0;
     double last_sample_wall_time_sec_ = 0.0;
     float last_voltage_ = std::numeric_limits<float>::quiet_NaN();
     std::string invalid_reason_ = "startup_unknown";

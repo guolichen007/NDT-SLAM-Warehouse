@@ -141,6 +141,9 @@ const CargoSafetyConfig& CargoSafetyEvaluator::config() const {
 CargoSafetyDecision composeCargoSafetyDecision(
     const CargoSafetyDecisionInput& input) {
     CargoSafetyDecision decision;
+    const bool gravity_required_fault =
+        input.hook_signal_role == HookLoadSignalRole::REQUIRED &&
+        !input.gravity_valid;
     decision.fault_mask = 0U;
     if (!input.system_ready) {
         decision.fault_mask |= CargoSafetyProtocol::kFaultStatusStale;
@@ -148,7 +151,7 @@ CargoSafetyDecision composeCargoSafetyDecision(
     if (!input.localization_valid) {
         decision.fault_mask |= CargoSafetyProtocol::kFaultLocalization;
     }
-    if (!input.gravity_valid) {
+    if (gravity_required_fault) {
         decision.fault_mask |= CargoSafetyProtocol::kFaultGravity;
     }
     if (input.cargo_fault) {
@@ -172,7 +175,7 @@ CargoSafetyDecision composeCargoSafetyDecision(
         decision.fault_code = CargoSafetyProtocol::kLocalizationInvalid;
         decision.reason = input.evidence_reason.empty()
             ? "localization_unreliable" : input.evidence_reason;
-    } else if (!input.gravity_valid) {
+    } else if (gravity_required_fault) {
         decision.fault_code = CargoSafetyProtocol::kGravityInvalid;
         decision.reason = input.evidence_reason.empty()
             ? "gravity_signal_invalid" : input.evidence_reason;

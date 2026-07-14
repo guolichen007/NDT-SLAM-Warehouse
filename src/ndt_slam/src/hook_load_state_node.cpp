@@ -27,6 +27,13 @@ public:
             hook_config_ = YAML::Node(YAML::NodeType::Map);
         }
         filter_.setConfig(readConfig());
+        diagnostic_disconnect_sec_ =
+            hook_config_["diagnostic_disconnect_sec"].as<double>(10.0);
+        if (!std::isfinite(diagnostic_disconnect_sec_) ||
+            diagnostic_disconnect_sec_ <= 0.0) {
+            diagnostic_disconnect_sec_ = 10.0;
+        }
+        startup_wall_sec_ = ros::WallTime::now().toSec();
 
         input_topic_ = hook_config_["topic"].as<std::string>("/gravity");
         output_topic_ =
@@ -65,13 +72,13 @@ private:
         config.hysteresis_v =
             hook_config_["hysteresis_v"].as<double>(0.03);
         int confirm_samples =
-            hook_config_["confirm_samples"].as<int>(3);
+            hook_config_["confirm_samples"].as<int>(2);
         config.stale_timeout_sec =
-            hook_config_["stale_timeout_sec"].as<double>(0.50);
+            hook_config_["stale_timeout_sec"].as<double>(2.50);
         config.valid_voltage_min_v =
             hook_config_["valid_voltage_min_v"].as<double>(0.0);
         config.valid_voltage_max_v =
-            hook_config_["valid_voltage_max_v"].as<double>(5.0);
+            hook_config_["valid_voltage_max_v"].as<double>(6.0);
         pnh_.param("low_threshold_v", config.low_threshold_v,
                    config.low_threshold_v);
         pnh_.param("high_threshold_v", config.high_threshold_v,
@@ -92,11 +99,23 @@ private:
 
     void voltageCallback(const std_msgs::Float32::ConstPtr& message) {
         last_source_stamp_ = ros::Time::now();
-        publish(filter_.ingest(message->data, ros::WallTime::now().toSec()),
+        last_voltage_wall_sec_ = ros::WallTime::now().toSec();
+        publish(filter_.ingest(message->data, last_source_stamp_.toSec(),
+                               last_voltage_wall_sec_),
                 last_source_stamp_);
     }
 
     void timerCallback(const ros::WallTimerEvent& event) {
+        const double last_progress = last_voltage_wall_sec_ > 0.0
+            ? last_voltage_wall_sec_ : startup_wall_sec_;
+        if (event.current_real.toSec() - last_progress >=
+            diagnostic_disconnect_sec_) {
+            ROS_WARN_THROTTLE(
+                diagnostic_disconnect_sec_,
+                "[HookLoadState] /gravity disconnected for %.1fs; "
+                "classification remains UNKNOWN without blocking auxiliary LiDAR",
+                event.current_real.toSec() - last_progress);
+        }
         publish(filter_.tick(event.current_real.toSec()), last_source_stamp_);
     }
 
@@ -124,6 +143,9 @@ private:
     std::string config_file_;
     YAML::Node hook_config_;
     ros::Time last_source_stamp_;
+    double startup_wall_sec_ = 0.0;
+    double last_voltage_wall_sec_ = 0.0;
+    double diagnostic_disconnect_sec_ = 10.0;
 };
 
 }  // namespace ndt_slam

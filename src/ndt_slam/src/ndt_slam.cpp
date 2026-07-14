@@ -1190,11 +1190,24 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         if (config["hook_load_signal"]) {
             const auto hls = config["hook_load_signal"];
             hook_load_signal_enabled_ = hls["enabled"].as<bool>(true);
-            hook_load_signal_required_ = hls["required"].as<bool>(true);
+            const bool legacy_required = hls["required"].as<bool>(true);
+            const bool role_present = hls["role"] && hls["role"].IsScalar();
+            const HookLoadRoleParseResult role_result =
+                parseHookLoadSignalRole({
+                    hook_load_signal_enabled_, role_present,
+                    role_present ? hls["role"].as<std::string>() : std::string(),
+                    legacy_required});
+            hook_load_signal_role_ = role_result.role;
+            hook_load_signal_role_config_valid_ = role_result.valid;
+            hook_load_signal_enabled_ =
+                hook_load_signal_role_ != HookLoadSignalRole::DISABLED;
+            if (!role_result.valid) {
+                ROS_ERROR("[HookLoadSignal] invalid role; fail-safe REQUIRED semantics active");
+            }
             hook_load_state_topic_ =
                 hls["state_topic"].as<std::string>("/hook/load_state");
             hook_load_state_stale_timeout_sec_ = std::max(
-                0.10, hls["consumer_timeout_sec"].as<double>(0.80));
+                0.10, hls["consumer_timeout_sec"].as<double>(3.00));
             const int history_samples = std::clamp(
                 hls["origin_history_samples"].as<int>(10), 3, 200);
             empty_hook_height_history_max_samples_ =
@@ -1223,11 +1236,12 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 hls["formal_removal_max_age_sec"].as<double>(0.80),
                 0.10, 3.0);
             ROS_INFO(
-                "[HookLoadSignal] enabled=%d required=%d state_topic=%s "
+                "[HookLoadSignal] enabled=%d role=%s role_source=%s state_topic=%s "
                 "consumer_stale=%.2fs origin_samples=%zu origin_age=%.2fs "
                 "origin_spread=%.2fm origin_match=%.2fm",
                 hook_load_signal_enabled_ ? 1 : 0,
-                hook_load_signal_required_ ? 1 : 0,
+                hookLoadSignalRoleName(hook_load_signal_role_),
+                role_result.reason.c_str(),
                 hook_load_state_topic_.c_str(),
                 hook_load_state_stale_timeout_sec_,
                 empty_hook_height_history_max_samples_,
@@ -1833,11 +1847,11 @@ void NdtSlamNode::hookLoadStateCallback(
 
 NdtSlamNode::HookLoadSnapshot NdtSlamNode::currentHookLoadSnapshot() const {
     if (!hook_load_signal_enabled_) {
-        HookLoadSnapshot legacy;
-        legacy.valid = true;
-        legacy.state = lidar_slam2_msgs::HookLoadState::STATE_LOADED;
-        legacy.reason = "hook_signal_disabled_legacy_mode";
-        return legacy;
+        HookLoadSnapshot disabled;
+        disabled.valid = false;
+        disabled.state = lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN;
+        disabled.reason = "hook_signal_disabled";
+        return disabled;
     }
 
     HookLoadSnapshot snapshot;
@@ -1858,11 +1872,6 @@ NdtSlamNode::HookLoadSnapshot NdtSlamNode::currentHookLoadSnapshot() const {
         snapshot.state = lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN;
         snapshot.reason = "consumer_signal_stale";
     }
-    if (!snapshot.valid && !hook_load_signal_required_) {
-        snapshot.valid = true;
-        snapshot.state = lidar_slam2_msgs::HookLoadState::STATE_LOADED;
-        snapshot.reason = "optional_signal_legacy_fallback";
-    }
     return snapshot;
 }
 
@@ -1871,8 +1880,11 @@ bool NdtSlamNode::shouldRemoveHookCargo() const {
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
     const double authorization_age =
         (ros::Time::now() - formal_cargo_removal_stamp_).toSec();
-    return hook.valid &&
-           hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED &&
+    const bool gravity_permits_removal =
+        hook_load_signal_role_ != HookLoadSignalRole::REQUIRED ||
+        (hook.valid &&
+         hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED);
+    return gravity_permits_removal &&
            formal_cargo_removal_authorized_ &&
            relocalization_pose_reliable_ &&
            formal_cargo_removal_track_id_ == cargo_fusion_track_id_ &&
@@ -1888,13 +1900,11 @@ bool NdtSlamNode::shouldRemoveHookCargo() const {
 }
 
 bool NdtSlamNode::hookAllowsMapCommit() const {
-    if (!hook_load_signal_enabled_) return true;
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
-    if (hook.reason == "optional_signal_legacy_fallback") return true;
-    if (!hook.valid) return false;
-    if (hook.state == lidar_slam2_msgs::HookLoadState::STATE_EMPTY) return true;
-    if (hook.state != lidar_slam2_msgs::HookLoadState::STATE_LOADED) return false;
-    return shouldRemoveHookCargo();
+    const HookLoadMapCommitDecision decision = evaluateHookLoadMapCommit({
+        hook_load_signal_role_, hook.valid,
+        static_cast<HookLoadState>(hook.state), shouldRemoveHookCargo(), false});
+    return decision.allow_commit;
 }
 
 void NdtSlamNode::recordEmptyHookOriginHeight(
@@ -2311,7 +2321,8 @@ void NdtSlamNode::processCloudThread() {
             hook_fixed_config_.enabled ? 1 : 0);
 
         const HookLoadSnapshot hook_load = currentHookLoadSnapshot();
-        if (hook_load.state != last_processed_hook_load_state_) {
+        if (hook_load_signal_role_ == HookLoadSignalRole::REQUIRED &&
+            hook_load.state != last_processed_hook_load_state_) {
             const bool entering_loaded = hook_load.valid &&
                 hook_load.state ==
                     lidar_slam2_msgs::HookLoadState::STATE_LOADED;
@@ -2322,9 +2333,10 @@ void NdtSlamNode::processCloudThread() {
                      hook_load.valid ? 1 : 0,
                      hook_load.reason.c_str());
         }
-        const bool hook_allows_tracking = hook_load.valid &&
-            hook_load.state ==
-                lidar_slam2_msgs::HookLoadState::STATE_LOADED;
+        const bool hook_allows_tracking =
+            hook_load_signal_role_ != HookLoadSignalRole::REQUIRED ||
+            (hook_load.valid && hook_load.state ==
+                lidar_slam2_msgs::HookLoadState::STATE_LOADED);
         const bool hook_is_empty = hook_load.valid &&
             hook_load.state ==
                 lidar_slam2_msgs::HookLoadState::STATE_EMPTY;
@@ -9159,25 +9171,40 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
         std::isfinite(status.hook_voltage) &&
         (status.hook_load_state == Status::HOOK_EMPTY ||
          status.hook_load_state == Status::HOOK_LOADED);
+    status.hook_signal_role =
+        static_cast<std::uint8_t>(hook_load_signal_role_);
+    HookLoadEvidenceInput evidence_input;
+    evidence_input.role = hook_load_signal_role_;
+    evidence_input.gravity_valid = gravity_valid;
+    evidence_input.gravity_state =
+        static_cast<HookLoadState>(status.hook_load_state);
+    evidence_input.lidar_cargo_valid = status.cargo_valid;
+    evidence_input.lidar_no_cargo_confirmed =
+        status.no_cargo_confirmed && !visual_conflict;
+    evidence_input.lidar_track_locked = status.cargo_valid;
+    evidence_input.lidar_geometry_valid = status.cargo_valid;
+    evidence_input.lidar_height_valid = status.cargo_valid;
+    const HookLoadEvidenceDecision hook_evidence =
+        evaluateHookLoadEvidence(evidence_input);
+    status.hook_signal_conflict = hook_evidence.gravity_conflict;
     const bool hook_empty = gravity_valid &&
         status.hook_load_state == Status::HOOK_EMPTY;
-    const bool hook_loaded = gravity_valid &&
-        status.hook_load_state == Status::HOOK_LOADED;
-    const bool safe_empty = hook_empty && status.no_cargo_confirmed &&
-        !visual_conflict;
+    const bool safe_empty = hook_evidence.lidar_empty_accepted;
+    const bool lidar_cargo_accepted = hook_evidence.lidar_cargo_accepted;
 
     const bool cargo_fault =
-        (hook_empty && visual_conflict) ||
-        (hook_loaded && !status.cargo_valid) ||
-        evaluator_fault == CargoSafetyFault::CARGO_HEIGHT_INVALID;
-    const bool obstacle_fault = hook_loaded &&
+        (hook_load_signal_role_ == HookLoadSignalRole::REQUIRED &&
+         hook_empty && visual_conflict) ||
+        (!safe_empty &&
+         evaluator_fault == CargoSafetyFault::CARGO_HEIGHT_INVALID);
+    const bool obstacle_fault = lidar_cargo_accepted &&
         (!status.obstacle_valid ||
          evaluator_fault == CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
     const bool warning_code_valid =
         warning_code == CargoSafetyEvaluator::kSafeCode ||
         warning_code == CargoSafetyEvaluator::kLevel1Code ||
         warning_code == CargoSafetyEvaluator::kLevel2Code;
-    const bool warning_contract_error = hook_loaded &&
+    const bool warning_contract_error = lidar_cargo_accepted &&
         evaluator_fault == CargoSafetyFault::NONE &&
         (!warning_valid || !warning_code_valid);
     const bool finite_contract_error =
@@ -9190,6 +9217,7 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
           !std::isfinite(status.obstacle_uncertainty_m) ||
           !std::isfinite(status.conservative_vertical_clearance_m)));
     const bool internal_fault = cargo_safety_config_error_ ||
+        !hook_load_signal_role_config_valid_ ||
         evaluator_fault == CargoSafetyFault::INTERNAL_ERROR ||
         warning_contract_error || finite_contract_error;
 
@@ -9224,13 +9252,22 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
                   Status::FAULT_INTERNAL ==
                       CargoSafetyProtocol::kFaultInternal,
                   "Cargo safety fault-mask mismatch");
+    static_assert(Status::HOOK_ROLE_DISABLED ==
+                      static_cast<std::uint8_t>(HookLoadSignalRole::DISABLED) &&
+                  Status::HOOK_ROLE_REQUIRED ==
+                      static_cast<std::uint8_t>(HookLoadSignalRole::REQUIRED) &&
+                  Status::HOOK_ROLE_AUXILIARY ==
+                      static_cast<std::uint8_t>(HookLoadSignalRole::AUXILIARY),
+                  "Hook load role schema mismatch");
 
     CargoSafetyDecisionInput decision_input;
     decision_input.system_ready = system_ready;
     decision_input.localization_valid = localization_valid;
+    decision_input.hook_signal_role = hook_load_signal_role_;
     decision_input.gravity_valid = gravity_valid;
+    decision_input.gravity_conflict = hook_evidence.gravity_conflict;
     decision_input.safe_empty = safe_empty;
-    decision_input.hook_loaded = hook_loaded;
+    decision_input.hook_loaded = lidar_cargo_accepted;
     decision_input.cargo_fault = cargo_fault;
     decision_input.obstacle_fault = obstacle_fault;
     decision_input.internal_fault = internal_fault;
@@ -9240,7 +9277,9 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
         ? "cargo_safety_config_invalid" :
           (warning_contract_error ? "warning_contract_invalid" :
            (finite_contract_error ? "non_finite_safety_status" :
-            evidence_reason));
+            (hook_evidence.gravity_conflict
+                ? std::string("gravity_lidar_conflict:") + evidence_reason
+                : evidence_reason)));
     const CargoSafetyDecision decision =
         composeCargoSafetyDecision(decision_input);
 
@@ -9258,9 +9297,14 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
 void NdtSlamNode::publishHookOnlySafetyStatus(
     const HookLoadSnapshot& hook, const ros::Time& stamp,
     bool visual_conflict, const std::string& reason) {
-    const bool safe_empty = hook.valid &&
-        hook.state == lidar_slam2_msgs::HookLoadState::STATE_EMPTY &&
-        !visual_conflict;
+    const bool lidar_no_cargo =
+        cargo_state_.state == CargoState::EMPTY && !visual_conflict;
+    const bool safe_empty =
+        hook_load_signal_role_ == HookLoadSignalRole::REQUIRED
+            ? (hook.valid &&
+               hook.state == lidar_slam2_msgs::HookLoadState::STATE_EMPTY &&
+               !visual_conflict)
+            : lidar_no_cargo;
 
     lidar_slam2_msgs::CargoSafetyStatus status;
     status.header.stamp = stamp;
@@ -9304,19 +9348,32 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     double processing_age_sec) {
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
     const bool visual_conflict = hook_fixed_cargo_.valid;
-    if (!hook.valid ||
-        hook.state == lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN ||
-        hook.state == lidar_slam2_msgs::HookLoadState::STATE_INHIBIT) {
+    const bool required_role =
+        hook_load_signal_role_ == HookLoadSignalRole::REQUIRED;
+    if (required_role &&
+        (!hook.valid ||
+         hook.state == lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN ||
+         hook.state == lidar_slam2_msgs::HookLoadState::STATE_INHIBIT)) {
         publishHookOnlySafetyStatus(
             hook, stamp, visual_conflict,
             std::string("hook_signal_invalid:") + hook.reason);
         return;
     }
-    if (hook.state == lidar_slam2_msgs::HookLoadState::STATE_EMPTY) {
+    if (required_role &&
+        hook.state == lidar_slam2_msgs::HookLoadState::STATE_EMPTY) {
         publishHookOnlySafetyStatus(
             hook, stamp, visual_conflict,
             visual_conflict ? "empty_hook_visual_conflict"
                             : "empty_hook_no_cargo_confirmed");
+        return;
+    }
+    const bool lidar_no_cargo_confirmed =
+        cargo_state_.state == CargoState::EMPTY && !visual_conflict;
+    if (!required_role && lidar_no_cargo_confirmed) {
+        publishHookOnlySafetyStatus(
+            hook, stamp, false,
+            hook.valid ? "lidar_no_cargo_gravity_diagnostic"
+                       : "lidar_no_cargo_gravity_unavailable");
         return;
     }
 
@@ -9418,6 +9475,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         formal_cargo_removal_authorized_ = active_track &&
             last_cargo_bottom_result_.geometry_valid;
         formal_cargo_removal_track_id_ = cargo_fusion_track_id_;
+        // Authorization age is tied to this LiDAR fusion update. Gravity
+        // receipt/progress timestamps never extend a cargo remove box.
         formal_cargo_removal_stamp_ = stamp;
     } else {
         // Never let the compatibility topics or legacy warning path keep a
@@ -11282,16 +11341,26 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     // 4. CargoCommit：当前帧吊货点删除（必须在 MapCommit 前）
     // ------------------------------------------------------------------------
     pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_cargo_base(new pcl::PointCloud<pcl::PointXYZ>);
+    const HookLoadSnapshot commit_hook = currentHookLoadSnapshot();
+    const HookLoadMapCommitDecision hook_map_policy =
+        evaluateHookLoadMapCommit({
+            hook_load_signal_role_, commit_hook.valid,
+            static_cast<HookLoadState>(commit_hook.state),
+            shouldRemoveHookCargo(),
+            payload_candidates && !payload_candidates->empty()});
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr cargo_commit_source =
+        hook_map_policy.exclude_candidate_region
+            ? objects_channel_safe : objects_base;
 
     removePointsInsideCargoRemoveBoxesBase(
-        objects_base,
+        cargo_commit_source,
         active_cargo_remove_boxes_base,
         objects_after_cargo_base,
         cargo_removed_base);
 
     // ========== Hook locked box 剔除（必须在 MapCommit 前）==========
     // 使用 CargoState 统一状态
-    if (shouldRemoveHookCargo()) {
+    if (hook_map_policy.use_formal_remove_box) {
         // 使用 CargoState 的中心和尺寸
         Eigen::Vector3f center = cargo_state_.center_base;
         Eigen::Vector3f size = cargo_state_.size;
@@ -11333,7 +11402,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     // v8-stable-r3: 降为 DEBUG
     ROS_DEBUG("[CargoCommit] seq=%d source=objects_base before=%zu active_boxes=%zu removed=%zu after=%zu",
              keyframe_count_ + 1,
-             objects_base->size(),
+             cargo_commit_source->size(),
              active_cargo_remove_boxes_base.size(),
              cargo_removed_base->size(),
              objects_after_cargo_base->size());

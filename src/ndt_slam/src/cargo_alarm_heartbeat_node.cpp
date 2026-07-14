@@ -15,7 +15,9 @@ struct StatusContractInput {
     int fault_code = 0;
     std::uint32_t fault_mask = 0U;
     bool localization_valid = false;
+    int hook_signal_role = 1;
     bool hook_signal_valid = false;
+    bool hook_signal_conflict = false;
     int hook_load_state = 0;
     bool no_cargo_confirmed = false;
     bool cargo_valid = false;
@@ -65,6 +67,9 @@ public:
     static constexpr int kInternalError = 35;
     static constexpr int kHookEmpty = 2;
     static constexpr int kHookLoaded = 3;
+    static constexpr int kHookRoleDisabled = 0;
+    static constexpr int kHookRoleRequired = 1;
+    static constexpr int kHookRoleAuxiliary = 2;
 
     struct Config {
         int confirm_frames = 2;
@@ -356,6 +361,15 @@ StatusContractResult validateStatusContract(
     if (!input.schema_valid) {
         return {State::kInternalError, false, false, "schema_mismatch"};
     }
+    const bool hook_role_valid =
+        input.hook_signal_role == State::kHookRoleDisabled ||
+        input.hook_signal_role == State::kHookRoleRequired ||
+        input.hook_signal_role == State::kHookRoleAuxiliary;
+    if (!hook_role_valid) {
+        return {State::kInternalError, false, false, "hook_role_invalid"};
+    }
+    const bool gravity_required =
+        input.hook_signal_role == State::kHookRoleRequired;
     const bool warning_code_valid = input.warning_code == 0 ||
         input.warning_code == State::kClear ||
         input.warning_code == State::kLevel1Warning ||
@@ -386,6 +400,11 @@ StatusContractResult validateStatusContract(
             return {State::kInternalError, false, false,
                     "fault_contract_mismatch"};
         }
+        if (input.fault_code == State::kGravityInvalid &&
+            !gravity_required) {
+            return {State::kInternalError, false, false,
+                    "auxiliary_gravity_fault_forbidden"};
+        }
         return {input.fault_code, true, false, "fault_status"};
     }
 
@@ -396,13 +415,17 @@ StatusContractResult validateStatusContract(
                 "warning_contract_mismatch"};
     }
 
+    const bool hook_supports_empty = !gravity_required ||
+        (input.hook_signal_valid &&
+         input.hook_load_state == State::kHookEmpty);
+    const bool hook_supports_loaded = !gravity_required ||
+        (input.hook_signal_valid &&
+         input.hook_load_state == State::kHookLoaded);
     const bool safe_empty = input.localization_valid &&
-        input.hook_signal_valid &&
-        input.hook_load_state == State::kHookEmpty &&
+        hook_supports_empty &&
         input.no_cargo_confirmed && !input.cargo_valid;
     const bool valid_loaded = input.localization_valid &&
-        input.hook_signal_valid &&
-        input.hook_load_state == State::kHookLoaded &&
+        hook_supports_loaded &&
         !input.no_cargo_confirmed && input.cargo_valid && input.obstacle_valid;
     const bool cluster_geometry_valid = input.obstacle_count > 0U &&
         std::isfinite(input.nearest_obstacle_distance_m) &&
@@ -583,6 +606,16 @@ private:
     }
 
     void statusCallback(const lidar_slam2_msgs::CargoSafetyStatus::ConstPtr& msg) {
+        static_assert(lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION == 4,
+                      "CargoSafetyStatus schema v4 is required");
+        static_assert(
+            lidar_slam2_msgs::CargoSafetyStatus::HOOK_ROLE_DISABLED ==
+                AlarmStateMachine::kHookRoleDisabled &&
+            lidar_slam2_msgs::CargoSafetyStatus::HOOK_ROLE_REQUIRED ==
+                AlarmStateMachine::kHookRoleRequired &&
+            lidar_slam2_msgs::CargoSafetyStatus::HOOK_ROLE_AUXILIARY ==
+                AlarmStateMachine::kHookRoleAuxiliary,
+            "Heartbeat hook-role constants do not match the message schema");
         StatusContractInput input;
         input.schema_valid = msg->schema_version ==
             lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION;
@@ -593,7 +626,9 @@ private:
         input.fault_code = msg->fault_code;
         input.fault_mask = msg->fault_mask;
         input.localization_valid = msg->localization_valid;
+        input.hook_signal_role = msg->hook_signal_role;
         input.hook_signal_valid = msg->hook_signal_valid;
+        input.hook_signal_conflict = msg->hook_signal_conflict;
         input.hook_load_state = msg->hook_load_state;
         input.no_cargo_confirmed = msg->no_cargo_confirmed;
         input.cargo_valid = msg->cargo_valid;

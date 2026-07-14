@@ -45,6 +45,7 @@
 #include <ndt_slam/cargo_box_estimator.hpp>
 #include <ndt_slam/cargo_bottom_fusion.hpp>
 #include <ndt_slam/cargo_safety_evaluator.hpp>
+#include <ndt_slam/hook_load_evidence_policy.hpp>
 #include <set>
 
 // v8-stable-r3: CraneMotionEKF
@@ -1583,7 +1584,8 @@ private:
         std::string reason = "no_signal";
     };
     bool hook_load_signal_enabled_ = true;
-    bool hook_load_signal_required_ = true;
+    HookLoadSignalRole hook_load_signal_role_ = HookLoadSignalRole::REQUIRED;
+    bool hook_load_signal_role_config_valid_ = true;
     std::string hook_load_state_topic_ = "/hook/load_state";
     double hook_load_state_stale_timeout_sec_ = 0.80;
     mutable std::mutex hook_load_state_mutex_;

@@ -1,7 +1,7 @@
 # Authoritative cargo safety evidence and final status consumed by the main
 # controller.  Warning codes describe physical hazards only; system faults use
 # a separate code range and fault mask.
-uint16 SCHEMA_VERSION=3
+uint16 SCHEMA_VERSION=4
 
 int32 CODE_CLEAR=14
 int32 CODE_LEVEL1_WARNING=17
@@ -26,6 +26,10 @@ uint8 HOOK_INHIBIT=1
 uint8 HOOK_EMPTY=2
 uint8 HOOK_LOADED=3
 
+uint8 HOOK_ROLE_DISABLED=0
+uint8 HOOK_ROLE_REQUIRED=1
+uint8 HOOK_ROLE_AUXILIARY=2
+
 std_msgs/Header header
 uint16 schema_version
 
@@ -38,7 +42,9 @@ int32 fault_code
 uint32 fault_mask
 
 bool localization_valid
+uint8 hook_signal_role
 bool hook_signal_valid
+bool hook_signal_conflict
 bool cargo_valid
 uint32 cargo_track_id
 uint8 cargo_source

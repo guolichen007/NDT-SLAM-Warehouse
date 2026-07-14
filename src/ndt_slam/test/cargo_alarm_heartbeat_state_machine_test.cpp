@@ -227,6 +227,49 @@ TEST(CargoAlarmHeartbeat, ContractRejectsSchemaUnknownAndInvalidHazardEvidence) 
               validateStatusContract(invalid18).code);
 }
 
+TEST(CargoAlarmHeartbeat, AuxiliaryRoleUsesLidarGeometryWhenGravityIsInvalid) {
+    StatusContractInput hazard = loadedWarning(
+        AlarmStateMachine::kLevel1Warning);
+    hazard.hook_signal_role = AlarmStateMachine::kHookRoleAuxiliary;
+    hazard.hook_signal_valid = false;
+    hazard.hook_load_state = 0;
+    hazard.hook_signal_conflict = true;
+    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
+              validateStatusContract(hazard).code);
+
+    StatusContractInput empty;
+    empty.schema_valid = true;
+    empty.valid = true;
+    empty.warning_valid = true;
+    empty.requested_code = AlarmStateMachine::kClear;
+    empty.warning_code = AlarmStateMachine::kClear;
+    empty.localization_valid = true;
+    empty.hook_signal_role = AlarmStateMachine::kHookRoleAuxiliary;
+    empty.hook_signal_valid = false;
+    empty.no_cargo_confirmed = true;
+    EXPECT_EQ(AlarmStateMachine::kClear,
+              validateStatusContract(empty).code);
+
+    hazard.obstacle_valid = false;
+    EXPECT_EQ(AlarmStateMachine::kInternalError,
+              validateStatusContract(hazard).code);
+}
+
+TEST(CargoAlarmHeartbeat, Code32IsReservedForRequiredGravity) {
+    StatusContractInput gravity = faultStatus(
+        AlarmStateMachine::kGravityInvalid, 4U);
+    gravity.hook_signal_role = AlarmStateMachine::kHookRoleRequired;
+    EXPECT_EQ(AlarmStateMachine::kGravityInvalid,
+              validateStatusContract(gravity).code);
+
+    gravity.hook_signal_role = AlarmStateMachine::kHookRoleAuxiliary;
+    EXPECT_EQ(AlarmStateMachine::kInternalError,
+              validateStatusContract(gravity).code);
+    gravity.hook_signal_role = AlarmStateMachine::kHookRoleDisabled;
+    EXPECT_EQ(AlarmStateMachine::kInternalError,
+              validateStatusContract(gravity).code);
+}
+
 TEST(CargoAlarmHeartbeat, EmptyHookClearIsExplicitlyAllowed) {
     StatusContractInput empty = loadedWarning(AlarmStateMachine::kClear);
     empty.hook_load_state = AlarmStateMachine::kHookEmpty;

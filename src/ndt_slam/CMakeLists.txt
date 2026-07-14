@@ -117,6 +117,7 @@ set(LIBRARY_SOURCES
   src/cargo_bottom_fusion.cpp
   src/cargo_safety_evaluator.cpp
   src/hook_load_state_filter.cpp
+  src/hook_load_evidence_policy.cpp
 )
 
 add_library(ndt_slam_lib SHARED
@@ -233,6 +234,13 @@ if(CATKIN_ENABLE_TESTING)
     test/crane_pose_constraint_test.cpp)
   if(TARGET crane_pose_constraint_test)
     target_link_libraries(crane_pose_constraint_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(hook_load_evidence_policy_test
+    test/hook_load_evidence_policy_test.cpp)
+  if(TARGET hook_load_evidence_policy_test)
+    target_link_libraries(hook_load_evidence_policy_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 endif()

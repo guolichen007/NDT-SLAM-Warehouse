@@ -27,6 +27,8 @@ def main() -> int:
     header = read("src/ndt_slam/include/ndt_slam/ndt_slam.hpp")
     heartbeat = read("src/ndt_slam/src/cargo_alarm_heartbeat_node.cpp")
     hook_node = read("src/ndt_slam/src/hook_load_state_node.cpp")
+    hook_policy = read(
+        "src/ndt_slam/src/hook_load_evidence_policy.cpp")
     safety_header = read(
         "src/ndt_slam/include/ndt_slam/cargo_safety_evaluator.hpp")
     safety_evaluator = read("src/ndt_slam/src/cargo_safety_evaluator.cpp")
@@ -45,13 +47,17 @@ def main() -> int:
     require("CargoBottomEstimate.msg" in messages and
             "CargoSafetyStatus.msg" in messages,
             "typed Cargo messages are not generated", failures)
-    require("SCHEMA_VERSION=3" in safety_message and
+    require("SCHEMA_VERSION=4" in safety_message and
             all(f"CODE_{name}" in safety_message for name in (
                 "CLEAR", "LEVEL1_WARNING", "LEVEL2_WARNING",
                 "SYSTEM_NOT_READY", "LOCALIZATION_INVALID",
                 "GRAVITY_INVALID", "CARGO_INVALID", "OBSTACLE_INVALID",
-                "INTERNAL_ERROR")),
-            "CargoSafetyStatus v3 code contract is incomplete", failures)
+                "INTERNAL_ERROR")) and
+            all(name in safety_message for name in (
+                "HOOK_ROLE_DISABLED", "HOOK_ROLE_REQUIRED",
+                "HOOK_ROLE_AUXILIARY", "hook_signal_role",
+                "hook_signal_conflict")),
+            "CargoSafetyStatus v4 role/code contract is incomplete", failures)
 
     for include in ("cargo_bottom_fusion.hpp", "cargo_safety_evaluator.hpp",
                     "CargoBottomEstimate.h", "CargoSafetyStatus.h"):
@@ -140,6 +146,32 @@ def main() -> int:
                 f"launch status contract missing {value}", failures)
     require("updateAndPublishCargoSafetyPipeline(" in node,
             "formal Cargo pipeline has no runtime call site", failures)
+    require("optional_signal_legacy_fallback" not in node and
+            "hook_signal_disabled_legacy_mode" not in node,
+            "auxiliary/disabled mode still fabricates LOADED evidence", failures)
+    require("HookLoadSignalRole::REQUIRED" in node and
+            "HookLoadSignalRole::AUXILIARY" in hook_policy and
+            "gravity_required_fault" in hook_policy,
+            "hook signal role-aware evidence policy is incomplete", failures)
+    require("auxiliary_gravity_fault_forbidden" in heartbeat and
+            "hook_supports_loaded" in heartbeat and
+            "hook_supports_empty" in heartbeat,
+            "heartbeat is not enforcing the schema-v4 role contract", failures)
+    require("exclude_candidate_region" in hook_policy and
+            "objects_channel_safe" in node and
+            "hook_map_policy.use_formal_remove_box" in node,
+            "auxiliary MapCommit can admit an unauthorized cargo candidate",
+            failures)
+    require('role: "auxiliary"' in live_config and
+            "confirm_samples: 2" in live_config and
+            "stale_timeout_sec: 2.50" in live_config and
+            "consumer_timeout_sec: 3.00" in live_config and
+            "valid_voltage_max_v: 6.0" in live_config and
+            "diagnostic_disconnect_sec: 10.0" in live_config,
+            "production Gravity auxiliary parameters are incomplete", failures)
+    require("duplicate_sample_ignored" in
+            read("src/ndt_slam/src/hook_load_state_filter.cpp"),
+            "duplicate Gravity samples can advance confirmation", failures)
     require("publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_" in node,
             "legacy payload compatibility output does not consume fusion", failures)
     require("SOURCE_ORIGIN_HEIGHT=5" in bottom_message and

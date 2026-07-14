@@ -8,6 +8,8 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
+#include "ndt_slam/hook_load_evidence_policy.hpp"
+
 namespace ndt_slam {
 
 /** Axis-aligned cargo bounds expressed in the base frame. */
@@ -114,7 +116,9 @@ struct CargoSafetyProtocol {
 struct CargoSafetyDecisionInput {
     bool system_ready = false;
     bool localization_valid = false;
+    HookLoadSignalRole hook_signal_role = HookLoadSignalRole::REQUIRED;
     bool gravity_valid = false;
+    bool gravity_conflict = false;
     bool safe_empty = false;
     bool hook_loaded = false;
     bool cargo_fault = false;

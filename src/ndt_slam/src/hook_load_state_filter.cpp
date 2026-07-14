@@ -84,7 +84,15 @@ HookLoadStateResult HookLoadStateFilter::result(
 
 HookLoadStateResult HookLoadStateFilter::ingest(
     double voltage, double wall_time_sec) {
+    return ingest(voltage, wall_time_sec, wall_time_sec);
+}
+
+HookLoadStateResult HookLoadStateFilter::ingest(
+    double voltage, double source_time_sec, double wall_time_sec) {
     if (!configValid()) return fail("invalid_config", voltage);
+    if (!std::isfinite(source_time_sec) || source_time_sec < 0.0) {
+        return fail("invalid_source_time", voltage);
+    }
     if (!std::isfinite(wall_time_sec) || wall_time_sec < 0.0) {
         return fail("invalid_wall_time", voltage);
     }
@@ -94,7 +102,26 @@ HookLoadStateResult HookLoadStateFilter::ingest(
         has_sample_ = true;
         return fail("wall_time_rollback", voltage);
     }
+    if (has_sample_ &&
+        source_time_sec + 1.0e-6 < last_source_time_sec_) {
+        last_source_time_sec_ = source_time_sec;
+        last_wall_time_sec_ = wall_time_sec;
+        last_sample_wall_time_sec_ = wall_time_sec;
+        has_sample_ = true;
+        return fail("source_time_rollback", voltage);
+    }
+    if (has_sample_ &&
+        std::abs(source_time_sec - last_source_time_sec_) <= 1.0e-6) {
+        if (wall_time_sec - last_sample_wall_time_sec_ + 1.0e-6 >=
+            config_.stale_timeout_sec) {
+            has_sample_ = false;
+            return fail("signal_stale", voltage);
+        }
+        return result(invalid_reason_.empty()
+            ? "duplicate_sample_ignored" : invalid_reason_);
+    }
     last_wall_time_sec_ = wall_time_sec;
+    last_source_time_sec_ = source_time_sec;
     last_sample_wall_time_sec_ = wall_time_sec;
     has_sample_ = true;
 
@@ -156,6 +183,7 @@ void HookLoadStateFilter::reset(const std::string& reason) {
     stable_samples_ = 0;
     has_sample_ = false;
     last_wall_time_sec_ = 0.0;
+    last_source_time_sec_ = 0.0;
     last_sample_wall_time_sec_ = 0.0;
     last_voltage_ = std::numeric_limits<float>::quiet_NaN();
     invalid_reason_ = reason;

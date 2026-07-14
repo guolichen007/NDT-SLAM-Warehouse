@@ -581,18 +581,21 @@ rviz_publish:
 # SLAM cargo lifecycle through the typed /hook/load_state topic.
 hook_load_signal:
   enabled: true
-  required: true
+  role: "auxiliary"
+  # Legacy compatibility only; role is authoritative when present.
+  required: false
   topic: "/gravity"
   state_topic: "/hook/load_state"
   publish_hz: 10.0
   low_threshold_v: 1.90
   high_threshold_v: 2.10
   hysteresis_v: 0.03
-  confirm_samples: 3
-  stale_timeout_sec: 0.50
-  consumer_timeout_sec: 0.80
+  confirm_samples: 2
+  stale_timeout_sec: 2.50
+  consumer_timeout_sec: 3.00
   valid_voltage_min_v: 0.0
-  valid_voltage_max_v: 5.0
+  valid_voltage_max_v: 6.0
+  diagnostic_disconnect_sec: 10.0
   origin_history_samples: 10
   # Origin-height evidence is accepted only from a recent, spatially stable
   # EMPTY interval and may be consumed by one EMPTY->LOADED lifecycle.
