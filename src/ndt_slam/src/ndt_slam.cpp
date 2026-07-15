@@ -1195,19 +1195,46 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         // v8-stable-r3: Registration Input 参数
         if (config["registration_input"]) {
             const auto n = config["registration_input"];
-            ndt_input_voxel_size_ = n["ndt_input_voxel_size"].as<double>(0.30);
-            object_weight_repeat_ = n["object_weight_repeat"].as<int>(2);
-            ground_sample_ratio_ = n["ground_sample_ratio"].as<double>(0.20);
-            max_ndt_points_ = n["max_ndt_points"].as<int>(8000);
-            min_objects_for_weighting_ = n["min_objects_for_weighting"].as<int>(500);
-            min_registration_points_ = n["min_registration_points"].as<int>(2500);
+            registration_cloud_config_.static_object_voxel_size =
+                n["static_object_voxel_size"].as<double>(0.22);
+            registration_cloud_config_.uncertain_candidate_voxel_size =
+                n["uncertain_candidate_voxel_size"].as<double>(0.30);
+            registration_cloud_config_.ground_grid_cell_m =
+                n["ground_grid_cell_m"].as<double>(0.50);
+            registration_cloud_config_.ground_edge_height_change_m =
+                n["ground_edge_height_change_m"].as<double>(0.08);
+            registration_cloud_config_.static_object_repeat =
+                n["static_object_repeat"].as<int>(2);
+            registration_cloud_config_.uncertain_candidate_repeat =
+                n["uncertain_candidate_repeat"].as<int>(1);
+            registration_cloud_config_.ground_max_fraction =
+                n["ground_max_fraction"].as<double>(0.35);
+            registration_cloud_config_.min_static_object_points =
+                n["min_static_object_points"].as<std::size_t>(600U);
+            registration_cloud_config_.min_structure_xy_cells =
+                n["min_structure_xy_cells"].as<std::size_t>(40U);
+            registration_cloud_config_.min_registration_points =
+                n["min_registration_points"].as<std::size_t>(2500U);
+            registration_cloud_config_.target_registration_points =
+                n["target_registration_points"].as<std::size_t>(4000U);
+            registration_cloud_config_.max_ndt_points =
+                n["max_ndt_points"].as<std::size_t>(6000U);
+            registration_cloud_config_.allow_full_ground_fallback =
+                n["allow_full_ground_fallback"].as<bool>(false);
+            if (registration_cloud_config_.allow_full_ground_fallback) {
+                ROS_ERROR("[RegistrationInput] allow_full_ground_fallback=true is unsafe and will be ignored");
+                registration_cloud_config_.allow_full_ground_fallback = false;
+            }
 
-            ROS_INFO("[RegistrationInput] voxel=%.2f repeat=%d ground_ratio=%.2f max_points=%d min_points=%d",
-                     ndt_input_voxel_size_,
-                     object_weight_repeat_,
-                     ground_sample_ratio_,
-                     max_ndt_points_,
-                     min_registration_points_);
+            ROS_INFO("[RegistrationInput] static_voxel=%.2f uncertain_voxel=%.2f ground_grid=%.2f ground_max=%.2f static_min=%zu total_min=%zu target=%zu max=%zu",
+                     registration_cloud_config_.static_object_voxel_size,
+                     registration_cloud_config_.uncertain_candidate_voxel_size,
+                     registration_cloud_config_.ground_grid_cell_m,
+                     registration_cloud_config_.ground_max_fraction,
+                     registration_cloud_config_.min_static_object_points,
+                     registration_cloud_config_.min_registration_points,
+                     registration_cloud_config_.target_registration_points,
+                     registration_cloud_config_.max_ndt_points);
         }
 
         // V3: Localization Target 参数
@@ -2828,10 +2855,12 @@ void NdtSlamNode::processCloudThread() {
                     std::memory_order_relaxed);
             }
         }
-        pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud =
+        RegistrationCloudBuildResult registration_build_result =
             buildRegistrationCloud(
                 registration_partition.static_objects, ground_cloud,
                 registration_partition.uncertain_candidates);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud =
+            registration_build_result.cloud;
 
         // ========== Hook locked box 剔除（NDT 输入）==========
         // 使用 CargoState 统一状态
@@ -2848,6 +2877,8 @@ void NdtSlamNode::processCloudThread() {
 
             // 从 registration_cloud 中剔除 Hook locked box 内的点
             pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::PointCloud<pcl::PointXYZ>::Ptr structure_cloud_filtered(
+                new pcl::PointCloud<pcl::PointXYZ>);
             size_t hook_removed_count = 0;
 
             for (const auto& p : registration_cloud->points) {
@@ -2860,8 +2891,45 @@ void NdtSlamNode::processCloudThread() {
                 }
             }
 
+            for (const auto& p :
+                 registration_build_result.structure_cloud->points) {
+                if (p.x < hook_bbox_min.x() || p.x > hook_bbox_max.x() ||
+                    p.y < hook_bbox_min.y() || p.y > hook_bbox_max.y() ||
+                    p.z < hook_bbox_min.z() || p.z > hook_bbox_max.z()) {
+                    structure_cloud_filtered->push_back(p);
+                }
+            }
+
             if (hook_removed_count > 0) {
                 registration_cloud = registration_cloud_filtered;
+                registration_build_result.cloud = registration_cloud;
+                registration_build_result.structure_cloud =
+                    structure_cloud_filtered;
+                registration_build_result.total_points =
+                    registration_cloud->size();
+                registration_build_result.static_object_points =
+                    structure_cloud_filtered->size();
+                registration_build_result.ground_fraction =
+                    registration_build_result.total_points > 0U
+                        ? static_cast<double>(
+                              registration_build_result.ground_points) /
+                              static_cast<double>(
+                                  registration_build_result.total_points)
+                        : 0.0;
+                if (registration_build_result.total_points <
+                        registration_cloud_config_.min_registration_points ||
+                    registration_build_result.static_object_points <
+                        registration_cloud_config_.min_static_object_points ||
+                    registration_build_result.ground_fraction >
+                        registration_cloud_config_.ground_max_fraction +
+                            1.0e-9) {
+                    registration_build_result.valid = false;
+                    registration_build_result.structure_quality_valid = false;
+                    registration_build_result.mode =
+                        "INSUFFICIENT_STRUCTURE";
+                    registration_build_result.reason =
+                        "authorized_cargo_removal_left_insufficient_structure";
+                }
                 formal_box_removed_points_.fetch_add(
                     hook_removed_count, std::memory_order_relaxed);
                 if (debug_cfg_.debug_registration_removal) {
@@ -2875,6 +2943,47 @@ void NdtSlamNode::processCloudThread() {
         } else if (debug_cfg_.debug_hook_removal) {
             ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec,
                 "[HookCargoRemoval] enabled=0 reason=safety_gate_closed");
+        }
+
+        last_registration_build_result_ = registration_build_result;
+        last_source_points_ =
+            static_cast<int>(registration_build_result.total_points);
+        const bool registration_mode_changed =
+            registration_build_result.mode != last_registration_console_mode_;
+        if (registration_mode_changed) {
+            if (registration_build_result.valid) {
+                ROS_INFO("[RegistrationInput] mode=%s valid=1 static=%zu uncertain=%zu ground=%zu total=%zu ground_fraction=%.3f reason=%s",
+                         registration_build_result.mode.c_str(),
+                         registration_build_result.static_object_points,
+                         registration_build_result.uncertain_candidate_points,
+                         registration_build_result.ground_points,
+                         registration_build_result.total_points,
+                         registration_build_result.ground_fraction,
+                         registration_build_result.reason.c_str());
+            } else {
+                ROS_WARN("[RegistrationInput] mode=%s valid=0 static=%zu uncertain=%zu ground=%zu total=%zu ground_fraction=%.3f reason=%s",
+                         registration_build_result.mode.c_str(),
+                         registration_build_result.static_object_points,
+                         registration_build_result.uncertain_candidate_points,
+                         registration_build_result.ground_points,
+                         registration_build_result.total_points,
+                         registration_build_result.ground_fraction,
+                         registration_build_result.reason.c_str());
+            }
+            last_registration_console_mode_ =
+                registration_build_result.mode;
+        } else {
+            ROS_INFO_THROTTLE(
+                5.0,
+                "[RegistrationInput] mode=%s valid=%d static=%zu uncertain=%zu ground=%zu total=%zu ground_fraction=%.3f reason=%s",
+                registration_build_result.mode.c_str(),
+                registration_build_result.valid ? 1 : 0,
+                registration_build_result.static_object_points,
+                registration_build_result.uncertain_candidate_points,
+                registration_build_result.ground_points,
+                registration_build_result.total_points,
+                registration_build_result.ground_fraction,
+                registration_build_result.reason.c_str());
         }
 
         // ========== 地面法向量诊断 ==========
@@ -3009,7 +3118,28 @@ void NdtSlamNode::processCloudThread() {
         static int frames_since_last_update = 0;
 
         try {
-            if (local_map_->empty() || local_map_->size() < 500) {
+            if (!registration_build_result.valid) {
+                last_ndt_converged_ = false;
+                last_ndt_fitness_ =
+                    std::numeric_limits<double>::infinity();
+                last_raw_step_ = 0.0;
+                last_source_points_ =
+                    static_cast<int>(registration_cloud->size());
+                if (crane_motion_ekf_enabled_ &&
+                    crane_motion_ekf_.initialized()) {
+                    const auto ekf_start = DiagClock::now();
+                    new_pose = crane_motion_ekf_.predictWithoutMeasurement(
+                        current_pose_, msg->header.stamp,
+                        "INSUFFICIENT_STRUCTURE");
+                    registration_success = true;
+                    ekf_reject_count_.fetch_add(
+                        1, std::memory_order_relaxed);
+                    diag_stage.ekf_ms += elapsedMs(ekf_start);
+                    diag_ekf_pose = new_pose;
+                    logSO3GuardPose(
+                        "ekf_pose", processing_frame_index, new_pose);
+                }
+            } else if (local_map_->empty() || local_map_->size() < 500) {
                 // 累积阶段
                 *local_map_ += *registration_cloud;
                 ++local_map_version_;
@@ -3306,7 +3436,8 @@ void NdtSlamNode::processCloudThread() {
                             : !ndt_accepted;
                         frame_registration_quality_valid =
                             ndt_accepted && std::isfinite(fitness_score) &&
-                            fitness_score <= map_commit_max_fitness_;
+                            fitness_score <= map_commit_max_fitness_ &&
+                            registration_build_result.structure_quality_valid;
                         frame_raw_increment_m =
                             diag_raw_ndt_step_from_previous;
 
@@ -3944,6 +4075,17 @@ void NdtSlamNode::processCloudThread() {
             ndt_rec.filtered_points =
                 static_cast<int>(filtered_cloud->size());
             ndt_rec.registration_points = last_source_points_;
+            ndt_rec.registration_mode = registration_build_result.mode;
+            ndt_rec.static_object_points = static_cast<int>(
+                registration_build_result.static_object_points);
+            ndt_rec.uncertain_candidate_points = static_cast<int>(
+                registration_build_result.uncertain_candidate_points);
+            ndt_rec.ground_points = static_cast<int>(
+                registration_build_result.ground_points);
+            ndt_rec.ground_fraction =
+                registration_build_result.ground_fraction;
+            ndt_rec.structure_quality_valid =
+                registration_build_result.structure_quality_valid;
             ndt_rec.target_points = last_target_points_;
             ndt_rec.target_source = last_actual_target_source_;
             ndt_rec.target_version = target_version_;
@@ -11067,59 +11209,13 @@ void NdtSlamNode::bindNdtInputTarget(
     last_target_reason_ = reason;
 }
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::buildRegistrationCloud(
+RegistrationCloudBuildResult NdtSlamNode::buildRegistrationCloud(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& human_safe_objects,
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_cloud,
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& uncertain_candidates) {
-    auto registration_cloud =
-        boost::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-
-    int repeat = object_weight_repeat_;
-    if (static_cast<int>(human_safe_objects->size()) <
-        min_objects_for_weighting_) {
-        repeat = 1;
-    }
-
-    // V3: object 点优先
-    for (int i = 0; i < repeat; ++i) {
-        *registration_cloud += *human_safe_objects;
-    }
-
-    // Uncertain channel candidates are deliberately kept at unit weight. They
-    // remain available for matching before formal cargo authorization without
-    // being amplified like confirmed static structure.
-    if (uncertain_candidates && !uncertain_candidates->empty()) {
-        *registration_cloud += *uncertain_candidates;
-    }
-
-    // V3: ground 只保留指定比例（默认 5%）
-    auto ground_sampled = sampleCloudByRatio(
-        ground_cloud,
-        ground_sample_ratio_);
-
-    *registration_cloud += *ground_sampled;
-
-    voxelDownsampleInPlace(registration_cloud, ndt_input_voxel_size_);
-
-    // V3: 检查最小点数，不足时回退到旧模式
-    if (static_cast<int>(registration_cloud->size()) < min_registration_points_) {
-        ROS_WARN_THROTTLE(5.0, "[RegistrationInput] points=%zu < min=%d, fallback to full ground",
-                          registration_cloud->size(), min_registration_points_);
-        // 回退：使用完整 ground
-        registration_cloud->clear();
-        for (int i = 0; i < repeat; ++i) {
-            *registration_cloud += *human_safe_objects;
-        }
-        if (uncertain_candidates && !uncertain_candidates->empty()) {
-            *registration_cloud += *uncertain_candidates;
-        }
-        *registration_cloud += *ground_cloud;
-        voxelDownsampleInPlace(registration_cloud, ndt_input_voxel_size_);
-    }
-
-    limitCloudUniformInPlace(registration_cloud, max_ndt_points_);
-
-    return registration_cloud;
+    return buildStructurePreservingRegistrationCloud(
+        human_safe_objects, uncertain_candidates, ground_cloud,
+        registration_cloud_config_);
 }
 
 // ============================================================================

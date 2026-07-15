@@ -148,6 +148,12 @@ struct NdtFrameRecord {
   int merged_points = 0;
   int filtered_points = 0;
   int registration_points = 0;
+  std::string registration_mode;
+  int static_object_points = 0;
+  int uncertain_candidate_points = 0;
+  int ground_points = 0;
+  double ground_fraction = 0.0;
+  bool structure_quality_valid = false;
   int target_points = 0;
   std::string target_source;
   int target_version = 0;

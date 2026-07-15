@@ -514,12 +514,19 @@ soft_yaw_filter:
 
 # ========== v8-stable-r3-final: Registration Input ==========
 registration_input:
-  ndt_input_voxel_size: 0.35   # V3: 从 0.30 增大到 0.35，降低点数
-  object_weight_repeat: 2
-  ground_sample_ratio: 0.05    # V3: 从 0.20 降到 0.05，降低地面主导
-  max_ndt_points: 5000         # V3: 从 8000 降到 5000，降低NDT计算量
-  min_objects_for_weighting: 500
-  min_registration_points: 2500  # V3: 最小配准点数，不足时回退旧模式
+  static_object_voxel_size: 0.22
+  uncertain_candidate_voxel_size: 0.30
+  ground_grid_cell_m: 0.50
+  ground_edge_height_change_m: 0.08
+  static_object_repeat: 2
+  uncertain_candidate_repeat: 1
+  ground_max_fraction: 0.35
+  min_static_object_points: 600
+  min_structure_xy_cells: 40
+  min_registration_points: 2500
+  target_registration_points: 4000
+  max_ndt_points: 6000
+  allow_full_ground_fallback: false
 
 # ========== V3: Localization Target ==========
 localization_target:

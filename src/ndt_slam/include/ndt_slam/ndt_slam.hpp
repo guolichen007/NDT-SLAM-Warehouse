@@ -53,6 +53,7 @@
 #include <ndt_slam/crane_pose_constraint.hpp>
 #include <ndt_slam/ndt_relocalizer.hpp>
 #include <ndt_slam/stationary_motion_policy.hpp>
+#include <ndt_slam/registration_cloud_builder.hpp>
 
 // NDT_OMP
 #include <pclomp/ndt_omp.h>
@@ -467,18 +468,15 @@ private:
                                             double speed_xy);
 
     // ========== v8-stable-r3: Registration Input ==========
-    double ndt_input_voxel_size_ = 0.30;
-    int object_weight_repeat_ = 2;
-    double ground_sample_ratio_ = 0.20;
-    int max_ndt_points_ = 8000;
-    int min_objects_for_weighting_ = 500;
-    int min_registration_points_ = 2500;  // V3: 最小配准点数
+    RegistrationCloudBuildConfig registration_cloud_config_;
+    RegistrationCloudBuildResult last_registration_build_result_;
+    std::string last_registration_console_mode_;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr sampleCloudByRatio(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double ratio);
     void voxelDownsampleInPlace(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double leaf);
     void limitCloudUniformInPlace(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, int max_points);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr buildRegistrationCloud(
+    RegistrationCloudBuildResult buildRegistrationCloud(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& human_safe_objects,
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& ground_cloud,
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& uncertain_candidates);

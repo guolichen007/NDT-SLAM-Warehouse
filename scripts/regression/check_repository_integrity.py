@@ -251,10 +251,64 @@ def stationary_motion_contract_failures() -> list[str]:
     return failures
 
 
+def registration_source_contract_failures() -> list[str]:
+    failures: list[str] = []
+    paths = (
+        Path("src/ndt_slam/include/ndt_slam/registration_cloud_builder.hpp"),
+        Path("src/ndt_slam/src/registration_cloud_builder.cpp"),
+        Path("src/ndt_slam/src/ndt_slam.cpp"),
+        Path("src/ndt_slam/include/ndt_slam/runtime_diagnostics.hpp"),
+        Path("src/ndt_slam/src/runtime_diagnostics.cpp"),
+        Path("src/ndt_slam/config/live_longterm_mapping.yaml"),
+    )
+    try:
+        text = "\n".join(
+            (ROOT / path).read_text(encoding="utf-8") for path in paths)
+    except OSError as error:
+        return [f"registration source contract cannot be read: {error}"]
+
+    required = (
+        "RegistrationCloudBuildResult",
+        "STRUCTURE_RICH",
+        "STRUCTURE_RECOVERY",
+        "GROUND_AUGMENTED",
+        "INSUFFICIENT_STRUCTURE",
+        "ground_max_fraction",
+        "structure_quality_valid",
+        "registration_mode",
+        "static_object_points",
+        "uncertain_candidate_points",
+        "ground_points",
+        "ground_fraction",
+        '"INSUFFICIENT_STRUCTURE"',
+        "predictWithoutMeasurement",
+        "allow_full_ground_fallback: false",
+    )
+    for token in required:
+        if token not in text:
+            failures.append(
+                f"registration source contract missing {token!r}")
+
+    for token in ('"FULL_GROUND"', "fallback to full ground"):
+        if token in text:
+            failures.append(
+                f"unsafe full-ground fallback remains: {token!r}")
+
+    node = (ROOT / paths[2]).read_text(encoding="utf-8")
+    partition = node.find("partitionRegistrationObjects(")
+    build = node.find("buildRegistrationCloud(", partition)
+    if partition < 0 or build < 0 or partition > build:
+        failures.append(
+            "registration cloud must be built from the post-HumanFilter partition")
+
+    return failures
+
+
 def main() -> int:
     failures: list[str] = runtime_so3_contract_failures()
     failures.extend(pending_origin_contract_failures())
     failures.extend(stationary_motion_contract_failures())
+    failures.extend(registration_source_contract_failures())
     try:
         paths = tracked_paths()
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:

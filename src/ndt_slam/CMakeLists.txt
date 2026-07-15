@@ -109,6 +109,7 @@ set(LIBRARY_SOURCES
   # v8-stable-r3: CraneMotionEKF
   src/crane_motion_ekf.cpp
   src/stationary_motion_policy.cpp
+  src/registration_cloud_builder.cpp
   src/crane_pose_constraint.cpp
   src/rigid_transform_conversion.cpp
   # Asynchronous local/global NDT relocalization
@@ -266,6 +267,13 @@ if(CATKIN_ENABLE_TESTING)
   if(TARGET stationary_motion_policy_test)
     target_link_libraries(stationary_motion_policy_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(registration_cloud_builder_test
+    test/registration_cloud_builder_test.cpp)
+  if(TARGET registration_cloud_builder_test)
+    target_link_libraries(registration_cloud_builder_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
   endif()
 endif()
 
