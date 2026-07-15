@@ -6,7 +6,8 @@ debug:
   publish_runtime_path: false  # runtime_path 只是显示辅助，不参与算法
   runtime_diagnostics:
     enabled: true
-    console_period_sec: 1.0
+    console_period_sec: 5.0
+    risk_repeat_period_sec: 5.0
     csv_enabled: true
     csv_flush_period_sec: 1.0
     warn_consecutive_overrun_frames: 3
@@ -17,7 +18,7 @@ debug:
 
 # 日志配置
 logging:
-  summary_interval_sec: 2.0
+  summary_interval_sec: 5.0
   warn_throttle_sec: 2.0
 
   debug_config: false
@@ -27,7 +28,7 @@ logging:
   debug_motion_gate: false
   debug_pose_flow: false
   debug_map_commit: false
-  debug_perf: true           # 测试时打开，输出 ndt_ms
+  debug_perf: false          # Per-frame timing stays in runtime_frames.csv.
   debug_cargo: false
   debug_cargo_bottom: false
   debug_cargo_warning: false

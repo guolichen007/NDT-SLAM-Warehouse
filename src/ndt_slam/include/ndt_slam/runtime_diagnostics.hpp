@@ -20,7 +20,8 @@ namespace ndt_slam {
 // Fixed-format risk tags — grep-friendly, never change the string.
 struct RuntimeDiagnosticsConfig {
   bool enabled = false;
-  double console_period_sec = 1.0;
+  double console_period_sec = 5.0;
+  double risk_repeat_period_sec = 5.0;
   bool csv_enabled = true;
   double csv_flush_period_sec = 1.0;
   int warn_consecutive_overrun_frames = 3;
@@ -28,6 +29,25 @@ struct RuntimeDiagnosticsConfig {
   int warn_target_fallback_frames = 3;
   double warn_cargo_bottom_jump_m = 0.20;
   double warn_cargo_height_jump_m = 0.20;
+};
+
+struct PipelineRiskRecord {
+  std::string reason;
+  int level = 0;
+  int frame = 0;
+  double stamp = 0.0;
+  double frame_budget_ms = 0.0;
+  double total_ms = 0.0;
+  double preprocess_ms = 0.0;
+  double target_prepare_ms = 0.0;
+  double ndt_align_ms = 0.0;
+  double ekf_ms = 0.0;
+  double map_commit_ms = 0.0;
+  int consecutive_overruns = 0;
+  double estimated_backlog_frames = 0.0;
+  double processed_hz = 0.0;
+  double input_hz = 0.0;
+  double drop_ratio = 0.0;
 };
 
 struct PipelineRateSnapshot {
@@ -293,21 +313,16 @@ public:
   void logNdtRiskTargetFallbackStreak(int count, const std::string& current_source,
                                        const std::string& fallback_source);
 
-  void logMergerRiskSingleTimeout(const std::string& sensor, double stamp,
-                                   double pair_wait_wall_ms, double nearest_sensor_dt_ms,
-                                   int64_t received_201, int64_t received_203,
-                                   int64_t paired, int64_t single_count);
-  void logMergerRiskPairDtExceeded(double stamp_201, double stamp_203,
-                                    double pair_dt_ms, double limit_ms);
-  void logMergerRiskCloudReuse(const std::string& sensor, double stamp, double previous_stamp);
+  // Pipeline overrun is a stateful event: enter/change/repeat/clear.  Calling
+  // this once per frame prevents FRAME_OVERRUN and SUSTAINED_OVERRUN from
+  // being printed as two independent warnings for the same observation.
+  void updatePipelineRisk(const PipelineRiskRecord& rec);
+  void clearPipelineRisk(const PipelineRiskRecord& rec);
 
-  void logPipelineRiskFrameOverrun(int frame, double stamp, double playback_rate,
-                                    double frame_budget_ms, double total_ms,
-                                    double preprocess_ms, double target_prepare_ms,
-                                    double ndt_align_ms, double ekf_ms,
-                                    double map_commit_ms, int consecutive_overruns);
-  void logPipelineRiskSustainedOverrun(int count, double estimated_backlog_frames,
-                                        double processed_hz, double input_hz);
+  // Clears a throttled non-pipeline risk and reports recovery once.  The key
+  // is stable per risk type; output_tag is the existing greppable log family.
+  void clearConsoleRisk(const std::string& key,
+                        const std::string& output_tag);
 
   void logOdomRiskRawStepExceeded(int frame, double stamp, double sensor_dt_ms,
                                    double raw_dx, double raw_dy, double raw_dz,
@@ -385,6 +400,16 @@ public:
 private:
   std::string timestamp() const;
   void maybeFlushCsv();
+  void writePipelineRisk(const char* event,
+                         const PipelineRiskRecord& rec,
+                         const std::string& previous_reason = "");
+  bool shouldEmitConsoleRisk(const std::string& key,
+                             const std::string& reason);
+
+  struct ConsoleRiskState {
+    std::string reason;
+    std::chrono::steady_clock::time_point last_emit;
+  };
 
   RuntimeDiagnosticsConfig cfg_;
   std::string output_dir_;
@@ -411,7 +436,15 @@ private:
   std::chrono::steady_clock::time_point last_csv_flush_;
   std::chrono::steady_clock::time_point last_health_console_;
   std::chrono::steady_clock::time_point last_pipeline_console_;
+  std::chrono::steady_clock::time_point last_pipeline_risk_console_;
   uint64_t last_pipeline_queue_drop_total_ = 0;
+  uint64_t last_pipeline_processed_total_ = 0;
+  int last_pipeline_overrun_count_ = 0;
+  bool pipeline_risk_active_ = false;
+  int pipeline_risk_level_ = 0;
+  std::string pipeline_risk_reason_;
+  std::mutex console_risk_mutex_;
+  std::map<std::string, ConsoleRiskState> console_risk_states_;
 
   mutable std::mutex rate_mutex_;
   uint64_t callback_total_ = 0;

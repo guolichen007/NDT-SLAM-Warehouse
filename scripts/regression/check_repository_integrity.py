@@ -355,12 +355,84 @@ def ndt_observability_contract_failures() -> list[str]:
     return failures
 
 
+def runtime_console_contract_failures() -> list[str]:
+    failures: list[str] = []
+    paths = (
+        Path("src/ndt_slam/config/live_longterm_mapping.yaml"),
+        Path("src/ndt_slam/include/ndt_slam/runtime_diagnostics.hpp"),
+        Path("src/ndt_slam/src/runtime_diagnostics.cpp"),
+        Path("src/ndt_slam/src/ndt_slam.cpp"),
+        Path("src/ndt_slam/src/PointCloudMerger.cpp"),
+        Path("src/ndt_slam/test/runtime_diagnostics_test.cpp"),
+        Path("src/ndt_slam/CMakeLists.txt"),
+    )
+    try:
+        texts = {
+            path: (ROOT / path).read_text(encoding="utf-8")
+            for path in paths
+        }
+    except OSError as error:
+        return [f"runtime console contract cannot be read: {error}"]
+
+    config = texts[paths[0]]
+    combined = "\n".join(texts.values())
+    required_config = (
+        "console_period_sec: 5.0",
+        "risk_repeat_period_sec: 5.0",
+        "summary_interval_sec: 5.0",
+        "debug_perf: false",
+        "csv_enabled: true",
+    )
+    for token in required_config:
+        if token not in config:
+            failures.append(
+                f"production console config missing {token!r}")
+
+    required_runtime = (
+        "runtime_frames.csv",
+        "writeNdtFrame",
+        "[PIPELINE_HEALTH]",
+        "updatePipelineRisk",
+        "clearPipelineRisk",
+        "shouldEmitConsoleRisk",
+        "clearConsoleRisk",
+        '"ENTER"',
+        '"CHANGE"',
+        '"REPEAT"',
+        '"CLEAR"',
+        "[MERGER_RISK_",
+        "[MERGER_RISK_CLEAR]",
+        "diagnostic_log_period_sec_",
+        "RuntimeDiagnosticsTest",
+        "runtime_diagnostics_test",
+    )
+    for token in required_runtime:
+        if token not in combined:
+            failures.append(
+                f"runtime console contract missing {token!r}")
+
+    forbidden = (
+        "logPipelineRiskFrameOverrun",
+        "logPipelineRiskSustainedOverrun",
+        "[PIPELINE_RISK] reason=FRAME_OVERRUN",
+        "[PIPELINE_RISK] reason=SUSTAINED_OVERRUN",
+        "fallback to full ground",
+    )
+    for token in forbidden:
+        if token in combined:
+            failures.append(
+                f"per-frame or unsafe runtime contract remains: {token!r}")
+
+    return failures
+
+
 def main() -> int:
     failures: list[str] = runtime_so3_contract_failures()
     failures.extend(pending_origin_contract_failures())
     failures.extend(stationary_motion_contract_failures())
     failures.extend(registration_source_contract_failures())
     failures.extend(ndt_observability_contract_failures())
+    failures.extend(runtime_console_contract_failures())
     try:
         paths = tracked_paths()
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:

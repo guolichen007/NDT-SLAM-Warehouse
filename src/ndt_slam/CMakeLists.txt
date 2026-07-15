@@ -283,6 +283,13 @@ if(CATKIN_ENABLE_TESTING)
     target_link_libraries(ndt_observability_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
+
+  catkin_add_gtest(runtime_diagnostics_test
+    test/runtime_diagnostics_test.cpp)
+  if(TARGET runtime_diagnostics_test)
+    target_link_libraries(runtime_diagnostics_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
 endif()
 
 install(TARGETS ndt_slam_lib ndt_slam_node pointcloud_merger cloud_diagnostics

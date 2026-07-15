@@ -47,14 +47,14 @@ public:
         nh_.param<double>("sync/timer_period_sec", timer_period_sec_, 0.010);
         nh_.param<int>("sync/max_queue_size", max_queue_size_, 8);
         nh_.param<int>("sync/subscriber_queue_size", subscriber_queue_size_, 10);
-        nh_.param<double>("sync/diagnostic_log_period_sec", diagnostic_log_period_sec_, 2.0);
+        nh_.param<double>("sync/diagnostic_log_period_sec", diagnostic_log_period_sec_, 5.0);
 
         max_pair_dt_sec_ = std::max(0.0, max_pair_dt_sec_);
         stale_timeout_sec_ = std::max(0.001, stale_timeout_sec_);
         timer_period_sec_ = std::max(0.001, timer_period_sec_);
         max_queue_size_ = std::max(1, max_queue_size_);
         subscriber_queue_size_ = std::max(1, subscriber_queue_size_);
-        diagnostic_log_period_sec_ = std::max(0.1, diagnostic_log_period_sec_);
+        diagnostic_log_period_sec_ = std::max(5.0, diagnostic_log_period_sec_);
 
         XmlRpc::XmlRpcValue lidars;
         if (!nh_.getParam("lidars", lidars) ||
@@ -407,13 +407,51 @@ private:
         diag_msg.data = diag.str();
         pub_diagnostics_.publish(diag_msg);
         ROS_DEBUG_STREAM("[MergerSync] " << diag_msg.data);
-        ROS_INFO_STREAM_THROTTLE(diagnostic_log_period_sec_,
-                                 "[MergerSync] " << diag_msg.data);
+
+        const std::string merger_risk_reason =
+            work.mode == "single_timeout"
+                ? "SINGLE_TIMEOUT"
+                : (work.pair_dt_sec > max_pair_dt_sec_
+                       ? "PAIR_DT_EXCEEDED" : "");
+        const SteadyClock::time_point merger_risk_now = SteadyClock::now();
+        if (!merger_risk_reason.empty()) {
+            const bool entering = !merger_risk_active_;
+            const bool changed = merger_risk_active_ &&
+                merger_risk_reason != merger_risk_reason_;
+            const bool repeat_due = merger_risk_active_ && !changed &&
+                std::chrono::duration<double>(
+                    merger_risk_now - last_merger_risk_log_time_).count() >=
+                    diagnostic_log_period_sec_;
+            if (entering || changed || repeat_due) {
+                const char* event = entering ? "ENTER" :
+                    (changed ? "CHANGE" : "REPEAT");
+                std::cout << "[MERGER_RISK_" << event << "]"
+                          << " reason=" << merger_risk_reason;
+                if (changed) {
+                    std::cout << " previous_reason=" << merger_risk_reason_;
+                }
+                std::cout << " " << diag_msg.data << std::endl;
+                last_merger_risk_log_time_ = merger_risk_now;
+            }
+            merger_risk_active_ = true;
+            merger_risk_reason_ = merger_risk_reason;
+        } else if (merger_risk_active_) {
+            std::cout << "[MERGER_RISK_CLEAR] reason="
+                      << merger_risk_reason_ << " " << diag_msg.data
+                      << std::endl;
+            merger_risk_active_ = false;
+            merger_risk_reason_.clear();
+        }
 
         // ========== Runtime Diagnostics: MERGER_HEALTH ==========
         {
-            static ros::Time last_merger_health_time;
-            if ((ros::Time::now() - last_merger_health_time).toSec() >= 1.0) {
+            static SteadyClock::time_point last_merger_health_time =
+                SteadyClock::now();
+            static std::uint64_t last_merger_health_published = 0;
+            const SteadyClock::time_point health_now = SteadyClock::now();
+            const double health_elapsed_sec = std::chrono::duration<double>(
+                health_now - last_merger_health_time).count();
+            if (health_elapsed_sec >= diagnostic_log_period_sec_) {
                 int64_t received_201 = 0, received_203 = 0;
                 int64_t paired = paired_count_.load();
                 int64_t single_201 = 0, single_203 = 0;
@@ -436,7 +474,9 @@ private:
 
                 double total_published = published_count_.load();
                 double pair_ratio = total_published > 0 ? paired / total_published : 0.0;
-                double output_hz = total_published / std::max(0.001, (ros::Time::now() - last_merger_health_time).toSec());
+                double output_hz =
+                    (total_published - last_merger_health_published) /
+                    std::max(0.001, health_elapsed_sec);
 
                 std::cout << "[MERGER_HEALTH]"
                           << " received_201=" << received_201
@@ -454,40 +494,12 @@ private:
                           << " last_mode=" << work.mode
                           << std::endl;
 
-                // SINGLE_TIMEOUT 风险输出
-                if (work.mode == "single_timeout") {
-                    std::string sensor = work.frames[0].lidar_name;
-                    std::cout << "[MERGER_RISK] reason=SINGLE_TIMEOUT"
-                              << " sensor=" << sensor
-                              << " stamp=" << std::fixed << std::setprecision(6) << latest_stamp.toSec()
-                              << " pair_wait_wall_ms=" << std::setprecision(1) << work.oldest_age_sec * 1000.0
-                              << " nearest_sensor_dt_ms=" << (work.pair_dt_sec < 0 ? -1.0 : work.pair_dt_sec * 1000.0)
-                              << " received_201=" << received_201
-                              << " received_203=" << received_203
-                              << " paired=" << paired
-                              << " single_count=" << fallback_count_.load()
-                              << std::endl;
-                }
-
-                // PAIR_DT_EXCEEDED 风险输出
-                if (work.pair_dt_sec > max_pair_dt_sec_) {
-                    std::cout << "[MERGER_RISK] reason=PAIR_DT_EXCEEDED"
-                              << " stamp_201=" << std::fixed << std::setprecision(6) << (work.frames.size() > 0 ? work.frames[0].frame.stamp.toSec() : 0.0)
-                              << " stamp_203=" << (work.frames.size() > 1 ? work.frames[1].frame.stamp.toSec() : 0.0)
-                              << " pair_dt_ms=" << std::setprecision(1) << work.pair_dt_sec * 1000.0
-                              << " limit_ms=" << max_pair_dt_sec_ * 1000.0
-                              << std::endl;
-                }
-
-                last_merger_health_time = ros::Time::now();
+                last_merger_health_time = health_now;
+                last_merger_health_published =
+                    static_cast<std::uint64_t>(total_published);
             }
         }
 
-        if (work.mode == "single_timeout") {
-            ROS_WARN_STREAM_THROTTLE(
-                1.0, "[MergerSync] counterpart timeout; published true single cloud: "
-                         << diag_msg.data);
-        }
     }
 
     ros::NodeHandle nh_;
@@ -509,7 +521,10 @@ private:
     double timer_period_sec_ = 0.010;
     int max_queue_size_ = 8;
     int subscriber_queue_size_ = 10;
-    double diagnostic_log_period_sec_ = 2.0;
+    double diagnostic_log_period_sec_ = 5.0;
+    bool merger_risk_active_ = false;
+    std::string merger_risk_reason_;
+    SteadyClock::time_point last_merger_risk_log_time_{};
 
     std::atomic<std::uint64_t> published_count_{0};
     std::atomic<std::uint64_t> paired_count_{0};

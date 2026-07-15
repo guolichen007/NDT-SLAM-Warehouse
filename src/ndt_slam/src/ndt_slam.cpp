@@ -540,7 +540,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         // 日志配置
         if (config["logging"]) {
             auto log = config["logging"];
-            debug_cfg_.summary_interval_sec = log["summary_interval_sec"].as<double>(2.0);
+            debug_cfg_.summary_interval_sec = log["summary_interval_sec"].as<double>(5.0);
             debug_cfg_.warn_throttle_sec = log["warn_throttle_sec"].as<double>(2.0);
             debug_cfg_.debug_config = log["debug_config"].as<bool>(false);
             debug_cfg_.debug_frame_start = log["debug_frame_start"].as<bool>(false);
@@ -549,7 +549,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             debug_cfg_.debug_motion_gate = log["debug_motion_gate"].as<bool>(false);
             debug_cfg_.debug_pose_flow = log["debug_pose_flow"].as<bool>(false);
             debug_cfg_.debug_map_commit = log["debug_map_commit"].as<bool>(false);
-            debug_cfg_.debug_perf = log["debug_perf"].as<bool>(true);
+            debug_cfg_.debug_perf = log["debug_perf"].as<bool>(false);
             debug_cfg_.debug_cargo = log["debug_cargo"].as<bool>(false);
             debug_cfg_.debug_cargo_bottom = log["debug_cargo_bottom"].as<bool>(false);
             debug_cfg_.debug_cargo_warning = log["debug_cargo_warning"].as<bool>(false);
@@ -1693,7 +1693,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         if (config["debug"] && config["debug"]["runtime_diagnostics"]) {
             auto diag = config["debug"]["runtime_diagnostics"];
             runtime_diag_config_.enabled = diag["enabled"].as<bool>(false);
-            runtime_diag_config_.console_period_sec = diag["console_period_sec"].as<double>(1.0);
+            runtime_diag_config_.console_period_sec = diag["console_period_sec"].as<double>(5.0);
+            runtime_diag_config_.risk_repeat_period_sec =
+                diag["risk_repeat_period_sec"].as<double>(5.0);
             runtime_diag_config_.csv_enabled = diag["csv_enabled"].as<bool>(true);
             runtime_diag_config_.csv_flush_period_sec = diag["csv_flush_period_sec"].as<double>(1.0);
             runtime_diag_config_.warn_consecutive_overrun_frames = diag["warn_consecutive_overrun_frames"].as<int>(3);
@@ -1705,9 +1707,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             // 默认输出目录
             diag_output_dir_ = "/home/ydkj/ndt_slam_runtime_data";
 
-            ROS_INFO("[RuntimeDiagnostics] enabled=%d console_period=%.1f csv=%d csv_flush=%.1f",
+            ROS_INFO("[RuntimeDiagnostics] enabled=%d console_period=%.1f risk_repeat=%.1f csv=%d csv_flush=%.1f",
                      runtime_diag_config_.enabled ? 1 : 0,
                      runtime_diag_config_.console_period_sec,
+                     runtime_diag_config_.risk_repeat_period_sec,
                      runtime_diag_config_.csv_enabled ? 1 : 0,
                      runtime_diag_config_.csv_flush_period_sec);
         }
@@ -3883,7 +3886,7 @@ void NdtSlamNode::processCloudThread() {
             diag_stage.icp_prepare_ms = elapsedMs(icp_prepare_start);
 
             ROS_INFO_THROTTLE(
-                1.0,
+                5.0,
                 "[ICP_FLOW] enabled=%d running=%d copies=%llu jobs=%llu "
                 "threads=%llu used=%llu stale_drop=%llu",
                 icp_refine_cfg_.enabled ? 1 : 0,
@@ -4291,6 +4294,9 @@ void NdtSlamNode::processCloudThread() {
                     diag_frame_index_, diag_last_cloud_stamp_, last_ndt_fitness_,
                     last_ndt_iterations_, last_actual_target_source_, last_target_points_,
                     last_source_points_, last_ndt_time_ms_, average_process_time_ms_);
+            } else {
+                runtime_diag_.clearConsoleRisk(
+                    "NDT_NOT_CONVERGED", "NDT_RISK");
             }
 
             // Fitness spike 检测
@@ -4302,6 +4308,9 @@ void NdtSlamNode::processCloudThread() {
                     diag_frame_index_, diag_last_cloud_stamp_, last_ndt_fitness_,
                     fitness_median, fitness_mad, 2.0, last_ndt_converged_,
                     last_raw_step_, diag_innovation);
+            } else {
+                runtime_diag_.clearConsoleRisk(
+                    "NDT_FITNESS_SPIKE", "NDT_RISK");
             }
 
             // Frame overrun 检测
@@ -4311,17 +4320,19 @@ void NdtSlamNode::processCloudThread() {
             if (diag_prediction_only) {
                 runtime_diag_.incrementPredictionOnly();
                 diag_consecutive_prediction_only_++;
-                if (diag_consecutive_prediction_only_ == 1) {
-                    runtime_diag_.logEkfRiskPredictionOnly(
-                        diag_frame_index_, diag_last_cloud_stamp_, diag_reject_reason,
-                        last_ndt_fitness_, last_ndt_converged_, diag_innovation,
-                        diag_consecutive_prediction_only_);
-                }
+                runtime_diag_.logEkfRiskPredictionOnly(
+                    diag_frame_index_, diag_last_cloud_stamp_, diag_reject_reason,
+                    last_ndt_fitness_, last_ndt_converged_, diag_innovation,
+                    diag_consecutive_prediction_only_);
                 if (diag_consecutive_prediction_only_ > 3) {
                     runtime_diag_.logEkfRiskPredictionStreak(
                         diag_consecutive_prediction_only_, 0, diag_last_valid_ndt_stamp_);
                 }
             } else {
+                runtime_diag_.clearConsoleRisk(
+                    "EKF_PREDICTION_ONLY", "EKF_RISK");
+                runtime_diag_.clearConsoleRisk(
+                    "EKF_PREDICTION_STREAK", "EKF_RISK");
                 runtime_diag_.resetConsecutivePredictionOnly();
                 diag_consecutive_prediction_only_ = 0;
                 diag_last_valid_ndt_stamp_ = diag_last_cloud_stamp_;
@@ -4339,6 +4350,9 @@ void NdtSlamNode::processCloudThread() {
                     diag_raw_ndt_step_from_previous,
                     diag_max_allowed_step, last_ndt_fitness_,
                     last_ndt_converged_);
+            } else {
+                runtime_diag_.clearConsoleRisk(
+                    "ODOM_RAW_STEP", "ODOM_RISK");
             }
 
             // Output step violation 检测
@@ -4349,18 +4363,21 @@ void NdtSlamNode::processCloudThread() {
                     diag_frame_index_, diag_last_cloud_stamp_,
                     diag_output_dx, diag_output_dy, 0.0,
                     diag_output_step, diag_max_allowed_step);
+            } else {
+                runtime_diag_.clearConsoleRisk(
+                    "ODOM_OUTPUT_STEP", "ODOM_RISK");
             }
 
             // 周期性健康日志
             static ros::Time last_diag_health_time;
-            if ((ros::Time::now() - last_diag_health_time).toSec() >= 1.0) {
+            if ((ros::Time::now() - last_diag_health_time).toSec() >= 5.0) {
                 logNdtHealthPeriodic();
                 last_diag_health_time = ros::Time::now();
             }
 
             // Cargo 健康日志
             static ros::Time last_cargo_health_time;
-            if ((ros::Time::now() - last_cargo_health_time).toSec() >= 1.0) {
+            if ((ros::Time::now() - last_cargo_health_time).toSec() >= 2.0) {
                 logCargoHealthPeriodic();
                 last_cargo_health_time = ros::Time::now();
             }
@@ -4374,7 +4391,7 @@ void NdtSlamNode::processCloudThread() {
             diag_pending_ndt_record_valid_ = true;
         }
 
-        ROS_INFO_THROTTLE(2.0,
+        ROS_INFO_THROTTLE(5.0,
             "[PipelineCounters] callback=%llu queue_drop=%llu dequeued=%llu empty=%llu too_few=%llu duplicate=%llu invalid_dt=%llu ndt_attempt=%llu converged=%llu nonconverged=%llu ekf_accept=%llu ekf_reject=%llu odom=%llu",
             static_cast<unsigned long long>(cloud_callback_count_.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(queue_overwrite_drop_count_.load(std::memory_order_relaxed)),
@@ -4466,6 +4483,23 @@ void NdtSlamNode::processCloudThread() {
                     queue_overwrite_drop_count_.load(
                         std::memory_order_relaxed));
             const double frame_budget_ms = final_rate.frame_budget_ms;
+            PipelineRiskRecord pipeline_risk;
+            pipeline_risk.frame = diag_pending_ndt_record_.frame_index;
+            pipeline_risk.stamp = diag_pending_ndt_record_.cloud_stamp;
+            pipeline_risk.frame_budget_ms = frame_budget_ms;
+            pipeline_risk.total_ms = average_process_time_ms_;
+            pipeline_risk.preprocess_ms =
+                diag_pending_ndt_record_.preprocess_ms;
+            pipeline_risk.target_prepare_ms =
+                diag_pending_ndt_record_.target_prepare_ms;
+            pipeline_risk.ndt_align_ms =
+                diag_pending_ndt_record_.ndt_align_ms;
+            pipeline_risk.ekf_ms = diag_pending_ndt_record_.ekf_ms;
+            pipeline_risk.map_commit_ms =
+                diag_pending_ndt_record_.map_commit_ms;
+            pipeline_risk.processed_hz = final_rate.processed_hz;
+            pipeline_risk.input_hz = final_rate.callback_hz;
+            pipeline_risk.drop_ratio = final_rate.drop_ratio;
             if (frame_budget_ms > 0.0 &&
                 average_process_time_ms_ > frame_budget_ms) {
                 std::size_t final_queue_size = 0U;
@@ -4474,23 +4508,21 @@ void NdtSlamNode::processCloudThread() {
                     final_queue_size = cloud_queue_.size();
                 }
                 runtime_diag_.incrementFrameOverrun();
-                runtime_diag_.logPipelineRiskFrameOverrun(
-                    diag_pending_ndt_record_.frame_index,
-                    diag_pending_ndt_record_.cloud_stamp, 1.0,
-                    frame_budget_ms, average_process_time_ms_,
-                    diag_pending_ndt_record_.preprocess_ms,
-                    diag_pending_ndt_record_.target_prepare_ms,
-                    diag_pending_ndt_record_.ndt_align_ms,
-                    diag_pending_ndt_record_.ekf_ms,
-                    diag_pending_ndt_record_.map_commit_ms,
-                    runtime_diag_.consecutiveOverruns());
-                if (runtime_diag_.consecutiveOverruns() >= 3) {
-                    runtime_diag_.logPipelineRiskSustainedOverrun(
-                        runtime_diag_.consecutiveOverruns(),
-                        static_cast<double>(final_queue_size),
-                        final_rate.processed_hz, final_rate.callback_hz);
-                }
+                pipeline_risk.consecutive_overruns =
+                    runtime_diag_.consecutiveOverruns();
+                pipeline_risk.estimated_backlog_frames =
+                    static_cast<double>(final_queue_size);
+                const bool sustained =
+                    pipeline_risk.consecutive_overruns >=
+                    runtime_diag_config_.warn_consecutive_overrun_frames;
+                pipeline_risk.reason = sustained
+                    ? "SUSTAINED_OVERRUN" : "FRAME_OVERRUN";
+                pipeline_risk.level = sustained ? 2 : 1;
+                runtime_diag_.updatePipelineRisk(pipeline_risk);
             } else {
+                pipeline_risk.consecutive_overruns =
+                    runtime_diag_.consecutiveOverruns();
+                runtime_diag_.clearPipelineRisk(pipeline_risk);
                 runtime_diag_.resetConsecutiveOverruns();
             }
             average_process_time_ms_ = elapsedMs(start_time);
@@ -7924,7 +7956,7 @@ bool NdtSlamNode::evaluateMotionGateForMapCommit(
     }
 
     ROS_INFO_THROTTLE(
-        1.0,
+        5.0,
         "[MOTION_GATE_INVARIANT] stationary=%d pose_modified=%d "
         "position_modified=%d velocity_modified=%d map_commit_allowed=%d "
         "checks=%llu blocked=%llu violations=%llu",
