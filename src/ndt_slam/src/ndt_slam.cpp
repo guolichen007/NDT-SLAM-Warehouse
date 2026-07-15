@@ -1306,6 +1306,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.compact_max_size_relative_step = std::clamp(
                 hcl["compact_max_size_relative_step"].as<float>(0.25F),
                 0.05F, 0.75F);
+            hook_lock_config_.suspended_min_ground_clearance_m = std::clamp(
+                hcl["suspended_min_ground_clearance_m"].as<float>(0.30F),
+                0.10F, 1.50F);
 
             // locked search margin
             hook_lock_config_.locked_search_margin_x = hcl["locked_search_margin_x"].as<float>(0.30f);
@@ -1418,6 +1421,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     tb["ground_expected_height_m"].as<float>(0.0f);
                 odom_anchor_config_.tight_box.ground_max_expected_height_delta_m =
                     tb["ground_max_expected_height_delta_m"].as<float>(0.30f);
+                odom_anchor_config_.tight_box.empty_max_hag_candidate_points =
+                    std::clamp(
+                        tb["empty_max_hag_candidate_points"].as<int>(2),
+                        0, 20);
                 odom_anchor_config_.tight_box.percentile_low = tb["percentile_low"].as<float>(0.08f);
                 odom_anchor_config_.tight_box.percentile_high = tb["percentile_high"].as<float>(0.92f);
                 odom_anchor_config_.tight_box.margin_xy_m = tb["margin_xy_m"].as<float>(0.05f);
@@ -2375,8 +2382,18 @@ void NdtSlamNode::processCloudThread() {
             hook_input_cloud && !hook_input_cloud->empty()) {
             hook_fixed_cargo_ = detectCargoAroundOdomAnchor(hook_input_cloud, msg->header.stamp);
                 hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
+                hook_fixed_cargo_.lidar_lift_evidence =
+                    hook_fixed_cargo_.valid &&
+                    hook_fixed_cargo_.ground_reference_valid &&
+                    hook_fixed_bottom_.valid &&
+                    hook_fixed_bottom_.source == "points_visible_side" &&
+                    std::isfinite(hook_fixed_bottom_.bottom_z_base) &&
+                    std::isfinite(hook_fixed_cargo_.ground_z) &&
+                    hook_fixed_bottom_.bottom_z_base -
+                            hook_fixed_cargo_.ground_z >=
+                        hook_lock_config_.suspended_min_ground_clearance_m;
                 if (hook_is_empty && localization_evidence_valid &&
-                    hook_fixed_cargo_.observation_valid &&
+                    !hook_fixed_cargo_.lidar_lift_evidence &&
                     hook_fixed_bottom_.valid &&
                     hook_fixed_cargo_.core_points_base &&
                     hook_fixed_bottom_.source == "points_visible_side") {
@@ -2405,8 +2422,8 @@ void NdtSlamNode::processCloudThread() {
                     hook_observation_association_stamp_ = msg->header.stamp;
                 }
                 lidar_no_cargo_evidence_.update({
-                    true, hook_fixed_cargo_.observation_valid,
-                    localization_evidence_valid, hook_fixed_cargo_.valid,
+                    true, hook_fixed_cargo_.outcome,
+                    localization_evidence_valid,
                     hook_lock_.state != HookCargoLockState::EMPTY,
                     msg->header.stamp.toSec()});
 
@@ -2461,11 +2478,11 @@ void NdtSlamNode::processCloudThread() {
                 last_anchor_marker_stamp_ = msg->header.stamp;
             }
         } else if (!skip_hook_this_frame && hook_detection_due) {
-            // This is a real due-frame empty observation. A rate-limited frame
-            // is deliberately ignored and must not age the cargo lock.
+            // Detection ran, but an empty/invalid input has no explicit
+            // negative evidence and therefore remains UNKNOWN.
             last_anchor_detect_stamp_ = msg->header.stamp;
-            hook_fixed_cargo_.valid = false;
-            hook_fixed_bottom_.valid = false;
+            hook_fixed_cargo_ = HookCargoDetection{};
+            hook_fixed_bottom_ = HookCargoBottomEstimate{};
             if (hook_allows_tracking) {
                 updateHookCargoLock(
                     hook_fixed_cargo_, hook_fixed_bottom_, msg->header.stamp);
@@ -2474,7 +2491,8 @@ void NdtSlamNode::processCloudThread() {
                 hook_observation_association_stamp_ = msg->header.stamp;
             }
             lidar_no_cargo_evidence_.update({
-                true, false, localization_evidence_valid, false,
+                true, CargoObservationOutcome::UNKNOWN,
+                localization_evidence_valid,
                 hook_lock_.state != HookCargoLockState::EMPTY,
                 msg->header.stamp.toSec()});
         }
@@ -8176,26 +8194,13 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             crop_cloud->push_back(p);
         }
     }
-
-    if (crop_cloud->empty()) {
-        result.reject_reason = "crop_empty";
-        ROS_DEBUG_THROTTLE(1.0, "[OdomAnchorDetect] input=%zu crop=0 anchor=(%.2f,%.2f)",
-                          cloud_base->size(), cx, cy);
-        return result;
-    }
     result.roi_finite_points = crop_cloud->size();
 
-    result.raw_roi_min_z = minimumFiniteZ(*crop_cloud);
-    if (!std::isfinite(result.raw_roi_min_z)) {
-        result.reject_reason = "raw_roi_no_finite_z";
-        return result;
-    }
-
-    // HAG 预过滤（如果启用）
-    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    if (odom_anchor_config_.tight_box.hag_filter_enabled) {
-        // Ground is estimated only from a spatially distributed external ring.
-        const auto& tight = odom_anchor_config_.tight_box;
+    // A negative cargo observation is accepted only when the external ring
+    // proves that the LiDAR actually observed the ROI surroundings. Detector
+    // failures with residual HAG points remain UNKNOWN.
+    const auto& tight = odom_anchor_config_.tight_box;
+    if (tight.hag_filter_enabled) {
         ExternalGroundConfig ground_config;
         ground_config.ring_width_m = tight.ground_ring_width_m;
         ground_config.cell_size_m = tight.ground_cell_size_m;
@@ -8203,8 +8208,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         ground_config.minimum_points_per_cell =
             tight.ground_min_points_per_cell;
         ground_config.minimum_quadrants = tight.ground_min_quadrants;
-        ground_config.allow_opposite_sides =
-            tight.ground_allow_opposite_sides;
+        ground_config.allow_opposite_sides = tight.ground_allow_opposite_sides;
         ground_config.maximum_range_m = tight.ground_max_range_m;
         ground_config.expected_height_enabled =
             tight.ground_expected_height_enabled;
@@ -8217,6 +8221,41 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             odom_anchor_config_.search_half_y, ground_config);
         result.ground_z = ground.z_m;
         result.ground_reference_valid = ground.valid;
+        result.roi_coverage_valid = ground.valid;
+    }
+
+    const auto classify_outcome = [&result, &tight](bool cargo_detected) {
+        result.outcome = classifyCargoObservationOutcome({
+            true, result.ground_reference_valid,
+            result.roi_coverage_valid, result.hag_candidate_points,
+            static_cast<std::size_t>(
+                std::max(0, tight.empty_max_hag_candidate_points)),
+            cargo_detected});
+    };
+
+    if (crop_cloud->empty()) {
+        classify_outcome(false);
+        result.reject_reason =
+            result.outcome == CargoObservationOutcome::EMPTY_CONFIRMED
+                ? "empty_confirmed_no_hag_candidates"
+                : "crop_empty_unknown";
+        ROS_DEBUG_THROTTLE(
+            1.0, "[OdomAnchorDetect] input=%zu crop=0 ground_valid=%d "
+            "outcome=%u anchor=(%.2f,%.2f)",
+            cloud_base->size(), result.ground_reference_valid ? 1 : 0,
+            static_cast<unsigned int>(result.outcome), cx, cy);
+        return result;
+    }
+
+    result.raw_roi_min_z = minimumFiniteZ(*crop_cloud);
+    if (!std::isfinite(result.raw_roi_min_z)) {
+        result.reject_reason = "raw_roi_no_finite_z";
+        return result;
+    }
+
+    // HAG 预过滤（如果启用）
+    pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    if (tight.hag_filter_enabled) {
         if (result.ground_reference_valid) {
             for (const auto& point : crop_cloud->points) {
                 const float hag = point.z - result.ground_z;
@@ -8233,11 +8272,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     } else {
         filtered_cloud = crop_cloud;
     }
-    result.observation_valid =
-        result.roi_finite_points >= static_cast<std::size_t>(
-            std::max(1, odom_anchor_config_.weak_min_points)) &&
-        (!odom_anchor_config_.tight_box.hag_filter_enabled ||
-         result.ground_reference_valid);
+    result.hag_candidate_points = filtered_cloud->size();
+    classify_outcome(false);
 
     if (!filtered_cloud->empty()) {
         result.hag_filtered_min_z = minimumFiniteZ(*filtered_cloud);
@@ -8257,9 +8293,17 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     }
 
     if (filtered_cloud->empty()) {
-        result.reject_reason = "hag_filter_empty";
+        result.reject_reason =
+            result.outcome == CargoObservationOutcome::EMPTY_CONFIRMED
+                ? "empty_confirmed_no_hag_candidates"
+                : "hag_filter_empty_unknown";
         ROS_DEBUG_THROTTLE(1.0, "[OdomAnchorDetect] input=%zu crop=%zu hag_filter=0",
                           cloud_base->size(), crop_cloud->size());
+        return result;
+    }
+
+    if (result.outcome == CargoObservationOutcome::EMPTY_CONFIRMED) {
+        result.reject_reason = "empty_confirmed_noise_floor";
         return result;
     }
 
@@ -8268,7 +8312,16 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     pcl::VoxelGrid<pcl::PointXYZ> vf;
     vf.setInputCloud(filtered_cloud);
     vf.setLeafSize(0.05f, 0.05f, 0.05f);
-    vf.filter(*voxel_cloud);
+    try {
+        vf.filter(*voxel_cloud);
+    } catch (const std::exception& error) {
+        result.reject_reason =
+            std::string("voxel_filter_failed:") + error.what();
+        return result;
+    } catch (...) {
+        result.reject_reason = "voxel_filter_failed:unknown";
+        return result;
+    }
 
     if (voxel_cloud->size() < static_cast<size_t>(odom_anchor_config_.weak_min_points)) {
         result.reject_reason = "too_few_points";
@@ -8288,7 +8341,16 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     ec.setMaxClusterSize(8000);
     ec.setSearchMethod(tree);
     ec.setInputCloud(voxel_cloud);
-    ec.extract(cluster_indices);
+    try {
+        ec.extract(cluster_indices);
+    } catch (const std::exception& error) {
+        result.reject_reason =
+            std::string("clustering_failed:") + error.what();
+        return result;
+    } catch (...) {
+        result.reject_reason = "clustering_failed:unknown";
+        return result;
+    }
 
     if (cluster_indices.empty()) {
         result.reject_reason = "no_clusters";
@@ -8440,6 +8502,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     result.visible_height = z95 - z05;
     result.xy_area = sx * sy;
     result.valid = true;
+    classify_outcome(true);
 
     if (debug_cfg_.debug_tight_box) {
         ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec,
@@ -8730,7 +8793,32 @@ void NdtSlamNode::updateHookCargoLock(
     const bool large_lock_observation = isLockStrongDetection(det, bottom);
     const bool compact_lock_observation =
         isCompactLockStrongDetection(det);
-    const HookLoadSnapshot hook = currentHookLoadSnapshot();
+    // REQUIRED transitions are evaluated while holding the same mutex used by
+    // the Gravity callback. This closes the outer-snapshot/inner-transition
+    // race instead of relying on two independently timed snapshots.
+    std::unique_lock<std::mutex> hook_policy_guard(
+        hook_load_state_mutex_, std::defer_lock);
+    HookLoadSnapshot hook;
+    if (hook_load_signal_role_ == HookLoadSignalRole::REQUIRED &&
+        hook_load_signal_enabled_) {
+        hook_policy_guard.lock();
+        hook = hook_load_snapshot_;
+        const double now = ros::WallTime::now().toSec();
+        const double receipt_age = now - hook.receipt_wall_sec;
+        const double progress_age = now - hook.source_progress_wall_sec;
+        if (!std::isfinite(receipt_age) || !std::isfinite(progress_age) ||
+            hook.receipt_wall_sec <= 0.0 ||
+            hook.source_progress_wall_sec <= 0.0 ||
+            receipt_age < 0.0 || progress_age < 0.0 ||
+            receipt_age > hook_load_state_stale_timeout_sec_ ||
+            progress_age > hook_load_state_stale_timeout_sec_) {
+            hook.valid = false;
+            hook.state = lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN;
+            hook.reason = "consumer_signal_stale";
+        }
+    } else {
+        hook = currentHookLoadSnapshot();
+    }
     const HookLoadState gravity_state =
         hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED
             ? HookLoadState::LOADED
@@ -8741,7 +8829,8 @@ void NdtSlamNode::updateHookCargoLock(
     const SuspendedCargoLockDecision candidate_policy =
         evaluateSuspendedCargoLock({
             hook_load_signal_role_, hook.valid, gravity_state,
-            hook_lock_config_.lock_confirm_frames});
+            hook_lock_config_.lock_confirm_frames,
+            det.lidar_lift_evidence});
     bool compact_size_continuous = true;
     if (compact_lock_observation && hook_lock_.has_last_accepted) {
         for (int axis = 0; axis < 3; ++axis) {
@@ -8783,6 +8872,13 @@ void NdtSlamNode::updateHookCargoLock(
         break;
 
     case HookCargoLockState::CANDIDATE:
+        if (!candidate_policy.allow_candidate) {
+            clearHookLock();
+            ROS_WARN_THROTTLE(
+                1.0, "[CargoLock] CANDIDATE->EMPTY policy=%s",
+                candidate_policy.reason.c_str());
+            break;
+        }
         if ((large_lock_observation ||
              (compact_lock_observation && compact_size_continuous)) &&
             (hook_lock_.confirm_count == 0 ||
@@ -8790,6 +8886,19 @@ void NdtSlamNode::updateHookCargoLock(
              (det.center_base.head<2>() -
               hook_lock_.last_accepted_center.head<2>()).norm() <=
                  hook_lock_config_.lock_max_center_step_m)) {
+            if (!candidate_policy.allow_lock) {
+                hook_lock_.confirm_count = 0;
+                hook_lock_.weak_count = 0;
+                hook_lock_.init_size_buffer.clear();
+                hook_lock_.last_accepted_center = det.center_base;
+                hook_lock_.last_accepted_size = det.size_visible;
+                hook_lock_.has_last_accepted = true;
+                hook_lock_.last_seen_stamp = stamp;
+                ROS_INFO_THROTTLE(
+                    1.0, "[CargoLock] CANDIDATE pre_lift_hold policy=%s",
+                    candidate_policy.reason.c_str());
+                break;
+            }
             if (hook_lock_.confirm_count == 0) {
                 hook_lock_.candidate_compact_profile =
                     !large_lock_observation && compact_lock_observation;
@@ -8816,7 +8925,8 @@ void NdtSlamNode::updateHookCargoLock(
                     hook_load_signal_role_, hook.valid, gravity_state,
                     hook_lock_.candidate_compact_profile
                         ? hook_lock_config_.compact_confirm_frames
-                        : hook_lock_config_.lock_confirm_frames})
+                        : hook_lock_config_.lock_confirm_frames,
+                    det.lidar_lift_evidence})
                     .required_confirm_frames;
             if (hook_lock_.confirm_count >= required_confirm_frames) {
                 hook_lock_.state = HookCargoLockState::LOCKED;
@@ -9425,32 +9535,37 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_origin_height_valid_ = false;
         cargo_origin_height_m_ = 0.0F;
         cargo_origin_height_track_id_ = cargo_fusion_track_id_;
-        {
-            std::lock_guard<std::mutex> lock(hook_load_state_mutex_);
-            if (pending_origin_height_valid_) {
-                const double origin_age =
-                    (stamp - pending_origin_stamp_).toSec();
-                const float origin_distance =
-                    (cargo_state_.center_base.head<2>() -
-                     pending_origin_center_base_).norm();
-                cargo_origin_height_valid_ =
-                    std::isfinite(origin_age) && origin_age >= 0.0 &&
-                    origin_age <= origin_history_max_age_sec_ &&
-                    std::isfinite(origin_distance) &&
-                    origin_distance <= origin_match_max_distance_m_;
-                if (cargo_origin_height_valid_) {
-                    cargo_origin_height_m_ = pending_origin_height_m_;
-                }
-                // An origin sample belongs to one EMPTY->LOADED lifecycle only.
-                pending_origin_height_valid_ = false;
-            }
-        }
     } else if (!active_track && cargo_fusion_track_active_) {
         cargo_bottom_fusion_.reset();
         cargo_origin_height_valid_ = false;
         formal_cargo_removal_authorized_ = false;
     }
     cargo_fusion_track_active_ = active_track;
+
+    // Gravity may become LOADED after a lift-evidence track has already
+    // started. Consume the EMPTY-phase origin as soon as it becomes available,
+    // not only on the first active-track frame.
+    if (active_track && !cargo_origin_height_valid_) {
+        std::lock_guard<std::mutex> lock(hook_load_state_mutex_);
+        if (pending_origin_height_valid_) {
+            const double origin_age =
+                (stamp - pending_origin_stamp_).toSec();
+            const float origin_distance =
+                (cargo_state_.center_base.head<2>() -
+                 pending_origin_center_base_).norm();
+            cargo_origin_height_valid_ =
+                std::isfinite(origin_age) && origin_age >= 0.0 &&
+                origin_age <= origin_history_max_age_sec_ &&
+                std::isfinite(origin_distance) &&
+                origin_distance <= origin_match_max_distance_m_;
+            if (cargo_origin_height_valid_) {
+                cargo_origin_height_m_ = pending_origin_height_m_;
+                cargo_origin_height_track_id_ = cargo_fusion_track_id_;
+            }
+            // An origin sample belongs to one EMPTY->LOADED lifecycle only.
+            pending_origin_height_valid_ = false;
+        }
+    }
 
     CargoBottomObservation observation;
     observation.track_valid = active_track;

@@ -1123,8 +1123,11 @@ private:
     // ========== HookFixedCargoDetector ==========
     struct HookCargoDetection {
         bool valid = false;
-        bool observation_valid = false;
+        CargoObservationOutcome outcome = CargoObservationOutcome::UNKNOWN;
+        bool roi_coverage_valid = false;
         std::size_t roi_finite_points = 0U;
+        std::size_t hag_candidate_points = 0U;
+        bool lidar_lift_evidence = false;
         int local_id = 0;
         Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f size_visible = Eigen::Vector3f::Zero();
@@ -1241,6 +1244,7 @@ private:
             bool ground_expected_height_enabled = true;
             float ground_expected_height_m = 0.0f;
             float ground_max_expected_height_delta_m = 0.30f;
+            int empty_max_hag_candidate_points = 2;
 
             // 分位数参数
             float percentile_low = 0.08f;
@@ -1420,6 +1424,7 @@ private:
         float compact_min_xy_area = 0.12F;
         int compact_confirm_frames = 5;
         float compact_max_size_relative_step = 0.25F;
+        float suspended_min_ground_clearance_m = 0.30F;
 
         // locked search margin
         float locked_search_margin_x = 0.30f;

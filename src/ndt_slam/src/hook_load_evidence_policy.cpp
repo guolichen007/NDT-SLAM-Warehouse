@@ -111,6 +111,7 @@ SuspendedCargoLockDecision evaluateSuspendedCargoLock(
 
     if (input.role == HookLoadSignalRole::REQUIRED) {
         decision.allow_candidate = gravity_loaded;
+        decision.allow_lock = gravity_loaded;
         decision.reason = gravity_loaded
             ? "required_gravity_loaded" : "required_gravity_unavailable";
         return decision;
@@ -118,22 +119,41 @@ SuspendedCargoLockDecision evaluateSuspendedCargoLock(
 
     decision.allow_candidate = true;
     if (input.role == HookLoadSignalRole::DISABLED) {
+        decision.allow_lock = true;
         decision.reason = "lidar_only";
         return decision;
     }
     if (gravity_loaded) {
+        decision.allow_lock = true;
         decision.reason = "auxiliary_gravity_support";
         return decision;
     }
     if (gravity_empty) {
         decision.gravity_conflict = true;
+        decision.allow_lock = input.lidar_lift_evidence;
         decision.required_confirm_frames = base_frames + 2;
         decision.reason = "auxiliary_empty_delayed_confirmation";
         return decision;
     }
+    decision.allow_lock = true;
     decision.required_confirm_frames = base_frames + 1;
     decision.reason = "auxiliary_gravity_unavailable_strict_lidar";
     return decision;
+}
+
+CargoObservationOutcome classifyCargoObservationOutcome(
+    const CargoObservationClassificationInput& input) {
+    if (!input.detection_executed) {
+        return CargoObservationOutcome::UNKNOWN;
+    }
+    if (input.cargo_detected) {
+        return CargoObservationOutcome::CARGO_DETECTED;
+    }
+    if (input.ground_reference_valid && input.roi_coverage_valid &&
+        input.hag_candidate_points <= input.maximum_empty_noise_points) {
+        return CargoObservationOutcome::EMPTY_CONFIRMED;
+    }
+    return CargoObservationOutcome::UNKNOWN;
 }
 
 LidarNoCargoEvidenceTracker::LidarNoCargoEvidenceTracker(
@@ -180,14 +200,16 @@ LidarNoCargoEvidenceResult LidarNoCargoEvidenceTracker::update(
         confirmed_ = false;
         confirm_count_ = 0U;
         reason_ = "localization_invalid";
-    } else if (!input.observation_valid) {
+    } else if (input.outcome == CargoObservationOutcome::UNKNOWN) {
         confirmed_ = false;
         confirm_count_ = 0U;
-        reason_ = "observation_invalid";
-    } else if (input.cargo_detected || input.cargo_lock_active) {
+        reason_ = "observation_unknown";
+    } else if (input.outcome == CargoObservationOutcome::CARGO_DETECTED ||
+               input.cargo_lock_active) {
         confirmed_ = false;
         confirm_count_ = 0U;
-        reason_ = input.cargo_detected ? "cargo_detected" : "cargo_lock_active";
+        reason_ = input.outcome == CargoObservationOutcome::CARGO_DETECTED
+            ? "cargo_detected" : "cargo_lock_active";
     } else {
         confirm_count_ = std::min<std::uint32_t>(
             confirm_count_ + 1U, std::numeric_limits<std::uint32_t>::max());

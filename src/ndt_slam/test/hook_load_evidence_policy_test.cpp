@@ -104,23 +104,77 @@ TEST(SuspendedCargoLock, CompactLidarIsRoleAware) {
     const auto auxiliary_unknown = evaluateSuspendedCargoLock(
         {HookLoadSignalRole::AUXILIARY, false, HookLoadState::UNKNOWN, 5});
     EXPECT_TRUE(auxiliary_unknown.allow_candidate);
+    EXPECT_TRUE(auxiliary_unknown.allow_lock);
     EXPECT_EQ(auxiliary_unknown.required_confirm_frames, 6);
 
     const auto auxiliary_loaded = evaluateSuspendedCargoLock(
         {HookLoadSignalRole::AUXILIARY, true, HookLoadState::LOADED, 5});
     EXPECT_TRUE(auxiliary_loaded.allow_candidate);
+    EXPECT_TRUE(auxiliary_loaded.allow_lock);
     EXPECT_FALSE(auxiliary_loaded.gravity_conflict);
     EXPECT_EQ(auxiliary_loaded.required_confirm_frames, 5);
 
     const auto auxiliary_empty = evaluateSuspendedCargoLock(
         {HookLoadSignalRole::AUXILIARY, true, HookLoadState::EMPTY, 5});
     EXPECT_TRUE(auxiliary_empty.allow_candidate);
+    EXPECT_FALSE(auxiliary_empty.allow_lock);
     EXPECT_TRUE(auxiliary_empty.gravity_conflict);
     EXPECT_EQ(auxiliary_empty.required_confirm_frames, 7);
+
+    const auto auxiliary_empty_lifted = evaluateSuspendedCargoLock(
+        {HookLoadSignalRole::AUXILIARY, true, HookLoadState::EMPTY, 5, true});
+    EXPECT_TRUE(auxiliary_empty_lifted.allow_candidate);
+    EXPECT_TRUE(auxiliary_empty_lifted.allow_lock);
 
     const auto required_unknown = evaluateSuspendedCargoLock(
         {HookLoadSignalRole::REQUIRED, false, HookLoadState::UNKNOWN, 5});
     EXPECT_FALSE(required_unknown.allow_candidate);
+    EXPECT_FALSE(required_unknown.allow_lock);
+}
+
+TEST(SuspendedCargoLock, RequiredTransitionCannotConfirmAfterSignalLoss) {
+    const auto loaded = evaluateSuspendedCargoLock(
+        {HookLoadSignalRole::REQUIRED, true, HookLoadState::LOADED, 3});
+    ASSERT_TRUE(loaded.allow_candidate);
+    ASSERT_TRUE(loaded.allow_lock);
+
+    const auto unknown = evaluateSuspendedCargoLock(
+        {HookLoadSignalRole::REQUIRED, false, HookLoadState::UNKNOWN, 3});
+    EXPECT_FALSE(unknown.allow_candidate);
+    EXPECT_FALSE(unknown.allow_lock);
+}
+
+TEST(CargoObservationOutcome, DispersedHagResidualIsUnknown) {
+    EXPECT_EQ(classifyCargoObservationOutcome(
+        {true, true, true, 12U, 2U, false}),
+        CargoObservationOutcome::UNKNOWN);
+}
+
+TEST(CargoObservationOutcome, VoxelTooFewResidualIsUnknown) {
+    EXPECT_EQ(classifyCargoObservationOutcome(
+        {true, true, true, 5U, 2U, false}),
+        CargoObservationOutcome::UNKNOWN);
+}
+
+TEST(CargoObservationOutcome, InvalidGroundAndCoverageAreUnknown) {
+    EXPECT_EQ(classifyCargoObservationOutcome(
+        {true, false, false, 0U, 2U, false}),
+        CargoObservationOutcome::UNKNOWN);
+}
+
+TEST(CargoObservationOutcome, SmallDetectedCargoIsNeverEmpty) {
+    EXPECT_EQ(classifyCargoObservationOutcome(
+        {true, true, true, 4U, 2U, true}),
+        CargoObservationOutcome::CARGO_DETECTED);
+}
+
+TEST(CargoObservationOutcome, ExplicitEmptyRequiresCoverageAndNoiseFloor) {
+    EXPECT_EQ(classifyCargoObservationOutcome(
+        {true, true, true, 0U, 2U, false}),
+        CargoObservationOutcome::EMPTY_CONFIRMED);
+    EXPECT_EQ(classifyCargoObservationOutcome(
+        {true, true, true, 2U, 2U, false}),
+        CargoObservationOutcome::EMPTY_CONFIRMED);
 }
 
 TEST(LidarNoCargoEvidence, RequiresIndependentValidDetectionFrames) {
@@ -128,46 +182,61 @@ TEST(LidarNoCargoEvidence, RequiresIndependentValidDetectionFrames) {
     EXPECT_FALSE(tracker.result().confirmed);
 
     const LidarNoCargoEvidenceInput first{
-        true, true, true, false, false, 10.0};
+        true, CargoObservationOutcome::EMPTY_CONFIRMED, true, false, 10.0};
     EXPECT_EQ(tracker.update(first).confirm_count, 1U);
     EXPECT_EQ(tracker.update(first).confirm_count, 1U);
     EXPECT_EQ(tracker.update(
-        {true, true, true, false, false, 11.0}).confirm_count, 2U);
+        {true, CargoObservationOutcome::EMPTY_CONFIRMED,
+         true, false, 11.0}).confirm_count, 2U);
     EXPECT_TRUE(tracker.update(
-        {true, true, true, false, false, 12.0}).confirmed);
+        {true, CargoObservationOutcome::EMPTY_CONFIRMED,
+         true, false, 12.0}).confirmed);
 }
 
 TEST(LidarNoCargoEvidence, InvalidQualityCargoAndLockFailClosed) {
     LidarNoCargoEvidenceTracker tracker({2U});
-    tracker.update({true, true, true, false, false, 1.0});
+    tracker.update({true, CargoObservationOutcome::EMPTY_CONFIRMED,
+                    true, false, 1.0});
     EXPECT_TRUE(tracker.update(
-        {true, true, true, false, false, 2.0}).confirmed);
+        {true, CargoObservationOutcome::EMPTY_CONFIRMED,
+         true, false, 2.0}).confirmed);
 
     EXPECT_FALSE(tracker.update(
-        {true, false, true, false, false, 3.0}).confirmed);
-    tracker.update({true, true, true, false, false, 4.0});
+        {true, CargoObservationOutcome::UNKNOWN,
+         true, false, 3.0}).confirmed);
+    tracker.update({true, CargoObservationOutcome::EMPTY_CONFIRMED,
+                    true, false, 4.0});
     EXPECT_FALSE(tracker.update(
-        {true, true, true, true, false, 5.0}).confirmed);
-    tracker.update({true, true, true, false, false, 6.0});
+        {true, CargoObservationOutcome::CARGO_DETECTED,
+         true, false, 5.0}).confirmed);
+    tracker.update({true, CargoObservationOutcome::EMPTY_CONFIRMED,
+                    true, false, 6.0});
     EXPECT_FALSE(tracker.update(
-        {true, true, true, false, true, 7.0}).confirmed);
+        {true, CargoObservationOutcome::EMPTY_CONFIRMED,
+         true, true, 7.0}).confirmed);
     EXPECT_FALSE(tracker.update(
-        {true, true, false, false, false, 8.0}).confirmed);
+        {true, CargoObservationOutcome::EMPTY_CONFIRMED,
+         false, false, 8.0}).confirmed);
 }
 
 TEST(LidarNoCargoEvidence, RollbackStartsUnconfirmedEpoch) {
     LidarNoCargoEvidenceTracker tracker({2U});
-    tracker.update({true, true, true, false, false, 100.0});
+    tracker.update({true, CargoObservationOutcome::EMPTY_CONFIRMED,
+                    true, false, 100.0});
     ASSERT_TRUE(tracker.update(
-        {true, true, true, false, false, 101.0}).confirmed);
+        {true, CargoObservationOutcome::EMPTY_CONFIRMED,
+         true, false, 101.0}).confirmed);
     const auto rollback = tracker.update(
-        {true, true, true, false, false, 1.0});
+        {true, CargoObservationOutcome::EMPTY_CONFIRMED,
+         true, false, 1.0});
     EXPECT_FALSE(rollback.confirmed);
     EXPECT_EQ(rollback.reason, "source_time_rollback");
     EXPECT_FALSE(tracker.update(
-        {true, true, true, false, false, 1.1}).confirmed);
+        {true, CargoObservationOutcome::EMPTY_CONFIRMED,
+         true, false, 1.1}).confirmed);
     EXPECT_TRUE(tracker.update(
-        {true, true, true, false, false, 1.2}).confirmed);
+        {true, CargoObservationOutcome::EMPTY_CONFIRMED,
+         true, false, 1.2}).confirmed);
 }
 
 TEST(HookLoadMapCommit, UsesLidarAuthorizationAndConservativeCandidateExclusion) {

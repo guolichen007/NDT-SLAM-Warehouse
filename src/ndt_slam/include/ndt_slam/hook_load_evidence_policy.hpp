@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -58,10 +59,12 @@ struct SuspendedCargoLockInput {
     bool gravity_valid = false;
     HookLoadState gravity_state = HookLoadState::UNKNOWN;
     int base_confirm_frames = 1;
+    bool lidar_lift_evidence = false;
 };
 
 struct SuspendedCargoLockDecision {
     bool allow_candidate = false;
+    bool allow_lock = false;
     bool gravity_conflict = false;
     int required_confirm_frames = 1;
     std::string reason = "required_gravity_unavailable";
@@ -70,15 +73,32 @@ struct SuspendedCargoLockDecision {
 SuspendedCargoLockDecision evaluateSuspendedCargoLock(
     const SuspendedCargoLockInput& input);
 
+enum class CargoObservationOutcome : std::uint8_t {
+    UNKNOWN = 0,
+    CARGO_DETECTED = 1,
+    EMPTY_CONFIRMED = 2
+};
+
+struct CargoObservationClassificationInput {
+    bool detection_executed = false;
+    bool ground_reference_valid = false;
+    bool roi_coverage_valid = false;
+    std::size_t hag_candidate_points = 0U;
+    std::size_t maximum_empty_noise_points = 0U;
+    bool cargo_detected = false;
+};
+
+CargoObservationOutcome classifyCargoObservationOutcome(
+    const CargoObservationClassificationInput& input);
+
 struct LidarNoCargoEvidenceConfig {
     std::uint32_t confirm_frames = 3U;
 };
 
 struct LidarNoCargoEvidenceInput {
     bool detection_executed = false;
-    bool observation_valid = false;
+    CargoObservationOutcome outcome = CargoObservationOutcome::UNKNOWN;
     bool localization_valid = false;
-    bool cargo_detected = false;
     bool cargo_lock_active = false;
     double source_time_sec = 0.0;
 };

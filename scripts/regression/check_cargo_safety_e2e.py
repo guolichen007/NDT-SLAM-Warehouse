@@ -190,16 +190,57 @@ def main() -> int:
             "lidar_empty_confirm_frames: 3" in live_config,
             "AUXILIARY no-cargo output still trusts default CargoState EMPTY",
             failures)
+    require("CargoObservationOutcome::UNKNOWN" in node and
+            "CargoObservationOutcome::EMPTY_CONFIRMED" in node and
+            "classifyCargoObservationOutcome" in hook_policy and
+            "hook_fixed_cargo_.observation_valid" not in node and
+            "empty_max_hag_candidate_points: 2" in live_config,
+            "cargo detector still derives EMPTY from a generic detection failure",
+            failures)
+    empty_gate = node.find(
+        "if (result.outcome == CargoObservationOutcome::EMPTY_CONFIRMED)")
+    voxel_stage = node.find("vf.filter(*voxel_cloud)", empty_gate)
+    cargo_outcome = node.find("classify_outcome(true)", voxel_stage)
+    require(empty_gate >= 0 and voxel_stage > empty_gate and
+            cargo_outcome > voxel_stage and
+            'result.reject_reason = "too_few_points"' in node and
+            'result.reject_reason = "no_clusters"' in node,
+            "post-HAG detector failures can still advance EMPTY evidence",
+            failures)
     require("evaluateSuspendedCargoLock" in node and
             "auxiliary_empty_delayed_confirmation" in hook_policy and
-            "auxiliary_gravity_unavailable_strict_lidar" in hook_policy,
+            "auxiliary_gravity_unavailable_strict_lidar" in hook_policy and
+            "decision.allow_lock = input.lidar_lift_evidence" in hook_policy and
+            "suspended_min_ground_clearance_m: 0.30" in live_config,
             "compact cargo lock is not role-aware", failures)
+    candidate_branch = node.find("case HookCargoLockState::CANDIDATE:")
+    locked_branch = node.find("case HookCargoLockState::LOCKED:", candidate_branch)
+    candidate_code = node[candidate_branch:locked_branch]
+    require(candidate_branch >= 0 and locked_branch > candidate_branch and
+            "if (!candidate_policy.allow_candidate)" in candidate_code and
+            "if (!candidate_policy.allow_lock)" in candidate_code and
+            "clearHookLock();" in candidate_code,
+            "REQUIRED policy is not enforced inside the candidate state",
+            failures)
+    lock_function = node.find("void NdtSlamNode::updateHookCargoLock(")
+    require(lock_function >= 0 and
+            "std::unique_lock<std::mutex> hook_policy_guard" in
+                node[lock_function:candidate_branch] and
+            "hook_policy_guard.lock();" in node[lock_function:candidate_branch],
+            "REQUIRED Gravity snapshot is not held across lock transition",
+            failures)
     origin_capture = node.find("if (hook_is_empty && localization_evidence_valid")
     origin_record = node.find("recordEmptyHookOriginHeight(", origin_capture)
     tracking_update = node.find("if (hook_allows_tracking)", origin_capture)
     require(origin_capture >= 0 and origin_record >= 0 and tracking_update >= 0 and
-            origin_record < tracking_update,
+            origin_record < tracking_update and
+            "!hook_fixed_cargo_.lidar_lift_evidence" in
+                node[origin_capture:origin_record],
             "AUXILIARY origin-height capture remains hidden behind tracking",
+            failures)
+    require("if (active_track && !cargo_origin_height_valid_)" in node and
+            "cargo_origin_height_track_id_ = cargo_fusion_track_id_" in node,
+            "late Gravity LOADED origin cannot attach to an active track",
             failures)
     require("publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_" in node,
             "legacy payload compatibility output does not consume fusion", failures)

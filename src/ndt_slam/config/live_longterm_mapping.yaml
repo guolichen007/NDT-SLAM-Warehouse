@@ -735,6 +735,9 @@ hook_cargo_lock:
   compact_min_xy_area: 0.12
   compact_confirm_frames: 5
   compact_max_size_relative_step: 0.25
+  # Gravity EMPTY may keep a pre-lift candidate, but cannot lock until the
+  # LiDAR bottom is this far above the external ground reference.
+  suspended_min_ground_clearance_m: 0.30
 
   # locked search margin
   locked_search_margin_x: 0.30
@@ -832,6 +835,9 @@ odom_anchored_cargo_box:
     ground_expected_height_enabled: true
     ground_expected_height_m: 0.0
     ground_max_expected_height_delta_m: 0.30
+    # Only this many HAG residual points are treated as sensor noise. Any
+    # larger unclustered residual keeps the cargo observation UNKNOWN.
+    empty_max_hag_candidate_points: 2
     percentile_low: 0.08
     percentile_high: 0.92
     margin_xy_m: 0.05
