@@ -158,7 +158,7 @@ StationaryMotionDecision StationaryMotionPolicy::update(
 
     const Eigen::Vector2d raw_delta =
         reliable && had_previous_raw
-            ? input.raw_position - previous_raw
+            ? Eigen::Vector2d(input.raw_position - previous_raw)
             : Eigen::Vector2d::Zero();
     const double raw_delta_norm = raw_delta.norm();
 
