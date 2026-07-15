@@ -1237,6 +1237,40 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                      registration_cloud_config_.max_ndt_points);
         }
 
+        if (config["ndt_observability"]) {
+            const auto n = config["ndt_observability"];
+            ndt_observability_config_.enabled =
+                n["enabled"].as<bool>(true);
+            ndt_observability_config_.moderate_ratio =
+                n["moderate_ratio"].as<double>(0.20);
+            ndt_observability_config_.severe_ratio =
+                n["severe_ratio"].as<double>(0.08);
+            ndt_observability_config_.moderate_weak_inflation =
+                n["moderate_weak_inflation"].as<double>(5.0);
+            ndt_observability_config_.severe_weak_inflation =
+                n["severe_weak_inflation"].as<double>(20.0);
+            ndt_observability_config_.min_structure_points =
+                n["min_structure_points"].as<std::size_t>(600U);
+            ndt_observability_config_.min_occupied_cells =
+                n["min_occupied_cells"].as<std::size_t>(40U);
+            ndt_observability_config_.min_local_normals =
+                n["min_local_normals"].as<std::size_t>(80U);
+            ndt_observability_config_.max_normal_samples =
+                n["max_normal_samples"].as<std::size_t>(800U);
+            ndt_observability_config_.local_neighbor_count =
+                n["local_neighbor_count"].as<int>(10);
+            ndt_observability_config_.occupancy_cell_m =
+                n["occupancy_cell_m"].as<double>(0.50);
+            ndt_observability_config_.min_xy_span_m =
+                n["min_xy_span_m"].as<double>(2.0);
+            ndt_observability_config_.normal_search_radius_m =
+                n["normal_search_radius_m"].as<double>(0.90);
+            ndt_observability_config_.min_normal_anisotropy =
+                n["min_normal_anisotropy"].as<double>(0.20);
+        }
+        crane_motion_ekf_cfg_.observability = ndt_observability_config_;
+        crane_motion_ekf_.setConfig(crane_motion_ekf_cfg_);
+
         // V3: Localization Target 参数
         if (config["localization_target"]) {
             const auto lt = config["localization_target"];
@@ -2986,6 +3020,52 @@ void NdtSlamNode::processCloudThread() {
                 registration_build_result.reason.c_str());
         }
 
+        std::vector<Eigen::Vector2d> observability_structure_points;
+        observability_structure_points.reserve(
+            registration_build_result.structure_cloud->size());
+        for (const auto& point :
+             registration_build_result.structure_cloud->points) {
+            if (std::isfinite(point.x) && std::isfinite(point.y)) {
+                observability_structure_points.emplace_back(
+                    point.x, point.y);
+            }
+        }
+        NdtObservability frame_ndt_observability =
+            estimateNdtObservabilityFromStructure(
+                observability_structure_points,
+                ndt_observability_config_);
+        if (!ndt_observability_config_.enabled) {
+            frame_ndt_observability.degenerate = false;
+            frame_ndt_observability.severely_degenerate = false;
+            frame_ndt_observability.reason = "disabled";
+        }
+        last_ndt_observability_ = frame_ndt_observability;
+        static std::string last_observability_reason;
+        if (frame_ndt_observability.reason != last_observability_reason) {
+            ROS_INFO("[NDTObservability] valid=%d degenerate=%d severe=%d ratio=%.4f strong=%.3f weak=%.3f weak_dir=(%.3f,%.3f) normals=%zu reason=%s proxy=static_local_xy_normals",
+                     frame_ndt_observability.valid ? 1 : 0,
+                     frame_ndt_observability.degenerate ? 1 : 0,
+                     frame_ndt_observability.severely_degenerate ? 1 : 0,
+                     frame_ndt_observability.eigenvalue_ratio,
+                     frame_ndt_observability.strong_eigenvalue,
+                     frame_ndt_observability.weak_eigenvalue,
+                     frame_ndt_observability.weak_direction.x(),
+                     frame_ndt_observability.weak_direction.y(),
+                     frame_ndt_observability.local_normals,
+                     frame_ndt_observability.reason.c_str());
+            last_observability_reason = frame_ndt_observability.reason;
+        } else {
+            ROS_INFO_THROTTLE(
+                5.0,
+                "[NDTObservability] valid=%d degenerate=%d severe=%d ratio=%.4f normals=%zu reason=%s proxy=static_local_xy_normals",
+                frame_ndt_observability.valid ? 1 : 0,
+                frame_ndt_observability.degenerate ? 1 : 0,
+                frame_ndt_observability.severely_degenerate ? 1 : 0,
+                frame_ndt_observability.eigenvalue_ratio,
+                frame_ndt_observability.local_normals,
+                frame_ndt_observability.reason.c_str());
+        }
+
         // ========== 地面法向量诊断 ==========
         // 初始化时和每 100 帧输出一次，用于检测外参 roll/pitch 误差
         diag_stage.registration_build_ms = elapsedMs(registration_build_start);
@@ -3111,14 +3191,19 @@ void NdtSlamNode::processCloudThread() {
         bool frame_ndt_accepted = false;
         bool frame_prediction_only = true;
         bool frame_registration_quality_valid = false;
-        bool frame_severe_degeneracy = false;
+        bool frame_severe_degeneracy =
+            frame_ndt_observability.severely_degenerate;
         Sophus::SE3d frame_raw_ndt_pose = current_pose_;
         double frame_raw_increment_m = 0.0;
         static Sophus::SE3d last_local_map_pose = Sophus::SE3d();
         static int frames_since_last_update = 0;
 
         try {
-            if (!registration_build_result.valid) {
+            const bool observability_unavailable =
+                ndt_observability_config_.enabled &&
+                !frame_ndt_observability.valid;
+            if (!registration_build_result.valid ||
+                observability_unavailable) {
                 last_ndt_converged_ = false;
                 last_ndt_fitness_ =
                     std::numeric_limits<double>::infinity();
@@ -3130,7 +3215,9 @@ void NdtSlamNode::processCloudThread() {
                     const auto ekf_start = DiagClock::now();
                     new_pose = crane_motion_ekf_.predictWithoutMeasurement(
                         current_pose_, msg->header.stamp,
-                        "INSUFFICIENT_STRUCTURE");
+                        observability_unavailable
+                            ? "INSUFFICIENT_OBSERVABILITY"
+                            : "INSUFFICIENT_STRUCTURE");
                     registration_success = true;
                     ekf_reject_count_.fetch_add(
                         1, std::memory_order_relaxed);
@@ -3393,7 +3480,8 @@ void NdtSlamNode::processCloudThread() {
                                     fitness_score,
                                     new_pose,
                                     msg->header.stamp,
-                                    ndt_time_ms);
+                                    ndt_time_ms,
+                                    &frame_ndt_observability);
                             }
 
                             ndt_accepted = crane_motion_ekf_.status().ndt_accepted;
@@ -3409,7 +3497,7 @@ void NdtSlamNode::processCloudThread() {
                                 ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec,
                                     "[EKF] pred=(%.2f,%.2f) ndt=(%.2f,%.2f) out=(%.2f,%.2f) "
                                     "vel=(%.2f,%.2f) innov=%.3f nis=%.2f step=%.3f/%.3f "
-                                    "lat=%.3f tan=%.3f R=%.4f P=%.4f mode=%s accept=%d predict=%d limited=%d reject=%s",
+                                    "lat=%.3f tan=%.3f R=%.4f obs_ratio=%.4f weak_inflate=%.1f P=%.4f mode=%s accept=%d predict=%d limited=%d reject=%s",
                                     ekf_status.predicted_pos.x(), ekf_status.predicted_pos.y(),
                                     ekf_status.ndt_pos.x(), ekf_status.ndt_pos.y(),
                                     ekf_status.output_pos.x(), ekf_status.output_pos.y(),
@@ -3421,6 +3509,8 @@ void NdtSlamNode::processCloudThread() {
                                     ekf_status.lateral_error,
                                     ekf_status.tangential_error,
                                     ekf_status.measurement_r,
+                                    ekf_status.observability_ratio,
+                                    ekf_status.weak_variance_inflation,
                                     ekf_status.p_trace,
                                     ekf_status.diagonal_mode ? "DIAG" : "NORMAL",
                                     ekf_status.ndt_accepted ? 1 : 0,
@@ -3437,7 +3527,9 @@ void NdtSlamNode::processCloudThread() {
                         frame_registration_quality_valid =
                             ndt_accepted && std::isfinite(fitness_score) &&
                             fitness_score <= map_commit_max_fitness_ &&
-                            registration_build_result.structure_quality_valid;
+                            registration_build_result.structure_quality_valid &&
+                            (!ndt_observability_config_.enabled ||
+                             frame_ndt_observability.valid);
                         frame_raw_increment_m =
                             diag_raw_ndt_step_from_previous;
 
@@ -4086,6 +4178,21 @@ void NdtSlamNode::processCloudThread() {
                 registration_build_result.ground_fraction;
             ndt_rec.structure_quality_valid =
                 registration_build_result.structure_quality_valid;
+            ndt_rec.observability_valid = frame_ndt_observability.valid;
+            ndt_rec.observability_degenerate =
+                frame_ndt_observability.degenerate;
+            ndt_rec.observability_severe =
+                frame_ndt_observability.severely_degenerate;
+            ndt_rec.observability_strong_eigenvalue =
+                frame_ndt_observability.strong_eigenvalue;
+            ndt_rec.observability_weak_eigenvalue =
+                frame_ndt_observability.weak_eigenvalue;
+            ndt_rec.observability_ratio =
+                frame_ndt_observability.eigenvalue_ratio;
+            ndt_rec.observability_weak_direction_x =
+                frame_ndt_observability.weak_direction.x();
+            ndt_rec.observability_weak_direction_y =
+                frame_ndt_observability.weak_direction.y();
             ndt_rec.target_points = last_target_points_;
             ndt_rec.target_source = last_actual_target_source_;
             ndt_rec.target_version = target_version_;

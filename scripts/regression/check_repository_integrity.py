@@ -304,11 +304,63 @@ def registration_source_contract_failures() -> list[str]:
     return failures
 
 
+def ndt_observability_contract_failures() -> list[str]:
+    failures: list[str] = []
+    paths = (
+        Path("src/ndt_slam/include/ndt_slam/ndt_observability.hpp"),
+        Path("src/ndt_slam/src/ndt_observability.cpp"),
+        Path("src/ndt_slam/src/crane_motion_ekf.cpp"),
+        Path("src/ndt_slam/src/ndt_slam.cpp"),
+        Path("src/ndt_slam/test/ndt_observability_test.cpp"),
+        Path("src/ndt_slam/config/live_longterm_mapping.yaml"),
+    )
+    try:
+        texts = {
+            path: (ROOT / path).read_text(encoding="utf-8")
+            for path in paths
+        }
+    except OSError as error:
+        return [f"NDT observability contract cannot be read: {error}"]
+    combined = "\n".join(texts.values())
+
+    required = (
+        "static_local_xy_normals",
+        "local-normal information proxy, not the internal NDT Hessian",
+        "information += anisotropy * normal * normal.transpose()",
+        "directions * directional_variance * directions.transpose()",
+        "moderate_weak_inflation: 5.0",
+        "severe_weak_inflation: 20.0",
+        "frame_severe_degeneracy",
+        "observability_weak_direction_x",
+        "HorizontalWallsHaveWeakXDirection",
+        "RotatedNinetyDegreesHasWeakYDirection",
+        "FortyFiveDegreeWeakDirectionIsCoordinateFree",
+        "UniformPerpendicularStructureIsObservable",
+    )
+    for token in required:
+        if token not in combined:
+            failures.append(
+                f"NDT observability contract missing {token!r}")
+
+    covariance_function = re.search(
+        r"buildObservabilityAwareMeasurementCovariance\(.*?\n\}",
+        texts[paths[1]],
+        re.DOTALL,
+    )
+    if covariance_function is None:
+        failures.append("observability-aware covariance function is missing")
+    elif "directional_variance(1, 1) = base * weak_inflation" not in (
+            covariance_function.group(0)):
+        failures.append("weak-direction covariance is not anisotropic")
+    return failures
+
+
 def main() -> int:
     failures: list[str] = runtime_so3_contract_failures()
     failures.extend(pending_origin_contract_failures())
     failures.extend(stationary_motion_contract_failures())
     failures.extend(registration_source_contract_failures())
+    failures.extend(ndt_observability_contract_failures())
     try:
         paths = tracked_paths()
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:

@@ -110,6 +110,7 @@ set(LIBRARY_SOURCES
   src/crane_motion_ekf.cpp
   src/stationary_motion_policy.cpp
   src/registration_cloud_builder.cpp
+  src/ndt_observability.cpp
   src/crane_pose_constraint.cpp
   src/rigid_transform_conversion.cpp
   # Asynchronous local/global NDT relocalization
@@ -274,6 +275,13 @@ if(CATKIN_ENABLE_TESTING)
   if(TARGET registration_cloud_builder_test)
     target_link_libraries(registration_cloud_builder_test
       ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(ndt_observability_test
+    test/ndt_observability_test.cpp)
+  if(TARGET ndt_observability_test)
+    target_link_libraries(ndt_observability_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 endif()
 

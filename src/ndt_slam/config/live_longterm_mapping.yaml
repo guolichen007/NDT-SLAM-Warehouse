@@ -528,6 +528,22 @@ registration_input:
   max_ndt_points: 6000
   allow_full_ground_fallback: false
 
+ndt_observability:
+  enabled: true
+  moderate_ratio: 0.20
+  severe_ratio: 0.08
+  moderate_weak_inflation: 5.0
+  severe_weak_inflation: 20.0
+  min_structure_points: 600
+  min_occupied_cells: 40
+  min_local_normals: 80
+  max_normal_samples: 800
+  local_neighbor_count: 10
+  occupancy_cell_m: 0.50
+  min_xy_span_m: 2.0
+  normal_search_radius_m: 0.90
+  min_normal_anisotropy: 0.20
+
 # ========== V3: Localization Target ==========
 localization_target:
   enabled: true              # legacy: maps to build_enabled

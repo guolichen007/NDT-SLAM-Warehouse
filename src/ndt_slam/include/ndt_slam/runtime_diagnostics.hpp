@@ -154,6 +154,14 @@ struct NdtFrameRecord {
   int ground_points = 0;
   double ground_fraction = 0.0;
   bool structure_quality_valid = false;
+  bool observability_valid = false;
+  bool observability_degenerate = false;
+  bool observability_severe = false;
+  double observability_strong_eigenvalue = 0.0;
+  double observability_weak_eigenvalue = 0.0;
+  double observability_ratio = 0.0;
+  double observability_weak_direction_x = 0.0;
+  double observability_weak_direction_y = 0.0;
   int target_points = 0;
   std::string target_source;
   int target_version = 0;

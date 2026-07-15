@@ -237,6 +237,9 @@ Sophus::SE3d CraneMotionEKF::predictWithoutMeasurement(
     status_.innovation.setZero();
     status_.innovation_norm = 0.0;
     status_.measurement_r = 0.0;
+    status_.measurement_covariance.setZero();
+    status_.observability_ratio = 0.0;
+    status_.weak_variance_inflation = 1.0;
     status_.nis = 0.0;
     status_.sensor_dt = dt;
     status_.ndt_time_ms = 0.0;
@@ -251,7 +254,8 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
                                            double ndt_fitness,
                                            const Sophus::SE3d& pose_template,
                                            const ros::Time& stamp,
-                                           double ndt_time_ms) {
+                                           double ndt_time_ms,
+                                           const NdtObservability* observability) {
     if (!initialized_) {
         initialize(ndt_pose, stamp);
         status_.fitness = ndt_fitness;
@@ -311,7 +315,14 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
                computeSlowFrameExtraR(ndt_time_ms);
     r = std::clamp(r, cfg_.r_ndt_base, cfg_.r_ndt_max);
 
-    Eigen::Matrix2d R = r * Eigen::Matrix2d::Identity();
+    const NdtObservability isotropic_observability;
+    const NdtObservability& frame_observability = observability
+        ? *observability
+        : isotropic_observability;
+    Eigen::Matrix2d R = observability
+        ? buildObservabilityAwareMeasurementCovariance(
+              r, frame_observability, cfg_.observability)
+        : r * Eigen::Matrix2d::Identity();
     Eigen::Matrix<double, 2, 4> H;
     H.setZero();
     H(0, 0) = 1.0;
@@ -320,12 +331,30 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
     const double nis = raw_innovation.dot(S.ldlt().solve(raw_innovation));
     status_.nis = std::isfinite(nis) ? nis : std::numeric_limits<double>::infinity();
     status_.measurement_r = r;
+    status_.measurement_covariance = R;
+    status_.observability_ratio = observability && observability->valid
+        ? observability->eigenvalue_ratio
+        : 1.0;
+    status_.weak_variance_inflation =
+        observability && observability->valid &&
+                observability->severely_degenerate
+            ? std::max(1.0, cfg_.observability.severe_weak_inflation)
+            : observability && observability->valid &&
+                    observability->degenerate
+                ? std::max(
+                      1.0,
+                      cfg_.observability.moderate_weak_inflation)
+                : 1.0;
 
     // Reject only when motion inconsistency and degraded matching quality
     // agree.  The per-axis test preserves legitimate diagonal motion.
-    const bool gross_axis_innovation =
-        std::abs(raw_innovation.x()) > cfg_.innovation_reject_m ||
-        std::abs(raw_innovation.y()) > cfg_.innovation_reject_m;
+    const bool observability_directional_gate =
+        observability && observability->valid && observability->degenerate;
+    const bool gross_axis_innovation = observability_directional_gate
+        ? std::abs(raw_innovation.dot(
+              observability->strong_direction)) > cfg_.innovation_reject_m
+        : std::abs(raw_innovation.x()) > cfg_.innovation_reject_m ||
+            std::abs(raw_innovation.y()) > cfg_.innovation_reject_m;
     const bool nis_outlier = status_.nis > cfg_.nis_reject_threshold;
     if ((gross_axis_innovation || nis_outlier) &&
         ndt_fitness > std::max(0.03, last_good_fitness_ * 1.5)) {
@@ -360,7 +389,21 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
     const double vy = x_pred(3);
     const double speed = std::hypot(vx, vy);
 
-    if (cfg_.axis_independent_gate) {
+    if (observability_directional_gate) {
+        double strong_innovation = innovation.dot(
+            observability->strong_direction);
+        double weak_innovation = innovation.dot(
+            observability->weak_direction);
+        strong_innovation = std::clamp(
+            strong_innovation, -cfg_.innovation_gate_m,
+            cfg_.innovation_gate_m);
+        weak_innovation = std::clamp(
+            weak_innovation, -cfg_.innovation_gate_m,
+            cfg_.innovation_gate_m);
+        innovation = strong_innovation *
+                observability->strong_direction +
+            weak_innovation * observability->weak_direction;
+    } else if (cfg_.axis_independent_gate) {
         innovation.x() = std::clamp(
             innovation.x(), -cfg_.innovation_gate_m, cfg_.innovation_gate_m);
         innovation.y() = std::clamp(
@@ -448,6 +491,7 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
     status_.innovation = innovation;
     status_.innovation_norm = raw_innov_norm;
     status_.measurement_r = r;
+    status_.measurement_covariance = R;
     status_.p_trace = P_.trace();
     status_.output_pos = x_.head<2>();
     status_.velocity = x_.tail<2>();

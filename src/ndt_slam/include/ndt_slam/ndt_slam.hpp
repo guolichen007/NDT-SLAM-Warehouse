@@ -471,6 +471,8 @@ private:
     RegistrationCloudBuildConfig registration_cloud_config_;
     RegistrationCloudBuildResult last_registration_build_result_;
     std::string last_registration_console_mode_;
+    NdtObservabilityConfig ndt_observability_config_;
+    NdtObservability last_ndt_observability_;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr sampleCloudByRatio(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double ratio);

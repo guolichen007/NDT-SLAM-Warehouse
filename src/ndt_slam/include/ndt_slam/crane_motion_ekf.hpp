@@ -7,6 +7,8 @@
 #include <cmath>
 #include <string>
 
+#include "ndt_slam/ndt_observability.hpp"
+
 namespace ndt_slam {
 
 struct CraneMotionEKFConfig {
@@ -41,6 +43,7 @@ struct CraneMotionEKFConfig {
 
     double stationary_position_hold_variance = 0.0025;
     double stationary_velocity_hold_variance = 0.001;
+    NdtObservabilityConfig observability;
 
     // Legacy velocity-direction damping can suppress a real second-axis
     // start.  Independent X/Y innovation gates are the production default.
@@ -84,6 +87,9 @@ struct CraneMotionEKFStatus {
     double lateral_error = 0.0;
     double tangential_error = 0.0;
     double measurement_r = 0.0;
+    Eigen::Matrix2d measurement_covariance = Eigen::Matrix2d::Zero();
+    double observability_ratio = 1.0;
+    double weak_variance_inflation = 1.0;
     double p_trace = 0.0;
     double fitness = 0.0;
     double sensor_dt = 0.0;
@@ -120,7 +126,8 @@ public:
                                double ndt_fitness,
                                const Sophus::SE3d& pose_template,
                                const ros::Time& stamp,
-                               double ndt_time_ms = 0.0);
+                               double ndt_time_ms = 0.0,
+                               const NdtObservability* observability = nullptr);
 
     // Advance x/P/stamp when a measurement is unavailable or rejected.  A
     // read-only prediction must never be used as the published runtime state.
