@@ -4,6 +4,7 @@
 #include "ndt_slam/cargo_observation_policy.hpp"
 #include "ndt_slam/registration_input_policy.hpp"
 #include "ndt_slam/rigid_transform_conversion.hpp"
+#include "ndt_slam/pending_origin_binding_policy.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -1291,6 +1292,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 static_cast<std::size_t>(history_samples);
             origin_history_max_age_sec_ = std::clamp(
                 hls["origin_history_max_age_sec"].as<double>(2.0), 0.2, 10.0);
+            origin_future_stamp_tolerance_sec_ = std::clamp(
+                hls["origin_future_stamp_tolerance_sec"].as<double>(0.05),
+                0.0, 1.0);
             origin_history_max_position_spread_m_ = std::clamp(
                 hls["origin_history_max_position_spread_m"].as<float>(0.35F),
                 0.05F, 2.0F);
@@ -1318,7 +1322,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             ROS_INFO(
                 "[HookLoadSignal] enabled=%d role=%s role_source=%s state_topic=%s "
                 "consumer_stale=%.2fs origin_samples=%zu origin_age=%.2fs "
-                "origin_spread=%.2fm origin_match=%.2fm",
+                "origin_future_tolerance=%.3fs origin_spread=%.2fm "
+                "origin_match=%.2fm",
                 hook_load_signal_enabled_ ? 1 : 0,
                 hookLoadSignalRoleName(hook_load_signal_role_),
                 role_result.reason.c_str(),
@@ -1326,6 +1331,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 hook_load_state_stale_timeout_sec_,
                 empty_hook_height_history_max_samples_,
                 origin_history_max_age_sec_,
+                origin_future_stamp_tolerance_sec_,
                 origin_history_max_position_spread_m_,
                 origin_match_max_distance_m_);
         }
@@ -1808,10 +1814,26 @@ void NdtSlamNode::hookLoadStateCallback(
                              state_valid && voltage_valid;
 
     std::lock_guard<std::mutex> lock(hook_load_state_mutex_);
+    const bool source_time_rollback =
+        !msg->header.stamp.isZero() &&
+        !hook_load_snapshot_.source_stamp.isZero() &&
+        msg->header.stamp.toSec() + 1.0e-6 <
+            hook_load_snapshot_.source_stamp.toSec();
+    if (source_time_rollback) {
+        // A restarted publisher or replayed bag establishes a new epoch.
+        // Origin evidence from the previous epoch must never cross this edge.
+        pending_origin_height_valid_ = false;
+        pending_origin_height_m_ = 0.0F;
+        pending_origin_center_base_.setZero();
+        pending_origin_stamp_ = ros::Time();
+        empty_hook_height_history_.clear();
+        ROS_WARN("[OriginBinding] reset on Gravity source-time rollback "
+                 "previous=%.6f current=%.6f",
+                 hook_load_snapshot_.source_stamp.toSec(),
+                 msg->header.stamp.toSec());
+    }
     const bool source_stamp_valid = !msg->header.stamp.isZero() &&
-        (hook_load_snapshot_.source_stamp.isZero() ||
-         msg->header.stamp.toSec() + 1.0e-6 >=
-             hook_load_snapshot_.source_stamp.toSec());
+        !source_time_rollback;
     const bool valid = basic_valid && source_stamp_valid;
     const double receipt_wall_sec = ros::WallTime::now().toSec();
     const bool source_stamp_advanced =
@@ -1920,7 +1942,7 @@ void NdtSlamNode::hookLoadStateCallback(
     hook_load_snapshot_.stable_samples = msg->stable_samples;
     hook_load_snapshot_.source_stamp = msg->header.stamp;
     hook_load_snapshot_.receipt_wall_sec = receipt_wall_sec;
-    if (source_stamp_advanced ||
+    if (source_stamp_advanced || source_time_rollback ||
         hook_load_snapshot_.source_progress_wall_sec <= 0.0) {
         hook_load_snapshot_.source_progress_wall_sec = receipt_wall_sec;
     }
@@ -2327,6 +2349,24 @@ void NdtSlamNode::processCloudThread() {
         // frame must use sensor time, not NDT wall-clock runtime.
         double sensor_dt = 0.10;
         if (!last_processed_frame_stamp_.isZero()) {
+            const bool lidar_time_rollback =
+                !msg->header.stamp.isZero() &&
+                msg->header.stamp.toSec() + 1.0e-6 <
+                    last_processed_frame_stamp_.toSec();
+            if (lidar_time_rollback) {
+                std::lock_guard<std::mutex> lock(hook_load_state_mutex_);
+                pending_origin_height_valid_ = false;
+                pending_origin_height_m_ = 0.0F;
+                pending_origin_center_base_.setZero();
+                pending_origin_stamp_ = ros::Time();
+                empty_hook_height_history_.clear();
+                last_cargo_pipeline_stamp_ = ros::Time();
+                ROS_WARN(
+                    "[OriginBinding] reset on LiDAR source-time rollback "
+                    "previous=%.6f current=%.6f",
+                    last_processed_frame_stamp_.toSec(),
+                    msg->header.stamp.toSec());
+            }
             sensor_dt = (msg->header.stamp - last_processed_frame_stamp_).toSec();
             if (!std::isfinite(sensor_dt) || sensor_dt <= 0.0 || sensor_dt > 1.0) {
                 invalid_sensor_dt_count_.fetch_add(1, std::memory_order_relaxed);
@@ -9713,22 +9753,69 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     if (active_track && !cargo_origin_height_valid_) {
         std::lock_guard<std::mutex> lock(hook_load_state_mutex_);
         if (pending_origin_height_valid_) {
-            const double origin_age =
-                (stamp - pending_origin_stamp_).toSec();
-            const float origin_distance =
-                (cargo_state_.center_base.head<2>() -
-                 pending_origin_center_base_).norm();
-            cargo_origin_height_valid_ =
-                std::isfinite(origin_age) && origin_age >= 0.0 &&
-                origin_age <= origin_history_max_age_sec_ &&
-                std::isfinite(origin_distance) &&
-                origin_distance <= origin_match_max_distance_m_;
-            if (cargo_origin_height_valid_) {
-                cargo_origin_height_m_ = pending_origin_height_m_;
-                cargo_origin_height_track_id_ = cargo_fusion_track_id_;
+            const bool track_center_finite =
+                cargo_state_.center_base.head<2>().allFinite();
+            const bool origin_center_finite =
+                pending_origin_center_base_.allFinite();
+            const double origin_distance =
+                track_center_finite && origin_center_finite
+                    ? static_cast<double>(
+                          (cargo_state_.center_base.head<2>() -
+                           pending_origin_center_base_).norm())
+                    : std::numeric_limits<double>::quiet_NaN();
+            PendingOriginAction action = std::isfinite(pending_origin_height_m_)
+                ? evaluatePendingOriginBinding({
+                      true, stamp.toSec(), pending_origin_stamp_.toSec(),
+                      origin_history_max_age_sec_,
+                      origin_future_stamp_tolerance_sec_,
+                      track_center_finite, origin_center_finite,
+                      origin_distance,
+                      static_cast<double>(origin_match_max_distance_m_)})
+                : PendingOriginAction::DISCARD_INVALID;
+
+            const auto clear_pending_origin = [this]() {
+                pending_origin_height_valid_ = false;
+                pending_origin_height_m_ = 0.0F;
+                pending_origin_center_base_.setZero();
+                pending_origin_stamp_ = ros::Time();
+            };
+            switch (action) {
+                case PendingOriginAction::KEEP_WAITING_FOR_LIDAR_TIME:
+                    ROS_DEBUG_THROTTLE(
+                        1.0,
+                        "[OriginBinding] action=%s lidar=%.6f origin=%.6f",
+                        pendingOriginActionName(action), stamp.toSec(),
+                        pending_origin_stamp_.toSec());
+                    break;
+                case PendingOriginAction::ATTACH:
+                    cargo_origin_height_valid_ = true;
+                    cargo_origin_height_m_ = pending_origin_height_m_;
+                    cargo_origin_height_track_id_ = cargo_fusion_track_id_;
+                    ROS_INFO(
+                        "[OriginBinding] action=%s track=%llu age=%.3f "
+                        "distance=%.3f",
+                        pendingOriginActionName(action),
+                        static_cast<unsigned long long>(
+                            cargo_fusion_track_id_),
+                        std::max(0.0,
+                                 (stamp - pending_origin_stamp_).toSec()),
+                        origin_distance);
+                    clear_pending_origin();
+                    break;
+                case PendingOriginAction::DISCARD_EXPIRED:
+                case PendingOriginAction::DISCARD_SPATIAL_MISMATCH:
+                case PendingOriginAction::DISCARD_INVALID:
+                    ROS_WARN_THROTTLE(
+                        1.0,
+                        "[OriginBinding] action=%s lidar=%.6f origin=%.6f "
+                        "distance=%.3f",
+                        pendingOriginActionName(action), stamp.toSec(),
+                        pending_origin_stamp_.toSec(), origin_distance);
+                    clear_pending_origin();
+                    break;
+                case PendingOriginAction::NONE:
+                    break;
             }
-            // An origin sample belongs to one EMPTY->LOADED lifecycle only.
-            pending_origin_height_valid_ = false;
         }
     }
 

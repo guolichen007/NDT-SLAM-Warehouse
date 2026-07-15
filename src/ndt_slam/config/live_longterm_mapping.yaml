@@ -603,6 +603,9 @@ hook_load_signal:
   # Origin-height evidence is accepted only from a recent, spatially stable
   # EMPTY interval and may be consumed by one EMPTY->LOADED lifecycle.
   origin_history_max_age_sec: 2.0
+  # Gravity may lead an older LiDAR frame by this much without consuming or
+  # discarding the pending origin; a later LiDAR frame performs the binding.
+  origin_future_stamp_tolerance_sec: 0.05
   origin_history_max_position_spread_m: 0.35
   origin_match_max_distance_m: 0.50
   origin_height_max_mad_m: 0.10

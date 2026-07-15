@@ -1611,6 +1611,7 @@ private:
     std::deque<OriginHeightSample> empty_hook_height_history_;
     std::size_t empty_hook_height_history_max_samples_ = 10U;
     double origin_history_max_age_sec_ = 2.0;
+    double origin_future_stamp_tolerance_sec_ = 0.05;
     float origin_history_max_position_spread_m_ = 0.35F;
     float origin_match_max_distance_m_ = 0.50F;
     float origin_height_max_mad_m_ = 0.10F;

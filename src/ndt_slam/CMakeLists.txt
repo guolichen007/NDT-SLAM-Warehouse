@@ -119,6 +119,7 @@ set(LIBRARY_SOURCES
   src/cargo_safety_evaluator.cpp
   src/hook_load_state_filter.cpp
   src/hook_load_evidence_policy.cpp
+  src/pending_origin_binding_policy.cpp
 )
 
 add_library(ndt_slam_lib SHARED
@@ -249,6 +250,13 @@ if(CATKIN_ENABLE_TESTING)
     test/hook_load_evidence_policy_test.cpp)
   if(TARGET hook_load_evidence_policy_test)
     target_link_libraries(hook_load_evidence_policy_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(pending_origin_binding_policy_test
+    test/pending_origin_binding_policy_test.cpp)
+  if(TARGET pending_origin_binding_policy_test)
+    target_link_libraries(pending_origin_binding_policy_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 endif()

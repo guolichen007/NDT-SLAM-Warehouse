@@ -147,8 +147,52 @@ def runtime_so3_contract_failures() -> list[str]:
     return failures
 
 
+def pending_origin_contract_failures() -> list[str]:
+    failures: list[str] = []
+    node_path = Path("src/ndt_slam/src/ndt_slam.cpp")
+    policy_path = Path(
+        "src/ndt_slam/src/pending_origin_binding_policy.cpp")
+    config_path = Path("src/ndt_slam/config/live_longterm_mapping.yaml")
+    try:
+        node = (ROOT / node_path).read_text(encoding="utf-8")
+        policy = (ROOT / policy_path).read_text(encoding="utf-8")
+        config = (ROOT / config_path).read_text(encoding="utf-8")
+    except OSError as error:
+        return [f"pending origin contract cannot be read: {error}"]
+
+    for token in (
+            "evaluatePendingOriginBinding",
+            "PendingOriginAction::KEEP_WAITING_FOR_LIDAR_TIME",
+            "PendingOriginAction::ATTACH",
+            "PendingOriginAction::DISCARD_EXPIRED",
+            "PendingOriginAction::DISCARD_SPATIAL_MISMATCH",
+            "PendingOriginAction::DISCARD_INVALID"):
+        if token not in node + policy:
+            failures.append(f"pending origin contract missing {token!r}")
+
+    keep_case = re.search(
+        r"case\s+PendingOriginAction::KEEP_WAITING_FOR_LIDAR_TIME\s*:"
+        r"(?P<body>.*?)case\s+PendingOriginAction::ATTACH\s*:",
+        node,
+        re.DOTALL,
+    )
+    if keep_case is None:
+        failures.append("pending origin KEEP branch is missing")
+    elif "pending_origin_height_valid_ = false" in keep_case.group("body"):
+        failures.append("pending origin KEEP branch clears pending evidence")
+
+    for token in (
+            "origin_future_stamp_tolerance_sec: 0.05",
+            "source_time_rollback",
+            "lidar_time_rollback"):
+        if token not in node + config:
+            failures.append(f"pending origin epoch/config guard missing {token!r}")
+    return failures
+
+
 def main() -> int:
     failures: list[str] = runtime_so3_contract_failures()
+    failures.extend(pending_origin_contract_failures())
     try:
         paths = tracked_paths()
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:
