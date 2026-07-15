@@ -86,8 +86,69 @@ def pollution_patterns() -> list[tuple[str, re.Pattern[str]]]:
     return patterns
 
 
-def main() -> int:
+def runtime_so3_contract_failures() -> list[str]:
+    """Guard known external registration/optimizer matrix boundaries."""
     failures: list[str] = []
+    required_tokens = {
+        Path("src/ndt_slam/src/ndt_slam.cpp"): (
+            "makeSafeSE3FromMatrix(ndt_matrix)",
+            "makeSafeSE3FromMatrix(refined_matrix)",
+            '"ndt_safe_se3"',
+            '"icp_matrix"',
+        ),
+        Path("src/ndt_slam/src/ndt_relocalizer.cpp"): (
+            "makeSafeSE3FromMatrix(transform.cast<double>())",
+        ),
+        Path("src/ndt_slam/src/loop_closure.cpp"): (
+            "makeSafeSE3FromMatrix(pose.matrix())",
+            "makeSafeSE3FromMatrix(transformation.cast<double>())",
+        ),
+        Path("src/ndt_slam/src/rigid_transform_conversion.cpp"): (
+            "Sophus::SE3d(Sophus::SO3d(quaternion), translation)",
+        ),
+    }
+    forbidden_tokens = {
+        Path("src/ndt_slam/src/ndt_slam.cpp"): (
+            "Sophus::SE3d(result_ortho)",
+            "Sophus::SE3d refined(refined_matrix)",
+            "Sophus::SE3d(refined_matrix)",
+            "Sophus::SE3d(initial_guess.cast<double>())",
+        ),
+        Path("src/ndt_slam/src/ndt_relocalizer.cpp"): (
+            "Sophus::SE3d(result)",
+        ),
+        Path("src/ndt_slam/src/loop_closure.cpp"): (
+            "Sophus::SE3d(pose.matrix())",
+            "Sophus::SE3d refined(transformation_double)",
+        ),
+    }
+
+    for relative, tokens in required_tokens.items():
+        try:
+            text = (ROOT / relative).read_text(encoding="utf-8")
+        except OSError as error:
+            failures.append(f"{relative.as_posix()}: cannot read: {error}")
+            continue
+        for token in tokens:
+            if token not in text:
+                failures.append(
+                    f"{relative.as_posix()}: missing SO3 boundary token {token!r}")
+
+    for relative, tokens in forbidden_tokens.items():
+        try:
+            text = (ROOT / relative).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for token in tokens:
+            if token in text:
+                failures.append(
+                    f"{relative.as_posix()}: unsafe external matrix "
+                    f"construction remains: {token!r}")
+    return failures
+
+
+def main() -> int:
+    failures: list[str] = runtime_so3_contract_failures()
     try:
         paths = tracked_paths()
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:

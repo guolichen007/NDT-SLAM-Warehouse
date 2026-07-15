@@ -3,11 +3,13 @@
 #include "ndt_slam/build_info.hpp"
 #include "ndt_slam/cargo_observation_policy.hpp"
 #include "ndt_slam/registration_input_policy.hpp"
+#include "ndt_slam/rigid_transform_conversion.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <Eigen/Geometry>
 #include <memory>
 #include <sophus/se3.hpp>
 #include <vector>
@@ -66,6 +68,13 @@ Sophus::SE3d LookupTransform(const std::string &target_frame,
                 tf.transform.rotation.y,
                 tf.transform.rotation.z
             );
+            if (!q.coeffs().allFinite() || !std::isfinite(q.norm()) ||
+                q.norm() <= 1.0e-12) {
+                ROS_WARN("Rejected invalid TF quaternion %s <- %s",
+                         target_frame.c_str(), source_frame.c_str());
+                return Sophus::SE3d();
+            }
+            q.normalize();
             transform.so3() = Sophus::SO3d(q);
             return transform;
         } catch (tf2::TransformException &ex) {
@@ -80,6 +89,74 @@ Sophus::SE3d LookupTransform(const std::string &target_frame,
 namespace ndt_slam {
 using lidar_slam2::utils::PointCloud2ToEigen;
 using lidar_slam2::utils::GetTimestamps;
+
+namespace {
+
+struct RotationStageMetrics {
+    bool finite = false;
+    double orthogonality_error_max =
+        std::numeric_limits<double>::infinity();
+    double orthogonality_error_frobenius =
+        std::numeric_limits<double>::infinity();
+    double determinant = std::numeric_limits<double>::quiet_NaN();
+    double quaternion_norm = std::numeric_limits<double>::quiet_NaN();
+};
+
+RotationStageMetrics inspectRotationStage(
+    const Eigen::Matrix3d& rotation, bool complete_input_finite) {
+    RotationStageMetrics metrics;
+    metrics.finite = complete_input_finite && rotation.allFinite();
+    if (!rotation.allFinite()) return metrics;
+
+    const Eigen::Matrix3d error =
+        rotation.transpose() * rotation - Eigen::Matrix3d::Identity();
+    metrics.orthogonality_error_max = error.cwiseAbs().maxCoeff();
+    metrics.orthogonality_error_frobenius = error.norm();
+    metrics.determinant = rotation.determinant();
+    const Eigen::Quaterniond quaternion(rotation);
+    if (quaternion.coeffs().allFinite()) {
+        metrics.quaternion_norm = quaternion.norm();
+    }
+    return metrics;
+}
+
+void logSO3GuardStage(const char* stage, std::uint64_t frame,
+                      const Eigen::Matrix3d& rotation,
+                      bool complete_input_finite, bool valid,
+                      const std::string& reason) {
+    const RotationStageMetrics metrics =
+        inspectRotationStage(rotation, complete_input_finite);
+    if (frame > 5U && valid) return;
+
+    if (valid) {
+        ROS_INFO(
+            "[SO3Guard] stage=%s frame=%llu finite=%d orth_max=%.17g "
+            "orth_fro=%.17g det=%.17g quaternion_norm=%.17g reason=%s",
+            stage, static_cast<unsigned long long>(frame),
+            metrics.finite ? 1 : 0, metrics.orthogonality_error_max,
+            metrics.orthogonality_error_frobenius, metrics.determinant,
+            metrics.quaternion_norm, reason.c_str());
+    } else {
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "[SO3Guard] stage=%s frame=%llu finite=%d orth_max=%.17g "
+            "orth_fro=%.17g det=%.17g quaternion_norm=%.17g reason=%s",
+            stage, static_cast<unsigned long long>(frame),
+            metrics.finite ? 1 : 0, metrics.orthogonality_error_max,
+            metrics.orthogonality_error_frobenius, metrics.determinant,
+            metrics.quaternion_norm, reason.c_str());
+    }
+}
+
+void logSO3GuardPose(const char* stage, std::uint64_t frame,
+                     const Sophus::SE3d& pose) {
+    const Eigen::Matrix3d rotation = pose.so3().matrix();
+    const bool finite = rotation.allFinite() && pose.translation().allFinite();
+    logSO3GuardStage(stage, frame, rotation, finite, finite,
+                     finite ? "ok" : "pose_non_finite");
+}
+
+}  // namespace
 
 static_assert(static_cast<std::uint8_t>(CargoBottomSource::INVALID) ==
               lidar_slam2_msgs::CargoBottomEstimate::SOURCE_INVALID,
@@ -2851,6 +2928,7 @@ void NdtSlamNode::processCloudThread() {
         Sophus::SE3d new_pose = current_pose_;
         bool registration_success = false;
         bool ndt_attempted_this_frame = false;
+        bool ndt_safe_pose_valid_this_frame = false;
         static Sophus::SE3d last_local_map_pose = Sophus::SE3d();
         static int frames_since_last_update = 0;
 
@@ -2932,11 +3010,11 @@ void NdtSlamNode::processCloudThread() {
                     Sophus::SE3d predicted = crane_motion_ekf_.predictPoseReadOnly(
                         current_pose_, last_sensor_dt_);
                     initial_guess = predicted.matrix().cast<float>();
+                    diag_initial_guess_pose = predicted;
                 } else {
                     initial_guess = current_pose_.matrix().cast<float>();
+                    diag_initial_guess_pose = current_pose_;
                 }
-                diag_initial_guess_pose =
-                    Sophus::SE3d(initial_guess.cast<double>());
                 diag_have_initial_guess = true;
 
                 last_source_points_ = static_cast<int>(registration_cloud->size());
@@ -3007,19 +3085,58 @@ void NdtSlamNode::processCloudThread() {
                         ndt_health_bad_ = false;
                     }
                     if (!result.isZero() && !result.hasNaN()) {
-                        // 正交化旋转矩阵
-                        Eigen::Matrix3d R = result.block<3,3>(0,0).cast<double>();
-                        Eigen::JacobiSVD<Eigen::Matrix3d> svd(R, Eigen::ComputeFullU | Eigen::ComputeFullV);
-                        Eigen::Matrix3d R_ortho = svd.matrixU() * svd.matrixV().transpose();
-                        if (R_ortho.determinant() < 0) {
-                            R_ortho.col(0) *= -1;
-                        }
-
-                        Eigen::Matrix4d result_ortho = Eigen::Matrix4d::Identity();
-                        result_ortho.block<3,3>(0,0) = R_ortho;
-                        result_ortho.block<3,1>(0,3) = result.block<3,1>(0,3).cast<double>();
-
-                        new_pose = Sophus::SE3d(result_ortho);
+                        // PCL registration output is approximate. Never pass
+                        // its matrix to Sophus' asserting matrix constructor.
+                        const Eigen::Matrix4d ndt_matrix = result.cast<double>();
+                        logSO3GuardStage(
+                            "raw_ndt_matrix", processing_frame_index,
+                            ndt_matrix.block<3, 3>(0, 0),
+                            ndt_matrix.allFinite(), ndt_matrix.allFinite(),
+                            "external_ndt_matrix");
+                        const SafeSE3Result converted =
+                            makeSafeSE3FromMatrix(ndt_matrix);
+                        if (!converted.valid) {
+                            logSO3GuardStage(
+                                "ndt_safe_se3", processing_frame_index,
+                                ndt_matrix.block<3, 3>(0, 0),
+                                ndt_matrix.allFinite(), false,
+                                converted.diagnostics.reason);
+                            ROS_ERROR_THROTTLE(
+                                1.0,
+                                "[SO3Guard] rejected NDT measurement frame=%llu "
+                                "reason=%s input_orth=%.17g input_det=%.17g "
+                                "projected_orth=%.17g projected_det=%.17g",
+                                static_cast<unsigned long long>(
+                                    processing_frame_index),
+                                converted.diagnostics.reason.c_str(),
+                                converted.diagnostics.input_orthogonality_error,
+                                converted.diagnostics.input_determinant,
+                                converted.diagnostics.projected_orthogonality_error,
+                                converted.diagnostics.projected_determinant);
+                            if (crane_motion_ekf_enabled_ &&
+                                crane_motion_ekf_.initialized()) {
+                                const auto ekf_start = DiagClock::now();
+                                new_pose =
+                                    crane_motion_ekf_.predictWithoutMeasurement(
+                                        current_pose_, msg->header.stamp,
+                                        "NDT_SAFE_SE3_REJECTED");
+                                registration_success = true;
+                                ekf_reject_count_.fetch_add(
+                                    1, std::memory_order_relaxed);
+                                diag_stage.ekf_ms += elapsedMs(ekf_start);
+                                diag_ekf_pose = new_pose;
+                                logSO3GuardPose(
+                                    "ekf_pose", processing_frame_index,
+                                    new_pose);
+                            }
+                        } else {
+                        ndt_safe_pose_valid_this_frame = true;
+                        logSO3GuardPose(
+                            "projected_ndt_rotation", processing_frame_index,
+                            converted.pose);
+                        new_pose = converted.pose;
+                        logSO3GuardPose(
+                            "ndt_safe_se3", processing_frame_index, new_pose);
                         diag_raw_ndt_pose = new_pose;
                         diag_have_raw_ndt_pose = true;
                         if (diag_have_previous_raw_ndt_pose) {
@@ -3110,6 +3227,8 @@ void NdtSlamNode::processCloudThread() {
                         diag_stage.ekf_ms += elapsedMs(ekf_start);
                         new_pose = ekf_pose;
                         diag_ekf_pose = ekf_pose;
+                        logSO3GuardPose(
+                            "ekf_pose", processing_frame_index, ekf_pose);
 
                         // NDT 健康日志（每秒一次）
                         if (debug_cfg_.debug_ndt_health) {
@@ -3178,9 +3297,17 @@ void NdtSlamNode::processCloudThread() {
                             last_local_map_pose = new_pose;
                             frames_since_last_update = 0;
                         }
+                        }
                     } else if (crane_motion_ekf_enabled_ &&
                                crane_motion_ekf_.initialized()) {
                         const auto ekf_start = DiagClock::now();
+                        const Eigen::Matrix4d invalid_ndt_matrix =
+                            result.cast<double>();
+                        logSO3GuardStage(
+                            "raw_ndt_matrix", processing_frame_index,
+                            invalid_ndt_matrix.block<3, 3>(0, 0),
+                            invalid_ndt_matrix.allFinite(), false,
+                            "zero_or_nan_ndt_transform");
                         ROS_WARN_THROTTLE(
                             1.0,
                             "NDT returned an invalid transformation; advancing EKF prediction");
@@ -3191,6 +3318,8 @@ void NdtSlamNode::processCloudThread() {
                         ekf_reject_count_.fetch_add(1, std::memory_order_relaxed);
                         diag_stage.ekf_ms += elapsedMs(ekf_start);
                         diag_ekf_pose = new_pose;
+                        logSO3GuardPose(
+                            "ekf_pose", processing_frame_index, new_pose);
                     }
                 } else {
                     static int no_converge_count = 0;
@@ -3209,6 +3338,8 @@ void NdtSlamNode::processCloudThread() {
                         ekf_reject_count_.fetch_add(1, std::memory_order_relaxed);
                         diag_stage.ekf_ms += elapsedMs(ekf_start);
                         diag_ekf_pose = new_pose;
+                        logSO3GuardPose(
+                            "ekf_pose", processing_frame_index, new_pose);
                     }
                 }
             }
@@ -3231,13 +3362,28 @@ void NdtSlamNode::processCloudThread() {
         }
 
         if (registration_success) {
+            logSO3GuardPose(
+                "crane_constrained_pose", processing_frame_index,
+                constrained_pose);
+            if (!constrained_pose.translation().allFinite() ||
+                !constrained_pose.so3().matrix().allFinite()) {
+                ROS_ERROR_THROTTLE(
+                    1.0,
+                    "[SO3Guard] refusing non-finite constrained pose frame=%llu",
+                    static_cast<unsigned long long>(processing_frame_index));
+                registration_success = false;
+            }
+        }
+
+        if (registration_success) {
             std::lock_guard<std::mutex> lock(cloud_mutex_);
             current_pose_ = constrained_pose;  // 发布约束后的 pose
         }
 
         if (ndt_attempted_this_frame) {
             const bool frame_ndt_healthy =
-                last_ndt_converged_ && std::isfinite(last_ndt_fitness_) &&
+                last_ndt_converged_ && ndt_safe_pose_valid_this_frame &&
+                std::isfinite(last_ndt_fitness_) &&
                 (!crane_motion_ekf_enabled_ ||
                  crane_motion_ekf_.status().ndt_accepted);
             updateRelocalization(processing_frame_index, msg->header.stamp,
@@ -3257,7 +3403,19 @@ void NdtSlamNode::processCloudThread() {
 
             // v8-stable-r3-hotfix-minimal: selectPublishedPose 已透传
             const auto publish_odom_start = DiagClock::now();
-            Sophus::SE3d final_pose = selectPublishedPose(constrained_pose, publish_time);
+            Sophus::SE3d final_pose =
+                selectPublishedPose(constrained_pose, publish_time);
+            if (!final_pose.translation().allFinite() ||
+                !final_pose.so3().matrix().allFinite()) {
+                ROS_ERROR_THROTTLE(
+                    1.0,
+                    "[SO3Guard] published-pose selector returned non-finite "
+                    "pose frame=%llu; using constrained pose",
+                    static_cast<unsigned long long>(processing_frame_index));
+                final_pose = constrained_pose;
+            }
+            logSO3GuardPose(
+                "published_pose", processing_frame_index, final_pose);
             publishOdometry(publish_time, msg->header.frame_id, final_pose);
             odom_publish_count_.fetch_add(1, std::memory_order_relaxed);
 
@@ -4301,23 +4459,29 @@ void NdtSlamNode::startIcpRefineJob(IcpRefineJob job) {
                     fitness <= icp_refine_cfg_.max_fitness) {
                     const Eigen::Matrix4f raw =
                         icp.getFinalTransformation();
-                    Eigen::Matrix3d rotation =
-                        raw.block<3, 3>(0, 0).cast<double>();
-                    Eigen::JacobiSVD<Eigen::Matrix3d> svd(
-                        rotation,
-                        Eigen::ComputeFullU | Eigen::ComputeFullV);
-                    Eigen::Matrix3d orthogonal =
-                        svd.matrixU() * svd.matrixV().transpose();
-                    if (orthogonal.determinant() < 0.0) {
-                        orthogonal.col(0) *= -1.0;
-                    }
-
-                    Eigen::Matrix4d refined_matrix =
-                        Eigen::Matrix4d::Identity();
-                    refined_matrix.block<3, 3>(0, 0) = orthogonal;
-                    refined_matrix.block<3, 1>(0, 3) =
-                        raw.block<3, 1>(0, 3).cast<double>();
-                    const Sophus::SE3d refined(refined_matrix);
+                    const Eigen::Matrix4d refined_matrix =
+                        raw.cast<double>();
+                    const SafeSE3Result converted =
+                        makeSafeSE3FromMatrix(refined_matrix);
+                    logSO3GuardStage(
+                        "icp_matrix", job.frame_index,
+                        refined_matrix.block<3, 3>(0, 0),
+                        refined_matrix.allFinite(), converted.valid,
+                        converted.diagnostics.reason);
+                    if (!converted.valid) {
+                        ROS_WARN_THROTTLE(
+                            1.0,
+                            "[SO3Guard] rejected ICP result frame=%llu "
+                            "reason=%s input_orth=%.17g input_det=%.17g "
+                            "projected_orth=%.17g projected_det=%.17g",
+                            static_cast<unsigned long long>(job.frame_index),
+                            converted.diagnostics.reason.c_str(),
+                            converted.diagnostics.input_orthogonality_error,
+                            converted.diagnostics.input_determinant,
+                            converted.diagnostics.projected_orthogonality_error,
+                            converted.diagnostics.projected_determinant);
+                    } else {
+                    const Sophus::SE3d refined = converted.pose;
 
                     const Sophus::SE3d correction =
                         job.ndt_pose.inverse() * refined;
@@ -4362,6 +4526,7 @@ void NdtSlamNode::startIcpRefineJob(IcpRefineJob job) {
                             static_cast<unsigned long long>(
                                 job.frame_index),
                             position_delta, rotation_delta_deg);
+                    }
                     }
                 }
             }

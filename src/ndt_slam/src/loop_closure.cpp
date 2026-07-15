@@ -1,4 +1,5 @@
 #include "ndt_slam/loop_closure.hpp"
+#include "ndt_slam/rigid_transform_conversion.hpp"
 #include <pcl/common/transforms.h>
 #include <pcl/registration/icp.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -217,15 +218,31 @@ Sophus::SE3d PoseGraphOptimizer::getOptimizedPose(int keyframe_id) const {
     g2o::VertexSE3* vertex = it->second;
     Eigen::Isometry3d pose = vertex->estimate();
 
-    return Sophus::SE3d(pose.matrix());
+    const SafeSE3Result converted =
+        makeSafeSE3FromMatrix(pose.matrix());
+    if (!converted.valid) {
+        ROS_ERROR("[SO3Guard] rejected optimized pose keyframe=%d reason=%s",
+                  keyframe_id, converted.diagnostics.reason.c_str());
+        return Sophus::SE3d();
+    }
+    return converted.pose;
 }
 
 void PoseGraphOptimizer::updateKeyFramePoses(std::vector<KeyFrame>& keyframes) {
     for (auto& keyframe : keyframes) {
-        Sophus::SE3d optimized_pose = getOptimizedPose(keyframe.id_);
-        if (optimized_pose.so3().matrix().allFinite()) {
-            keyframe.pose_ = optimized_pose;
+        const auto vertex_it = vertices_.find(keyframe.id_);
+        if (vertex_it == vertices_.end()) continue;
+        const SafeSE3Result converted = makeSafeSE3FromMatrix(
+            vertex_it->second->estimate().matrix());
+        if (!converted.valid) {
+            ROS_ERROR(
+                "[SO3Guard] preserving keyframe=%llu after invalid optimized "
+                "pose reason=%s",
+                static_cast<unsigned long long>(keyframe.id_),
+                converted.diagnostics.reason.c_str());
+            continue;
         }
+        keyframe.pose_ = converted.pose;
     }
 }
 
@@ -448,23 +465,14 @@ std::optional<Sophus::SE3d> LoopClosureDetector::refinePose(
 
     Eigen::Matrix4f transformation = icp.getFinalTransformation();
     if (!transformation.allFinite()) return std::nullopt;
-    Eigen::Matrix4d transformation_double = transformation.cast<double>();
-
-    Eigen::Matrix3d R = transformation_double.block<3, 3>(0, 0);
-    Eigen::JacobiSVD<Eigen::Matrix3d> svd(R, Eigen::ComputeFullU | Eigen::ComputeFullV);
-    Eigen::Matrix3d R_ortho = svd.matrixU() * svd.matrixV().transpose();
-
-    if (R_ortho.determinant() < 0) {
-        R_ortho.col(0) *= -1;
-    }
-
-    transformation_double.block<3, 3>(0, 0) = R_ortho;
-
-    const Sophus::SE3d refined(transformation_double);
-    if (!refined.so3().matrix().allFinite() ||
-        !refined.translation().allFinite()) {
+    const SafeSE3Result converted =
+        makeSafeSE3FromMatrix(transformation.cast<double>());
+    if (!converted.valid) {
+        ROS_WARN("[SO3Guard] rejected loop ICP result reason=%s",
+                 converted.diagnostics.reason.c_str());
         return std::nullopt;
     }
+    const Sophus::SE3d refined = converted.pose;
     const Sophus::SE3d correction = initial_guess.inverse() * refined;
     if (correction.translation().norm() > maximum_translation ||
         correction.so3().log().norm() > maximum_rotation) {
@@ -757,8 +765,22 @@ void LoopClosureNode::odomCallback(const nav_msgs::Odometry::ConstPtr msg) {
     Eigen::Vector3d position(msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z);
     Eigen::Quaterniond orientation(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x,
                                    msg->pose.pose.orientation.y, msg->pose.pose.orientation.z);
-
-    last_pose_ = Sophus::SE3d(orientation, position);
+    if (!orientation.coeffs().allFinite() || !position.allFinite() ||
+        !std::isfinite(orientation.norm()) ||
+        orientation.norm() <= 1.0e-12) {
+        ROS_WARN_THROTTLE(1.0, "[SO3Guard] rejected invalid odometry pose");
+        return;
+    }
+    orientation.normalize();
+    const SafeSE3Result converted = makeSafeSE3(
+        orientation.toRotationMatrix(), position);
+    if (!converted.valid) {
+        ROS_WARN_THROTTLE(
+            1.0, "[SO3Guard] rejected odometry pose reason=%s",
+            converted.diagnostics.reason.c_str());
+        return;
+    }
+    last_pose_ = converted.pose;
     last_stamp_ = msg->header.stamp;
 }
 

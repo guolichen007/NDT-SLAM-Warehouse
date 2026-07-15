@@ -1,10 +1,10 @@
 #include "ndt_slam/ndt_relocalizer.hpp"
+#include "ndt_slam/rigid_transform_conversion.hpp"
 
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pclomp/ndt_omp.h>
 
-#include <Eigen/SVD>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -58,21 +58,6 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr cropAround(
     output->height = 1;
     output->is_dense = false;
     return output;
-}
-
-bool finitePose(const Eigen::Matrix4f& transform) {
-    return transform.allFinite() &&
-           std::abs(transform(3, 3) - 1.0F) < 1.0e-3F;
-}
-
-Sophus::SE3d orthonormalPose(const Eigen::Matrix4f& transform) {
-    Eigen::Matrix4d result = transform.cast<double>();
-    Eigen::JacobiSVD<Eigen::Matrix3d> svd(
-        result.block<3, 3>(0, 0), Eigen::ComputeFullU | Eigen::ComputeFullV);
-    Eigen::Matrix3d rotation = svd.matrixU() * svd.matrixV().transpose();
-    if (rotation.determinant() < 0.0) rotation.col(0) *= -1.0;
-    result.block<3, 3>(0, 0) = rotation;
-    return Sophus::SE3d(result);
 }
 
 }  // namespace
@@ -215,8 +200,10 @@ RelocalizationResult NdtRelocalizer::run(const RelocalizationJob& job) const {
         if (!ndt.hasConverged()) continue;
 
         const Eigen::Matrix4f transform = ndt.getFinalTransformation();
-        if (!finitePose(transform)) continue;
-        const Sophus::SE3d candidate = orthonormalPose(transform);
+        const SafeSE3Result converted =
+            makeSafeSE3FromMatrix(transform.cast<double>());
+        if (!converted.valid) continue;
+        const Sophus::SE3d candidate = converted.pose;
         const double fitness = ndt.getFitnessScore();
         const double probability = ndt.getTransformationProbability();
         if (!std::isfinite(fitness) || fitness > config.max_fitness ||

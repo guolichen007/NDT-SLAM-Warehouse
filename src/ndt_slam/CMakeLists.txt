@@ -109,6 +109,7 @@ set(LIBRARY_SOURCES
   # v8-stable-r3: CraneMotionEKF
   src/crane_motion_ekf.cpp
   src/crane_pose_constraint.cpp
+  src/rigid_transform_conversion.cpp
   # Asynchronous local/global NDT relocalization
   src/ndt_relocalizer.cpp
   # Runtime diagnostics (1.0x/1.5x acceptance testing)
@@ -234,6 +235,13 @@ if(CATKIN_ENABLE_TESTING)
     test/crane_pose_constraint_test.cpp)
   if(TARGET crane_pose_constraint_test)
     target_link_libraries(crane_pose_constraint_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(rigid_transform_conversion_test
+    test/rigid_transform_conversion_test.cpp)
+  if(TARGET rigid_transform_conversion_test)
+    target_link_libraries(rigid_transform_conversion_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
