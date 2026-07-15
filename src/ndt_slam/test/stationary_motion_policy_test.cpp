@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <vector>
+
 #include "ndt_slam/stationary_motion_policy.hpp"
 
 namespace ndt_slam {
@@ -73,8 +75,69 @@ TEST(StationaryMotionPolicyTest, InconsistentDriftCannotExitHold) {
         EXPECT_FALSE(decision.allow_persistent_map_commit);
     }
     EXPECT_NEAR(accumulated_path, 0.70, 1.0e-9);
+    // Let the bounded evidence window age out. Random cyclic drift must not
+    // escape through the anchor-drift failsafe.
+    for (int i = 0; i < 18; ++i) {
+        stamp += 0.1;
+        const auto decision = policy.update(
+            reliableInput(stamp, raw, Eigen::Vector2d::Zero(), 0.0));
+        saw_drift_rejection = saw_drift_rejection ||
+            decision.reason == "DRIFT_ONLY_REJECTED";
+        EXPECT_NE(decision.state, RuntimeMotionState::CATCH_UP);
+    }
     EXPECT_EQ(policy.state(), RuntimeMotionState::STATIONARY_HOLD);
     EXPECT_TRUE(saw_drift_rejection);
+}
+
+TEST(StationaryMotionPolicyTest,
+     DroppedFrameLowIncrementsAccumulateBySensorTime) {
+    StationaryMotionPolicy policy;
+    double stamp = 0.0;
+    Eigen::Vector2d raw = Eigen::Vector2d::Zero();
+    enterStationary(policy, &stamp, &raw);
+
+    StationaryMotionDecision decision;
+    for (int i = 0; i < 10; ++i) {
+        // A 0.2 s processed-frame interval is expected when the latest-only
+        // queue drops a frame. No individual displacement reaches the legacy
+        // 0.02 m threshold, but the time-window motion is coherent and real.
+        stamp += 0.2;
+        raw.x() += 0.019;
+        decision = policy.update(
+            reliableInput(stamp, raw, Eigen::Vector2d::Zero(), 0.019, 0.095));
+        if (decision.state == RuntimeMotionState::MOVING_CONFIRM) {
+            EXPECT_FALSE(decision.apply_position_constraint);
+            EXPECT_FALSE(decision.allow_local_map_update);
+            EXPECT_FALSE(decision.allow_persistent_map_commit);
+        }
+    }
+    EXPECT_EQ(decision.state, RuntimeMotionState::CATCH_UP);
+    EXPECT_TRUE(decision.movement_confirmed);
+}
+
+TEST(StationaryMotionPolicyTest,
+     OneDirectionOutlierDoesNotEraseMotionWindow) {
+    StationaryMotionPolicy policy;
+    double stamp = 0.0;
+    Eigen::Vector2d raw = Eigen::Vector2d::Zero();
+    enterStationary(policy, &stamp, &raw);
+
+    const std::vector<Eigen::Vector2d> deltas = {
+        Eigen::Vector2d(0.05, 0.00),
+        Eigen::Vector2d(0.05, 0.00),
+        Eigen::Vector2d(-0.01, 0.01),
+        Eigen::Vector2d(0.05, 0.00),
+        Eigen::Vector2d(0.05, 0.00)};
+    StationaryMotionDecision decision;
+    for (const auto& delta : deltas) {
+        stamp += 0.1;
+        raw += delta;
+        decision = policy.update(
+            reliableInput(stamp, raw, Eigen::Vector2d::Zero(),
+                          delta.norm(), 0.10));
+    }
+    EXPECT_EQ(decision.state, RuntimeMotionState::CATCH_UP);
+    EXPECT_TRUE(decision.start_catch_up);
 }
 
 TEST(StationaryMotionPolicyTest, RealMotionUsesBoundedCatchUpBeforeMoving) {

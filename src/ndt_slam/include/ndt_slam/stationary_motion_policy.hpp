@@ -2,6 +2,7 @@
 
 #include <Eigen/Core>
 
+#include <deque>
 #include <string>
 
 namespace ndt_slam {
@@ -24,6 +25,10 @@ struct StationaryMotionPolicyConfig {
     double exit_min_increment_m = 0.02;
     double exit_cumulative_motion_m = 0.15;
     double exit_direction_cosine_min = 0.80;
+    double exit_evidence_window_sec = 1.50;
+    double exit_min_speed_mps = 0.04;
+    double exit_force_anchor_drift_m = 0.30;
+    double moving_confirm_timeout_sec = 1.50;
 
     double catch_up_max_step_m = 0.08;
     double catch_up_complete_error_m = 0.10;
@@ -81,11 +86,19 @@ private:
     bool isFreshTimestamp(double stamp_sec) const;
     bool isReliableMeasurement(const StationaryMotionInput& input) const;
     void enterStationary(const StationaryMotionInput& input);
-    void beginMovementConfirmation(const Eigen::Vector2d& delta);
+    void beginMovementConfirmation(double stamp_sec);
     void rejectMovementEvidence(const StationaryMotionInput& input,
                                 const std::string& reason);
+    void appendMotionSample(double stamp_sec,
+                            const Eigen::Vector2d& raw_position);
+    void pruneMotionSamples(double stamp_sec);
     StationaryMotionDecision baseDecision(
         const StationaryMotionInput& input) const;
+
+    struct MotionSample {
+        double stamp_sec = 0.0;
+        Eigen::Vector2d raw_position = Eigen::Vector2d::Zero();
+    };
 
     StationaryMotionPolicyConfig config_;
     RuntimeMotionState state_ = RuntimeMotionState::MOVING;
@@ -99,6 +112,8 @@ private:
     Eigen::Vector2d raw_anchor_position_ = Eigen::Vector2d::Zero();
     Eigen::Vector2d accumulated_motion_ = Eigen::Vector2d::Zero();
     double confirmed_path_length_m_ = 0.0;
+    std::deque<MotionSample> motion_samples_;
+    double movement_confirm_start_stamp_sec_ = 0.0;
 
     int stationary_enter_count_ = 0;
     int movement_confirm_count_ = 0;

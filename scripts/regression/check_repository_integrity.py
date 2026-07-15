@@ -220,6 +220,9 @@ def stationary_motion_contract_failures() -> list[str]:
         "catch_up_blocks_maps",
         "applyStationaryConstraint",
         "stationary_policy:",
+        "exit_evidence_window_sec",
+        "exit_force_anchor_drift_m",
+        "ANCHOR_DRIFT_FAILSAFE_START_CATCH_UP",
     )
     combined = node + policy + ekf + config
     for token in required:
@@ -248,6 +251,67 @@ def stationary_motion_contract_failures() -> list[str]:
     if catch_up_gate is None:
         failures.append("CATCH_UP persistent MapCommit gate is missing")
 
+    if "if (state_ == RuntimeMotionState::STATIONARY_HOLD)" not in policy:
+        failures.append(
+            "MOVING_CONFIRM must not share the stationary position constraint")
+
+    return failures
+
+
+def runtime_visualization_contract_failures() -> list[str]:
+    failures: list[str] = []
+    node_path = Path("src/ndt_slam/src/ndt_slam.cpp")
+    header_path = Path("src/ndt_slam/include/ndt_slam/ndt_slam.hpp")
+    marker_path = Path(
+        "src/ndt_slam/src/cargo_marker_lifecycle.cpp")
+    config_path = Path("src/ndt_slam/config/live_longterm_mapping.yaml")
+    try:
+        node = (ROOT / node_path).read_text(encoding="utf-8")
+        header = (ROOT / header_path).read_text(encoding="utf-8")
+        marker = (ROOT / marker_path).read_text(encoding="utf-8")
+        config = (ROOT / config_path).read_text(encoding="utf-8")
+    except OSError as error:
+        return [f"runtime visualization contract cannot be read: {error}"]
+
+    combined = node + header + marker + config
+    required = (
+        "mapPublicationThread",
+        "requestMapPublication(stamp);",
+        "map_maintenance_max_deferral_frames_",
+        "force_map_maintenance_timeslice",
+        "max_deferral_frames: 5",
+        "CargoMarkerLifecycle",
+        "freeze_geometry_after_lock: true",
+        "hook_lock_rigid_geometry",
+        "rigid_suspended_track",
+        "last_good_height_hold",
+        "last_good_localization_hold",
+        "marker.action = lifecycle.show",
+        "cargo_marker:",
+    )
+    for token in required:
+        if token not in combined:
+            failures.append(
+                f"runtime visualization contract missing {token!r}")
+
+    marker_function = re.search(
+        r"void NdtSlamNode::publishCargoFusionMarker\(.*?\n}\n",
+        node,
+        re.DOTALL,
+    )
+    if marker_function is None:
+        failures.append("authoritative Cargo marker function is missing")
+    elif "marker.action = bottom.valid" in marker_function.group(0):
+        failures.append("single invalid CargoBottom frame still deletes marker")
+
+    for forbidden in (
+            "if (display_map_->empty()) return",
+            "if (ground_map_->empty()) return",
+            "if (objects_map_->empty()) return",
+            "if (objects_clean_map_->empty()) return"):
+        if forbidden in node:
+            failures.append(
+                f"latched map publication still skips empty layer: {forbidden!r}")
     return failures
 
 
@@ -433,6 +497,7 @@ def main() -> int:
     failures.extend(registration_source_contract_failures())
     failures.extend(ndt_observability_contract_failures())
     failures.extend(runtime_console_contract_failures())
+    failures.extend(runtime_visualization_contract_failures())
     try:
         paths = tracked_paths()
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:

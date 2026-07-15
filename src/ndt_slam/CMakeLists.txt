@@ -119,6 +119,7 @@ set(LIBRARY_SOURCES
   src/runtime_diagnostics.cpp
   # Formal cargo bottom and structured safety-status pipeline
   src/cargo_bottom_fusion.cpp
+  src/cargo_marker_lifecycle.cpp
   src/cargo_safety_evaluator.cpp
   src/hook_load_state_filter.cpp
   src/hook_load_evidence_policy.cpp
@@ -197,6 +198,13 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_bottom_fusion_test.cpp)
   if(TARGET cargo_bottom_fusion_test)
     target_link_libraries(cargo_bottom_fusion_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_marker_lifecycle_test
+    test/cargo_marker_lifecycle_test.cpp)
+  if(TARGET cargo_marker_lifecycle_test)
+    target_link_libraries(cargo_marker_lifecycle_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 

@@ -291,6 +291,9 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     relocalizer_.start();
     shutdown_ = false;
     running_ = true;
+    map_publication_shutdown_ = false;
+    map_publication_thread_ =
+        std::thread(&NdtSlamNode::mapPublicationThread, this);
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
 
     timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
@@ -440,6 +443,9 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     relocalizer_.start();
     shutdown_ = false;
     running_ = true;
+    map_publication_shutdown_ = false;
+    map_publication_thread_ =
+        std::thread(&NdtSlamNode::mapPublicationThread, this);
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
 
     timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
@@ -456,9 +462,17 @@ NdtSlamNode::~NdtSlamNode() {
     shutdown_ = true;
     queue_cv_.notify_all();
     tracking_cv_.notify_all();
+    {
+        std::lock_guard<std::mutex> lock(map_publication_mutex_);
+        map_publication_shutdown_ = true;
+    }
+    map_publication_cv_.notify_all();
 
     if (process_thread_.joinable()) {
         process_thread_.join();
+    }
+    if (map_publication_thread_.joinable()) {
+        map_publication_thread_.join();
     }
     relocalizer_.stop();
     if (icp_thread_.joinable()) {
@@ -903,6 +917,14 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 policy["exit_cumulative_motion_m"].as<double>(0.15);
             stationary_motion_policy_config_.exit_direction_cosine_min =
                 policy["exit_direction_cosine_min"].as<double>(0.80);
+            stationary_motion_policy_config_.exit_evidence_window_sec =
+                policy["exit_evidence_window_sec"].as<double>(1.50);
+            stationary_motion_policy_config_.exit_min_speed_mps =
+                policy["exit_min_speed_mps"].as<double>(0.04);
+            stationary_motion_policy_config_.exit_force_anchor_drift_m =
+                policy["exit_force_anchor_drift_m"].as<double>(0.30);
+            stationary_motion_policy_config_.moving_confirm_timeout_sec =
+                policy["moving_confirm_timeout_sec"].as<double>(1.50);
             stationary_motion_policy_config_.catch_up_max_step_m =
                 policy["catch_up_max_step_m"].as<double>(0.08);
             stationary_motion_policy_config_.catch_up_complete_error_m =
@@ -916,6 +938,13 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         }
         stationary_motion_policy_.setConfig(
             stationary_motion_policy_config_);
+
+        CargoMarkerLifecycleConfig marker_lifecycle_config;
+        if (config["cargo_marker"]) {
+            marker_lifecycle_config.invalid_hold_sec =
+                config["cargo_marker"]["invalid_hold_sec"].as<double>(2.0);
+        }
+        cargo_marker_lifecycle_.setConfig(marker_lifecycle_config);
 
         if (config["online_cache"]) {
             auto oc = config["online_cache"];
@@ -1431,6 +1460,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             const auto maintenance = config["map_maintenance"];
             map_maintenance_interval_commits_ = std::clamp(
                 maintenance["interval_commits"].as<int>(3), 1, 100);
+            map_maintenance_max_deferral_frames_ = std::clamp(
+                maintenance["max_deferral_frames"].as<int>(5), 1, 1000);
         }
 
         if (config["hook_cargo_lock"]) {
@@ -1446,6 +1477,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.size_change_max_ratio = hcl["size_change_max_ratio"].as<float>(0.60f);
             hook_lock_config_.size_update_confirm_frames = hcl["size_update_confirm_frames"].as<int>(5);
             hook_lock_config_.size_update_alpha = hcl["size_update_alpha"].as<float>(0.15f);
+            hook_lock_config_.freeze_geometry_after_lock =
+                hcl["freeze_geometry_after_lock"].as<bool>(true);
             hook_lock_config_.bottom_alpha_points = hcl["bottom_alpha_points"].as<float>(0.30f);
             hook_lock_config_.bottom_alpha_memory = hcl["bottom_alpha_memory"].as<float>(0.15f);
             hook_lock_config_.bottom_hold_uncertainty_growth = hcl["bottom_hold_uncertainty_growth"].as<float>(0.02f);
@@ -2209,14 +2242,63 @@ void NdtSlamNode::requestMapMaintenance() {
     }
 }
 
-void NdtSlamNode::runMapMaintenanceIfIdle() {
+void NdtSlamNode::requestMapPublication(const ros::Time& stamp) {
+    {
+        std::lock_guard<std::mutex> lock(map_publication_mutex_);
+        ++map_publication_requested_version_;
+        if (map_publication_requested_version_ == 0U) {
+            ++map_publication_requested_version_;
+        }
+        map_publication_stamp_ = stamp;
+    }
+    map_publication_cv_.notify_one();
+}
+
+void NdtSlamNode::mapPublicationThread() {
+    while (true) {
+        std::uint64_t requested_version = 0U;
+        ros::Time stamp;
+        {
+            std::unique_lock<std::mutex> lock(map_publication_mutex_);
+            map_publication_cv_.wait(lock, [this]() {
+                return map_publication_shutdown_ ||
+                    map_publication_requested_version_ >
+                        map_publication_completed_version_;
+            });
+            if (map_publication_shutdown_) return;
+            requested_version = map_publication_requested_version_;
+            stamp = map_publication_stamp_;
+        }
+
+        const auto publish_start = std::chrono::steady_clock::now();
+        publishMap();
+        publishDisplayMap();
+        publishGroundMap();
+        publishObjectsMap();
+        publishObjectsCleanMap();
+        const double publish_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - publish_start).count();
+        {
+            std::lock_guard<std::mutex> lock(map_publication_mutex_);
+            map_publication_completed_version_ = std::max(
+                map_publication_completed_version_, requested_version);
+        }
+        ROS_INFO("[MapPublish] version=%llu stamp=%.3f duration_ms=%.1f",
+                 static_cast<unsigned long long>(requested_version),
+                 stamp.toSec(), publish_ms);
+    }
+}
+
+void NdtSlamNode::runMapMaintenanceIfIdle(bool force_timeslice) {
     if (clean_rebuild_requested_from_worker_.exchange(
             false, std::memory_order_acq_rel)) {
         map_maintenance_pending_ = true;
         clean_map_rebuild_pending_ = true;
         shadow_target_pending_ = true;
     }
-    if (!map_maintenance_pending_ || localizationInputPending()) return;
+    if (!map_maintenance_pending_ ||
+        (!force_timeslice && localizationInputPending())) return;
 
     map_maintenance_pending_ = false;
     const bool clean_rebuild_requested = clean_map_rebuild_pending_;
@@ -2224,17 +2306,23 @@ void NdtSlamNode::runMapMaintenanceIfIdle() {
     if (clean_map_rebuild_pending_) {
         clean_map_rebuild_pending_ = false;
         const auto clean_map_start = std::chrono::steady_clock::now();
-        rebuildCleanMap();
+        rebuildCleanMap(!force_timeslice);
         last_commit_clean_map_ms_ =
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - clean_map_start).count();
     }
 
-    // If a localization frame arrived during the rebuild, leave RViz
-    // serialization pending and process that frame first.
-    if (localizationInputPending()) {
+    if (clean_rebuild_requested) {
+        requestMapPublication(last_stamp_);
+        map_maintenance_has_run_ = true;
+    }
+
+    // A forced timeslice completes exactly one expensive reconstruction phase.
+    // Remaining stateful owner-thread tasks stay pending for the next bounded
+    // timeslice; map serialization has already moved to its own worker.
+    if (clean_rebuild_requested && localizationInputPending()) {
         map_maintenance_pending_ = true;
-        if (clean_rebuild_requested &&
+        if (!force_timeslice && clean_rebuild_requested &&
             clean_map_content_version_ == clean_version_before) {
             clean_map_rebuild_pending_ = true;
         }
@@ -2247,37 +2335,39 @@ void NdtSlamNode::runMapMaintenanceIfIdle() {
             swapLocalizationTargetBuffers();
             shadow_target_source_version_ = clean_map_content_version_;
             shadow_target_pending_ = false;
+            if (force_timeslice && localizationInputPending()) {
+                map_maintenance_pending_ = true;
+                return;
+            }
         } else {
             map_maintenance_pending_ = true;
             return;
         }
     }
 
-    if (clean_rebuild_requested) {
-        const auto publish_start = std::chrono::steady_clock::now();
-        publishDisplayMap();
-        publishGroundMap();
-        publishObjectsMap();
-        publishObjectsCleanMap();
-        last_commit_display_map_ms_ =
-            std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - publish_start).count();
-        map_maintenance_has_run_ = true;
-    }
-
     if (loop_closure_enabled_ && loop_closure_pending_) {
-        if (localizationInputPending()) {
+        if (!force_timeslice && localizationInputPending()) {
             map_maintenance_pending_ = true;
             return;
         }
         loop_closure_pending_ = false;
         processLoopClosure();
+        if (force_timeslice && localizationInputPending()) {
+            map_maintenance_pending_ = true;
+            return;
+        }
     } else if (!loop_closure_enabled_) {
         loop_closure_pending_ = false;
     }
 
-    const auto yield_if_localization_waiting = [this]() {
-        if (!localizationInputPending()) return false;
+    const auto yield_if_localization_waiting =
+        [this, force_timeslice]() {
+        if (!localizationInputPending() || force_timeslice) return false;
+        map_maintenance_pending_ = true;
+        return true;
+    };
+    const auto finish_forced_phase = [this, force_timeslice]() {
+        if (!force_timeslice || !localizationInputPending()) return false;
         map_maintenance_pending_ = true;
         return true;
     };
@@ -2285,26 +2375,31 @@ void NdtSlamNode::runMapMaintenanceIfIdle() {
     if (release_keyframes_pending_) {
         release_keyframes_pending_ = false;
         releaseOldKeyframeClouds();
+        if (finish_forced_phase()) return;
     }
     if (yield_if_localization_waiting()) return;
     if (flush_tiles_pending_) {
         flush_tiles_pending_ = false;
         flushDirtyTiles();
+        if (finish_forced_phase()) return;
     }
     if (yield_if_localization_waiting()) return;
     if (runtime_status_pending_) {
         runtime_status_pending_ = false;
         writeRuntimeStatus();
+        if (finish_forced_phase()) return;
     }
     if (yield_if_localization_waiting()) return;
     if (memory_guard_pending_) {
         memory_guard_pending_ = false;
         checkMemoryGuard();
+        if (finish_forced_phase()) return;
     }
     if (yield_if_localization_waiting()) return;
     if (active_map_rebuild_pending_.exchange(
             false, std::memory_order_acq_rel)) {
         rebuildActiveMapFromRecentKeyframes();
+        if (finish_forced_phase()) return;
     }
 
     ROS_DEBUG("[MapMaintenance] clean_ms=%.1f publish_ms=%.1f clean_points=%zu",
@@ -2335,6 +2430,7 @@ void NdtSlamNode::processCloudThread() {
         sensor_msgs::PointCloud2::ConstPtr msg;
         double diag_queue_age_ms = 0.0;
         bool run_map_maintenance = false;
+        bool force_map_maintenance_timeslice = false;
 
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
@@ -2346,18 +2442,31 @@ void NdtSlamNode::processCloudThread() {
                            std::memory_order_acquire) || shutdown_;
             });
             if (shutdown_) break;
-            if (cloud_queue_.empty()) {
-                run_map_maintenance = map_maintenance_pending_ ||
+            const bool owner_task_pending = map_maintenance_pending_ ||
                     clean_rebuild_requested_from_worker_.load(
                         std::memory_order_acquire) ||
                     loop_closure_result_ready_.load(
                         std::memory_order_acquire);
+            force_map_maintenance_timeslice = owner_task_pending &&
+                !cloud_queue_.empty() &&
+                map_maintenance_deferral_frames_ >=
+                    map_maintenance_max_deferral_frames_;
+            if (cloud_queue_.empty() || force_map_maintenance_timeslice) {
+                run_map_maintenance = owner_task_pending;
+                if (run_map_maintenance) {
+                    map_maintenance_deferral_frames_ = 0;
+                }
             } else {
                 CloudQueueEntry entry = std::move(cloud_queue_.front());
                 cloud_queue_.pop_front();
                 msg = std::move(entry.message);
                 diag_queue_age_ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - entry.enqueued_at).count();
+                if (owner_task_pending) {
+                    ++map_maintenance_deferral_frames_;
+                } else {
+                    map_maintenance_deferral_frames_ = 0;
+                }
             }
         }
 
@@ -2365,7 +2474,7 @@ void NdtSlamNode::processCloudThread() {
             runtime_state_mutex_);
         if (run_map_maintenance) {
             consumeLoopClosureResult(last_stamp_);
-            runMapMaintenanceIfIdle();
+            runMapMaintenanceIfIdle(force_map_maintenance_timeslice);
             continue;
         }
 
@@ -5233,12 +5342,12 @@ void NdtSlamNode::rebuildGlobalMapFromSnapshot(
 
 
 void NdtSlamNode::publishDisplayMap() {
-    pcl::PointCloud<pcl::PointXYZ>::ConstPtr snapshot;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr snapshot(
+        new pcl::PointCloud<pcl::PointXYZ>);
     sensor_msgs::PointCloud2 map_msg;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
-        if (display_map_->empty()) return;
-        snapshot = display_map_;
+        if (display_map_) *snapshot = *display_map_;
     }
     pcl::toROSMsg(*snapshot, map_msg);
     map_msg.header.stamp = ros::Time::now();
@@ -5247,12 +5356,12 @@ void NdtSlamNode::publishDisplayMap() {
 }
 
 void NdtSlamNode::publishGroundMap() {
-    pcl::PointCloud<pcl::PointXYZ>::ConstPtr snapshot;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr snapshot(
+        new pcl::PointCloud<pcl::PointXYZ>);
     sensor_msgs::PointCloud2 msg;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
-        if (ground_map_->empty()) return;
-        snapshot = ground_map_;
+        if (ground_map_) *snapshot = *ground_map_;
     }
     pcl::toROSMsg(*snapshot, msg);
     msg.header.stamp = ros::Time::now();
@@ -5261,12 +5370,12 @@ void NdtSlamNode::publishGroundMap() {
 }
 
 void NdtSlamNode::publishObjectsMap() {
-    pcl::PointCloud<pcl::PointXYZ>::ConstPtr snapshot;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr snapshot(
+        new pcl::PointCloud<pcl::PointXYZ>);
     sensor_msgs::PointCloud2 msg;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
-        if (objects_map_->empty()) return;
-        snapshot = objects_map_;
+        if (objects_map_) *snapshot = *objects_map_;
     }
     pcl::toROSMsg(*snapshot, msg);
     msg.header.stamp = ros::Time::now();
@@ -5275,12 +5384,12 @@ void NdtSlamNode::publishObjectsMap() {
 }
 
 void NdtSlamNode::publishObjectsCleanMap() {
-    pcl::PointCloud<pcl::PointXYZ>::ConstPtr snapshot;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr snapshot(
+        new pcl::PointCloud<pcl::PointXYZ>);
     sensor_msgs::PointCloud2 msg;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
-        if (objects_clean_map_->empty()) return;
-        snapshot = objects_clean_map_;
+        if (objects_clean_map_) *snapshot = *objects_clean_map_;
     }
     pcl::toROSMsg(*snapshot, msg);
     msg.header.stamp = ros::Time::now();
@@ -5288,16 +5397,18 @@ void NdtSlamNode::publishObjectsCleanMap() {
     objects_clean_map_pub_.publish(msg);
 }
 
-void NdtSlamNode::rebuildCleanMap() {
+void NdtSlamNode::rebuildCleanMap(bool allow_localization_yield) {
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr objects_snapshot;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
         objects_snapshot = objects_map_;
     }
     std::size_t cooperative_work_count = 0U;
-    const auto should_yield_to_localization = [this, &cooperative_work_count]() {
+    const auto should_yield_to_localization =
+        [this, &cooperative_work_count, allow_localization_yield]() {
         ++cooperative_work_count;
-        return cooperative_work_count % 2048U == 0U &&
+        return allow_localization_yield &&
+               cooperative_work_count % 2048U == 0U &&
                localizationInputPending();
     };
     // 使用持久化的 BEV 观测计数做时间一致性过滤
@@ -6393,15 +6504,12 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
 #endif  // 旧代码结束
 
 void NdtSlamNode::publishMap() {
-    pcl::PointCloud<pcl::PointXYZ>::ConstPtr snapshot;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr snapshot(
+        new pcl::PointCloud<pcl::PointXYZ>);
     sensor_msgs::PointCloud2 map_msg;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
-        if (global_map_->empty()) {
-            ROS_DEBUG("Global map is empty, skipping publish");
-            return;
-        }
-        snapshot = global_map_;
+        if (global_map_) *snapshot = *global_map_;
     }
     pcl::toROSMsg(*snapshot, map_msg);
     map_msg.header.stamp = ros::Time::now();
@@ -6741,6 +6849,12 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     relocalization_last_result_frame_ = 0;
     relocalization_cooldown_until_frame_ = 0;
 
+    cargo_marker_lifecycle_.reset();
+    const ros::Time reset_stamp = ros::Time::now();
+    publishCargoFusionMarker(
+        CargoBottomResult{}, reset_stamp, false, true);
+    requestMapPublication(reset_stamp);
+
     ROS_INFO("SLAM system reset complete");
     return true;
 }
@@ -7000,6 +7114,7 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
             ? RelocalizationState::DEGRADED
             : RelocalizationState::IDLE;
         relocalization_invalid_safety_published_ = relocalization_enabled_;
+        cargo_marker_lifecycle_.reset();
         if (relocalization_enabled_) {
             publishRelocalizationSafetyInvalid(
                 load_stamp, "runtime_map_replaced");
@@ -7013,8 +7128,7 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
             : "Map loaded; runtime state reset";
         response.num_points = loaded_cloud->size();
 
-        publishMap();
-        publishDisplayMap();
+        requestMapPublication(load_stamp);
 
         ROS_INFO("Map loaded: %s, points: %lu", file_path.c_str(), loaded_cloud->size());
     } catch (const std::exception& e) {
@@ -7684,6 +7798,8 @@ void NdtSlamNode::publishRelocalizationSafetyInvalid(
         status, false, CargoSafetyFault::NONE, 0U, false,
         "relocalization:" + reason);
     cargo_safety_status_pub_.publish(status);
+    publishCargoFusionMarker(
+        CargoBottomResult{}, stamp, false, false);
 }
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::filterDynamicPoints(
@@ -9490,8 +9606,17 @@ void NdtSlamNode::updateHookCargoLock(
                 observation_associated = true;
                 hook_lock_.last_seen_stamp = stamp;
                 // 更新高度和尺寸
-                if (bottom.valid) updateLockedHeight(bottom, stamp, false);
-                if (strong) maybeUpdateLockedSize(det, bottom);
+                if (!hook_lock_config_.freeze_geometry_after_lock) {
+                    if (bottom.valid) updateLockedHeight(bottom, stamp, false);
+                    if (strong) maybeUpdateLockedSize(det, bottom);
+                } else if (bottom.valid) {
+                    // The accepted observation refreshes association age and
+                    // uncertainty, but the confirmed suspended-cargo geometry
+                    // remains fixed for this lock lifetime.
+                    hook_lock_.last_good_height_stamp = stamp;
+                    hook_lock_.bottom_uncertainty = std::min(
+                        hook_lock_.bottom_uncertainty, bottom.uncertainty);
+                }
 
                 // 更新 last accepted
                 if (det.core_points_base && !det.core_points_base->empty()) {
@@ -9548,8 +9673,17 @@ void NdtSlamNode::updateHookCargoLock(
                 observation_associated = true;
                 hook_lock_.state = HookCargoLockState::LOCKED;
                 hook_lock_.last_seen_stamp = stamp;
-                if (bottom.valid) updateLockedHeight(bottom, stamp, false);
-                if (strong) maybeUpdateLockedSize(det, bottom);
+                if (!hook_lock_config_.freeze_geometry_after_lock) {
+                    if (bottom.valid) updateLockedHeight(bottom, stamp, false);
+                    if (strong) maybeUpdateLockedSize(det, bottom);
+                } else if (bottom.valid) {
+                    // A recovered observation proves that the rigid suspended
+                    // cargo is still associated, but it must not reshape the
+                    // box that was confirmed before the temporary loss.
+                    hook_lock_.last_good_height_stamp = stamp;
+                    hook_lock_.bottom_uncertainty = std::min(
+                        hook_lock_.bottom_uncertainty, bottom.uncertainty);
+                }
                 ROS_INFO("[CargoLock] LOST_HOLD->LOCKED (associated recovery)");
             } else {
                 growUncertainty();
@@ -9626,38 +9760,58 @@ void NdtSlamNode::updateCargoState(
             last_tight_box_obs_.selected_points = det.core_points_base->size();
             last_tight_box_obs_.source = "tight_box";
 
-            // 自适应更新 center（允许一定偏移）
-            if (cargo_state_.valid_geometry) {
-                float center_alpha = 0.25f;
-                float max_center_step = 0.08f;
-
-                Eigen::Vector3f center_diff = det.center_base - cargo_state_.center_base;
-                for (int i = 0; i < 2; ++i) {  // 只更新 x, y
-                    float step = std::max(-max_center_step, std::min(center_diff(i), max_center_step));
-                    cargo_state_.center_base(i) += center_alpha * step;
-                }
-
-                // 自适应更新 size
-                float size_alpha = 0.30f;
-                float max_size_step = 0.10f;
-
-                Eigen::Vector3f size_diff = det.size_visible - cargo_state_.size;
-                for (int i = 0; i < 3; ++i) {
-                    float step = std::max(-max_size_step, std::min(size_diff(i), max_size_step));
-                    cargo_state_.size(i) += size_alpha * step;
-                }
+            if (hook_lock_config_.freeze_geometry_after_lock &&
+                hook_lock_.has_locked_size) {
+                const Eigen::Vector2f anchor = getCargoAnchorXY();
+                cargo_state_.center_base.x() = anchor.x();
+                cargo_state_.center_base.y() = anchor.y();
+                cargo_state_.size = hook_lock_.locked_size;
+                cargo_state_.valid_geometry = true;
+                cargo_state_.source = "hook_lock_rigid_geometry";
             } else {
-                // 初始化
-                cargo_state_.center_base = det.center_base;
-                cargo_state_.size = det.size_visible;
-            }
+                // Legacy adaptive mode remains available for deployments where
+                // the tracked object is not rigidly suspended.
+                if (cargo_state_.valid_geometry) {
+                    constexpr float kCenterAlpha = 0.25F;
+                    constexpr float kMaxCenterStep = 0.08F;
+                    const Eigen::Vector3f center_diff =
+                        det.center_base - cargo_state_.center_base;
+                    for (int i = 0; i < 2; ++i) {
+                        const float step = std::clamp(
+                            center_diff(i), -kMaxCenterStep, kMaxCenterStep);
+                        cargo_state_.center_base(i) += kCenterAlpha * step;
+                    }
 
-            cargo_state_.valid_geometry = true;
-            cargo_state_.source = "tight_box";
+                    constexpr float kSizeAlpha = 0.30F;
+                    constexpr float kMaxSizeStep = 0.10F;
+                    const Eigen::Vector3f size_diff =
+                        det.size_visible - cargo_state_.size;
+                    for (int i = 0; i < 3; ++i) {
+                        const float step = std::clamp(
+                            size_diff(i), -kMaxSizeStep, kMaxSizeStep);
+                        cargo_state_.size(i) += kSizeAlpha * step;
+                    }
+                } else {
+                    cargo_state_.center_base = det.center_base;
+                    cargo_state_.size = det.size_visible;
+                }
+                cargo_state_.valid_geometry = true;
+                cargo_state_.source = "tight_box";
+            }
         }
 
         // 更新高度（带稳定保护）
-        if (bottom.valid) {
+        if (hook_lock_config_.freeze_geometry_after_lock &&
+            hook_lock_.has_good_height) {
+            cargo_state_.bottom_z = hook_lock_.stable_bottom_z;
+            cargo_state_.top_z = hook_lock_.stable_top_z;
+            cargo_state_.bottom_unc = hook_lock_.bottom_uncertainty;
+            cargo_state_.center_base.z() =
+                0.5F * (cargo_state_.bottom_z + cargo_state_.top_z);
+            cargo_state_.size.z() =
+                cargo_state_.top_z - cargo_state_.bottom_z;
+            cargo_state_.valid_height = true;
+        } else if (bottom.valid) {
             float new_bottom = bottom.bottom_z_base;
             float new_top = bottom.top_z_base;
 
@@ -9727,14 +9881,16 @@ void NdtSlamNode::updateCargoState(
 
         // ========== 同步 CargoState 回 hook_lock_ ==========
         // 让所有下游（Marker、Removal、Warning）使用同一份数据
-        if (cargo_state_.valid_geometry) {
+        if (cargo_state_.valid_geometry &&
+            !hook_lock_config_.freeze_geometry_after_lock) {
             hook_lock_.locked_center_base = cargo_state_.center_base;
             hook_lock_.last_accepted_center = cargo_state_.center_base;
             hook_lock_.locked_size = cargo_state_.size;
             hook_lock_.has_locked_size = true;
         }
 
-        if (cargo_state_.valid_height) {
+        if (cargo_state_.valid_height &&
+            !hook_lock_config_.freeze_geometry_after_lock) {
             hook_lock_.stable_bottom_z = cargo_state_.bottom_z;
             hook_lock_.stable_top_z = cargo_state_.top_z;
             hook_lock_.bottom_uncertainty = cargo_state_.bottom_unc;
@@ -9757,7 +9913,84 @@ void NdtSlamNode::updateCargoState(
 }
 
 void NdtSlamNode::publishCargoFusionMarker(
-    const CargoBottomResult& bottom, const ros::Time& stamp) {
+    const CargoBottomResult& bottom, const ros::Time& stamp,
+    bool explicit_empty, bool localization_valid) {
+    CargoBoxGeometry visual_geometry = bottom.geometry;
+    const bool rigid_suspended_track = localization_valid &&
+        (cargo_state_.state == CargoState::LOCKED ||
+         cargo_state_.state == CargoState::LOST) &&
+        hook_lock_config_.freeze_geometry_after_lock &&
+        hook_lock_.has_locked_size && hook_lock_.has_good_height &&
+        hook_lock_.locked_size.head<2>().minCoeff() > 0.0F &&
+        hook_lock_.stable_top_z > hook_lock_.stable_bottom_z;
+    if (rigid_suspended_track) {
+        const Eigen::Vector2f anchor = getCargoAnchorXY();
+        const float bottom_z = hook_lock_.stable_bottom_z;
+        const float top_z = hook_lock_.stable_top_z;
+        const float half_x = 0.5F * hook_lock_.locked_size.x();
+        const float half_y = 0.5F * hook_lock_.locked_size.y();
+        visual_geometry = CargoBoxGeometry{};
+        visual_geometry.bottom_z_base = bottom_z;
+        visual_geometry.top_z_base = top_z;
+        visual_geometry.center_base = Eigen::Vector3f(
+            anchor.x(), anchor.y(), 0.5F * (bottom_z + top_z));
+        visual_geometry.size_base = Eigen::Vector3f(
+            hook_lock_.locked_size.x(), hook_lock_.locked_size.y(),
+            top_z - bottom_z);
+        std::size_t corner_index = 0U;
+        for (int z_side = 0; z_side < 2; ++z_side) {
+            const float z = z_side == 0 ? bottom_z : top_z;
+            for (int y_side = 0; y_side < 2; ++y_side) {
+                for (int x_side = 0; x_side < 2; ++x_side) {
+                    const Eigen::Vector3f corner(
+                        anchor.x() + (x_side == 0 ? -half_x : half_x),
+                        anchor.y() + (y_side == 0 ? -half_y : half_y), z);
+                    visual_geometry.corners_base[corner_index] = corner;
+                    visual_geometry.corners_map[corner_index] =
+                        (current_pose_ * corner.cast<double>()).cast<float>();
+                    ++corner_index;
+                }
+            }
+        }
+        Eigen::Vector3f minimum = visual_geometry.corners_map.front();
+        Eigen::Vector3f maximum = minimum;
+        visual_geometry.center_map.setZero();
+        for (const auto& corner : visual_geometry.corners_map) {
+            minimum = minimum.cwiseMin(corner);
+            maximum = maximum.cwiseMax(corner);
+            visual_geometry.center_map += corner;
+        }
+        visual_geometry.center_map /= 8.0F;
+        visual_geometry.size_map = maximum - minimum;
+        visual_geometry.bottom_z_map = minimum.z();
+        visual_geometry.top_z_map = maximum.z();
+        visual_geometry.valid = true;
+    }
+
+    CargoMarkerLifecycleInput lifecycle_input;
+    lifecycle_input.stamp_sec = stamp.toSec();
+    lifecycle_input.explicit_empty = explicit_empty;
+    lifecycle_input.localization_valid = localization_valid;
+    lifecycle_input.geometry_valid = rigid_suspended_track ||
+        (bottom.geometry_valid && bottom.geometry.valid);
+    lifecycle_input.safety_height_valid = bottom.valid;
+    lifecycle_input.geometry = visual_geometry;
+    CargoMarkerLifecycleDecision lifecycle =
+        cargo_marker_lifecycle_.update(lifecycle_input);
+
+    if (lifecycle.show && lifecycle.using_last_good_geometry &&
+        localization_valid) {
+        // The cargo is fixed in base/hook coordinates. During a short bottom
+        // evidence gap, keep following the runtime pose instead of freezing
+        // the last box in map coordinates.
+        for (std::size_t i = 0U;
+             i < lifecycle.geometry.corners_base.size(); ++i) {
+            lifecycle.geometry.corners_map[i] =
+                (current_pose_ *
+                 lifecycle.geometry.corners_base[i].cast<double>()).cast<float>();
+        }
+    }
+
     if (cargo_fused_box_marker_pub_.getNumSubscribers() == 0U) return;
 
     visualization_msgs::Marker marker;
@@ -9765,17 +9998,29 @@ void NdtSlamNode::publishCargoFusionMarker(
     marker.header.frame_id = map_frame_;
     marker.ns = "cargo_fused_box";
     marker.id = 0;
-    marker.action = bottom.valid
+    marker.action = lifecycle.show
         ? visualization_msgs::Marker::ADD
         : visualization_msgs::Marker::DELETE;
     marker.type = visualization_msgs::Marker::LINE_LIST;
     marker.pose.orientation.w = 1.0;
     marker.scale.x = 0.04;
-    marker.color.r = bottom.source == CargoBottomSource::POINTS ? 0.1F : 1.0F;
-    marker.color.g = bottom.source == CargoBottomSource::POINTS ? 1.0F : 0.7F;
-    marker.color.b = 0.1F;
+    if (lifecycle.style == CargoMarkerStyle::LOCALIZATION_DEGRADED) {
+        marker.color.r = 0.65F;
+        marker.color.g = 0.65F;
+        marker.color.b = 0.65F;
+    } else if (lifecycle.style == CargoMarkerStyle::HEIGHT_DEGRADED) {
+        marker.color.r = 1.0F;
+        marker.color.g = 0.55F;
+        marker.color.b = 0.05F;
+    } else {
+        marker.color.r = bottom.source == CargoBottomSource::POINTS
+            ? 0.1F : 1.0F;
+        marker.color.g = bottom.source == CargoBottomSource::POINTS
+            ? 1.0F : 0.7F;
+        marker.color.b = 0.1F;
+    }
     marker.color.a = 0.95F;
-    if (bottom.valid) {
+    if (lifecycle.show) {
         constexpr int kEdges[12][2] = {
             {0, 1}, {1, 3}, {3, 2}, {2, 0},
             {4, 5}, {5, 7}, {7, 6}, {6, 4},
@@ -9785,7 +10030,8 @@ void NdtSlamNode::publishCargoFusionMarker(
             for (int endpoint : edge) {
                 geometry_msgs::Point point;
                 const Eigen::Vector3f& corner =
-                    bottom.geometry.corners_map[static_cast<std::size_t>(endpoint)];
+                    lifecycle.geometry.corners_map[
+                        static_cast<std::size_t>(endpoint)];
                 point.x = corner.x();
                 point.y = corner.y();
                 point.z = corner.z();
@@ -9978,7 +10224,10 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
     bottom.invalid_reason = status.reason;
     bottom.uncertainty_m = cargo_bottom_fusion_.config().invalid_uncertainty;
     cargo_bottom_estimate_pub_.publish(bottom);
-    publishCargoFusionMarker(CargoBottomResult{}, stamp);
+    const bool localization_valid =
+        !tracking_lost_.load() && relocalization_pose_reliable_;
+    publishCargoFusionMarker(
+        CargoBottomResult{}, stamp, safe_empty, localization_valid);
     publishPayloadTrackInfoInvalid(status.reason);
 }
 
@@ -10159,9 +10408,13 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     last_cargo_pipeline_stamp_ = stamp;
     if (last_cargo_bottom_result_.valid) {
         cargo_state_.valid_height = true;
-        cargo_state_.bottom_z =
-            last_cargo_bottom_result_.geometry.bottom_z_base;
-        cargo_state_.top_z = last_cargo_bottom_result_.geometry.top_z_base;
+        if (!hook_lock_config_.freeze_geometry_after_lock ||
+            !hook_lock_.has_good_height) {
+            cargo_state_.bottom_z =
+                last_cargo_bottom_result_.geometry.bottom_z_base;
+            cargo_state_.top_z =
+                last_cargo_bottom_result_.geometry.top_z_base;
+        }
         cargo_state_.bottom_unc = last_cargo_bottom_result_.uncertainty;
         cargo_state_.bottom_safe_z = cargo_state_.bottom_z -
             cargo_state_.bottom_unc - 0.05F;
@@ -12437,8 +12690,11 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     }
 
     // ------------------------------------------------------------------------
-    // 10. Defer CleanMap/RViz maintenance until the localization queue is idle.
+    // 10. Clean-map maintenance is bounded by a forced owner-thread timeslice.
+    // RViz layer publication is independently version-driven and starts on the
+    // first successful commit even if the localization queue never becomes empty.
     // ------------------------------------------------------------------------
+    requestMapPublication(stamp);
     requestMapMaintenance();
     last_clean_points_ = objects_clean_map_ ? objects_clean_map_->size() : 0;
 

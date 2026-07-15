@@ -181,9 +181,18 @@ stationary_policy:
   exit_min_increment_m: 0.02
   exit_cumulative_motion_m: 0.15
   exit_direction_cosine_min: 0.80
+  exit_evidence_window_sec: 1.50
+  exit_min_speed_mps: 0.04
+  exit_force_anchor_drift_m: 0.30
+  moving_confirm_timeout_sec: 1.50
   catch_up_max_step_m: 0.08
   catch_up_complete_error_m: 0.10
   catch_up_confirm_frames: 2
+
+# Visualization continuity only. Safety validity and removal authorization
+# continue to use current CargoBottom evidence without this hold.
+cargo_marker:
+  invalid_hold_sec: 2.0
 
 # 关键帧 active window
 online_cache:
@@ -680,10 +689,12 @@ status_codes:
   obstacle_invalid: 34
   internal_error: 35
 
-# Heavy clean-map rebuild, RViz serialization and loop detection are run only
-# while the localization input queue is empty.
+# Clean-map maintenance receives a bounded owner-thread timeslice even when the
+# latest-only localization queue remains continuously occupied. RViz map
+# serialization runs on its own version-driven worker.
 map_maintenance:
   interval_commits: 3
+  max_deferral_frames: 5
 
 hook_fixed_cargo_detector:
   enabled: true
@@ -751,6 +762,9 @@ hook_cargo_lock:
   size_change_max_ratio: 0.60
   size_update_confirm_frames: 5
   size_update_alpha: 0.15
+  # A suspended cargo is a rigid body. Once lock confirmation finishes, keep
+  # its base-relative box dimensions/height fixed until EMPTY or LOST_CLEAR.
+  freeze_geometry_after_lock: true
   candidate_hold_sec: 1.0
   candidate_max_weak_frames: 10
   bottom_alpha_points: 0.30

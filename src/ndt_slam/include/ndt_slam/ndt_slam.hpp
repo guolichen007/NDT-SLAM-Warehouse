@@ -44,6 +44,7 @@
 // P0.5: 货物框估计器
 #include <ndt_slam/cargo_box_estimator.hpp>
 #include <ndt_slam/cargo_bottom_fusion.hpp>
+#include <ndt_slam/cargo_marker_lifecycle.hpp>
 #include <ndt_slam/cargo_safety_evaluator.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
 #include <set>
@@ -173,7 +174,7 @@ private:
 
     void rebuildGlobalMapFromSnapshot(std::uint64_t expected_generation);
     void publishDisplayMap();     // 发布显示地图
-    void rebuildCleanMap();             // 异步重建 clean map（带时间一致性）
+    void rebuildCleanMap(bool allow_localization_yield = true);
     void publishGroundMap();
     void publishObjectsMap();
     void publishObjectsCleanMap();
@@ -674,9 +675,24 @@ private:
     Sophus::SE3d shadow_target_pose_;
     int map_maintenance_commit_count_ = 0;
     int map_maintenance_interval_commits_ = 3;
+    int map_maintenance_deferral_frames_ = 0;
+    int map_maintenance_max_deferral_frames_ = 5;
     bool localizationInputPending();
     void requestMapMaintenance();
-    void runMapMaintenanceIfIdle();
+    void runMapMaintenanceIfIdle(bool force_timeslice);
+
+    // Map serialization is version-driven and independent of the localization
+    // input queue. The worker deep-copies each immutable layer under map_mutex_,
+    // then performs ROS serialization and publication without that lock.
+    std::thread map_publication_thread_;
+    std::mutex map_publication_mutex_;
+    std::condition_variable map_publication_cv_;
+    bool map_publication_shutdown_ = false;
+    std::uint64_t map_publication_requested_version_ = 0U;
+    std::uint64_t map_publication_completed_version_ = 0U;
+    ros::Time map_publication_stamp_;
+    void requestMapPublication(const ros::Time& stamp);
+    void mapPublicationThread();
 
     bool has_first_odom_ = false;
     Eigen::Vector3d last_position_;
@@ -1408,6 +1424,7 @@ private:
         float size_change_max_ratio = 0.60f;
         int size_update_confirm_frames = 5;
         float size_update_alpha = 0.15f;
+        bool freeze_geometry_after_lock = true;
         float bottom_alpha_points = 0.30f;
         float bottom_alpha_memory = 0.15f;
         float bottom_hold_uncertainty_growth = 0.02f;
@@ -1572,6 +1589,7 @@ private:
     ros::Publisher cargo_fused_box_marker_pub_;
 
     CargoBottomFusion cargo_bottom_fusion_;
+    CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
     CargoBottomResult last_cargo_bottom_result_;
     CargoSafetyResult last_cargo_safety_result_;
@@ -1681,7 +1699,9 @@ private:
         const ros::Time& obstacle_cloud_stamp,
         double processing_age_sec);
     void publishCargoFusionMarker(const CargoBottomResult& bottom,
-                                  const ros::Time& stamp);
+                                  const ros::Time& stamp,
+                                  bool explicit_empty = false,
+                                  bool localization_valid = true);
     HookLoadSnapshot currentHookLoadSnapshot() const;
     lidar_slam2_msgs::CargoSafetyStatus composeCargoSafetyStatus(
         lidar_slam2_msgs::CargoSafetyStatus status,

@@ -36,6 +36,16 @@ void StationaryMotionPolicy::setConfig(
                  config_.exit_cumulative_motion_m);
     config_.exit_direction_cosine_min =
         std::clamp(config_.exit_direction_cosine_min, -1.0, 1.0);
+    config_.exit_evidence_window_sec =
+        std::max(0.1, config_.exit_evidence_window_sec);
+    config_.exit_min_speed_mps =
+        std::max(0.0, config_.exit_min_speed_mps);
+    config_.exit_force_anchor_drift_m =
+        std::max(config_.exit_cumulative_motion_m,
+                 config_.exit_force_anchor_drift_m);
+    config_.moving_confirm_timeout_sec =
+        std::max(config_.exit_evidence_window_sec,
+                 config_.moving_confirm_timeout_sec);
     config_.catch_up_max_step_m =
         std::max(1.0e-6, config_.catch_up_max_step_m);
     config_.catch_up_complete_error_m =
@@ -54,6 +64,8 @@ void StationaryMotionPolicy::reset() {
     raw_anchor_position_.setZero();
     accumulated_motion_.setZero();
     confirmed_path_length_m_ = 0.0;
+    motion_samples_.clear();
+    movement_confirm_start_stamp_sec_ = 0.0;
     stationary_enter_count_ = 0;
     movement_confirm_count_ = 0;
     catch_up_complete_count_ = 0;
@@ -86,16 +98,16 @@ void StationaryMotionPolicy::enterStationary(
     raw_anchor_position_ = input.raw_position;
     accumulated_motion_.setZero();
     confirmed_path_length_m_ = 0.0;
+    motion_samples_.clear();
+    motion_samples_.push_back({input.stamp_sec, input.raw_position});
+    movement_confirm_start_stamp_sec_ = 0.0;
     movement_confirm_count_ = 0;
     catch_up_complete_count_ = 0;
 }
 
-void StationaryMotionPolicy::beginMovementConfirmation(
-    const Eigen::Vector2d& delta) {
+void StationaryMotionPolicy::beginMovementConfirmation(double stamp_sec) {
     state_ = RuntimeMotionState::MOVING_CONFIRM;
-    accumulated_motion_ = delta;
-    confirmed_path_length_m_ = delta.norm();
-    movement_confirm_count_ = 1;
+    movement_confirm_start_stamp_sec_ = stamp_sec;
     catch_up_complete_count_ = 0;
 }
 
@@ -105,10 +117,38 @@ void StationaryMotionPolicy::rejectMovementEvidence(
     (void)input;
     (void)reason;
     state_ = RuntimeMotionState::STATIONARY_HOLD;
+    anchor_position_ = input.filtered_position;
+    raw_anchor_position_ = input.raw_position;
     accumulated_motion_.setZero();
     confirmed_path_length_m_ = 0.0;
+    motion_samples_.clear();
+    if (input.raw_position.allFinite() && std::isfinite(input.stamp_sec)) {
+        motion_samples_.push_back({input.stamp_sec, input.raw_position});
+    }
+    movement_confirm_start_stamp_sec_ = 0.0;
     movement_confirm_count_ = 0;
     catch_up_complete_count_ = 0;
+}
+
+void StationaryMotionPolicy::appendMotionSample(
+    double stamp_sec, const Eigen::Vector2d& raw_position) {
+    if (!std::isfinite(stamp_sec) || !raw_position.allFinite()) return;
+    if (!motion_samples_.empty() &&
+        stamp_sec <= motion_samples_.back().stamp_sec +
+                         config_.timestamp_epsilon_sec) {
+        return;
+    }
+    motion_samples_.push_back({stamp_sec, raw_position});
+    pruneMotionSamples(stamp_sec);
+}
+
+void StationaryMotionPolicy::pruneMotionSamples(double stamp_sec) {
+    const double minimum_stamp =
+        stamp_sec - config_.exit_evidence_window_sec;
+    while (motion_samples_.size() > 2U &&
+           motion_samples_[1].stamp_sec < minimum_stamp) {
+        motion_samples_.pop_front();
+    }
 }
 
 StationaryMotionDecision StationaryMotionPolicy::baseDecision(
@@ -123,8 +163,7 @@ StationaryMotionDecision StationaryMotionPolicy::baseDecision(
     decision.allow_persistent_map_commit =
         state_ == RuntimeMotionState::MOVING && reliable;
 
-    if (state_ == RuntimeMotionState::STATIONARY_HOLD ||
-        state_ == RuntimeMotionState::MOVING_CONFIRM) {
+    if (state_ == RuntimeMotionState::STATIONARY_HOLD) {
         decision.apply_stationary_hold = true;
         decision.apply_position_constraint = true;
         decision.constrained_position = anchor_position_;
@@ -229,60 +268,93 @@ StationaryMotionDecision StationaryMotionPolicy::update(
         ? (input.raw_position - raw_anchor_position_).norm()
         : 0.0;
     const bool physically_plausible = reliable && had_previous_raw &&
-        raw_delta_norm >= config_.exit_min_increment_m - 1.0e-9 &&
         raw_delta_norm <= input.allowed_physical_step_m + 1.0e-9;
-
-    if (!physically_plausible) {
-        const bool drift_only =
-            anchor_drift >= config_.exit_cumulative_motion_m;
-        rejectMovementEvidence(
-            input, drift_only ? "DRIFT_ONLY_REJECTED" : "HOLD");
-        StationaryMotionDecision decision = baseDecision(input);
-        decision.reason = drift_only
-            ? "DRIFT_ONLY_REJECTED"
-            : (reliable ? "STATIONARY_HOLD" : "UNRELIABLE_MOVE_EVIDENCE");
-        return decision;
+    if (physically_plausible) {
+        appendMotionSample(input.stamp_sec, input.raw_position);
+    } else {
+        pruneMotionSamples(input.stamp_sec);
     }
 
-    if (state_ == RuntimeMotionState::STATIONARY_HOLD) {
-        beginMovementConfirmation(raw_delta);
-        StationaryMotionDecision decision = baseDecision(input);
-        decision.reason = "MOVEMENT_CONFIRM_PENDING";
-        return decision;
+    accumulated_motion_.setZero();
+    confirmed_path_length_m_ = 0.0;
+    double evidence_duration_sec = 0.0;
+    if (motion_samples_.size() >= 2U) {
+        accumulated_motion_ =
+            motion_samples_.back().raw_position -
+            motion_samples_.front().raw_position;
+        evidence_duration_sec =
+            motion_samples_.back().stamp_sec -
+            motion_samples_.front().stamp_sec;
+        for (std::size_t i = 1U; i < motion_samples_.size(); ++i) {
+            confirmed_path_length_m_ +=
+                (motion_samples_[i].raw_position -
+                 motion_samples_[i - 1U].raw_position).norm();
+        }
+    }
+    const double net_motion_m = accumulated_motion_.norm();
+    const double direction_coherence = confirmed_path_length_m_ > 1.0e-12
+        ? net_motion_m / confirmed_path_length_m_
+        : 0.0;
+    const double window_speed_mps = evidence_duration_sec > 1.0e-6
+        ? net_motion_m / evidence_duration_sec
+        : 0.0;
+    movement_confirm_count_ = motion_samples_.empty()
+        ? 0
+        : static_cast<int>(motion_samples_.size()) - 1;
+
+    const bool movement_window_started = physically_plausible &&
+        confirmed_path_length_m_ + 1.0e-9 >=
+            config_.exit_min_increment_m;
+    if (state_ == RuntimeMotionState::STATIONARY_HOLD &&
+        movement_window_started) {
+        beginMovementConfirmation(input.stamp_sec);
     }
 
-    const double accumulated_norm = accumulated_motion_.norm();
-    const double direction_cosine = accumulated_norm > 1.0e-12
-        ? raw_delta.dot(accumulated_motion_) /
-            (raw_delta_norm * accumulated_norm)
-        : 1.0;
-    if (!std::isfinite(direction_cosine) ||
-        direction_cosine < config_.exit_direction_cosine_min) {
-        rejectMovementEvidence(input, "DRIFT_ONLY_REJECTED");
-        StationaryMotionDecision decision = baseDecision(input);
-        decision.reason = "DRIFT_ONLY_REJECTED";
-        return decision;
-    }
+    const bool confirmed_by_window =
+        movement_confirm_count_ >= config_.exit_confirm_frames &&
+        net_motion_m + 1.0e-9 >= config_.exit_cumulative_motion_m &&
+        direction_coherence + 1.0e-9 >=
+            config_.exit_direction_cosine_min &&
+        window_speed_mps + 1.0e-9 >= config_.exit_min_speed_mps;
+    const bool forced_anchor_release =
+        movement_confirm_count_ >= config_.exit_confirm_frames &&
+        anchor_drift + 1.0e-9 >= config_.exit_force_anchor_drift_m;
 
-    accumulated_motion_ += raw_delta;
-    confirmed_path_length_m_ += raw_delta_norm;
-    ++movement_confirm_count_;
-
-    if (movement_confirm_count_ >= config_.exit_confirm_frames &&
-        accumulated_motion_.norm() + 1.0e-9 >=
-            config_.exit_cumulative_motion_m) {
+    if (confirmed_by_window || forced_anchor_release) {
         state_ = RuntimeMotionState::CATCH_UP;
         catch_up_complete_count_ = 0;
         StationaryMotionDecision decision = baseDecision(input);
         decision.movement_confirmed = true;
         decision.start_catch_up = true;
-        decision.constrained_position = anchor_position_;
-        decision.reason = "MOVEMENT_CONFIRMED_START_CATCH_UP";
+        decision.constrained_position = input.filtered_position;
+        decision.reason = confirmed_by_window
+            ? "MOVEMENT_CONFIRMED_START_CATCH_UP"
+            : "ANCHOR_DRIFT_FAILSAFE_START_CATCH_UP";
+        return decision;
+    }
+
+    if (state_ == RuntimeMotionState::MOVING_CONFIRM) {
+        const double confirm_age_sec =
+            input.stamp_sec - movement_confirm_start_stamp_sec_;
+        if (confirm_age_sec > config_.moving_confirm_timeout_sec &&
+            anchor_drift < config_.exit_cumulative_motion_m &&
+            direction_coherence < config_.exit_direction_cosine_min) {
+            rejectMovementEvidence(input, "DRIFT_ONLY_REJECTED");
+            StationaryMotionDecision decision = baseDecision(input);
+            decision.reason = "DRIFT_ONLY_REJECTED";
+            return decision;
+        }
+        StationaryMotionDecision decision = baseDecision(input);
+        decision.reason = physically_plausible
+            ? "MOVEMENT_CONFIRM_PENDING"
+            : "MOVEMENT_CONFIRM_GAP";
         return decision;
     }
 
     StationaryMotionDecision decision = baseDecision(input);
-    decision.reason = "MOVEMENT_CONFIRM_PENDING";
+    decision.reason = reliable
+        ? "STATIONARY_HOLD"
+        : "UNRELIABLE_MOVE_EVIDENCE";
     return decision;
 }
 
