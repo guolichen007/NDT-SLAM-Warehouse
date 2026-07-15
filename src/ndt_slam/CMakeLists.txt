@@ -108,6 +108,7 @@ set(LIBRARY_SOURCES
   src/cargo_box_estimator.cpp
   # v8-stable-r3: CraneMotionEKF
   src/crane_motion_ekf.cpp
+  src/stationary_motion_policy.cpp
   src/crane_pose_constraint.cpp
   src/rigid_transform_conversion.cpp
   # Asynchronous local/global NDT relocalization
@@ -257,6 +258,13 @@ if(CATKIN_ENABLE_TESTING)
     test/pending_origin_binding_policy_test.cpp)
   if(TARGET pending_origin_binding_policy_test)
     target_link_libraries(pending_origin_binding_policy_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(stationary_motion_policy_test
+    test/stationary_motion_policy_test.cpp)
+  if(TARGET stationary_motion_policy_test)
+    target_link_libraries(stationary_motion_policy_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 endif()

@@ -52,6 +52,7 @@
 #include <ndt_slam/crane_motion_ekf.hpp>
 #include <ndt_slam/crane_pose_constraint.hpp>
 #include <ndt_slam/ndt_relocalizer.hpp>
+#include <ndt_slam/stationary_motion_policy.hpp>
 
 // NDT_OMP
 #include <pclomp/ndt_omp.h>
@@ -934,21 +935,24 @@ private:
     int moved_frame_count_ = 0;
 
     // P1: MotionGate stationary anchor（防止静止漂移误触发）
-    bool stationary_anchor_valid_ = false;
-    Sophus::SE3d stationary_anchor_pose_;
-    double stationary_start_time_ = 0.0;
-    int moving_confirm_frames_ = 0;
-    double motion_gate_stationary_drift_ignore_radius_ = 0.60;
-    int motion_gate_moving_confirm_frames_ = 2;
     double motion_gate_moving_min_velocity_ = 0.08;
-    double last_frame_stamp_for_gate_ = 0.0;
-    Eigen::Vector3d last_frame_pos_for_gate_ = Eigen::Vector3d::Zero();
 
-    // MotionGate state is map-commit evidence only. Runtime pose publication
-    // never reads these flags.
+    // One policy decision controls runtime pose hold, local-map writes, and
+    // persistent MapCommit independently.
+    StationaryMotionPolicyConfig stationary_motion_policy_config_;
+    StationaryMotionPolicy stationary_motion_policy_;
+    StationaryMotionDecision stationary_motion_decision_;
+    RuntimeMotionState previous_runtime_motion_state_ =
+        RuntimeMotionState::MOVING;
+    bool allow_runtime_local_map_update_ = false;
+    bool allow_persistent_map_commit_ = false;
+    std::atomic<uint64_t> local_map_update_allowed_count_{0};
+    std::atomic<uint64_t> local_map_update_blocked_count_{0};
+    std::atomic<uint64_t> persistent_map_commit_allowed_count_{0};
+    std::atomic<uint64_t> persistent_map_commit_blocked_count_{0};
+
     Sophus::SE3d published_pose_;
     bool motion_gate_stationary_ = false;
-    int moving_confirm_count_ = 0;
 
     // P0-3: MapCommit evidence only. Does NOT affect runtime odom/TF/path.
     Sophus::SE3d last_raw_ndt_pose_;
@@ -958,13 +962,16 @@ private:
 
     bool has_last_raw_ndt_pose_ = false;
     bool has_commit_gate_reference_ = false;
-    int stationary_move_confirm_frames_ = 3;
-
-    // fix/588-runtime-localization-stable: raw anchor for stationary exit evidence
-    Sophus::SE3d stationary_raw_anchor_pose_;
-    bool stationary_raw_anchor_valid_ = false;
-
     Sophus::SE3d selectPublishedPose(const Sophus::SE3d& constrained_pose, const ros::Time& stamp);
+
+    StationaryMotionDecision updateStationaryMotionState(
+        const StationaryMotionInput& input,
+        const Sophus::SE3d& pose_template,
+        Sophus::SE3d& constrained_pose);
+    void enterStationaryState(const StationaryMotionInput& input,
+                              const std::string& reason);
+    void exitStationaryState(const std::string& reason);
+    void resetStationaryState(const std::string& reason);
 
     // The only production entry point to MotionGate.  It verifies that gate
     // evaluation cannot modify the runtime EKF state or current pose.

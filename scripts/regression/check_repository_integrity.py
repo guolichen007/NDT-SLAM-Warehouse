@@ -190,9 +190,71 @@ def pending_origin_contract_failures() -> list[str]:
     return failures
 
 
+def stationary_motion_contract_failures() -> list[str]:
+    failures: list[str] = []
+    node_path = Path("src/ndt_slam/src/ndt_slam.cpp")
+    policy_path = Path(
+        "src/ndt_slam/src/stationary_motion_policy.cpp")
+    ekf_path = Path("src/ndt_slam/src/crane_motion_ekf.cpp")
+    config_path = Path("src/ndt_slam/config/live_longterm_mapping.yaml")
+    try:
+        node = (ROOT / node_path).read_text(encoding="utf-8")
+        policy = (ROOT / policy_path).read_text(encoding="utf-8")
+        ekf = (ROOT / ekf_path).read_text(encoding="utf-8")
+        config = (ROOT / config_path).read_text(encoding="utf-8")
+    except OSError as error:
+        return [f"stationary motion contract cannot be read: {error}"]
+
+    required = (
+        "RuntimeMotionState::STATIONARY_HOLD",
+        "RuntimeMotionState::MOVING_CONFIRM",
+        "RuntimeMotionState::CATCH_UP",
+        "DRIFT_ONLY_REJECTED",
+        "updateStationaryMotionState",
+        "enterStationaryState",
+        "exitStationaryState",
+        "resetStationaryState",
+        "allow_runtime_local_map_update_",
+        "allow_persistent_map_commit_",
+        "catch_up_blocks_local_map",
+        "catch_up_blocks_maps",
+        "applyStationaryConstraint",
+        "stationary_policy:",
+    )
+    combined = node + policy + ekf + config
+    for token in required:
+        if token not in combined:
+            failures.append(f"stationary motion contract missing {token!r}")
+
+    for token in (
+            "raw_drift",
+            "motion_gate_stationary_drift_ignore_radius_",
+            "unfreeze_initial_map_commit"):
+        if token in node:
+            failures.append(
+                f"drift-only stationary exit token remains: {token!r}")
+
+    policy_call = node.find("updateStationaryMotionState(")
+    local_map_write = node.find("*local_map_ += *transformed")
+    if policy_call < 0 or local_map_write < 0 or policy_call > local_map_write:
+        failures.append(
+            "stationary policy must run before runtime local-map writes")
+
+    catch_up_gate = re.search(
+        r"shouldCommitKeyframe\(.*?RuntimeMotionState::CATCH_UP.*?return false;",
+        node,
+        re.DOTALL,
+    )
+    if catch_up_gate is None:
+        failures.append("CATCH_UP persistent MapCommit gate is missing")
+
+    return failures
+
+
 def main() -> int:
     failures: list[str] = runtime_so3_contract_failures()
     failures.extend(pending_origin_contract_failures())
+    failures.extend(stationary_motion_contract_failures())
     try:
         paths = tracked_paths()
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:

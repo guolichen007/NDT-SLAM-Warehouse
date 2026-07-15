@@ -170,6 +170,20 @@ motion_gate:
   min_rotation_deg: 3.0        # 最小旋转（度）
   min_time_between_keyframes_sec: 2.0  # 最小时间间隔（秒）
 
+stationary_policy:
+  enter_confirm_frames: 20
+  enter_max_raw_increment_m: 0.015
+  enter_max_speed_mps: 0.03
+  position_hold_variance: 0.0025
+  velocity_hold_variance: 0.001
+  exit_confirm_frames: 3
+  exit_min_increment_m: 0.02
+  exit_cumulative_motion_m: 0.15
+  exit_direction_cosine_min: 0.80
+  catch_up_max_step_m: 0.08
+  catch_up_complete_error_m: 0.10
+  catch_up_confirm_frames: 2
+
 # 关键帧 active window
 online_cache:
   max_active_keyframes: 80     # 最大活跃关键帧数

@@ -887,6 +887,36 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             motion_gate_min_time_sec_ = mg["min_time_between_keyframes_sec"].as<double>(2.0);
         }
 
+        if (config["stationary_policy"]) {
+            const auto policy = config["stationary_policy"];
+            stationary_motion_policy_config_.enter_confirm_frames =
+                policy["enter_confirm_frames"].as<int>(20);
+            stationary_motion_policy_config_.enter_max_raw_increment_m =
+                policy["enter_max_raw_increment_m"].as<double>(0.015);
+            stationary_motion_policy_config_.enter_max_speed_mps =
+                policy["enter_max_speed_mps"].as<double>(0.03);
+            stationary_motion_policy_config_.exit_confirm_frames =
+                policy["exit_confirm_frames"].as<int>(3);
+            stationary_motion_policy_config_.exit_min_increment_m =
+                policy["exit_min_increment_m"].as<double>(0.02);
+            stationary_motion_policy_config_.exit_cumulative_motion_m =
+                policy["exit_cumulative_motion_m"].as<double>(0.15);
+            stationary_motion_policy_config_.exit_direction_cosine_min =
+                policy["exit_direction_cosine_min"].as<double>(0.80);
+            stationary_motion_policy_config_.catch_up_max_step_m =
+                policy["catch_up_max_step_m"].as<double>(0.08);
+            stationary_motion_policy_config_.catch_up_complete_error_m =
+                policy["catch_up_complete_error_m"].as<double>(0.10);
+            stationary_motion_policy_config_.catch_up_confirm_frames =
+                policy["catch_up_confirm_frames"].as<int>(2);
+            crane_motion_ekf_cfg_.stationary_position_hold_variance =
+                policy["position_hold_variance"].as<double>(0.0025);
+            crane_motion_ekf_cfg_.stationary_velocity_hold_variance =
+                policy["velocity_hold_variance"].as<double>(0.001);
+        }
+        stationary_motion_policy_.setConfig(
+            stationary_motion_policy_config_);
+
         if (config["online_cache"]) {
             auto oc = config["online_cache"];
             max_active_keyframes_ = oc["max_active_keyframes"].as<int>(80);
@@ -2969,6 +2999,12 @@ void NdtSlamNode::processCloudThread() {
         bool registration_success = false;
         bool ndt_attempted_this_frame = false;
         bool ndt_safe_pose_valid_this_frame = false;
+        bool frame_ndt_accepted = false;
+        bool frame_prediction_only = true;
+        bool frame_registration_quality_valid = false;
+        bool frame_severe_degeneracy = false;
+        Sophus::SE3d frame_raw_ndt_pose = current_pose_;
+        double frame_raw_increment_m = 0.0;
         static Sophus::SE3d last_local_map_pose = Sophus::SE3d();
         static int frames_since_last_update = 0;
 
@@ -3179,6 +3215,7 @@ void NdtSlamNode::processCloudThread() {
                             "ndt_safe_se3", processing_frame_index, new_pose);
                         diag_raw_ndt_pose = new_pose;
                         diag_have_raw_ndt_pose = true;
+                        frame_raw_ndt_pose = new_pose;
                         if (diag_have_previous_raw_ndt_pose) {
                             diag_raw_ndt_step_from_previous =
                                 (new_pose.translation().head<2>() -
@@ -3263,6 +3300,16 @@ void NdtSlamNode::processCloudThread() {
                             }
                         }
 
+                        frame_ndt_accepted = ndt_accepted;
+                        frame_prediction_only = crane_motion_ekf_enabled_
+                            ? crane_motion_ekf_.status().prediction_only
+                            : !ndt_accepted;
+                        frame_registration_quality_valid =
+                            ndt_accepted && std::isfinite(fitness_score) &&
+                            fitness_score <= map_commit_max_fitness_;
+                        frame_raw_increment_m =
+                            diag_raw_ndt_step_from_previous;
+
                         // v8-stable-r3: 使用 EKF 输出作为 new_pose
                         diag_stage.ekf_ms += elapsedMs(ekf_start);
                         new_pose = ekf_pose;
@@ -3291,52 +3338,6 @@ void NdtSlamNode::processCloudThread() {
 
                         registration_success = true;
 
-                        // 关键帧策略：需要足够的运动才更新局部地图
-                        frames_since_last_update++;
-                        Sophus::SE3d delta = last_local_map_pose.inverse() * new_pose;
-                        double move_dist = delta.translation().norm();
-                        double move_rot = delta.so3().log().norm();
-
-                        // Prediction-only/rejected poses must not feed either
-                        // the persistent map or the runtime registration map.
-                        if (!ndt_accepted || !relocalization_pose_reliable_) {
-                            ROS_DEBUG("[LocalMap] skipped rejected/prediction-only frame");
-                        } else if (move_dist > 0.5 || move_rot > 0.08 || frames_since_last_update > 15) {
-                            // 用配准点云更新局部地图
-                            pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZ>);
-                            pcl::transformPointCloud(
-                                *registration_cloud, *transformed,
-                                new_pose.matrix().cast<float>());
-                            *local_map_ += *transformed;
-
-                            // 清理远处的点（15m 半径，更紧凑的局部地图）
-                            Eigen::Vector3d current_pos = new_pose.translation();
-                            pcl::PointCloud<pcl::PointXYZ>::Ptr cropped(new pcl::PointCloud<pcl::PointXYZ>);
-                            for (const auto& p : local_map_->points) {
-                                double dx = p.x - current_pos.x();
-                                double dy = p.y - current_pos.y();
-                                double dz = p.z - current_pos.z();
-                                if (dx*dx + dy*dy + dz*dz < 225.0) {  // 15m 半径
-                                    cropped->push_back(p);
-                                }
-                            }
-
-                            // 体素滤波：增大 leaf size 到 0.3m，与 NDT resolution 匹配
-                            if (cropped->size() > 8000) {
-                                pcl::VoxelGrid<pcl::PointXYZ> vf;
-                                vf.setInputCloud(cropped);
-                                vf.setLeafSize(0.3, 0.3, 0.3);
-                                pcl::PointCloud<pcl::PointXYZ> filtered_map;
-                                vf.filter(filtered_map);
-                                *local_map_ = filtered_map;
-                            } else {
-                                *local_map_ = *cropped;
-                            }
-                            ++local_map_version_;
-
-                            last_local_map_pose = new_pose;
-                            frames_since_last_update = 0;
-                        }
                         }
                     } else if (crane_motion_ekf_enabled_ &&
                                crane_motion_ekf_.initialized()) {
@@ -3385,6 +3386,105 @@ void NdtSlamNode::processCloudThread() {
             }
         } catch (const std::exception& e) {
             ROS_ERROR("NDT_OMP exception: %s", e.what());
+        }
+
+        StationaryMotionInput motion_input;
+        motion_input.stamp_sec = msg->header.stamp.toSec();
+        motion_input.ndt_converged = last_ndt_converged_;
+        motion_input.ndt_accepted = frame_ndt_accepted;
+        motion_input.prediction_only = frame_prediction_only;
+        motion_input.registration_quality_valid =
+            frame_registration_quality_valid;
+        motion_input.severe_degeneracy = frame_severe_degeneracy;
+        motion_input.raw_position = frame_raw_ndt_pose.translation().head<2>();
+        motion_input.filtered_position = new_pose.translation().head<2>();
+        motion_input.filtered_velocity =
+            crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()
+                ? crane_motion_ekf_.status().velocity
+                : Eigen::Vector2d::Zero();
+        motion_input.raw_increment_m = frame_raw_increment_m;
+        motion_input.allowed_physical_step_m =
+            crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()
+                ? std::max(1.0e-6,
+                           crane_motion_ekf_.status().max_allowed_step)
+                : std::max(1.0e-6,
+                           crane_motion_ekf_cfg_.max_step_max_m);
+
+        if (motion_gate_enabled_ && registration_success) {
+            stationary_motion_decision_ = updateStationaryMotionState(
+                motion_input, new_pose, new_pose);
+        } else {
+            stationary_motion_decision_ = StationaryMotionDecision{};
+            stationary_motion_decision_.state = RuntimeMotionState::MOVING;
+            stationary_motion_decision_.allow_local_map_update =
+                frame_ndt_accepted && frame_registration_quality_valid;
+            stationary_motion_decision_.allow_persistent_map_commit =
+                stationary_motion_decision_.allow_local_map_update;
+            stationary_motion_decision_.constrained_position =
+                new_pose.translation().head<2>();
+            stationary_motion_decision_.reason = motion_gate_enabled_
+                ? "NO_RUNTIME_POSE"
+                : "POLICY_DISABLED";
+            allow_runtime_local_map_update_ =
+                stationary_motion_decision_.allow_local_map_update;
+            allow_persistent_map_commit_ =
+                stationary_motion_decision_.allow_persistent_map_commit;
+        }
+
+        // Runtime local-map writes are authorized independently from
+        // persistent MapCommit. STATIONARY_HOLD, MOVING_CONFIRM, CATCH_UP,
+        // prediction-only, and severe-degeneracy frames all stop here.
+        if (registration_success) {
+            ++frames_since_last_update;
+            const Sophus::SE3d delta =
+                last_local_map_pose.inverse() * new_pose;
+            const double move_dist = delta.translation().norm();
+            const double move_rot = delta.so3().log().norm();
+            const bool catch_up_blocks_local_map =
+                stationary_motion_decision_.state ==
+                    RuntimeMotionState::CATCH_UP;
+            if (!allow_runtime_local_map_update_ ||
+                catch_up_blocks_local_map ||
+                !relocalization_pose_reliable_) {
+                ROS_DEBUG("[LocalMap] blocked state=%s reason=%s",
+                          runtimeMotionStateName(
+                              stationary_motion_decision_.state),
+                          stationary_motion_decision_.reason.c_str());
+            } else if (move_dist > 0.5 || move_rot > 0.08 ||
+                       frames_since_last_update > 15) {
+                pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(
+                    new pcl::PointCloud<pcl::PointXYZ>);
+                pcl::transformPointCloud(
+                    *registration_cloud, *transformed,
+                    new_pose.matrix().cast<float>());
+                *local_map_ += *transformed;
+
+                const Eigen::Vector3d current_pos = new_pose.translation();
+                pcl::PointCloud<pcl::PointXYZ>::Ptr cropped(
+                    new pcl::PointCloud<pcl::PointXYZ>);
+                for (const auto& p : local_map_->points) {
+                    const double dx = p.x - current_pos.x();
+                    const double dy = p.y - current_pos.y();
+                    const double dz = p.z - current_pos.z();
+                    if (dx * dx + dy * dy + dz * dz < 225.0) {
+                        cropped->push_back(p);
+                    }
+                }
+
+                if (cropped->size() > 8000) {
+                    pcl::VoxelGrid<pcl::PointXYZ> vf;
+                    vf.setInputCloud(cropped);
+                    vf.setLeafSize(0.3, 0.3, 0.3);
+                    pcl::PointCloud<pcl::PointXYZ> filtered_map;
+                    vf.filter(filtered_map);
+                    *local_map_ = filtered_map;
+                } else {
+                    *local_map_ = *cropped;
+                }
+                ++local_map_version_;
+                last_local_map_pose = new_pose;
+                frames_since_last_update = 0;
+            }
         }
 
         // ========== 阶段 6：更新位姿 ==========
@@ -4276,7 +4376,8 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr NdtSlamNode::filterOutlierPoints(const pcl::
 // CRITICAL RUNTIME CHAIN - DO NOT MODIFY
 // a7be4bf runtime pose chain must stay unchanged:
 // NDT/refined/EKF -> publishOdometry -> TF -> publishRuntimePath.
-// MotionGate controls MapCommit only.
+// Runtime motion constraints are applied inside the EKF before publication;
+// the later MapCommit gate remains read-only.
 // raw_ndt_pose is allowed only as MapCommit evidence.
 // Do NOT route raw_pose/tracking_pose to odom/TF/runtime_path/current_cloud.
 void NdtSlamNode::publishOdometry(const ros::Time& stamp, const std::string& cloud_frame_id, const Sophus::SE3d& pose_override) {
@@ -4352,7 +4453,8 @@ void NdtSlamNode::publishOdometry(const ros::Time& stamp, const std::string& clo
 // CRITICAL RUNTIME CHAIN - DO NOT MODIFY
 // a7be4bf runtime pose chain must stay unchanged:
 // NDT/refined/EKF -> publishOdometry -> TF -> publishRuntimePath.
-// MotionGate controls MapCommit only.
+// Runtime motion constraints are applied inside the EKF before publication;
+// the later MapCommit gate remains read-only.
 // raw_ndt_pose is allowed only as MapCommit evidence.
 // Do NOT route raw_pose/tracking_pose to odom/TF/runtime_path/current_cloud.
 void NdtSlamNode::publishRuntimePath(const Sophus::SE3d& pose, const ros::Time& stamp) {
@@ -6308,17 +6410,9 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     last_processed_frame_hash_ = 0U;
     has_last_raw_ndt_pose_ = false;
     has_commit_gate_reference_ = false;
-    is_stationary_ = false;
-    motion_gate_stationary_ = false;
-    stationary_anchor_valid_ = false;
-    stationary_raw_anchor_valid_ = false;
-    stationary_frame_count_ = 0;
-    moving_confirm_frames_ = 0;
-    moving_confirm_count_ = 0;
+    resetStationaryState("reset_service");
     last_keyframe_pose_for_gate_ = Sophus::SE3d();
     last_keyframe_time_for_gate_ = ros::Time();
-    last_frame_stamp_for_gate_ = 0.0;
-    last_frame_pos_for_gate_.setZero();
     moved_frame_count_ = 0;
     delta_translation_ = 0.0;
     delta_yaw_ = 0.0;
@@ -6567,17 +6661,9 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
         last_processed_frame_hash_ = 0U;
         has_last_raw_ndt_pose_ = false;
         has_commit_gate_reference_ = false;
-        is_stationary_ = false;
-        motion_gate_stationary_ = false;
-        stationary_anchor_valid_ = false;
-        stationary_raw_anchor_valid_ = false;
-        stationary_frame_count_ = 0;
-        moving_confirm_frames_ = 0;
-        moving_confirm_count_ = 0;
+        resetStationaryState("load_map");
         last_keyframe_pose_for_gate_ = Sophus::SE3d();
         last_keyframe_time_for_gate_ = ros::Time();
-        last_frame_stamp_for_gate_ = 0.0;
-        last_frame_pos_for_gate_.setZero();
         moved_frame_count_ = 0;
         delta_translation_ = 0.0;
         delta_yaw_ = 0.0;
@@ -7448,10 +7534,100 @@ Sophus::SE3d NdtSlamNode::selectPublishedPose(
     return published_pose_;
 }
 
+StationaryMotionDecision NdtSlamNode::updateStationaryMotionState(
+    const StationaryMotionInput& input,
+    const Sophus::SE3d& pose_template,
+    Sophus::SE3d& constrained_pose) {
+    StationaryMotionDecision decision = stationary_motion_policy_.update(input);
+    const RuntimeMotionState next_state = decision.state;
+
+    if (previous_runtime_motion_state_ == RuntimeMotionState::MOVING &&
+        next_state == RuntimeMotionState::STATIONARY_HOLD) {
+        enterStationaryState(input, decision.reason);
+    } else if (previous_runtime_motion_state_ != RuntimeMotionState::MOVING &&
+               next_state == RuntimeMotionState::MOVING) {
+        exitStationaryState(decision.reason);
+    }
+
+    if (next_state != previous_runtime_motion_state_) {
+        ROS_INFO("[MotionState] %s -> %s reason=%s local_map=%d persistent_map=%d",
+                 runtimeMotionStateName(previous_runtime_motion_state_),
+                 runtimeMotionStateName(next_state), decision.reason.c_str(),
+                 decision.allow_local_map_update ? 1 : 0,
+                 decision.allow_persistent_map_commit ? 1 : 0);
+    }
+
+    const bool catch_up_blocks_maps =
+        next_state == RuntimeMotionState::CATCH_UP;
+    allow_runtime_local_map_update_ =
+        decision.allow_local_map_update && !catch_up_blocks_maps;
+    allow_persistent_map_commit_ =
+        decision.allow_persistent_map_commit && !catch_up_blocks_maps;
+    if (allow_runtime_local_map_update_) {
+        local_map_update_allowed_count_.fetch_add(
+            1, std::memory_order_relaxed);
+    } else {
+        local_map_update_blocked_count_.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+    if (allow_persistent_map_commit_) {
+        persistent_map_commit_allowed_count_.fetch_add(
+            1, std::memory_order_relaxed);
+    } else {
+        persistent_map_commit_blocked_count_.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+
+    if (decision.apply_position_constraint &&
+        crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
+        ros::Time constraint_stamp;
+        constraint_stamp.fromSec(input.stamp_sec);
+        constrained_pose = crane_motion_ekf_.applyStationaryConstraint(
+            pose_template, decision.constrained_position,
+            constraint_stamp);
+        decision.constrained_position =
+            constrained_pose.translation().head<2>();
+    }
+
+    previous_runtime_motion_state_ = next_state;
+    return decision;
+}
+
+void NdtSlamNode::enterStationaryState(
+    const StationaryMotionInput& input,
+    const std::string& reason) {
+    is_stationary_ = true;
+    motion_gate_stationary_ = true;
+    stationary_frame_count_ = 0;
+    ROS_INFO("[MotionState] enter_stationary anchor=(%.3f,%.3f) reason=%s",
+             input.filtered_position.x(), input.filtered_position.y(),
+             reason.c_str());
+}
+
+void NdtSlamNode::exitStationaryState(const std::string& reason) {
+    is_stationary_ = false;
+    motion_gate_stationary_ = false;
+    stationary_frame_count_ = 0;
+    ROS_INFO("[MotionState] exit_stationary reason=%s", reason.c_str());
+}
+
+void NdtSlamNode::resetStationaryState(const std::string& reason) {
+    stationary_motion_policy_.reset();
+    stationary_motion_decision_ = StationaryMotionDecision{};
+    previous_runtime_motion_state_ = RuntimeMotionState::MOVING;
+    is_stationary_ = false;
+    motion_gate_stationary_ = false;
+    stationary_frame_count_ = 0;
+    allow_runtime_local_map_update_ = false;
+    allow_persistent_map_commit_ = false;
+    ROS_INFO("[MotionState] reset reason=%s", reason.c_str());
+}
+
 // CRITICAL RUNTIME CHAIN - DO NOT MODIFY
 // a7be4bf runtime pose chain must stay unchanged:
 // NDT/refined/EKF -> publishOdometry -> TF -> publishRuntimePath.
-// MotionGate controls MapCommit only.
+// Runtime motion constraints are applied inside the EKF before publication;
+// the later MapCommit gate remains read-only.
 // raw_ndt_pose is allowed only as MapCommit evidence.
 // Do NOT route raw_pose/tracking_pose to odom/TF/runtime_path/current_cloud.
 bool NdtSlamNode::evaluateMotionGateForMapCommit(
@@ -7521,213 +7697,48 @@ bool NdtSlamNode::evaluateMotionGateForMapCommit(
     return map_commit_allowed;
 }
 
-bool NdtSlamNode::shouldCommitKeyframe(const Sophus::SE3d& current_pose, const ros::Time& current_time) {
+bool NdtSlamNode::shouldCommitKeyframe(
+    const Sophus::SE3d& current_pose,
+    const ros::Time& current_time) {
     if (!motion_gate_enabled_) {
-        return true;  // 未启用 MotionGate，始终允许
+        return true;
     }
 
-    // 首帧总是允许
+    // CATCH_UP is an explicit no-write state even if a stale decision flag is
+    // accidentally carried across a future refactor.
+    if (!allow_persistent_map_commit_ ||
+        stationary_motion_decision_.state == RuntimeMotionState::CATCH_UP) {
+        return false;
+    }
+
     if (last_keyframe_pose_for_gate_.translation().norm() < 0.001) {
         last_keyframe_pose_for_gate_ = current_pose;
         last_keyframe_time_for_gate_ = current_time;
-        last_frame_pos_for_gate_ = current_pose.translation();
-        last_frame_stamp_for_gate_ = current_time.toSec();
         return true;
     }
 
-    // 计算位移和旋转
-    Sophus::SE3d delta = last_keyframe_pose_for_gate_.inverse() * current_pose;
-    double translation = delta.translation().norm();
-    double rotation = delta.so3().log().norm() * 180.0 / M_PI;
-    double time_elapsed = (current_time - last_keyframe_time_for_gate_).toSec();
-
-    // P1: 计算帧间速度（用于静止检测）
-    double frame_dt = current_time.toSec() - last_frame_stamp_for_gate_;
-    double frame_dx = (current_pose.translation() - last_frame_pos_for_gate_).norm();
-    double frame_vel = frame_dt > 1e-3 ? frame_dx / frame_dt : 0.0;
-    last_frame_pos_for_gate_ = current_pose.translation();
-    last_frame_stamp_for_gate_ = current_time.toSec();
-
+    const Sophus::SE3d delta =
+        last_keyframe_pose_for_gate_.inverse() * current_pose;
+    const double translation = delta.translation().norm();
+    const double rotation_deg =
+        delta.so3().log().norm() * 180.0 / M_PI;
+    const double elapsed_sec =
+        (current_time - last_keyframe_time_for_gate_).toSec();
     delta_translation_ = translation;
-    delta_yaw_ = rotation;
+    delta_yaw_ = rotation_deg;
 
-    // 检查是否满足条件
-    bool moved_enough = (translation >= motion_gate_min_translation_m_ ||
-                         rotation >= motion_gate_min_rotation_deg_);
-    bool time_elapsed_enough = (time_elapsed >= motion_gate_min_time_sec_);
-
-    // P1: 静止检测（基于帧间速度）
-    bool detected_stationary = (frame_vel < motion_gate_moving_min_velocity_ &&
-                                rotation < motion_gate_min_rotation_deg_);
-
-    // 进入静止状态
-    if (!is_stationary_ && detected_stationary) {
-        stationary_frame_count_++;
-        if (stationary_frame_count_ > 30) {
-            is_stationary_ = true;
-            motion_gate_stationary_ = true;  // v8: 设置 PoseFreeze 标志
-            stationary_anchor_pose_ = current_pose;
-            stationary_anchor_valid_ = true;
-            stationary_start_time_ = current_time.toSec();
-            moving_confirm_frames_ = 0;
-            moving_confirm_count_ = 0;
-
-            // fix/588-runtime-localization-stable: 记录 raw anchor 用于 stationary exit 判断
-            if (has_last_raw_ndt_pose_) {
-                stationary_raw_anchor_pose_ = last_raw_ndt_pose_;
-                stationary_raw_anchor_valid_ = true;
-            } else {
-                stationary_raw_anchor_pose_ = current_pose;
-                stationary_raw_anchor_valid_ = false;
-            }
-
-            ROS_INFO("[MotionGate] Crane stopped | keyframes=%d | anchor=(%.2f,%.2f,%.2f) raw_anchor=(%.2f,%.2f,%.2f) | pausing map commit only",
-                     keyframe_count_,
-                     stationary_anchor_pose_.translation().x(),
-                     stationary_anchor_pose_.translation().y(),
-                     stationary_anchor_pose_.translation().z(),
-                     stationary_raw_anchor_pose_.translation().x(),
-                     stationary_raw_anchor_pose_.translation().y(),
-                     stationary_raw_anchor_pose_.translation().z());
-        }
-    } else if (!detected_stationary) {
-        stationary_frame_count_ = 0;
-    }
-
-    // P1: 静止期间检查漂移（使用 raw NDT drift 避免 frozen pose 反馈环）
-    if (is_stationary_ && stationary_anchor_valid_) {
-        double elapsed = current_time.toSec() - stationary_start_time_;
-
-        // 计算 filtered_drift（仅用于日志）
-        double filtered_drift =
-            (current_pose.translation().head<2>() -
-             stationary_anchor_pose_.translation().head<2>()).norm();
-
-        // 计算 raw_drift（主退出证据）
-        double raw_drift = filtered_drift;
-        if (stationary_raw_anchor_valid_ && has_last_raw_ndt_pose_) {
-            raw_drift =
-                (last_raw_ndt_pose_.translation().head<2>() -
-                 stationary_raw_anchor_pose_.translation().head<2>()).norm();
-        }
-
-        // P0-3: evidence 检查必须放在任何 SKIP_COMMIT 判断之前
-        // 计算 evidence_trans = max(raw_trans, refined_trans, runtime_trans)
-        double raw_trans = 0.0;
-        double refined_trans = 0.0;
-        double runtime_trans = 0.0;
-
-        if (has_commit_gate_reference_) {
-            if (has_last_raw_ndt_pose_) {
-                raw_trans = (last_raw_ndt_pose_.translation().head<2>() -
-                            last_commit_raw_pose_.translation().head<2>()).norm();
-            }
-
-            refined_trans = (current_pose.translation().head<2>() -
-                            last_commit_refined_pose_.translation().head<2>()).norm();
-            runtime_trans = (current_pose.translation().head<2>() -
-                            last_commit_runtime_pose_.translation().head<2>()).norm();
-        }
-
-        double evidence_trans = std::max(raw_trans, std::max(refined_trans, runtime_trans));
-
-        ROS_INFO_THROTTLE(
-            2.0,
-            "[MotionGateEvidence] raw=%.3f refined=%.3f runtime=%.3f evidence=%.3f dt=%.2f fitness=%.3f kf=%d",
-            raw_trans,
-            refined_trans,
-            runtime_trans,
-            evidence_trans,
-            elapsed,
-            last_ndt_fitness_,
-            keyframe_count_);
-
-        // Outer MapCommit quality gating has already accepted this frame; do
-        // not introduce a second, stricter fitness cliff in MotionGate.
-        if (keyframe_count_ <= 1 &&
-            elapsed > 3.0 &&
-            evidence_trans > 0.15) {
-            ROS_WARN(
-                "[MotionGate] unfreeze_initial_map_commit raw=%.3f refined=%.3f runtime=%.3f evidence=%.3f dt=%.2f fitness=%.3f",
-                raw_trans,
-                refined_trans,
-                runtime_trans,
-                evidence_trans,
-                elapsed,
-                last_ndt_fitness_);
-            // 确认移动，恢复提交，必须复位所有 stationary 状态
-            is_stationary_ = false;
-            motion_gate_stationary_ = false;
-            stationary_anchor_valid_ = false;
-            stationary_raw_anchor_valid_ = false;
-            moving_confirm_frames_ = 0;
-            moving_confirm_count_ = 0;
-            stationary_frame_count_ = 0;
-            return true;
-        }
-
-        // 漂移在 ignore_radius 内，认为是 NDT 静止漂移，不提交
-        if (raw_drift < motion_gate_stationary_drift_ignore_radius_) {
-            ROS_INFO_THROTTLE(2.0,
-                "[MotionGate] stationary_skip_map_commit raw_drift=%.3f filtered_drift=%.3f elapsed=%.1f action=SKIP_MAP_COMMIT odom_publish=1 pose_override=0",
-                raw_drift, filtered_drift, elapsed);
-            return false;
-        }
-
-        // 超过 ignore_radius，需要连续确认才能认为真的在移动
-        moving_confirm_frames_++;
-        if (moving_confirm_frames_ < motion_gate_moving_confirm_frames_) {
-            ROS_INFO_THROTTLE(1.0,
-                "[MotionGate] possible_move raw_drift=%.3f filtered_drift=%.3f confirm=%d/%d action=WAIT_MAP_COMMIT",
-                raw_drift, filtered_drift, moving_confirm_frames_, motion_gate_moving_confirm_frames_);
-            return false;
-        }
-
-        // 确认移动，恢复提交，必须复位所有 stationary 状态
-        is_stationary_ = false;
-        motion_gate_stationary_ = false;
-        stationary_anchor_valid_ = false;
-        stationary_raw_anchor_valid_ = false;
-        moving_confirm_frames_ = 0;
-        moving_confirm_count_ = 0;
-        stationary_frame_count_ = 0;
-
-        ROS_INFO("[MotionGate] exit_stationary raw_drift=%.3f filtered_drift=%.3f confirm=%d action=RESUME_MAP_COMMIT",
-                 raw_drift, filtered_drift, motion_gate_moving_confirm_frames_);
-    }
-
-    // 正常移动检测（使用 evidence_trans）
-    // 计算 evidence_trans = max(raw_trans, refined_trans, runtime_trans)
-    double raw_trans_move = 0.0;
-    double refined_trans_move = 0.0;
-    double runtime_trans_move = 0.0;
-
-    if (has_commit_gate_reference_) {
-        if (has_last_raw_ndt_pose_) {
-            raw_trans_move = (last_raw_ndt_pose_.translation().head<2>() -
-                             last_commit_raw_pose_.translation().head<2>()).norm();
-        }
-
-        refined_trans_move = (current_pose.translation().head<2>() -
-                             last_commit_refined_pose_.translation().head<2>()).norm();
-        runtime_trans_move = (current_pose.translation().head<2>() -
-                             last_commit_runtime_pose_.translation().head<2>()).norm();
-    }
-
-    double evidence_trans_move = std::max(raw_trans_move, std::max(refined_trans_move, runtime_trans_move));
-
-    // 正常运动提交条件
-    if (evidence_trans_move > motion_gate_min_translation_m_ &&
-        time_elapsed_enough &&
-        !is_stationary_) {
+    const bool moved_enough =
+        translation >= motion_gate_min_translation_m_ ||
+        rotation_deg >= motion_gate_min_rotation_deg_;
+    if (moved_enough && elapsed_sec >= motion_gate_min_time_sec_) {
         last_keyframe_pose_for_gate_ = current_pose;
         last_keyframe_time_for_gate_ = current_time;
-        moved_frame_count_++;
+        ++moved_frame_count_;
         return true;
     }
-
     return false;
 }
+
 
 void NdtSlamNode::releaseOldKeyframeClouds() {
     if (max_active_keyframes_ <= 0) return;
@@ -11253,7 +11264,8 @@ bool NdtSlamNode::isDuplicateFrameBySignature(const FrameSignature& cur) const
 // CRITICAL RUNTIME CHAIN - DO NOT MODIFY
 // a7be4bf runtime pose chain must stay unchanged:
 // NDT/refined/EKF -> publishOdometry -> TF -> publishRuntimePath.
-// MotionGate controls MapCommit only.
+// Runtime motion constraints are applied inside the EKF before publication;
+// the later MapCommit gate remains read-only.
 // raw_ndt_pose is allowed only as MapCommit evidence.
 // Do NOT route raw_pose/tracking_pose to odom/TF/runtime_path/current_cloud.
 void NdtSlamNode::commitKeyFrameWithDynamicFiltering(

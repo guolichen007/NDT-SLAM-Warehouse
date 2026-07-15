@@ -487,24 +487,48 @@ Sophus::SE3d CraneMotionEKF::buildPoseFromState(
     return out;
 }
 
-// v8-stable-r3-hotfix-minimal: 静止零速约束
-void CraneMotionEKF::applyStationaryConstraint(const Eigen::Vector2d& anchor_xy) {
-    // 强制位置到锚点
-    x_(0) = anchor_xy.x();
-    x_(1) = anchor_xy.y();
-    // 强制速度为零
-    x_(2) = 0.0;
-    x_(3) = 0.0;
+Sophus::SE3d CraneMotionEKF::applyStationaryConstraint(
+    const Sophus::SE3d& pose_template,
+    const Eigen::Vector2d& anchor_position,
+    const ros::Time& stamp) {
+    if (!initialized_ || !anchor_position.allFinite()) {
+        return pose_template;
+    }
 
-    // 收紧不确定性：位置 ±5cm，速度 ±0.02m/s
-    P_(0, 0) = 0.0025;
-    P_(1, 1) = 0.0025;
-    P_(2, 2) = 0.0004;
-    P_(3, 3) = 0.0004;
+    Eigen::Matrix<double, 2, 4> H;
+    H.setZero();
+    H(0, 0) = 1.0;
+    H(1, 1) = 1.0;
+    const double position_variance =
+        std::max(1.0e-9, cfg_.stationary_position_hold_variance);
+    const Eigen::Matrix2d R =
+        position_variance * Eigen::Matrix2d::Identity();
+    const Eigen::Matrix2d S = H * P_ * H.transpose() + R;
+    const Eigen::Matrix<double, 4, 2> K =
+        P_ * H.transpose() * S.ldlt().solve(Eigen::Matrix2d::Identity());
+    x_ += K * (anchor_position - x_.head<2>());
+    const Eigen::Matrix4d I_KH = Eigen::Matrix4d::Identity() - K * H;
+    P_ = I_KH * P_ * I_KH.transpose() + K * R * K.transpose();
 
-    // 更新状态输出
+    // The zero-drift hold model is an equality constraint after the
+    // pseudo-measurement covariance update.
+    x_.head<2>() = anchor_position;
+    x_.tail<2>().setZero();
+    P_.block<2, 2>(0, 2).setZero();
+    P_.block<2, 2>(2, 0).setZero();
+    P_(0, 0) = std::min(P_(0, 0), position_variance);
+    P_(1, 1) = std::min(P_(1, 1), position_variance);
+    const double velocity_variance =
+        std::max(1.0e-9, cfg_.stationary_velocity_hold_variance);
+    P_(2, 2) = std::min(P_(2, 2), velocity_variance);
+    P_(3, 3) = std::min(P_(3, 3), velocity_variance);
+
+    last_stamp_ = stamp;
+    status_.initialized = true;
     status_.output_pos = x_.head<2>();
     status_.velocity = x_.tail<2>();
+    status_.p_trace = P_.trace();
+    return buildPoseFromState(x_, pose_template);
 }
 
 // fix/588-runtime-localization-stable: 只清速度，不改位置

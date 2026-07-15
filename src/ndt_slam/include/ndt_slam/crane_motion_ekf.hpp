@@ -39,6 +39,9 @@ struct CraneMotionEKFConfig {
     double max_step_min_m = 0.08;
     double max_step_max_m = 0.25;
 
+    double stationary_position_hold_variance = 0.0025;
+    double stationary_velocity_hold_variance = 0.001;
+
     // Legacy velocity-direction damping can suppress a real second-axis
     // start.  Independent X/Y innovation gates are the production default.
     bool axis_independent_gate = true;
@@ -137,7 +140,10 @@ public:
     const Eigen::Vector4d& state() const { return x_; }
 
     // v8-stable-r3-hotfix-minimal: 静止零速约束
-    void applyStationaryConstraint(const Eigen::Vector2d& anchor_xy);
+    Sophus::SE3d applyStationaryConstraint(
+        const Sophus::SE3d& pose_template,
+        const Eigen::Vector2d& anchor_position,
+        const ros::Time& stamp);
 
     // fix/588-runtime-localization-stable: 只清速度，不改位置
     void applyZeroVelocityConstraint();
