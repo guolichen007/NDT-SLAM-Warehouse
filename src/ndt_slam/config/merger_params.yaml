@@ -19,6 +19,9 @@ sync:
   max_queue_size: 8
   subscriber_queue_size: 10
   diagnostic_log_period_sec: 2.0
+  # Diagnostics remain available on the ROS topic; suppress periodic terminal
+  # health output so the operator console stays cargo/safety focused.
+  console_health_enabled: false
 
 lidars:
   - name: "lidar150"

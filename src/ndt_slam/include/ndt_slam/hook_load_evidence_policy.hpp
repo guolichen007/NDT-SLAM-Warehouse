@@ -73,6 +73,22 @@ struct SuspendedCargoLockDecision {
 SuspendedCargoLockDecision evaluateSuspendedCargoLock(
     const SuspendedCargoLockInput& input);
 
+// Geometry may lock before a trustworthy bottom estimate exists. In frozen
+// mode the first later valid height initializes the rigid Z extent exactly
+// once; subsequent observations may refresh age/uncertainty but never reshape
+// the suspended object.
+enum class LockedCargoHeightAction : std::uint8_t {
+    IGNORE_INVALID = 0,
+    INITIALIZE_ONCE = 1,
+    UPDATE_ADAPTIVE = 2,
+    REFRESH_FROZEN = 3
+};
+
+LockedCargoHeightAction evaluateLockedCargoHeightAction(
+    bool freeze_geometry_after_lock,
+    bool has_good_height,
+    bool observation_valid);
+
 enum class CargoObservationOutcome : std::uint8_t {
     UNKNOWN = 0,
     CARGO_DETECTED = 1,

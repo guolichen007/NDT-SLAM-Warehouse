@@ -130,7 +130,7 @@ void logSO3GuardStage(const char* stage, std::uint64_t frame,
     if (frame > 5U && valid) return;
 
     if (valid) {
-        ROS_INFO(
+        ROS_DEBUG(
             "[SO3Guard] stage=%s frame=%llu finite=%d orth_max=%.17g "
             "orth_fro=%.17g det=%.17g quaternion_norm=%.17g reason=%s",
             stage, static_cast<unsigned long long>(frame),
@@ -283,7 +283,7 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
         ROS_INFO("NDT_OMP: using KDTREE neighbor search");
     }
 
-    ROS_INFO("NDT_OMP initialized: resolution=%.2f, step_size=%.2f, max_iter=%d, threads=%d, search=%s",
+    ROS_DEBUG("NDT_OMP initialized: resolution=%.2f, step_size=%.2f, max_iter=%d, threads=%d, search=%s",
              ndt_resolution_, ndt_step_size_, ndt_max_iterations_, ndt_num_threads_,
              ndt_neighbor_search_method_.c_str());
 
@@ -298,8 +298,8 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
 
     timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
 
-    ROS_INFO("NdtSlamNode initialized with NDT_OMP");
-    ROS_INFO("Services: reset, set_pose, relocalize, save_map, load_map, rebuild_map");
+    ROS_DEBUG("NdtSlamNode initialized with NDT_OMP");
+    ROS_DEBUG("Services: reset, set_pose, relocalize, save_map, load_map, rebuild_map");
 }
 
 NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHandle& nh)
@@ -414,20 +414,20 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         ndt_->setNeighborhoodSearchMethod(pclomp::KDTREE);
     }
 
-    ROS_INFO("NDT_OMP initialized: resolution=%.2f, step_size=%.2f, max_iter=%d, threads=%d, search=%s",
+    ROS_DEBUG("NDT_OMP initialized: resolution=%.2f, step_size=%.2f, max_iter=%d, threads=%d, search=%s",
              ndt_resolution_, ndt_step_size_, ndt_max_iterations_, ndt_num_threads_,
              ndt_neighbor_search_method_.c_str());
 
     // 初始化 PayloadTrackManager
     payload_tracker_.configureFromYaml(config_file_path);
     payload_tracker_config_ = payload_tracker_.getConfig();
-    ROS_INFO("[PayloadTracker] initialized: enabled=%d, base_stability_std_thresh=%.2f",
+    ROS_DEBUG("[PayloadTracker] initialized: enabled=%d, base_stability_std_thresh=%.2f",
              payload_tracker_config_.enabled ? 1 : 0, payload_tracker_config_.base_stability_std_thresh);
 
     // P0.5: 初始化 CargoBoxEstimator
     cargo_box_estimator_.configureFromYaml(config_file_path);
     cargo_box_estimator_config_ = cargo_box_estimator_.getConfig();
-    ROS_INFO("[CargoBoxEstimator] initialized: enabled=%d, use_crane_axis_obb=%d",
+    ROS_DEBUG("[CargoBoxEstimator] initialized: enabled=%d, use_crane_axis_obb=%d",
              cargo_box_estimator_config_.enabled ? 1 : 0, cargo_box_estimator_config_.use_crane_axis_obb);
 
     // Runtime diagnostics: configure and log startup
@@ -450,9 +450,9 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
 
     timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
 
-    ROS_INFO("NdtSlamNode initialized with NDT_OMP");
-    ROS_INFO("Config file: %s", config_file_path.c_str());
-    ROS_INFO("Services: reset, set_pose, relocalize, save_map, load_map, rebuild_map");
+    ROS_DEBUG("NdtSlamNode initialized with NDT_OMP");
+    ROS_DEBUG("Config file: %s", config_file_path.c_str());
+    ROS_DEBUG("Services: reset, set_pose, relocalize, save_map, load_map, rebuild_map");
 }
 
 NdtSlamNode::~NdtSlamNode() {
@@ -473,6 +473,9 @@ NdtSlamNode::~NdtSlamNode() {
     }
     if (map_publication_thread_.joinable()) {
         map_publication_thread_.join();
+    }
+    if (clean_map_rebuild_thread_.joinable()) {
+        clean_map_rebuild_thread_.join();
     }
     relocalizer_.stop();
     if (icp_thread_.joinable()) {
@@ -548,7 +551,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         if (config["debug"]) {
             auto dbg = config["debug"];
             debug_cfg_.publish_runtime_path = dbg["publish_runtime_path"].as<bool>(false);
-            ROS_INFO("[DebugConfig] publish_runtime_path=%d", debug_cfg_.publish_runtime_path ? 1 : 0);
+            ROS_DEBUG("[DebugConfig] publish_runtime_path=%d", debug_cfg_.publish_runtime_path ? 1 : 0);
         }
 
         // 日志配置
@@ -822,22 +825,26 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         }
         dynamic_event_manager_.configure(dynamic_event_config_);
 
-        ROS_INFO("=== DynamicEventManager Config ===");
-        ROS_INFO("  enabled: %s", dynamic_event_config_.enabled ? "true" : "false");
-        ROS_INFO("  payload_pre_guard: %.1fs, moving_post_guard: %.1fs, unknown_post_guard: %.1fs",
-                 dynamic_event_config_.payload_pre_guard_sec,
-                 dynamic_event_config_.moving_post_guard_sec,
-                 dynamic_event_config_.unknown_post_guard_sec);
-        ROS_INFO("  placement: enabled=%s, stable_frames=%d, disp_thresh=%.2f, vel_thresh=%.2f",
-                 dynamic_event_config_.placement_detection_enabled ? "true" : "false",
-                 dynamic_event_config_.stable_frames_thresh,
-                 dynamic_event_config_.stable_map_disp_thresh_m,
-                 dynamic_event_config_.stable_velocity_thresh_mps);
-        ROS_INFO("  human_pre_guard: %.1fs, post_guard: %.1fs",
-                 dynamic_event_config_.human_pre_guard_sec, dynamic_event_config_.human_post_guard_sec);
+        if (debug_cfg_.debug_config) {
+            ROS_INFO("=== DynamicEventManager Config ===");
+            ROS_INFO("  enabled: %s", dynamic_event_config_.enabled ? "true" : "false");
+            ROS_INFO("  payload_pre_guard: %.1fs, moving_post_guard: %.1fs, unknown_post_guard: %.1fs",
+                     dynamic_event_config_.payload_pre_guard_sec,
+                     dynamic_event_config_.moving_post_guard_sec,
+                     dynamic_event_config_.unknown_post_guard_sec);
+            ROS_INFO("  placement: enabled=%s, stable_frames=%d, disp_thresh=%.2f, vel_thresh=%.2f",
+                     dynamic_event_config_.placement_detection_enabled ? "true" : "false",
+                     dynamic_event_config_.stable_frames_thresh,
+                     dynamic_event_config_.stable_map_disp_thresh_m,
+                     dynamic_event_config_.stable_velocity_thresh_mps);
+            ROS_INFO("  human_pre_guard: %.1fs, post_guard: %.1fs",
+                     dynamic_event_config_.human_pre_guard_sec,
+                     dynamic_event_config_.human_post_guard_sec);
+        }
 
         loop_closure_detector_.configureFromYaml(config_file_path);
 
+        if (debug_cfg_.debug_config) {
         ROS_INFO("=== NdtSlamNode Parameters ===");
         ROS_INFO("=== HumanObjectFilter Config ===");
         ROS_INFO("  enabled: %s", human_filter_config_.enabled ? "true" : "false");
@@ -886,6 +893,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         ROS_INFO("=== Near-Field Filter Config ===");
         ROS_INFO("  near_field_radius: %.1f m", near_field_radius_);
         ROS_INFO("  near_field_z_min: %.1f m", near_field_z_min_);
+        }
 
         // ========== 长期建图参数 ==========
         if (config["longterm_mapping"]) {
@@ -965,15 +973,17 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             tile_voxel_objects_ = pm["tile_voxel_objects"].as<double>(0.08);
         }
 
-        ROS_INFO("=== Long-Term Mapping Config ===");
-        ROS_INFO("  longterm_mapping: %s", longterm_mapping_enabled_ ? "true" : "false");
-        ROS_INFO("  motion_gate: %s", motion_gate_enabled_ ? "true" : "false");
-        ROS_INFO("  motion_gate_min_translation: %.2f m", motion_gate_min_translation_m_);
-        ROS_INFO("  motion_gate_min_rotation: %.1f deg", motion_gate_min_rotation_deg_);
-        ROS_INFO("  motion_gate_min_time: %.1f sec", motion_gate_min_time_sec_);
-        ROS_INFO("  max_active_keyframes: %d", max_active_keyframes_);
-        ROS_INFO("  persistent_map: %s", persistent_map_enabled_ ? "true" : "false");
-        ROS_INFO("  persistent_map_dir: %s", persistent_map_root_dir_.c_str());
+        if (debug_cfg_.debug_config) {
+            ROS_INFO("=== Long-Term Mapping Config ===");
+            ROS_INFO("  longterm_mapping: %s", longterm_mapping_enabled_ ? "true" : "false");
+            ROS_INFO("  motion_gate: %s", motion_gate_enabled_ ? "true" : "false");
+            ROS_INFO("  motion_gate_min_translation: %.2f m", motion_gate_min_translation_m_);
+            ROS_INFO("  motion_gate_min_rotation: %.1f deg", motion_gate_min_rotation_deg_);
+            ROS_INFO("  motion_gate_min_time: %.1f sec", motion_gate_min_time_sec_);
+            ROS_INFO("  max_active_keyframes: %d", max_active_keyframes_);
+            ROS_INFO("  persistent_map: %s", persistent_map_enabled_ ? "true" : "false");
+            ROS_INFO("  persistent_map_dir: %s", persistent_map_root_dir_.c_str());
+        }
 
         if (config["memory_guard"]) {
             auto mg = config["memory_guard"];
@@ -1006,9 +1016,12 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         if (fixed_z_source_ == "config") {
             fixed_z_ = fixed_z_value_;
             first_pose_initialized_ = true;  // 不需要从第一帧初始化
-            ROS_INFO("[CraneConstraint] fixed_z_source=config, fixed_z=%.3f", fixed_z_);
+            if (debug_cfg_.debug_config) {
+                ROS_INFO("[CraneConstraint] fixed_z_source=config, fixed_z=%.3f", fixed_z_);
+            }
         }
 
+        if (debug_cfg_.debug_config) {
         ROS_INFO("=== Crane Motion Constraint ===");
         ROS_INFO("  enabled: %s", crane_constraint_enabled_ ? "true" : "false");
         ROS_INFO("  lock_z: %s, fixed_z_source: %s, fixed_z: %.3f",
@@ -1022,13 +1035,16 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         ROS_INFO("  hard_threshold: %d MB", hard_threshold_mb_);
         ROS_INFO("  emergency_threshold: %d MB", emergency_threshold_mb_);
         ROS_INFO("  check_interval: %d sec", memory_check_interval_sec_);
+        }
 
         // commit_enabled 配置（observe_only 模式）
         if (config["longterm_mapping"]) {
             auto ltm = config["longterm_mapping"];
             commit_enabled_ = ltm["commit_enabled"].as<bool>(true);
         }
-        ROS_INFO("  commit_enabled: %s", commit_enabled_ ? "true" : "false");
+        if (debug_cfg_.debug_config) {
+            ROS_INFO("  commit_enabled: %s", commit_enabled_ ? "true" : "false");
+        }
 
         if (config["disk_guard"]) {
             auto dg = config["disk_guard"];
@@ -1037,17 +1053,21 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             pause_mapping_when_disk_low_ = dg["pause_mapping_when_low"].as<bool>(true);
         }
 
-        ROS_INFO("=== Disk Guard Config ===");
-        ROS_INFO("  enabled: %s", disk_guard_enabled_ ? "true" : "false");
-        ROS_INFO("  min_free_disk: %.1f GB", min_free_disk_gb_);
+        if (debug_cfg_.debug_config) {
+            ROS_INFO("=== Disk Guard Config ===");
+            ROS_INFO("  enabled: %s", disk_guard_enabled_ ? "true" : "false");
+            ROS_INFO("  min_free_disk: %.1f GB", min_free_disk_gb_);
+        }
 
         if (config["pointcloud_watchdog"]) {
             auto pw = config["pointcloud_watchdog"];
             pointcloud_stale_timeout_sec_ = pw["stale_timeout_sec"].as<double>(10.0);
         }
 
-        ROS_INFO("=== Pointcloud Watchdog Config ===");
-        ROS_INFO("  stale_timeout: %.1f sec", pointcloud_stale_timeout_sec_);
+        if (debug_cfg_.debug_config) {
+            ROS_INFO("=== Pointcloud Watchdog Config ===");
+            ROS_INFO("  stale_timeout: %.1f sec", pointcloud_stale_timeout_sec_);
+        }
 
         if (config["ndt_health"]) {
             auto nh = config["ndt_health"];
@@ -1060,10 +1080,12 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             rebuild_every_keyframes_ = am["rebuild_every_keyframes"].as<int>(10);
         }
 
-        ROS_INFO("=== NDT Health Config ===");
-        ROS_INFO("  fitness_warning_threshold: %.2f", fitness_warning_threshold_);
-        ROS_INFO("  rebuild_every_keyframes: %d", rebuild_every_keyframes_);
-        ROS_INFO("===========================");
+        if (debug_cfg_.debug_config) {
+            ROS_INFO("=== NDT Health Config ===");
+            ROS_INFO("  fitness_warning_threshold: %.2f", fitness_warning_threshold_);
+            ROS_INFO("  rebuild_every_keyframes: %d", rebuild_every_keyframes_);
+            ROS_INFO("===========================");
+        }
 
         // v8-stable-r3: CraneMotionEKF 参数
         if (config["crane_motion_ekf"]) {
@@ -1141,7 +1163,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
             crane_motion_ekf_.setConfig(crane_motion_ekf_cfg_);
 
-            ROS_INFO("[CraneMotionEKF] enabled=%d q_pos=%.3f q_vel=%.3f gate=%.2f reject=%.2f reject_high_fitness=%d fitness_reject=%.3f fitness_recover=%.3f",
+            ROS_DEBUG("[CraneMotionEKF] enabled=%d q_pos=%.3f q_vel=%.3f gate=%.2f reject=%.2f reject_high_fitness=%d fitness_reject=%.3f fitness_recover=%.3f",
                      crane_motion_ekf_enabled_ ? 1 : 0,
                      crane_motion_ekf_cfg_.q_pos,
                      crane_motion_ekf_cfg_.q_vel,
@@ -1150,12 +1172,12 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                      crane_motion_ekf_cfg_.reject_high_fitness ? 1 : 0,
                      crane_motion_ekf_cfg_.ndt_fitness_reject_threshold,
                      crane_motion_ekf_cfg_.ndt_fitness_recover_threshold);
-            ROS_INFO("[CraneMotionEKF:RuntimeGuard] enabled=%d warn_ms=%.1f emergency_ms=%.1f slow_extra_r=%.3f",
+            ROS_DEBUG("[CraneMotionEKF:RuntimeGuard] enabled=%d warn_ms=%.1f emergency_ms=%.1f slow_extra_r=%.3f",
                      crane_motion_ekf_cfg_.slow_frame_guard_enabled ? 1 : 0,
                      crane_motion_ekf_cfg_.slow_frame_warn_ms,
                      crane_motion_ekf_cfg_.slow_frame_emergency_ms,
                      crane_motion_ekf_cfg_.slow_frame_extra_r);
-            ROS_INFO("[CraneMotionEKF:MotionLimit] max_speed=%.3f safety=%.3f step_min=%.3f step_max=%.3f axis_speed=(%.3f,%.3f) axis_accel=(%.3f,%.3f) axis_gate=%d map_commit_fitness=%.3f",
+            ROS_DEBUG("[CraneMotionEKF:MotionLimit] max_speed=%.3f safety=%.3f step_min=%.3f step_max=%.3f axis_speed=(%.3f,%.3f) axis_accel=(%.3f,%.3f) axis_gate=%d map_commit_fitness=%.3f",
                      crane_motion_ekf_cfg_.max_speed_mps,
                      crane_motion_ekf_cfg_.max_step_safety_factor,
                      crane_motion_ekf_cfg_.max_step_min_m,
@@ -1189,7 +1211,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             icp_refine_cfg_.max_fitness =
                 std::max(0.0, n["max_fitness"].as<double>(0.50));
         }
-        ROS_INFO("[ICPConfig] enabled=%d run_after_ndt=%d objects_only=%d "
+        ROS_DEBUG("[ICPConfig] enabled=%d run_after_ndt=%d objects_only=%d "
                  "min_points=%d iterations=%d max_corr=%.3f epsilon=%.6f "
                  "max_ms=%.1f max_fitness=%.3f",
                  icp_refine_cfg_.enabled ? 1 : 0,
@@ -1215,7 +1237,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
             yaw_warn_raw_filtered_diff_rad_ = n["warn_raw_filtered_diff_deg"].as<double>(3.0) * M_PI / 180.0;
 
-            ROS_INFO("[SoftYaw] enabled=%d alpha_static=%.3f alpha_moving=%.3f",
+            ROS_DEBUG("[SoftYaw] enabled=%d alpha_static=%.3f alpha_moving=%.3f",
                      soft_yaw_enabled_ ? 1 : 0,
                      yaw_filter_alpha_stationary_,
                      yaw_filter_alpha_moving_);
@@ -1255,7 +1277,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 registration_cloud_config_.allow_full_ground_fallback = false;
             }
 
-            ROS_INFO("[RegistrationInput] static_voxel=%.2f uncertain_voxel=%.2f ground_grid=%.2f ground_max=%.2f static_min=%zu total_min=%zu target=%zu max=%zu",
+            ROS_DEBUG("[RegistrationInput] static_voxel=%.2f uncertain_voxel=%.2f ground_grid=%.2f ground_max=%.2f static_min=%zu total_min=%zu target=%zu max=%zu",
                      registration_cloud_config_.static_object_voxel_size,
                      registration_cloud_config_.uncertain_candidate_voxel_size,
                      registration_cloud_config_.ground_grid_cell_m,
@@ -1321,7 +1343,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             crop_update_yaw_deg_ = lt["update_yaw_deg"].as<double>(2.0);
             crop_update_min_interval_frames_ = lt["update_min_interval_frames"].as<int>(3);
 
-            ROS_INFO("[LocTarget] build_enabled=%d use_for_ndt=%d objects_only=%d ground_edge=%d min=%d max=%d voxel=%.2f crop=%d radius=(%.1f,%.1f) update_dist=%.2f update_yaw=%.1f min_interval=%d",
+            ROS_DEBUG("[LocTarget] build_enabled=%d use_for_ndt=%d objects_only=%d ground_edge=%d min=%d max=%d voxel=%.2f crop=%d radius=(%.1f,%.1f) update_dist=%.2f update_yaw=%.1f min_interval=%d",
                      localization_target_build_enabled_ ? 1 : 0,
                      localization_target_use_for_ndt_ ? 1 : 0,
                      use_objects_only_initial_ ? 1 : 0,
@@ -1342,7 +1364,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             adaptive_target_total_ms_ = n["target_total_ms"].as<double>(80.0);
             adaptive_emergency_total_ms_ = n["emergency_total_ms"].as<double>(120.0);
 
-            ROS_INFO("[AdaptiveNDT] enabled=%d target_ms=%.1f emergency_ms=%.1f",
+            ROS_DEBUG("[AdaptiveNDT] enabled=%d target_ms=%.1f emergency_ms=%.1f",
                      adaptive_ndt_enabled_ ? 1 : 0,
                      adaptive_target_total_ms_,
                      adaptive_emergency_total_ms_);
@@ -1642,14 +1664,22 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 odom_anchor_config_.tight_box.sub_cluster_enabled = tb["sub_cluster_enabled"].as<bool>(true);
                 odom_anchor_config_.tight_box.sub_cluster_tolerance_m = tb["sub_cluster_tolerance_m"].as<float>(0.10f);
                 odom_anchor_config_.tight_box.sub_cluster_min_points = tb["sub_cluster_min_points"].as<int>(20);
+                odom_anchor_config_.tight_box.orientation_enabled =
+                    tb["orientation_enabled"].as<bool>(true);
+                odom_anchor_config_.tight_box.orientation_min_points =
+                    std::max(3, tb["orientation_min_points"].as<int>(20));
+                odom_anchor_config_.tight_box.orientation_min_axis_ratio =
+                    std::max(1.0F,
+                             tb["orientation_min_axis_ratio"].as<float>(1.10F));
 
-                ROS_INFO("[TightBoxConfig] enabled=%d symmetry=%s hag_filter=%d percentile=[%.2f,%.2f] sub_cluster=%d",
+                ROS_INFO("[TightBoxConfig] enabled=%d symmetry=%s hag_filter=%d percentile=[%.2f,%.2f] sub_cluster=%d oriented=%d",
                          odom_anchor_config_.tight_box.enabled ? 1 : 0,
                          odom_anchor_config_.tight_box.anchor_symmetry_mode.c_str(),
                          odom_anchor_config_.tight_box.hag_filter_enabled ? 1 : 0,
                          odom_anchor_config_.tight_box.percentile_low,
                          odom_anchor_config_.tight_box.percentile_high,
-                         odom_anchor_config_.tight_box.sub_cluster_enabled ? 1 : 0);
+                         odom_anchor_config_.tight_box.sub_cluster_enabled ? 1 : 0,
+                         odom_anchor_config_.tight_box.orientation_enabled ? 1 : 0);
             }
 
             // Cargo Warning 配置
@@ -1726,6 +1756,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         if (config["debug"] && config["debug"]["runtime_diagnostics"]) {
             auto diag = config["debug"]["runtime_diagnostics"];
             runtime_diag_config_.enabled = diag["enabled"].as<bool>(false);
+            runtime_diag_config_.console_enabled =
+                diag["console_enabled"].as<bool>(true);
+            runtime_diag_config_.cargo_console_enabled =
+                diag["cargo_console_enabled"].as<bool>(true);
             runtime_diag_config_.console_period_sec = diag["console_period_sec"].as<double>(5.0);
             runtime_diag_config_.risk_repeat_period_sec =
                 diag["risk_repeat_period_sec"].as<double>(5.0);
@@ -1740,8 +1774,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             // 默认输出目录
             diag_output_dir_ = "/home/ydkj/ndt_slam_runtime_data";
 
-            ROS_INFO("[RuntimeDiagnostics] enabled=%d console_period=%.1f risk_repeat=%.1f csv=%d csv_flush=%.1f",
+            ROS_DEBUG("[RuntimeDiagnostics] enabled=%d console=%d cargo_console=%d console_period=%.1f risk_repeat=%.1f csv=%d csv_flush=%.1f",
                      runtime_diag_config_.enabled ? 1 : 0,
+                     runtime_diag_config_.console_enabled ? 1 : 0,
+                     runtime_diag_config_.cargo_console_enabled ? 1 : 0,
                      runtime_diag_config_.console_period_sec,
                      runtime_diag_config_.risk_repeat_period_sec,
                      runtime_diag_config_.csv_enabled ? 1 : 0,
@@ -2271,11 +2307,9 @@ void NdtSlamNode::mapPublicationThread() {
         }
 
         const auto publish_start = std::chrono::steady_clock::now();
-        publishMap();
-        publishDisplayMap();
-        publishGroundMap();
-        publishObjectsMap();
-        publishObjectsCleanMap();
+        const MapPublicationSnapshot snapshot =
+            captureMapPublicationSnapshot(requested_version, stamp);
+        publishMapPublicationSnapshot(snapshot);
         const double publish_ms =
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - publish_start).count();
@@ -2284,13 +2318,280 @@ void NdtSlamNode::mapPublicationThread() {
             map_publication_completed_version_ = std::max(
                 map_publication_completed_version_, requested_version);
         }
-        ROS_INFO("[MapPublish] version=%llu stamp=%.3f duration_ms=%.1f",
+        ROS_DEBUG("[MapPublish] version=%llu stamp=%.3f duration_ms=%.1f",
                  static_cast<unsigned long long>(requested_version),
                  stamp.toSec(), publish_ms);
     }
 }
 
+NdtSlamNode::MapPublicationSnapshot
+NdtSlamNode::captureMapPublicationSnapshot(
+    std::uint64_t version, const ros::Time& requested_stamp) {
+    MapPublicationSnapshot snapshot;
+    snapshot.version = version;
+    snapshot.stamp = requested_stamp.isZero()
+        ? ros::Time::now() : requested_stamp;
+    snapshot.registration.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    snapshot.display.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    snapshot.ground.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    snapshot.objects.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    snapshot.objects_clean.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    // All five layers are copied in one critical section, so a background map
+    // swap cannot mix generations between the latched ROS topics. Conversion
+    // and publication remain outside map_mutex_.
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        if (global_map_) *snapshot.registration = *global_map_;
+        if (display_map_) *snapshot.display = *display_map_;
+        if (ground_map_) *snapshot.ground = *ground_map_;
+        if (objects_map_) *snapshot.objects = *objects_map_;
+        if (objects_clean_map_) {
+            *snapshot.objects_clean = *objects_clean_map_;
+        }
+    }
+    return snapshot;
+}
+
+void NdtSlamNode::publishMapPublicationSnapshot(
+    const MapPublicationSnapshot& snapshot) {
+    const auto make_message = [this, &snapshot](
+        const pcl::PointCloud<pcl::PointXYZ>& cloud) {
+        sensor_msgs::PointCloud2 message;
+        pcl::toROSMsg(cloud, message);
+        message.header.seq = static_cast<std::uint32_t>(
+            snapshot.version & 0xffffffffU);
+        message.header.stamp = snapshot.stamp;
+        message.header.frame_id = map_frame_;
+        return message;
+    };
+    map_pub_.publish(make_message(*snapshot.registration));
+    display_map_pub_.publish(make_message(*snapshot.display));
+    ground_map_pub_.publish(make_message(*snapshot.ground));
+    objects_map_pub_.publish(make_message(*snapshot.objects));
+    objects_clean_map_pub_.publish(make_message(*snapshot.objects_clean));
+}
+
+void NdtSlamNode::advanceObjectsMapContentVersionLocked() {
+    ++objects_map_content_version_;
+    if (objects_map_content_version_ == 0U) {
+        ++objects_map_content_version_;
+    }
+}
+
+void NdtSlamNode::startCleanMapRebuildJob() {
+    if (clean_map_rebuild_running_.load(std::memory_order_acquire)) {
+        // The in-flight snapshot is rejected by the version gate if a newer
+        // objects map exists. Remember non-map input changes (deny/protect
+        // histories) too, but do not keep the owner loop awake meanwhile.
+        clean_map_rebuild_pending_ = true;
+        return;
+    }
+    if (clean_map_rebuild_thread_.joinable()) {
+        clean_map_rebuild_thread_.join();
+    }
+
+    constexpr float kCleanCellSize = 0.15F;
+    const double current_time = ros::Time::now().toSec();
+    CleanMapBuildInput input;
+    input.cell_size_m = kCleanCellSize;
+    std::uint64_t source_objects_version = 0U;
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        source_objects_version = objects_map_content_version_;
+        if (objects_map_) {
+            input.object_points.reserve(objects_map_->size());
+            for (const auto& point : objects_map_->points) {
+                input.object_points.emplace_back(point.x, point.y, point.z);
+            }
+        }
+    }
+    if (rebuild_payload_candidate_) {
+        input.payload_candidate_points.reserve(
+            rebuild_payload_candidate_->size());
+        for (const auto& point : rebuild_payload_candidate_->points) {
+            input.payload_candidate_points.emplace_back(
+                point.x, point.y, point.z);
+        }
+    }
+    for (const auto& item : bev_observation_count_) {
+        input.observation_counts.emplace(
+            CleanMapCell{item.first.x, item.first.y}, item.second);
+    }
+
+    if (dynamic_event_config_.enabled &&
+        dynamic_event_config_.clean_deny_enabled) {
+        input.deny_cells = dynamic_event_manager_.getDynamicDenyCells(
+            kCleanCellSize, current_time);
+        input.protect_cells = dynamic_event_manager_.getStaticProtectCells(
+            kCleanCellSize, current_time);
+        if (dynamic_event_config_.enable_cargo_history_clean) {
+            for (const auto& item : cargo_deny_history_) {
+                const double age = current_time - item.second.last_seen_time;
+                if (std::isfinite(age) && age >= 0.0 &&
+                    age < cargo_deny_ttl_) {
+                    input.deny_cells.insert(item.first);
+                }
+            }
+        }
+    }
+
+    input.use_human_deny = human_filter_config_.enabled &&
+        dynamic_event_config_.enable_human_history_clean;
+    if (input.use_human_deny) {
+        input.human_deny_cells = human_filter_.getDenyCellsSnapshot(
+            kCleanCellSize, current_time);
+    }
+
+    input.use_3d_deny = dynamic_event_config_.enabled &&
+        !dynamic_deny_volume_map_.empty();
+    if (input.use_3d_deny &&
+        std::isfinite(dynamic_deny_resolution_) &&
+        dynamic_deny_resolution_ > 0.0) {
+        for (const auto& item : dynamic_deny_volume_map_) {
+            const double x_min = item.first.first * dynamic_deny_resolution_;
+            const double y_min = item.first.second * dynamic_deny_resolution_;
+            const double x_max = x_min + dynamic_deny_resolution_;
+            const double y_max = y_min + dynamic_deny_resolution_;
+            const int clean_x_min = static_cast<int>(
+                std::floor(x_min / kCleanCellSize));
+            const int clean_y_min = static_cast<int>(
+                std::floor(y_min / kCleanCellSize));
+            const int clean_x_max = static_cast<int>(
+                std::floor((x_max - 1e-9) / kCleanCellSize));
+            const int clean_y_max = static_cast<int>(
+                std::floor((y_max - 1e-9) / kCleanCellSize));
+            for (const auto& volume : item.second) {
+                const double age = current_time - volume.stamp;
+                if (!std::isfinite(age) || age < 0.0 ||
+                    age >= dynamic_deny_ttl_) {
+                    continue;
+                }
+                for (int x = clean_x_min; x <= clean_x_max; ++x) {
+                    for (int y = clean_y_min; y <= clean_y_max; ++y) {
+                        input.deny_ranges[{x, y}].push_back(
+                            {volume.z_min, volume.z_max});
+                    }
+                }
+            }
+        }
+    }
+
+    clean_map_rebuild_running_.store(true, std::memory_order_release);
+    clean_map_rebuild_thread_ = std::thread(
+        [this, source_objects_version, input = std::move(input)]() mutable {
+            CleanMapWorkerResult result;
+            result.source_objects_version = source_objects_version;
+            const auto started = std::chrono::steady_clock::now();
+            try {
+                result.build = buildCleanMapFromSnapshot(input);
+                result.valid = result.build.valid;
+            } catch (const std::exception& error) {
+                result.build.reason =
+                    std::string("worker_exception:") + error.what();
+            } catch (...) {
+                result.build.reason = "worker_exception:unknown";
+            }
+            result.duration_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count();
+            {
+                std::lock_guard<std::mutex> lock(
+                    clean_map_rebuild_result_mutex_);
+                clean_map_worker_result_ = std::move(result);
+            }
+            clean_map_rebuild_result_ready_.store(
+                true, std::memory_order_release);
+            clean_map_rebuild_running_.store(
+                false, std::memory_order_release);
+            queue_cv_.notify_one();
+        });
+}
+
+void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
+    if (!clean_map_rebuild_result_ready_.exchange(
+            false, std::memory_order_acq_rel)) {
+        return;
+    }
+    CleanMapWorkerResult result;
+    {
+        std::lock_guard<std::mutex> lock(clean_map_rebuild_result_mutex_);
+        result = std::move(clean_map_worker_result_);
+    }
+    std::uint64_t current_objects_version = 0U;
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        current_objects_version = objects_map_content_version_;
+    }
+    const CleanMapBuildAction initial_action = evaluateCleanMapBuildAction(
+        result.valid,
+        clean_map_rebuild_pending_.load(std::memory_order_acquire),
+        result.source_objects_version, current_objects_version);
+    if (initial_action == CleanMapBuildAction::DISCARD_SUPERSEDED ||
+        initial_action == CleanMapBuildAction::DISCARD_STALE_OBJECTS) {
+        // A maintenance request or objects-map swap arrived after this
+        // immutable input snapshot. Never publish a clean layer without its
+        // newest map and deny/protect evidence.
+        clean_map_rebuild_pending_ = true;
+        map_maintenance_pending_ = true;
+        return;
+    }
+    if (initial_action == CleanMapBuildAction::DISCARD_INVALID) {
+        ROS_DEBUG("[CleanMapWorker] rejected reason=%s duration_ms=%.1f",
+                  result.build.reason.c_str(), result.duration_ms);
+        return;
+    }
+
+    auto clean_cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    clean_cloud->reserve(result.build.clean_points.size());
+    for (const Eigen::Vector3f& point : result.build.clean_points) {
+        pcl::PointXYZ pcl_point;
+        pcl_point.x = point.x();
+        pcl_point.y = point.y();
+        pcl_point.z = point.z();
+        clean_cloud->push_back(pcl_point);
+    }
+    clean_cloud->width = static_cast<std::uint32_t>(clean_cloud->size());
+    clean_cloud->height = 1U;
+    clean_cloud->is_dense = false;
+
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        if (evaluateCleanMapBuildAction(
+                result.valid, false, result.source_objects_version,
+                objects_map_content_version_) !=
+            CleanMapBuildAction::APPLY) {
+            ROS_DEBUG("[CleanMapWorker] stale source=%llu current=%llu",
+                      static_cast<unsigned long long>(
+                          result.source_objects_version),
+                      static_cast<unsigned long long>(
+                          objects_map_content_version_));
+            clean_map_rebuild_pending_ = true;
+            map_maintenance_pending_ = true;
+            return;
+        }
+        objects_clean_map_.swap(clean_cloud);
+        ++clean_map_content_version_;
+        if (clean_map_content_version_ == 0U) {
+            ++clean_map_content_version_;
+        }
+    }
+
+    last_commit_clean_map_ms_ = result.duration_ms;
+    map_maintenance_has_run_ = true;
+    shadow_target_pending_ = true;
+    map_maintenance_pending_ = true;
+    requestMapPublication(stamp);
+    ROS_DEBUG("[CleanMapWorker] source=%llu points=%zu cells=%d/%d "
+              "denied=%d protected=%d duration_ms=%.1f",
+              static_cast<unsigned long long>(
+                  result.source_objects_version),
+              result.build.clean_points.size(), result.build.passed_cells,
+              result.build.total_cells, result.build.denied_cells,
+              result.build.protected_cells, result.duration_ms);
+}
+
 void NdtSlamNode::runMapMaintenanceIfIdle(bool force_timeslice) {
+    consumeCleanMapRebuildResult(last_stamp_);
     if (clean_rebuild_requested_from_worker_.exchange(
             false, std::memory_order_acq_rel)) {
         map_maintenance_pending_ = true;
@@ -2302,29 +2603,20 @@ void NdtSlamNode::runMapMaintenanceIfIdle(bool force_timeslice) {
 
     map_maintenance_pending_ = false;
     const bool clean_rebuild_requested = clean_map_rebuild_pending_;
-    const std::uint64_t clean_version_before = clean_map_content_version_;
     if (clean_map_rebuild_pending_) {
         clean_map_rebuild_pending_ = false;
-        const auto clean_map_start = std::chrono::steady_clock::now();
-        rebuildCleanMap(!force_timeslice);
-        last_commit_clean_map_ms_ =
-            std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - clean_map_start).count();
-    }
-
-    if (clean_rebuild_requested) {
-        requestMapPublication(last_stamp_);
-        map_maintenance_has_run_ = true;
+        startCleanMapRebuildJob();
     }
 
     // A forced timeslice completes exactly one expensive reconstruction phase.
     // Remaining stateful owner-thread tasks stay pending for the next bounded
     // timeslice; map serialization has already moved to its own worker.
     if (clean_rebuild_requested && localizationInputPending()) {
-        map_maintenance_pending_ = true;
-        if (!force_timeslice && clean_rebuild_requested &&
-            clean_map_content_version_ == clean_version_before) {
-            clean_map_rebuild_pending_ = true;
+        if (release_keyframes_pending_ || flush_tiles_pending_ ||
+            runtime_status_pending_ || memory_guard_pending_ ||
+            active_map_rebuild_pending_.load(std::memory_order_acquire) ||
+            loop_closure_pending_) {
+            map_maintenance_pending_ = true;
         }
         return;
     }
@@ -2408,7 +2700,7 @@ void NdtSlamNode::runMapMaintenanceIfIdle(bool force_timeslice) {
 }
 
 void NdtSlamNode::processCloudThread() {
-    ROS_INFO("Processing thread started");
+    ROS_DEBUG("Processing thread started");
 
     // 统计变量
     int total_frames = 0;
@@ -2438,12 +2730,16 @@ void NdtSlamNode::processCloudThread() {
                 return !cloud_queue_.empty() || map_maintenance_pending_ ||
                        clean_rebuild_requested_from_worker_.load(
                            std::memory_order_acquire) ||
+                       clean_map_rebuild_result_ready_.load(
+                           std::memory_order_acquire) ||
                        loop_closure_result_ready_.load(
                            std::memory_order_acquire) || shutdown_;
             });
             if (shutdown_) break;
             const bool owner_task_pending = map_maintenance_pending_ ||
                     clean_rebuild_requested_from_worker_.load(
+                        std::memory_order_acquire) ||
+                    clean_map_rebuild_result_ready_.load(
                         std::memory_order_acquire) ||
                     loop_closure_result_ready_.load(
                         std::memory_order_acquire);
@@ -2474,12 +2770,14 @@ void NdtSlamNode::processCloudThread() {
             runtime_state_mutex_);
         if (run_map_maintenance) {
             consumeLoopClosureResult(last_stamp_);
+            consumeCleanMapRebuildResult(last_stamp_);
             runMapMaintenanceIfIdle(force_map_maintenance_timeslice);
             continue;
         }
 
         if (!msg) continue;
         consumeLoopClosureResult(msg->header.stamp);
+        consumeCleanMapRebuildResult(msg->header.stamp);
         cloud_dequeue_count_.fetch_add(1, std::memory_order_relaxed);
 
         total_frames++;
@@ -3098,7 +3396,7 @@ void NdtSlamNode::processCloudThread() {
             registration_build_result.mode != last_registration_console_mode_;
         if (registration_mode_changed) {
             if (registration_build_result.valid) {
-                ROS_INFO("[RegistrationInput] mode=%s valid=1 static=%zu uncertain=%zu ground=%zu total=%zu ground_fraction=%.3f reason=%s",
+                ROS_DEBUG("[RegistrationInput] mode=%s valid=1 static=%zu uncertain=%zu ground=%zu total=%zu ground_fraction=%.3f reason=%s",
                          registration_build_result.mode.c_str(),
                          registration_build_result.static_object_points,
                          registration_build_result.uncertain_candidate_points,
@@ -3107,7 +3405,7 @@ void NdtSlamNode::processCloudThread() {
                          registration_build_result.ground_fraction,
                          registration_build_result.reason.c_str());
             } else {
-                ROS_WARN("[RegistrationInput] mode=%s valid=0 static=%zu uncertain=%zu ground=%zu total=%zu ground_fraction=%.3f reason=%s",
+                ROS_DEBUG("[RegistrationInput] mode=%s valid=0 static=%zu uncertain=%zu ground=%zu total=%zu ground_fraction=%.3f reason=%s",
                          registration_build_result.mode.c_str(),
                          registration_build_result.static_object_points,
                          registration_build_result.uncertain_candidate_points,
@@ -3119,7 +3417,7 @@ void NdtSlamNode::processCloudThread() {
             last_registration_console_mode_ =
                 registration_build_result.mode;
         } else {
-            ROS_INFO_THROTTLE(
+            ROS_DEBUG_THROTTLE(
                 5.0,
                 "[RegistrationInput] mode=%s valid=%d static=%zu uncertain=%zu ground=%zu total=%zu ground_fraction=%.3f reason=%s",
                 registration_build_result.mode.c_str(),
@@ -3154,7 +3452,7 @@ void NdtSlamNode::processCloudThread() {
         last_ndt_observability_ = frame_ndt_observability;
         static std::string last_observability_reason;
         if (frame_ndt_observability.reason != last_observability_reason) {
-            ROS_INFO("[NDTObservability] valid=%d degenerate=%d severe=%d ratio=%.4f strong=%.3f weak=%.3f weak_dir=(%.3f,%.3f) normals=%zu reason=%s proxy=static_local_xy_normals",
+            ROS_DEBUG("[NDTObservability] valid=%d degenerate=%d severe=%d ratio=%.4f strong=%.3f weak=%.3f weak_dir=(%.3f,%.3f) normals=%zu reason=%s proxy=static_local_xy_normals",
                      frame_ndt_observability.valid ? 1 : 0,
                      frame_ndt_observability.degenerate ? 1 : 0,
                      frame_ndt_observability.severely_degenerate ? 1 : 0,
@@ -3167,7 +3465,7 @@ void NdtSlamNode::processCloudThread() {
                      frame_ndt_observability.reason.c_str());
             last_observability_reason = frame_ndt_observability.reason;
         } else {
-            ROS_INFO_THROTTLE(
+            ROS_DEBUG_THROTTLE(
                 5.0,
                 "[NDTObservability] valid=%d degenerate=%d severe=%d ratio=%.4f normals=%zu reason=%s proxy=static_local_xy_normals",
                 frame_ndt_observability.valid ? 1 : 0,
@@ -3287,7 +3585,7 @@ void NdtSlamNode::processCloudThread() {
         if (should_init) {
             std::lock_guard<std::mutex> lock(cloud_mutex_);
             current_pose_ = Sophus::SE3d();
-            ROS_INFO("SLAM initialized: total=%lu, feature=%lu, ground=%lu, reg=%lu",
+            ROS_DEBUG("SLAM initialized: total=%lu, feature=%lu, ground=%lu, reg=%lu",
                      filtered_cloud->size(), feature_cloud->size(), ground_cloud->size(), registration_cloud->size());
         }
 
@@ -3345,7 +3643,7 @@ void NdtSlamNode::processCloudThread() {
                 registration_success = true;
 
                 if (local_map_->size() >= 500 && local_map_->size() < 600) {
-                    ROS_INFO("Local map ready: %lu points", local_map_->size());
+                    ROS_DEBUG("Local map ready: %lu points", local_map_->size());
                     last_local_map_pose = current_pose_;
                 }
             } else {
@@ -3994,7 +4292,7 @@ void NdtSlamNode::processCloudThread() {
             }
             diag_stage.icp_prepare_ms = elapsedMs(icp_prepare_start);
 
-            ROS_INFO_THROTTLE(
+            ROS_DEBUG_THROTTLE(
                 5.0,
                 "[ICP_FLOW] enabled=%d running=%d copies=%llu jobs=%llu "
                 "threads=%llu used=%llu stale_drop=%llu",
@@ -4500,7 +4798,7 @@ void NdtSlamNode::processCloudThread() {
             diag_pending_ndt_record_valid_ = true;
         }
 
-        ROS_INFO_THROTTLE(5.0,
+        ROS_DEBUG_THROTTLE(5.0,
             "[PipelineCounters] callback=%llu queue_drop=%llu dequeued=%llu empty=%llu too_few=%llu duplicate=%llu invalid_dt=%llu ndt_attempt=%llu converged=%llu nonconverged=%llu ekf_accept=%llu ekf_reject=%llu odom=%llu",
             static_cast<unsigned long long>(cloud_callback_count_.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(queue_overwrite_drop_count_.load(std::memory_order_relaxed)),
@@ -4519,7 +4817,7 @@ void NdtSlamNode::processCloudThread() {
         // Status 只在运动时报告，每 30 秒一次
         if ((ros::Time::now() - last_log_time).toSec() > 30.0) {
             Eigen::Vector3d pos = current_pose_.translation();
-            ROS_INFO("[Status] frames=%d/%d, pose=(%.2f, %.2f, %.2f), "
+            ROS_DEBUG("[Status] frames=%d/%d, pose=(%.2f, %.2f, %.2f), "
                      "keyframes=%d, tiles_flushed=%d, "
                      "local_map=%zu, active_map=%zu, process=%.2fs",
                      success_frames, total_frames, pos.x(), pos.y(), pos.z(),
@@ -4640,7 +4938,7 @@ void NdtSlamNode::processCloudThread() {
         }
     }
 
-    ROS_INFO("Processing thread stopped");
+    ROS_DEBUG("Processing thread stopped");
 }
 
 void NdtSlamNode::preprocessPointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
@@ -4726,7 +5024,7 @@ void NdtSlamNode::extractFeatures(const pcl::PointCloud<pcl::PointXYZ>::Ptr& clo
     static int extract_count = 0;
     extract_count++;
     if (extract_count % 100 == 0) {
-        ROS_INFO("Feature: total=%lu, feature=%lu, ground=%lu, reg=%lu",
+        ROS_DEBUG("Feature: total=%lu, feature=%lu, ground=%lu, reg=%lu",
                  cloud->size(), feature_points->size(), ground_points->size(), registration_cloud->size());
     }
 }
@@ -4911,7 +5209,7 @@ void NdtSlamNode::publishInitialTransform() {
     map_to_odom.transform.rotation.w = 1.0;
     tf_broadcaster_->sendTransform(map_to_odom);
 
-    ROS_INFO("Published initial TF: map -> %s -> %s", odom_frame_.c_str(), base_frame_.c_str());
+    ROS_DEBUG("Published initial TF: map -> %s -> %s", odom_frame_.c_str(), base_frame_.c_str());
 }
 
 void NdtSlamNode::publishTF(const ros::Time& stamp) {
@@ -5320,6 +5618,7 @@ void NdtSlamNode::rebuildGlobalMapFromSnapshot(
                 display_map_.swap(new_display);
                 ground_map_.swap(new_ground);
                 objects_map_.swap(new_objects);
+                advanceObjectsMapContentVersionLocked();
                 rebuild_objects_filtered_.reset(
                     new pcl::PointCloud<pcl::PointXYZ>(*objects_map_));
             }
@@ -5395,294 +5694,6 @@ void NdtSlamNode::publishObjectsCleanMap() {
     msg.header.stamp = ros::Time::now();
     msg.header.frame_id = map_frame_;
     objects_clean_map_pub_.publish(msg);
-}
-
-void NdtSlamNode::rebuildCleanMap(bool allow_localization_yield) {
-    pcl::PointCloud<pcl::PointXYZ>::ConstPtr objects_snapshot;
-    {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        objects_snapshot = objects_map_;
-    }
-    std::size_t cooperative_work_count = 0U;
-    const auto should_yield_to_localization =
-        [this, &cooperative_work_count, allow_localization_yield]() {
-        ++cooperative_work_count;
-        return allow_localization_yield &&
-               cooperative_work_count % 2048U == 0U &&
-               localizationInputPending();
-    };
-    // 使用持久化的 BEV 观测计数做时间一致性过滤
-    // 只有被 >= clean_min_observations_ 个关键帧观测到的 cell 才进入 clean map
-    // 自适应：远处点云稀疏，放宽高度和时间一致性要求
-    if (!objects_snapshot || objects_snapshot->empty()) {
-        ROS_DEBUG("[CleanMap] objects_map_ is empty, skipping");
-        return;
-    }
-
-    // P1: 保护检查 - 如果 objects_map 有点但 bev_observation_count_ 为空，跳过
-    if (objects_snapshot->size() > 1000 && bev_observation_count_.empty()) {
-        ROS_ERROR("[CleanMap] FAIL: objects_map has %zu points but bev_observation_count_ is empty, skip clean rebuild",
-                  objects_snapshot->size());
-        return;
-    }
-
-    ROS_INFO("[CleanMap] rebuilding: objects_map=%zu, bev_obs_count=%zu",
-             objects_snapshot->size(), bev_observation_count_.size());
-
-    // ========== Dynamic Deny Gate + Static Protect ==========
-    std::set<std::pair<int,int>> deny_cells;
-    std::set<std::pair<int,int>> protect_cells;
-    int cargo_deny_count = 0;
-    int human_deny_count = 0;
-
-    if (dynamic_event_config_.enabled && dynamic_event_config_.clean_deny_enabled) {
-        double current_time = ros::Time::now().toSec();
-
-        // 吊货 deny cells（从 DynamicEventManager 获取）
-        auto cargo_deny = dynamic_event_manager_.getDynamicDenyCells(0.15, current_time);
-        cargo_deny_count = cargo_deny.size();
-        deny_cells.insert(cargo_deny.begin(), cargo_deny.end());
-
-        // P2: 人员 deny cells（从 HumanFilter 获取）
-        // 在下面的过滤逻辑中检查
-
-        protect_cells = dynamic_event_manager_.getStaticProtectCells(0.15, current_time);
-
-        if (!deny_cells.empty()) {
-            ROS_INFO("[CleanMapDynamicGate] cargo_deny_cells=%d, total_deny_cells=%zu",
-                     cargo_deny_count, deny_cells.size());
-        }
-        if (!protect_cells.empty()) {
-            ROS_INFO("[CleanMapStaticProtect] protect_cells=%zu", protect_cells.size());
-        }
-    }
-
-    const double clean_bev_cell = 0.15;
-    const int clean_min_points = 3;
-
-    // ========== 构建 payload_candidate 的 BEV 索引（用于 placed cargo 保护）==========
-    std::map<BevKey, std::vector<int>> payload_cand_bev_indices;
-    if (!protect_cells.empty() && rebuild_payload_candidate_ && !rebuild_payload_candidate_->empty()) {
-        for (int i = 0; i < (int)rebuild_payload_candidate_->size(); ++i) {
-            if (should_yield_to_localization()) {
-                ROS_DEBUG("[CleanMap] aborted for queued localization frame");
-                return;
-            }
-            const auto& p = rebuild_payload_candidate_->points[i];
-            BevKey bk{(int)std::floor(p.x / clean_bev_cell), (int)std::floor(p.y / clean_bev_cell)};
-            payload_cand_bev_indices[bk].push_back(i);
-        }
-        ROS_INFO("[CleanMapPlacedCargo] payload_candidate BEV cells=%zu", payload_cand_bev_indices.size());
-    }
-
-    // 使用 objects_map_ 的全局 z 最小值作为地面参考
-    float obj_z_min = 1e9;
-    for (const auto& p : objects_snapshot->points) {
-        if (should_yield_to_localization()) {
-            ROS_DEBUG("[CleanMap] aborted for queued localization frame");
-            return;
-        }
-        if (p.z < obj_z_min) obj_z_min = p.z;
-    }
-
-    // 按 BEV cell 分组
-    std::map<BevKey, float> bev_max_h;
-    std::map<BevKey, float> bev_dist;    // 每个 cell 的平均距离
-    std::map<BevKey, int> bev_count;
-    std::map<BevKey, std::vector<int>> bev_indices;
-
-    for (int i = 0; i < (int)objects_snapshot->size(); ++i) {
-        if (should_yield_to_localization()) {
-            ROS_DEBUG("[CleanMap] aborted for queued localization frame");
-            return;
-        }
-        const auto& p = objects_snapshot->points[i];
-        BevKey bk{(int)std::floor(p.x / clean_bev_cell), (int)std::floor(p.y / clean_bev_cell)};
-        bev_indices[bk].push_back(i);
-        bev_count[bk]++;
-        float h = p.z - obj_z_min;
-        if (bev_max_h.find(bk) == bev_max_h.end() || h > bev_max_h[bk]) {
-            bev_max_h[bk] = h;
-        }
-
-        // 记录距离（用于自适应阈值）
-        float dist = std::sqrt(p.x * p.x + p.y * p.y);
-        if (bev_dist.find(bk) == bev_dist.end()) {
-            bev_dist[bk] = dist;
-        } else {
-            bev_dist[bk] = (bev_dist[bk] + dist) / 2.0f;  // 平均距离
-        }
-    }
-
-    // 自适应阈值函数
-    auto getAdaptiveMinHeight = [](float dist) -> float {
-        if (dist < 10.0f) return 0.35f;   // 近处：0.35m
-        if (dist < 20.0f) return 0.25f;   // 中距离：0.25m
-        return 0.15f;                      // 远处：0.15m
-    };
-
-    auto getAdaptiveMinObs = [](float dist) -> int {
-        if (dist < 10.0f) return 2;        // 近处：2次观测
-        if (dist < 20.0f) return 1;        // 中距离：1次观测
-        return 1;                           // 远处：1次观测（首次进入即可保留）
-    };
-
-    // 构建 clean map：自适应高度 + 点数 + 自适应时间一致性
-    pcl::PointCloud<pcl::PointXYZ>::Ptr new_clean(new pcl::PointCloud<pcl::PointXYZ>);
-    int total_cells = 0, passed_cells = 0;
-    int near_passed = 0, mid_passed = 0, far_passed = 0;
-    int near_failed = 0, mid_failed = 0, far_failed = 0;
-
-    int deny_rejected_cells = 0;
-    int deny_rejected_points = 0;
-    int protect_kept_cells = 0;
-    int protect_kept_points = 0;
-
-    // P0-4: 3D deny volume 替代 2D BEV deny
-    // 只有 enable_cargo_history_clean=true 时才使用旧的 2D deny
-    // 新的 3D deny 在后面逐点检查
-    if (dynamic_event_config_.enabled && dynamic_event_config_.clean_deny_enabled &&
-        dynamic_event_config_.enable_cargo_history_clean) {
-        double current_time = ros::Time::now().toSec();
-        for (const auto& [bk, indices] : bev_indices) {
-            float cell_center_x = bk.x * clean_bev_cell + clean_bev_cell / 2;
-            float cell_center_y = bk.y * clean_bev_cell + clean_bev_cell / 2;
-            if (isCargoDenied(cell_center_x, cell_center_y, current_time)) {
-                deny_cells.insert({bk.x, bk.y});
-            }
-        }
-        if (!cargo_deny_history_.empty()) {
-            ROS_INFO("[CleanMapCargoHistory] cargo_deny_history_cells=%zu", cargo_deny_history_.size());
-        }
-    }
-
-    for (auto& [bk, indices] : bev_indices) {
-        if (should_yield_to_localization()) {
-            ROS_DEBUG("[CleanMap] aborted for queued localization frame");
-            return;
-        }
-        total_cells++;
-
-        std::pair<int,int> bk_pair = {bk.x, bk.y};
-
-        // ========== Static Protect 优先级最高 ==========
-        if (!protect_cells.empty() && protect_cells.find(bk_pair) != protect_cells.end()) {
-            // 停放保护区域：直接保留，不走 dynamic deny
-            for (int idx : indices) {
-                new_clean->push_back(objects_snapshot->points[idx]);
-            }
-
-            // 将 placed cargo 的 payload_candidate 点也添加到 clean map
-            auto payload_it = payload_cand_bev_indices.find(bk);
-            if (payload_it != payload_cand_bev_indices.end()) {
-                for (int idx : payload_it->second) {
-                    new_clean->push_back(rebuild_payload_candidate_->points[idx]);
-                }
-                protect_kept_points += payload_it->second.size();
-                ROS_DEBUG("[CleanMapPlacedCargo] added %zu payload_candidate points to protect cell (%d,%d)",
-                          payload_it->second.size(), bk.x, bk.y);
-            }
-
-            protect_kept_cells++;
-            protect_kept_points += indices.size();
-            passed_cells++;
-            continue;
-        }
-
-        // ========== Dynamic Deny Gate ==========
-        if (!deny_cells.empty() && deny_cells.find(bk_pair) != deny_cells.end()) {
-            deny_rejected_cells++;
-            deny_rejected_points += indices.size();
-            continue;  // 跳过被动态事件覆盖的 cell
-        }
-
-        // P2: Human Deny Gate（从 HumanFilter 的 deny history 检查）
-        // P0-4: 只有 enable_human_history_clean=true 时才使用
-        if (human_filter_config_.enabled && dynamic_event_config_.enable_human_history_clean) {
-            // 检查该 cell 的中心点是否被 deny
-            float cell_center_x = bk.x * clean_bev_cell + clean_bev_cell / 2;
-            float cell_center_y = bk.y * clean_bev_cell + clean_bev_cell / 2;
-            double current_time = ros::Time::now().toSec();
-
-            if (human_filter_.isCellDenied(cell_center_x, cell_center_y, current_time)) {
-                human_deny_count++;
-                deny_rejected_cells++;
-                deny_rejected_points += indices.size();
-                continue;  // 跳过被人员动态覆盖的 cell
-            }
-        }
-
-        int obs_count = 0;
-        auto it = bev_observation_count_.find(bk);
-        if (it != bev_observation_count_.end()) obs_count = it->second;
-
-        float dist = bev_dist[bk];
-        float min_height = getAdaptiveMinHeight(dist);
-        int min_obs = getAdaptiveMinObs(dist);
-
-        // 三重过滤：自适应高度，点数 >= 3，自适应观测次数
-        if (bev_max_h[bk] >= min_height &&
-            bev_count[bk] >= clean_min_points &&
-            obs_count >= min_obs) {
-            for (int idx : indices) {
-                const auto& p = objects_snapshot->points[idx];
-
-                // P0-3: 3D deny volume 检查（替代 2D BEV 全高度删除）
-                // 只删除在 deny volume z 范围内的点，保护下方静态货物
-                if (dynamic_event_config_.enabled && !dynamic_deny_volume_map_.empty()) {
-                    if (isPointDeniedBy3DHistory(p.x, p.y, p.z)) {
-                        deny_rejected_points++;
-                        continue;
-                    }
-                }
-
-                new_clean->push_back(p);
-            }
-            passed_cells++;
-            if (dist < 10.0f) near_passed++;
-            else if (dist < 20.0f) mid_passed++;
-            else far_passed++;
-        } else {
-            if (dist < 10.0f) near_failed++;
-            else if (dist < 20.0f) mid_failed++;
-            else far_failed++;
-        }
-    }
-
-    if (protect_kept_cells > 0) {
-        ROS_INFO("[CleanMapStaticProtect] protect_cells=%d, protected_points=%d",
-                 protect_kept_cells, protect_kept_points);
-    }
-    if (deny_rejected_cells > 0) {
-        ROS_INFO("[CleanMapDynamicGate] rejected_cells=%d, rejected_points=%d, cargo_deny=%d, human_deny=%d, cargo_history=%zu",
-                 deny_rejected_cells, deny_rejected_points, cargo_deny_count, human_deny_count, cargo_deny_history_.size());
-    }
-
-    // 更新 clean map（线程安全）
-    {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        *objects_clean_map_ = *new_clean;
-        ++clean_map_content_version_;
-        if (clean_map_content_version_ == 0U) ++clean_map_content_version_;
-    }
-
-    // [CleanMapDynamicGate3D] 日志
-    ROS_INFO("[CleanMapDynamicGate3D] cargo_volumes=%zu human_volumes=%zu cargo_3d_denied_points=%d human_3d_denied_points=%d protected_static_points=%d clean_points=%zu",
-             dynamic_deny_volume_map_.size(),
-             (size_t)0,  // human volumes 暂时为 0
-             deny_rejected_points,  // cargo 3D denied
-             human_deny_count,      // human denied
-             protect_kept_points,   // protected static
-             new_clean->size());
-
-    ROS_INFO("[CleanMaskStatus] using_mask=true, deny_cells=%zu, protect_cells=%zu, deny_rejected=%d, protect_kept=%d",
-             deny_cells.size(), protect_cells.size(), deny_rejected_cells, protect_kept_cells);
-    ROS_INFO("[CleanMap] rebuilt: %d/%d cells passed (near=%d/%d mid=%d/%d far=%d/%d), points=%zu",
-             passed_cells, total_cells,
-             near_passed, near_passed + near_failed,
-             mid_passed, mid_passed + mid_failed,
-             far_passed, far_passed + far_failed,
-             new_clean->size());
 }
 
 void NdtSlamNode::separateGroundByGrid(const pcl::PointCloud<pcl::PointXYZ>& input,
@@ -5931,7 +5942,7 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
     if (false) {
         keyframe_count_++;
         Eigen::Vector3d pos = pose.translation();
-        ROS_INFO("[MapCommit] keyframe #%d added | pos=(%.1f, %.1f, %.1f) | tiles=%d",
+        ROS_DEBUG("[MapCommit] keyframe #%d added | pos=(%.1f, %.1f, %.1f) | tiles=%d",
                  keyframe_count_, pos.x(), pos.y(), pos.z(),
                  flushed_tile_count_.load(std::memory_order_relaxed));
 
@@ -6485,14 +6496,7 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
             publishObjectsMap();
 
             // clean map 异步构建（不阻塞主处理线程）
-            if (!clean_rebuild_running_.load()) {
-                if (clean_rebuild_thread_.joinable()) clean_rebuild_thread_.join();
-                clean_rebuild_running_.store(true);
-                clean_rebuild_thread_ = std::thread([this]() {
-                    rebuildCleanMap();
-                    clean_rebuild_running_.store(false);
-                });
-            }
+            startCleanMapRebuildJob();
         }
     }
 
@@ -6734,6 +6738,7 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         ground_map_->clear();
         objects_map_->clear();
         objects_clean_map_->clear();
+        advanceObjectsMapContentVersionLocked();
         rebuild_objects_filtered_->clear();
         rebuild_payload_candidate_->clear();
         rebuild_payload_dynamic_->clear();
@@ -6983,6 +6988,7 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
             ground_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
             objects_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
             objects_clean_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+            advanceObjectsMapContentVersionLocked();
             current_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
             local_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
             rebuild_objects_filtered_.reset(
@@ -8071,7 +8077,7 @@ bool NdtSlamNode::evaluateMotionGateForMapCommit(
             velocity_modified ? 1 : 0);
     }
 
-    ROS_INFO_THROTTLE(
+    ROS_DEBUG_THROTTLE(
         5.0,
         "[MOTION_GATE_INVARIANT] stationary=%d pose_modified=%d "
         "position_modified=%d velocity_modified=%d map_commit_allowed=%d "
@@ -8557,7 +8563,11 @@ void NdtSlamNode::forceDownsampleAllMaps() {
     forceVoxel(global_map_, 0.5, "global_map_");
     forceVoxel(display_map_, 0.5, "display_map_");
     forceVoxel(ground_map_, 0.3, "ground_map_");
+    const bool objects_changed = objects_map_ && objects_map_->size() > 1000U;
     forceVoxel(objects_map_, 0.3, "objects_map_");
+    if (objects_changed) {
+        advanceObjectsMapContentVersionLocked();
+    }
 }
 
 // ========== 磁盘保护实现 ==========
@@ -8736,6 +8746,7 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
                         display_map_.swap(new_display);
                         ground_map_.swap(new_ground);
                         objects_map_.swap(new_objects);
+                        advanceObjectsMapContentVersionLocked();
                         rebuild_objects_filtered_.reset(
                             new pcl::PointCloud<pcl::PointXYZ>(*objects_map_));
                     }
@@ -8878,7 +8889,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             }
         } else {
             *filtered_cloud = *crop_cloud;
-            ROS_WARN_THROTTLE(
+            ROS_DEBUG_THROTTLE(
                 2.0, "[OdomAnchorDetect] no reliable external ground; "
                 "bypass HAG prefilter");
         }
@@ -9034,6 +9045,54 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     }
 
     result.core_points_base = final_points;
+
+    // Keep the formal CargoBottom/Safety footprint axis-aligned. The OBB is
+    // visualization-only: it preserves the suspended object's own footprint
+    // direction so the rigid marker does not silently inherit base_link axes.
+    if (odom_anchor_config_.tight_box.orientation_enabled) {
+        std::vector<Eigen::Vector2f> footprint_points;
+        footprint_points.reserve(result.core_points_base->size());
+        for (const auto& point : result.core_points_base->points) {
+            footprint_points.emplace_back(point.x, point.y);
+        }
+        CargoOrientedFootprintConfig footprint_config;
+        footprint_config.minimum_points = static_cast<std::size_t>(std::max(
+            3, odom_anchor_config_.tight_box.orientation_min_points));
+        footprint_config.percentile_low =
+            odom_anchor_config_.tight_box.percentile_low;
+        footprint_config.percentile_high =
+            odom_anchor_config_.tight_box.percentile_high;
+        footprint_config.margin_m =
+            odom_anchor_config_.tight_box.margin_xy_m;
+        footprint_config.minimum_axis_ratio =
+            odom_anchor_config_.tight_box.orientation_min_axis_ratio;
+        footprint_config.minimum_long_side_m = std::max(
+            odom_anchor_config_.min_size_x, odom_anchor_config_.min_size_y);
+        footprint_config.minimum_short_side_m = std::min(
+            odom_anchor_config_.min_size_x, odom_anchor_config_.min_size_y);
+        footprint_config.maximum_long_side_m = std::max(
+            odom_anchor_config_.max_size_x, odom_anchor_config_.max_size_y);
+        footprint_config.maximum_short_side_m = std::min(
+            odom_anchor_config_.max_size_x, odom_anchor_config_.max_size_y);
+        const CargoOrientedFootprint footprint =
+            estimateCargoOrientedFootprint(
+                footprint_points, anchor, footprint_config);
+        result.visual_footprint_valid = footprint.valid;
+        if (footprint.valid) {
+            result.visual_size_long_short = footprint.size_long_short;
+            result.visual_yaw_base_rad = footprint.yaw_base_rad;
+        }
+        ROS_DEBUG_THROTTLE(
+            2.0,
+            "[CargoFootprint] valid=%d size=(%.2f,%.2f) yaw_deg=%.1f "
+            "axis_ratio=%.2f points=%zu reason=%s",
+            footprint.valid ? 1 : 0, footprint.size_long_short.x(),
+            footprint.size_long_short.y(),
+            footprint.yaw_base_rad * 180.0F /
+                3.14159265358979323846F,
+            footprint.axis_ratio, footprint.finite_points,
+            footprint.reason.c_str());
+    }
 
     // 计算 bbox（使用配置的分位数）
     std::vector<float> xs, ys, zs;
@@ -9343,6 +9402,31 @@ void NdtSlamNode::updateLockedHeight(const HookCargoBottomEstimate& bottom, cons
     hook_lock_.last_good_height_stamp = stamp;
 }
 
+void NdtSlamNode::updateLockedHeightAfterAssociation(
+    const HookCargoBottomEstimate& bottom, const ros::Time& stamp) {
+    const LockedCargoHeightAction action = evaluateLockedCargoHeightAction(
+        hook_lock_config_.freeze_geometry_after_lock,
+        hook_lock_.has_good_height, bottom.valid);
+    switch (action) {
+    case LockedCargoHeightAction::IGNORE_INVALID:
+        return;
+    case LockedCargoHeightAction::INITIALIZE_ONCE:
+        updateLockedHeight(bottom, stamp, true);
+        ROS_WARN("[CargoLock] frozen height initialized after lock "
+                 "bottom=%.2f top=%.2f",
+                 bottom.bottom_z_base, bottom.top_z_base);
+        return;
+    case LockedCargoHeightAction::UPDATE_ADAPTIVE:
+        updateLockedHeight(bottom, stamp, false);
+        return;
+    case LockedCargoHeightAction::REFRESH_FROZEN:
+        hook_lock_.last_good_height_stamp = stamp;
+        hook_lock_.bottom_uncertainty = std::min(
+            hook_lock_.bottom_uncertainty, bottom.uncertainty);
+        return;
+    }
+}
+
 void NdtSlamNode::maybeUpdateLockedSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom) {
     if (!hook_lock_.has_locked_size) return;
     Eigen::Vector3f raw_size = computeFixedCenterSize(det, bottom);
@@ -9379,9 +9463,14 @@ void NdtSlamNode::clearHookLock() {
     hook_lock_.weak_count = 0;
     hook_lock_.lost_count = 0;
     hook_lock_.has_locked_size = false;
+    hook_lock_.has_locked_visual_footprint = false;
+    hook_lock_.locked_visual_size.setZero();
+    hook_lock_.locked_visual_yaw_base_rad = 0.0F;
     hook_lock_.has_good_height = false;
     hook_lock_.size_update_count = 0;
     hook_lock_.init_size_buffer.clear();
+    hook_lock_.init_visual_size_buffer.clear();
+    hook_lock_.init_visual_yaw_buffer.clear();
     hook_lock_.size_candidate_buffer.clear();
     hook_lock_.last_accepted_core_points.reset();
     hook_lock_.last_accepted_center.setZero();
@@ -9473,6 +9562,8 @@ void NdtSlamNode::updateHookCargoLock(
             hook_lock_.state = HookCargoLockState::CANDIDATE;
             hook_lock_.confirm_count = 0;
             hook_lock_.init_size_buffer.clear();
+            hook_lock_.init_visual_size_buffer.clear();
+            hook_lock_.init_visual_yaw_buffer.clear();
             hook_lock_.last_accepted_center = det.center_base;
             hook_lock_.last_accepted_size = det.size_visible;
             hook_lock_.has_last_accepted = true;
@@ -9503,11 +9594,13 @@ void NdtSlamNode::updateHookCargoLock(
                 hook_lock_.confirm_count = 0;
                 hook_lock_.weak_count = 0;
                 hook_lock_.init_size_buffer.clear();
+                hook_lock_.init_visual_size_buffer.clear();
+                hook_lock_.init_visual_yaw_buffer.clear();
                 hook_lock_.last_accepted_center = det.center_base;
                 hook_lock_.last_accepted_size = det.size_visible;
                 hook_lock_.has_last_accepted = true;
                 hook_lock_.last_seen_stamp = stamp;
-                ROS_INFO_THROTTLE(
+                ROS_DEBUG_THROTTLE(
                     1.0, "[CargoLock] CANDIDATE pre_lift_hold policy=%s",
                     candidate_policy.reason.c_str());
                 break;
@@ -9521,11 +9614,17 @@ void NdtSlamNode::updateHookCargoLock(
             hook_lock_.confirm_count++;
             hook_lock_.weak_count = 0;
             hook_lock_.init_size_buffer.push_back(computeFixedCenterSize(det, bottom));
+            if (det.visual_footprint_valid) {
+                hook_lock_.init_visual_size_buffer.push_back(
+                    det.visual_size_long_short);
+                hook_lock_.init_visual_yaw_buffer.push_back(
+                    det.visual_yaw_base_rad);
+            }
             hook_lock_.last_accepted_center = det.center_base;
             hook_lock_.last_accepted_size = det.size_visible;
             hook_lock_.has_last_accepted = true;
             hook_lock_.last_seen_stamp = stamp;
-            ROS_INFO("[CargoLock] CANDIDATE confirm=%d points=%zu visible_h=%.2f xy_area=%.2f bottom=%.2f top=%.2f",
+            ROS_DEBUG("[CargoLock] CANDIDATE confirm=%d points=%zu visible_h=%.2f xy_area=%.2f bottom=%.2f top=%.2f",
                      hook_lock_.confirm_count,
                      det.core_points_base ? det.core_points_base->size() : 0,
                      det.visible_height,
@@ -9546,6 +9645,33 @@ void NdtSlamNode::updateHookCargoLock(
                 observation_associated = true;
                 hook_lock_.locked_size = medianSize(hook_lock_.init_size_buffer);
                 hook_lock_.has_locked_size = true;
+                hook_lock_.has_locked_visual_footprint = false;
+                if (hook_lock_.init_visual_size_buffer.size() >= 2U) {
+                    std::vector<float> long_sides;
+                    std::vector<float> short_sides;
+                    long_sides.reserve(
+                        hook_lock_.init_visual_size_buffer.size());
+                    short_sides.reserve(
+                        hook_lock_.init_visual_size_buffer.size());
+                    for (const auto& visual_size :
+                         hook_lock_.init_visual_size_buffer) {
+                        long_sides.push_back(visual_size.x());
+                        short_sides.push_back(visual_size.y());
+                    }
+                    std::sort(long_sides.begin(), long_sides.end());
+                    std::sort(short_sides.begin(), short_sides.end());
+                    float mean_visual_yaw = 0.0F;
+                    if (meanCargoAxialYaw(
+                            hook_lock_.init_visual_yaw_buffer,
+                            &mean_visual_yaw)) {
+                        const std::size_t middle = long_sides.size() / 2U;
+                        hook_lock_.locked_visual_size = Eigen::Vector2f(
+                            long_sides[middle], short_sides[middle]);
+                        hook_lock_.locked_visual_yaw_base_rad =
+                            mean_visual_yaw;
+                        hook_lock_.has_locked_visual_footprint = true;
+                    }
+                }
                 hook_lock_.locked_stamp = stamp;
 
                 // 使用 odom anchor 作为中心
@@ -9561,8 +9687,16 @@ void NdtSlamNode::updateHookCargoLock(
                          anchor.x(), anchor.y());
 
                 updateLockedHeight(bottom, stamp, true);
-                ROS_WARN("[CargoLock] CANDIDATE->LOCKED size=(%.2f,%.2f,%.2f) anchor=(%.2f,%.2f)",
-                         hook_lock_.locked_size.x(), hook_lock_.locked_size.y(), hook_lock_.locked_size.z(),
+                ROS_WARN("[CargoLock] CANDIDATE->LOCKED size=(%.2f,%.2f,%.2f) "
+                         "visual_size=(%.2f,%.2f) visual_yaw_deg=%.1f "
+                         "oriented=%d anchor=(%.2f,%.2f)",
+                         hook_lock_.locked_size.x(), hook_lock_.locked_size.y(),
+                         hook_lock_.locked_size.z(),
+                         hook_lock_.locked_visual_size.x(),
+                         hook_lock_.locked_visual_size.y(),
+                         hook_lock_.locked_visual_yaw_base_rad * 180.0F /
+                             3.14159265358979323846F,
+                         hook_lock_.has_locked_visual_footprint ? 1 : 0,
                          anchor.x(), anchor.y());
             }
         } else if (weak) {
@@ -9571,6 +9705,8 @@ void NdtSlamNode::updateHookCargoLock(
             hook_lock_.weak_count++;
             hook_lock_.confirm_count = 0;
             hook_lock_.init_size_buffer.clear();
+            hook_lock_.init_visual_size_buffer.clear();
+            hook_lock_.init_visual_yaw_buffer.clear();
             hook_lock_.has_last_accepted = false;
             hook_lock_.last_seen_stamp = stamp;
             if (hook_lock_.weak_count >
@@ -9579,14 +9715,14 @@ void NdtSlamNode::updateHookCargoLock(
                 hook_lock_.weak_count = 0;
                 ROS_INFO("[CargoLock] CANDIDATE->EMPTY reason=weak_limit");
             } else {
-                ROS_INFO("[CargoLock] CANDIDATE weak_hold confirm=%d weak=%d",
+                ROS_DEBUG("[CargoLock] CANDIDATE weak_hold confirm=%d weak=%d",
                          hook_lock_.confirm_count, hook_lock_.weak_count);
             }
         } else {
             // 无检测，检查超时
             double age = (stamp - hook_lock_.last_seen_stamp).toSec();
             if (age < hook_lock_config_.candidate_hold_sec) {
-                ROS_INFO("[CargoLock] CANDIDATE no_detect_hold age=%.2f confirm=%d",
+                ROS_DEBUG("[CargoLock] CANDIDATE no_detect_hold age=%.2f confirm=%d",
                          age, hook_lock_.confirm_count);
             } else {
                 hook_lock_.state = HookCargoLockState::EMPTY;
@@ -9606,16 +9742,9 @@ void NdtSlamNode::updateHookCargoLock(
                 observation_associated = true;
                 hook_lock_.last_seen_stamp = stamp;
                 // 更新高度和尺寸
-                if (!hook_lock_config_.freeze_geometry_after_lock) {
-                    if (bottom.valid) updateLockedHeight(bottom, stamp, false);
-                    if (strong) maybeUpdateLockedSize(det, bottom);
-                } else if (bottom.valid) {
-                    // The accepted observation refreshes association age and
-                    // uncertainty, but the confirmed suspended-cargo geometry
-                    // remains fixed for this lock lifetime.
-                    hook_lock_.last_good_height_stamp = stamp;
-                    hook_lock_.bottom_uncertainty = std::min(
-                        hook_lock_.bottom_uncertainty, bottom.uncertainty);
+                updateLockedHeightAfterAssociation(bottom, stamp);
+                if (!hook_lock_config_.freeze_geometry_after_lock && strong) {
+                    maybeUpdateLockedSize(det, bottom);
                 }
 
                 // 更新 last accepted
@@ -9673,23 +9802,16 @@ void NdtSlamNode::updateHookCargoLock(
                 observation_associated = true;
                 hook_lock_.state = HookCargoLockState::LOCKED;
                 hook_lock_.last_seen_stamp = stamp;
-                if (!hook_lock_config_.freeze_geometry_after_lock) {
-                    if (bottom.valid) updateLockedHeight(bottom, stamp, false);
-                    if (strong) maybeUpdateLockedSize(det, bottom);
-                } else if (bottom.valid) {
-                    // A recovered observation proves that the rigid suspended
-                    // cargo is still associated, but it must not reshape the
-                    // box that was confirmed before the temporary loss.
-                    hook_lock_.last_good_height_stamp = stamp;
-                    hook_lock_.bottom_uncertainty = std::min(
-                        hook_lock_.bottom_uncertainty, bottom.uncertainty);
+                updateLockedHeightAfterAssociation(bottom, stamp);
+                if (!hook_lock_config_.freeze_geometry_after_lock && strong) {
+                    maybeUpdateLockedSize(det, bottom);
                 }
                 ROS_INFO("[CargoLock] LOST_HOLD->LOCKED (associated recovery)");
             } else {
                 growUncertainty();
                 const double lost_age =
                     (stamp - hook_lock_.last_seen_stamp).toSec();
-                ROS_WARN_THROTTLE(
+                ROS_DEBUG_THROTTLE(
                     2.0,
                     "[CargoLock] LOST_HOLD recovery rejected age=%.2f reason=%s",
                     lost_age, reject_reason.c_str());
@@ -9927,24 +10049,42 @@ void NdtSlamNode::publishCargoFusionMarker(
         const Eigen::Vector2f anchor = getCargoAnchorXY();
         const float bottom_z = hook_lock_.stable_bottom_z;
         const float top_z = hook_lock_.stable_top_z;
-        const float half_x = 0.5F * hook_lock_.locked_size.x();
-        const float half_y = 0.5F * hook_lock_.locked_size.y();
+        const bool use_oriented_footprint =
+            hook_lock_.has_locked_visual_footprint &&
+            hook_lock_.locked_visual_size.minCoeff() > 0.0F &&
+            std::isfinite(hook_lock_.locked_visual_yaw_base_rad);
+        const Eigen::Vector2f visual_size = use_oriented_footprint
+            ? hook_lock_.locked_visual_size
+            : Eigen::Vector2f(hook_lock_.locked_size.head<2>());
+        const float visual_yaw = use_oriented_footprint
+            ? hook_lock_.locked_visual_yaw_base_rad : 0.0F;
+        const float cosine = std::cos(visual_yaw);
+        const float sine = std::sin(visual_yaw);
+        const float half_long = 0.5F * visual_size.x();
+        const float half_short = 0.5F * visual_size.y();
         visual_geometry = CargoBoxGeometry{};
         visual_geometry.bottom_z_base = bottom_z;
         visual_geometry.top_z_base = top_z;
         visual_geometry.center_base = Eigen::Vector3f(
             anchor.x(), anchor.y(), 0.5F * (bottom_z + top_z));
         visual_geometry.size_base = Eigen::Vector3f(
-            hook_lock_.locked_size.x(), hook_lock_.locked_size.y(),
-            top_z - bottom_z);
+            visual_size.x(), visual_size.y(), top_z - bottom_z);
         std::size_t corner_index = 0U;
         for (int z_side = 0; z_side < 2; ++z_side) {
             const float z = z_side == 0 ? bottom_z : top_z;
             for (int y_side = 0; y_side < 2; ++y_side) {
                 for (int x_side = 0; x_side < 2; ++x_side) {
+                    const Eigen::Vector2f local_corner(
+                        x_side == 0 ? -half_long : half_long,
+                        y_side == 0 ? -half_short : half_short);
+                    const Eigen::Vector2f rotated_corner(
+                        cosine * local_corner.x() -
+                            sine * local_corner.y(),
+                        sine * local_corner.x() +
+                            cosine * local_corner.y());
                     const Eigen::Vector3f corner(
-                        anchor.x() + (x_side == 0 ? -half_x : half_x),
-                        anchor.y() + (y_side == 0 ? -half_y : half_y), z);
+                        anchor.x() + rotated_corner.x(),
+                        anchor.y() + rotated_corner.y(), z);
                     visual_geometry.corners_base[corner_index] = corner;
                     visual_geometry.corners_map[corner_index] =
                         (current_pose_ * corner.cast<double>()).cast<float>();
@@ -10838,11 +10978,11 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
             box_source
         };
 
-        ROS_INFO_THROTTLE(1.0,
+        ROS_DEBUG_THROTTLE(1.0,
             "[CargoSourceMode] mode=hook_local_roi global_dynamic_track=debug_only source=%s",
             box_source == 1.0f ? "V2_CORE" : "LAST_GOOD");
 
-        ROS_INFO_THROTTLE(1.0,
+        ROS_DEBUG_THROTTLE(1.0,
             "[CargoTargetHardCheck] source=hook_roi selected=0 payload=0 match=1 state=%d",
             static_cast<int>(hook_lock_.state));
     } else {
@@ -10862,7 +11002,7 @@ void NdtSlamNode::publishPayloadTrackInfo(const ros::Time& stamp) {
             0.0f               // box_source = NONE
         };
 
-        ROS_INFO_THROTTLE(1.0,
+        ROS_DEBUG_THROTTLE(1.0,
             "[CargoTargetHardCheck] source=hook_roi selected=-1 payload=-1 match=0 reason=not_locked state=%d",
             static_cast<int>(hook_lock_.state));
     }
@@ -10941,7 +11081,7 @@ void NdtSlamNode::publishPayloadTrackInfoFromOdomAnchorBox(const ros::Time& stam
             0.0f               // box_source = NONE
         };
 
-        ROS_INFO_THROTTLE(1.0,
+        ROS_DEBUG_THROTTLE(1.0,
             "[CargoTargetHardCheck] source=odom_anchor selected=-1 payload=-1 match=0 reason=not_locked state=%d",
             static_cast<int>(hook_lock_.state));
     }
@@ -10967,7 +11107,7 @@ void NdtSlamNode::publishPayloadTrackInfoInvalid(const std::string& reason) {
         0.0f               // box_source = NONE
     };
 
-    ROS_INFO_THROTTLE(1.0,
+    ROS_DEBUG_THROTTLE(1.0,
         "[CargoTargetHardCheck] source=hook_roi selected=-1 payload=-1 match=0 reason=%s state=%d",
         reason.c_str(), static_cast<int>(hook_lock_.state));
 
@@ -11415,7 +11555,7 @@ bool NdtSlamNode::updateLocalizationTarget(
         cached_target_valid_ = false;
         cached_target_points_ = 0;
         last_target_reason_ = "candidate_below_min_points";
-        ROS_WARN_THROTTLE(
+        ROS_DEBUG_THROTTLE(
             2.0,
             "[LocTarget] candidate rejected after crop/voxel: points=%zu min=%d; using local_map",
             candidate->size(), localization_target_min_points_);
@@ -11454,7 +11594,7 @@ bool NdtSlamNode::swapLocalizationTargetBuffers() {
     cached_target_points_ = 0;
     last_target_reason_ = "snapshot_swapped";
 
-    ROS_INFO("[LocTarget] READY: version=%llu points=%zu min=%d",
+    ROS_DEBUG("[LocTarget] READY: version=%llu points=%zu min=%d",
              static_cast<unsigned long long>(localization_target_version_),
              localization_target_snapshot_->size(),
              localization_target_min_points_);
@@ -11519,7 +11659,7 @@ bool NdtSlamNode::updateCroppedCachedTarget(const Sophus::SE3d& predicted_pose) 
         localization_target_ready_ = false;
         localization_target_state_ = LocalizationTargetState::TARGET_DEGRADED;
         last_target_reason_ = "crop_below_min_points";
-        ROS_WARN_THROTTLE(
+        ROS_DEBUG_THROTTLE(
             2.0,
             "[LocTarget] crop invalidated: points=%zu min=%d; using local_map",
             cropped->size(), localization_target_min_points_);
@@ -11545,7 +11685,7 @@ bool NdtSlamNode::updateCroppedCachedTarget(const Sophus::SE3d& predicted_pose) 
         localization_target_ready_ = false;
         localization_target_state_ = LocalizationTargetState::TARGET_DEGRADED;
         last_target_reason_ = "crop_voxel_below_min_points";
-        ROS_WARN_THROTTLE(
+        ROS_DEBUG_THROTTLE(
             2.0,
             "[LocTarget] voxelized crop invalidated: points=%zu min=%d; using local_map",
             filtered_ptr->size(), localization_target_min_points_);
@@ -11589,7 +11729,7 @@ void NdtSlamNode::bindNdtInputTarget(
         last_bound_ndt_target_source_ = source;
         ++setInputTarget_count_;
         ++target_rebuild_count_;
-        ROS_INFO("[LocTarget] bind source=%s version=%llu points=%zu reason=%s setInput=%d",
+        ROS_DEBUG("[LocTarget] bind source=%s version=%llu points=%zu reason=%s setInput=%d",
                  source.c_str(),
                  static_cast<unsigned long long>(content_version),
                  target->size(), reason.c_str(), setInputTarget_count_);
@@ -12485,7 +12625,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     keyframe_count_++;
 
     // [MapCommit] 日志（要求的格式）
-    ROS_INFO("[MapCommit] seq=%d keyframe=%d commit_total=%zu commit_objects=%zu cargo_removed=%zu human_removed=%zu",
+    ROS_DEBUG("[MapCommit] seq=%d keyframe=%d commit_total=%zu commit_objects=%zu cargo_removed=%zu human_removed=%zu",
              keyframe_count_,
              keyframe_count_,
              commit_cloud_base->size(),
@@ -12549,6 +12689,9 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         size_t before_objects = objects_map_->size();
         addInRange(objects_transformed, objects_map_);
         objects_added = objects_map_->size() - before_objects;
+        if (objects_added > 0U) {
+            advanceObjectsMapContentVersionLocked();
+        }
     }
 
     // [MapWrite] 日志：debug_map_commit 开启时输出
@@ -12573,6 +12716,9 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                 objects_map_, new_cargo_volumes_this_frame_);
             erased_display = eraseDynamicPointsFromCloud(
                 display_map_, new_cargo_volumes_this_frame_);
+            if (erased_objects > 0U) {
+                advanceObjectsMapContentVersionLocked();
+            }
             objects_left = objects_map_->size();
             display_left = display_map_->size();
         }
@@ -13521,13 +13667,19 @@ void NdtSlamNode::logCargoHealthPeriodic() {
 
     CargoFrameRecord rec;
     rec.stamp = cargo_state_.stamp.toSec();
-    rec.track_id = selected_payload_track_id_;
+    rec.track_id = static_cast<int>(std::min<std::uint64_t>(
+        cargo_fusion_track_id_,
+        static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
     rec.center_x = cargo_state_.center_base.x();
     rec.center_y = cargo_state_.center_base.y();
     rec.center_z = cargo_state_.center_base.z();
     rec.size_x = cargo_state_.size.x();
     rec.size_y = cargo_state_.size.y();
     rec.size_z = cargo_state_.size.z();
+    rec.footprint_yaw_deg = hook_lock_.has_locked_visual_footprint
+        ? hook_lock_.locked_visual_yaw_base_rad * 180.0 /
+            3.14159265358979323846
+        : 0.0;
     rec.raw_bottom_z = cargo_state_.bottom_z;
     rec.filtered_bottom_z = cargo_state_.bottom_z;
     rec.stable_bottom_z = cargo_state_.bottom_safe_z;
@@ -13535,13 +13687,35 @@ void NdtSlamNode::logCargoHealthPeriodic() {
     rec.height_m = cargo_state_.top_z - cargo_state_.bottom_z;
     rec.bottom_valid = cargo_state_.valid_height;
     rec.height_valid = cargo_state_.valid_height;
-    rec.observation_valid = cargo_state_.valid_geometry;
+    rec.observation_valid = hook_observation_associated_current_;
+    rec.cluster_points = hook_fixed_cargo_.core_points_base
+        ? static_cast<int>(std::min<std::size_t>(
+            hook_fixed_cargo_.core_points_base->size(),
+            static_cast<std::size_t>(std::numeric_limits<int>::max())))
+        : 0;
+    rec.support_points = static_cast<int>(std::min<std::size_t>(
+        last_cargo_bottom_result_.selected_stats.bottom_band_points,
+        static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.filter_accepted = last_cargo_bottom_result_.valid;
+    rec.filter_reason = last_cargo_bottom_result_.reason;
+    rec.lost_frames = hook_lock_.lost_count;
 
     switch (cargo_state_.state) {
         case CargoState::EMPTY: rec.track_state = "EMPTY"; break;
         case CargoState::CANDIDATE: rec.track_state = "CANDIDATE"; break;
         case CargoState::LOCKED: rec.track_state = "LOCKED"; break;
         case CargoState::LOST: rec.track_state = "LOST"; break;
+    }
+
+    switch (hook_lock_.state) {
+        case HookCargoLockState::EMPTY: rec.lock_state = "EMPTY"; break;
+        case HookCargoLockState::CANDIDATE:
+            rec.lock_state = "CANDIDATE";
+            break;
+        case HookCargoLockState::LOCKED: rec.lock_state = "LOCKED"; break;
+        case HookCargoLockState::LOST_HOLD:
+            rec.lock_state = "LOST_HOLD";
+            break;
     }
 
     runtime_diag_.logCargoHealth(rec);

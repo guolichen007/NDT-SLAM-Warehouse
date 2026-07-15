@@ -288,6 +288,26 @@ def runtime_visualization_contract_failures() -> list[str]:
         "last_good_localization_hold",
         "marker.action = lifecycle.show",
         "cargo_marker:",
+        "estimateCargoOrientedFootprint",
+        "has_locked_visual_footprint",
+        "locked_visual_yaw_base_rad",
+        "rotated_corner",
+        "orientation_enabled: true",
+        "orientation_min_axis_ratio: 1.10",
+        "LockedCargoHeightAction::INITIALIZE_ONCE",
+        "updateLockedHeightAfterAssociation",
+        "MapPublicationSnapshot",
+        "captureMapPublicationSnapshot",
+        "publishMapPublicationSnapshot",
+        "message.header.seq",
+        "buildCleanMapFromSnapshot",
+        "clean_map_rebuild_thread_",
+        "clean_map_rebuild_result_ready_",
+        "source_objects_version",
+        "objects_map_content_version_",
+        "getDenyCellsSnapshot",
+        "CleanMapBuildAction::DISCARD_SUPERSEDED",
+        "CleanMapBuildAction::DISCARD_STALE_OBJECTS",
     )
     for token in required:
         if token not in combined:
@@ -308,7 +328,8 @@ def runtime_visualization_contract_failures() -> list[str]:
             "if (display_map_->empty()) return",
             "if (ground_map_->empty()) return",
             "if (objects_map_->empty()) return",
-            "if (objects_clean_map_->empty()) return"):
+            "if (objects_clean_map_->empty()) return",
+            "rebuildCleanMap(!force_timeslice)"):
         if forbidden in node:
             failures.append(
                 f"latched map publication still skips empty layer: {forbidden!r}")
@@ -427,6 +448,7 @@ def runtime_console_contract_failures() -> list[str]:
         Path("src/ndt_slam/src/runtime_diagnostics.cpp"),
         Path("src/ndt_slam/src/ndt_slam.cpp"),
         Path("src/ndt_slam/src/PointCloudMerger.cpp"),
+        Path("src/ndt_slam/config/merger_params.yaml"),
         Path("src/ndt_slam/test/runtime_diagnostics_test.cpp"),
         Path("src/ndt_slam/CMakeLists.txt"),
     )
@@ -446,6 +468,8 @@ def runtime_console_contract_failures() -> list[str]:
         "summary_interval_sec: 5.0",
         "debug_perf: false",
         "csv_enabled: true",
+        "console_enabled: false",
+        "cargo_console_enabled: true",
     )
     for token in required_config:
         if token not in config:
@@ -454,7 +478,11 @@ def runtime_console_contract_failures() -> list[str]:
 
     required_runtime = (
         "runtime_frames.csv",
+        "cargo_frames.csv",
         "writeNdtFrame",
+        "writeCargoFrame",
+        "[CARGO_MONITOR]",
+        "console_health_enabled: false",
         "[PIPELINE_HEALTH]",
         "updatePipelineRisk",
         "clearPipelineRisk",

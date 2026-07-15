@@ -7,6 +7,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 
 namespace ndt_slam {
 
@@ -159,6 +160,11 @@ public:
 
     // P1: 获取当前 deny cells 数量
     int getDenyCellCount() const;
+
+    // Return an immutable, resolution-normalized view for background map
+    // maintenance. Expired cells are excluded while holding the filter lock.
+    std::set<std::pair<int, int>> getDenyCellsSnapshot(
+        double target_resolution, double current_time) const;
 
 private:
     // 候选检测

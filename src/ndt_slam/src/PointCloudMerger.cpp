@@ -48,6 +48,8 @@ public:
         nh_.param<int>("sync/max_queue_size", max_queue_size_, 8);
         nh_.param<int>("sync/subscriber_queue_size", subscriber_queue_size_, 10);
         nh_.param<double>("sync/diagnostic_log_period_sec", diagnostic_log_period_sec_, 5.0);
+        nh_.param<bool>("sync/console_health_enabled",
+                        console_health_enabled_, false);
 
         max_pair_dt_sec_ = std::max(0.0, max_pair_dt_sec_);
         stale_timeout_sec_ = std::max(0.001, stale_timeout_sec_);
@@ -64,14 +66,14 @@ public:
                 "PointCloudMerger requires a 'lidars' array containing one or two entries");
         }
 
-        ROS_INFO("========================================");
-        ROS_INFO("PointCloudMerger consume-once synchronizer:");
-        ROS_INFO("  output=%s frame=%s diagnostics=%s",
+        ROS_DEBUG("========================================");
+        ROS_DEBUG("PointCloudMerger consume-once synchronizer:");
+        ROS_DEBUG("  output=%s frame=%s diagnostics=%s",
                  output_topic_.c_str(), output_frame_.c_str(), diagnostics_topic_.c_str());
-        ROS_INFO("  transform_to_base=%s voxel=%s leaf=%.3fm",
+        ROS_DEBUG("  transform_to_base=%s voxel=%s leaf=%.3fm",
                  transform_to_base_ ? "true" : "false",
                  use_voxel_filter_ ? "ON" : "OFF", voxel_size_);
-        ROS_INFO("  max_pair_dt=%.1fms stale_timeout=%.1fms timer=%.1fms queue=%d",
+        ROS_DEBUG("  max_pair_dt=%.1fms stale_timeout=%.1fms timer=%.1fms queue=%d",
                  max_pair_dt_sec_ * 1000.0, stale_timeout_sec_ * 1000.0,
                  timer_period_sec_ * 1000.0, max_queue_size_);
 
@@ -117,10 +119,10 @@ public:
 
             lidar_names_.push_back(name);
             lidars_.emplace(name, std::move(lidar));
-            ROS_INFO("  [%s] topic=%s extrinsic=%s", name.c_str(), topic.c_str(),
+            ROS_DEBUG("  [%s] topic=%s extrinsic=%s", name.c_str(), topic.c_str(),
                      lidar_cfg.hasMember("Lidar2BaseExtrinsic") ? "loaded" : "identity");
         }
-        ROS_INFO("========================================");
+        ROS_DEBUG("========================================");
 
         // Construct subscriptions only after all map entries are stable.  The
         // extrinsics are immutable after construction and may be read lock-free.
@@ -137,7 +139,7 @@ public:
         pub_diagnostics_ = nh_.advertise<std_msgs::String>(diagnostics_topic_, 10);
         timer_ = nh_.createTimer(ros::Duration(timer_period_sec_),
                                  &PointCloudMerger::mergeAndPublish, this);
-        ROS_INFO("PointCloudMerger ready (%zu lidar%s)", lidar_names_.size(),
+        ROS_DEBUG("PointCloudMerger ready (%zu lidar%s)", lidar_names_.size(),
                  lidar_names_.size() == 1U ? "" : "s");
     }
 
@@ -451,7 +453,8 @@ private:
             const SteadyClock::time_point health_now = SteadyClock::now();
             const double health_elapsed_sec = std::chrono::duration<double>(
                 health_now - last_merger_health_time).count();
-            if (health_elapsed_sec >= diagnostic_log_period_sec_) {
+            if (console_health_enabled_ &&
+                health_elapsed_sec >= diagnostic_log_period_sec_) {
                 int64_t received_201 = 0, received_203 = 0;
                 int64_t paired = paired_count_.load();
                 int64_t single_201 = 0, single_203 = 0;
@@ -522,6 +525,7 @@ private:
     int max_queue_size_ = 8;
     int subscriber_queue_size_ = 10;
     double diagnostic_log_period_sec_ = 5.0;
+    bool console_health_enabled_ = false;
     bool merger_risk_active_ = false;
     std::string merger_risk_reason_;
     SteadyClock::time_point last_merger_risk_log_time_{};

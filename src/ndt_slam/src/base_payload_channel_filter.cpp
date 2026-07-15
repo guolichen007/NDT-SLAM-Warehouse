@@ -32,7 +32,7 @@ void BasePayloadChannelFilter::configureFromYaml(const std::string& config_file)
             config_.expand_z = ch["expand_z"].as<double>(0.4);
             config_.include_weak_points_in_bbox = ch["include_weak_points_in_bbox"].as<bool>(true);
 
-            ROS_INFO("[BasePayloadChannel] loaded config: enabled=%d, "
+            ROS_DEBUG("[BasePayloadChannel] loaded config: enabled=%d, "
                      "lateral=[%.1f±%.1f], longitudinal=[%.1f, %.1f], min_hag=%.2f",
                      config_.enabled ? 1 : 0,
                      config_.lateral_center, config_.lateral_half_width,

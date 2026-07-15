@@ -17,12 +17,12 @@ int main(int argc, char** argv) {
         config_file_path = argv[1];
     }
 
-    ROS_INFO("Starting NDT SLAM System");
-    ROS_INFO("Using config file: %s", config_file_path.c_str());
+    ROS_DEBUG("Starting NDT SLAM System");
+    ROS_DEBUG("Using config file: %s", config_file_path.c_str());
 
     ndt_slam::NdtSlamNode slam_node(config_file_path, nh);
 
-    ROS_INFO("NDT SLAM System started, spinning...");
+    ROS_DEBUG("NDT SLAM System started, spinning...");
 
     ros::spin();
 

@@ -144,6 +144,24 @@ TEST(SuspendedCargoLock, RequiredTransitionCannotConfirmAfterSignalLoss) {
     EXPECT_FALSE(unknown.allow_lock);
 }
 
+TEST(LockedCargoHeight, FrozenGeometryInitializesFirstValidHeightOnlyOnce) {
+    EXPECT_EQ(evaluateLockedCargoHeightAction(true, false, false),
+              LockedCargoHeightAction::IGNORE_INVALID);
+    EXPECT_EQ(evaluateLockedCargoHeightAction(true, false, true),
+              LockedCargoHeightAction::INITIALIZE_ONCE);
+    EXPECT_EQ(evaluateLockedCargoHeightAction(true, true, true),
+              LockedCargoHeightAction::REFRESH_FROZEN);
+    EXPECT_EQ(evaluateLockedCargoHeightAction(true, true, false),
+              LockedCargoHeightAction::IGNORE_INVALID);
+}
+
+TEST(LockedCargoHeight, AdaptiveGeometryKeepsUpdatingValidHeight) {
+    EXPECT_EQ(evaluateLockedCargoHeightAction(false, false, true),
+              LockedCargoHeightAction::UPDATE_ADAPTIVE);
+    EXPECT_EQ(evaluateLockedCargoHeightAction(false, true, true),
+              LockedCargoHeightAction::UPDATE_ADAPTIVE);
+}
+
 TEST(CargoObservationOutcome, DispersedHagResidualIsUnknown) {
     EXPECT_EQ(classifyCargoObservationOutcome(
         {true, true, true, 12U, 2U, false}),

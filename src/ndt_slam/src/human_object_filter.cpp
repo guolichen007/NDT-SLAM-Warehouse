@@ -682,4 +682,45 @@ int HumanObjectDynamicFilter::getDenyCellCount() const {
     return human_deny_cells_.size();
 }
 
+std::set<std::pair<int, int>>
+HumanObjectDynamicFilter::getDenyCellsSnapshot(
+    double target_resolution, double current_time) const {
+    std::set<std::pair<int, int>> snapshot;
+    if (!std::isfinite(target_resolution) || target_resolution <= 0.0) {
+        return snapshot;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    const double source_resolution = filter_config_.bev_resolution;
+    if (!std::isfinite(source_resolution) || source_resolution <= 0.0) {
+        return snapshot;
+    }
+    for (const auto& item : human_deny_cells_) {
+        const double age = current_time - item.second.last_seen_time;
+        if (!std::isfinite(age) || age < 0.0 || age >= human_deny_ttl_) {
+            continue;
+        }
+        const double x_min = item.first.first * source_resolution;
+        const double y_min = item.first.second * source_resolution;
+        const double x_max = x_min + source_resolution;
+        const double y_max = y_min + source_resolution;
+        const int target_x_min = static_cast<int>(
+            std::floor(x_min / target_resolution));
+        const int target_y_min = static_cast<int>(
+            std::floor(y_min / target_resolution));
+        // Subtract a tiny epsilon so a boundary-aligned source cell does not
+        // spill into an unrelated adjacent target cell.
+        const int target_x_max = static_cast<int>(
+            std::floor((x_max - 1e-9) / target_resolution));
+        const int target_y_max = static_cast<int>(
+            std::floor((y_max - 1e-9) / target_resolution));
+        for (int x = target_x_min; x <= target_x_max; ++x) {
+            for (int y = target_y_min; y <= target_y_max; ++y) {
+                snapshot.emplace(x, y);
+            }
+        }
+    }
+    return snapshot;
+}
+
 } // namespace ndt_slam

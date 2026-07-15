@@ -72,7 +72,7 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
     cargo_csv_.open(output_dir_ + "/cargo_frames.csv");
     cargo_csv_ << "stamp,track_state,track_id,lock_state,observation_valid,"
                << "cluster_points,support_points,center_x,center_y,center_z,"
-               << "size_x,size_y,size_z,raw_bottom_z,filtered_bottom_z,stable_bottom_z,"
+               << "size_x,size_y,size_z,footprint_yaw_deg,raw_bottom_z,filtered_bottom_z,stable_bottom_z,"
                << "top_z,height_m,bottom_valid,height_valid,filter_accepted,filter_reason,"
                << "odom_x,odom_y,odom_z\n";
   }
@@ -172,7 +172,7 @@ void RuntimeDiagnostics::logPipelineRate(
     const PipelineRateSnapshot& rate,
     size_t queue_size,
     double oldest_age_ms) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   const auto now = std::chrono::steady_clock::now();
   if (std::chrono::duration<double>(now - last_pipeline_console_).count() <
       cfg_.console_period_sec) {
@@ -234,7 +234,7 @@ std::string RuntimeDiagnostics::timestamp() const {
 }
 
 void RuntimeDiagnostics::logRunConfig(const std::map<std::string, std::string>& params) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   std::cout << "[RUNCFG]" << std::endl;
   for (auto& kv : params) {
     std::cout << "  " << kv.first << "=" << kv.second << std::endl;
@@ -242,7 +242,7 @@ void RuntimeDiagnostics::logRunConfig(const std::map<std::string, std::string>& 
 }
 
 void RuntimeDiagnostics::logMergerCfg(const std::map<std::string, std::string>& params) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   std::cout << "[MERGER_CFG]" << std::endl;
   for (auto& kv : params) {
     std::cout << "  " << kv.first << "=" << kv.second << std::endl;
@@ -250,7 +250,7 @@ void RuntimeDiagnostics::logMergerCfg(const std::map<std::string, std::string>& 
 }
 
 void RuntimeDiagnostics::logBuildId(const std::map<std::string, std::string>& params) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   std::cout << "[BUILD_ID]" << std::endl;
   for (auto& kv : params) {
     std::cout << "  " << kv.first << "=" << kv.second << std::endl;
@@ -369,6 +369,7 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << std::setprecision(4)
                << rec.center_x << "," << rec.center_y << "," << rec.center_z << ","
                << rec.size_x << "," << rec.size_y << "," << rec.size_z << ","
+               << rec.footprint_yaw_deg << ","
                << std::setprecision(4)
                << rec.raw_bottom_z << "," << rec.filtered_bottom_z << ","
                << rec.stable_bottom_z << "," << rec.top_z << ","
@@ -404,7 +405,7 @@ void RuntimeDiagnostics::logNdtHealth(int frame, double stamp, double input_hz,
                                        int prediction_only_count, int consecutive_prediction_only,
                                        double raw_step_m, double output_step_m,
                                        double allowed_step_m) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   auto now = std::chrono::steady_clock::now();
   if (std::chrono::duration<double>(now - last_health_console_).count() < cfg_.console_period_sec)
     return;
@@ -442,7 +443,7 @@ void RuntimeDiagnostics::logMergerHealth(int64_t received_201, int64_t received_
                                           double pair_dt_ms_p95, double pair_dt_ms_max,
                                           double output_hz, int64_t dropped, int64_t reused,
                                           const std::string& last_mode) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   std::cout << "[MERGER_HEALTH]"
             << " received_201=" << received_201
             << " received_203=" << received_203
@@ -461,31 +462,25 @@ void RuntimeDiagnostics::logMergerHealth(int64_t received_201, int64_t received_
 }
 
 void RuntimeDiagnostics::logCargoHealth(const CargoFrameRecord& rec) {
-  if (!cfg_.enabled) return;
-  std::cout << "[CARGO_HEALTH]"
+  if (!cfg_.enabled || !cfg_.cargo_console_enabled) return;
+  std::cout << "[CARGO_MONITOR]"
             << " stamp=" << std::fixed << std::setprecision(3) << rec.stamp
             << " track_state=" << rec.track_state
             << " track_id=" << rec.track_id
             << " lock_state=" << rec.lock_state
             << " observation_valid=" << (rec.observation_valid ? 1 : 0)
-            << " cluster_points=" << rec.cluster_points
-            << " support_points=" << rec.support_points
-            << " center_x=" << std::setprecision(3) << rec.center_x
-            << " center_y=" << rec.center_y
-            << " center_z=" << rec.center_z
-            << " size_x=" << rec.size_x
-            << " size_y=" << rec.size_y
-            << " size_z=" << rec.size_z
-            << " raw_bottom_z=" << rec.raw_bottom_z
-            << " filtered_bottom_z=" << rec.filtered_bottom_z
-            << " stable_bottom_z=" << rec.stable_bottom_z
-            << " top_z=" << rec.top_z
-            << " height_m=" << rec.height_m
-            << " bottom_valid=" << (rec.bottom_valid ? 1 : 0)
+            << " points=" << rec.cluster_points
+            << " support=" << rec.support_points
+            << " center=(" << std::setprecision(3) << rec.center_x
+            << "," << rec.center_y << "," << rec.center_z << ")"
+            << " size=(" << rec.size_x << "," << rec.size_y
+            << "," << rec.size_z << ")"
+            << " yaw_deg=" << std::setprecision(1)
+            << rec.footprint_yaw_deg
+            << " bottom=" << std::setprecision(3) << rec.stable_bottom_z
+            << " top=" << rec.top_z
             << " height_valid=" << (rec.height_valid ? 1 : 0)
-            << " filter_accepted=" << (rec.filter_accepted ? 1 : 0)
-            << " filter_reason=" << rec.filter_reason
-            << " lost_frames=" << rec.lost_frames
+            << " reason=" << rec.filter_reason
             << std::endl;
 }
 
@@ -495,7 +490,7 @@ void RuntimeDiagnostics::logNdtRiskNotConverged(int frame, double stamp, double 
                                                   int iterations, const std::string& target_source,
                                                   int target_points, int input_points,
                                                   double ndt_ms, double total_ms) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   if (!shouldEmitConsoleRisk("NDT_NOT_CONVERGED", "NOT_CONVERGED")) return;
   std::cout << "[NDT_RISK] reason=NOT_CONVERGED"
             << " frame=" << frame
@@ -514,7 +509,7 @@ void RuntimeDiagnostics::logNdtRiskFitnessSpike(int frame, double stamp, double 
                                                   double rolling_median, double rolling_mad,
                                                   double configured_threshold, bool converged,
                                                   double raw_step_m, double innovation_m) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   if (!shouldEmitConsoleRisk("NDT_FITNESS_SPIKE", "FITNESS_SPIKE")) return;
   std::cout << "[NDT_RISK] reason=FITNESS_SPIKE"
             << " frame=" << frame
@@ -534,7 +529,7 @@ void RuntimeDiagnostics::logNdtRiskTargetTooSmall(int frame, double stamp,
                                                     int candidate_points, int required_points,
                                                     const std::string& fallback_source,
                                                     int fallback_points) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   if (!shouldEmitConsoleRisk("NDT_TARGET_TOO_SMALL", "TARGET_TOO_SMALL")) return;
   std::cout << "[NDT_RISK] reason=TARGET_TOO_SMALL"
             << " frame=" << frame
@@ -550,7 +545,7 @@ void RuntimeDiagnostics::logNdtRiskTargetTooSmall(int frame, double stamp,
 void RuntimeDiagnostics::logNdtRiskTargetFallbackStreak(int count,
                                                           const std::string& current_source,
                                                           const std::string& fallback_source) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   if (!shouldEmitConsoleRisk(
           "NDT_TARGET_FALLBACK_STREAK", "TARGET_FALLBACK_STREAK")) return;
   std::cout << "[NDT_RISK] reason=TARGET_FALLBACK_STREAK"
@@ -590,7 +585,7 @@ void RuntimeDiagnostics::writePipelineRisk(
 }
 
 void RuntimeDiagnostics::updatePipelineRisk(const PipelineRiskRecord& rec) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   const auto now = std::chrono::steady_clock::now();
   const bool entering = !pipeline_risk_active_;
   const bool changed = pipeline_risk_active_ &&
@@ -612,7 +607,7 @@ void RuntimeDiagnostics::updatePipelineRisk(const PipelineRiskRecord& rec) {
 }
 
 void RuntimeDiagnostics::clearPipelineRisk(const PipelineRiskRecord& rec) {
-  if (!cfg_.enabled || !pipeline_risk_active_) return;
+  if (!cfg_.enabled || !cfg_.console_enabled || !pipeline_risk_active_) return;
   PipelineRiskRecord cleared = rec;
   cleared.reason = pipeline_risk_reason_;
   cleared.level = pipeline_risk_level_;
@@ -644,7 +639,7 @@ bool RuntimeDiagnostics::shouldEmitConsoleRisk(
 void RuntimeDiagnostics::clearConsoleRisk(
     const std::string& key,
     const std::string& output_tag) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   std::string previous_reason;
   {
     std::lock_guard<std::mutex> lock(console_risk_mutex_);
@@ -664,7 +659,7 @@ void RuntimeDiagnostics::logOdomRiskRawStepExceeded(int frame, double stamp,
                                                        double raw_dx, double raw_dy, double raw_dz,
                                                        double raw_step_m, double allowed_step_m,
                                                        double fitness, bool converged) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   if (!shouldEmitConsoleRisk("ODOM_RAW_STEP", "RAW_STEP_EXCEEDED")) return;
   std::cout << "[ODOM_RISK] reason=RAW_STEP_EXCEEDED"
             << " frame=" << frame
@@ -685,7 +680,7 @@ void RuntimeDiagnostics::logOdomRiskOutputStepViolation(int frame, double stamp,
                                                            double output_dz,
                                                            double output_step_m,
                                                            double allowed_step_m) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   if (!shouldEmitConsoleRisk(
           "ODOM_OUTPUT_STEP", "OUTPUT_STEP_VIOLATION")) return;
   std::cout << "[ODOM_RISK] reason=OUTPUT_STEP_VIOLATION"
@@ -704,7 +699,7 @@ void RuntimeDiagnostics::logEkfRiskPredictionOnly(int frame, double stamp,
                                                     double fitness, bool converged,
                                                     double innovation_m,
                                                     int consecutive_count) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   if (!shouldEmitConsoleRisk("EKF_PREDICTION_ONLY", cause)) return;
   std::cout << "[EKF_RISK] reason=PREDICTION_ONLY"
             << " frame=" << frame
@@ -719,7 +714,7 @@ void RuntimeDiagnostics::logEkfRiskPredictionOnly(int frame, double stamp,
 
 void RuntimeDiagnostics::logEkfRiskPredictionStreak(int count, double duration_sec,
                                                       double last_valid_stamp) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   if (!shouldEmitConsoleRisk(
           "EKF_PREDICTION_STREAK", "PREDICTION_STREAK")) return;
   std::cout << "[EKF_RISK] reason=PREDICTION_STREAK"
@@ -734,7 +729,7 @@ void RuntimeDiagnostics::logEkfRiskRecovery(const std::string& recovery_cause,
                                               int prediction_only_frames,
                                               double innovation_m, double fitness,
                                               double covariance_before, double covariance_after) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   clearConsoleRisk("EKF_PREDICTION_ONLY", "EKF_RISK");
   clearConsoleRisk("EKF_PREDICTION_STREAK", "EKF_RISK");
   std::cout << "[EKF_RISK] reason=RECOVERY"
@@ -752,7 +747,7 @@ void RuntimeDiagnostics::logMapCommitBlocked(const std::string& reason, double f
                                                bool converged, bool prediction_only,
                                                bool step_valid,
                                                const std::string& target_source) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.console_enabled) return;
   if (!shouldEmitConsoleRisk("MAP_COMMIT_BLOCKED", reason)) return;
   std::cout << "[MAP_COMMIT_BLOCKED]"
             << " reason=" << reason
@@ -771,7 +766,7 @@ void RuntimeDiagnostics::logCargoRiskDetectionLost(double stamp, int track_id,
                                                      const std::string& current_state,
                                                      int lost_frames,
                                                      double last_valid_bottom_z) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.cargo_console_enabled) return;
   if (!shouldEmitConsoleRisk("CARGO_DETECTION_LOST", "DETECTION_LOST")) return;
   std::cout << "[CARGO_RISK] reason=DETECTION_LOST"
             << " stamp=" << std::fixed << std::setprecision(3) << stamp
@@ -786,7 +781,7 @@ void RuntimeDiagnostics::logCargoRiskDetectionLost(double stamp, int track_id,
 void RuntimeDiagnostics::logCargoRiskInsufficientPoints(double stamp, int track_id,
                                                           int cluster_points,
                                                           int required_points) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.cargo_console_enabled) return;
   if (!shouldEmitConsoleRisk(
           "CARGO_INSUFFICIENT_POINTS", "INSUFFICIENT_POINTS")) return;
   std::cout << "[CARGO_RISK] reason=INSUFFICIENT_POINTS"
@@ -803,7 +798,7 @@ void RuntimeDiagnostics::logCargoRiskBottomJump(double stamp, int track_id,
                                                   double filtered_bottom_z,
                                                   double delta_m, bool filter_accepted,
                                                   const std::string& filter_reason) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.cargo_console_enabled) return;
   if (!shouldEmitConsoleRisk("CARGO_BOTTOM_JUMP", filter_reason)) return;
   std::cout << "[CARGO_RISK] reason=BOTTOM_JUMP"
             << " stamp=" << std::fixed << std::setprecision(3) << stamp
@@ -821,7 +816,7 @@ void RuntimeDiagnostics::logCargoRiskHeightJump(double stamp, int track_id,
                                                    double previous_height_m,
                                                    double height_m, double delta_m,
                                                    double bottom_z, double top_z) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.cargo_console_enabled) return;
   if (!shouldEmitConsoleRisk("CARGO_HEIGHT_JUMP", "HEIGHT_JUMP")) return;
   std::cout << "[CARGO_RISK] reason=HEIGHT_JUMP"
             << " stamp=" << std::fixed << std::setprecision(3) << stamp
@@ -838,7 +833,7 @@ void RuntimeDiagnostics::logCargoRiskHeightInvalid(double stamp, int track_id,
                                                       bool bottom_valid, bool top_valid,
                                                       int cluster_points,
                                                       const std::string& state) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.cargo_console_enabled) return;
   if (!shouldEmitConsoleRisk("CARGO_HEIGHT_INVALID", state)) return;
   std::cout << "[CARGO_RISK] reason=HEIGHT_INVALID"
             << " stamp=" << std::fixed << std::setprecision(3) << stamp
@@ -856,7 +851,7 @@ void RuntimeDiagnostics::logCargoRiskBoxGeometryJump(double stamp, int track_id,
                                                         double size_delta_y,
                                                         double size_delta_z,
                                                         double odom_step_m) {
-  if (!cfg_.enabled) return;
+  if (!cfg_.enabled || !cfg_.cargo_console_enabled) return;
   if (!shouldEmitConsoleRisk(
           "CARGO_BOX_GEOMETRY_JUMP", "BOX_GEOMETRY_JUMP")) return;
   std::cout << "[CARGO_RISK] reason=BOX_GEOMETRY_JUMP"

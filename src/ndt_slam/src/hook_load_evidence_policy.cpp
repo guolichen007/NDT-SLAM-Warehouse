@@ -141,6 +141,21 @@ SuspendedCargoLockDecision evaluateSuspendedCargoLock(
     return decision;
 }
 
+LockedCargoHeightAction evaluateLockedCargoHeightAction(
+    bool freeze_geometry_after_lock,
+    bool has_good_height,
+    bool observation_valid) {
+    if (!observation_valid) {
+        return LockedCargoHeightAction::IGNORE_INVALID;
+    }
+    if (!freeze_geometry_after_lock) {
+        return LockedCargoHeightAction::UPDATE_ADAPTIVE;
+    }
+    return has_good_height
+        ? LockedCargoHeightAction::REFRESH_FROZEN
+        : LockedCargoHeightAction::INITIALIZE_ONCE;
+}
+
 CargoObservationOutcome classifyCargoObservationOutcome(
     const CargoObservationClassificationInput& input) {
     if (!input.detection_executed) {

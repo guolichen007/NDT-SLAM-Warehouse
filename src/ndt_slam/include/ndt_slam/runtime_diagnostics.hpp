@@ -20,6 +20,8 @@ namespace ndt_slam {
 // Fixed-format risk tags — grep-friendly, never change the string.
 struct RuntimeDiagnosticsConfig {
   bool enabled = false;
+  bool console_enabled = true;
+  bool cargo_console_enabled = true;
   double console_period_sec = 5.0;
   double risk_repeat_period_sec = 5.0;
   bool csv_enabled = true;
@@ -241,6 +243,7 @@ struct CargoFrameRecord {
   int support_points = 0;
   double center_x = 0.0, center_y = 0.0, center_z = 0.0;
   double size_x = 0.0, size_y = 0.0, size_z = 0.0;
+  double footprint_yaw_deg = 0.0;
   double raw_bottom_z = 0.0;
   double filtered_bottom_z = 0.0;
   double stable_bottom_z = 0.0;

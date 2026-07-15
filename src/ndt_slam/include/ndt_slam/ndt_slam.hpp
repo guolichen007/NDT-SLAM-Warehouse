@@ -45,6 +45,7 @@
 #include <ndt_slam/cargo_box_estimator.hpp>
 #include <ndt_slam/cargo_bottom_fusion.hpp>
 #include <ndt_slam/cargo_marker_lifecycle.hpp>
+#include <ndt_slam/cargo_oriented_footprint.hpp>
 #include <ndt_slam/cargo_safety_evaluator.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
 #include <set>
@@ -52,6 +53,7 @@
 // v8-stable-r3: CraneMotionEKF
 #include <ndt_slam/crane_motion_ekf.hpp>
 #include <ndt_slam/crane_pose_constraint.hpp>
+#include <ndt_slam/clean_map_builder.hpp>
 #include <ndt_slam/ndt_relocalizer.hpp>
 #include <ndt_slam/stationary_motion_policy.hpp>
 #include <ndt_slam/registration_cloud_builder.hpp>
@@ -174,7 +176,6 @@ private:
 
     void rebuildGlobalMapFromSnapshot(std::uint64_t expected_generation);
     void publishDisplayMap();     // 发布显示地图
-    void rebuildCleanMap(bool allow_localization_yield = true);
     void publishGroundMap();
     void publishObjectsMap();
     void publishObjectsCleanMap();
@@ -670,6 +671,18 @@ private:
     bool memory_guard_pending_ = false;
     std::atomic<bool> active_map_rebuild_pending_{false};
     std::atomic<bool> clean_rebuild_requested_from_worker_{false};
+    std::thread clean_map_rebuild_thread_;
+    std::atomic<bool> clean_map_rebuild_running_{false};
+    std::atomic<bool> clean_map_rebuild_result_ready_{false};
+    std::mutex clean_map_rebuild_result_mutex_;
+    struct CleanMapWorkerResult {
+        bool valid = false;
+        std::uint64_t source_objects_version = 0U;
+        double duration_ms = 0.0;
+        CleanMapBuildResult build;
+    };
+    CleanMapWorkerResult clean_map_worker_result_;
+    std::uint64_t objects_map_content_version_ = 1U;
     std::uint64_t clean_map_content_version_ = 0U;
     std::uint64_t shadow_target_source_version_ = 0U;
     Sophus::SE3d shadow_target_pose_;
@@ -679,6 +692,9 @@ private:
     int map_maintenance_max_deferral_frames_ = 5;
     bool localizationInputPending();
     void requestMapMaintenance();
+    void startCleanMapRebuildJob();
+    void consumeCleanMapRebuildResult(const ros::Time& stamp);
+    void advanceObjectsMapContentVersionLocked();
     void runMapMaintenanceIfIdle(bool force_timeslice);
 
     // Map serialization is version-driven and independent of the localization
@@ -691,8 +707,21 @@ private:
     std::uint64_t map_publication_requested_version_ = 0U;
     std::uint64_t map_publication_completed_version_ = 0U;
     ros::Time map_publication_stamp_;
+    struct MapPublicationSnapshot {
+        std::uint64_t version = 0U;
+        ros::Time stamp;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr registration;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr display;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr ground;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr objects;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr objects_clean;
+    };
     void requestMapPublication(const ros::Time& stamp);
     void mapPublicationThread();
+    MapPublicationSnapshot captureMapPublicationSnapshot(
+        std::uint64_t version, const ros::Time& stamp);
+    void publishMapPublicationSnapshot(
+        const MapPublicationSnapshot& snapshot);
 
     bool has_first_odom_ = false;
     Eigen::Vector3d last_position_;
@@ -1154,6 +1183,9 @@ private:
         int local_id = 0;
         Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f size_visible = Eigen::Vector3f::Zero();
+        bool visual_footprint_valid = false;
+        Eigen::Vector2f visual_size_long_short = Eigen::Vector2f::Zero();
+        float visual_yaw_base_rad = 0.0F;
         float z05 = 0.0f;
         float z50 = 0.0f;
         float z95 = 0.0f;
@@ -1286,6 +1318,9 @@ private:
             bool sub_cluster_enabled = true;
             float sub_cluster_tolerance_m = 0.10f;
             int sub_cluster_min_points = 20;
+            bool orientation_enabled = true;
+            int orientation_min_points = 20;
+            float orientation_min_axis_ratio = 1.10F;
         } tight_box;
 
         // Cargo Warning 子配置
@@ -1516,6 +1551,8 @@ private:
 
         Eigen::Vector3f locked_size = Eigen::Vector3f::Zero();
         Eigen::Vector3f locked_center_base = Eigen::Vector3f::Zero();  // CargoState 同步
+        Eigen::Vector2f locked_visual_size = Eigen::Vector2f::Zero();
+        float locked_visual_yaw_base_rad = 0.0F;
 
         float stable_bottom_z = 0.0f;
         float stable_top_z = 0.0f;
@@ -1523,9 +1560,12 @@ private:
         float bottom_uncertainty = 0.30f;
 
         bool has_locked_size = false;
+        bool has_locked_visual_footprint = false;
         bool has_good_height = false;
 
         std::deque<Eigen::Vector3f> init_size_buffer;
+        std::deque<Eigen::Vector2f> init_visual_size_buffer;
+        std::vector<float> init_visual_yaw_buffer;
         std::deque<Eigen::Vector3f> size_candidate_buffer;
 
         // 重复帧检测
@@ -1669,6 +1709,8 @@ private:
     Eigen::Vector3f computeFixedCenterSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
     Eigen::Vector3f medianSize(const std::deque<Eigen::Vector3f>& buffer);
     void updateLockedHeight(const HookCargoBottomEstimate& bottom, const ros::Time& stamp, bool initialize);
+    void updateLockedHeightAfterAssociation(
+        const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
     void maybeUpdateLockedSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
     void growUncertainty();
     void clearHookLock();
