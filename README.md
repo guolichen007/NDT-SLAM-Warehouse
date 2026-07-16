@@ -1,38 +1,23 @@
-# NDT-SLAM-Warehouse
+# NDT-SLAM Warehouse
 
-室内仓库 / 天车场景的 NDT-SLAM 定位、建图与吊物可视化工程。
+面向室内仓库和天车作业的 ROS1 NDT 定位、长期建图、吊物跟踪与避障工程。
 
-当前主线版本目标：
+当前生产链路同时维护定位、五层地图和一条正式吊物安全协议。吊物一旦确认，系统冻结稳健二维定向包围框的长、宽、方向和高度；作业期间只更新刚体中心，因此框会随平移与起升实时移动，不会因单帧稀疏点云改变形状。
 
-- 保持 A7 风格平滑轨迹链路；
-- 输出稳定 `odom` / `TF` / `runtime_path`；
-- 使用 `OdomAnchorBox` 在 `base_link` / odom 锚点显示绿色吊物框；
-- 货物框中心固定在 `base_link` 坐标系下的机械锚点；
-- 点云检测只更新货物框尺寸和高度；
-- 默认不启用货物移除、动态擦除和避障报警。
+## 核心行为
 
----
+- 定位：结构优先的 NDT 输入，结构不足时进入 EKF prediction-only，不回退到整片地面。
+- 静止保持：`STATIONARY_HOLD -> MOVING_CONFIRM -> CATCH_UP -> MOVING`，随机累计漂移不能直接解除静止状态。
+- 吊物几何：同一份 `LockedCargoShape + LiveCargoPose` 同时服务于 RViz、Cargo Bottom、避障、自体点剔除、NDT 输入和 MapCommit。
+- 生命周期：`EMPTY -> CANDIDATE -> LOCKED -> LOST_HOLD -> EMPTY`。`LOST_HOLD` 保留最近可信框并增加不确定度，不生成新 track id。
+- 正式安全码：`14` 为 CLEAR；`17` 为 3 m 内且垂直净空小于 0.8 m；`18` 为 3–5 m 且垂直净空小于 0.8 m；`30–35` 为系统或证据故障。
+- Gravity：输入话题统一为 `/gravity`。`AUXILIARY` 模式下 LiDAR 是主信号，Gravity 不可用不能永久阻断紧凑货物检测。
+- 地图：同次发布的 registration/display/ground/objects/objects_clean 使用同一内容代次；空层也会发布同代空消息，避免 RViz 保留旧层。
+- 控制台：生产默认只显示吊物状态、安全码变化和不可忽略的运行时错误；逐帧定位、地图和性能数据继续写入 CSV。
 
-## 当前主线功能状态
+## 构建
 
-| 功能 | 状态 | 说明 |
-|---|---|---|
-| NDT 定位 | ✅ 默认启用 | 输出 `odom` / `TF` |
-| CraneMotionEKF | ✅ 默认启用 | 合并验收 `recovery=0` |
-| runtime_path | ✅ 默认启用 | A7 风格轨迹显示 |
-| display_map | ✅ 默认启用 | 建图与显示层 |
-| OdomAnchorBox | ✅ 默认启用 | 绿色框锁定 `base_link` / odom anchor |
-| size / height 自适应 | ✅ 默认启用 | 由 anchor 附近点云估计 |
-| cargo debug 点云 | ❌ 默认关闭 | 调试时手动打开 |
-| HookCargoRemoval | ❌ 默认关闭 | 后续单独验证 |
-| cargo 避障报警 | 🚧 未启用 | 后续接入 14 / 17 / 18 预警 |
-| 重定位 | 🚧 独立开发 | 不属于当前 cargo 主线内容 |
-
----
-
-## 快速启动
-
-### 1. 编译
+Ubuntu / ROS Noetic：
 
 ```bash
 cd ~/NDT-slam-ws
@@ -40,224 +25,140 @@ catkin_make --pkg ndt_slam
 source devel/setup.bash
 ```
 
-### 2. 启动定位 / 建图 / OdomAnchorBox 显示
+Windows 只用于源码修改和静态合同检查，不能替代 ROS/PCL/Sophus 编译与 bag 验收。
+
+## 启动
 
 ```bash
-rosnode kill -a || true
-pkill -f ndt_slam_node || true
-pkill -f cargo_forbidden_zone_node || true
-pkill -f pointcloud_merger || true
-
-rosparam set /use_sim_time true
-
 roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
   use_sim_time:=true \
-  persistent_map:=false \
-  odom_anchored_cargo_box_enabled:=true \
-  hook_cargo_removal_enabled:=false \
-  use_cargo_visualizer:=true \
-  ndt_publish_cargo_markers:=false \
-  publish_cargo_debug_points:=false
+  persistent_map:=false
 ```
 
-### 3. 播放 bag
+随后播放带 `/clock` 的 bag：
 
 ```bash
-rosbag play /home/ydkj/AutoCraneSlam-ROS1/bag/调运大件.bag --clock
+rosbag play /path/to/warehouse.bag --clock
 ```
 
----
+正式配置位于：
 
-## 关键配置
-
-配置文件：
-
-```bash
+```text
 src/ndt_slam/config/live_longterm_mapping.yaml
+src/ndt_slam/config/merger_params.yaml
 ```
 
-核心配置：
+## 吊物框合同
 
-```yaml
-odom_anchored_cargo_box:
-  enabled: true
-  anchor_x: 0.0
-  anchor_y: 0.0
-  detect_rate_hz: 5.0
-  marker_rate_hz: 5.0
+检测阶段从货物点计算稳健二维 OBB：
 
-  publish_debug_points: false
-  publish_selected_core_points: false
-  publish_raw_candidate_points: false
-  publish_default_box_marker: false
+1. 过滤非有限点并计算中心化协方差；
+2. 以主特征向量得到轴向 yaw（`yaw` 与 `yaw + pi` 等价）；
+3. 使用 P08/P92 投影范围抑制离群点；
+4. 同时检查几何长宽比、特征值比和多帧方向集中度；
+5. 达到确认帧数后冻结 `length/width/height/yaw`。
 
-  verbose_debug: false
+锁定后：
 
-  use_global_payload_tracker: false
-  use_cargobox_v2: false
-  use_dynamic_history_eraser: false
-  enable_hook_cargo_removal: false
+- `LiveCargoPose.center_base` 由当前 LiDAR 观测做有界滤波更新；
+- 起升只改变中心 Z，不因绝对 bottom/top 变化而错误进入 LOST；
+- 正式 marker 和旧兼容 marker 都使用同一 map-frame yaw；
+- Cargo Bottom 在 OBB 局部坐标中统计支撑点、跨度和网格覆盖；
+- 避障距离按点到旋转矩形的真实二维距离计算；
+- 正式货物点从 registration/MapCommit 中按同一 OBB 剔除。
+
+若货物近似正方形或方向证据不稳定，系统不会伪造一个方向；它会继续保持候选或已有冻结方向。
+
+## 安全协议
+
+输入：
+
+```text
+/cargo_avoidance/safety_status
 ```
 
-说明：
+输出：
 
-- `anchor_x / anchor_y` 是绿色框在 `base_link` 坐标系下的固定机械锚点；
-- 默认 `(0.0, 0.0)` 表示框中心锁在 `base_link` 原点；
-- 如果现场确认吊钩相对 `base_link` 有固定机械偏移，只修改 `anchor_x / anchor_y`；
-- 点云检测不能修改框中心，只能更新尺寸和高度；
-- `HookCargoRemoval` 默认关闭，避免影响 NDT 定位链路；
-- `publish_debug_points` 默认关闭，避免 RViz 和终端卡顿。
+```text
+/cargo_avoidance/status_code
+```
 
----
+状态定义：
+
+| Code | 含义 |
+|---:|---|
+| 14 | 无碰撞风险；无障碍时障碍几何允许为 NaN |
+| 17 | 障碍距吊物 OBB 不超过 3 m，且垂直净空小于 0.8 m |
+| 18 | 障碍距吊物 OBB 大于 3 m、不超过 5 m，且垂直净空小于 0.8 m |
+| 30 | 系统未就绪、状态超时或源时间轴回退帧 |
+| 31 | 定位无效 |
+| 32 | 吊物几何无效 |
+| 33 | 吊物底部证据无效 |
+| 34 | 障碍证据不足或无效 |
+| 35 | 内部错误 |
+
+新鲜且时间戳前进的正式状态立即生效；重复时间戳不能推进任何状态，heartbeat 只重发当前码。时间戳回退帧输出 30 并建立新 epoch，下一条前进时间戳可恢复。
 
 ## 主要 Topic
 
-| Topic | 说明 |
+| Topic | 内容 |
 |---|---|
-| `/odom` | 定位结果 |
-| `/tf` | `map` / `odom` / `base_link` 变换 |
-| `/ndt_slam/runtime_path` | 运行轨迹 |
-| `/payload_track_info` | OdomAnchorBox bbox 数据 |
-| `/cargo_core_bbox_marker` | 绿色货物框 |
-| `/display_map` | 显示地图 |
-| `/merged_points` | 输入点云或当前点云 |
+| `/odom` | 运行位姿 |
+| `/ndt_slam/runtime_path` | 实时轨迹 |
+| `/merged_points` | 合并后的当前帧点云 |
+| `/map` | registration 层 |
+| `/display_map` | 全量显示层 |
+| `/display_map_ground` | 地面层 |
+| `/display_map_objects` | 原始静态物体层 |
+| `/display_map_objects_clean` | 清理后的静态物体层 |
+| `/cargo_core_bbox_marker` | 正式冻结形状、实时移动的吊物框 |
+| `/cargo_tight_box_marker` | 使用相同刚体几何的兼容框 |
+| `/cargo_warning_zone_marker` | 与吊物方向一致的 3 m / 5 m 区域 |
+| `/cargo_avoidance/status_code` | 14/17/18/30–35 安全码 |
 
----
+RViz 的 Fixed Frame 使用 `map`。若只看到当前帧点云，应先检查五个地图 topic 是否均在发布以及同一时刻的 `header.seq` 是否一致，而不是修改 RViz 左侧显示配置。
 
-## RViz 推荐显示
+## 诊断
 
-默认打开：
-
-- `/ndt_slam/runtime_path`
-- `/cargo_core_bbox_marker`
-- `/merged_points` 或当前点云
-- `/odom`
-
-调试时才打开：
-
-- `/cargo_selected_core_points`
-- `/hook_raw_candidate_points`
-- `/hook_default_box_marker`
-
-默认不要打开过多 display/debug 点云，否则 RViz 容易卡顿。
-
----
-
-## 主线验收
-
-### Baseline：cargo 全关
-
-```bash
-roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
-  use_sim_time:=true \
-  persistent_map:=false \
-  odom_anchored_cargo_box_enabled:=false \
-  hook_cargo_removal_enabled:=false \
-  use_cargo_visualizer:=false \
-  ndt_publish_cargo_markers:=false \
-  2>&1 | tee /tmp/a7_baseline_final.log
-```
-
-验收：
-
-```bash
-grep "CraneMotionEKF.*recovery" /tmp/a7_baseline_final.log | wc -l
-grep "NDTHealth" /tmp/a7_baseline_final.log | tail -30
-grep "\[ERROR\]" /tmp/a7_baseline_final.log | head -20
-```
-
-通过标准：
-
-- `recovery = 0`
-- 无 `[ERROR]`
-- NDT fitness 不持续升高
-- `runtime_path` 平滑
-
----
-
-### Display-only：只开 OdomAnchorBox
-
-```bash
-roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
-  use_sim_time:=true \
-  persistent_map:=false \
-  odom_anchored_cargo_box_enabled:=true \
-  hook_cargo_removal_enabled:=false \
-  use_cargo_visualizer:=true \
-  ndt_publish_cargo_markers:=false \
-  publish_cargo_debug_points:=false \
-  2>&1 | tee /tmp/a7_odom_anchor_final.log
-```
-
-验收：
-
-```bash
-LOG=/tmp/a7_odom_anchor_final.log
-
-grep "OdomAnchorBoxConfig\|OdomAnchorSummary\|CargoLock" "$LOG" | head -120
-grep "CraneMotionEKF.*recovery" "$LOG" | wc -l
-grep "\[ERROR\]" "$LOG" | head -20
-```
-
-通过标准：
-
-- `recovery = 0`
-- 无 `[ERROR]`
-- `OdomAnchorSummary` 正常输出
-- `CargoLock` 能进入 `LOCKED`
-- 绿色框跟随 `odom` / `base_link`
-
----
-
-## 当前版本不包含
-
-当前主线版本暂不默认启用：
-
-- HookCargoRemoval；
-- 动态货物移除；
-- cargo volume 动态擦除；
-- cargo 避障报警 14 / 17 / 18；
-- 全局重定位流程。
-
-这些功能需要后续独立验证后再进入主线。
-
----
-
-## 常见问题
-
-### 1. 绿色框为什么不跟检测簇中心走？
-
-当前主线采用 `OdomAnchorBox`。绿色框中心固定在 `base_link` 坐标系下的机械锚点，点云检测只负责更新尺寸和高度。这样可以避免货物框被旁边点云簇、吊具点、局部噪声带偏。
-
-### 2. 现场吊钩不在 base_link 原点怎么办？
-
-只修改：
+生产配置默认：
 
 ```yaml
-odom_anchored_cargo_box:
-  anchor_x: <机械固定偏移 x>
-  anchor_y: <机械固定偏移 y>
+logging:
+  debug_perf: false
+  summary_interval_sec: 10.0
+
+debug:
+  runtime_diagnostics:
+    enabled: true
+    console_health_enabled: false
+    console_risk_enabled: false
+    cargo_console_enabled: true
+    csv_enabled: true
 ```
 
-不要用检测点中心修改 anchor。
+终端保留：
 
-### 3. 为什么默认关闭 HookCargoRemoval？
+- `CargoLock` / `CARGO_HEALTH`；
+- `SAFETY_WARN` / `SAFETY_FAULT` 以及安全码或 reason 变化；
+- `SO3Guard` 失败、非有限 NDT、时间 epoch 重置和节点级错误。
 
-当前阶段优先保证定位轨迹稳定。HookCargoRemoval 会影响 NDT 输入点云，必须单独分支验证，不在当前主线默认开启。
+逐帧性能、可观测性、registration 模式、地图门控和 pipeline 风险写入配置的 diagnostics 目录，不靠高频控制台输出做验收。
 
-### 4. 终端为什么只看到少量 OdomAnchorSummary？
+## 静态检查
 
-高频 cargo 调试日志已降级为 DEBUG。默认只输出状态变化和 summary，避免 rosconsole 和 RViz 卡顿。
+```bash
+git diff --check
+python scripts/regression/check_repository_integrity.py
+python scripts/regression/check_cargo_safety_e2e.py
+```
 
----
+Ubuntu 还必须按顺序执行 clean build、gtest、静止漂移 bag、真实移动 catch-up、吊物起升/平移、17/18/14 空间合同和第二次 bag 时间 epoch 回退测试。
 
-## 依赖
+## 验收重点
 
-- Ubuntu 20.04 + ROS Noetic
-- PCL, Eigen3, Sophus, yaml-cpp, g2o, ndt_omp, TBB
-
----
-
-## 许可证
-
-MIT License
+- 横向实际货物的框长轴应与点云长轴一致，而不是固定沿 map/base 轴。
+- LOCKED 后长宽、高度、yaw 保持不变，中心随吊物连续移动。
+- 起升过程中不能因 bottom Z 变化进入 LOST。
+- 短时点云破碎不能直接解释为明确无货，也不能产生错误 CLEAR。
+- 只有真实空间碰撞风险输出 17/18；定位、Gravity、证据质量问题只能输出 30–35。
+- 五层地图在 RViz 中持续可见，且同次发布 `header.seq` 一致。
