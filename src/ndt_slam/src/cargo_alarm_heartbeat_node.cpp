@@ -339,6 +339,8 @@ public:
           pnh_("~"),
           heartbeat_hz_(readPositiveParam("heartbeat_hz", 5.0)),
           stale_timeout_sec_(readPositiveParam("stale_timeout_sec", 0.8)),
+          pending_error_sec_(readPositiveParam("pending_error_sec", 1.0)),
+          pending_repeat_sec_(readPositiveParam("pending_repeat_sec", 2.0)),
           contract_config_(readStatusContractConfig()),
           state_machine_(stale_timeout_sec_) {
         pnh_.param<std::string>("status_topic", status_topic_,
@@ -469,10 +471,54 @@ private:
         status_code_pub_.publish(message);
         if (publish_legacy_alarm_topic_) legacy_alarm_pub_.publish(message);
 
-        if (!log_change) {
-            ROS_DEBUG("[CargoAlarmHeartbeat] code=%d reason=%s", code, reason);
+        const double wall_now_sec = ros::WallTime::now().toSec();
+        const std::string status_reason = has_last_status_
+            ? last_status_.reason : std::string(reason);
+        const bool pending_evidence =
+            code == AlarmStateMachine::kObstacleInvalid &&
+            (status_reason.find("pending") != std::string::npos ||
+             status_reason.find("too_sparse") != std::string::npos ||
+             status_reason.find("spatial_discontinuity") !=
+                 std::string::npos ||
+             status_reason.find("source_unresolved") != std::string::npos ||
+             status_reason.find("evidence_gap") != std::string::npos);
+        const bool noisy_pending =
+            status_reason.find("too_sparse") != std::string::npos ||
+            status_reason.find("spatial_discontinuity") !=
+                std::string::npos ||
+            status_reason.find("source_unresolved") != std::string::npos;
+        if (pending_evidence) {
+            if (!pending_active_ || log_change) {
+                pending_active_ = true;
+                pending_since_wall_sec_ = wall_now_sec;
+                pending_error_reported_ = false;
+            }
+            const double pending_age = std::max(
+                0.0, wall_now_sec - pending_since_wall_sec_);
+            const bool persistent_due = pending_age >= pending_error_sec_ &&
+                (!pending_error_reported_ ||
+                 wall_now_sec - last_pending_log_wall_sec_ >=
+                     pending_repeat_sec_);
+            if (persistent_due) {
+                ROS_ERROR("[SAFETY_FAULT_PERSISTENT] code=34 age=%.2f "
+                          "reason=%s",
+                          pending_age, status_reason.c_str());
+                pending_error_reported_ = true;
+                last_pending_log_wall_sec_ = wall_now_sec;
+            } else if (log_change && noisy_pending) {
+                ROS_WARN("[SAFETY_PENDING] code=34 reason=%s",
+                         status_reason.c_str());
+                last_pending_log_wall_sec_ = wall_now_sec;
+            } else if (log_change) {
+                ROS_DEBUG("[SAFETY_PENDING] code=34 reason=%s",
+                          status_reason.c_str());
+            }
             return;
         }
+        pending_active_ = false;
+        pending_since_wall_sec_ = 0.0;
+        pending_error_reported_ = false;
+        if (!log_change) return;
         if (code == AlarmStateMachine::kClear) {
             ROS_INFO("[SAFETY] code=14 state=CLEAR "
                      "localization_valid=%d gravity_valid=%d "
@@ -520,10 +566,16 @@ private:
     bool publish_legacy_alarm_topic_ = false;
     const double heartbeat_hz_;
     const double stale_timeout_sec_;
+    const double pending_error_sec_;
+    const double pending_repeat_sec_;
     const StatusContractConfig contract_config_;
     AlarmStateMachine state_machine_;
     lidar_slam2_msgs::CargoSafetyStatus last_status_;
     bool has_last_status_ = false;
+    bool pending_active_ = false;
+    bool pending_error_reported_ = false;
+    double pending_since_wall_sec_ = 0.0;
+    double last_pending_log_wall_sec_ = 0.0;
 };
 
 }  // namespace cargo_alarm

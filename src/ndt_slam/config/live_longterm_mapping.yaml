@@ -706,6 +706,8 @@ cargo_safety:
   residual_minimum_motion_match_score: 0.70
   residual_surface_band_below_m: 0.60
   residual_surface_band_above_m: 0.20
+  safety_console_period_sec: 2.0
+  safety_pending_error_sec: 1.0
 
 status_codes:
   clear: 14

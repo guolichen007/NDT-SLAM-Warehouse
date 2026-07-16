@@ -2378,6 +2378,14 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 0.0F,
                 cargo_safety["residual_surface_band_above_m"]
                     .as<float>(0.20F));
+            cargo_safety_console_period_sec_ = std::max(
+                0.5,
+                cargo_safety["safety_console_period_sec"]
+                    .as<double>(2.0));
+            cargo_safety_pending_error_sec_ = std::max(
+                0.5,
+                cargo_safety["safety_pending_error_sec"]
+                    .as<double>(1.0));
         }
 
     } catch (const YAML::Exception& e) {
@@ -11782,15 +11790,61 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
 
 void NdtSlamNode::logCargoSafetyStatus(
     const lidar_slam2_msgs::CargoSafetyStatus& status) {
-    const bool changed =
-        status.requested_alarm_code != cargo_last_requested_code_ ||
-        status.reason != cargo_last_safety_reason_;
+    const bool code_changed =
+        status.requested_alarm_code != cargo_last_requested_code_;
+    const bool pending_evidence =
+        status.requested_alarm_code ==
+            CargoSafetyProtocol::kObstacleInvalid &&
+        (status.reason.find("pending") != std::string::npos ||
+         status.reason.find("too_sparse") != std::string::npos ||
+         status.reason.find("spatial_discontinuity") != std::string::npos ||
+         status.reason.find("source_unresolved") != std::string::npos ||
+         status.reason.find("evidence_gap") != std::string::npos);
+    const bool noisy_pending =
+        status.reason.find("too_sparse") != std::string::npos ||
+        status.reason.find("spatial_discontinuity") != std::string::npos ||
+        status.reason.find("source_unresolved") != std::string::npos;
+    cargo_last_requested_code_ = status.requested_alarm_code;
+    cargo_last_safety_reason_ = status.reason;
+
+    if (pending_evidence) {
+        if (cargo_safety_pending_since_stamp_.isZero() || code_changed) {
+            cargo_safety_pending_since_stamp_ = status.header.stamp;
+            cargo_safety_pending_error_reported_ = false;
+        }
+    } else {
+        cargo_safety_pending_since_stamp_ = ros::Time();
+        cargo_safety_pending_error_reported_ = false;
+    }
     const double elapsed = cargo_last_safety_console_stamp_.isZero()
         ? std::numeric_limits<double>::infinity()
         : (status.header.stamp - cargo_last_safety_console_stamp_).toSec();
     const bool periodic = !std::isfinite(elapsed) || elapsed < 0.0 ||
-        elapsed >= debug_cfg_.summary_interval_sec;
-    if (!changed && !periodic) return;
+        elapsed >= cargo_safety_console_period_sec_;
+    const double pending_age = pending_evidence &&
+            !cargo_safety_pending_since_stamp_.isZero()
+        ? std::max(
+              0.0,
+              (status.header.stamp - cargo_safety_pending_since_stamp_)
+                  .toSec())
+        : 0.0;
+    const bool persistent_due = pending_evidence &&
+        pending_age >= cargo_safety_pending_error_sec_ &&
+        !cargo_safety_pending_error_reported_;
+    const bool one_shot_hard_fault =
+        status.requested_alarm_code ==
+            CargoSafetyProtocol::kCargoInvalid ||
+        status.requested_alarm_code ==
+            CargoSafetyProtocol::kLocalizationInvalid ||
+        status.requested_alarm_code ==
+            CargoSafetyProtocol::kGravityInvalid ||
+        status.requested_alarm_code ==
+            CargoSafetyProtocol::kInternalError;
+    if (pending_evidence && !periodic && !code_changed && !persistent_due) {
+        return;
+    }
+    if (one_shot_hard_fault && !code_changed) return;
+    if (!pending_evidence && !code_changed && !periodic) return;
 
     std::ostringstream message;
     message << "[CARGO_SAFETY] code=" << status.requested_alarm_code
@@ -11818,18 +11872,31 @@ void NdtSlamNode::logCargoSafetyStatus(
             << " obstacle_unc=" << cargo_obstacle_uncertainty_m_
             << " horizontal_unc=" << cargo_horizontal_uncertainty_m_
             << " vertical_unc=" << cargo_vertical_uncertainty_m_
+            << " spatial_mode=" << cargo_safety_spatial_mode_
+            << " obstacle_track=" << cargo_obstacle_track_id_
+            << " confirm=" << cargo_obstacle_track_confirm_count_
+            << " pending_age=" << pending_age
             << " ground_valid="
             << (hook_fixed_cargo_.ground_reference_valid ? 1 : 0)
             << " ground_z=" << hook_fixed_cargo_.ground_z;
-    if (status.requested_alarm_code == CargoSafetyProtocol::kLevel1Warning ||
+    if (pending_evidence &&
+        pending_age >= cargo_safety_pending_error_sec_) {
+        ROS_ERROR_STREAM("[CARGO_SAFETY_PERSISTENT] " << message.str());
+        cargo_safety_pending_error_reported_ = true;
+    } else if (pending_evidence && noisy_pending) {
+        ROS_WARN_STREAM("[CARGO_SAFETY_PENDING] " << message.str());
+    } else if (pending_evidence) {
+        ROS_DEBUG_STREAM("[CARGO_SAFETY_PENDING] " << message.str());
+    } else if (status.requested_alarm_code ==
+                   CargoSafetyProtocol::kCargoInvalid) {
+        ROS_ERROR_STREAM(message.str());
+    } else if (status.requested_alarm_code == CargoSafetyProtocol::kLevel1Warning ||
         status.requested_alarm_code == CargoSafetyProtocol::kLevel2Warning ||
         status.requested_alarm_code >= CargoSafetyProtocol::kSystemNotReady) {
         ROS_WARN_STREAM(message.str());
     } else {
         ROS_INFO_STREAM(message.str());
     }
-    cargo_last_requested_code_ = status.requested_alarm_code;
-    cargo_last_safety_reason_ = status.reason;
     cargo_last_safety_console_stamp_ = status.header.stamp;
 }
 

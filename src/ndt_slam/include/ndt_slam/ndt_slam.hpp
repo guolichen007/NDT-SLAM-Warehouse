@@ -1883,6 +1883,10 @@ private:
         CargoSafetyProtocol::kSystemNotReady;
     std::string cargo_last_safety_reason_ = "startup";
     ros::Time cargo_last_safety_console_stamp_;
+    ros::Time cargo_safety_pending_since_stamp_;
+    double cargo_safety_console_period_sec_ = 2.0;
+    double cargo_safety_pending_error_sec_ = 1.0;
+    bool cargo_safety_pending_error_reported_ = false;
     RigidCargoGeometry current_rigid_cargo_geometry_;
     RigidCargoGeometry previous_self_mask_geometry_;
     RigidCargoGeometry accepted_self_mask_geometry_;

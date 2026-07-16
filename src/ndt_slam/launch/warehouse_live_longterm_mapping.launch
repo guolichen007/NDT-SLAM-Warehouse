@@ -48,6 +48,8 @@
         <param name="legacy_alarm_topic" value="/cargo_avoidance/alarm_code"/>
         <param name="heartbeat_hz" value="5.0"/>
         <param name="stale_timeout_sec" value="0.8"/>
+        <param name="pending_error_sec" value="1.0"/>
+        <param name="pending_repeat_sec" value="2.0"/>
         <param name="level1_distance_m" value="3.0"/>
         <param name="level2_distance_m" value="5.0"/>
         <param name="minimum_vertical_clearance_m" value="0.80"/>

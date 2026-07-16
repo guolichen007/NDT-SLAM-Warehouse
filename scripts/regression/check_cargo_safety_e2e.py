@@ -432,6 +432,14 @@ def main() -> int:
 
     require("cargo_alarm_heartbeat_node" in launch,
             "production launch does not start heartbeat", failures)
+    require("SAFETY_PENDING" in heartbeat and
+            "SAFETY_FAULT_PERSISTENT" in heartbeat and
+            "pending_error_sec" in heartbeat + launch and
+            "pending_repeat_sec" in heartbeat + launch and
+            "CARGO_SAFETY_PERSISTENT" in node and
+            "cargo_safety_pending_error_sec_" in node,
+            "pending evidence is still logged as an immediate persistent fault",
+            failures)
     for value in ("/cargo_avoidance/safety_status",
                   "/cargo_avoidance/status_code",
                   'publish_legacy_alarm_topic" value="false',
