@@ -1616,6 +1616,18 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 hcl["lost_velocity_decay_tau_sec"].as<float>(0.30F));
             hook_lock_config_.rearm_empty_confirm_sec = std::max(
                 0.0F, hcl["rearm_empty_confirm_sec"].as<float>(1.0F));
+            hook_lock_config_.self_cargo_base_margin_xy_m = std::max(
+                0.0F,
+                hcl["self_cargo_base_margin_xy_m"].as<float>(0.15F));
+            hook_lock_config_.self_cargo_base_margin_z_m = std::max(
+                0.0F,
+                hcl["self_cargo_base_margin_z_m"].as<float>(0.12F));
+            hook_lock_config_.self_cargo_max_margin_xy_m = std::max(
+                hook_lock_config_.self_cargo_base_margin_xy_m,
+                hcl["self_cargo_max_margin_xy_m"].as<float>(0.40F));
+            hook_lock_config_.self_cargo_max_margin_z_m = std::max(
+                hook_lock_config_.self_cargo_base_margin_z_m,
+                hcl["self_cargo_max_margin_z_m"].as<float>(0.30F));
             hook_lock_config_.lost_position_uncertainty_per_sec = std::max(
                 0.0F,
                 hcl["lost_position_uncertainty_per_sec"].as<float>(0.05F));
@@ -10158,9 +10170,10 @@ RigidCargoGeometry NdtSlamNode::buildCurrentRigidCargoGeometryForPose(
     current_rigid_cargo_geometry_ = ndt_slam::buildCurrentRigidCargoGeometry(
         hook_lock_.locked_shape, live_pose, transform,
         cargo_fusion_track_id_,
-        std::max({hook_lock_.vertical_pose_uncertainty_m,
-                  hook_lock_.horizontal_tracking_residual_m,
-                  live_pose.position_uncertainty_m}));
+        std::max(hook_lock_.horizontal_tracking_residual_m,
+                 live_pose.position_uncertainty_m),
+        std::max(hook_lock_.vertical_tracking_residual_m,
+                 hook_lock_.vertical_pose_uncertainty_m));
     current_rigid_cargo_geometry_.height_evidence_stamp_sec =
         !hook_lock_.direct_bottom_evidence_stamp.isZero()
             ? hook_lock_.direct_bottom_evidence_stamp.toSec()
@@ -10254,6 +10267,8 @@ void NdtSlamNode::clearHookLock() {
     hook_lock_.rearm_gravity_state =
         lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN;
     current_rigid_cargo_geometry_ = RigidCargoGeometry{};
+    previous_self_mask_geometry_ = RigidCargoGeometry{};
+    accepted_self_mask_geometry_ = RigidCargoGeometry{};
     hook_lock_.has_good_height = false;
     hook_lock_.size_update_count = 0;
     hook_lock_.init_size_buffer.clear();
@@ -11638,7 +11653,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         stamp.toSec(), rigid_geometry.pose_evidence_stamp_sec,
         rigid_geometry.height_evidence_stamp_sec,
         hook_lock_config_.formal_pose_hold_sec,
-        rigid_geometry.pose.position_uncertainty_m);
+        rigid_geometry.horizontal_uncertainty_m);
     if (rigid_geometry.valid) {
         CargoBoxGeometry formal_geometry;
         formal_geometry.valid = true;
@@ -11686,7 +11701,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             last_cargo_bottom_result_.source_name = "RECENT_STABLE";
             last_cargo_bottom_result_.reason = formal_use.reason;
             last_cargo_bottom_result_.uncertainty =
-                rigid_geometry.geometry_uncertainty_m;
+                rigid_geometry.vertical_uncertainty_m;
             last_cargo_bottom_result_.confidence = std::max(
                 0.20F, hook_lock_.locked_shape.orientation_confidence *
                     (hook_lock_.state == HookCargoLockState::LOST_HOLD
@@ -11697,7 +11712,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_state_.bottom_z = rigid_geometry.bottom_z_base;
         cargo_state_.top_z = rigid_geometry.top_z_base;
         cargo_state_.bottom_unc =
-            rigid_geometry.geometry_uncertainty_m;
+            rigid_geometry.vertical_uncertainty_m;
         cargo_state_.bottom_safe_z = cargo_state_.bottom_z -
             cargo_state_.bottom_unc - 0.05F;
         cargo_state_.valid_geometry = true;
@@ -11871,20 +11886,67 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointXYZ>::Ptr external_obstacle_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
-    const CargoObbFootprint exact_self_footprint =
+    const CargoObbFootprint predicted_self_footprint =
         rigid_geometry.valid
             ? toCargoObbFootprint(rigid_geometry)
             : CargoObbFootprint{};
+    const CargoObbFootprint previous_self_footprint =
+        previous_self_mask_geometry_.valid &&
+                previous_self_mask_geometry_.track_id == rigid_geometry.track_id
+            ? toCargoObbFootprint(previous_self_mask_geometry_)
+            : CargoObbFootprint{};
+    const CargoObbFootprint accepted_self_footprint =
+        accepted_self_mask_geometry_.valid &&
+                accepted_self_mask_geometry_.track_id == rigid_geometry.track_id
+            ? toCargoObbFootprint(accepted_self_mask_geometry_)
+            : CargoObbFootprint{};
+    const float self_margin_xy = std::min(
+        hook_lock_config_.self_cargo_max_margin_xy_m,
+        hook_lock_config_.self_cargo_base_margin_xy_m +
+            hook_lock_.horizontal_tracking_residual_m +
+            rigid_geometry.horizontal_uncertainty_m);
+    const float self_margin_z = std::min(
+        hook_lock_config_.self_cargo_max_margin_z_m,
+        hook_lock_config_.self_cargo_base_margin_z_m +
+            hook_lock_.vertical_tracking_residual_m +
+            0.5F * rigid_geometry.vertical_uncertainty_m);
     self_removed_cloud->reserve(obstacle_roi->size());
     external_obstacle_cloud->reserve(obstacle_roi->size());
     for (const pcl::PointXYZ& point : obstacle_roi->points) {
-        if (exact_self_footprint.valid &&
+        const Eigen::Vector3f point_base = point.getVector3fMap();
+        const bool inside_predicted = predicted_self_footprint.valid &&
             containsPointInCargoObbBase(
-                point.getVector3fMap(), exact_self_footprint,
-                0.08F, 0.10F)) {
+                point_base, predicted_self_footprint,
+                self_margin_xy, self_margin_z);
+        const bool inside_previous = previous_self_footprint.valid &&
+            containsPointInCargoObbBase(
+                point_base, previous_self_footprint,
+                self_margin_xy, self_margin_z);
+        const bool inside_accepted = accepted_self_footprint.valid &&
+            containsPointInCargoObbBase(
+                point_base, accepted_self_footprint,
+                self_margin_xy, self_margin_z);
+        const bool inside_swept_previous =
+            previous_self_footprint.valid && predicted_self_footprint.valid &&
+            containsPointInSweptCargoObbBase(
+                point_base, previous_self_footprint,
+                predicted_self_footprint, self_margin_xy, self_margin_z);
+        const bool inside_swept_accepted =
+            accepted_self_footprint.valid && predicted_self_footprint.valid &&
+            containsPointInSweptCargoObbBase(
+                point_base, accepted_self_footprint,
+                predicted_self_footprint, self_margin_xy, self_margin_z);
+        if (inside_predicted || inside_previous || inside_accepted ||
+            inside_swept_previous || inside_swept_accepted) {
             self_removed_cloud->push_back(point);
         } else {
             external_obstacle_cloud->push_back(point);
+        }
+    }
+    if (rigid_geometry.valid) {
+        previous_self_mask_geometry_ = rigid_geometry;
+        if (hook_observation_associated_current_) {
+            accepted_self_mask_geometry_ = rigid_geometry;
         }
     }
     cargo_self_removed_points_ = self_removed_cloud->size();

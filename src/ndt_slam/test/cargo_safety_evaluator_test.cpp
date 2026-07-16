@@ -290,7 +290,7 @@ TEST(CargoSafetyEvaluator, ValidObservationWithNoObstacleIsClear) {
     EXPECT_EQ(result.reason, "clear_no_external_obstacle");
 }
 
-TEST(CargoSafetyEvaluator, ObservationContainingOnlyCargoSelfPointsIsClear) {
+TEST(CargoSafetyEvaluator, CargoSelfPointsCannotProduceDistanceZero) {
     CargoSafetyInput input = baseInput();
     auto cloud = mutableObstacleCloud(&input);
 

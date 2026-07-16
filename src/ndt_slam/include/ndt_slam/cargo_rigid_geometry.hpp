@@ -99,7 +99,8 @@ struct RigidCargoGeometry {
     Eigen::Vector3f aabb_max_base = Eigen::Vector3f::Zero();
     Eigen::Vector3f aabb_min_map = Eigen::Vector3f::Zero();
     Eigen::Vector3f aabb_max_map = Eigen::Vector3f::Zero();
-    float geometry_uncertainty_m = 0.0F;
+    float horizontal_uncertainty_m = 0.0F;
+    float vertical_uncertainty_m = 0.0F;
     double pose_evidence_stamp_sec = 0.0;
     double height_evidence_stamp_sec = 0.0;
     double evaluation_stamp_sec = 0.0;
@@ -134,7 +135,8 @@ RigidCargoGeometry buildCurrentRigidCargoGeometry(
     const LiveCargoPose& live_pose,
     const Eigen::Isometry3f& T_map_base,
     std::uint64_t track_id,
-    float uncertainty_m);
+    float horizontal_uncertainty_m,
+    float vertical_uncertainty_m);
 
 std::array<Eigen::Vector3f, 8> buildCargoObbCornersBase(
     const LockedCargoShape& shape,
@@ -149,6 +151,14 @@ bool containsPointInCargoObbBase(
     const CargoObbFootprint& footprint,
     float margin_xy_m = 0.0F,
     float margin_z_m = 0.0F);
+
+bool containsPointInSweptCargoObbBase(
+    const Eigen::Vector3f& point_base,
+    const CargoObbFootprint& start,
+    const CargoObbFootprint& finish,
+    float margin_xy_m = 0.0F,
+    float margin_z_m = 0.0F,
+    float maximum_sample_step_m = 0.08F);
 
 float pointToCargoObbDistance2D(
     const Eigen::Vector2f& point_base,

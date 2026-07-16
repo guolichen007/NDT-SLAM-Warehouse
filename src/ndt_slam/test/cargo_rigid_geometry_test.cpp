@@ -117,7 +117,7 @@ TEST(CargoRigidGeometryTest, MissingObservationPredictsImmediatelyButPreservesEv
 TEST(CargoRigidGeometryTest, PositionUncertaintyExpandsFormalFootprint) {
     const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
         shape(), pose(Eigen::Vector3f::Zero()),
-        Eigen::Isometry3f::Identity(), 11U, 0.20F);
+        Eigen::Isometry3f::Identity(), 11U, 0.20F, 0.10F);
     ASSERT_TRUE(geometry.valid);
     const CargoObbFootprint expanded = toCargoObbFootprint(geometry, 0.20F);
     EXPECT_NEAR(expanded.length_m, 2.40F, 1.0e-5F);
@@ -194,10 +194,10 @@ TEST(CargoRigidGeometryTest, ShapeStaysFixedWhilePoseMovesAndHoists) {
     const LockedCargoShape locked = shape(0.4F);
     const RigidCargoGeometry first = buildCurrentRigidCargoGeometry(
         locked, pose(Eigen::Vector3f(0.0F, 0.0F, 1.0F)),
-        Eigen::Isometry3f::Identity(), 7U, 0.05F);
+        Eigen::Isometry3f::Identity(), 7U, 0.05F, 0.08F);
     const RigidCargoGeometry moved = buildCurrentRigidCargoGeometry(
         locked, pose(Eigen::Vector3f(0.6F, -0.4F, 2.0F)),
-        Eigen::Isometry3f::Identity(), 7U, 0.08F);
+        Eigen::Isometry3f::Identity(), 7U, 0.08F, 0.12F);
     ASSERT_TRUE(first.valid);
     ASSERT_TRUE(moved.valid);
     EXPECT_FLOAT_EQ(first.shape.length_m, moved.shape.length_m);
@@ -212,10 +212,10 @@ TEST(CargoRigidGeometryTest, NormalHoistUpdatesCenterWithoutChangingHeight) {
     const LockedCargoShape locked = shape(0.2F);
     const RigidCargoGeometry low = buildCurrentRigidCargoGeometry(
         locked, pose(Eigen::Vector3f(0.0F, 0.0F, 1.2F)),
-        Eigen::Isometry3f::Identity(), 13U, 0.05F);
+        Eigen::Isometry3f::Identity(), 13U, 0.05F, 0.08F);
     const RigidCargoGeometry high = buildCurrentRigidCargoGeometry(
         locked, pose(Eigen::Vector3f(0.0F, 0.0F, 2.2F)),
-        Eigen::Isometry3f::Identity(), 13U, 0.05F);
+        Eigen::Isometry3f::Identity(), 13U, 0.05F, 0.08F);
     ASSERT_TRUE(low.valid);
     ASSERT_TRUE(high.valid);
     EXPECT_FLOAT_EQ(low.shape.height_m, high.shape.height_m);
@@ -251,7 +251,7 @@ TEST(CargoRigidGeometryTest, ContainsAndDistanceUseOrientedCoordinates) {
     constexpr float kQuarterTurn = 1.57079632679489661923F;
     const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
         shape(kQuarterTurn), pose(Eigen::Vector3f(0.0F, 0.0F, 1.0F)),
-        Eigen::Isometry3f::Identity(), 9U, 0.05F);
+        Eigen::Isometry3f::Identity(), 9U, 0.05F, 0.08F);
     ASSERT_TRUE(geometry.valid);
     const CargoObbFootprint footprint = toCargoObbFootprint(geometry);
     EXPECT_TRUE(containsPointInCargoObbBase(
@@ -261,6 +261,61 @@ TEST(CargoRigidGeometryTest, ContainsAndDistanceUseOrientedCoordinates) {
     EXPECT_NEAR(pointToCargoObbDistance2D(
                     Eigen::Vector2f(0.9F, 0.0F), footprint),
                 0.5F, 1.0e-5F);
+}
+
+TEST(CargoRigidGeometryTest, TrackingLagCargoPointsRemainSelfRemoved) {
+    const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
+        shape(), pose(Eigen::Vector3f(0.2F, 0.0F, 1.0F)),
+        Eigen::Isometry3f::Identity(), 21U, 0.20F, 0.08F);
+    ASSERT_TRUE(geometry.valid);
+    const CargoObbFootprint footprint = toCargoObbFootprint(geometry);
+    EXPECT_TRUE(containsPointInCargoObbBase(
+        Eigen::Vector3f(-0.90F, 0.0F, 1.0F), footprint, 0.15F, 0.12F));
+}
+
+TEST(CargoRigidGeometryTest, SweptCargoPointsRemainSelfRemoved) {
+    CargoObbFootprint start;
+    start.valid = true;
+    start.center_base = Eigen::Vector2f(0.0F, 0.0F);
+    start.length_m = 1.0F;
+    start.width_m = 0.5F;
+    start.yaw_base_rad = 0.0F;
+    start.min_z = 0.5F;
+    start.max_z = 1.5F;
+    CargoObbFootprint finish = start;
+    finish.center_base.x() = 1.0F;
+    EXPECT_TRUE(containsPointInSweptCargoObbBase(
+        Eigen::Vector3f(0.5F, 0.0F, 1.0F), start, finish, 0.05F, 0.05F));
+}
+
+TEST(CargoRigidGeometryTest, RealObstacleNearCargoEdgeRemainsExternal) {
+    const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
+        shape(), pose(Eigen::Vector3f(0.0F, 0.0F, 1.0F)),
+        Eigen::Isometry3f::Identity(), 22U, 0.10F, 0.08F);
+    ASSERT_TRUE(geometry.valid);
+    const CargoObbFootprint footprint = toCargoObbFootprint(geometry);
+    EXPECT_FALSE(containsPointInCargoObbBase(
+        Eigen::Vector3f(1.45F, 0.0F, 1.0F), footprint, 0.15F, 0.12F));
+}
+
+TEST(CargoRigidGeometryTest, HorizontalResidualDoesNotInflateBottomUncertainty) {
+    const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
+        shape(), pose(Eigen::Vector3f(0.0F, 0.0F, 1.0F)),
+        Eigen::Isometry3f::Identity(), 23U, 0.40F, 0.06F);
+    ASSERT_TRUE(geometry.valid);
+    EXPECT_FLOAT_EQ(geometry.horizontal_uncertainty_m, 0.40F);
+    EXPECT_FLOAT_EQ(geometry.vertical_uncertainty_m, 0.06F);
+}
+
+TEST(CargoRigidGeometryTest, VerticalResidualDoesNotExpandHorizontalFootprint) {
+    const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
+        shape(), pose(Eigen::Vector3f(0.0F, 0.0F, 1.0F)),
+        Eigen::Isometry3f::Identity(), 24U, 0.05F, 0.40F);
+    ASSERT_TRUE(geometry.valid);
+    const CargoObbFootprint footprint = toCargoObbFootprint(
+        geometry, geometry.horizontal_uncertainty_m);
+    EXPECT_NEAR(footprint.length_m, 2.10F, 1.0e-5F);
+    EXPECT_NEAR(footprint.width_m, 0.90F, 1.0e-5F);
 }
 
 }  // namespace

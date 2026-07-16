@@ -1542,6 +1542,10 @@ private:
         float locked_obb_min_short_axis_coverage = 0.12F;
         float lost_velocity_decay_tau_sec = 0.30F;
         float rearm_empty_confirm_sec = 1.0F;
+        float self_cargo_base_margin_xy_m = 0.15F;
+        float self_cargo_base_margin_z_m = 0.12F;
+        float self_cargo_max_margin_xy_m = 0.40F;
+        float self_cargo_max_margin_z_m = 0.30F;
         float lost_position_uncertainty_per_sec = 0.05F;
         float lost_position_uncertainty_max_m = 0.50F;
 
@@ -1755,6 +1759,8 @@ private:
     float cargo_nearest_cluster_distance_m_ =
         std::numeric_limits<float>::infinity();
     RigidCargoGeometry current_rigid_cargo_geometry_;
+    RigidCargoGeometry previous_self_mask_geometry_;
+    RigidCargoGeometry accepted_self_mask_geometry_;
     bool cargo_safety_config_error_ = false;
     std::uint64_t cargo_fusion_track_id_ = 0;
     bool cargo_fusion_track_active_ = false;

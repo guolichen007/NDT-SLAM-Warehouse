@@ -810,6 +810,10 @@ hook_cargo_lock:
   locked_obb_min_short_axis_coverage: 0.12
   lost_velocity_decay_tau_sec: 0.30
   rearm_empty_confirm_sec: 1.0
+  self_cargo_base_margin_xy_m: 0.15
+  self_cargo_base_margin_z_m: 0.12
+  self_cargo_max_margin_xy_m: 0.40
+  self_cargo_max_margin_z_m: 0.30
   lost_position_uncertainty_per_sec: 0.05
   lost_position_uncertainty_max_m: 0.50
 

@@ -244,7 +244,8 @@ RigidCargoGeometry buildCurrentRigidCargoGeometry(
     const LiveCargoPose& live_pose,
     const Eigen::Isometry3f& T_map_base,
     std::uint64_t track_id,
-    float uncertainty_m) {
+    float horizontal_uncertainty_m,
+    float vertical_uncertainty_m) {
     RigidCargoGeometry result;
     result.track_id = track_id;
     result.shape = shape;
@@ -265,7 +266,10 @@ RigidCargoGeometry buildCurrentRigidCargoGeometry(
         result.reason = "invalid_map_transform";
         return result;
     }
-    if (!std::isfinite(uncertainty_m) || uncertainty_m < 0.0F) {
+    if (!std::isfinite(horizontal_uncertainty_m) ||
+        horizontal_uncertainty_m < 0.0F ||
+        !std::isfinite(vertical_uncertainty_m) ||
+        vertical_uncertainty_m < 0.0F) {
         result.reason = "invalid_uncertainty";
         return result;
     }
@@ -294,7 +298,8 @@ RigidCargoGeometry buildCurrentRigidCargoGeometry(
                 result.corners_map[i]);
         }
     }
-    result.geometry_uncertainty_m = uncertainty_m;
+    result.horizontal_uncertainty_m = horizontal_uncertainty_m;
+    result.vertical_uncertainty_m = vertical_uncertainty_m;
     result.pose_evidence_stamp_sec = live_pose.evidence_stamp_sec;
     result.evaluation_stamp_sec = live_pose.evaluation_stamp_sec;
     result.valid = true;
@@ -394,6 +399,51 @@ bool containsPointInCargoObbBase(
         std::abs(local_y) <= 0.5F * footprint.width_m + margin_xy &&
         point_base.z() >= footprint.min_z - margin_z &&
         point_base.z() <= footprint.max_z + margin_z;
+}
+
+bool containsPointInSweptCargoObbBase(
+    const Eigen::Vector3f& point_base,
+    const CargoObbFootprint& start,
+    const CargoObbFootprint& finish,
+    float margin_xy_m,
+    float margin_z_m,
+    float maximum_sample_step_m) {
+    if (!start.valid || !finish.valid || !point_base.allFinite() ||
+        !std::isfinite(maximum_sample_step_m) ||
+        maximum_sample_step_m <= 0.0F ||
+        cargoAxialYawDifference(
+            start.yaw_base_rad, finish.yaw_base_rad) > 1.0e-3F) {
+        return false;
+    }
+    const float center_distance =
+        (finish.center_base - start.center_base).norm();
+    const float vertical_distance = std::max(
+        std::abs(finish.min_z - start.min_z),
+        std::abs(finish.max_z - start.max_z));
+    const int steps = std::clamp(
+        static_cast<int>(std::ceil(
+            std::max(center_distance, vertical_distance) /
+            maximum_sample_step_m)),
+        1, 24);
+    for (int index = 0; index <= steps; ++index) {
+        const float alpha = static_cast<float>(index) /
+            static_cast<float>(steps);
+        CargoObbFootprint sample = start;
+        sample.center_base =
+            (1.0F - alpha) * start.center_base +
+            alpha * finish.center_base;
+        sample.length_m =
+            (1.0F - alpha) * start.length_m + alpha * finish.length_m;
+        sample.width_m =
+            (1.0F - alpha) * start.width_m + alpha * finish.width_m;
+        sample.min_z = (1.0F - alpha) * start.min_z + alpha * finish.min_z;
+        sample.max_z = (1.0F - alpha) * start.max_z + alpha * finish.max_z;
+        if (containsPointInCargoObbBase(
+                point_base, sample, margin_xy_m, margin_z_m)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 float pointToCargoObbDistance2D(
