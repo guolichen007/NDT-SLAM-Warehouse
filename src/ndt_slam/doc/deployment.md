@@ -6,6 +6,19 @@
 
 ## 构建与测试
 
+克隆时必须初始化固定版本的 `ndt_omp` 子模块：
+
+```bash
+git clone --recurse-submodules <repository-url> NDT-slam-ws
+# 已有工作区：git submodule update --init --recursive
+```
+
+`package.xml` 声明 ROS/rosdep 可解析的 Eigen、PCL、yaml-cpp、OpenCV、
+Boost、g2o 与 `ndt_omp` 依赖。ROS Noetic 没有与本工程接口固定一致的
+Sophus rosdep 包；干净环境必须按 `.github/workflows/ci.yml` 所列提交安装
+Sophus。g2o 也按工作流中的 `2023_02_14` 固定版本安装，避免系统版本的
+CMake target 名称与本工程不一致。
+
 ```bash
 cd ~/NDT-slam-ws
 source /opt/ros/noetic/setup.bash
