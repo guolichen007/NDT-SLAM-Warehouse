@@ -1,72 +1,41 @@
 # 系统架构
 
-## 整体数据流
+## 运行链路
 
-```
-rs_201 + rs_203 (双雷达)
-    ↓
-pointcloud_merger (点云合并 + 体素去重)
-    ↓
-/merged_points
-    ↓
-┌─ 近场过滤（去除起重机抓臂/吊具）
-├─ 范围过滤 + 体素降采样
-├─ 网格局部地面分割
-├─ 动态物体过滤（吊货 + 工人）
-├─ MotionGate（静止不建图）
-├─ NDT_OMP 配准 → 位姿估计
-├─ 关键帧管理（active window + 磁盘 tile）
-└─ 多层地图生成 + 闭环检测
+```text
+双雷达 -> pointcloud_merger -> /merged_points
+  -> 近场/人体/吊物候选过滤
+  -> 结构保持 Registration Source
+  -> NDT + Observability -> 各向异性 EKF
+  -> StationaryMotionPolicy -> odom / TF / runtime_path
+  -> MapCommit -> raw layer snapshot -> Clean Worker -> MapLayerBundle
+
+同一帧 LiDAR -> Cargo observation -> Hook Cargo Lock
+  -> LockedCargoShape + LiveCargoPose
+  -> Cargo Bottom -> Cargo Safety 14/17/18 或 30-35
+  -> Heartbeat（状态所有者）
 ```
 
-## 代码结构
+## 定位职责边界
 
-```
-src/ndt_slam/
-├── src/                           # 源文件
-│   ├── main.cpp                   # 主入口
-│   ├── ndt_slam.cpp               # 主 SLAM 节点
-│   ├── keyframe_manager.cpp       # 关键帧管理
-│   ├── loop_closure.cpp           # 闭环检测
-│   ├── point_cloud_processing.cpp # 点云处理
-│   ├── base_payload_channel_filter.cpp # 吊货通道过滤
-│   ├── payload_tracker.cpp        # 吊货跟踪
-│   ├── human_object_filter.cpp    # 人体过滤
-│   ├── dynamic_event_manager.cpp  # 动态事件管理
-│   ├── PointCloudMerger.cpp       # 双雷达合并
-│   └── CloudDiagnostics.cpp       # 点云诊断
-│
-├── include/ndt_slam/              # 头文件
-│   ├── ndt_slam.hpp
-│   ├── keyframe_manager.hpp
-│   ├── loop_closure.hpp
-│   ├── point_cloud_processing.hpp
-│   ├── base_payload_channel_filter.hpp
-│   ├── payload_tracker.hpp
-│   ├── human_object_filter.hpp
-│   └── dynamic_event_manager.hpp
-```
+- `RegistrationCloudBuilder` 优先保留竖直静态结构、未授权候选和限额地面，不允许 full-ground fallback。
+- `NdtObservability` 使用结构法向构造二维信息代理；它不是 NDT Hessian。强弱方向先旋转到 map/EKF 坐标系，再生成各向异性测量协方差。
+- `CraneMotionEKF` 负责预测、NDT 更新和静止伪测量。
+- `StationaryMotionPolicy` 独立决定运行位姿保持、真实移动确认、CATCH_UP，以及 local map 与持久地图写入权限。
 
-## 配准流程
+## 吊物职责边界
 
-```
-实时定位链路：
-  merged_points → 近场过滤 → 预处理 → 地面/物体分割
-  → NDT_OMP 配准（1.0m 分辨率）→ 位姿估计 → 发布 odom/TF
+- `LockedCargoShape`：确认后冻结长、宽、高、轴向 yaw。
+- `LiveCargoPose`：保存中心、真实证据时间、计算时间、来源和位置不确定度。
+- `RigidCargoGeometry`：生成 base/map 八角点，并作为 marker、Cargo Bottom、安全距离、自体点剔除和 MapCommit 的唯一正式几何。
+- `CargoMarkerLifecycle`：显示生命周期；显示保持不等于正式安全证据有效。
+- `CargoSafetyEvaluator`：只根据空间碰撞关系产生 14/17/18，证据故障产生 30-35。
+- `cargo_alarm_heartbeat_node`：维护输出状态；重复时间戳和 heartbeat tick 不产生新证据。
 
-后台精配准：
-  ICP 精配准（异步）→ 修正关键帧位姿 → 用于地图插入
-```
+## 地图职责边界
 
-## 地图分层
+运行地图是可变工作区；正式发布地图是不可变 `MapLayerBundle`。Clean Worker 从 raw bundle N 构建 clean N，完成后一次性发布五层 N。工作地图已前进到 N+1 时，完整 N 仍可发布，但其 clean 层不会反向覆盖当前工作地图。
 
-| 地图类型 | 文件名 | 体素 | 用途 |
-|---------|--------|------|------|
-| 配准地图 | registration_map.pcd | 0.3m | NDT 配准用粗地图 |
-| 显示地图 | display_map.pcd | 0.1m | 全量显示，保留货物轮廓 |
-| 地面地图 | ground_map.pcd | 0.15m | 地面分割结果 |
-| 物体地图 | objects_raw.pcd | 0.06m | 非地面/货物原始层 |
-| 物体干净版 | objects_clean.pcd | 0.06m | 经 BEV+时间一致性过滤 |
-| 地面干净版 | ground_map_clean.pcd | 0.08m | 后处理生成的干净地面 |
-| 精定位图 | localization_map_fine.pcd | 0.10m | 后处理生成的精定位地图 |
-| 导航栅格 | navigation_grid_0.05m.pgm | 0.05m | 2D 导航占用栅格 |
+## 时间合同
+
+LiDAR、Gravity、Cargo Bottom 和 Safety 都以源时间戳判定证据是否前进。时间回退帧立即故障闭锁并建立新 epoch；后续新时间轴可恢复。显示时间、证据时间和评估时间不得互相冒充。

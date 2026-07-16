@@ -330,19 +330,24 @@ endif()
 install(TARGETS ndt_slam_lib ndt_slam_node pointcloud_merger cloud_diagnostics
                 cargo_forbidden_zone_node cargo_alarm_heartbeat_node
                 hook_load_state_node
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib
-  RUNTIME DESTINATION bin
+  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
 install(DIRECTORY include/
-  DESTINATION include
+  DESTINATION ${CATKIN_GLOBAL_INCLUDE_DESTINATION}
 )
 
-install(DIRECTORY launch
+install(DIRECTORY launch config rviz doc
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
 
-install(DIRECTORY config
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+install(DIRECTORY scripts/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/scripts
+  USE_SOURCE_PERMISSIONS
+)
+
+install(FILES scripts/ndt-slam.service
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/systemd
 )

@@ -9,7 +9,7 @@
 - 定位：结构优先的 NDT 输入，结构不足时进入 EKF prediction-only，不回退到整片地面。
 - 静止保持：`STATIONARY_HOLD -> MOVING_CONFIRM -> CATCH_UP -> MOVING`，随机累计漂移不能直接解除静止状态。
 - 吊物几何：同一份 `LockedCargoShape + LiveCargoPose` 同时服务于 RViz、Cargo Bottom、避障、自体点剔除、NDT 输入和 MapCommit。
-- 生命周期：`EMPTY -> CANDIDATE -> LOCKED -> LOST_HOLD -> EMPTY`。`LOST_HOLD` 保留最近可信框并增加不确定度，不生成新 track id。
+- 生命周期：`EMPTY -> CANDIDATE -> LOCKED -> LOST_HOLD -> EMPTY`。`LOST_HOLD` 保留 marker，但正式安全/地图剔除只在短 `formal_hold_sec` 内使用真实时间戳证据；超时后故障闭锁为 33。
 - 正式安全码：`14` 为 CLEAR；`17` 为 3 m 内且垂直净空小于 0.8 m；`18` 为 3–5 m 且垂直净空小于 0.8 m；`30–35` 为系统或证据故障。
 - Gravity：输入话题统一为 `/gravity`。`AUXILIARY` 模式下 LiDAR 是主信号，Gravity 不可用不能永久阻断紧凑货物检测。
 - 地图：同次发布的 registration/display/ground/objects/objects_clean 使用同一内容代次；空层也会发布同代空消息，避免 RViz 保留旧层。
@@ -131,7 +131,7 @@ debug:
   runtime_diagnostics:
     enabled: true
     console_health_enabled: false
-    console_risk_enabled: false
+    console_risk_enabled: true
     cargo_console_enabled: true
     csv_enabled: true
 ```
@@ -142,7 +142,19 @@ debug:
 - `SAFETY_WARN` / `SAFETY_FAULT` 以及安全码或 reason 变化；
 - `SO3Guard` 失败、非有限 NDT、时间 epoch 重置和节点级错误。
 
-逐帧性能、可观测性、registration 模式、地图门控和 pipeline 风险写入配置的 diagnostics 目录，不靠高频控制台输出做验收。
+逐帧性能、可观测性、registration 模式和地图门控写入 diagnostics 目录。运行风险只按 ENTER/CHANGE/REPEAT/CLEAR 事件输出，相同状态 10 秒内不重复。
+
+## 工程文档
+
+- [系统架构](src/ndt_slam/doc/architecture.md)
+- [定位运行时](src/ndt_slam/doc/localization_runtime.md)
+- [吊物跟踪与安全](src/ndt_slam/doc/cargo_tracking_and_safety.md)
+- [地图生命周期](src/ndt_slam/doc/map_lifecycle.md)
+- [配置说明](src/ndt_slam/doc/configuration.md)
+- [部署](src/ndt_slam/doc/deployment.md)
+- [运行与运维](src/ndt_slam/doc/operations.md)
+- [测试与验收](src/ndt_slam/doc/testing_and_acceptance.md)
+- [故障排查](src/ndt_slam/doc/troubleshooting.md)
 
 ## 静态检查
 
