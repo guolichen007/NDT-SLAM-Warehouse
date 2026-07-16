@@ -2314,6 +2314,41 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                         .as<float>(0.15F));
         }
         cargo_obstacle_tracker_.setConfig(obstacle_tracker_config);
+        if (cargo_safety) {
+            cargo_motion_corridor_config_.enabled =
+                cargo_safety["motion_corridor_enabled"].as<bool>(true);
+            cargo_motion_corridor_config_.immediate_near_field_m =
+                std::max(0.0F,
+                    cargo_safety[
+                        "motion_corridor_immediate_near_field_m"]
+                        .as<float>(0.30F));
+            cargo_motion_corridor_config_.minimum_motion_speed_mps =
+                std::max(0.0F,
+                    cargo_safety["motion_corridor_minimum_speed_mps"]
+                        .as<float>(0.05F));
+            cargo_motion_corridor_config_.prediction_horizon_sec =
+                std::max(0.5F,
+                    cargo_safety[
+                        "motion_corridor_prediction_horizon_sec"]
+                        .as<float>(3.0F));
+            cargo_motion_corridor_config_.lateral_margin_m =
+                std::max(0.0F,
+                    cargo_safety["motion_corridor_lateral_margin_m"]
+                        .as<float>(0.30F));
+            cargo_motion_corridor_config_.rear_margin_m =
+                std::max(0.0F,
+                    cargo_safety["motion_corridor_rear_margin_m"]
+                        .as<float>(0.30F));
+            cargo_motion_corridor_config_.velocity_alpha = std::clamp(
+                cargo_safety["motion_corridor_velocity_alpha"]
+                    .as<float>(0.35F),
+                0.0F, 1.0F);
+            cargo_motion_corridor_config_.maximum_velocity_sample_gap_sec =
+                std::max(0.10,
+                    cargo_safety[
+                        "motion_corridor_maximum_velocity_sample_gap_sec"]
+                        .as<double>(0.80));
+        }
 
     } catch (const YAML::Exception& e) {
         ROS_ERROR("YAML parse error: %s", e.what());
@@ -2602,6 +2637,13 @@ void NdtSlamNode::resetCargoForHookState(bool preserve_origin_height) {
     confirmed_cargo_safety_result_ = CargoSafetyResult{};
     cargo_safety_temporal_filter_.reset();
     cargo_obstacle_tracker_.reset();
+    cargo_map_motion_sample_valid_ = false;
+    cargo_previous_center_map_.setZero();
+    cargo_velocity_map_.setZero();
+    cargo_previous_center_stamp_sec_ = 0.0;
+    cargo_safety_spatial_mode_ = "RADIAL_FALLBACK";
+    cargo_corridor_eligible_clusters_ = 0U;
+    cargo_corridor_rejected_clusters_ = 0U;
     has_stable_height_ = false;
     stable_height_ = 0.0F;
     if (!preserve_origin_height) {
@@ -12260,6 +12302,45 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         safety_input.footprint_base = toCargoObbFootprint(
             rigid_geometry, formal_use.horizontal_uncertainty_m);
     }
+    Eigen::Vector2f cargo_center_map = Eigen::Vector2f::Zero();
+    bool cargo_map_velocity_valid = false;
+    if (rigid_geometry.valid &&
+        rigid_geometry.pose.center_base.allFinite()) {
+        const Eigen::Vector3d center_map_3d = pose_map_base *
+            rigid_geometry.pose.center_base.cast<double>();
+        cargo_center_map = center_map_3d.head<2>().cast<float>();
+        const double current_stamp_sec = stamp.toSec();
+        if (cargo_map_motion_sample_valid_) {
+            const double sample_dt_sec =
+                current_stamp_sec - cargo_previous_center_stamp_sec_;
+            if (sample_dt_sec > 1.0e-4 &&
+                sample_dt_sec <=
+                    cargo_motion_corridor_config_
+                        .maximum_velocity_sample_gap_sec &&
+                cargo_previous_center_map_.allFinite()) {
+                const Eigen::Vector2f measured_velocity =
+                    (cargo_center_map - cargo_previous_center_map_) /
+                    static_cast<float>(sample_dt_sec);
+                const float alpha =
+                    cargo_motion_corridor_config_.velocity_alpha;
+                cargo_velocity_map_ =
+                    (1.0F - alpha) * cargo_velocity_map_ +
+                    alpha * measured_velocity;
+                cargo_map_velocity_valid = cargo_velocity_map_.allFinite();
+            } else if (sample_dt_sec < -1.0e-4 ||
+                       sample_dt_sec >
+                           cargo_motion_corridor_config_
+                               .maximum_velocity_sample_gap_sec) {
+                cargo_velocity_map_.setZero();
+            }
+        }
+        cargo_previous_center_map_ = cargo_center_map;
+        cargo_previous_center_stamp_sec_ = current_stamp_sec;
+        cargo_map_motion_sample_valid_ = true;
+    } else {
+        cargo_map_motion_sample_valid_ = false;
+        cargo_velocity_map_.setZero();
+    }
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr obstacle_roi(
         new pcl::PointCloud<pcl::PointXYZ>);
@@ -12550,8 +12631,115 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     }
     safety_input.obstacle_roi_finite_points = roi_finite_points;
     safety_input.obstacle_roi_coverage_ratio = coverage_ratio;
-    const CargoSafetyResult raw_cargo_safety_result =
+    const CargoSafetyResult radial_safety_result =
         cargo_safety_evaluator_.evaluate(safety_input);
+    CargoSafetyResult raw_cargo_safety_result = radial_safety_result;
+    cargo_corridor_eligible_clusters_ = 0U;
+    cargo_corridor_rejected_clusters_ = 0U;
+    const float cargo_map_speed = cargo_velocity_map_.norm();
+    const bool motion_corridor_authoritative =
+        cargo_motion_corridor_config_.enabled &&
+        cargo_map_velocity_valid && std::isfinite(cargo_map_speed) &&
+        cargo_map_speed >=
+            cargo_motion_corridor_config_.minimum_motion_speed_mps;
+    cargo_safety_spatial_mode_ = cargoSafetySpatialModeName(
+        motion_corridor_authoritative
+            ? CargoSafetySpatialMode::MOTION_CORRIDOR
+            : CargoSafetySpatialMode::RADIAL_FALLBACK);
+    if (radial_safety_result.input_valid &&
+        radial_safety_result.warning_valid &&
+        radial_safety_result.fault == CargoSafetyFault::NONE &&
+        (radial_safety_result.warning_code ==
+             CargoSafetyEvaluator::kLevel1Code ||
+         radial_safety_result.warning_code ==
+             CargoSafetyEvaluator::kLevel2Code)) {
+        raw_cargo_safety_result.cluster_evidence.clear();
+        raw_cargo_safety_result.has_cluster_evidence = false;
+        raw_cargo_safety_result.evaluated_cluster_count = 0U;
+        const float cargo_half_diagonal = 0.5F * std::hypot(
+            rigid_geometry.shape.length_m,
+            rigid_geometry.shape.width_m);
+        const auto more_dangerous = [](
+            const CargoSafetyClusterEvidence& candidate,
+            const CargoSafetyClusterEvidence& current) {
+            const int candidate_priority =
+                candidate.warning_code == CargoSafetyEvaluator::kLevel1Code
+                    ? 2 : 1;
+            const int current_priority =
+                current.warning_code == CargoSafetyEvaluator::kLevel1Code
+                    ? 2 : 1;
+            if (candidate_priority != current_priority) {
+                return candidate_priority > current_priority;
+            }
+            if (candidate.conservative_clearance_m !=
+                current.conservative_clearance_m) {
+                return candidate.conservative_clearance_m <
+                    current.conservative_clearance_m;
+            }
+            return candidate.footprint_distance_m <
+                current.footprint_distance_m;
+        };
+        for (const CargoSafetyClusterEvidence& evidence :
+             radial_safety_result.cluster_evidence) {
+            if (evidence.warning_code !=
+                    CargoSafetyEvaluator::kLevel1Code &&
+                evidence.warning_code !=
+                    CargoSafetyEvaluator::kLevel2Code) {
+                continue;
+            }
+            const Eigen::Vector3d nearest_map_3d = pose_map_base *
+                evidence.nearest_point_base.getVector3fMap().cast<double>();
+            const Eigen::Vector3d centroid_map_3d = pose_map_base *
+                evidence.centroid_base.getVector3fMap().cast<double>();
+            CargoMotionCorridorInput corridor_input;
+            corridor_input.cargo_center_map = cargo_center_map;
+            corridor_input.cargo_velocity_map = cargo_velocity_map_;
+            corridor_input.velocity_valid = cargo_map_velocity_valid;
+            corridor_input.cargo_half_diagonal_m = cargo_half_diagonal;
+            corridor_input.horizontal_uncertainty_m =
+                formal_use.horizontal_uncertainty_m;
+            corridor_input.obstacle_nearest_map =
+                nearest_map_3d.head<2>().cast<float>();
+            corridor_input.obstacle_centroid_map =
+                centroid_map_3d.head<2>().cast<float>();
+            corridor_input.current_footprint_distance_m =
+                evidence.footprint_distance_m;
+            const CargoMotionCorridorDecision corridor_decision =
+                evaluateCargoMotionCorridor(
+                    cargo_motion_corridor_config_, corridor_input);
+            cargo_safety_spatial_mode_ =
+                cargoSafetySpatialModeName(corridor_decision.mode);
+            if (!corridor_decision.eligible) {
+                ++cargo_corridor_rejected_clusters_;
+                continue;
+            }
+            ++cargo_corridor_eligible_clusters_;
+            raw_cargo_safety_result.cluster_evidence.push_back(evidence);
+            ++raw_cargo_safety_result.evaluated_cluster_count;
+            if (!raw_cargo_safety_result.has_cluster_evidence ||
+                more_dangerous(
+                    evidence,
+                    raw_cargo_safety_result.most_dangerous_cluster)) {
+                raw_cargo_safety_result.most_dangerous_cluster = evidence;
+                raw_cargo_safety_result.has_cluster_evidence = true;
+            }
+        }
+        if (raw_cargo_safety_result.has_cluster_evidence) {
+            raw_cargo_safety_result.warning_code =
+                raw_cargo_safety_result.most_dangerous_cluster.warning_code;
+            raw_cargo_safety_result.reason =
+                cargo_safety_spatial_mode_ == "MOTION_CORRIDOR"
+                    ? "hazard_inside_motion_corridor"
+                    : "hazard_radial_fallback";
+        } else {
+            raw_cargo_safety_result.warning_code =
+                CargoSafetyEvaluator::kSafeCode;
+            raw_cargo_safety_result.warning_valid = true;
+            raw_cargo_safety_result.fault = CargoSafetyFault::NONE;
+            raw_cargo_safety_result.reason =
+                "clear_no_hazard_in_motion_corridor";
+        }
+    }
     cargo_raw_warning_code_ = raw_cargo_safety_result.warning_valid
         ? raw_cargo_safety_result.warning_code : 0;
     last_cargo_safety_result_ = raw_cargo_safety_result;
@@ -15841,6 +16029,16 @@ void NdtSlamNode::logCargoHealthPeriodic() {
         cargo_obstacle_track_velocity_map_.y();
     rec.obstacle_track_velocity_z =
         cargo_obstacle_track_velocity_map_.z();
+    rec.safety_spatial_mode = cargo_safety_spatial_mode_;
+    rec.cargo_map_speed_mps = cargo_velocity_map_.norm();
+    rec.corridor_eligible_clusters = static_cast<int>(
+        std::min<std::size_t>(
+            cargo_corridor_eligible_clusters_,
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.corridor_rejected_clusters = static_cast<int>(
+        std::min<std::size_t>(
+            cargo_corridor_rejected_clusters_,
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
     rec.safety_reason = cargo_last_safety_reason_;
     rec.support_points = static_cast<int>(std::min<std::size_t>(
         last_cargo_bottom_result_.selected_stats.bottom_band_points,

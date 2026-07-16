@@ -292,6 +292,10 @@ struct CargoFrameRecord {
   double obstacle_track_velocity_x = 0.0;
   double obstacle_track_velocity_y = 0.0;
   double obstacle_track_velocity_z = 0.0;
+  std::string safety_spatial_mode = "RADIAL_FALLBACK";
+  double cargo_map_speed_mps = 0.0;
+  int corridor_eligible_clusters = 0;
+  int corridor_rejected_clusters = 0;
   std::string safety_reason = "system_not_ready";
   double center_x = 0.0, center_y = 0.0, center_z = 0.0;
   double measured_center_x = 0.0, measured_center_y = 0.0,

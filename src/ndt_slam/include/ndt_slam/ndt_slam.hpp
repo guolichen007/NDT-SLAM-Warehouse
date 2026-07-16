@@ -50,6 +50,7 @@
 #include <ndt_slam/cargo_rigid_geometry.hpp>
 #include <ndt_slam/cargo_safety_evaluator.hpp>
 #include <ndt_slam/cargo_obstacle_tracker.hpp>
+#include <ndt_slam/cargo_motion_corridor.hpp>
 #include <ndt_slam/cargo_safety_temporal_filter.hpp>
 #include <ndt_slam/cargo_track_policy.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
@@ -1826,6 +1827,7 @@ private:
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
     CargoObstacleTracker cargo_obstacle_tracker_;
+    CargoMotionCorridorConfig cargo_motion_corridor_config_;
     CargoSafetyTemporalFilter cargo_safety_temporal_filter_;
     CargoBottomResult last_cargo_bottom_result_;
     CargoSafetyResult last_cargo_safety_result_;
@@ -1863,6 +1865,13 @@ private:
     bool cargo_obstacle_track_static_ = false;
     Eigen::Vector3f cargo_obstacle_track_velocity_map_ =
         Eigen::Vector3f::Zero();
+    bool cargo_map_motion_sample_valid_ = false;
+    Eigen::Vector2f cargo_previous_center_map_ = Eigen::Vector2f::Zero();
+    Eigen::Vector2f cargo_velocity_map_ = Eigen::Vector2f::Zero();
+    double cargo_previous_center_stamp_sec_ = 0.0;
+    std::string cargo_safety_spatial_mode_ = "RADIAL_FALLBACK";
+    std::size_t cargo_corridor_eligible_clusters_ = 0U;
+    std::size_t cargo_corridor_rejected_clusters_ = 0U;
     std::int32_t cargo_last_requested_code_ =
         CargoSafetyProtocol::kSystemNotReady;
     std::string cargo_last_safety_reason_ = "startup";

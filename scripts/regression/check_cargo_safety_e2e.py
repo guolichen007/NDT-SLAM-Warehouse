@@ -314,6 +314,8 @@ def main() -> int:
         "src/ndt_slam/src/cargo_safety_temporal_filter.cpp")
     obstacle_tracker = read(
         "src/ndt_slam/src/cargo_obstacle_tracker.cpp")
+    motion_corridor = read(
+        "src/ndt_slam/src/cargo_motion_corridor.cpp")
     require("minimum_hazard_cluster_points" in temporal_filter and
             "maximum_centroid_step_m" in temporal_filter and
             "repeated_source_stamp_ignored" in temporal_filter and
@@ -334,6 +336,14 @@ def main() -> int:
             "consecutive_observations" in obstacle_tracker and
             "centroid_map" in obstacle_tracker,
             "hazards are not confirmed by persistent map-frame identity",
+            failures)
+    require("src/cargo_motion_corridor.cpp" in cmake and
+            "evaluateCargoMotionCorridor" in node and
+            "immediate_near_field_m" in motion_corridor and
+            "RADIAL_FALLBACK" in motion_corridor and
+            "MOTION_CORRIDOR" in motion_corridor and
+            "clear_no_hazard_in_motion_corridor" in node,
+            "cargo safety does not gate radial structures by a swept corridor",
             failures)
     require("axis_aligned_yaw_after_lock: true" in live_config and
             "freeze_vertical_position_after_lock: false" in live_config and
@@ -386,6 +396,8 @@ def main() -> int:
             "used_previous_confirmation" in runtime_header and
             "obstacle_track_id" in runtime_header and
             "obstacle_track_velocity" in runtime_header and
+            "safety_spatial_mode" in runtime_header and
+            "corridor_rejected_clusters" in runtime_header and
             "requested_alarm_code" in runtime_header,
             "cargo safety evidence is incomplete in frame diagnostics",
             failures)

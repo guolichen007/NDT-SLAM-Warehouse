@@ -692,6 +692,14 @@ cargo_safety:
   obstacle_track_association_top_step_m: 0.75
   obstacle_track_stale_sec: 1.00
   obstacle_track_static_velocity_mps: 0.15
+  motion_corridor_enabled: true
+  motion_corridor_immediate_near_field_m: 0.30
+  motion_corridor_minimum_speed_mps: 0.05
+  motion_corridor_prediction_horizon_sec: 3.0
+  motion_corridor_lateral_margin_m: 0.30
+  motion_corridor_rear_margin_m: 0.30
+  motion_corridor_velocity_alpha: 0.35
+  motion_corridor_maximum_velocity_sample_gap_sec: 0.80
 
 status_codes:
   clear: 14
