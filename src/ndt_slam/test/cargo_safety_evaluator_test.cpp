@@ -67,7 +67,6 @@ TEST(CargoSafetyConfig, ProductionDefaultsMatchContract) {
     EXPECT_FLOAT_EQ(config.level2_distance_m, 5.0F);
     EXPECT_FLOAT_EQ(config.minimum_vertical_clearance_m, 0.80F);
     EXPECT_FLOAT_EQ(config.minimum_roi_coverage_ratio, 0.05F);
-    EXPECT_DOUBLE_EQ(config.maximum_height_age_sec, 0.50);
     EXPECT_DOUBLE_EQ(config.maximum_obstacle_cloud_age_sec, 0.50);
 }
 
@@ -223,6 +222,7 @@ TEST(CargoSafetyEvaluator, InvalidHeightNeverBecomesLevel2Warning) {
 
     CargoSafetyInput stale = baseInput();
     stale.evaluation_time_sec = 11.0;
+    stale.height.stale = true;
     const CargoSafetyResult stale_result = evaluator.evaluate(stale);
     EXPECT_TRUE(stale_result.height_stale);
     EXPECT_FALSE(stale_result.warning_valid);

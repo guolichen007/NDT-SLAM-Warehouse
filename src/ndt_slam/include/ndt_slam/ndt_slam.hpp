@@ -1599,7 +1599,8 @@ private:
         float live_pose_max_z_speed_mps = 1.5F;
         float live_pose_step_margin_m = 0.05F;
         float live_pose_velocity_alpha = 0.35F;
-        float formal_pose_hold_sec = 2.00F;
+        float formal_xy_evidence_hold_sec = 2.00F;
+        float formal_vertical_evidence_hold_sec = 2.00F;
         float direct_bottom_soft_stale_sec = 1.50F;
         float velocity_model_uncertainty_mps = 0.05F;
         float association_max_xy_gate_m = 0.80F;

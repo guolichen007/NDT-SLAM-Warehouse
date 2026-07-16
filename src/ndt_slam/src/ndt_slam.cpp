@@ -1764,11 +1764,14 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.live_pose_velocity_alpha = std::clamp(
                 hcl["live_pose_velocity_alpha"].as<float>(0.35F),
                 0.0F, 1.0F);
-            hook_lock_config_.formal_pose_hold_sec = std::max(
-                0.10F, hcl["formal_pose_hold_sec"].as<float>(
-                    hcl["formal_hold_sec"].as<float>(2.00F)));
+            hook_lock_config_.formal_xy_evidence_hold_sec = std::max(
+                0.10F,
+                hcl["formal_xy_evidence_hold_sec"].as<float>(2.00F));
+            hook_lock_config_.formal_vertical_evidence_hold_sec = std::max(
+                0.10F,
+                hcl["formal_vertical_evidence_hold_sec"].as<float>(2.00F));
             hook_lock_config_.direct_bottom_soft_stale_sec = std::max(
-                hook_lock_config_.formal_pose_hold_sec,
+                hook_lock_config_.formal_vertical_evidence_hold_sec,
                 hcl["direct_bottom_soft_stale_sec"].as<float>(1.50F));
             hook_lock_config_.velocity_model_uncertainty_mps = std::max(
                 0.0F,
@@ -2205,8 +2208,6 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             : 0.80F;
         safety_config.cargo_bottom_extra_margin_m =
             odom_anchor_config_.cargo_warning.cargo_bottom_extra_margin_m;
-        safety_config.maximum_height_age_sec = cargo_safety
-            ? cargo_safety["maximum_height_age_sec"].as<double>(0.50) : 0.50;
         safety_config.obstacle_top_percentile =
             odom_anchor_config_.cargo_warning.obstacle_top_percentile;
         safety_config.obstacle_cluster_tolerance_m =
@@ -2235,7 +2236,6 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             nearly_equal(safety_config.level2_distance_m, 5.0) &&
             nearly_equal(safety_config.minimum_vertical_clearance_m, 0.80) &&
             nearly_equal(safety_config.minimum_roi_coverage_ratio, 0.05) &&
-            nearly_equal(safety_config.maximum_height_age_sec, 0.50) &&
             nearly_equal(safety_config.maximum_obstacle_cloud_age_sec, 0.50);
 
         const YAML::Node status_codes = config["status_codes"];
@@ -2260,7 +2260,6 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             safety_config.level2_distance_m = 5.0F;
             safety_config.minimum_vertical_clearance_m = 0.80F;
             safety_config.minimum_roi_coverage_ratio = 0.05F;
-            safety_config.maximum_height_age_sec = 0.50;
             safety_config.maximum_obstacle_cloud_age_sec = 0.50;
         }
         cargo_safety_evaluator_.setConfig(safety_config);
@@ -9637,7 +9636,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         hook_lock_.locked_shape.valid) {
         identity_context.predicted_track_valid = true;
         const double dt = std::min(
-            static_cast<double>(hook_lock_config_.formal_pose_hold_sec),
+            static_cast<double>(
+                hook_lock_config_.formal_xy_evidence_hold_sec),
             std::max(
                 0.0,
                 stamp.toSec() -
@@ -9681,7 +9681,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
                (stamp - retired_cargo_stamp_).toSec() <=
                    hook_lock_config_.lost_clear_sec) {
         const double retired_dt = std::min(
-            static_cast<double>(hook_lock_config_.formal_pose_hold_sec),
+            static_cast<double>(
+                hook_lock_config_.formal_xy_evidence_hold_sec),
             (stamp - retired_cargo_stamp_).toSec());
         const double retired_decayed_dt =
             hook_lock_config_.lost_velocity_decay_tau_sec *
@@ -10479,11 +10480,18 @@ void NdtSlamNode::updateLiveCargoPose(
     hook_lock_.vertical_pose_uncertainty_m = std::max(
         accepted_direct_bottom ? bottom.uncertainty : bottom_age_uncertainty,
         hook_lock_.vertical_tracking_residual_m);
-    // Any independently-stamped, associated cargo core refreshes its live
-    // vertical pose. Direct bottom-band support improves uncertainty, but is
-    // not the only authority for center_z +/- frozen_height/2.
-    hook_lock_.live_vertical_pose_valid = true;
-    hook_lock_.live_vertical_pose_evidence_stamp = stamp;
+    // Only a physical vertical measurement advances formal Z authority.
+    // XY-only association, prediction and display retention must not refresh
+    // this timestamp.
+    const bool formal_vertical_measurement =
+        vertical_source == CargoVerticalPoseSource::DIRECT_TOP ||
+        vertical_source == CargoVerticalPoseSource::DIRECT_BOTTOM ||
+        vertical_source ==
+            CargoVerticalPoseSource::LOCKED_OBB_POINT_SUPPORT;
+    if (formal_vertical_measurement) {
+        hook_lock_.live_vertical_pose_valid = true;
+        hook_lock_.live_vertical_pose_evidence_stamp = stamp;
+    }
     hook_lock_.direct_bottom_support_valid = accepted_direct_bottom;
     hook_lock_.locked_center_base = hook_lock_.live_pose.center_base;
 }
@@ -10498,7 +10506,7 @@ RigidCargoGeometry NdtSlamNode::buildCurrentRigidCargoGeometryForPose(
     if (cargoTrackRetained() && live_pose.valid && !current_association) {
         live_pose = propagateHeldCargoPose(
             live_pose, hook_lock_.live_pose_velocity_base, stamp.toSec(),
-            hook_lock_config_.formal_pose_hold_sec,
+            hook_lock_config_.formal_xy_evidence_hold_sec,
             hook_lock_config_.live_pose_max_xy_speed_mps,
             hook_lock_config_.live_pose_max_z_speed_mps,
             hook_lock_config_.lost_velocity_decay_tau_sec,
@@ -10516,8 +10524,9 @@ RigidCargoGeometry NdtSlamNode::buildCurrentRigidCargoGeometryForPose(
         std::max(hook_lock_.vertical_tracking_residual_m,
                  hook_lock_.vertical_pose_uncertainty_m));
     current_rigid_cargo_geometry_.height_evidence_stamp_sec =
-        !hook_lock_.direct_bottom_evidence_stamp.isZero()
-            ? hook_lock_.direct_bottom_evidence_stamp.toSec()
+        hook_lock_.live_vertical_pose_valid &&
+                !hook_lock_.live_vertical_pose_evidence_stamp.isZero()
+            ? hook_lock_.live_vertical_pose_evidence_stamp.toSec()
             : (!hook_lock_.locked_stamp.isZero()
                    ? hook_lock_.locked_stamp.toSec()
                    : live_pose.evidence_stamp_sec);
@@ -12135,33 +12144,25 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     last_cargo_bottom_result_ = cargo_bottom_fusion_.update(observation);
     last_cargo_pipeline_stamp_ = stamp;
     const bool current_bottom_evidence =
-        last_cargo_bottom_result_.valid &&
-        last_cargo_bottom_result_.source !=
-            CargoBottomSource::RECENT_STABLE &&
-        std::isfinite(last_cargo_bottom_result_.evidence_stamp_sec) &&
-        std::abs(last_cargo_bottom_result_.evidence_stamp_sec -
-                 stamp.toSec()) <= 1.0e-4;
+        hook_lock_.live_vertical_pose_valid &&
+        !hook_lock_.live_vertical_pose_evidence_stamp.isZero() &&
+        std::abs((hook_lock_.live_vertical_pose_evidence_stamp - stamp)
+                     .toSec()) <= 1.0e-4 &&
+        (hook_lock_.live_pose.vertical_source ==
+             CargoVerticalPoseSource::DIRECT_TOP ||
+         hook_lock_.live_pose.vertical_source ==
+             CargoVerticalPoseSource::DIRECT_BOTTOM ||
+         hook_lock_.live_pose.vertical_source ==
+             CargoVerticalPoseSource::LOCKED_OBB_POINT_SUPPORT);
     RigidCargoGeometry rigid_geometry =
         buildCurrentRigidCargoGeometryForPose(pose_map_base, stamp);
-    if (rigid_geometry.valid) {
-        if (current_bottom_evidence &&
-            std::isfinite(last_cargo_bottom_result_.evidence_stamp_sec) &&
-            last_cargo_bottom_result_.evidence_stamp_sec > 0.0) {
-            rigid_geometry.height_evidence_stamp_sec =
-                last_cargo_bottom_result_.evidence_stamp_sec;
-        } else if (rigid_geometry.height_evidence_stamp_sec <= 0.0) {
-            rigid_geometry.height_evidence_stamp_sec =
-                last_cargo_bottom_result_.evidence_stamp_sec > 0.0
-                    ? last_cargo_bottom_result_.evidence_stamp_sec
-                    : rigid_geometry.pose_evidence_stamp_sec;
-        }
-    }
     const CargoFormalUseDecision formal_use = evaluateCargoFormalUse(
         rigid_geometry.valid,
         hook_lock_.state == HookCargoLockState::LOST_HOLD,
         stamp.toSec(), rigid_geometry.pose_evidence_stamp_sec,
         rigid_geometry.height_evidence_stamp_sec,
-        hook_lock_config_.formal_pose_hold_sec,
+        hook_lock_config_.formal_xy_evidence_hold_sec,
+        hook_lock_config_.formal_vertical_evidence_hold_sec,
         rigid_geometry.horizontal_uncertainty_m);
     if (rigid_geometry.valid) {
         CargoBoxGeometry formal_geometry;
@@ -12197,11 +12198,10 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         // evaluator uses evidence_stamp_sec and must never see a held sample
         // refreshed to the current tick.
         last_cargo_bottom_result_.stamp_sec = stamp.toSec();
-        // The bottom is center_z minus the frozen rigid height. Its formal
-        // evidence therefore advances with an associated live pose; direct
-        // bottom age only affects vertical uncertainty.
+        // Frozen thickness persists, but bottom position authority advances
+        // only with DIRECT_TOP/DIRECT_BOTTOM/LOCKED_OBB_POINT_SUPPORT.
         last_cargo_bottom_result_.evidence_stamp_sec =
-            rigid_geometry.pose_evidence_stamp_sec;
+            rigid_geometry.height_evidence_stamp_sec;
         if (!current_bottom_evidence) {
             last_cargo_bottom_result_.valid =
                 formal_use.formal_safety_valid;

@@ -27,7 +27,6 @@ bool isValidConfig(const CargoSafetyConfig& config) {
            isFinite(config.minimum_vertical_clearance_m) &&
            isFinite(config.cargo_bottom_extra_margin_m) &&
            config.cargo_bottom_extra_margin_m >= 0.0f &&
-           isFinite(config.maximum_height_age_sec) && config.maximum_height_age_sec >= 0.0 &&
            isFinite(config.future_stamp_tolerance_sec) &&
            config.future_stamp_tolerance_sec >= 0.0 &&
            isFinite(config.maximum_obstacle_cloud_age_sec) &&
@@ -227,7 +226,7 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         result.reason = "height_timestamp_in_future";
         return result;
     }
-    if (input.height.stale || result.height_age_sec > config_.maximum_height_age_sec) {
+    if (input.height.stale) {
         result.height_stale = true;
         result.fault = CargoSafetyFault::CARGO_HEIGHT_INVALID;
         result.reason = "height_stale";

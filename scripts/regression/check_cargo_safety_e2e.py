@@ -377,6 +377,17 @@ def main() -> int:
             "horizontal_tracking_residual_m" in node,
             "live vertical evidence or tracking residual uncertainty is missing",
             failures)
+    require("formal_xy_evidence_hold_sec" in node + live_config and
+            "formal_vertical_evidence_hold_sec" in node + live_config and
+            "formal_pose_hold_sec" not in node + live_config and
+            "maximum_height_age_sec" not in
+                safety_header + safety_evaluator + live_config and
+            "formal_vertical_measurement" in node and
+            "CargoVerticalPoseSource::PREDICTION" not in
+                node[node.find("const bool formal_vertical_measurement"):
+                     node.find("if (formal_vertical_measurement)")],
+            "formal vertical evidence lifetime is duplicated or prediction-fed",
+            failures)
     for topic in ("/cargo_avoidance/candidate_components",
                   "/cargo_avoidance/selected_candidate_cloud",
                   "/cargo_avoidance/predicted_obb",

@@ -30,42 +30,55 @@ LiveCargoPose pose(const Eigen::Vector3f& center) {
 
 TEST(CargoRigidGeometryTest, LostHoldExpiresFormalUseButKeepsDisplay) {
     const CargoFormalUseDecision short_hold = evaluateCargoFormalUse(
-        true, true, 10.4, 10.0, 10.0, 0.5, 0.12F);
+        true, true, 10.4, 10.0, 10.0, 0.5, 0.5, 0.12F);
     EXPECT_TRUE(short_hold.display_valid);
     EXPECT_TRUE(short_hold.formal_safety_valid);
     EXPECT_TRUE(short_hold.formal_removal_valid);
 
     const CargoFormalUseDecision expired = evaluateCargoFormalUse(
-        true, true, 10.6, 10.0, 10.0, 0.5, 0.18F);
+        true, true, 10.6, 10.0, 10.0, 0.5, 0.5, 0.18F);
     EXPECT_TRUE(expired.display_valid);
     EXPECT_FALSE(expired.formal_safety_valid);
     EXPECT_FALSE(expired.formal_removal_valid);
-    EXPECT_EQ(expired.reason, "lost_hold_display_only_evidence_expired");
+    EXPECT_EQ(expired.reason, "formal_vertical_evidence_expired");
 }
 
 TEST(CargoRigidGeometryTest, LockedStateCannotBypassFormalEvidenceCutoff) {
     const CargoFormalUseDecision expired_while_locked =
         evaluateCargoFormalUse(
-            true, false, 10.6, 10.0, 10.0, 0.5, 0.18F);
+            true, false, 10.6, 10.0, 10.0, 0.5, 0.5, 0.18F);
     EXPECT_TRUE(expired_while_locked.display_valid);
     EXPECT_FALSE(expired_while_locked.formal_safety_valid);
     EXPECT_FALSE(expired_while_locked.formal_removal_valid);
     EXPECT_EQ(expired_while_locked.reason,
-              "locked_display_only_evidence_expired");
+              "formal_vertical_evidence_expired");
 
     const CargoFormalUseDecision expired_after_state_transition =
         evaluateCargoFormalUse(
-            true, true, 10.6, 10.0, 10.0, 0.5, 0.18F);
+            true, true, 10.6, 10.0, 10.0, 0.5, 0.5, 0.18F);
     EXPECT_FALSE(expired_after_state_transition.formal_safety_valid);
     EXPECT_FALSE(expired_after_state_transition.formal_removal_valid);
 }
 
-TEST(CargoRigidGeometryTest, FrozenHeightDoesNotExpireWithDirectBottomGap) {
+TEST(CargoRigidGeometryTest, FrozenThicknessDoesNotRefreshVerticalPosition) {
     const CargoFormalUseDecision decision = evaluateCargoFormalUse(
-        true, false, 20.0, 19.7, 10.0, 0.60, 0.15F);
-    EXPECT_TRUE(decision.formal_safety_valid);
-    EXPECT_TRUE(decision.formal_removal_valid);
+        true, false, 20.0, 19.7, 10.0, 0.60, 0.60, 0.15F);
+    EXPECT_FALSE(decision.formal_safety_valid);
+    EXPECT_FALSE(decision.formal_removal_valid);
     EXPECT_GT(decision.height_age_sec, 9.0);
+    EXPECT_EQ(decision.reason, "formal_vertical_evidence_expired");
+}
+
+TEST(CargoRigidGeometryTest, XyAndVerticalEvidenceExpireIndependently) {
+    const CargoFormalUseDecision xy_expired = evaluateCargoFormalUse(
+        true, false, 10.6, 10.0, 10.5, 0.50, 1.00, 0.15F);
+    EXPECT_FALSE(xy_expired.formal_safety_valid);
+    EXPECT_EQ(xy_expired.reason, "formal_xy_evidence_expired");
+
+    const CargoFormalUseDecision vertical_expired = evaluateCargoFormalUse(
+        true, false, 10.6, 10.5, 10.0, 1.00, 0.50, 0.15F);
+    EXPECT_FALSE(vertical_expired.formal_safety_valid);
+    EXPECT_EQ(vertical_expired.reason, "formal_vertical_evidence_expired");
 }
 
 TEST(CargoRigidGeometryTest, MissingObservationPredictsImmediatelyButPreservesEvidenceAge) {
@@ -89,7 +102,8 @@ TEST(CargoRigidGeometryTest, MissingObservationPredictsImmediatelyButPreservesEv
     EXPECT_NEAR(held_short.position_uncertainty_m, 0.12F, 1.0e-5F);
     const CargoFormalUseDecision short_use = evaluateCargoFormalUse(
         true, false, 10.4, held_short.evidence_stamp_sec,
-        held_short.evidence_stamp_sec, 0.5, held_short.position_uncertainty_m);
+        held_short.evidence_stamp_sec, 0.5, 0.5,
+        held_short.position_uncertainty_m);
     EXPECT_TRUE(short_use.formal_safety_valid);
     EXPECT_TRUE(short_use.formal_removal_valid);
 
@@ -107,7 +121,7 @@ TEST(CargoRigidGeometryTest, MissingObservationPredictsImmediatelyButPreservesEv
     EXPECT_DOUBLE_EQ(held_expired.evidence_stamp_sec, 10.0);
     const CargoFormalUseDecision expired_use = evaluateCargoFormalUse(
         true, false, 10.6, held_expired.evidence_stamp_sec,
-        held_expired.evidence_stamp_sec, 0.5,
+        held_expired.evidence_stamp_sec, 0.5, 0.5,
         held_expired.position_uncertainty_m);
     EXPECT_TRUE(expired_use.display_valid);
     EXPECT_FALSE(expired_use.formal_safety_valid);
@@ -223,12 +237,13 @@ TEST(CargoRigidGeometryTest, NormalHoistUpdatesCenterWithoutChangingHeight) {
                 1.0F, 1.0e-5F);
 }
 
-TEST(CargoRigidGeometryTest, PoseEvidenceRefreshesFromAssociatedCore) {
+TEST(CargoRigidGeometryTest, XyEvidenceCannotRefreshVerticalAuthority) {
     const CargoFormalUseDecision decision = evaluateCargoFormalUse(
-        true, false, 30.0, 29.7, 20.0, 0.60, 0.12F);
-    EXPECT_TRUE(decision.formal_safety_valid);
+        true, false, 30.0, 29.7, 20.0, 0.60, 0.60, 0.12F);
+    EXPECT_FALSE(decision.formal_safety_valid);
     EXPECT_LT(decision.pose_age_sec, 0.60);
     EXPECT_GT(decision.height_age_sec, 9.0);
+    EXPECT_EQ(decision.reason, "formal_vertical_evidence_expired");
 }
 
 TEST(CargoRigidGeometryTest, LostDisplayPredictionStopsAfterFormalHold) {

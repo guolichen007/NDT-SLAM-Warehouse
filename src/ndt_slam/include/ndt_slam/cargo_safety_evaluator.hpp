@@ -31,7 +31,6 @@ struct CargoSafetyConfig {
     float minimum_vertical_clearance_m = 0.80f;
 
     float cargo_bottom_extra_margin_m = 0.05f;
-    double maximum_height_age_sec = 0.50;
     double future_stamp_tolerance_sec = 0.05;
     double maximum_obstacle_cloud_age_sec = 0.50;
     std::size_t minimum_roi_finite_points = 20;

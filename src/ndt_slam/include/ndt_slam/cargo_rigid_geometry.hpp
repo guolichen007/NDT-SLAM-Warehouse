@@ -127,7 +127,8 @@ CargoFormalUseDecision evaluateCargoFormalUse(
     double evaluation_stamp_sec,
     double pose_evidence_stamp_sec,
     double height_evidence_stamp_sec,
-    double formal_hold_sec,
+    double formal_xy_evidence_hold_sec,
+    double formal_vertical_evidence_hold_sec,
     float horizontal_uncertainty_m);
 
 RigidCargoGeometry buildCurrentRigidCargoGeometry(

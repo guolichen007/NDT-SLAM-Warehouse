@@ -322,7 +322,8 @@ def runtime_visualization_contract_failures() -> list[str]:
         "result.bundle.objects_clean",
         "evaluateCargoFormalUse",
         "evidence_stamp_sec",
-        "formal_hold_sec",
+        "formal_xy_evidence_hold_sec",
+        "formal_vertical_evidence_hold_sec",
         "propagateHeldCargoPose",
         "updateCargoLivePoseStep",
     )

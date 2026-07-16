@@ -676,7 +676,6 @@ cargo_safety:
   level2_distance_m: 5.0
   minimum_vertical_clearance_m: 0.80
   minimum_roi_coverage_ratio: 0.05
-  maximum_height_age_sec: 0.50
   maximum_obstacle_cloud_age_sec: 0.50
   # 17/18 need three independent, spatially continuous obstacle clusters.
   # Sparse/jumping returns remain fail-safe evidence-invalid (34). A confirmed
@@ -840,7 +839,8 @@ hook_cargo_lock:
   live_pose_velocity_alpha: 0.35
   # LOST_HOLD remains visible for lost_clear_sec, but formal safety/removal may
   # only use prediction/held evidence inside this short window.
-  formal_pose_hold_sec: 2.00
+  formal_xy_evidence_hold_sec: 2.00
+  formal_vertical_evidence_hold_sec: 2.00
   direct_bottom_soft_stale_sec: 2.00
   velocity_model_uncertainty_mps: 0.05
   association_max_xy_gate_m: 0.80

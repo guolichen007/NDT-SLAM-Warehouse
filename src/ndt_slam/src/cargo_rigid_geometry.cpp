@@ -331,13 +331,17 @@ CargoFormalUseDecision evaluateCargoFormalUse(
     double evaluation_stamp_sec,
     double pose_evidence_stamp_sec,
     double height_evidence_stamp_sec,
-    double formal_hold_sec,
+    double formal_xy_evidence_hold_sec,
+    double formal_vertical_evidence_hold_sec,
     float horizontal_uncertainty_m) {
     CargoFormalUseDecision decision;
     if (!geometry_valid || !std::isfinite(evaluation_stamp_sec) ||
         !std::isfinite(pose_evidence_stamp_sec) ||
         !std::isfinite(height_evidence_stamp_sec) ||
-        !std::isfinite(formal_hold_sec) || formal_hold_sec < 0.0 ||
+        !std::isfinite(formal_xy_evidence_hold_sec) ||
+        formal_xy_evidence_hold_sec < 0.0 ||
+        !std::isfinite(formal_vertical_evidence_hold_sec) ||
+        formal_vertical_evidence_hold_sec < 0.0 ||
         !std::isfinite(horizontal_uncertainty_m) ||
         horizontal_uncertainty_m < 0.0F) {
         decision.reason = "invalid_geometry_or_evidence_time";
@@ -352,17 +356,23 @@ CargoFormalUseDecision evaluateCargoFormalUse(
     }
     decision.display_valid = true;
     decision.horizontal_uncertainty_m = horizontal_uncertainty_m;
-    // Frozen shape height remains authoritative for the lifetime of the
-    // retained track. Direct bottom age is diagnostic/uncertainty evidence;
-    // only the live pose evidence window gates formal safety and removal.
-    const bool within_hold =
-        decision.pose_age_sec <= formal_hold_sec + 1.0e-4;
+    // Frozen physical thickness does not expire, but both horizontal pose and
+    // live vertical position require their own recent physical evidence.
+    const bool xy_within_hold = decision.pose_age_sec <=
+        formal_xy_evidence_hold_sec + 1.0e-4;
+    const bool vertical_within_hold = decision.height_age_sec <=
+        formal_vertical_evidence_hold_sec + 1.0e-4;
+    const bool within_hold = xy_within_hold && vertical_within_hold;
     decision.formal_safety_valid = within_hold;
     decision.formal_removal_valid = within_hold;
     if (within_hold) {
         decision.reason = lost_hold
             ? "lost_hold_formal_window"
             : "locked_formal_window";
+    } else if (!vertical_within_hold) {
+        decision.reason = "formal_vertical_evidence_expired";
+    } else if (!xy_within_hold) {
+        decision.reason = "formal_xy_evidence_expired";
     } else {
         decision.reason = lost_hold
             ? "lost_hold_display_only_evidence_expired"
