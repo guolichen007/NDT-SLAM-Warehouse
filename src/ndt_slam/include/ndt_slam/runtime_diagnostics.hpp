@@ -251,13 +251,35 @@ struct CargoFrameRecord {
   double shape_confidence = 0.0;
   double motion_confidence = 0.0;
   double overall_lock_confidence = 0.0;
+  int obstacle_roi_finite_points = 0;
+  double obstacle_roi_coverage_ratio = 0.0;
   int self_removed_points = 0;
+  int identity_self_removed_points = 0;
+  int rigging_self_removed_points = 0;
   int external_obstacle_points = 0;
+  double self_margin_xy_m = 0.0;
+  double self_margin_z_m = 0.0;
+  double horizontal_uncertainty_m = 0.0;
+  double vertical_uncertainty_m = 0.0;
+  bool ground_reference_valid = false;
+  double ground_z = 0.0;
+  int dangerous_cluster_points = 0;
+  double nearest_obstacle_x = 0.0;
+  double nearest_obstacle_y = 0.0;
+  double nearest_obstacle_z = 0.0;
   double nearest_cluster_center_x = 0.0;
   double nearest_cluster_center_y = 0.0;
   double nearest_cluster_center_z = 0.0;
   double nearest_cluster_distance =
       std::numeric_limits<double>::infinity();
+  double obstacle_top_z95_m =
+      std::numeric_limits<double>::quiet_NaN();
+  double obstacle_uncertainty_m =
+      std::numeric_limits<double>::quiet_NaN();
+  double conservative_clearance_m =
+      std::numeric_limits<double>::quiet_NaN();
+  int requested_alarm_code = 30;
+  std::string safety_reason = "system_not_ready";
   double center_x = 0.0, center_y = 0.0, center_z = 0.0;
   double measured_center_x = 0.0, measured_center_y = 0.0,
          measured_center_z = 0.0;

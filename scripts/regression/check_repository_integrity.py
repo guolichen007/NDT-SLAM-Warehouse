@@ -525,7 +525,7 @@ def runtime_console_contract_failures() -> list[str]:
         "debug_perf: false",
         "csv_enabled: true",
         "console_health_enabled: false",
-        "console_risk_enabled: true",
+        "console_risk_enabled: false",
         "cargo_console_enabled: true",
     )
     for token in required_config:
@@ -539,6 +539,7 @@ def runtime_console_contract_failures() -> list[str]:
         "writeNdtFrame",
         "writeCargoFrame",
         "[CARGO_MONITOR]",
+        "[CARGO_SAFETY]",
         "console_health_enabled: false",
         "[PIPELINE_HEALTH]",
         "updatePipelineRisk",

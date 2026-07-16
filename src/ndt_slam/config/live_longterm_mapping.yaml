@@ -11,8 +11,9 @@ debug:
     console_health_enabled: false
     # Operational terminal is reserved for cargo tracking and safety changes.
     # Localization/pipeline risk samples remain in the per-frame CSV files.
-    # Event-mode only: ENTER/CHANGE/REPEAT/CLEAR, never per-frame spam.
-    console_risk_enabled: true
+    # NDT/pipeline risk details remain in runtime_frames.csv. Immediate ROS
+    # errors (SO3/non-finite/relocalization) are unaffected by this switch.
+    console_risk_enabled: false
     cargo_console_enabled: true
     health_period_sec: 10.0
     risk_repeat_period_sec: 10.0
@@ -814,6 +815,14 @@ hook_cargo_lock:
   self_cargo_base_margin_z_m: 0.12
   self_cargo_max_margin_xy_m: 0.40
   self_cargo_max_margin_z_m: 0.30
+  # Spatial correspondence with the current selected component removes the
+  # same physical cargo returns after feature/downsampling shifts them.  This
+  # radius is deliberately much smaller than the OBB margin so external
+  # obstacles touching the cargo boundary remain visible to safety.
+  self_cargo_point_match_radius_m: 0.06
+  # A narrow line mask follows the suspension path from cargo top to the
+  # configured hook anchor; it removes rope/hook returns, not a broad volume.
+  self_rigging_radius_m: 0.10
   lost_position_uncertainty_per_sec: 0.05
   lost_position_uncertainty_max_m: 0.50
 

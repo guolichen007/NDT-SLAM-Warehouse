@@ -1790,6 +1790,12 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.self_cargo_max_margin_z_m = std::max(
                 hook_lock_config_.self_cargo_base_margin_z_m,
                 hcl["self_cargo_max_margin_z_m"].as<float>(0.30F));
+            hook_lock_config_.self_cargo_point_match_radius_m = std::clamp(
+                hcl["self_cargo_point_match_radius_m"].as<float>(0.06F),
+                0.02F, 0.12F);
+            hook_lock_config_.self_rigging_radius_m = std::clamp(
+                hcl["self_rigging_radius_m"].as<float>(0.10F),
+                0.03F, 0.20F);
             hook_lock_config_.lost_position_uncertainty_per_sec = std::max(
                 0.0F,
                 hcl["lost_position_uncertainty_per_sec"].as<float>(0.05F));
@@ -5216,12 +5222,9 @@ void NdtSlamNode::processCloudThread() {
                 last_diag_health_time = ros::Time::now();
             }
 
-            // Cargo 健康日志
-            static ros::Time last_cargo_health_time;
-            if ((ros::Time::now() - last_cargo_health_time).toSec() >= 2.0) {
-                logCargoHealthPeriodic();
-                last_cargo_health_time = ros::Time::now();
-            }
+            // Cargo CSV is frame-by-frame. RuntimeDiagnostics performs its own
+            // console throttling, so operational output remains sparse.
+            logCargoHealthPeriodic();
 
             // Create the pending record now; total_ms is finalized at the true
             // loop tail after periodic maintenance and risk output.
@@ -8211,6 +8214,7 @@ void NdtSlamNode::publishRelocalizationSafetyInvalid(
         status, false, CargoSafetyFault::NONE, 0U, false,
         "relocalization:" + reason);
     cargo_safety_status_pub_.publish(status);
+    logCargoSafetyStatus(status);
     publishCargoFusionMarker(
         CargoBottomResult{}, stamp, false, false);
 }
@@ -9564,6 +9568,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         odom_anchor_config_.max_size_x, odom_anchor_config_.max_size_y);
 
     std::size_t selected_component_index = 0U;
+    const bool collect_candidate_debug =
+        cargo_candidate_components_pub_.getNumSubscribers() > 0U;
     std::vector<CargoCandidateIdentityScore> component_scores;
     component_scores.reserve(cluster_indices.size());
     for (std::size_t component_index = 0U;
@@ -9575,7 +9581,9 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         component_z.reserve(cluster_indices[component_index].indices.size());
         for (int point_index : cluster_indices[component_index].indices) {
             const pcl::PointXYZ& point = voxel_cloud->points[point_index];
-            result.candidate_components_base->push_back(point);
+            if (collect_candidate_debug) {
+                result.candidate_components_base->push_back(point);
+            }
             footprint_points.emplace_back(point.x, point.y);
             component_z.push_back(point.z);
         }
@@ -11459,10 +11467,12 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
     CargoSafetyFault evaluator_fault,
     std::uint16_t warning_code,
     bool warning_valid,
-    const std::string& evidence_reason) const {
+    const std::string& evidence_reason,
+    bool evidence_initialized) const {
     using Status = lidar_slam2_msgs::CargoSafetyStatus;
 
-    const bool system_ready = running_.load() && !status.header.stamp.isZero();
+    const bool system_ready = running_.load() &&
+        !status.header.stamp.isZero() && evidence_initialized;
     const bool localization_valid =
         !tracking_lost_.load() && relocalization_pose_reliable_ &&
         (relocalization_state_ == RelocalizationState::IDLE ||
@@ -11594,9 +11604,63 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
     return status;
 }
 
+void NdtSlamNode::logCargoSafetyStatus(
+    const lidar_slam2_msgs::CargoSafetyStatus& status) {
+    const bool changed =
+        status.requested_alarm_code != cargo_last_requested_code_ ||
+        status.reason != cargo_last_safety_reason_;
+    const double elapsed = cargo_last_safety_console_stamp_.isZero()
+        ? std::numeric_limits<double>::infinity()
+        : (status.header.stamp - cargo_last_safety_console_stamp_).toSec();
+    const bool periodic = !std::isfinite(elapsed) || elapsed < 0.0 ||
+        elapsed >= debug_cfg_.summary_interval_sec;
+    if (!changed && !periodic) return;
+
+    std::ostringstream message;
+    message << "[CARGO_SAFETY] code=" << status.requested_alarm_code
+            << " reason=" << status.reason
+            << " track=" << status.cargo_track_id
+            << " cargo_valid=" << (status.cargo_valid ? 1 : 0)
+            << " roi_finite=" << cargo_obstacle_roi_finite_points_
+            << " coverage=" << std::fixed << std::setprecision(3)
+            << cargo_obstacle_roi_coverage_ratio_
+            << " self_removed=" << cargo_self_removed_points_
+            << " identity_removed="
+            << cargo_identity_self_removed_points_
+            << " rigging_removed="
+            << cargo_rigging_self_removed_points_
+            << " external=" << cargo_external_obstacle_points_
+            << " cluster_points=" << cargo_dangerous_cluster_points_
+            << " distance=" << cargo_nearest_cluster_distance_m_
+            << " clearance=" << cargo_conservative_clearance_m_
+            << " nearest=(" << cargo_nearest_obstacle_point_.x() << ","
+            << cargo_nearest_obstacle_point_.y() << ","
+            << cargo_nearest_obstacle_point_.z() << ")"
+            << " bottom=" << status.cargo_bottom_z_map
+            << " bottom_unc=" << status.cargo_bottom_uncertainty_m
+            << " obstacle_top=" << cargo_obstacle_top_z95_m_
+            << " obstacle_unc=" << cargo_obstacle_uncertainty_m_
+            << " horizontal_unc=" << cargo_horizontal_uncertainty_m_
+            << " vertical_unc=" << cargo_vertical_uncertainty_m_
+            << " ground_valid="
+            << (hook_fixed_cargo_.ground_reference_valid ? 1 : 0)
+            << " ground_z=" << hook_fixed_cargo_.ground_z;
+    if (status.requested_alarm_code == CargoSafetyProtocol::kLevel1Warning ||
+        status.requested_alarm_code == CargoSafetyProtocol::kLevel2Warning ||
+        status.requested_alarm_code >= CargoSafetyProtocol::kSystemNotReady) {
+        ROS_WARN_STREAM(message.str());
+    } else {
+        ROS_INFO_STREAM(message.str());
+    }
+    cargo_last_requested_code_ = status.requested_alarm_code;
+    cargo_last_safety_reason_ = status.reason;
+    cargo_last_safety_console_stamp_ = status.header.stamp;
+}
+
 void NdtSlamNode::publishHookOnlySafetyStatus(
     const HookLoadSnapshot& hook, const ros::Time& stamp,
-    bool visual_conflict, const std::string& reason) {
+    bool visual_conflict, const std::string& reason,
+    bool evidence_initialized) {
     const bool lidar_no_cargo =
         lidar_no_cargo_evidence_.result().confirmed && !visual_conflict;
     const bool safe_empty =
@@ -11622,8 +11686,31 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
     status = composeCargoSafetyStatus(
         status, visual_conflict, CargoSafetyFault::NONE,
         safe_empty ? CargoSafetyEvaluator::kSafeCode : 0U,
-        safe_empty, reason.empty() ? hook.reason : reason);
+        safe_empty, reason.empty() ? hook.reason : reason,
+        evidence_initialized);
+    cargo_obstacle_roi_finite_points_ = 0U;
+    cargo_obstacle_roi_coverage_ratio_ = 0.0F;
+    cargo_self_removed_points_ = 0U;
+    cargo_identity_self_removed_points_ = 0U;
+    cargo_rigging_self_removed_points_ = 0U;
+    cargo_external_obstacle_points_ = 0U;
+    cargo_dangerous_cluster_points_ = 0U;
+    cargo_nearest_obstacle_point_.setZero();
+    cargo_nearest_cluster_center_.setZero();
+    cargo_nearest_cluster_distance_m_ =
+        std::numeric_limits<float>::infinity();
+    cargo_obstacle_top_z95_m_ =
+        std::numeric_limits<float>::quiet_NaN();
+    cargo_obstacle_uncertainty_m_ =
+        std::numeric_limits<float>::quiet_NaN();
+    cargo_conservative_clearance_m_ =
+        std::numeric_limits<float>::quiet_NaN();
+    cargo_horizontal_uncertainty_m_ = 0.0F;
+    cargo_vertical_uncertainty_m_ = 0.0F;
+    cargo_self_margin_xy_m_ = 0.0F;
+    cargo_self_margin_z_m_ = 0.0F;
     cargo_safety_status_pub_.publish(status);
+    logCargoSafetyStatus(status);
 
     lidar_slam2_msgs::CargoBottomEstimate bottom;
     bottom.header = status.header;
@@ -11649,6 +11736,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const ros::Time& stamp,
     const ros::Time& obstacle_cloud_stamp,
     double processing_age_sec) {
+    last_cargo_pipeline_stamp_ = stamp;
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
     const bool visual_conflict = hook_fixed_cargo_.valid;
     const bool required_role =
@@ -11698,6 +11786,18 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         formal_cargo_removal_authorized_ = false;
     }
     cargo_fusion_track_active_ = active_track;
+    if (!active_track) {
+        // Before either a retained cargo track or an independently confirmed
+        // EMPTY observation exists, the safety evidence epoch has not
+        // started.  Report 30 (not-ready), not 33 (an established cargo whose
+        // live pose/height has become invalid).
+        publishHookOnlySafetyStatus(
+            hook, stamp, visual_conflict,
+            visual_conflict ? "cargo_candidate_not_yet_authoritative"
+                            : "cargo_track_not_initialized",
+            false);
+        return;
+    }
 
     // Gravity may become LOADED after a lift-evidence track has already
     // started. Consume the EMPTY-phase origin as soon as it becomes available,
@@ -12110,10 +12210,76 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         hook_lock_config_.self_cargo_base_margin_z_m +
             hook_lock_.vertical_tracking_residual_m +
             0.5F * rigid_geometry.vertical_uncertainty_m);
+    cargo_obstacle_roi_finite_points_ = roi_finite_points;
+    cargo_obstacle_roi_coverage_ratio_ = coverage_ratio;
+    cargo_self_margin_xy_m_ = self_margin_xy;
+    cargo_self_margin_z_m_ = self_margin_z;
+    cargo_horizontal_uncertainty_m_ =
+        rigid_geometry.horizontal_uncertainty_m;
+    cargo_vertical_uncertainty_m_ =
+        rigid_geometry.vertical_uncertainty_m;
+
+    pcl::KdTreeFLANN<pcl::PointXYZ> identity_self_tree;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr identity_self_reference;
+    if (detection_is_current && hook_fixed_cargo_.core_points_base &&
+        !hook_fixed_cargo_.core_points_base->empty()) {
+        identity_self_reference = hook_fixed_cargo_.core_points_base;
+    } else if (hook_lock_.has_last_accepted &&
+               hook_lock_.last_accepted_core_points &&
+               !hook_lock_.last_accepted_core_points->empty() &&
+               rigid_geometry.pose.center_base.allFinite()) {
+        // Detection is intentionally rate-limited.  Between detector frames,
+        // translate the last identity-selected component with the retained
+        // rigid pose instead of dropping the identity mask for one frame.
+        identity_self_reference.reset(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        identity_self_reference->reserve(
+            hook_lock_.last_accepted_core_points->size());
+        const Eigen::Vector3f translation =
+            rigid_geometry.pose.center_base -
+            hook_lock_.last_accepted_center;
+        for (const pcl::PointXYZ& source :
+             hook_lock_.last_accepted_core_points->points) {
+            pcl::PointXYZ projected = source;
+            projected.x += translation.x();
+            projected.y += translation.y();
+            projected.z += translation.z();
+            identity_self_reference->push_back(projected);
+        }
+    }
+    const bool identity_self_mask_valid = identity_self_reference &&
+        !identity_self_reference->empty();
+    if (identity_self_mask_valid) {
+        identity_self_tree.setInputCloud(identity_self_reference);
+    }
+    const float identity_match_radius_sq =
+        hook_lock_config_.self_cargo_point_match_radius_m *
+        hook_lock_config_.self_cargo_point_match_radius_m;
+    std::size_t identity_self_removed = 0U;
+    std::size_t rigging_self_removed = 0U;
+    const Eigen::Vector2f hook_anchor = getCargoAnchorXY();
+    const float rigging_lower_z = predicted_self_footprint.valid
+        ? predicted_self_footprint.max_z_base - self_margin_z
+        : std::numeric_limits<float>::infinity();
+    const float rigging_upper_z = std::max(
+        rigging_lower_z + 0.10F,
+        static_cast<float>(odom_anchor_config_.search_z_max));
+    std::vector<int> identity_nearest_index(1);
+    std::vector<float> identity_nearest_distance_sq(1);
     self_removed_cloud->reserve(obstacle_roi->size());
     external_obstacle_cloud->reserve(obstacle_roi->size());
     for (const pcl::PointXYZ& point : obstacle_roi->points) {
         const Eigen::Vector3f point_base = point.getVector3fMap();
+        bool matches_current_identity = false;
+        if (identity_self_mask_valid) {
+            matches_current_identity =
+                identity_self_tree.nearestKSearch(
+                    point, 1, identity_nearest_index,
+                    identity_nearest_distance_sq) > 0 &&
+                !identity_nearest_distance_sq.empty() &&
+                identity_nearest_distance_sq.front() <=
+                    identity_match_radius_sq;
+        }
         const bool inside_predicted = predicted_self_footprint.valid &&
             containsPointInCargoObbBase(
                 point_base, predicted_self_footprint,
@@ -12136,9 +12302,28 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             containsPointInSweptCargoObbBase(
                 point_base, accepted_self_footprint,
                 predicted_self_footprint, self_margin_xy, self_margin_z);
-        if (inside_predicted || inside_previous || inside_accepted ||
+        bool inside_rigging = false;
+        if (predicted_self_footprint.valid &&
+            point.z >= rigging_lower_z &&
+            point.z <= rigging_upper_z + self_margin_z) {
+            const float alpha = std::clamp(
+                (point.z - rigging_lower_z) /
+                    std::max(0.10F, rigging_upper_z - rigging_lower_z),
+                0.0F, 1.0F);
+            const Eigen::Vector2f expected_xy =
+                (1.0F - alpha) * predicted_self_footprint.center_base +
+                alpha * hook_anchor;
+            inside_rigging =
+                (point_base.head<2>() - expected_xy).norm() <=
+                hook_lock_config_.self_rigging_radius_m;
+        }
+        if (matches_current_identity || inside_rigging ||
+            inside_predicted || inside_previous ||
+            inside_accepted ||
             inside_swept_previous || inside_swept_accepted) {
             self_removed_cloud->push_back(point);
+            if (matches_current_identity) ++identity_self_removed;
+            if (inside_rigging) ++rigging_self_removed;
         } else {
             external_obstacle_cloud->push_back(point);
         }
@@ -12150,6 +12335,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         }
     }
     cargo_self_removed_points_ = self_removed_cloud->size();
+    cargo_identity_self_removed_points_ = identity_self_removed;
+    cargo_rigging_self_removed_points_ = rigging_self_removed;
     cargo_external_obstacle_points_ = external_obstacle_cloud->size();
     const auto publish_safety_debug_cloud = [&stamp](
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
@@ -12193,8 +12380,16 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     pcl::PointCloud<pcl::PointXYZ>::Ptr dangerous_cluster_debug(
         new pcl::PointCloud<pcl::PointXYZ>);
     cargo_nearest_cluster_center_.setZero();
+    cargo_nearest_obstacle_point_.setZero();
     cargo_nearest_cluster_distance_m_ =
         std::numeric_limits<float>::infinity();
+    cargo_dangerous_cluster_points_ = 0U;
+    cargo_obstacle_top_z95_m_ =
+        std::numeric_limits<float>::quiet_NaN();
+    cargo_obstacle_uncertainty_m_ =
+        std::numeric_limits<float>::quiet_NaN();
+    cargo_conservative_clearance_m_ =
+        std::numeric_limits<float>::quiet_NaN();
     if (last_cargo_safety_result_.has_cluster_evidence) {
         const CargoSafetyClusterEvidence& evidence =
             last_cargo_safety_result_.most_dangerous_cluster;
@@ -12220,6 +12415,13 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         }
         cargo_nearest_cluster_distance_m_ =
             evidence.footprint_distance_m;
+        cargo_dangerous_cluster_points_ = evidence.point_count;
+        cargo_nearest_obstacle_point_ = seed;
+        cargo_obstacle_top_z95_m_ = evidence.obstacle_top_z95_m;
+        cargo_obstacle_uncertainty_m_ =
+            evidence.obstacle_uncertainty_m;
+        cargo_conservative_clearance_m_ =
+            evidence.conservative_clearance_m;
     }
     publish_safety_debug_cloud(
         dangerous_cluster_debug, cargo_most_dangerous_cluster_pub_);
@@ -12270,6 +12472,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         last_cargo_safety_result_.warning_code,
         last_cargo_safety_result_.warning_valid, evidence_reason);
     cargo_safety_status_pub_.publish(safety_msg);
+    logCargoSafetyStatus(safety_msg);
     publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_, stamp);
 }
 
@@ -15188,7 +15391,9 @@ void NdtSlamNode::logCargoHealthPeriodic() {
     if (!runtime_diag_.isEnabled()) return;
 
     CargoFrameRecord rec;
-    rec.stamp = cargo_state_.stamp.toSec();
+    rec.stamp = !last_cargo_pipeline_stamp_.isZero()
+        ? last_cargo_pipeline_stamp_.toSec()
+        : cargo_state_.stamp.toSec();
     rec.track_id = static_cast<int>(std::min<std::uint64_t>(
         cargo_fusion_track_id_,
         static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
@@ -15209,7 +15414,7 @@ void NdtSlamNode::logCargoHealthPeriodic() {
         current_rigid_cargo_geometry_.valid
             ? current_rigid_cargo_geometry_.pose.source
             : hook_lock_.live_pose.source);
-    const double evaluation_stamp = cargo_state_.stamp.toSec();
+    const double evaluation_stamp = rec.stamp;
     rec.pose_evidence_age_sec =
         hook_lock_.live_pose.evidence_stamp_sec > 0.0
             ? std::max(0.0, evaluation_stamp -
@@ -15260,16 +15465,49 @@ void NdtSlamNode::logCargoHealthPeriodic() {
         hook_lock_.provisional_observations.empty()
             ? hook_fixed_cargo_.overall_lock_confidence
             : hook_lock_.provisional_summary.overall_lock_confidence;
+    rec.obstacle_roi_finite_points = static_cast<int>(
+        std::min<std::size_t>(
+            cargo_obstacle_roi_finite_points_,
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.obstacle_roi_coverage_ratio =
+        cargo_obstacle_roi_coverage_ratio_;
     rec.self_removed_points = static_cast<int>(std::min<std::size_t>(
         cargo_self_removed_points_,
         static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.identity_self_removed_points = static_cast<int>(
+        std::min<std::size_t>(
+            cargo_identity_self_removed_points_,
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.rigging_self_removed_points = static_cast<int>(
+        std::min<std::size_t>(
+            cargo_rigging_self_removed_points_,
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
     rec.external_obstacle_points = static_cast<int>(std::min<std::size_t>(
         cargo_external_obstacle_points_,
         static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.self_margin_xy_m = cargo_self_margin_xy_m_;
+    rec.self_margin_z_m = cargo_self_margin_z_m_;
+    rec.horizontal_uncertainty_m = cargo_horizontal_uncertainty_m_;
+    rec.vertical_uncertainty_m = cargo_vertical_uncertainty_m_;
+    rec.ground_reference_valid =
+        hook_fixed_cargo_.ground_reference_valid;
+    rec.ground_z = hook_fixed_cargo_.ground_z;
+    rec.dangerous_cluster_points = static_cast<int>(
+        std::min<std::size_t>(
+            cargo_dangerous_cluster_points_,
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.nearest_obstacle_x = cargo_nearest_obstacle_point_.x();
+    rec.nearest_obstacle_y = cargo_nearest_obstacle_point_.y();
+    rec.nearest_obstacle_z = cargo_nearest_obstacle_point_.z();
     rec.nearest_cluster_center_x = cargo_nearest_cluster_center_.x();
     rec.nearest_cluster_center_y = cargo_nearest_cluster_center_.y();
     rec.nearest_cluster_center_z = cargo_nearest_cluster_center_.z();
     rec.nearest_cluster_distance = cargo_nearest_cluster_distance_m_;
+    rec.obstacle_top_z95_m = cargo_obstacle_top_z95_m_;
+    rec.obstacle_uncertainty_m = cargo_obstacle_uncertainty_m_;
+    rec.conservative_clearance_m = cargo_conservative_clearance_m_;
+    rec.requested_alarm_code = cargo_last_requested_code_;
+    rec.safety_reason = cargo_last_safety_reason_;
     rec.support_points = static_cast<int>(std::min<std::size_t>(
         last_cargo_bottom_result_.selected_stats.bottom_band_points,
         static_cast<std::size_t>(std::numeric_limits<int>::max())));

@@ -32,6 +32,8 @@ def main() -> int:
     crane_constraint = read("src/ndt_slam/src/crane_pose_constraint.cpp")
     safety_header = read(
         "src/ndt_slam/include/ndt_slam/cargo_safety_evaluator.hpp")
+    runtime_header = read(
+        "src/ndt_slam/include/ndt_slam/runtime_diagnostics.hpp")
     safety_evaluator = read("src/ndt_slam/src/cargo_safety_evaluator.cpp")
     launch = read("src/ndt_slam/launch/warehouse_live_longterm_mapping.launch")
     messages = read("src/lidar_slam2_msgs/CMakeLists.txt")
@@ -73,7 +75,8 @@ def main() -> int:
     require("cargo_safety_evaluator_.evaluate(safety_input)" in node,
             "CargoSafetyEvaluator is not invoked by the runtime", failures)
     require("composeCargoSafetyStatus(" in node and
-            node.count("status.requested_alarm_code =") == 1,
+            len(re.findall(
+                r"status\.requested_alarm_code\s*=(?!=)", node)) == 1,
             "final status code is not composed at one authoritative site",
             failures)
     require("CargoSafetyFault" in safety_header and
@@ -317,6 +320,23 @@ def main() -> int:
                   "/cargo_avoidance/external_obstacle_cloud",
                   "/cargo_avoidance/most_dangerous_cluster"):
         require(topic in node, f"cargo debug topic missing: {topic}", failures)
+    require("cargo_track_not_initialized" in node and
+            "evidence_initialized" in node and
+            "CargoSafetyProtocol::kSystemNotReady" in node,
+            "pre-authority cargo startup is not mapped to code 30", failures)
+    require("self_cargo_point_match_radius_m" in node + live_config and
+            "self_rigging_radius_m" in node + live_config and
+            "identity_self_tree.nearestKSearch" in node and
+            "inside_rigging" in node and
+            "cargo_identity_self_removed_points_" in node,
+            "identity-selected cargo returns can still leak into obstacles",
+            failures)
+    require("dangerous_cluster_points" in runtime_header and
+            "nearest_obstacle_x" in runtime_header and
+            "conservative_clearance_m" in runtime_header and
+            "requested_alarm_code" in runtime_header,
+            "cargo safety evidence is incomplete in frame diagnostics",
+            failures)
     require("NDT_SKIPPED_BOOTSTRAP" in node and
             "fitnessStats().count() >= 30U" in node and
             "last_ndt_fitness_ >= map_commit_max_fitness_" in node,

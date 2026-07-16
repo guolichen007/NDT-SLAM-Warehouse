@@ -74,10 +74,21 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
     cargo_csv_ << "stamp,track_state,track_id,lock_state,observation_valid,"
                << "cluster_points,support_points,candidate_count,selected_candidate_id,"
                << "identity_score,orientation_confidence,shape_confidence,"
-               << "motion_confidence,overall_lock_confidence,self_removed_points,"
-               << "external_obstacle_points,nearest_cluster_center_x,"
+               << "motion_confidence,overall_lock_confidence,"
+               << "obstacle_roi_finite_points,obstacle_roi_coverage_ratio,"
+               << "self_removed_points,identity_self_removed_points,"
+               << "rigging_self_removed_points,"
+               << "external_obstacle_points,self_margin_xy_m,self_margin_z_m,"
+               << "horizontal_uncertainty_m,vertical_uncertainty_m,"
+               << "ground_reference_valid,ground_z,"
+               << "dangerous_cluster_points,nearest_obstacle_x,"
+               << "nearest_obstacle_y,nearest_obstacle_z,"
+               << "nearest_cluster_center_x,"
                << "nearest_cluster_center_y,nearest_cluster_center_z,"
-               << "nearest_cluster_distance,live_center_x,live_center_y,live_center_z,"
+               << "nearest_cluster_distance,obstacle_top_z95_m,"
+               << "obstacle_uncertainty_m,conservative_clearance_m,"
+               << "requested_alarm_code,safety_reason,"
+               << "live_center_x,live_center_y,live_center_z,"
                << "measured_center_x,measured_center_y,measured_center_z,"
                << "predicted_center_x,predicted_center_y,predicted_center_z,"
                << "center_residual_x,center_residual_y,center_residual_z,"
@@ -416,12 +427,29 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << rec.identity_score << "," << rec.orientation_confidence << ","
                << rec.shape_confidence << "," << rec.motion_confidence << ","
                << rec.overall_lock_confidence << ","
+               << rec.obstacle_roi_finite_points << ","
+               << rec.obstacle_roi_coverage_ratio << ","
                << rec.self_removed_points << ","
+               << rec.identity_self_removed_points << ","
+               << rec.rigging_self_removed_points << ","
                << rec.external_obstacle_points << ","
+               << rec.self_margin_xy_m << "," << rec.self_margin_z_m << ","
+               << rec.horizontal_uncertainty_m << ","
+               << rec.vertical_uncertainty_m << ","
+               << (rec.ground_reference_valid ? 1 : 0) << ","
+               << rec.ground_z << ","
+               << rec.dangerous_cluster_points << ","
+               << rec.nearest_obstacle_x << ","
+               << rec.nearest_obstacle_y << ","
+               << rec.nearest_obstacle_z << ","
                << rec.nearest_cluster_center_x << ","
                << rec.nearest_cluster_center_y << ","
                << rec.nearest_cluster_center_z << ","
                << rec.nearest_cluster_distance << ","
+               << rec.obstacle_top_z95_m << ","
+               << rec.obstacle_uncertainty_m << ","
+               << rec.conservative_clearance_m << ","
+               << rec.requested_alarm_code << "," << rec.safety_reason << ","
                << std::setprecision(4)
                << rec.center_x << "," << rec.center_y << "," << rec.center_z << ","
                << rec.measured_center_x << "," << rec.measured_center_y << ","
@@ -537,6 +565,8 @@ void RuntimeDiagnostics::logCargoHealth(const CargoFrameRecord& rec) {
   last_cargo_console_ = now;
   std::cout << "[CARGO_MONITOR]"
             << " stamp=" << std::fixed << std::setprecision(3) << rec.stamp
+            << " safety_code=" << rec.requested_alarm_code
+            << " safety_reason=" << rec.safety_reason
             << " track_state=" << rec.track_state
             << " track_id=" << rec.track_id
             << " lock_state=" << rec.lock_state
@@ -553,6 +583,11 @@ void RuntimeDiagnostics::logCargoHealth(const CargoFrameRecord& rec) {
             << rec.stable_bottom_z
             << " top=" << rec.top_z
             << " height_valid=" << (rec.height_valid ? 1 : 0)
+            << " external_points=" << rec.external_obstacle_points
+            << " dangerous_cluster_points="
+            << rec.dangerous_cluster_points
+            << " nearest_distance=" << rec.nearest_cluster_distance
+            << " clearance=" << rec.conservative_clearance_m
             << " reason=" << rec.filter_reason
             << std::endl;
 }

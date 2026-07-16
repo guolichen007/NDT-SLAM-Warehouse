@@ -1601,6 +1601,11 @@ private:
         float self_cargo_base_margin_z_m = 0.12F;
         float self_cargo_max_margin_xy_m = 0.40F;
         float self_cargo_max_margin_z_m = 0.30F;
+        // Matches only points that are spatially coincident with the current
+        // identity-selected cargo component.  It closes the downsampling gap
+        // without expanding the OBB enough to hide a nearby real obstacle.
+        float self_cargo_point_match_radius_m = 0.06F;
+        float self_rigging_radius_m = 0.10F;
         float lost_position_uncertainty_per_sec = 0.05F;
         float lost_position_uncertainty_max_m = 0.50F;
 
@@ -1809,10 +1814,31 @@ private:
     CargoBottomResult last_cargo_bottom_result_;
     CargoSafetyResult last_cargo_safety_result_;
     std::size_t cargo_self_removed_points_ = 0U;
+    std::size_t cargo_identity_self_removed_points_ = 0U;
+    std::size_t cargo_rigging_self_removed_points_ = 0U;
     std::size_t cargo_external_obstacle_points_ = 0U;
+    std::size_t cargo_obstacle_roi_finite_points_ = 0U;
+    float cargo_obstacle_roi_coverage_ratio_ = 0.0F;
+    float cargo_self_margin_xy_m_ = 0.0F;
+    float cargo_self_margin_z_m_ = 0.0F;
+    float cargo_horizontal_uncertainty_m_ = 0.0F;
+    float cargo_vertical_uncertainty_m_ = 0.0F;
+    std::size_t cargo_dangerous_cluster_points_ = 0U;
+    Eigen::Vector3f cargo_nearest_obstacle_point_ =
+        Eigen::Vector3f::Zero();
     Eigen::Vector3f cargo_nearest_cluster_center_ = Eigen::Vector3f::Zero();
     float cargo_nearest_cluster_distance_m_ =
         std::numeric_limits<float>::infinity();
+    float cargo_obstacle_top_z95_m_ =
+        std::numeric_limits<float>::quiet_NaN();
+    float cargo_obstacle_uncertainty_m_ =
+        std::numeric_limits<float>::quiet_NaN();
+    float cargo_conservative_clearance_m_ =
+        std::numeric_limits<float>::quiet_NaN();
+    std::int32_t cargo_last_requested_code_ =
+        CargoSafetyProtocol::kSystemNotReady;
+    std::string cargo_last_safety_reason_ = "startup";
+    ros::Time cargo_last_safety_console_stamp_;
     RigidCargoGeometry current_rigid_cargo_geometry_;
     RigidCargoGeometry previous_self_mask_geometry_;
     RigidCargoGeometry accepted_self_mask_geometry_;
@@ -1942,11 +1968,15 @@ private:
         CargoSafetyFault evaluator_fault,
         std::uint16_t warning_code,
         bool warning_valid,
-        const std::string& evidence_reason) const;
+        const std::string& evidence_reason,
+        bool evidence_initialized = true) const;
     void publishHookOnlySafetyStatus(const HookLoadSnapshot& hook,
                                      const ros::Time& stamp,
                                      bool visual_conflict,
-                                     const std::string& reason);
+                                     const std::string& reason,
+                                     bool evidence_initialized = true);
+    void logCargoSafetyStatus(
+        const lidar_slam2_msgs::CargoSafetyStatus& status);
     void resetCargoForHookState(bool preserve_origin_height);
     bool hookAllowsMapCommit() const;
     void recordEmptyHookOriginHeight(float height_m,

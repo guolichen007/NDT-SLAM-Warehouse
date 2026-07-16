@@ -139,8 +139,12 @@ TEST(CargoSafetyDecision, SystemAndGravityFaultsNeverBecomeLevel2Warning) {
     CargoSafetyDecisionInput startup = validLoadedDecision(
         CargoSafetyProtocol::kLevel2Warning);
     startup.system_ready = false;
-    EXPECT_EQ(composeCargoSafetyDecision(startup).requested_code,
+    startup.evidence_reason = "cargo_track_not_initialized";
+    const CargoSafetyDecision startup_result =
+        composeCargoSafetyDecision(startup);
+    EXPECT_EQ(startup_result.requested_code,
               CargoSafetyProtocol::kSystemNotReady);
+    EXPECT_EQ(startup_result.reason, "cargo_track_not_initialized");
 
     CargoSafetyDecisionInput gravity = validLoadedDecision(
         CargoSafetyProtocol::kLevel2Warning);

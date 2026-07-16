@@ -169,7 +169,8 @@ CargoSafetyDecision composeCargoSafetyDecision(
             ? "internal_contract_error" : input.evidence_reason;
     } else if (!input.system_ready) {
         decision.fault_code = CargoSafetyProtocol::kSystemNotReady;
-        decision.reason = "system_not_ready";
+        decision.reason = input.evidence_reason.empty()
+            ? "system_not_ready" : input.evidence_reason;
     } else if (!input.localization_valid) {
         decision.fault_code = CargoSafetyProtocol::kLocalizationInvalid;
         decision.reason = input.evidence_reason.empty()
