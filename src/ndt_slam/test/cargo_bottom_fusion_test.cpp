@@ -239,11 +239,14 @@ TEST(CargoBottomFusion, RecentStableExpiresAndNeverLeaksAcrossTrack) {
     config.accumulation_window_sec = 0.10;
     config.stable_hold_sec = 0.50;
     CargoBottomFusion fusion(config);
-    ASSERT_TRUE(fusion.update(observation(7, 1.0, boxPoints(1.0F, 2.0F))).valid);
+    const CargoBottomResult first = fusion.update(
+        observation(7, 1.0, boxPoints(1.0F, 2.0F)));
+    ASSERT_TRUE(first.valid);
 
     CargoBottomResult held = fusion.update(observation(7, 1.2, {}));
     ASSERT_TRUE(held.valid) << held.reason;
     EXPECT_EQ(held.source, CargoBottomSource::RECENT_STABLE);
+    EXPECT_DOUBLE_EQ(held.evidence_stamp_sec, first.evidence_stamp_sec);
     EXPECT_GT(held.uncertainty, config.recent_stable_uncertainty_min);
 
     CargoBottomResult expired = fusion.update(observation(7, 1.7, {}));

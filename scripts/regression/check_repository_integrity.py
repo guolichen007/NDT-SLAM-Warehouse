@@ -276,7 +276,7 @@ def runtime_visualization_contract_failures() -> list[str]:
     combined = node + header + marker + config
     required = (
         "mapPublicationThread",
-        "requestMapPublication(stamp);",
+        "requestMapPublication(",
         "map_maintenance_max_deferral_frames_",
         "force_map_maintenance_timeslice",
         "max_deferral_frames: 5",
@@ -298,6 +298,8 @@ def runtime_visualization_contract_failures() -> list[str]:
         "LockedCargoHeightAction::INITIALIZE_ONCE",
         "updateLockedHeightAfterAssociation",
         "MapPublicationSnapshot",
+        "MapLayerBundle",
+        "latest_completed_map_bundle_",
         "map_layer_generation_",
         "advanceMapLayerGenerationLocked",
         "captureMapPublicationSnapshot",
@@ -313,7 +315,11 @@ def runtime_visualization_contract_failures() -> list[str]:
         "objects_map_content_version_",
         "getDenyCellsSnapshot",
         "CleanMapBuildAction::APPLY",
-        "CleanMapBuildAction::DISCARD_STALE_OBJECTS",
+        "CleanMapBuildAction::PUBLISH_SNAPSHOT_ONLY",
+        "result.bundle.objects_clean",
+        "evaluateCargoFormalUse",
+        "evidence_stamp_sec",
+        "formal_hold_sec",
     )
     for token in required:
         if token not in combined:
@@ -475,7 +481,7 @@ def runtime_console_contract_failures() -> list[str]:
         "debug_perf: false",
         "csv_enabled: true",
         "console_health_enabled: false",
-        "console_risk_enabled: false",
+        "console_risk_enabled: true",
         "cargo_console_enabled: true",
     )
     for token in required_config:

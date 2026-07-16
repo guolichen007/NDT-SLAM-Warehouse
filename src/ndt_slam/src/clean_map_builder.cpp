@@ -48,7 +48,7 @@ CleanMapBuildAction evaluateCleanMapBuildAction(
     // the latest deny/protect evidence.
     (void)newer_request_pending;
     if (source_objects_version != current_objects_version) {
-        return CleanMapBuildAction::DISCARD_STALE_OBJECTS;
+        return CleanMapBuildAction::PUBLISH_SNAPSHOT_ONLY;
     }
     return CleanMapBuildAction::APPLY;
 }

@@ -678,11 +678,24 @@ private:
     std::atomic<bool> clean_map_rebuild_running_{false};
     std::atomic<bool> clean_map_rebuild_result_ready_{false};
     std::mutex clean_map_rebuild_result_mutex_;
+    struct MapLayerBundle {
+        bool valid = false;
+        std::uint64_t generation = 0U;
+        std::uint64_t objects_version = 0U;
+        std::uint64_t lifecycle_epoch = 0U;
+        ros::Time source_stamp;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr registration;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr display;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr ground;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr objects;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr objects_clean;
+    };
     struct CleanMapWorkerResult {
         bool valid = false;
         std::uint64_t source_objects_version = 0U;
         double duration_ms = 0.0;
         CleanMapBuildResult build;
+        MapLayerBundle bundle;
     };
     CleanMapWorkerResult clean_map_worker_result_;
     std::uint64_t objects_map_content_version_ = 1U;
@@ -701,9 +714,9 @@ private:
     void runMapMaintenanceIfIdle(bool force_timeslice);
 
     // Map serialization is request-driven and independent of the localization
-    // input queue. A request id only wakes/coalesces the worker; the published
-    // seq comes from map_layer_generation_, which advances only when layer
-    // content changes. All five layers are copied in one map lock transaction.
+    // input queue. The clean worker seals raw N plus clean N into one immutable
+    // bundle; publication copies only bundle pointers. header.seq therefore
+    // identifies one complete five-layer content generation.
     std::thread map_publication_thread_;
     std::mutex map_publication_mutex_;
     std::condition_variable map_publication_cv_;
@@ -712,15 +725,16 @@ private:
     std::uint64_t map_publication_completed_version_ = 0U;
     ros::Time map_publication_stamp_;
     std::uint64_t map_layer_generation_ = 1U;
+    MapLayerBundle latest_completed_map_bundle_;
     struct MapPublicationSnapshot {
         std::uint64_t request_version = 0U;
         std::uint64_t generation = 0U;
         ros::Time stamp;
-        pcl::PointCloud<pcl::PointXYZ>::Ptr registration;
-        pcl::PointCloud<pcl::PointXYZ>::Ptr display;
-        pcl::PointCloud<pcl::PointXYZ>::Ptr ground;
-        pcl::PointCloud<pcl::PointXYZ>::Ptr objects;
-        pcl::PointCloud<pcl::PointXYZ>::Ptr objects_clean;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr registration;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr display;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr ground;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr objects;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr objects_clean;
     };
     void requestMapPublication(const ros::Time& stamp);
     void mapPublicationThread();
@@ -729,6 +743,7 @@ private:
     void publishMapPublicationSnapshot(
         const MapPublicationSnapshot& snapshot);
     void advanceMapLayerGenerationLocked();
+    void sealCurrentMapLayerBundleLocked(const ros::Time& stamp);
 
     bool has_first_odom_ = false;
     Eigen::Vector3d last_position_;
@@ -1487,8 +1502,11 @@ private:
         float locked_update_max_top_jump = 0.60f;
         int locked_update_min_points = 20;
         float live_pose_center_alpha = 0.45F;
-        float live_pose_max_xy_step_m = 0.20F;
-        float live_pose_max_z_step_m = 0.35F;
+        float live_pose_max_xy_speed_mps = 2.0F;
+        float live_pose_max_z_speed_mps = 1.5F;
+        float live_pose_step_margin_m = 0.05F;
+        float live_pose_velocity_alpha = 0.35F;
+        float formal_hold_sec = 0.50F;
         float lost_position_uncertainty_per_sec = 0.05F;
         float lost_position_uncertainty_max_m = 0.50F;
 
@@ -1573,6 +1591,11 @@ private:
         Eigen::Vector3f locked_center_base = Eigen::Vector3f::Zero();  // CargoState 同步
         LockedCargoShape locked_shape;
         LiveCargoPose live_pose;
+        Eigen::Vector3f live_pose_velocity_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f live_pose_measured_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f live_pose_predicted_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f live_pose_residual_base = Eigen::Vector3f::Zero();
+        double live_pose_dt_sec = 0.0;
 
         float stable_bottom_z = 0.0f;
         float stable_top_z = 0.0f;

@@ -243,6 +243,16 @@ struct CargoFrameRecord {
   int cluster_points = 0;
   int support_points = 0;
   double center_x = 0.0, center_y = 0.0, center_z = 0.0;
+  double measured_center_x = 0.0, measured_center_y = 0.0,
+         measured_center_z = 0.0;
+  double predicted_center_x = 0.0, predicted_center_y = 0.0,
+         predicted_center_z = 0.0;
+  double center_residual_x = 0.0, center_residual_y = 0.0,
+         center_residual_z = 0.0;
+  double pose_sensor_dt_sec = 0.0;
+  std::string position_source;
+  double pose_evidence_age_sec = 0.0;
+  double height_evidence_age_sec = 0.0;
   double size_x = 0.0, size_y = 0.0, size_z = 0.0;
   double footprint_yaw_deg = 0.0;
   double raw_bottom_z = 0.0;

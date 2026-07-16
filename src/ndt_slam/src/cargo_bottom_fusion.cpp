@@ -672,6 +672,7 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
     CargoBottomResult result;
     result.track_id = observation.track_id;
     result.stamp_sec = observation.stamp_sec;
+    result.evidence_stamp_sec = observation.stamp_sec;
     std::string invalid_config_field;
     if (!validConfig(config_, &invalid_config_field)) {
         reset();
@@ -925,6 +926,7 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
             selected.confidence = std::min(
                 stable_.confidence, config_.recent_stable_confidence_base) * decay;
             selected.age_sec = age;
+            result.evidence_stamp_sec = stable_.stamp_sec;
             selected.memory_center_base = observation.track_center_valid
                 ? observation.track_center_base.head<2>()
                 : stable_.center_base;
@@ -1043,6 +1045,7 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
                     selected.confidence = stable_.confidence * 0.50F;
                     selected.age_sec =
                         observation.stamp_sec - stable_.stamp_sec;
+                    result.evidence_stamp_sec = stable_.stamp_sec;
                 } else {
                     selected.stats = CargoVerticalStats{};
                     selected.confidence = 0.0F;

@@ -73,10 +73,15 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
     cargo_csv_.open(output_dir_ + "/cargo_frames.csv");
     cargo_csv_ << "stamp,track_state,track_id,lock_state,observation_valid,"
                << "cluster_points,support_points,live_center_x,live_center_y,live_center_z,"
+               << "measured_center_x,measured_center_y,measured_center_z,"
+               << "predicted_center_x,predicted_center_y,predicted_center_z,"
+               << "center_residual_x,center_residual_y,center_residual_z,"
+               << "pose_sensor_dt_sec,position_source,pose_evidence_age_sec,"
+               << "height_evidence_age_sec,"
                << "locked_length_m,locked_width_m,locked_height_m,locked_yaw_deg,"
                << "raw_bottom_z,filtered_bottom_z,conservative_bottom_z,"
                << "top_z,height_m,bottom_valid,height_valid,filter_accepted,filter_reason,"
-               << "odom_x,odom_y,odom_z\n";
+               << "lost_frames,odom_x,odom_y,odom_z\n";
   }
 
   last_csv_flush_ = std::chrono::steady_clock::now();
@@ -400,6 +405,15 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << rec.cluster_points << "," << rec.support_points << ","
                << std::setprecision(4)
                << rec.center_x << "," << rec.center_y << "," << rec.center_z << ","
+               << rec.measured_center_x << "," << rec.measured_center_y << ","
+               << rec.measured_center_z << ","
+               << rec.predicted_center_x << "," << rec.predicted_center_y << ","
+               << rec.predicted_center_z << ","
+               << rec.center_residual_x << "," << rec.center_residual_y << ","
+               << rec.center_residual_z << ","
+               << rec.pose_sensor_dt_sec << "," << rec.position_source << ","
+               << rec.pose_evidence_age_sec << ","
+               << rec.height_evidence_age_sec << ","
                << rec.size_x << "," << rec.size_y << "," << rec.size_z << ","
                << rec.footprint_yaw_deg << ","
                << std::setprecision(4)
@@ -408,7 +422,8 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << rec.height_m << ","
                << (rec.bottom_valid ? 1 : 0) << "," << (rec.height_valid ? 1 : 0) << ","
                << (rec.filter_accepted ? 1 : 0) << "," << rec.filter_reason << ","
-               << rec.odom_x << "," << rec.odom_y << "," << rec.odom_z << "\n";
+               << rec.lost_frames << "," << rec.odom_x << "," << rec.odom_y
+               << "," << rec.odom_z << "\n";
   }
   maybeFlushCsv();
 }

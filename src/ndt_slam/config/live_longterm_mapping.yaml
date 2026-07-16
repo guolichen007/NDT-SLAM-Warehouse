@@ -11,7 +11,8 @@ debug:
     console_health_enabled: false
     # Operational terminal is reserved for cargo tracking and safety changes.
     # Localization/pipeline risk samples remain in the per-frame CSV files.
-    console_risk_enabled: false
+    # Event-mode only: ENTER/CHANGE/REPEAT/CLEAR, never per-frame spam.
+    console_risk_enabled: true
     cargo_console_enabled: true
     health_period_sec: 10.0
     risk_repeat_period_sec: 10.0
@@ -778,8 +779,15 @@ hook_cargo_lock:
   locked_update_max_top_jump: 0.60
   locked_update_min_points: 20
   live_pose_center_alpha: 0.45
-  live_pose_max_xy_step_m: 0.20
-  live_pose_max_z_step_m: 0.35
+  # Physical rate limits are sensor-dt based; the margin absorbs quantization
+  # and association noise without imposing a frame-rate-dependent speed cap.
+  live_pose_max_xy_speed_mps: 2.0
+  live_pose_max_z_speed_mps: 1.5
+  live_pose_step_margin_m: 0.05
+  live_pose_velocity_alpha: 0.35
+  # LOST_HOLD remains visible for lost_clear_sec, but formal safety/removal may
+  # only use prediction/held evidence inside this short window.
+  formal_hold_sec: 0.50
   lost_position_uncertainty_per_sec: 0.05
   lost_position_uncertainty_max_m: 0.50
 

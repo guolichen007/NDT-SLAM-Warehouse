@@ -49,6 +49,31 @@ float cargoAxialYawDifference(float lhs_rad, float rhs_rad) {
     return std::abs(normalizeCargoAxialYaw(lhs_rad - rhs_rad));
 }
 
+Eigen::Vector3f limitCargoPoseResidualByRate(
+    const Eigen::Vector3f& residual,
+    double sensor_dt_sec,
+    float max_xy_speed_mps,
+    float max_z_speed_mps,
+    float step_margin_m) {
+    if (!residual.allFinite() || !std::isfinite(sensor_dt_sec) ||
+        sensor_dt_sec <= 0.0 || !std::isfinite(max_xy_speed_mps) ||
+        !std::isfinite(max_z_speed_mps) || !std::isfinite(step_margin_m) ||
+        max_xy_speed_mps < 0.0F || max_z_speed_mps < 0.0F ||
+        step_margin_m < 0.0F) {
+        return Eigen::Vector3f::Zero();
+    }
+    Eigen::Vector3f limited = residual;
+    const float dt = static_cast<float>(sensor_dt_sec);
+    const float max_xy_step = max_xy_speed_mps * dt + step_margin_m;
+    const float max_z_step = max_z_speed_mps * dt + step_margin_m;
+    const float xy_norm = limited.head<2>().norm();
+    if (xy_norm > max_xy_step && xy_norm > 1.0e-6F) {
+        limited.head<2>() *= max_xy_step / xy_norm;
+    }
+    limited.z() = std::clamp(limited.z(), -max_z_step, max_z_step);
+    return limited;
+}
+
 std::array<Eigen::Vector3f, 8> buildCargoObbCornersBase(
     const LockedCargoShape& shape,
     const Eigen::Vector3f& center_base) {
@@ -92,7 +117,10 @@ RigidCargoGeometry buildCurrentRigidCargoGeometry(
         return result;
     }
     if (!live_pose.valid || !live_pose.center_base.allFinite() ||
-        !std::isfinite(live_pose.stamp_sec) || live_pose.stamp_sec <= 0.0) {
+        !std::isfinite(live_pose.evidence_stamp_sec) ||
+        live_pose.evidence_stamp_sec <= 0.0 ||
+        !std::isfinite(live_pose.evaluation_stamp_sec) ||
+        live_pose.evaluation_stamp_sec <= 0.0) {
         result.reason = "invalid_live_pose";
         return result;
     }
@@ -130,23 +158,73 @@ RigidCargoGeometry buildCurrentRigidCargoGeometry(
         }
     }
     result.geometry_uncertainty_m = uncertainty_m;
+    result.pose_evidence_stamp_sec = live_pose.evidence_stamp_sec;
+    result.evaluation_stamp_sec = live_pose.evaluation_stamp_sec;
     result.valid = true;
     result.reason = "locked_shape_live_pose";
     return result;
 }
 
 CargoObbFootprint toCargoObbFootprint(
-    const RigidCargoGeometry& geometry) {
+    const RigidCargoGeometry& geometry,
+    float horizontal_expansion_m) {
     CargoObbFootprint footprint;
-    if (!geometry.valid) return footprint;
+    if (!geometry.valid || !std::isfinite(horizontal_expansion_m) ||
+        horizontal_expansion_m < 0.0F) return footprint;
     footprint.valid = true;
     footprint.center_base = geometry.pose.center_base.head<2>();
-    footprint.length_m = geometry.shape.length_m;
-    footprint.width_m = geometry.shape.width_m;
+    footprint.length_m = geometry.shape.length_m +
+        2.0F * horizontal_expansion_m;
+    footprint.width_m = geometry.shape.width_m +
+        2.0F * horizontal_expansion_m;
     footprint.yaw_base_rad = geometry.shape.yaw_base_rad;
     footprint.min_z = geometry.bottom_z_base;
     footprint.max_z = geometry.top_z_base;
     return footprint;
+}
+
+CargoFormalUseDecision evaluateCargoFormalUse(
+    bool geometry_valid,
+    bool lost_hold,
+    double evaluation_stamp_sec,
+    double pose_evidence_stamp_sec,
+    double height_evidence_stamp_sec,
+    double formal_hold_sec,
+    float horizontal_uncertainty_m) {
+    CargoFormalUseDecision decision;
+    if (!geometry_valid || !std::isfinite(evaluation_stamp_sec) ||
+        !std::isfinite(pose_evidence_stamp_sec) ||
+        !std::isfinite(height_evidence_stamp_sec) ||
+        !std::isfinite(formal_hold_sec) || formal_hold_sec < 0.0 ||
+        !std::isfinite(horizontal_uncertainty_m) ||
+        horizontal_uncertainty_m < 0.0F) {
+        decision.reason = "invalid_geometry_or_evidence_time";
+        return decision;
+    }
+    decision.pose_age_sec = evaluation_stamp_sec - pose_evidence_stamp_sec;
+    decision.height_age_sec = evaluation_stamp_sec - height_evidence_stamp_sec;
+    if (decision.pose_age_sec < -1.0e-4 ||
+        decision.height_age_sec < -1.0e-4) {
+        decision.reason = "future_cargo_evidence";
+        return decision;
+    }
+    decision.display_valid = true;
+    decision.horizontal_uncertainty_m = horizontal_uncertainty_m;
+    if (!lost_hold) {
+        decision.formal_safety_valid = true;
+        decision.formal_removal_valid = true;
+        decision.reason = "current_locked_track";
+        return decision;
+    }
+    const bool within_hold =
+        decision.pose_age_sec <= formal_hold_sec + 1.0e-4 &&
+        decision.height_age_sec <= formal_hold_sec + 1.0e-4;
+    decision.formal_safety_valid = within_hold;
+    decision.formal_removal_valid = within_hold;
+    decision.reason = within_hold
+        ? "lost_hold_formal_window"
+        : "lost_hold_display_only_evidence_expired";
+    return decision;
 }
 
 bool containsPointInCargoObbBase(

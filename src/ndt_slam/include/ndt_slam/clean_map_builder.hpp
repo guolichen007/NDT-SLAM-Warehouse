@@ -47,7 +47,10 @@ struct CleanMapBuildResult {
 enum class CleanMapBuildAction {
     APPLY,
     DISCARD_INVALID,
-    DISCARD_STALE_OBJECTS
+    // The raw snapshot and its derived clean layer remain a publishable,
+    // coherent bundle even when the working map has advanced. It is simply
+    // not installed as the current clean working layer.
+    PUBLISH_SNAPSHOT_ONLY
 };
 
 CleanMapBuildAction evaluateCleanMapBuildAction(

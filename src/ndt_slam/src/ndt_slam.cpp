@@ -253,6 +253,10 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     current_pose_ = Sophus::SE3d();
     global_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     display_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    ground_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    objects_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    objects_clean_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    sealCurrentMapLayerBundleLocked(ros::Time::now());
     local_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     current_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     current_cloud_transformed_.reset(new pcl::PointCloud<pcl::PointXYZ>);
@@ -380,6 +384,7 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     ground_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     objects_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     objects_clean_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+    sealCurrentMapLayerBundleLocked(ros::Time::now());
     rebuild_objects_filtered_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     rebuild_payload_candidate_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     rebuild_payload_dynamic_.reset(new pcl::PointCloud<pcl::PointXYZ>);
@@ -1517,10 +1522,20 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.locked_update_min_points = hcl["locked_update_min_points"].as<int>(20);
             hook_lock_config_.live_pose_center_alpha = std::clamp(
                 hcl["live_pose_center_alpha"].as<float>(0.45F), 0.0F, 1.0F);
-            hook_lock_config_.live_pose_max_xy_step_m = std::max(
-                0.01F, hcl["live_pose_max_xy_step_m"].as<float>(0.20F));
-            hook_lock_config_.live_pose_max_z_step_m = std::max(
-                0.01F, hcl["live_pose_max_z_step_m"].as<float>(0.35F));
+            hook_lock_config_.live_pose_max_xy_speed_mps = std::max(
+                0.01F,
+                hcl["live_pose_max_xy_speed_mps"].as<float>(2.0F));
+            hook_lock_config_.live_pose_max_z_speed_mps = std::max(
+                0.01F,
+                hcl["live_pose_max_z_speed_mps"].as<float>(1.5F));
+            hook_lock_config_.live_pose_step_margin_m = std::max(
+                0.0F,
+                hcl["live_pose_step_margin_m"].as<float>(0.05F));
+            hook_lock_config_.live_pose_velocity_alpha = std::clamp(
+                hcl["live_pose_velocity_alpha"].as<float>(0.35F),
+                0.0F, 1.0F);
+            hook_lock_config_.formal_hold_sec = std::max(
+                0.0F, hcl["formal_hold_sec"].as<float>(0.50F));
             hook_lock_config_.lost_position_uncertainty_per_sec = std::max(
                 0.0F,
                 hcl["lost_position_uncertainty_per_sec"].as<float>(0.05F));
@@ -2351,32 +2366,33 @@ NdtSlamNode::captureMapPublicationSnapshot(
     std::uint64_t version, const ros::Time& requested_stamp) {
     MapPublicationSnapshot snapshot;
     snapshot.request_version = version;
-    snapshot.stamp = requested_stamp.isZero()
-        ? ros::Time::now() : requested_stamp;
-    snapshot.registration.reset(new pcl::PointCloud<pcl::PointXYZ>);
-    snapshot.display.reset(new pcl::PointCloud<pcl::PointXYZ>);
-    snapshot.ground.reset(new pcl::PointCloud<pcl::PointXYZ>);
-    snapshot.objects.reset(new pcl::PointCloud<pcl::PointXYZ>);
-    snapshot.objects_clean.reset(new pcl::PointCloud<pcl::PointXYZ>);
-    // All five layers are copied in one critical section, so a background map
-    // swap cannot mix generations between the latched ROS topics. Conversion
-    // and publication remain outside map_mutex_.
+    // All pointers come from one sealed, immutable content generation. The
+    // publication worker never combines current raw maps with an older clean
+    // layer.
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
-        snapshot.generation = map_layer_generation_;
-        if (global_map_) *snapshot.registration = *global_map_;
-        if (display_map_) *snapshot.display = *display_map_;
-        if (ground_map_) *snapshot.ground = *ground_map_;
-        if (objects_map_) *snapshot.objects = *objects_map_;
-        if (objects_clean_map_) {
-            *snapshot.objects_clean = *objects_clean_map_;
-        }
+        snapshot.generation = latest_completed_map_bundle_.generation;
+        snapshot.stamp = latest_completed_map_bundle_.source_stamp.isZero()
+            ? (requested_stamp.isZero() ? ros::Time::now() : requested_stamp)
+            : latest_completed_map_bundle_.source_stamp;
+        snapshot.registration = latest_completed_map_bundle_.registration;
+        snapshot.display = latest_completed_map_bundle_.display;
+        snapshot.ground = latest_completed_map_bundle_.ground;
+        snapshot.objects = latest_completed_map_bundle_.objects;
+        snapshot.objects_clean =
+            latest_completed_map_bundle_.objects_clean;
     }
     return snapshot;
 }
 
 void NdtSlamNode::publishMapPublicationSnapshot(
     const MapPublicationSnapshot& snapshot) {
+    if (!snapshot.registration || !snapshot.display || !snapshot.ground ||
+        !snapshot.objects || !snapshot.objects_clean) {
+        ROS_ERROR_THROTTLE(
+            5.0, "[MapPublish] incomplete immutable layer bundle");
+        return;
+    }
     const auto make_message = [this, &snapshot](
         const pcl::PointCloud<pcl::PointXYZ>& cloud) {
         sensor_msgs::PointCloud2 message;
@@ -2401,6 +2417,27 @@ void NdtSlamNode::advanceMapLayerGenerationLocked() {
     }
 }
 
+void NdtSlamNode::sealCurrentMapLayerBundleLocked(const ros::Time& stamp) {
+    const auto clone = [](const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
+        return pcl::PointCloud<pcl::PointXYZ>::Ptr(
+            cloud ? new pcl::PointCloud<pcl::PointXYZ>(*cloud)
+                  : new pcl::PointCloud<pcl::PointXYZ>);
+    };
+    latest_completed_map_bundle_.valid = true;
+    latest_completed_map_bundle_.generation = map_layer_generation_;
+    latest_completed_map_bundle_.objects_version =
+        objects_map_content_version_;
+    latest_completed_map_bundle_.lifecycle_epoch =
+        map_rebuild_generation_.load(std::memory_order_acquire);
+    latest_completed_map_bundle_.source_stamp =
+        stamp.isZero() ? ros::Time::now() : stamp;
+    latest_completed_map_bundle_.registration = clone(global_map_);
+    latest_completed_map_bundle_.display = clone(display_map_);
+    latest_completed_map_bundle_.ground = clone(ground_map_);
+    latest_completed_map_bundle_.objects = clone(objects_map_);
+    latest_completed_map_bundle_.objects_clean = clone(objects_clean_map_);
+}
+
 void NdtSlamNode::advanceObjectsMapContentVersionLocked() {
     ++objects_map_content_version_;
     if (objects_map_content_version_ == 0U) {
@@ -2410,9 +2447,9 @@ void NdtSlamNode::advanceObjectsMapContentVersionLocked() {
 
 void NdtSlamNode::startCleanMapRebuildJob() {
     if (clean_map_rebuild_running_.load(std::memory_order_acquire)) {
-        // The in-flight snapshot is rejected by the version gate if a newer
-        // objects map exists. Remember non-map input changes (deny/protect
-        // histories) too, but do not keep the owner loop awake meanwhile.
+        // The in-flight immutable snapshot remains publishable even if a newer
+        // objects map exists. Remember the newer raw/deny/protect generation
+        // so a follow-up build converges to the current working map.
         clean_map_rebuild_pending_ = true;
         return;
     }
@@ -2425,14 +2462,30 @@ void NdtSlamNode::startCleanMapRebuildJob() {
     CleanMapBuildInput input;
     input.cell_size_m = kCleanCellSize;
     std::uint64_t source_objects_version = 0U;
+    MapLayerBundle source_bundle;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
+        const auto clone = [](const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
+            return pcl::PointCloud<pcl::PointXYZ>::Ptr(
+                cloud ? new pcl::PointCloud<pcl::PointXYZ>(*cloud)
+                      : new pcl::PointCloud<pcl::PointXYZ>);
+        };
         source_objects_version = objects_map_content_version_;
-        if (objects_map_) {
-            input.object_points.reserve(objects_map_->size());
-            for (const auto& point : objects_map_->points) {
-                input.object_points.emplace_back(point.x, point.y, point.z);
-            }
+        source_bundle.valid = true;
+        source_bundle.generation = map_layer_generation_;
+        source_bundle.objects_version = source_objects_version;
+        source_bundle.lifecycle_epoch =
+            map_rebuild_generation_.load(std::memory_order_acquire);
+        source_bundle.source_stamp.fromSec(current_time);
+        source_bundle.registration = clone(global_map_);
+        source_bundle.display = clone(display_map_);
+        source_bundle.ground = clone(ground_map_);
+        source_bundle.objects = clone(objects_map_);
+    }
+    if (source_bundle.objects) {
+        input.object_points.reserve(source_bundle.objects->size());
+        for (const auto& point : source_bundle.objects->points) {
+            input.object_points.emplace_back(point.x, point.y, point.z);
         }
     }
     if (rebuild_payload_candidate_) {
@@ -2508,13 +2561,33 @@ void NdtSlamNode::startCleanMapRebuildJob() {
 
     clean_map_rebuild_running_.store(true, std::memory_order_release);
     clean_map_rebuild_thread_ = std::thread(
-        [this, source_objects_version, input = std::move(input)]() mutable {
+        [this, source_objects_version, source_bundle = std::move(source_bundle),
+         input = std::move(input)]() mutable {
             CleanMapWorkerResult result;
             result.source_objects_version = source_objects_version;
+            result.bundle = std::move(source_bundle);
             const auto started = std::chrono::steady_clock::now();
             try {
                 result.build = buildCleanMapFromSnapshot(input);
                 result.valid = result.build.valid;
+                if (result.valid) {
+                    auto clean_cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(
+                        new pcl::PointCloud<pcl::PointXYZ>);
+                    clean_cloud->reserve(result.build.clean_points.size());
+                    for (const Eigen::Vector3f& point :
+                         result.build.clean_points) {
+                        pcl::PointXYZ pcl_point;
+                        pcl_point.x = point.x();
+                        pcl_point.y = point.y();
+                        pcl_point.z = point.z();
+                        clean_cloud->push_back(pcl_point);
+                    }
+                    clean_cloud->width = static_cast<std::uint32_t>(
+                        clean_cloud->size());
+                    clean_cloud->height = 1U;
+                    clean_cloud->is_dense = false;
+                    result.bundle.objects_clean = clean_cloud;
+                }
             } catch (const std::exception& error) {
                 result.build.reason =
                     std::string("worker_exception:") + error.what();
@@ -2546,6 +2619,11 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
         std::lock_guard<std::mutex> lock(clean_map_rebuild_result_mutex_);
         result = std::move(clean_map_worker_result_);
     }
+    if (result.bundle.lifecycle_epoch !=
+        map_rebuild_generation_.load(std::memory_order_acquire)) {
+        ROS_DEBUG("[CleanMapWorker] discarded previous lifecycle epoch");
+        return;
+    }
     std::uint64_t current_objects_version = 0U;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
@@ -2555,70 +2633,57 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
         result.valid,
         clean_map_rebuild_pending_.load(std::memory_order_acquire),
         result.source_objects_version, current_objects_version);
-    if (initial_action == CleanMapBuildAction::DISCARD_STALE_OBJECTS) {
-        // The objects layer changed while the worker ran, so this result
-        // cannot be applied. A deny/protect-only superseding request does not
-        // discard a current objects generation; it is applied now and rebuilt
-        // again below, which guarantees finite-progress liveness.
-        clean_map_rebuild_pending_ = true;
-        map_maintenance_pending_ = true;
-        return;
-    }
     if (initial_action == CleanMapBuildAction::DISCARD_INVALID) {
         ROS_DEBUG("[CleanMapWorker] rejected reason=%s duration_ms=%.1f",
                   result.build.reason.c_str(), result.duration_ms);
         return;
     }
 
-    auto clean_cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    clean_cloud->reserve(result.build.clean_points.size());
-    for (const Eigen::Vector3f& point : result.build.clean_points) {
-        pcl::PointXYZ pcl_point;
-        pcl_point.x = point.x();
-        pcl_point.y = point.y();
-        pcl_point.z = point.z();
-        clean_cloud->push_back(pcl_point);
-    }
-    clean_cloud->width = static_cast<std::uint32_t>(clean_cloud->size());
-    clean_cloud->height = 1U;
-    clean_cloud->is_dense = false;
-
+    bool installed_as_current = false;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
-        if (evaluateCleanMapBuildAction(
-                result.valid, false, result.source_objects_version,
-                objects_map_content_version_) !=
-            CleanMapBuildAction::APPLY) {
-            ROS_DEBUG("[CleanMapWorker] stale source=%llu current=%llu",
-                      static_cast<unsigned long long>(
-                          result.source_objects_version),
-                      static_cast<unsigned long long>(
-                          objects_map_content_version_));
+        const CleanMapBuildAction final_action = evaluateCleanMapBuildAction(
+            result.valid, false, result.source_objects_version,
+            objects_map_content_version_);
+        if (final_action == CleanMapBuildAction::APPLY &&
+            result.bundle.objects_clean) {
+            objects_clean_map_.reset(
+                new pcl::PointCloud<pcl::PointXYZ>(
+                    *result.bundle.objects_clean));
+            ++clean_map_content_version_;
+            if (clean_map_content_version_ == 0U) {
+                ++clean_map_content_version_;
+            }
+            installed_as_current = true;
+        } else if (final_action ==
+                   CleanMapBuildAction::PUBLISH_SNAPSHOT_ONLY) {
             clean_map_rebuild_pending_ = true;
             map_maintenance_pending_ = true;
-            return;
         }
-        objects_clean_map_.swap(clean_cloud);
+        // Publish the completed raw+clean snapshot even when the working map
+        // advanced during the build. This removes clean-worker starvation
+        // without ever installing stale clean content into the working map.
         advanceMapLayerGenerationLocked();
-        ++clean_map_content_version_;
-        if (clean_map_content_version_ == 0U) {
-            ++clean_map_content_version_;
-        }
+        result.bundle.generation = map_layer_generation_;
+        result.bundle.valid = true;
+        latest_completed_map_bundle_ = result.bundle;
     }
 
     last_commit_clean_map_ms_ = result.duration_ms;
     map_maintenance_has_run_ = true;
-    shadow_target_pending_ = true;
+    shadow_target_pending_ = shadow_target_pending_ || installed_as_current;
     map_maintenance_pending_ = true;
-    requestMapPublication(stamp);
+    requestMapPublication(
+        result.bundle.source_stamp.isZero()
+            ? stamp : result.bundle.source_stamp);
     ROS_DEBUG("[CleanMapWorker] source=%llu points=%zu cells=%d/%d "
-              "denied=%d protected=%d duration_ms=%.1f",
+              "denied=%d protected=%d installed_current=%d duration_ms=%.1f",
               static_cast<unsigned long long>(
                   result.source_objects_version),
               result.build.clean_points.size(), result.build.passed_cells,
               result.build.total_cells, result.build.denied_cells,
-              result.build.protected_cells, result.duration_ms);
+              result.build.protected_cells,
+              installed_as_current ? 1 : 0, result.duration_ms);
 }
 
 void NdtSlamNode::runMapMaintenanceIfIdle(bool force_timeslice) {
@@ -6735,6 +6800,7 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         objects_clean_map_->clear();
         advanceMapLayerGenerationLocked();
         advanceObjectsMapContentVersionLocked();
+        sealCurrentMapLayerBundleLocked(ros::Time::now());
         rebuild_objects_filtered_->clear();
         rebuild_payload_candidate_->clear();
         rebuild_payload_dynamic_->clear();
@@ -6988,6 +7054,7 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
             objects_clean_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
             advanceMapLayerGenerationLocked();
             advanceObjectsMapContentVersionLocked();
+            sealCurrentMapLayerBundleLocked(load_stamp);
             current_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
             local_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
             rebuild_objects_filtered_.reset(
@@ -7260,21 +7327,25 @@ void NdtSlamNode::saveMultiLayerMaps(const std::string& session_dir) {
         pcl::PointCloud<pcl::PointXYZ>::Ptr ground_raw_snapshot;
         {
             std::lock_guard<std::mutex> lock(map_mutex_);
-            const auto clone = [](const pcl::PointCloud<pcl::PointXYZ>::Ptr& map) {
+            const auto clone = [](const auto& map) {
                 return map
                     ? pcl::PointCloud<pcl::PointXYZ>::Ptr(
                           new pcl::PointCloud<pcl::PointXYZ>(*map))
                     : pcl::PointCloud<pcl::PointXYZ>::Ptr(
                           new pcl::PointCloud<pcl::PointXYZ>);
             };
-            // Deep copies are required here: the live map-commit path appends
-            // to the current cloud objects in place. A shared_ptr-only snapshot
-            // would keep storage alive but would still race those mutations.
-            global_snapshot = clone(global_map_);
-            display_snapshot = clone(display_map_);
-            ground_snapshot = clone(ground_map_);
-            objects_snapshot = clone(objects_map_);
-            clean_snapshot = clone(objects_clean_map_);
+            // Formal layers are saved from one completed immutable bundle.
+            // This prevents raw N+1 from being serialized with clean N.
+            global_snapshot = clone(
+                latest_completed_map_bundle_.registration);
+            display_snapshot = clone(
+                latest_completed_map_bundle_.display);
+            ground_snapshot = clone(latest_completed_map_bundle_.ground);
+            objects_snapshot = clone(latest_completed_map_bundle_.objects);
+            clean_snapshot = clone(
+                latest_completed_map_bundle_.objects_clean);
+            // Diagnostic layers are not members of the formal bundle and are
+            // intentionally captured from their current working snapshots.
             filtered_snapshot = clone(rebuild_objects_filtered_);
             payload_candidate_snapshot = clone(rebuild_payload_candidate_);
             payload_dynamic_snapshot = clone(rebuild_payload_dynamic_);
@@ -9536,26 +9607,48 @@ void NdtSlamNode::updateLiveCargoPose(
     }
     if (!measured.allFinite()) return;
 
+    const double stamp_sec = stamp.toSec();
+    if (hook_lock_.live_pose.valid &&
+        stamp_sec <= hook_lock_.live_pose.evidence_stamp_sec + 1.0e-4) {
+        // A repeated physical sample is not a new motion observation.
+        return;
+    }
     if (!hook_lock_.live_pose.valid ||
         !hook_lock_.live_pose.center_base.allFinite()) {
         hook_lock_.live_pose.center_base = measured;
+        hook_lock_.live_pose_velocity_base.setZero();
+        hook_lock_.live_pose_predicted_base = measured;
+        hook_lock_.live_pose_residual_base.setZero();
+        hook_lock_.live_pose_dt_sec = 0.0;
     } else {
-        Eigen::Vector3f delta =
-            measured - hook_lock_.live_pose.center_base;
-        const float xy_norm = delta.head<2>().norm();
-        if (xy_norm > hook_lock_config_.live_pose_max_xy_step_m &&
-            xy_norm > 1.0e-6F) {
-            delta.head<2>() *=
-                hook_lock_config_.live_pose_max_xy_step_m / xy_norm;
-        }
-        delta.z() = std::clamp(
-            delta.z(), -hook_lock_config_.live_pose_max_z_step_m,
-            hook_lock_config_.live_pose_max_z_step_m);
-        hook_lock_.live_pose.center_base +=
+        const double dt = stamp_sec -
+            hook_lock_.live_pose.evidence_stamp_sec;
+        if (!std::isfinite(dt) || dt <= 0.0) return;
+        const float dt_f = static_cast<float>(dt);
+        const Eigen::Vector3f previous = hook_lock_.live_pose.center_base;
+        const Eigen::Vector3f predicted = previous +
+            hook_lock_.live_pose_velocity_base * dt_f;
+        const Eigen::Vector3f delta = limitCargoPoseResidualByRate(
+            measured - predicted, dt,
+            hook_lock_config_.live_pose_max_xy_speed_mps,
+            hook_lock_config_.live_pose_max_z_speed_mps,
+            hook_lock_config_.live_pose_step_margin_m);
+        hook_lock_.live_pose.center_base = predicted +
             hook_lock_config_.live_pose_center_alpha * delta;
+        const Eigen::Vector3f observed_velocity =
+            (hook_lock_.live_pose.center_base - previous) / dt_f;
+        hook_lock_.live_pose_velocity_base =
+            (1.0F - hook_lock_config_.live_pose_velocity_alpha) *
+                hook_lock_.live_pose_velocity_base +
+            hook_lock_config_.live_pose_velocity_alpha * observed_velocity;
+        hook_lock_.live_pose_predicted_base = predicted;
+        hook_lock_.live_pose_residual_base = measured - predicted;
+        hook_lock_.live_pose_dt_sec = dt;
     }
+    hook_lock_.live_pose_measured_base = measured;
     hook_lock_.live_pose.valid = true;
-    hook_lock_.live_pose.stamp_sec = stamp.toSec();
+    hook_lock_.live_pose.evidence_stamp_sec = stamp_sec;
+    hook_lock_.live_pose.evaluation_stamp_sec = stamp_sec;
     hook_lock_.live_pose.source = source;
     hook_lock_.live_pose.position_uncertainty_m =
         std::max(0.0F, bottom.valid ? bottom.uncertainty : 0.12F);
@@ -9568,15 +9661,25 @@ RigidCargoGeometry NdtSlamNode::buildCurrentRigidCargoGeometryForPose(
     LiveCargoPose live_pose = hook_lock_.live_pose;
     if (hook_lock_.state == HookCargoLockState::LOST_HOLD &&
         live_pose.valid) {
-        const double age = std::max(
-            0.0, stamp.toSec() - live_pose.stamp_sec);
-        live_pose.source = CargoPoseSource::RECENT_STABLE_HOLD;
+        const double age = std::max(0.0, stamp.toSec() -
+            live_pose.evidence_stamp_sec);
+        const double prediction_age = std::min(
+            age, static_cast<double>(hook_lock_config_.formal_hold_sec));
+        if (hook_lock_.live_pose_velocity_base.allFinite() &&
+            prediction_age > 0.0) {
+            live_pose.center_base += hook_lock_.live_pose_velocity_base *
+                static_cast<float>(prediction_age);
+            live_pose.source = CargoPoseSource::MOTION_PREDICTION;
+        } else {
+            live_pose.source = CargoPoseSource::RECENT_STABLE_HOLD;
+        }
         live_pose.position_uncertainty_m = std::min(
             hook_lock_config_.lost_position_uncertainty_max_m,
             live_pose.position_uncertainty_m +
                 static_cast<float>(age) *
                     hook_lock_config_.lost_position_uncertainty_per_sec);
     }
+    live_pose.evaluation_stamp_sec = stamp.toSec();
     Eigen::Isometry3f transform = Eigen::Isometry3f::Identity();
     transform.matrix() = pose_map_base.matrix().cast<float>();
     current_rigid_cargo_geometry_ = ndt_slam::buildCurrentRigidCargoGeometry(
@@ -9584,6 +9687,9 @@ RigidCargoGeometry NdtSlamNode::buildCurrentRigidCargoGeometryForPose(
         cargo_fusion_track_id_,
         std::max(hook_lock_.bottom_uncertainty,
                  live_pose.position_uncertainty_m));
+    current_rigid_cargo_geometry_.height_evidence_stamp_sec =
+        hook_lock_.last_good_height_stamp.isZero()
+            ? 0.0 : hook_lock_.last_good_height_stamp.toSec();
     return current_rigid_cargo_geometry_;
 }
 
@@ -9625,6 +9731,11 @@ void NdtSlamNode::clearHookLock() {
     hook_lock_.has_locked_size = false;
     hook_lock_.locked_shape = LockedCargoShape{};
     hook_lock_.live_pose = LiveCargoPose{};
+    hook_lock_.live_pose_velocity_base.setZero();
+    hook_lock_.live_pose_measured_base.setZero();
+    hook_lock_.live_pose_predicted_base.setZero();
+    hook_lock_.live_pose_residual_base.setZero();
+    hook_lock_.live_pose_dt_sec = 0.0;
     current_rigid_cargo_geometry_ = RigidCargoGeometry{};
     hook_lock_.has_good_height = false;
     hook_lock_.size_update_count = 0;
@@ -10740,9 +10851,35 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
 
     last_cargo_bottom_result_ = cargo_bottom_fusion_.update(observation);
     last_cargo_pipeline_stamp_ = stamp;
-    const bool current_bottom_evidence = last_cargo_bottom_result_.valid;
+    const bool current_bottom_evidence =
+        last_cargo_bottom_result_.valid &&
+        last_cargo_bottom_result_.source !=
+            CargoBottomSource::RECENT_STABLE &&
+        std::isfinite(last_cargo_bottom_result_.evidence_stamp_sec) &&
+        std::abs(last_cargo_bottom_result_.evidence_stamp_sec -
+                 stamp.toSec()) <= 1.0e-4;
     RigidCargoGeometry rigid_geometry =
         buildCurrentRigidCargoGeometryForPose(pose_map_base, stamp);
+    if (rigid_geometry.valid) {
+        if (current_bottom_evidence &&
+            std::isfinite(last_cargo_bottom_result_.evidence_stamp_sec) &&
+            last_cargo_bottom_result_.evidence_stamp_sec > 0.0) {
+            rigid_geometry.height_evidence_stamp_sec =
+                last_cargo_bottom_result_.evidence_stamp_sec;
+        } else if (rigid_geometry.height_evidence_stamp_sec <= 0.0) {
+            rigid_geometry.height_evidence_stamp_sec =
+                last_cargo_bottom_result_.evidence_stamp_sec > 0.0
+                    ? last_cargo_bottom_result_.evidence_stamp_sec
+                    : rigid_geometry.pose_evidence_stamp_sec;
+        }
+    }
+    const CargoFormalUseDecision formal_use = evaluateCargoFormalUse(
+        rigid_geometry.valid,
+        hook_lock_.state == HookCargoLockState::LOST_HOLD,
+        stamp.toSec(), rigid_geometry.pose_evidence_stamp_sec,
+        rigid_geometry.height_evidence_stamp_sec,
+        hook_lock_config_.formal_hold_sec,
+        rigid_geometry.pose.position_uncertainty_m);
     if (rigid_geometry.valid) {
         CargoBoxGeometry formal_geometry;
         formal_geometry.valid = true;
@@ -10766,19 +10903,26 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         formal_geometry.top_z_map = rigid_geometry.aabb_max_map.z();
         last_cargo_bottom_result_.geometry = formal_geometry;
         last_cargo_bottom_result_.geometry_valid = true;
-        last_cargo_bottom_result_.height_valid = true;
+        last_cargo_bottom_result_.height_valid =
+            formal_use.formal_safety_valid;
+        last_cargo_bottom_result_.valid =
+            last_cargo_bottom_result_.valid &&
+            formal_use.formal_safety_valid;
         last_cargo_bottom_result_.height = rigid_geometry.shape.height_m;
         last_cargo_bottom_result_.track_id = cargo_fusion_track_id_;
+        // stamp_sec is the evaluation time for the message. The safety
+        // evaluator uses evidence_stamp_sec and must never see a held sample
+        // refreshed to the current tick.
         last_cargo_bottom_result_.stamp_sec = stamp.toSec();
+        last_cargo_bottom_result_.evidence_stamp_sec =
+            rigid_geometry.height_evidence_stamp_sec;
         if (!current_bottom_evidence) {
-            last_cargo_bottom_result_.valid = true;
+            last_cargo_bottom_result_.valid =
+                formal_use.formal_safety_valid;
             last_cargo_bottom_result_.source =
                 CargoBottomSource::RECENT_STABLE;
             last_cargo_bottom_result_.source_name = "RECENT_STABLE";
-            last_cargo_bottom_result_.reason =
-                hook_lock_.state == HookCargoLockState::LOST_HOLD
-                    ? "lost_hold_locked_shape_live_pose"
-                    : "locked_shape_live_pose_height_hold";
+            last_cargo_bottom_result_.reason = formal_use.reason;
             last_cargo_bottom_result_.uncertainty =
                 rigid_geometry.geometry_uncertainty_m;
             last_cargo_bottom_result_.confidence = std::max(
@@ -10795,12 +10939,15 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_state_.bottom_safe_z = cargo_state_.bottom_z -
             cargo_state_.bottom_unc - 0.05F;
         cargo_state_.valid_geometry = true;
-        cargo_state_.valid_height = true;
+        cargo_state_.valid_height = formal_use.formal_safety_valid;
         cargo_state_.source = std::string("rigid:") +
             cargoPoseSourceName(rigid_geometry.pose.source);
-        formal_cargo_removal_authorized_ = active_track;
+        formal_cargo_removal_authorized_ = active_track &&
+            formal_use.formal_removal_valid;
         formal_cargo_removal_track_id_ = cargo_fusion_track_id_;
-        formal_cargo_removal_stamp_ = stamp;
+        formal_cargo_removal_stamp_.fromSec(std::min(
+            rigid_geometry.pose_evidence_stamp_sec,
+            rigid_geometry.height_evidence_stamp_sec));
     } else {
         cargo_state_.valid_height = false;
         cargo_state_.bottom_unc =
@@ -10862,13 +11009,15 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     safety_input.evaluation_time_sec = stamp.toSec();
     safety_input.height.valid = last_cargo_bottom_result_.valid;
     safety_input.height.stale = false;
-    safety_input.height.stamp_sec = last_cargo_bottom_result_.stamp_sec;
+    safety_input.height.stamp_sec =
+        last_cargo_bottom_result_.evidence_stamp_sec;
     safety_input.height.bottom_z =
         last_cargo_bottom_result_.geometry.bottom_z_base;
     safety_input.height.bottom_uncertainty_m =
         last_cargo_bottom_result_.uncertainty;
     if (rigid_geometry.valid) {
-        safety_input.footprint_base = toCargoObbFootprint(rigid_geometry);
+        safety_input.footprint_base = toCargoObbFootprint(
+            rigid_geometry, formal_use.horizontal_uncertainty_m);
     }
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr obstacle_roi(
@@ -10878,10 +11027,15 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     float coverage_ratio = 0.0F;
     if (last_cargo_bottom_result_.geometry_valid) {
         const float radius = cargo_safety_evaluator_.config().level2_distance_m;
-        const float min_x = rigid_geometry.aabb_min_base.x() - radius;
-        const float max_x = rigid_geometry.aabb_max_base.x() + radius;
-        const float min_y = rigid_geometry.aabb_min_base.y() - radius;
-        const float max_y = rigid_geometry.aabb_max_base.y() + radius;
+        const float uncertainty = formal_use.horizontal_uncertainty_m;
+        const float min_x = rigid_geometry.aabb_min_base.x() - radius -
+            uncertainty;
+        const float max_x = rigid_geometry.aabb_max_base.x() + radius +
+            uncertainty;
+        const float min_y = rigid_geometry.aabb_min_base.y() - radius -
+            uncertainty;
+        const float max_y = rigid_geometry.aabb_max_base.y() + radius +
+            uncertainty;
         constexpr float kCoverageCell = 0.50F;
         if (obstacle_cloud_base) {
             obstacle_roi->reserve(obstacle_cloud_base->size());
@@ -13060,10 +13214,10 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
 
     // ------------------------------------------------------------------------
     // 10. Clean-map maintenance is bounded by a forced owner-thread timeslice.
-    // RViz layer publication is independently version-driven and starts on the
-    // first successful commit even if the localization queue never becomes empty.
+    // The clean worker publishes only after sealing raw and derived layers
+    // into one immutable bundle. A raw commit must not republish an older
+    // complete bundle under a new timestamp.
     // ------------------------------------------------------------------------
-    requestMapPublication(stamp);
     requestMapMaintenance();
     last_clean_points_ = objects_clean_map_ ? objects_clean_map_->size() : 0;
 
@@ -13923,6 +14077,31 @@ void NdtSlamNode::logCargoHealthPeriodic() {
     rec.center_x = cargo_state_.center_base.x();
     rec.center_y = cargo_state_.center_base.y();
     rec.center_z = cargo_state_.center_base.z();
+    rec.measured_center_x = hook_lock_.live_pose_measured_base.x();
+    rec.measured_center_y = hook_lock_.live_pose_measured_base.y();
+    rec.measured_center_z = hook_lock_.live_pose_measured_base.z();
+    rec.predicted_center_x = hook_lock_.live_pose_predicted_base.x();
+    rec.predicted_center_y = hook_lock_.live_pose_predicted_base.y();
+    rec.predicted_center_z = hook_lock_.live_pose_predicted_base.z();
+    rec.center_residual_x = hook_lock_.live_pose_residual_base.x();
+    rec.center_residual_y = hook_lock_.live_pose_residual_base.y();
+    rec.center_residual_z = hook_lock_.live_pose_residual_base.z();
+    rec.pose_sensor_dt_sec = hook_lock_.live_pose_dt_sec;
+    rec.position_source = cargoPoseSourceName(
+        current_rigid_cargo_geometry_.valid
+            ? current_rigid_cargo_geometry_.pose.source
+            : hook_lock_.live_pose.source);
+    const double evaluation_stamp = cargo_state_.stamp.toSec();
+    rec.pose_evidence_age_sec =
+        hook_lock_.live_pose.evidence_stamp_sec > 0.0
+            ? std::max(0.0, evaluation_stamp -
+                  hook_lock_.live_pose.evidence_stamp_sec)
+            : 0.0;
+    rec.height_evidence_age_sec =
+        last_cargo_bottom_result_.evidence_stamp_sec > 0.0
+            ? std::max(0.0, evaluation_stamp -
+                  last_cargo_bottom_result_.evidence_stamp_sec)
+            : 0.0;
     rec.size_x = cargo_state_.size.x();
     rec.size_y = cargo_state_.size.y();
     rec.size_z = cargo_state_.size.z();

@@ -189,6 +189,9 @@ struct CargoBottomResult {
     bool geometry_valid = false;
     std::uint64_t track_id = 0;
     double stamp_sec = 0.0;
+    // Timestamp of the physical height evidence. For RECENT_STABLE and a held
+    // large-jump transition this remains the stable sample timestamp.
+    double evidence_stamp_sec = 0.0;
     CargoBottomSource source = CargoBottomSource::INVALID;
     std::string source_name = "INVALID";
     std::string reason = "not_initialized";

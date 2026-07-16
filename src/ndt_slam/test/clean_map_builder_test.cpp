@@ -66,7 +66,7 @@ TEST(CleanMapBuilder, NewerRequestDoesNotStarveCurrentObjectsSnapshot) {
     EXPECT_EQ(evaluateCleanMapBuildAction(true, true, 7U, 7U),
               CleanMapBuildAction::APPLY);
     EXPECT_EQ(evaluateCleanMapBuildAction(true, false, 7U, 8U),
-              CleanMapBuildAction::DISCARD_STALE_OBJECTS);
+              CleanMapBuildAction::PUBLISH_SNAPSHOT_ONLY);
 }
 
 }  // namespace
