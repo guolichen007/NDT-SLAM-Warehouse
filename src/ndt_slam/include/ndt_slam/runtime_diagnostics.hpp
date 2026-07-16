@@ -20,10 +20,11 @@ namespace ndt_slam {
 // Fixed-format risk tags — grep-friendly, never change the string.
 struct RuntimeDiagnosticsConfig {
   bool enabled = false;
-  bool console_enabled = true;
+  bool console_health_enabled = false;
+  bool console_risk_enabled = false;
   bool cargo_console_enabled = true;
-  double console_period_sec = 5.0;
-  double risk_repeat_period_sec = 5.0;
+  double health_period_sec = 10.0;
+  double risk_repeat_period_sec = 10.0;
   bool csv_enabled = true;
   double csv_flush_period_sec = 1.0;
   int warn_consecutive_overrun_frames = 3;
@@ -263,6 +264,7 @@ public:
   ~RuntimeDiagnostics();
 
   void configure(const RuntimeDiagnosticsConfig& cfg, const std::string& output_dir);
+  void resetTimeEpoch();
 
   // Callback and processing rates are deliberately tracked separately.
   // Acceptance frame budget comes from callback sensor time, never from the
@@ -438,6 +440,7 @@ private:
 
   std::chrono::steady_clock::time_point last_csv_flush_;
   std::chrono::steady_clock::time_point last_health_console_;
+  std::chrono::steady_clock::time_point last_cargo_console_;
   std::chrono::steady_clock::time_point last_pipeline_console_;
   std::chrono::steady_clock::time_point last_pipeline_risk_console_;
   uint64_t last_pipeline_queue_drop_total_ = 0;

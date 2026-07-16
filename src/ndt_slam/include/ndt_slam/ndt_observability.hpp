@@ -52,6 +52,12 @@ NdtObservability estimateNdtObservabilityFromStructure(
     const std::vector<Eigen::Vector2d>& static_structure_points,
     const NdtObservabilityConfig& config);
 
+// Rotates source/base-frame axes into the EKF measurement frame. The
+// eigenvalues and degeneracy classification are frame invariant.
+NdtObservability rotateNdtObservability(
+    const NdtObservability& observability,
+    double target_from_source_yaw_rad);
+
 Eigen::Matrix2d buildObservabilityAwareMeasurementCovariance(
     double base_variance,
     const NdtObservability& observability,

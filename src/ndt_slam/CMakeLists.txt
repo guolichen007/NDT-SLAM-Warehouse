@@ -121,6 +121,7 @@ set(LIBRARY_SOURCES
   src/cargo_bottom_fusion.cpp
   src/clean_map_builder.cpp
   src/cargo_oriented_footprint.cpp
+  src/cargo_rigid_geometry.cpp
   src/cargo_marker_lifecycle.cpp
   src/cargo_safety_evaluator.cpp
   src/hook_load_state_filter.cpp
@@ -215,6 +216,16 @@ if(CATKIN_ENABLE_TESTING)
   if(TARGET cargo_oriented_footprint_test)
     target_link_libraries(cargo_oriented_footprint_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_rigid_geometry_test
+    test/cargo_rigid_geometry_test.cpp)
+  if(TARGET cargo_rigid_geometry_test)
+    target_link_libraries(cargo_rigid_geometry_test
+      ndt_slam_lib
+      ${catkin_LIBRARIES}
+      ${PCL_LIBRARIES}
+      gtest_main)
   endif()
 
   catkin_add_gtest(clean_map_builder_test

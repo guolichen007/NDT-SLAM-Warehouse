@@ -95,22 +95,22 @@ def main() -> int:
             "heartbeat does not distinguish clear empty ROI from hazards",
             failures)
     for token in (
-            "source_stamp_advanced", "fresh_source_evidence",
-            "clear_confirm_pending", "clear_delay_started",
+            "source_stamp_advanced", "duplicate_source_stamp",
             "warning_geometry_mismatch", "clear_geometry_mismatch"):
         require(token in heartbeat,
                 f"heartbeat safety contract is missing {token}", failures)
-    require(not re.search(
-                r"applyCandidate\s*\([^;]*?\btrue\s*,\s*\"fresh_status\"",
-                heartbeat, re.DOTALL),
-            "heartbeat treats every received status as fresh evidence",
-            failures)
-    clear_confirmation_calls = re.findall(
-        r"candidateConfirmed\s*\(\s*kClear\s*,\s*"
-        r"fresh_source_evidence\s*\)", heartbeat)
-    require(len(clear_confirmation_calls) == 1,
-            "CLEAR confirmation must have exactly one common counting entry",
-            failures)
+    require("current_code_ = requested_code" in heartbeat and
+            "if (!source_stamp_advanced)" in heartbeat,
+            "fresh formal status is not applied immediately or duplicate stamp "
+            "can still transition", failures)
+    for forbidden in (
+            "candidateConfirmed", "clear_confirm_pending",
+            "clear_delay_started", "level1_exit_distance_m_",
+            "level2_exit_distance_m_", "clearance_exit_m_",
+            "clear_delay_sec_"):
+        require(forbidden not in heartbeat,
+                f"formal heartbeat still contains legacy state delay {forbidden}",
+                failures)
     rollback_epoch = re.search(
         r"source_stamp_sec\s*\+\s*kTimeEpsilonSec\s*<\s*"
         r"last_source_stamp_sec_\s*\)\s*\{(?P<body>.*?)"
@@ -123,10 +123,8 @@ def main() -> int:
             rollback_epoch.group("body"),
             "source rollback does not establish a recoverable new epoch",
             failures)
-    require("requires_clear_confirmation" in heartbeat and
-            "current_code_ != kClear" in heartbeat and
-            "leaving_warning" not in heartbeat,
-            "CLEAR confirmation is not required for every non-clear state",
+    require("return {current_code_, false, \"heartbeat\"};" in heartbeat,
+            "heartbeat tick can still synthesize a formal transition",
             failures)
     require(re.search(
                 r"!result\.has_cluster_evidence.*?"

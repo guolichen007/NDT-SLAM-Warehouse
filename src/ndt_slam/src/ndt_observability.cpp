@@ -197,6 +197,27 @@ NdtObservability estimateNdtObservabilityFromStructure(
     return result;
 }
 
+NdtObservability rotateNdtObservability(
+    const NdtObservability& observability,
+    double target_from_source_yaw_rad) {
+    NdtObservability rotated = observability;
+    if (!observability.valid ||
+        !observability.strong_direction.allFinite() ||
+        !observability.weak_direction.allFinite() ||
+        !std::isfinite(target_from_source_yaw_rad)) {
+        return rotated;
+    }
+    const double cosine = std::cos(target_from_source_yaw_rad);
+    const double sine = std::sin(target_from_source_yaw_rad);
+    Eigen::Matrix2d target_from_source;
+    target_from_source << cosine, -sine, sine, cosine;
+    rotated.strong_direction =
+        (target_from_source * observability.strong_direction).normalized();
+    rotated.weak_direction =
+        (target_from_source * observability.weak_direction).normalized();
+    return rotated;
+}
+
 Eigen::Matrix2d buildObservabilityAwareMeasurementCovariance(
     double base_variance,
     const NdtObservability& observability,

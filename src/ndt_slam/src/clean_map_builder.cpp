@@ -42,9 +42,11 @@ CleanMapBuildAction evaluateCleanMapBuildAction(
     std::uint64_t source_objects_version,
     std::uint64_t current_objects_version) {
     if (!build_valid) return CleanMapBuildAction::DISCARD_INVALID;
-    if (newer_request_pending) {
-        return CleanMapBuildAction::DISCARD_SUPERSEDED;
-    }
+    // A newer request must trigger another build, but it must not starve the
+    // last completed result. Apply the completed snapshot when its objects
+    // generation is still current, then let the pending request converge to
+    // the latest deny/protect evidence.
+    (void)newer_request_pending;
     if (source_objects_version != current_objects_version) {
         return CleanMapBuildAction::DISCARD_STALE_OBJECTS;
     }

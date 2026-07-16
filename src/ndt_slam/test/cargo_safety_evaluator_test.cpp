@@ -13,10 +13,11 @@ CargoSafetyInput baseInput() {
     input.height.bottom_uncertainty_m = 0.10F;
     input.height.stamp_sec = 10.0;
     input.evaluation_time_sec = 10.0;
-    input.footprint_base.min_x = -0.5F;
-    input.footprint_base.max_x = 0.5F;
-    input.footprint_base.min_y = -0.5F;
-    input.footprint_base.max_y = 0.5F;
+    input.footprint_base.valid = true;
+    input.footprint_base.center_base.setZero();
+    input.footprint_base.length_m = 1.0F;
+    input.footprint_base.width_m = 1.0F;
+    input.footprint_base.yaw_base_rad = 0.0F;
     input.footprint_base.min_z = 1.9F;
     input.footprint_base.max_z = 3.0F;
     input.obstacle_cloud_base.reset(new pcl::PointCloud<pcl::PointXYZ>);
@@ -318,7 +319,7 @@ TEST(CargoSafetyEvaluator, InvalidConfigAndInputAreInternalErrors) {
 
     CargoSafetyEvaluator evaluator;
     CargoSafetyInput invalid_input = baseInput();
-    invalid_input.footprint_base.max_x = invalid_input.footprint_base.min_x;
+    invalid_input.footprint_base.length_m = 0.0F;
     const CargoSafetyResult input_result = evaluator.evaluate(invalid_input);
     EXPECT_EQ(input_result.warning_code, 0U);
     EXPECT_EQ(input_result.fault, CargoSafetyFault::INTERNAL_ERROR);
@@ -358,6 +359,23 @@ TEST(CargoSafetyEvaluator, NeverExcludesObstacleBelowFusedBottom) {
     EXPECT_TRUE(result.warning_valid);
     EXPECT_EQ(result.self_cargo_points_removed, 0U);
     EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel1Code);
+}
+
+TEST(CargoSafetyEvaluator, RotatedFootprintUsesObbDistanceAndSelfRemoval) {
+    CargoSafetyInput input = baseInput();
+    input.footprint_base.length_m = 2.0F;
+    input.footprint_base.width_m = 0.6F;
+    input.footprint_base.yaw_base_rad =
+        0.5F * 3.14159265358979323846F;
+    auto cloud = mutableObstacleCloud(&input);
+    for (int i = 0; i < 8; ++i) {
+        cloud->push_back(pcl::PointXYZ(
+            0.0F, 0.70F + 0.005F * static_cast<float>(i), 2.10F));
+    }
+    const CargoSafetyResult result = CargoSafetyEvaluator().evaluate(input);
+    EXPECT_TRUE(result.warning_valid);
+    EXPECT_EQ(result.self_cargo_points_removed, 8U);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kSafeCode);
 }
 
 }  // namespace

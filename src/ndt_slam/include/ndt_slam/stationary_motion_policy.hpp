@@ -26,12 +26,12 @@ struct StationaryMotionPolicyConfig {
     double exit_cumulative_motion_m = 0.15;
     double exit_direction_cosine_min = 0.80;
     double exit_evidence_window_sec = 1.50;
-    double exit_min_speed_mps = 0.04;
+    double exit_min_speed_mps = 0.01;
     double exit_force_anchor_drift_m = 0.30;
     double moving_confirm_timeout_sec = 1.50;
 
     double catch_up_max_step_m = 0.08;
-    double catch_up_complete_error_m = 0.10;
+    double catch_up_complete_error_m = 0.03;
     int catch_up_confirm_frames = 2;
 
     double timestamp_epsilon_sec = 1.0e-6;

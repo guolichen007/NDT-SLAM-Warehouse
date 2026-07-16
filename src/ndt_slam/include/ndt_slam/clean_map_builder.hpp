@@ -47,7 +47,6 @@ struct CleanMapBuildResult {
 enum class CleanMapBuildAction {
     APPLY,
     DISCARD_INVALID,
-    DISCARD_SUPERSEDED,
     DISCARD_STALE_OBJECTS
 };
 

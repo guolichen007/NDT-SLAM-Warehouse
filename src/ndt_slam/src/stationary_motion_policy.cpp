@@ -245,7 +245,9 @@ StationaryMotionDecision StationaryMotionPolicy::update(
         decision.catch_up_step_m = step;
         decision.reason = "CATCH_UP_BOUNDED";
 
-        if (error_norm <= config_.catch_up_complete_error_m + 1.0e-9) {
+        const double post_step_residual_m = std::max(0.0, error_norm - step);
+        if (post_step_residual_m <=
+            config_.catch_up_complete_error_m + 1.0e-9) {
             ++catch_up_complete_count_;
         } else {
             catch_up_complete_count_ = 0;
@@ -259,7 +261,11 @@ StationaryMotionDecision StationaryMotionPolicy::update(
             confirmed_path_length_m_ = 0.0;
             decision = baseDecision(input);
             decision.state = state_;
-            decision.reason = "CATCH_UP_COMPLETE";
+            // The transition frame is a release guard: runtime pose may leave
+            // CATCH_UP, but neither map path can consume that same frame.
+            decision.allow_local_map_update = false;
+            decision.allow_persistent_map_commit = false;
+            decision.reason = "CATCH_UP_COMPLETE_RELEASE_GUARD";
         }
         return decision;
     }

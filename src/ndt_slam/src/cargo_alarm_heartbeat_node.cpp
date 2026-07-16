@@ -71,15 +71,6 @@ public:
     static constexpr int kHookRoleRequired = 1;
     static constexpr int kHookRoleAuxiliary = 2;
 
-    struct Config {
-        int confirm_frames = 2;
-        double level1_exit_distance_m = 3.20;
-        double level2_exit_distance_m = 5.20;
-        double clearance_exit_m = 0.90;
-        double immediate_clearance_m = 0.50;
-        double clear_delay_sec = 0.50;
-    };
-
     struct Result {
         int code = kSystemNotReady;
         bool changed = false;
@@ -87,19 +78,7 @@ public:
     };
 
     explicit AlarmStateMachine(double stale_timeout_sec)
-        : AlarmStateMachine(stale_timeout_sec, Config{}) {}
-
-    AlarmStateMachine(double stale_timeout_sec, const Config& config)
-        : stale_timeout_sec_(sanitizePositive(stale_timeout_sec, 0.8)),
-          confirm_frames_(std::max(1, config.confirm_frames)),
-          level1_exit_distance_m_(sanitizePositive(
-              config.level1_exit_distance_m, 3.20)),
-          level2_exit_distance_m_(sanitizePositive(
-              config.level2_exit_distance_m, 5.20)),
-          clearance_exit_m_(sanitizePositive(config.clearance_exit_m, 0.90)),
-          immediate_clearance_m_(sanitizeNonNegative(
-              config.immediate_clearance_m, 0.50)),
-          clear_delay_sec_(sanitizeNonNegative(config.clear_delay_sec, 0.50)) {}
+        : stale_timeout_sec_(sanitizePositive(stale_timeout_sec, 0.8)) {}
 
     int currentCode() const { return current_code_; }
 
@@ -142,15 +121,16 @@ public:
             return forceCode(kInternalError, "unknown_status_code");
         }
 
-        last_candidate_code_ = requested_code;
-        last_distance_m_ = distance_m;
-        last_clearance_m_ = clearance_m;
-        last_clear_without_obstacle_geometry_ =
-            clear_without_obstacle_geometry;
-        return applyCandidate(requested_code, wall_now_sec, distance_m,
-                              clearance_m, clear_without_obstacle_geometry,
-                              source_stamp_advanced,
-                              "fresh_status");
+        (void)distance_m;
+        (void)clearance_m;
+        (void)clear_without_obstacle_geometry;
+        if (!source_stamp_advanced) {
+            return {current_code_, false, "duplicate_source_stamp"};
+        }
+
+        const bool changed = current_code_ != requested_code;
+        current_code_ = requested_code;
+        return {current_code_, changed, "fresh_status"};
     }
 
     Result tick(double wall_now_sec) {
@@ -168,10 +148,7 @@ public:
             stale_timeout_sec_) {
             return forceCode(kSystemNotReady, "source_stamp_stale");
         }
-        return applyCandidate(last_candidate_code_, wall_now_sec,
-                              last_distance_m_, last_clearance_m_,
-                              last_clear_without_obstacle_geometry_, false,
-                              "heartbeat");
+        return {current_code_, false, "heartbeat"};
     }
 
     static bool isAllowedCode(int code) {
@@ -185,14 +162,6 @@ private:
 
     static double sanitizePositive(double value, double fallback) {
         return std::isfinite(value) && value > 0.0 ? value : fallback;
-    }
-
-    static double sanitizeNonNegative(double value, double fallback) {
-        return std::isfinite(value) && value >= 0.0 ? value : fallback;
-    }
-
-    static bool isFaultCode(int code) {
-        return code >= kSystemNotReady && code <= kInternalError;
     }
 
     bool observeWallClock(double wall_now_sec) {
@@ -210,144 +179,18 @@ private:
     Result forceCode(int code, const char* reason) {
         const bool changed = current_code_ != code;
         current_code_ = code;
-        last_candidate_code_ = code;
-        pending_candidate_code_ = 0;
-        pending_candidate_frames_ = 0;
-        clear_pending_ = false;
         return {current_code_, changed, reason};
     }
 
-    bool candidateConfirmed(int candidate, bool fresh_source_evidence) {
-        if (pending_candidate_code_ != candidate) {
-            pending_candidate_code_ = candidate;
-            pending_candidate_frames_ = fresh_source_evidence ? 1 : 0;
-        } else if (fresh_source_evidence) {
-            ++pending_candidate_frames_;
-        }
-        return pending_candidate_frames_ >= confirm_frames_;
-    }
-
-    void resetCandidateConfirmation() {
-        pending_candidate_code_ = 0;
-        pending_candidate_frames_ = 0;
-    }
-
-    Result applyCandidate(int candidate,
-                          double wall_now_sec,
-                          double distance_m,
-                          double clearance_m,
-                          bool clear_without_obstacle_geometry,
-                          bool fresh_source_evidence,
-                          const char* reason) {
-        if (isFaultCode(candidate)) {
-            return forceCode(candidate, reason);
-        }
-
-        if (candidate == kLevel1Warning || candidate == kLevel2Warning) {
-            clear_pending_ = false;
-            if (pending_candidate_code_ == kClear) {
-                resetCandidateConfirmation();
-            }
-            const bool severe = std::isfinite(clearance_m) &&
-                clearance_m < immediate_clearance_m_;
-            const bool level2_to_level1 =
-                current_code_ == kLevel2Warning && candidate == kLevel1Warning;
-            if (candidate == current_code_) {
-                resetCandidateConfirmation();
-                return {current_code_, false, reason};
-            }
-
-            if (current_code_ == kLevel1Warning &&
-                candidate == kLevel2Warning) {
-                const bool exited_level1 = std::isfinite(distance_m) &&
-                    distance_m > level1_exit_distance_m_;
-                if (!exited_level1 ||
-                    !candidateConfirmed(candidate, fresh_source_evidence)) {
-                    return {current_code_, false, "level1_exit_pending"};
-                }
-            } else if (!severe && !level2_to_level1 &&
-                       !candidateConfirmed(candidate, fresh_source_evidence)) {
-                return {current_code_, false, "warning_confirm_pending"};
-            }
-
-            resetCandidateConfirmation();
-            const bool changed = current_code_ != candidate;
-            current_code_ = candidate;
-            return {current_code_, changed, severe
-                ? "immediate_low_clearance" : reason};
-        }
-
-        if (candidate == kClear && current_code_ != kClear) {
-            const bool requires_clear_confirmation = current_code_ != kClear;
-            bool geometry_exited = clear_without_obstacle_geometry ||
-                isFaultCode(current_code_);
-            if (current_code_ == kLevel1Warning &&
-                !clear_without_obstacle_geometry) {
-                geometry_exited =
-                    (std::isfinite(distance_m) &&
-                     distance_m > level1_exit_distance_m_) ||
-                    (std::isfinite(clearance_m) &&
-                     clearance_m >= clearance_exit_m_);
-            } else if (current_code_ == kLevel2Warning &&
-                       !clear_without_obstacle_geometry) {
-                geometry_exited =
-                    (std::isfinite(distance_m) &&
-                     distance_m > level2_exit_distance_m_) ||
-                    (std::isfinite(clearance_m) &&
-                     clearance_m >= clearance_exit_m_);
-            }
-            if (!geometry_exited) {
-                clear_pending_ = false;
-                resetCandidateConfirmation();
-                return {current_code_, false, "clear_hysteresis_hold"};
-            }
-            if (requires_clear_confirmation && !clear_pending_ &&
-                !candidateConfirmed(kClear, fresh_source_evidence)) {
-                return {current_code_, false, "clear_confirm_pending"};
-            }
-            if (!clear_pending_) {
-                resetCandidateConfirmation();
-                clear_pending_ = true;
-                clear_pending_since_wall_sec_ = wall_now_sec;
-                return {current_code_, false, "clear_delay_started"};
-            }
-            if (wall_now_sec - clear_pending_since_wall_sec_ + kTimeEpsilonSec <
-                clear_delay_sec_) {
-                return {current_code_, false, "clear_delay_pending"};
-            }
-            current_code_ = kClear;
-            clear_pending_ = false;
-            return {current_code_, true, "clear_delay_satisfied"};
-        }
-
-        resetCandidateConfirmation();
-        clear_pending_ = false;
-        return {current_code_, false, reason};
-    }
-
     const double stale_timeout_sec_;
-    const int confirm_frames_;
-    const double level1_exit_distance_m_;
-    const double level2_exit_distance_m_;
-    const double clearance_exit_m_;
-    const double immediate_clearance_m_;
-    const double clear_delay_sec_;
     int current_code_ = kSystemNotReady;
-    int last_candidate_code_ = kSystemNotReady;
-    int pending_candidate_code_ = 0;
-    int pending_candidate_frames_ = 0;
     bool has_status_ = false;
     bool has_wall_observation_ = false;
     bool has_source_stamp_ = false;
-    bool clear_pending_ = false;
-    bool last_clear_without_obstacle_geometry_ = false;
     double last_receipt_wall_sec_ = 0.0;
     double last_observed_wall_sec_ = 0.0;
     double last_source_stamp_sec_ = 0.0;
     double last_source_progress_wall_sec_ = 0.0;
-    double clear_pending_since_wall_sec_ = 0.0;
-    double last_distance_m_ = std::numeric_limits<double>::infinity();
-    double last_clearance_m_ = std::numeric_limits<double>::infinity();
 };
 
 StatusContractResult validateStatusContract(
@@ -496,9 +339,8 @@ public:
           pnh_("~"),
           heartbeat_hz_(readPositiveParam("heartbeat_hz", 5.0)),
           stale_timeout_sec_(readPositiveParam("stale_timeout_sec", 0.8)),
-          warning_config_(readWarningConfig()),
           contract_config_(readStatusContractConfig()),
-          state_machine_(stale_timeout_sec_, warning_config_) {
+          state_machine_(stale_timeout_sec_) {
         pnh_.param<std::string>("status_topic", status_topic_,
                                 "/cargo_avoidance/safety_status");
         pnh_.param<std::string>("status_code_topic", status_code_topic_,
@@ -548,45 +390,6 @@ private:
             return fallback;
         }
         return value;
-    }
-
-    double readNonNegativeParam(const std::string& name, double fallback) {
-        double value = fallback;
-        pnh_.param(name, value, fallback);
-        if (!std::isfinite(value) || value < 0.0) {
-            ROS_ERROR("[CargoAlarmHeartbeat] ~%s=%.6f invalid; using %.6f",
-                      name.c_str(), value, fallback);
-            return fallback;
-        }
-        return value;
-    }
-
-    AlarmStateMachine::Config readWarningConfig() {
-        AlarmStateMachine::Config config;
-        pnh_.param("confirm_frames", config.confirm_frames, 2);
-        config.level1_exit_distance_m =
-            readPositiveParam("level1_exit_distance_m", 3.20);
-        config.level2_exit_distance_m =
-            readPositiveParam("level2_exit_distance_m", 5.20);
-        config.clearance_exit_m =
-            readPositiveParam("clearance_exit_m", 0.90);
-        config.immediate_clearance_m =
-            readNonNegativeParam("immediate_clearance_m", 0.50);
-        config.clear_delay_sec =
-            readNonNegativeParam("clear_delay_sec", 0.50);
-        const bool valid = config.confirm_frames == 2 &&
-            std::abs(config.level1_exit_distance_m - 3.20) <= 1.0e-6 &&
-            std::abs(config.level2_exit_distance_m - 5.20) <= 1.0e-6 &&
-            std::abs(config.clearance_exit_m - 0.90) <= 1.0e-6 &&
-            std::abs(config.immediate_clearance_m - 0.50) <= 1.0e-6 &&
-            std::abs(config.clear_delay_sec - 0.50) <= 1.0e-6;
-        if (!valid) {
-            ROS_ERROR("[CargoAlarmHeartbeat] invalid warning_state; "
-                      "restoring confirm=2 exit=(3.20,5.20,0.90) "
-                      "immediate=0.50 clear_delay=0.50");
-            config = AlarmStateMachine::Config();
-        }
-        return config;
     }
 
     StatusContractConfig readStatusContractConfig() {
@@ -695,8 +498,13 @@ private:
                 std::string(reason) == "heartbeat";
             const std::string fault_reason = has_last_status_ && message_reason
                 ? last_status_.reason : std::string(reason);
-            ROS_ERROR("[SAFETY_FAULT] code=%d reason=%s",
-                      code, fault_reason.c_str());
+            if (code == AlarmStateMachine::kSystemNotReady) {
+                ROS_WARN("[SAFETY_FAULT] code=%d reason=%s",
+                         code, fault_reason.c_str());
+            } else {
+                ROS_ERROR("[SAFETY_FAULT] code=%d reason=%s",
+                          code, fault_reason.c_str());
+            }
         }
     }
 
@@ -712,7 +520,6 @@ private:
     bool publish_legacy_alarm_topic_ = false;
     const double heartbeat_hz_;
     const double stale_timeout_sec_;
-    const AlarmStateMachine::Config warning_config_;
     const StatusContractConfig contract_config_;
     AlarmStateMachine state_machine_;
     lidar_slam2_msgs::CargoSafetyStatus last_status_;

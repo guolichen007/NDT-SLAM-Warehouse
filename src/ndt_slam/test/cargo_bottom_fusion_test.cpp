@@ -52,6 +52,32 @@ TEST(CargoBottomFusion, RobustPercentileRejectsSingleLowOutlier) {
     EXPECT_GE(result.selected_stats.bottom_band_xy_cells, 3U);
 }
 
+TEST(CargoBottomFusion, RotatedFootprintUsesCargoLocalSupportCoordinates) {
+    constexpr float kYaw = 0.78539816339744830962F;
+    const float cosine = std::cos(kYaw);
+    const float sine = std::sin(kYaw);
+    auto points = boxPoints(1.0F, 2.0F, 7, 4);
+    for (auto& point : points) {
+        const float x = point.x();
+        const float y = point.y();
+        point.x() = cosine * x - sine * y + 1.5F;
+        point.y() = sine * x + cosine * y - 0.7F;
+    }
+    CargoBottomObservation rotated = observation(2, 1.0, points);
+    rotated.footprint_center_base = Eigen::Vector2f(1.5F, -0.7F);
+    rotated.footprint_size_xy = Eigen::Vector2f(1.6F, 1.0F);
+    rotated.footprint_yaw_base_rad = kYaw;
+
+    CargoBottomFusion fusion;
+    const CargoBottomResult result = fusion.update(rotated);
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.source, CargoBottomSource::POINTS);
+    EXPECT_NEAR(result.geometry.center_base.x(), 1.5F, 0.08F);
+    EXPECT_NEAR(result.geometry.center_base.y(), -0.7F, 0.08F);
+    EXPECT_NEAR(result.geometry.bottom_z_base, 1.0F, 0.08F);
+    EXPECT_GE(result.selected_stats.bottom_band_xy_cells, 3U);
+}
+
 TEST(CargoBottomFusion, RejectsBottomSupportInSingleCell) {
     CargoBottomFusionConfig config;
     config.points_min_bottom_band_xy_cells = 3;

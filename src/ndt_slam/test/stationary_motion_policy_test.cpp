@@ -177,8 +177,35 @@ TEST(StationaryMotionPolicyTest, RealMotionUsesBoundedCatchUpBeforeMoving) {
     stamp += 0.1;
     decision = policy.update(reliableInput(stamp, raw, filtered, 0.0, 0.05));
     EXPECT_EQ(decision.state, RuntimeMotionState::MOVING);
+    EXPECT_EQ(decision.reason, "CATCH_UP_COMPLETE_RELEASE_GUARD");
+    EXPECT_FALSE(decision.allow_local_map_update);
+    EXPECT_FALSE(decision.allow_persistent_map_commit);
+
+    stamp += 0.1;
+    decision = policy.update(reliableInput(stamp, raw, raw, 0.0, 0.05));
+    EXPECT_EQ(decision.state, RuntimeMotionState::MOVING);
     EXPECT_TRUE(decision.allow_local_map_update);
     EXPECT_TRUE(decision.allow_persistent_map_commit);
+}
+
+TEST(StationaryMotionPolicyTest, VeryLowSpeedCoherentMotionCanExit) {
+    StationaryMotionPolicy policy;
+    StationaryMotionPolicyConfig config;
+    config.exit_evidence_window_sec = 30.0;
+    policy.setConfig(config);
+    double stamp = 0.0;
+    Eigen::Vector2d raw = Eigen::Vector2d::Zero();
+    enterStationary(policy, &stamp, &raw);
+
+    StationaryMotionDecision decision;
+    for (int i = 0; i < 16; ++i) {
+        stamp += 1.0;
+        raw.x() += 0.01;
+        decision = policy.update(
+            reliableInput(stamp, raw, Eigen::Vector2d::Zero(), 0.01, 0.01));
+    }
+    EXPECT_EQ(decision.state, RuntimeMotionState::CATCH_UP);
+    EXPECT_TRUE(decision.movement_confirmed);
 }
 
 TEST(StationaryMotionPolicyTest, PredictionAndNonphysicalStepsNeverConfirmExit) {

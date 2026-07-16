@@ -216,6 +216,7 @@ RegistrationCloudBuildResult buildStructurePreservingRegistrationCloud(
         result.static_object_points >= config.min_static_object_points &&
         result.structure_xy_cells >= config.min_structure_xy_cells;
     *result.structure_cloud = *selected_static;
+    *result.static_component = *selected_static;
 
     if (!result.structure_quality_valid) {
         result.mode = "INSUFFICIENT_STRUCTURE";
@@ -243,6 +244,7 @@ RegistrationCloudBuildResult buildStructurePreservingRegistrationCloud(
     limitUniform(selected_uncertain,
                  remaining_after_static / uncertain_repeat);
     result.uncertain_candidate_points = selected_uncertain->size();
+    *result.uncertain_component = *selected_uncertain;
     appendRepeated(*selected_uncertain, config.uncertain_candidate_repeat,
                    *result.cloud);
 
@@ -260,6 +262,7 @@ RegistrationCloudBuildResult buildStructurePreservingRegistrationCloud(
         : 0U;
     limitUniform(selected_ground, std::min(ratio_cap, target_cap));
     result.ground_points = selected_ground->size();
+    *result.ground_component = *selected_ground;
     *result.cloud += *selected_ground;
 
     result.total_points = result.cloud->size();
@@ -288,6 +291,79 @@ RegistrationCloudBuildResult buildStructurePreservingRegistrationCloud(
     } else {
         result.mode = "STRUCTURE_RICH";
         result.reason = "safe_static_structure_sufficient";
+    }
+    return result;
+}
+
+RegistrationCloudBuildResult excludeCargoObbFromRegistrationCloud(
+    const RegistrationCloudBuildResult& input,
+    const CargoObbFootprint& footprint,
+    float margin_xy_m,
+    float margin_z_m,
+    const RegistrationCloudBuildConfig& input_config,
+    std::size_t* removed_weighted_points) {
+    RegistrationCloudBuildResult result;
+    if (removed_weighted_points) *removed_weighted_points = 0U;
+    if (!footprint.valid) {
+        result.reason = "invalid_cargo_obb";
+        return result;
+    }
+    const auto filter_component = [&](const Cloud::ConstPtr& source,
+                                      CloudPtr destination) {
+        if (!source) return;
+        destination->reserve(source->size());
+        for (const auto& point : source->points) {
+            if (!finitePoint(point)) continue;
+            if (!containsPointInCargoObbBase(
+                    Eigen::Vector3f(point.x, point.y, point.z), footprint,
+                    margin_xy_m, margin_z_m)) {
+                destination->push_back(point);
+            }
+        }
+    };
+    filter_component(input.static_component, result.static_component);
+    filter_component(input.uncertain_component, result.uncertain_component);
+    filter_component(input.ground_component, result.ground_component);
+
+    RegistrationCloudBuildConfig config = input_config;
+    config.static_object_repeat = std::max(1, config.static_object_repeat);
+    config.uncertain_candidate_repeat =
+        std::max(0, config.uncertain_candidate_repeat);
+    config.ground_max_fraction =
+        std::clamp(config.ground_max_fraction, 0.0, 0.49);
+    *result.structure_cloud = *result.static_component;
+    appendRepeated(*result.static_component, config.static_object_repeat,
+                   *result.cloud);
+    appendRepeated(*result.uncertain_component,
+                   config.uncertain_candidate_repeat, *result.cloud);
+    *result.cloud += *result.ground_component;
+
+    result.static_object_points = result.static_component->size();
+    result.uncertain_candidate_points =
+        result.uncertain_component->size();
+    result.ground_points = result.ground_component->size();
+    result.total_points = result.cloud->size();
+    result.structure_xy_cells = countXyCells(
+        *result.static_component,
+        std::max(0.05, config.static_object_voxel_size * 2.0));
+    result.ground_fraction = result.total_points > 0U
+        ? static_cast<double>(result.ground_points) /
+            static_cast<double>(result.total_points)
+        : 0.0;
+    result.structure_quality_valid =
+        result.static_object_points >= config.min_static_object_points &&
+        result.structure_xy_cells >= config.min_structure_xy_cells;
+    result.valid = result.structure_quality_valid &&
+        result.total_points >= config.min_registration_points &&
+        result.total_points <= config.max_ndt_points &&
+        result.ground_fraction <= config.ground_max_fraction + 1.0e-9;
+    result.mode = result.valid ? input.mode : "INSUFFICIENT_STRUCTURE";
+    result.reason = result.valid
+        ? "authorized_cargo_obb_removed_metrics_recomputed"
+        : "authorized_cargo_removal_left_insufficient_structure";
+    if (removed_weighted_points) {
+        *removed_weighted_points = input.total_points > result.total_points
+            ? input.total_points - result.total_points : 0U;
     }
     return result;
 }

@@ -9,20 +9,11 @@
 #include <pcl/point_types.h>
 
 #include "ndt_slam/hook_load_evidence_policy.hpp"
+#include "ndt_slam/cargo_rigid_geometry.hpp"
 
 namespace ndt_slam {
 
-/** Axis-aligned cargo bounds expressed in the base frame. */
-struct CargoBaseFootprint {
-    float min_x = 0.0f;
-    float max_x = 0.0f;
-    float min_y = 0.0f;
-    float max_y = 0.0f;
-
-    // The vertical bounds are used only to reject returns from the cargo itself.
-    float min_z = 0.0f;
-    float max_z = 0.0f;
-};
+using CargoBaseFootprint = CargoObbFootprint;
 
 /** Latest fused cargo-bottom estimate supplied to the safety evaluator. */
 struct CargoHeightState {

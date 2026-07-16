@@ -8,11 +8,15 @@ debug:
     enabled: true
     # Production console is Cargo/Safety focused. Full localization and timing
     # diagnostics remain available frame-by-frame in CSV.
-    console_enabled: false
+    console_health_enabled: false
+    # Operational terminal is reserved for cargo tracking and safety changes.
+    # Localization/pipeline risk samples remain in the per-frame CSV files.
+    console_risk_enabled: false
     cargo_console_enabled: true
-    console_period_sec: 5.0
-    risk_repeat_period_sec: 5.0
+    health_period_sec: 10.0
+    risk_repeat_period_sec: 10.0
     csv_enabled: true
+    output_dir: "/tmp/ndt_slam_runtime_data"
     csv_flush_period_sec: 1.0
     warn_consecutive_overrun_frames: 3
     warn_prediction_only_frames: 3
@@ -22,7 +26,7 @@ debug:
 
 # 日志配置
 logging:
-  summary_interval_sec: 5.0
+  summary_interval_sec: 10.0
   warn_throttle_sec: 2.0
 
   debug_config: false
@@ -186,11 +190,11 @@ stationary_policy:
   exit_cumulative_motion_m: 0.15
   exit_direction_cosine_min: 0.80
   exit_evidence_window_sec: 1.50
-  exit_min_speed_mps: 0.04
+  exit_min_speed_mps: 0.01
   exit_force_anchor_drift_m: 0.30
   moving_confirm_timeout_sec: 1.50
   catch_up_max_step_m: 0.08
-  catch_up_complete_error_m: 0.10
+  catch_up_complete_error_m: 0.03
   catch_up_confirm_frames: 2
 
 # Visualization continuity only. Safety validity and removal authorization
@@ -673,15 +677,6 @@ cargo_safety:
   maximum_height_age_sec: 0.50
   maximum_obstacle_cloud_age_sec: 0.50
 
-warning_state:
-  publish_hz: 5.0
-  confirm_frames: 2
-  level1_exit_distance_m: 3.20
-  level2_exit_distance_m: 5.20
-  clearance_exit_m: 0.90
-  immediate_clearance_m: 0.50
-  clear_delay_sec: 0.50
-
 status_codes:
   clear: 14
   level1: 17
@@ -782,6 +777,11 @@ hook_cargo_lock:
   locked_update_max_z_jump: 0.45
   locked_update_max_top_jump: 0.60
   locked_update_min_points: 20
+  live_pose_center_alpha: 0.45
+  live_pose_max_xy_step_m: 0.20
+  live_pose_max_z_step_m: 0.35
+  lost_position_uncertainty_per_sec: 0.05
+  lost_position_uncertainty_max_m: 0.50
 
   # 锁定时 strong 条件（比更新时更严格）
   lock_strong_min_points: 80
@@ -911,7 +911,11 @@ odom_anchored_cargo_box:
     # observations fall back to the conservative axis-aligned box.
     orientation_enabled: true
     orientation_min_points: 20
-    orientation_min_axis_ratio: 1.10
+    orientation_min_geometric_aspect_ratio: 1.20
+    orientation_min_eigenvalue_ratio: 1.44
+    orientation_min_concentration: 0.70
+    orientation_min_confirm_frames: 3
+    orientation_max_yaw_spread_deg: 12.0
 
   cargo_warning:
     enabled: true

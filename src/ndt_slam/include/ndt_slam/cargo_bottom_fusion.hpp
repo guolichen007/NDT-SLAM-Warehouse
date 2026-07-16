@@ -173,6 +173,7 @@ struct CargoBottomObservation {
     bool footprint_valid = false;
     Eigen::Vector2f footprint_center_base = Eigen::Vector2f::Zero();
     Eigen::Vector2f footprint_size_xy = Eigen::Vector2f::Zero();
+    float footprint_yaw_base_rad = 0.0F;
 
     // Optional center of the same tracked cargo at stamp_sec.  When present it
     // lets the accumulator compensate cargo translation (including hoisting in

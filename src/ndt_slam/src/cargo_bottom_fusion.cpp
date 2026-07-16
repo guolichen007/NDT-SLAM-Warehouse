@@ -189,11 +189,17 @@ void filterToFootprint(std::vector<Eigen::Vector3f>* points,
     const Eigen::Vector2f half =
         0.5F * observation.footprint_size_xy.array().abs().matrix() +
         Eigen::Vector2f::Constant(std::max(0.0F, margin));
+    const float cosine = std::cos(observation.footprint_yaw_base_rad);
+    const float sine = std::sin(observation.footprint_yaw_base_rad);
     points->erase(
         std::remove_if(points->begin(), points->end(), [&](const Eigen::Vector3f& point) {
-            const Eigen::Vector2f delta =
-                (point.head<2>() - observation.footprint_center_base).cwiseAbs();
-            return delta.x() > half.x() || delta.y() > half.y();
+            const Eigen::Vector2f delta = point.head<2>() -
+                observation.footprint_center_base;
+            const Eigen::Vector2f local(
+                cosine * delta.x() + sine * delta.y(),
+                -sine * delta.x() + cosine * delta.y());
+            return std::abs(local.x()) > half.x() ||
+                std::abs(local.y()) > half.y();
         }),
         points->end());
 }
@@ -208,7 +214,9 @@ CargoVerticalStats analyzeVertical(
     std::size_t min_band_cells,
     float min_band_point_ratio,
     float min_band_cell_ratio,
+    const Eigen::Vector2f& footprint_center_xy,
     const Eigen::Vector2f& footprint_size_xy,
+    float footprint_yaw_rad,
     float min_bottom_span_ratio,
     std::size_t min_vertical_bins,
     float vertical_bin_size,
@@ -234,13 +242,27 @@ CargoVerticalStats analyzeVertical(
         std::numeric_limits<float>::infinity());
     Eigen::Vector2f all_max = Eigen::Vector2f::Constant(
         -std::numeric_limits<float>::infinity());
+    const bool oriented_coordinates = footprint_center_xy.allFinite() &&
+        footprint_size_xy.minCoeff() > 0.0F &&
+        std::isfinite(footprint_yaw_rad);
+    const float cosine = std::cos(footprint_yaw_rad);
+    const float sine = std::sin(footprint_yaw_rad);
+    const auto footprintLocal = [&](const Eigen::Vector3f& point) {
+        if (!oriented_coordinates) return point.head<2>().eval();
+        const Eigen::Vector2f delta =
+            point.head<2>() - footprint_center_xy;
+        return Eigen::Vector2f(
+            cosine * delta.x() + sine * delta.y(),
+            -sine * delta.x() + cosine * delta.y());
+    };
     for (const auto& point : points) {
         z_values.push_back(point.z());
-        all_min = all_min.cwiseMin(point.head<2>());
-        all_max = all_max.cwiseMax(point.head<2>());
+        const Eigen::Vector2f local = footprintLocal(point);
+        all_min = all_min.cwiseMin(local);
+        all_max = all_max.cwiseMax(local);
         all_cells.emplace(
-            static_cast<int>(std::floor(point.x() / xy_cell_size)),
-            static_cast<int>(std::floor(point.y() / xy_cell_size)));
+            static_cast<int>(std::floor(local.x() / xy_cell_size)),
+            static_cast<int>(std::floor(local.y() / xy_cell_size)));
     }
     stats.z02 = percentile(z_values, 0.02F);
     stats.z05 = percentile(z_values, 0.05F);
@@ -282,11 +304,12 @@ CargoVerticalStats analyzeVertical(
     for (const auto& point : points) {
         if (point.z() >= stats.z02 - 1.0e-4F && point.z() <= band_top) {
             ++stats.bottom_band_points;
-            band_min = band_min.cwiseMin(point.head<2>());
-            band_max = band_max.cwiseMax(point.head<2>());
+            const Eigen::Vector2f local = footprintLocal(point);
+            band_min = band_min.cwiseMin(local);
+            band_max = band_max.cwiseMax(local);
             band_cells.emplace(
-                static_cast<int>(std::floor(point.x() / xy_cell_size)),
-                static_cast<int>(std::floor(point.y() / xy_cell_size)));
+                static_cast<int>(std::floor(local.x() / xy_cell_size)),
+                static_cast<int>(std::floor(local.y() / xy_cell_size)));
         }
     }
     stats.bottom_band_xy_cells = band_cells.size();
@@ -417,7 +440,8 @@ CargoBoxGeometry makeGeometry(
     Eigen::Vector2f size = memory_size;
     if (observation.footprint_valid &&
         observation.footprint_center_base.allFinite() &&
-        observation.footprint_size_xy.allFinite()) {
+        observation.footprint_size_xy.allFinite() &&
+        std::isfinite(observation.footprint_yaw_base_rad)) {
         center = observation.footprint_center_base;
         size = observation.footprint_size_xy.cwiseAbs();
     } else if (!inferFootprint(selected_points, &center, &size) &&
@@ -439,14 +463,20 @@ CargoBoxGeometry makeGeometry(
 
     const float hx = 0.5F * size.x();
     const float hy = 0.5F * size.y();
+    const float yaw = observation.footprint_valid
+        ? observation.footprint_yaw_base_rad : 0.0F;
+    const float cosine = std::cos(yaw);
+    const float sine = std::sin(yaw);
     std::size_t index = 0;
     for (int z_side = 0; z_side < 2; ++z_side) {
         const float z = z_side == 0 ? bottom_z : top_z;
         for (int y_side = 0; y_side < 2; ++y_side) {
             for (int x_side = 0; x_side < 2; ++x_side) {
+                const float local_x = x_side == 0 ? -hx : hx;
+                const float local_y = y_side == 0 ? -hy : hy;
                 const Eigen::Vector3f corner(
-                    center.x() + (x_side == 0 ? -hx : hx),
-                    center.y() + (y_side == 0 ? -hy : hy), z);
+                    center.x() + cosine * local_x - sine * local_y,
+                    center.y() + sine * local_x + cosine * local_y, z);
                 geometry.corners_base[index] = corner;
                 geometry.corners_map[index] = observation.T_map_base * corner;
                 ++index;
@@ -667,7 +697,8 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
     if (observation.footprint_valid &&
         (!observation.footprint_center_base.allFinite() ||
          !observation.footprint_size_xy.allFinite() ||
-         observation.footprint_size_xy.minCoeff() <= 0.0F)) {
+         observation.footprint_size_xy.minCoeff() <= 0.0F ||
+         !std::isfinite(observation.footprint_yaw_base_rad))) {
         result.reason = "invalid_tracked_footprint";
         return result;
     }
@@ -743,7 +774,9 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
         config_.points_min_bottom_band_xy_cells,
         config_.points_min_bottom_band_point_ratio,
         config_.points_min_bottom_band_xy_cell_ratio,
-        footprint_size, config_.points_min_bottom_span_ratio,
+        observation.footprint_center_base, footprint_size,
+        observation.footprint_yaw_base_rad,
+        config_.points_min_bottom_span_ratio,
         config_.points_min_vertical_bins, config_.points_vertical_bin_size,
         config_.points_max_vertical_gap, observation.prior_height_valid,
         observation.prior_height_m, config_.prior_height_tolerance);
@@ -757,7 +790,9 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
         config_.points_min_bottom_band_xy_cells,
         config_.points_min_bottom_band_point_ratio,
         config_.points_min_bottom_band_xy_cell_ratio,
-        footprint_size, config_.points_min_bottom_span_ratio,
+        observation.footprint_center_base, footprint_size,
+        observation.footprint_yaw_base_rad,
+        config_.points_min_bottom_span_ratio,
         config_.points_min_vertical_bins, config_.points_vertical_bin_size,
         config_.points_max_vertical_gap, observation.prior_height_valid,
         observation.prior_height_m, config_.prior_height_tolerance);

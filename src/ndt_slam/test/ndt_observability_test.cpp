@@ -132,5 +132,23 @@ TEST(NdtObservabilityTest, ModerateAndSevereInflationPreserveStrongDirection) {
     EXPECT_NEAR(covariance(1, 1), 0.02, 1.0e-12);
 }
 
+TEST(NdtObservabilityTest, SourceAxesRotateIntoEkfMeasurementFrame) {
+    NdtObservability source;
+    source.valid = true;
+    source.degenerate = true;
+    source.strong_direction = Eigen::Vector2d::UnitY();
+    source.weak_direction = Eigen::Vector2d::UnitX();
+
+    const NdtObservability yaw45 = rotateNdtObservability(source, kPi / 4.0);
+    EXPECT_GT(absoluteAlignment(
+                  yaw45.weak_direction,
+                  Eigen::Vector2d(std::sqrt(0.5), std::sqrt(0.5))),
+              0.999);
+
+    const NdtObservability yaw90 = rotateNdtObservability(source, kPi / 2.0);
+    EXPECT_GT(absoluteAlignment(yaw90.weak_direction,
+                                Eigen::Vector2d::UnitY()), 0.999);
+}
+
 }  // namespace
 }  // namespace ndt_slam

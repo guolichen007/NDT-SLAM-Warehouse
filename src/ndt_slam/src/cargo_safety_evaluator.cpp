@@ -54,11 +54,11 @@ bool isValidConfig(const CargoSafetyConfig& config) {
 }
 
 bool isValidFootprint(const CargoBaseFootprint& footprint) {
-    return isFinite(footprint.min_x) && isFinite(footprint.max_x) &&
-           isFinite(footprint.min_y) && isFinite(footprint.max_y) &&
+    return footprint.valid && footprint.center_base.allFinite() &&
+           isFinite(footprint.length_m) && footprint.length_m > 0.0F &&
+           isFinite(footprint.width_m) && footprint.width_m > 0.0F &&
+           isFinite(footprint.yaw_base_rad) &&
            isFinite(footprint.min_z) && isFinite(footprint.max_z) &&
-           footprint.min_x < footprint.max_x &&
-           footprint.min_y < footprint.max_y &&
            footprint.min_z < footprint.max_z;
 }
 
@@ -70,23 +70,22 @@ bool isInsideExpandedCargo(const pcl::PointXYZ& point,
                            const CargoBaseFootprint& footprint,
                            const CargoSafetyConfig& config,
                            float fused_bottom_z) {
-    const float exclusion_min_z = std::max(
+    CargoBaseFootprint conservative = footprint;
+    conservative.min_z = std::max(
         footprint.min_z - config.self_cargo_margin_z_m, fused_bottom_z);
-    return point.x >= footprint.min_x - config.self_cargo_margin_x_m &&
-           point.x <= footprint.max_x + config.self_cargo_margin_x_m &&
-           point.y >= footprint.min_y - config.self_cargo_margin_y_m &&
-           point.y <= footprint.max_y + config.self_cargo_margin_y_m &&
-           point.z >= exclusion_min_z &&
-           point.z <= footprint.max_z + config.self_cargo_margin_z_m;
+    conservative.max_z =
+        footprint.max_z + config.self_cargo_margin_z_m;
+    return containsPointInCargoObbBase(
+        Eigen::Vector3f(point.x, point.y, point.z), conservative,
+        std::max(config.self_cargo_margin_x_m,
+                 config.self_cargo_margin_y_m),
+        0.0F);
 }
 
 float pointToFootprintDistance(const pcl::PointXYZ& point,
                                const CargoBaseFootprint& footprint) {
-    const float dx = std::max(
-        std::max(footprint.min_x - point.x, 0.0f), point.x - footprint.max_x);
-    const float dy = std::max(
-        std::max(footprint.min_y - point.y, 0.0f), point.y - footprint.max_y);
-    return std::hypot(dx, dy);
+    return pointToCargoObbDistance2D(
+        Eigen::Vector2f(point.x, point.y), footprint);
 }
 
 float nearestRankPercentile(std::vector<float>* values, float percentile) {

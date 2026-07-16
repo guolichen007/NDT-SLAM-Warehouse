@@ -46,6 +46,7 @@
 #include <ndt_slam/cargo_bottom_fusion.hpp>
 #include <ndt_slam/cargo_marker_lifecycle.hpp>
 #include <ndt_slam/cargo_oriented_footprint.hpp>
+#include <ndt_slam/cargo_rigid_geometry.hpp>
 #include <ndt_slam/cargo_safety_evaluator.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
 #include <set>
@@ -423,7 +424,7 @@ private:
         bool publish_runtime_path = false;
 
         // 日志控制
-        double summary_interval_sec = 2.0;
+        double summary_interval_sec = 10.0;
         double warn_throttle_sec = 2.0;
 
         bool debug_config = false;
@@ -433,7 +434,7 @@ private:
         bool debug_motion_gate = false;
         bool debug_pose_flow = false;
         bool debug_map_commit = false;
-        bool debug_perf = true;           // 测试时打开，输出 ndt_ms
+        bool debug_perf = false;
         bool debug_cargo = false;
         bool debug_cargo_bottom = false;
         bool debug_cargo_warning = false;
@@ -550,6 +551,8 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr last_bound_ndt_target_;
     uint64_t last_bound_ndt_target_version_ = 0;
     uint64_t local_map_version_ = 0;
+    bool bootstrap_local_map_complete_ = false;
+    int bootstrap_local_map_frames_ = 0;
     std::string last_bound_ndt_target_source_ = "none";
     std::string last_actual_target_source_ = "bootstrap_local_map";
     std::string last_target_reason_ = "startup";
@@ -697,9 +700,10 @@ private:
     void advanceObjectsMapContentVersionLocked();
     void runMapMaintenanceIfIdle(bool force_timeslice);
 
-    // Map serialization is version-driven and independent of the localization
-    // input queue. The worker deep-copies each immutable layer under map_mutex_,
-    // then performs ROS serialization and publication without that lock.
+    // Map serialization is request-driven and independent of the localization
+    // input queue. A request id only wakes/coalesces the worker; the published
+    // seq comes from map_layer_generation_, which advances only when layer
+    // content changes. All five layers are copied in one map lock transaction.
     std::thread map_publication_thread_;
     std::mutex map_publication_mutex_;
     std::condition_variable map_publication_cv_;
@@ -707,8 +711,10 @@ private:
     std::uint64_t map_publication_requested_version_ = 0U;
     std::uint64_t map_publication_completed_version_ = 0U;
     ros::Time map_publication_stamp_;
+    std::uint64_t map_layer_generation_ = 1U;
     struct MapPublicationSnapshot {
-        std::uint64_t version = 0U;
+        std::uint64_t request_version = 0U;
+        std::uint64_t generation = 0U;
         ros::Time stamp;
         pcl::PointCloud<pcl::PointXYZ>::Ptr registration;
         pcl::PointCloud<pcl::PointXYZ>::Ptr display;
@@ -722,6 +728,7 @@ private:
         std::uint64_t version, const ros::Time& stamp);
     void publishMapPublicationSnapshot(
         const MapPublicationSnapshot& snapshot);
+    void advanceMapLayerGenerationLocked();
 
     bool has_first_odom_ = false;
     Eigen::Vector3d last_position_;
@@ -1017,6 +1024,8 @@ private:
                               const std::string& reason);
     void exitStationaryState(const std::string& reason);
     void resetStationaryState(const std::string& reason);
+    void handleLidarTimeRollback(const ros::Time& previous_stamp,
+                                 const ros::Time& current_stamp);
 
     // The only production entry point to MotionGate.  It verifies that gate
     // evaluation cannot modify the runtime EKF state or current pose.
@@ -1183,9 +1192,11 @@ private:
         int local_id = 0;
         Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f size_visible = Eigen::Vector3f::Zero();
-        bool visual_footprint_valid = false;
-        Eigen::Vector2f visual_size_long_short = Eigen::Vector2f::Zero();
-        float visual_yaw_base_rad = 0.0F;
+        bool oriented_footprint_valid = false;
+        Eigen::Vector2f footprint_center_base = Eigen::Vector2f::Zero();
+        Eigen::Vector2f footprint_length_width = Eigen::Vector2f::Zero();
+        float footprint_yaw_base_rad = 0.0F;
+        float orientation_confidence = 0.0F;
         float z05 = 0.0f;
         float z50 = 0.0f;
         float z95 = 0.0f;
@@ -1320,7 +1331,11 @@ private:
             int sub_cluster_min_points = 20;
             bool orientation_enabled = true;
             int orientation_min_points = 20;
-            float orientation_min_axis_ratio = 1.10F;
+            float orientation_min_geometric_aspect_ratio = 1.20F;
+            float orientation_min_eigenvalue_ratio = 1.44F;
+            float orientation_min_concentration = 0.70F;
+            int orientation_min_confirm_frames = 3;
+            float orientation_max_yaw_spread_deg = 12.0F;
         } tight_box;
 
         // Cargo Warning 子配置
@@ -1471,6 +1486,11 @@ private:
         float locked_update_max_z_jump = 0.45f;
         float locked_update_max_top_jump = 0.60f;
         int locked_update_min_points = 20;
+        float live_pose_center_alpha = 0.45F;
+        float live_pose_max_xy_step_m = 0.20F;
+        float live_pose_max_z_step_m = 0.35F;
+        float lost_position_uncertainty_per_sec = 0.05F;
+        float lost_position_uncertainty_max_m = 0.50F;
 
         // 锁定时 strong 条件（比更新时更严格）
         int lock_strong_min_points = 80;
@@ -1551,8 +1571,8 @@ private:
 
         Eigen::Vector3f locked_size = Eigen::Vector3f::Zero();
         Eigen::Vector3f locked_center_base = Eigen::Vector3f::Zero();  // CargoState 同步
-        Eigen::Vector2f locked_visual_size = Eigen::Vector2f::Zero();
-        float locked_visual_yaw_base_rad = 0.0F;
+        LockedCargoShape locked_shape;
+        LiveCargoPose live_pose;
 
         float stable_bottom_z = 0.0f;
         float stable_top_z = 0.0f;
@@ -1560,12 +1580,12 @@ private:
         float bottom_uncertainty = 0.30f;
 
         bool has_locked_size = false;
-        bool has_locked_visual_footprint = false;
         bool has_good_height = false;
 
         std::deque<Eigen::Vector3f> init_size_buffer;
-        std::deque<Eigen::Vector2f> init_visual_size_buffer;
-        std::vector<float> init_visual_yaw_buffer;
+        std::deque<Eigen::Vector2f> init_oriented_size_buffer;
+        std::vector<float> init_oriented_yaw_buffer;
+        std::vector<float> init_orientation_confidence_buffer;
         std::deque<Eigen::Vector3f> size_candidate_buffer;
 
         // 重复帧检测
@@ -1633,6 +1653,7 @@ private:
     CargoSafetyEvaluator cargo_safety_evaluator_;
     CargoBottomResult last_cargo_bottom_result_;
     CargoSafetyResult last_cargo_safety_result_;
+    RigidCargoGeometry current_rigid_cargo_geometry_;
     bool cargo_safety_config_error_ = false;
     std::uint64_t cargo_fusion_track_id_ = 0;
     bool cargo_fusion_track_active_ = false;
@@ -1711,6 +1732,14 @@ private:
     void updateLockedHeight(const HookCargoBottomEstimate& bottom, const ros::Time& stamp, bool initialize);
     void updateLockedHeightAfterAssociation(
         const HookCargoBottomEstimate& bottom, const ros::Time& stamp);
+    void updateLiveCargoPose(const HookCargoDetection& det,
+                             const HookCargoBottomEstimate& bottom,
+                             const ros::Time& stamp,
+                             CargoPoseSource source);
+    RigidCargoGeometry buildCurrentRigidCargoGeometryForPose(
+        const Sophus::SE3d& pose_map_base,
+        const ros::Time& stamp);
+    bool cargoTrackRetained() const;
     void maybeUpdateLockedSize(const HookCargoDetection& det, const HookCargoBottomEstimate& bottom);
     void growUncertainty();
     void clearHookLock();

@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <string>
 
+#include "ndt_slam/cargo_rigid_geometry.hpp"
+
 namespace ndt_slam {
 
 struct RegistrationCloudBuildConfig {
@@ -34,6 +36,12 @@ struct RegistrationCloudBuildResult {
         new pcl::PointCloud<pcl::PointXYZ>};
     pcl::PointCloud<pcl::PointXYZ>::Ptr structure_cloud{
         new pcl::PointCloud<pcl::PointXYZ>};
+    pcl::PointCloud<pcl::PointXYZ>::Ptr static_component{
+        new pcl::PointCloud<pcl::PointXYZ>};
+    pcl::PointCloud<pcl::PointXYZ>::Ptr uncertain_component{
+        new pcl::PointCloud<pcl::PointXYZ>};
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ground_component{
+        new pcl::PointCloud<pcl::PointXYZ>};
 
     bool valid = false;
     bool structure_quality_valid = false;
@@ -54,5 +62,13 @@ RegistrationCloudBuildResult buildStructurePreservingRegistrationCloud(
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& uncertain_candidates,
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& ground,
     const RegistrationCloudBuildConfig& config);
+
+RegistrationCloudBuildResult excludeCargoObbFromRegistrationCloud(
+    const RegistrationCloudBuildResult& input,
+    const CargoObbFootprint& footprint,
+    float margin_xy_m,
+    float margin_z_m,
+    const RegistrationCloudBuildConfig& config,
+    std::size_t* removed_weighted_points = nullptr);
 
 }  // namespace ndt_slam

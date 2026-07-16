@@ -53,50 +53,34 @@ StatusContractInput faultStatus(int code, std::uint32_t mask) {
 }
 
 TEST(CargoAlarmHeartbeat, StartupAndStaleUseSystemNotReady) {
-    AlarmStateMachine::Config config;
-    config.clear_delay_sec = 0.0;
-    AlarmStateMachine state(0.5, config);
+    AlarmStateMachine state(0.5);
     EXPECT_EQ(AlarmStateMachine::kSystemNotReady, state.currentCode());
     EXPECT_EQ(AlarmStateMachine::kSystemNotReady, state.tick(1.0).code);
 
-    state.ingest(AlarmStateMachine::kClear, 2.0, 20.0,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    EXPECT_EQ(AlarmStateMachine::kSystemNotReady, state.tick(2.0).code);
-    state.ingest(AlarmStateMachine::kClear, 2.1, 20.1,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
+    EXPECT_EQ(AlarmStateMachine::kClear,
+              state.ingest(AlarmStateMachine::kClear, 2.0, 20.0).code);
     EXPECT_EQ(AlarmStateMachine::kClear, state.tick(2.1).code);
     EXPECT_EQ(AlarmStateMachine::kSystemNotReady, state.tick(2.6).code);
 }
 
 TEST(CargoAlarmHeartbeat, SourceRollbackStartsRecoverableNewEpoch) {
-    AlarmStateMachine::Config config;
-    config.clear_delay_sec = 0.0;
-    AlarmStateMachine state(0.8, config);
+    AlarmStateMachine state(0.8);
     state.ingest(AlarmStateMachine::kCargoInvalid, 10.0, 100.0);
     EXPECT_EQ(AlarmStateMachine::kSystemNotReady,
               state.ingest(AlarmStateMachine::kClear,
                            10.1, 1.0,
                            std::numeric_limits<double>::infinity(),
                            std::numeric_limits<double>::infinity(), true).code);
-    EXPECT_EQ(AlarmStateMachine::kSystemNotReady,
+    EXPECT_EQ(AlarmStateMachine::kClear,
               state.ingest(AlarmStateMachine::kClear,
                            10.2, 1.1,
                            std::numeric_limits<double>::infinity(),
                            std::numeric_limits<double>::infinity(), true).code);
-    EXPECT_EQ(AlarmStateMachine::kSystemNotReady,
-              state.ingest(AlarmStateMachine::kClear,
-                           10.3, 1.2,
-                           std::numeric_limits<double>::infinity(),
-                           std::numeric_limits<double>::infinity(), true).code);
-    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(10.3).code);
+    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(10.2).code);
 }
 
 TEST(CargoAlarmHeartbeat, SecondBagPlaybackCanRecoverWithoutNodeRestart) {
-    AlarmStateMachine::Config config;
-    config.clear_delay_sec = 0.0;
-    AlarmStateMachine state(2.0, config);
+    AlarmStateMachine state(2.0);
     state.ingest(AlarmStateMachine::kCargoInvalid, 1.0, 50.0);
     state.ingest(AlarmStateMachine::kCargoInvalid, 1.1, 50.1);
 
@@ -104,22 +88,16 @@ TEST(CargoAlarmHeartbeat, SecondBagPlaybackCanRecoverWithoutNodeRestart) {
               state.ingest(AlarmStateMachine::kClear, 2.0, 5.0,
                            std::numeric_limits<double>::infinity(),
                            std::numeric_limits<double>::infinity(), true).code);
-    state.ingest(AlarmStateMachine::kClear, 2.1, 5.1,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    state.ingest(AlarmStateMachine::kClear, 2.2, 5.2,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(2.2).code);
+    EXPECT_EQ(AlarmStateMachine::kClear,
+              state.ingest(AlarmStateMachine::kClear, 2.1, 5.1).code);
 }
 
-TEST(CargoAlarmHeartbeat, NonAdvancingSourceStampUsesCode30) {
+TEST(CargoAlarmHeartbeat, DuplicateSourceStampCannotChangeFormalCode) {
     AlarmStateMachine stalled(0.5);
     stalled.ingest(AlarmStateMachine::kCargoInvalid, 20.0, 200.0);
-    stalled.ingest(AlarmStateMachine::kCargoInvalid, 20.4, 200.0);
-    EXPECT_EQ(AlarmStateMachine::kSystemNotReady,
-              stalled.ingest(AlarmStateMachine::kCargoInvalid,
-                             20.5, 200.0).code);
+    EXPECT_EQ(AlarmStateMachine::kCargoInvalid,
+              stalled.ingest(AlarmStateMachine::kClear, 20.1, 200.0).code);
+    EXPECT_EQ(AlarmStateMachine::kSystemNotReady, stalled.tick(20.5).code);
 }
 
 TEST(CargoAlarmHeartbeat, InvalidTimestampAndUnknownCodeUseInternalError) {
@@ -130,53 +108,20 @@ TEST(CargoAlarmHeartbeat, InvalidTimestampAndUnknownCodeUseInternalError) {
               state.ingest(99, 1.1, 1.1).code);
 }
 
-TEST(CargoAlarmHeartbeat, WarningEntryIsConfirmedButSevereClearanceIsImmediate) {
-    AlarmStateMachine::Config config;
-    config.clear_delay_sec = 0.0;
-    AlarmStateMachine state(2.0, config);
-    state.ingest(AlarmStateMachine::kClear, 1.0, 10.0, 6.0, 1.0, true);
-    state.ingest(AlarmStateMachine::kClear, 1.01, 10.01, 6.0, 1.0, true);
-    ASSERT_EQ(AlarmStateMachine::kClear, state.tick(1.01).code);
-
+TEST(CargoAlarmHeartbeat, EveryFreshFormalTransitionIsImmediate) {
+    AlarmStateMachine state(2.0);
     EXPECT_EQ(AlarmStateMachine::kClear,
-              state.ingest(AlarmStateMachine::kLevel2Warning,
-                           1.1, 10.1, 4.0, 0.70).code);
+              state.ingest(AlarmStateMachine::kClear,
+                           1.0, 10.0, 6.0, 1.0, true).code);
     EXPECT_EQ(AlarmStateMachine::kLevel2Warning,
               state.ingest(AlarmStateMachine::kLevel2Warning,
-                           1.2, 10.2, 4.0, 0.70).code);
+                           1.1, 10.1, 4.0, 0.70).code);
     EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
               state.ingest(AlarmStateMachine::kLevel1Warning,
-                           1.3, 10.3, 2.0, 0.70).code);
-
-    AlarmStateMachine severe(2.0, config);
-    severe.ingest(AlarmStateMachine::kClear, 2.0, 20.0, 6.0, 1.0, true);
-    severe.ingest(AlarmStateMachine::kClear,
-                  2.01, 20.01, 6.0, 1.0, true);
-    severe.tick(2.01);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              severe.ingest(AlarmStateMachine::kLevel1Warning,
-                            2.1, 20.1, 2.0, 0.49).code);
-}
-
-TEST(CargoAlarmHeartbeat, WarningExitUsesHysteresisAndClearDelay) {
-    AlarmStateMachine::Config config;
-    config.clear_delay_sec = 0.5;
-    AlarmStateMachine state(2.0, config);
-    state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.0, 10.0, 2.0, 0.49);
-    ASSERT_EQ(AlarmStateMachine::kLevel1Warning, state.currentCode());
-
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
+                           1.2, 10.2, 2.0, 0.70).code);
+    EXPECT_EQ(AlarmStateMachine::kClear,
               state.ingest(AlarmStateMachine::kClear,
-                           1.1, 10.1, 3.10, 0.85).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              state.ingest(AlarmStateMachine::kClear,
-                           1.2, 10.2, 3.21, 0.85).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              state.ingest(AlarmStateMachine::kClear,
-                           1.3, 10.3, 3.21, 0.85).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.799).code);
-    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(1.8).code);
+                           1.3, 10.3, 3.01, 0.80).code);
 }
 
 TEST(CargoAlarmHeartbeat, FaultCodesPassThroughImmediately) {
@@ -290,230 +235,44 @@ TEST(CargoAlarmHeartbeat, LoadedClearAllowsValidObservationWithNoObstacle) {
     EXPECT_TRUE(result.clear_without_obstacle_geometry);
 }
 
-TEST(CargoAlarmHeartbeat, FirstNoObstacleClearCannotReleaseLevel1Warning) {
+TEST(CargoAlarmHeartbeat, FreshClearImmediatelyReleasesWarning) {
     AlarmStateMachine state(0.8);
     state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.0, 10.0, 2.0, 0.49);
-    ASSERT_EQ(AlarmStateMachine::kLevel1Warning, state.currentCode());
-
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
-                           std::numeric_limits<double>::infinity(),
-                           std::numeric_limits<double>::infinity(), true).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.3).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.6).code);
+                 1.0, 10.0, 2.0, 0.79);
+    EXPECT_EQ(AlarmStateMachine::kClear,
+              state.ingest(AlarmStateMachine::kClear,
+                           1.1, 10.1, 3.01, 0.80).code);
 }
 
-TEST(CargoAlarmHeartbeat, TwoFreshNoObstacleClearsStartDelay) {
-    AlarmStateMachine state(2.0);
-    state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.0, 10.0, 2.0, 0.49);
-
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
-                           std::numeric_limits<double>::infinity(),
-                           std::numeric_limits<double>::infinity(), true).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.2).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              state.ingest(AlarmStateMachine::kClear, 1.3, 10.2,
-                           std::numeric_limits<double>::infinity(),
-                           std::numeric_limits<double>::infinity(), true).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.799).code);
-    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(1.8).code);
-}
-
-TEST(CargoAlarmHeartbeat, DuplicateSourceStampIsNotFreshClearEvidence) {
-    AlarmStateMachine state(2.0);
-    state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.0, 10.0, 2.0, 0.49);
-
-    state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              state.ingest(AlarmStateMachine::kClear, 1.2, 10.1,
-                           std::numeric_limits<double>::infinity(),
-                           std::numeric_limits<double>::infinity(), true).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.3).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              state.ingest(AlarmStateMachine::kClear, 1.4, 10.2,
-                           std::numeric_limits<double>::infinity(),
-                           std::numeric_limits<double>::infinity(), true).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.899).code);
-    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(1.9).code);
-}
-
-TEST(CargoAlarmHeartbeat, OneClearThenStreamLossGoesDirectlyToCode30) {
+TEST(CargoAlarmHeartbeat, FreshClearImmediatelyRecoversFault) {
     AlarmStateMachine state(0.8);
-    state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.0, 10.0, 2.0, 0.49);
-    state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.6).code);
-    EXPECT_EQ(AlarmStateMachine::kSystemNotReady, state.tick(1.901).code);
-}
-
-TEST(CargoAlarmHeartbeat, StartupSingleClearCannotReachClearByHeartbeat) {
-    AlarmStateMachine state(0.8);
-    state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-
-    EXPECT_EQ(AlarmStateMachine::kSystemNotReady, state.tick(1.6).code);
-    EXPECT_EQ(AlarmStateMachine::kSystemNotReady, state.tick(1.901).code);
-}
-
-TEST(CargoAlarmHeartbeat, FaultSingleClearStaysFaultUntilStreamIsStale) {
-    AlarmStateMachine state(0.8);
-    state.ingest(AlarmStateMachine::kGravityInvalid, 1.0, 10.0);
-    EXPECT_EQ(AlarmStateMachine::kGravityInvalid,
-              state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
-                           std::numeric_limits<double>::infinity(),
-                           std::numeric_limits<double>::infinity(), true).code);
-
-    EXPECT_EQ(AlarmStateMachine::kGravityInvalid, state.tick(1.6).code);
-    EXPECT_EQ(AlarmStateMachine::kSystemNotReady, state.tick(1.901).code);
-}
-
-TEST(CargoAlarmHeartbeat, FaultTwoFreshClearsStartDelayBeforeRelease) {
-    AlarmStateMachine state(2.0);
     state.ingest(AlarmStateMachine::kObstacleInvalid, 1.0, 10.0);
-    EXPECT_EQ(AlarmStateMachine::kObstacleInvalid,
-              state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
+    EXPECT_EQ(AlarmStateMachine::kClear,
+              state.ingest(AlarmStateMachine::kClear,
+                           1.1, 10.1,
                            std::numeric_limits<double>::infinity(),
                            std::numeric_limits<double>::infinity(), true).code);
-    EXPECT_EQ(AlarmStateMachine::kObstacleInvalid,
-              state.ingest(AlarmStateMachine::kClear, 1.2, 10.2,
-                           std::numeric_limits<double>::infinity(),
-                           std::numeric_limits<double>::infinity(), true).code);
-    EXPECT_EQ(AlarmStateMachine::kObstacleInvalid, state.tick(1.699).code);
-    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(1.7).code);
 }
 
-TEST(CargoAlarmHeartbeat, Level2AlsoRequiresTwoFreshClears) {
-    AlarmStateMachine state(2.0);
+TEST(CargoAlarmHeartbeat, DuplicateStampCannotReleaseWarning) {
+    AlarmStateMachine state(0.8);
     state.ingest(AlarmStateMachine::kLevel2Warning,
-                 1.0, 10.0, 4.0, 0.49);
-
-    state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    EXPECT_EQ(AlarmStateMachine::kLevel2Warning, state.tick(1.2).code);
+                 1.0, 10.0, 4.0, 0.79);
     EXPECT_EQ(AlarmStateMachine::kLevel2Warning,
-              state.ingest(AlarmStateMachine::kClear, 1.3, 10.2,
-                           std::numeric_limits<double>::infinity(),
-                           std::numeric_limits<double>::infinity(), true).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel2Warning, state.tick(1.799).code);
-    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(1.8).code);
+              state.ingest(AlarmStateMachine::kClear,
+                           1.1, 10.0, 5.01, 0.80).code);
+    EXPECT_EQ(AlarmStateMachine::kClear,
+              state.ingest(AlarmStateMachine::kClear,
+                           1.2, 10.1, 5.01, 0.80).code);
 }
 
-TEST(CargoAlarmHeartbeat, GeometryClearAlsoRequiresTwoFreshMessages) {
-    AlarmStateMachine state(2.0);
+TEST(CargoAlarmHeartbeat, HeartbeatOnlyRepeatsAndNeverTransitions) {
+    AlarmStateMachine state(0.8);
     state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.0, 10.0, 2.0, 0.49);
-
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              state.ingest(AlarmStateMachine::kClear,
-                           1.1, 10.1, 3.21, 0.85).code);
+                 1.0, 10.0, 2.0, 0.79);
     EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.2).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              state.ingest(AlarmStateMachine::kClear,
-                           1.3, 10.2, 3.21, 0.85).code);
-    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(1.8).code);
-}
-
-TEST(CargoAlarmHeartbeat, FailedClearGeometryResetsConfirmation) {
-    AlarmStateMachine state(2.0);
-    state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.0, 10.0, 2.0, 0.49);
-    state.ingest(AlarmStateMachine::kClear, 1.1, 10.1, 3.21, 0.85);
-
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              state.ingest(AlarmStateMachine::kClear,
-                           1.2, 10.2, 3.10, 0.85).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning,
-              state.ingest(AlarmStateMachine::kClear,
-                           1.3, 10.3, 3.21, 0.85).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.4).code);
-    state.ingest(AlarmStateMachine::kClear, 1.5, 10.4, 3.21, 0.85);
-    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(2.0).code);
-}
-
-TEST(CargoAlarmHeartbeat, NewRiskCancelsPendingClearConfirmation) {
-    AlarmStateMachine state(2.0);
-    state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.0, 10.0, 2.0, 0.49);
-    state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.2, 10.2, 2.0, 0.70);
-
-    state.ingest(AlarmStateMachine::kClear, 1.3, 10.3,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.4).code);
-    state.ingest(AlarmStateMachine::kClear, 1.5, 10.4,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(2.0).code);
-
-    AlarmStateMachine escalation(2.0);
-    escalation.ingest(AlarmStateMachine::kLevel1Warning,
-                      3.0, 30.0, 2.0, 0.49);
-    escalation.ingest(AlarmStateMachine::kClear, 3.1, 30.1,
-                      std::numeric_limits<double>::infinity(),
-                      std::numeric_limits<double>::infinity(), true);
-    escalation.ingest(AlarmStateMachine::kLevel2Warning,
-                      3.2, 30.2, 3.10, 0.70);
-    escalation.ingest(AlarmStateMachine::kClear, 3.3, 30.3,
-                      std::numeric_limits<double>::infinity(),
-                      std::numeric_limits<double>::infinity(), true);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, escalation.tick(3.4).code);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, escalation.tick(3.8).code);
-}
-
-TEST(CargoAlarmHeartbeat, FaultCancelsPendingClearConfirmation) {
-    AlarmStateMachine state(2.0);
-    state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.0, 10.0, 2.0, 0.49);
-    state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    state.ingest(AlarmStateMachine::kGravityInvalid, 1.2, 10.2);
-    state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.3, 10.3, 2.0, 0.49);
-
-    state.ingest(AlarmStateMachine::kClear, 1.4, 10.4,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.5).code);
-}
-
-TEST(CargoAlarmHeartbeat, ConfirmFramesThreeRequiresThreeFreshClears) {
-    AlarmStateMachine::Config config;
-    config.confirm_frames = 3;
-    AlarmStateMachine state(2.0, config);
-    state.ingest(AlarmStateMachine::kLevel1Warning,
-                 1.0, 10.0, 2.0, 0.49);
-
-    state.ingest(AlarmStateMachine::kClear, 1.1, 10.1,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    state.ingest(AlarmStateMachine::kClear, 1.2, 10.2,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    state.ingest(AlarmStateMachine::kClear, 1.3, 10.2,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.4).code);
-    state.ingest(AlarmStateMachine::kClear, 1.5, 10.3,
-                 std::numeric_limits<double>::infinity(),
-                 std::numeric_limits<double>::infinity(), true);
-    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.999).code);
-    EXPECT_EQ(AlarmStateMachine::kClear, state.tick(2.0).code);
+    EXPECT_EQ(AlarmStateMachine::kLevel1Warning, state.tick(1.7).code);
+    EXPECT_EQ(AlarmStateMachine::kSystemNotReady, state.tick(1.801).code);
 }
 
 TEST(CargoAlarmHeartbeat, Level1GeometryContractUsesEntryThresholds) {

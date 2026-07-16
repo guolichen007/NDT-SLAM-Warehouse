@@ -58,13 +58,13 @@ TEST(CleanMapBuilder, LargeMapWithoutObservationHistoryFailsClosed) {
     EXPECT_EQ(result.reason, "observation_history_empty");
 }
 
-TEST(CleanMapBuilder, WorkerResultRequiresCurrentUnsupersededSnapshot) {
+TEST(CleanMapBuilder, NewerRequestDoesNotStarveCurrentObjectsSnapshot) {
     EXPECT_EQ(evaluateCleanMapBuildAction(true, false, 7U, 7U),
               CleanMapBuildAction::APPLY);
     EXPECT_EQ(evaluateCleanMapBuildAction(false, false, 7U, 7U),
               CleanMapBuildAction::DISCARD_INVALID);
     EXPECT_EQ(evaluateCleanMapBuildAction(true, true, 7U, 7U),
-              CleanMapBuildAction::DISCARD_SUPERSEDED);
+              CleanMapBuildAction::APPLY);
     EXPECT_EQ(evaluateCleanMapBuildAction(true, false, 7U, 8U),
               CleanMapBuildAction::DISCARD_STALE_OBJECTS);
 }

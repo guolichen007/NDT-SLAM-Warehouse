@@ -29,8 +29,10 @@ bool validConfig(const CargoOrientedFootprintConfig& config) {
         config.percentile_high <= 1.0F &&
         config.percentile_low < config.percentile_high &&
         std::isfinite(config.margin_m) && config.margin_m >= 0.0F &&
-        std::isfinite(config.minimum_axis_ratio) &&
-        config.minimum_axis_ratio >= 1.0F &&
+        std::isfinite(config.minimum_geometric_aspect_ratio) &&
+        config.minimum_geometric_aspect_ratio >= 1.0F &&
+        std::isfinite(config.minimum_eigenvalue_ratio) &&
+        config.minimum_eigenvalue_ratio >= 1.0F &&
         std::isfinite(config.minimum_long_side_m) &&
         std::isfinite(config.minimum_short_side_m) &&
         std::isfinite(config.maximum_long_side_m) &&
@@ -55,38 +57,52 @@ float normalizeCargoAxialYaw(float yaw_rad) {
 bool meanCargoAxialYaw(const std::vector<float>& yaw_samples,
                        float* mean_yaw_rad) {
     if (!mean_yaw_rad) return false;
+    const CargoAxialYawSummary summary =
+        summarizeCargoAxialYaw(yaw_samples);
+    if (!summary.valid) return false;
+    *mean_yaw_rad = summary.mean_yaw_rad;
+    return true;
+}
+
+CargoAxialYawSummary summarizeCargoAxialYaw(
+    const std::vector<float>& yaw_samples) {
+    CargoAxialYawSummary summary;
     double cosine_sum = 0.0;
     double sine_sum = 0.0;
-    std::size_t finite_count = 0U;
     for (const float yaw : yaw_samples) {
         if (!std::isfinite(yaw)) continue;
         cosine_sum += std::cos(2.0 * static_cast<double>(yaw));
         sine_sum += std::sin(2.0 * static_cast<double>(yaw));
-        ++finite_count;
+        ++summary.sample_count;
     }
-    if (finite_count == 0U ||
+    if (summary.sample_count == 0U ||
         std::hypot(cosine_sum, sine_sum) <= 1.0e-9) {
-        return false;
+        return summary;
     }
-    *mean_yaw_rad = normalizeCargoAxialYaw(static_cast<float>(
+    summary.mean_yaw_rad = normalizeCargoAxialYaw(static_cast<float>(
         0.5 * std::atan2(sine_sum, cosine_sum)));
-    return true;
+    summary.concentration = static_cast<float>(
+        std::hypot(cosine_sum, sine_sum) /
+        static_cast<double>(summary.sample_count));
+    for (const float yaw : yaw_samples) {
+        if (!std::isfinite(yaw)) continue;
+        summary.maximum_deviation_rad = std::max(
+            summary.maximum_deviation_rad,
+            std::abs(normalizeCargoAxialYaw(
+                yaw - summary.mean_yaw_rad)));
+    }
+    summary.valid = true;
+    return summary;
 }
 
 CargoOrientedFootprint estimateCargoOrientedFootprint(
     const std::vector<Eigen::Vector2f>& points_base,
-    const Eigen::Vector2f& anchor_base,
     const CargoOrientedFootprintConfig& config) {
     CargoOrientedFootprint result;
     if (!validConfig(config)) {
         result.reason = "invalid_config";
         return result;
     }
-    if (!anchor_base.allFinite()) {
-        result.reason = "nonfinite_anchor";
-        return result;
-    }
-
     std::vector<Eigen::Vector2f> finite_points;
     finite_points.reserve(points_base.size());
     std::vector<float> finite_x;
@@ -149,9 +165,9 @@ CargoOrientedFootprint estimateCargoOrientedFootprint(
     }
     const float weak = std::max(0.0F, solver.eigenvalues()(0));
     const float strong = std::max(0.0F, solver.eigenvalues()(1));
-    result.axis_ratio = strong / std::max(weak, 1.0e-8F);
-    if (!std::isfinite(result.axis_ratio) ||
-        result.axis_ratio < config.minimum_axis_ratio) {
+    result.eigenvalue_ratio = strong / std::max(weak, 1.0e-8F);
+    if (!std::isfinite(result.eigenvalue_ratio) ||
+        result.eigenvalue_ratio < config.minimum_eigenvalue_ratio) {
         result.reason = "orientation_ambiguous";
         return result;
     }
@@ -163,9 +179,9 @@ CargoOrientedFootprint estimateCargoOrientedFootprint(
     along_long.reserve(finite_points.size());
     along_short.reserve(finite_points.size());
     for (const auto& point : finite_points) {
-        const Eigen::Vector2f anchored = point - anchor_base;
-        along_long.push_back(anchored.dot(long_axis));
-        along_short.push_back(anchored.dot(short_axis));
+        const Eigen::Vector2f centered = point - centroid;
+        along_long.push_back(centered.dot(long_axis));
+        along_short.push_back(centered.dot(short_axis));
     }
 
     const float long_low = percentile(along_long, config.percentile_low);
@@ -178,15 +194,27 @@ CargoOrientedFootprint estimateCargoOrientedFootprint(
         return result;
     }
 
-    float long_size = 2.0F *
-        (std::max(std::abs(long_low), std::abs(long_high)) + config.margin_m);
-    float short_size = 2.0F *
-        (std::max(std::abs(short_low), std::abs(short_high)) + config.margin_m);
+    float long_size = long_high - long_low + 2.0F * config.margin_m;
+    float short_size = short_high - short_low + 2.0F * config.margin_m;
+    float long_mid = 0.5F * (long_low + long_high);
+    float short_mid = 0.5F * (short_low + short_high);
     float yaw = std::atan2(long_axis.y(), long_axis.x());
     if (short_size > long_size) {
         std::swap(long_size, short_size);
+        std::swap(long_mid, short_mid);
+        std::swap(long_axis, short_axis);
         yaw += 0.5F * 3.14159265358979323846F;
     }
+    result.geometric_aspect_ratio =
+        long_size / std::max(short_size, 1.0e-6F);
+    if (!std::isfinite(result.geometric_aspect_ratio) ||
+        result.geometric_aspect_ratio + 1.0e-6F <
+            config.minimum_geometric_aspect_ratio) {
+        result.reason = "geometric_aspect_ambiguous";
+        return result;
+    }
+    result.center_base = centroid + long_mid * long_axis +
+        short_mid * short_axis;
     long_size = std::clamp(
         long_size, config.minimum_long_side_m, config.maximum_long_side_m);
     short_size = std::clamp(
@@ -199,6 +227,18 @@ CargoOrientedFootprint estimateCargoOrientedFootprint(
     result.valid = true;
     result.size_long_short = Eigen::Vector2f(long_size, short_size);
     result.yaw_base_rad = normalizeCargoAxialYaw(yaw);
+    const float eigen_confidence = std::clamp(
+        (result.eigenvalue_ratio - 1.0F) /
+            std::max(1.0e-6F,
+                     config.minimum_eigenvalue_ratio - 1.0F),
+        0.0F, 1.0F);
+    const float geometry_confidence = std::clamp(
+        (result.geometric_aspect_ratio - 1.0F) /
+            std::max(1.0e-6F,
+                     config.minimum_geometric_aspect_ratio - 1.0F),
+        0.0F, 1.0F);
+    result.orientation_confidence =
+        std::min(eigen_confidence, geometry_confidence);
     result.reason = "robust_pca_obb";
     return result;
 }
