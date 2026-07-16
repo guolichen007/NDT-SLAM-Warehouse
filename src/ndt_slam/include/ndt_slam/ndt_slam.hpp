@@ -49,6 +49,7 @@
 #include <ndt_slam/cargo_oriented_footprint.hpp>
 #include <ndt_slam/cargo_rigid_geometry.hpp>
 #include <ndt_slam/cargo_safety_evaluator.hpp>
+#include <ndt_slam/cargo_obstacle_tracker.hpp>
 #include <ndt_slam/cargo_safety_temporal_filter.hpp>
 #include <ndt_slam/cargo_track_policy.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
@@ -1824,6 +1825,7 @@ private:
     CargoBottomFusion cargo_bottom_fusion_;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
+    CargoObstacleTracker cargo_obstacle_tracker_;
     CargoSafetyTemporalFilter cargo_safety_temporal_filter_;
     CargoBottomResult last_cargo_bottom_result_;
     CargoSafetyResult last_cargo_safety_result_;
@@ -1855,6 +1857,12 @@ private:
     std::int32_t cargo_temporal_candidate_code_ = 0;
     int cargo_temporal_candidate_count_ = 0;
     bool cargo_used_previous_confirmation_ = false;
+    std::uint64_t cargo_obstacle_track_id_ = 0U;
+    double cargo_obstacle_track_age_sec_ = 0.0;
+    int cargo_obstacle_track_confirm_count_ = 0;
+    bool cargo_obstacle_track_static_ = false;
+    Eigen::Vector3f cargo_obstacle_track_velocity_map_ =
+        Eigen::Vector3f::Zero();
     std::int32_t cargo_last_requested_code_ =
         CargoSafetyProtocol::kSystemNotReady;
     std::string cargo_last_safety_reason_ = "startup";

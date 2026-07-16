@@ -2289,6 +2289,31 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                            .as<float>(0.75F));
         }
         cargo_safety_temporal_filter_.setConfig(temporal_config);
+        CargoObstacleTrackerConfig obstacle_tracker_config;
+        obstacle_tracker_config.confirm_frames =
+            temporal_config.hazard_confirm_frames;
+        obstacle_tracker_config.minimum_points =
+            temporal_config.minimum_hazard_cluster_points;
+        obstacle_tracker_config.maximum_observation_gap_sec =
+            temporal_config.maximum_evidence_gap_sec;
+        if (cargo_safety) {
+            obstacle_tracker_config.association_max_centroid_distance_m =
+                std::max(0.05F,
+                    cargo_safety["obstacle_track_association_distance_m"]
+                        .as<float>(0.75F));
+            obstacle_tracker_config.association_max_top_step_m =
+                std::max(0.05F,
+                    cargo_safety["obstacle_track_association_top_step_m"]
+                        .as<float>(0.75F));
+            obstacle_tracker_config.stale_track_sec = std::max(
+                obstacle_tracker_config.maximum_observation_gap_sec,
+                cargo_safety["obstacle_track_stale_sec"].as<double>(1.00));
+            obstacle_tracker_config.static_velocity_threshold_mps =
+                std::max(0.0F,
+                    cargo_safety["obstacle_track_static_velocity_mps"]
+                        .as<float>(0.15F));
+        }
+        cargo_obstacle_tracker_.setConfig(obstacle_tracker_config);
 
     } catch (const YAML::Exception& e) {
         ROS_ERROR("YAML parse error: %s", e.what());
@@ -2576,6 +2601,7 @@ void NdtSlamNode::resetCargoForHookState(bool preserve_origin_height) {
     last_cargo_safety_result_ = CargoSafetyResult{};
     confirmed_cargo_safety_result_ = CargoSafetyResult{};
     cargo_safety_temporal_filter_.reset();
+    cargo_obstacle_tracker_.reset();
     has_stable_height_ = false;
     stable_height_ = 0.0F;
     if (!preserve_origin_height) {
@@ -8219,6 +8245,7 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
         last_cargo_safety_result_ = CargoSafetyResult{};
         confirmed_cargo_safety_result_ = CargoSafetyResult{};
         cargo_safety_temporal_filter_.reset();
+        cargo_obstacle_tracker_.reset();
         formal_cargo_removal_authorized_ = false;
         formal_cargo_removal_stamp_ = ros::Time();
         last_cargo_pipeline_stamp_ = ros::Time();
@@ -12528,25 +12555,102 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     cargo_raw_warning_code_ = raw_cargo_safety_result.warning_valid
         ? raw_cargo_safety_result.warning_code : 0;
     last_cargo_safety_result_ = raw_cargo_safety_result;
-    if (last_cargo_safety_result_.input_valid &&
-        last_cargo_safety_result_.warning_valid &&
-        last_cargo_safety_result_.fault == CargoSafetyFault::NONE) {
+    std::vector<CargoObstacleObservation> obstacle_track_observations;
+    if (raw_cargo_safety_result.input_valid &&
+        raw_cargo_safety_result.warning_valid &&
+        raw_cargo_safety_result.fault == CargoSafetyFault::NONE) {
+        obstacle_track_observations.reserve(
+            raw_cargo_safety_result.cluster_evidence.size());
+        for (std::size_t evidence_index = 0U;
+             evidence_index < raw_cargo_safety_result.cluster_evidence.size();
+             ++evidence_index) {
+            const CargoSafetyClusterEvidence& evidence =
+                raw_cargo_safety_result.cluster_evidence[evidence_index];
+            if (evidence.warning_code != CargoSafetyEvaluator::kLevel1Code &&
+                evidence.warning_code != CargoSafetyEvaluator::kLevel2Code) {
+                continue;
+            }
+            const Eigen::Vector3d centroid_map = pose_map_base *
+                evidence.centroid_base.getVector3fMap().cast<double>();
+            const Eigen::Vector3d top_map = pose_map_base * Eigen::Vector3d(
+                evidence.centroid_base.x, evidence.centroid_base.y,
+                evidence.obstacle_top_z95_m);
+            CargoObstacleObservation observation;
+            observation.source_index = evidence_index;
+            observation.centroid_map = centroid_map.cast<float>();
+            observation.top_z95_map = static_cast<float>(top_map.z());
+            observation.footprint_distance_m =
+                evidence.footprint_distance_m;
+            observation.conservative_clearance_m =
+                evidence.conservative_clearance_m;
+            observation.point_count = evidence.point_count;
+            observation.warning_code = evidence.warning_code;
+            obstacle_track_observations.push_back(observation);
+        }
+    }
+    const CargoObstacleTrackerDecision obstacle_track_decision =
+        cargo_obstacle_tracker_.update(
+            stamp.toSec(), obstacle_track_observations);
+    cargo_obstacle_track_id_ = obstacle_track_decision.selected_track_id;
+    cargo_obstacle_track_age_sec_ =
+        obstacle_track_decision.selected_track_age_sec;
+    cargo_obstacle_track_confirm_count_ =
+        obstacle_track_decision.selected_confirm_count;
+    cargo_obstacle_track_static_ =
+        obstacle_track_decision.selected_track_static;
+    cargo_obstacle_track_velocity_map_ =
+        obstacle_track_decision.selected_track_velocity;
+
+    const auto make_obstacle_pending = [&](const std::string& reason) {
+        last_cargo_safety_result_.input_valid = false;
+        last_cargo_safety_result_.warning_valid = false;
+        last_cargo_safety_result_.warning_code = 0U;
+        last_cargo_safety_result_.fault =
+            CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
+        last_cargo_safety_result_.reason = reason;
+    };
+
+    if (raw_cargo_safety_result.input_valid &&
+        raw_cargo_safety_result.warning_valid &&
+        raw_cargo_safety_result.fault == CargoSafetyFault::NONE &&
+        (raw_cargo_safety_result.warning_code ==
+             CargoSafetyEvaluator::kLevel1Code ||
+         raw_cargo_safety_result.warning_code ==
+             CargoSafetyEvaluator::kLevel2Code)) {
+        cargo_safety_temporal_filter_.reset();
+        confirmed_cargo_safety_result_ = CargoSafetyResult{};
+        cargo_temporal_candidate_code_ =
+            raw_cargo_safety_result.warning_code;
+        cargo_temporal_candidate_count_ =
+            obstacle_track_decision.selected_confirm_count;
+        cargo_used_previous_confirmation_ = false;
+        if (obstacle_track_decision.confirmed_hazard &&
+            obstacle_track_decision.selected_source_index <
+                raw_cargo_safety_result.cluster_evidence.size()) {
+            const CargoSafetyClusterEvidence& selected =
+                raw_cargo_safety_result.cluster_evidence[
+                    obstacle_track_decision.selected_source_index];
+            last_cargo_safety_result_.has_cluster_evidence = true;
+            last_cargo_safety_result_.most_dangerous_cluster = selected;
+            last_cargo_safety_result_.warning_code =
+                obstacle_track_decision.warning_code;
+            last_cargo_safety_result_.reason =
+                obstacle_track_decision.reason;
+            cargo_confirmed_warning_code_ =
+                obstacle_track_decision.warning_code;
+            confirmed_cargo_safety_result_ = last_cargo_safety_result_;
+        } else {
+            cargo_confirmed_warning_code_ = 0;
+            make_obstacle_pending(obstacle_track_decision.reason);
+        }
+    } else if (raw_cargo_safety_result.input_valid &&
+               raw_cargo_safety_result.warning_valid &&
+               raw_cargo_safety_result.fault == CargoSafetyFault::NONE) {
+        // CLEAR confirmation remains a separate two-frame lifecycle guard.
         CargoSafetyTemporalInput temporal_input;
         temporal_input.stamp_sec = stamp.toSec();
         temporal_input.raw_valid = true;
-        temporal_input.raw_code =
-            last_cargo_safety_result_.warning_code;
-        if (last_cargo_safety_result_.has_cluster_evidence) {
-            const CargoSafetyClusterEvidence& evidence =
-                last_cargo_safety_result_.most_dangerous_cluster;
-            temporal_input.cluster_points = evidence.point_count;
-            temporal_input.cluster_centroid =
-                evidence.centroid_base.getVector3fMap();
-            temporal_input.footprint_distance_m =
-                evidence.footprint_distance_m;
-            temporal_input.conservative_clearance_m =
-                evidence.conservative_clearance_m;
-        }
+        temporal_input.raw_code = CargoSafetyEvaluator::kSafeCode;
         const CargoSafetyTemporalDecision temporal_decision =
             cargo_safety_temporal_filter_.update(temporal_input);
         cargo_confirmed_warning_code_ = temporal_decision.confirmed_code;
@@ -12556,32 +12660,12 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             temporal_decision.stable &&
             !temporal_decision.use_current_evidence;
         if (!temporal_decision.stable) {
-            last_cargo_safety_result_.input_valid = false;
-            last_cargo_safety_result_.warning_valid = false;
-            last_cargo_safety_result_.warning_code = 0U;
-            last_cargo_safety_result_.fault =
-                CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
-            last_cargo_safety_result_.reason = temporal_decision.reason;
-        } else if (temporal_decision.use_current_evidence) {
+            make_obstacle_pending(temporal_decision.reason);
+        } else {
             last_cargo_safety_result_.warning_code =
                 temporal_decision.code;
             last_cargo_safety_result_.reason = temporal_decision.reason;
             confirmed_cargo_safety_result_ = last_cargo_safety_result_;
-        } else if (confirmed_cargo_safety_result_.warning_valid &&
-                   confirmed_cargo_safety_result_.warning_code ==
-                       temporal_decision.code) {
-            last_cargo_safety_result_ = confirmed_cargo_safety_result_;
-            last_cargo_safety_result_.reason = temporal_decision.reason;
-        } else {
-            // Do not manufacture 17/18 geometry after lifecycle reset. A new
-            // complete evidence window must repopulate the cache.
-            last_cargo_safety_result_.input_valid = false;
-            last_cargo_safety_result_.warning_valid = false;
-            last_cargo_safety_result_.warning_code = 0U;
-            last_cargo_safety_result_.fault =
-                CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
-            last_cargo_safety_result_.reason =
-                "temporal_confirmed_evidence_cache_missing";
         }
     } else {
         // Faults remain immediate and cannot be used as temporal evidence.
@@ -15746,6 +15830,17 @@ void NdtSlamNode::logCargoHealthPeriodic() {
     // explicit field so Ubuntu CSV review can verify it remains zero.
     rec.temporal_hold_age_sec = 0.0;
     rec.used_previous_confirmation = cargo_used_previous_confirmation_;
+    rec.obstacle_track_id = cargo_obstacle_track_id_;
+    rec.obstacle_track_age_sec = cargo_obstacle_track_age_sec_;
+    rec.obstacle_track_confirm_count =
+        cargo_obstacle_track_confirm_count_;
+    rec.obstacle_track_static = cargo_obstacle_track_static_;
+    rec.obstacle_track_velocity_x =
+        cargo_obstacle_track_velocity_map_.x();
+    rec.obstacle_track_velocity_y =
+        cargo_obstacle_track_velocity_map_.y();
+    rec.obstacle_track_velocity_z =
+        cargo_obstacle_track_velocity_map_.z();
     rec.safety_reason = cargo_last_safety_reason_;
     rec.support_points = static_cast<int>(std::min<std::size_t>(
         last_cargo_bottom_result_.selected_stats.bottom_band_points,

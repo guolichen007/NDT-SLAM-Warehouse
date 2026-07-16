@@ -403,6 +403,7 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         }
 
         ++result.evaluated_cluster_count;
+        result.cluster_evidence.push_back(evidence);
         if (!result.has_cluster_evidence ||
             isMoreDangerous(evidence, result.most_dangerous_cluster)) {
             result.most_dangerous_cluster = evidence;

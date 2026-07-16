@@ -92,8 +92,8 @@ def main() -> int:
             safety_evaluator and
             "result.warning_code = kSafeCode" in safety_evaluator,
             "valid empty obstacle ROI is not classified CLEAR", failures)
-    require("last_cargo_safety_result_.input_valid &&" in node and
-            "last_cargo_safety_result_.fault == CargoSafetyFault::NONE" in node and
+    require("message.obstacle_valid = result.input_valid &&" in node and
+            "result.fault == CargoSafetyFault::NONE" in node and
             "status.obstacle_count > 0U" in node,
             "obstacle validity is still coupled to cluster presence", failures)
     require("input.obstacle_count == 0U" in heartbeat and
@@ -312,6 +312,8 @@ def main() -> int:
             failures)
     temporal_filter = read(
         "src/ndt_slam/src/cargo_safety_temporal_filter.cpp")
+    obstacle_tracker = read(
+        "src/ndt_slam/src/cargo_obstacle_tracker.cpp")
     require("minimum_hazard_cluster_points" in temporal_filter and
             "maximum_centroid_step_m" in temporal_filter and
             "repeated_source_stamp_ignored" in temporal_filter and
@@ -324,6 +326,14 @@ def main() -> int:
             "clear_confirm_frames: 2" in live_config and
             "cargo_safety_temporal_filter_.update" in node,
             "17/18 do not require fresh spatially continuous cluster evidence",
+            failures)
+    require("src/cargo_obstacle_tracker.cpp" in cmake and
+            "cargo_obstacle_tracker_.update" in node and
+            "cluster_evidence.push_back" in safety_evaluator and
+            "current_source_index" in obstacle_tracker and
+            "consecutive_observations" in obstacle_tracker and
+            "centroid_map" in obstacle_tracker,
+            "hazards are not confirmed by persistent map-frame identity",
             failures)
     require("axis_aligned_yaw_after_lock: true" in live_config and
             "freeze_vertical_position_after_lock: false" in live_config and
@@ -374,6 +384,8 @@ def main() -> int:
             "confirmed_warning_code" in runtime_header and
             "temporal_candidate_code" in runtime_header and
             "used_previous_confirmation" in runtime_header and
+            "obstacle_track_id" in runtime_header and
+            "obstacle_track_velocity" in runtime_header and
             "requested_alarm_code" in runtime_header,
             "cargo safety evidence is incomplete in frame diagnostics",
             failures)

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <vector>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -148,6 +149,7 @@ struct CargoSafetyResult {
     std::size_t evaluated_cluster_count = 0;
 
     CargoSafetyClusterEvidence most_dangerous_cluster;
+    std::vector<CargoSafetyClusterEvidence> cluster_evidence;
     std::string reason = "invalid_input";
 };
 

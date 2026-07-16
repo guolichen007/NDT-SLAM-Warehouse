@@ -285,6 +285,13 @@ struct CargoFrameRecord {
   int temporal_candidate_count = 0;
   double temporal_hold_age_sec = 0.0;
   bool used_previous_confirmation = false;
+  std::uint64_t obstacle_track_id = 0U;
+  double obstacle_track_age_sec = 0.0;
+  int obstacle_track_confirm_count = 0;
+  bool obstacle_track_static = false;
+  double obstacle_track_velocity_x = 0.0;
+  double obstacle_track_velocity_y = 0.0;
+  double obstacle_track_velocity_z = 0.0;
   std::string safety_reason = "system_not_ready";
   double center_x = 0.0, center_y = 0.0, center_z = 0.0;
   double measured_center_x = 0.0, measured_center_y = 0.0,

@@ -688,6 +688,10 @@ cargo_safety:
   maximum_centroid_step_m: 0.75
   maximum_distance_step_m: 0.75
   maximum_clearance_step_m: 0.75
+  obstacle_track_association_distance_m: 0.75
+  obstacle_track_association_top_step_m: 0.75
+  obstacle_track_stale_sec: 1.00
+  obstacle_track_static_velocity_mps: 0.15
 
 status_codes:
   clear: 14
