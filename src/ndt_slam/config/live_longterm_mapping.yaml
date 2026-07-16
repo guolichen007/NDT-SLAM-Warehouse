@@ -784,6 +784,9 @@ hook_cargo_lock:
   minimum_identity_confidence: 0.62
   minimum_overall_lock_confidence: 0.68
   maximum_provisional_shape_cv: 0.20
+  minimum_candidate_score_margin: 0.08
+  suspension_confirm_frames: 3
+  minimum_lift_from_origin_m: 0.25
   reacquisition_overlap_extra: 0.10
   residual_uncertainty_decay: 0.80
   live_pose_center_alpha: 0.45
@@ -920,7 +923,8 @@ odom_anchored_cargo_box:
     size_update_mode: "adaptive"
     size_update_alpha: 0.30
     max_size_change_per_frame_m: 0.10
-    sub_cluster_enabled: true
+    # Identity selection and geometry must consume the same full component.
+    sub_cluster_enabled: false
     sub_cluster_tolerance_m: 0.10
     sub_cluster_min_points: 20
     # Preserve the detected cargo's own footprint direction. Square/ambiguous

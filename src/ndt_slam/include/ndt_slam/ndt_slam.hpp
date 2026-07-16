@@ -1203,6 +1203,9 @@ private:
         int local_id = 0;
         std::size_t candidate_count = 0U;
         int selected_candidate_id = -1;
+        float candidate_top1_score = 0.0F;
+        float candidate_top2_score = 0.0F;
+        float candidate_score_margin = 0.0F;
         float identity_confidence = 0.0F;
         float shape_confidence = 0.0F;
         float motion_confidence = 0.0F;
@@ -1516,6 +1519,9 @@ private:
         float minimum_identity_confidence = 0.62F;
         float minimum_overall_lock_confidence = 0.68F;
         float maximum_provisional_shape_cv = 0.20F;
+        float minimum_candidate_score_margin = 0.08F;
+        int suspension_confirm_frames = 3;
+        float minimum_lift_from_origin_m = 0.25F;
         float reacquisition_overlap_extra = 0.10F;
         float residual_uncertainty_decay = 0.80F;
         float live_pose_center_alpha = 0.45F;
@@ -1636,6 +1642,17 @@ private:
         std::vector<float> init_orientation_confidence_buffer;
         std::vector<CargoCandidateDescriptor> provisional_observations;
         std::vector<CargoCandidateIdentityScore> provisional_scores;
+        std::uint64_t provisional_track_id = 0U;
+        Eigen::Vector3f provisional_velocity_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f provisional_origin_center_base = Eigen::Vector3f::Zero();
+        double provisional_last_evidence_stamp_sec = 0.0;
+        int suspension_confirm_count = 0;
+        int lift_confirm_count = 0;
+        float ground_clearance_m =
+            std::numeric_limits<float>::quiet_NaN();
+        float lift_from_origin_m = 0.0F;
+        CargoLockAuthoritySource lock_authority_source =
+            CargoLockAuthoritySource::NONE;
         std::deque<Eigen::Vector3f> size_candidate_buffer;
 
         // 重复帧检测
@@ -1653,6 +1670,7 @@ private:
 
     HookCargoLockConfig hook_lock_config_;
     HookCargoLock hook_lock_;
+    std::uint64_t next_provisional_track_id_ = 0U;
     LockedCargoShape retired_cargo_shape_;
     Eigen::Vector3f retired_cargo_center_base_ = Eigen::Vector3f::Zero();
     Eigen::Vector3f retired_cargo_velocity_base_ = Eigen::Vector3f::Zero();

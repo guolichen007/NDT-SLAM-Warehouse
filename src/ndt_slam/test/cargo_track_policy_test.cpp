@@ -124,5 +124,84 @@ TEST(CargoTrackPolicy, ReacquisitionRejectsIncompatibleShape) {
   EXPECT_FALSE(decision.accepted);
 }
 
+TEST(CargoTrackPolicy, NearHookStableBackgroundCannotFormalLock) {
+  const CargoPhysicalLockAuthorityDecision decision =
+      evaluateCargoPhysicalLockAuthority({
+          HookLoadSignalRole::AUXILIARY, true, HookLoadState::EMPTY,
+          0.05F, 0.30F, 0.0F, 0.25F, 0, 0, 3});
+  EXPECT_FALSE(decision.allowed);
+  EXPECT_EQ(decision.source, CargoLockAuthoritySource::NONE);
+}
+
+TEST(CargoTrackPolicy, AuxiliaryEmptyRequiresIndependentLiftEvidence) {
+  const CargoPhysicalLockAuthorityDecision decision =
+      evaluateCargoPhysicalLockAuthority({
+          HookLoadSignalRole::AUXILIARY, true, HookLoadState::EMPTY,
+          0.45F, 0.30F, 0.30F, 0.25F, 3, 3, 3});
+  EXPECT_TRUE(decision.allowed);
+  EXPECT_EQ(decision.source, CargoLockAuthoritySource::LIFT_FROM_ORIGIN);
+  EXPECT_TRUE(decision.gravity_conflict);
+}
+
+TEST(CargoTrackPolicy, LiftFromOriginCanAuthorizeLock) {
+  const CargoPhysicalLockAuthorityDecision decision =
+      evaluateCargoPhysicalLockAuthority({
+          HookLoadSignalRole::AUXILIARY, false, HookLoadState::UNKNOWN,
+          0.10F, 0.30F, 0.35F, 0.25F, 0, 3, 3});
+  EXPECT_TRUE(decision.allowed);
+  EXPECT_EQ(decision.source, CargoLockAuthoritySource::LIFT_FROM_ORIGIN);
+}
+
+TEST(CargoTrackPolicy, CargoNearGroundCannotFormalLock) {
+  const CargoPhysicalLockAuthorityDecision decision =
+      evaluateCargoPhysicalLockAuthority({
+          HookLoadSignalRole::DISABLED, false, HookLoadState::UNKNOWN,
+          0.10F, 0.30F, 0.05F, 0.25F, 8, 8, 3});
+  EXPECT_FALSE(decision.allowed);
+}
+
+TEST(CargoTrackPolicy, LoadedSignalCanAuthorizeLock) {
+  const CargoPhysicalLockAuthorityDecision decision =
+      evaluateCargoPhysicalLockAuthority({
+          HookLoadSignalRole::AUXILIARY, true, HookLoadState::LOADED,
+          0.0F, 0.30F, 0.0F, 0.25F, 0, 0, 3});
+  EXPECT_TRUE(decision.allowed);
+  EXPECT_EQ(decision.source, CargoLockAuthoritySource::GRAVITY_LOADED);
+}
+
+TEST(CargoTrackPolicy, Top1Top2AmbiguityPreventsFormalLock) {
+  CargoCandidateIdentityScore first = strongScore(1);
+  CargoCandidateIdentityScore second = strongScore(2);
+  second.identity_confidence = 0.89F;
+  const CargoCandidateRanking ranking =
+      rankCargoCandidateIdentityScores({first, second});
+  EXPECT_TRUE(ranking.valid);
+  EXPECT_LT(ranking.margin, 0.08F);
+}
+
+TEST(CargoTrackPolicy, IdentitySelectedComponentEqualsGeometryComponent) {
+  CargoCandidateIdentityScore weak = strongScore(4);
+  weak.identity_confidence = 0.40F;
+  weak.overall_lock_confidence = 0.45F;
+  CargoCandidateIdentityScore strong = strongScore(9);
+  const CargoCandidateRanking ranking =
+      rankCargoCandidateIdentityScores({weak, strong});
+  ASSERT_TRUE(ranking.valid);
+  EXPECT_EQ(ranking.top1.component_id, 9);
+}
+
+TEST(CargoTrackPolicy, DifferentComponentsCannotShareProvisionalWindow) {
+  CargoAssociationInput input;
+  input.candidate = candidate(
+      8, 0.8F, 0.8F, 2.5F, 1.1F, 0.9F, 0.5F, 1.2F);
+  input.previous_center = Eigen::Vector3f(0.0F, 0.0F, 2.5F);
+  input.locked_size = Eigen::Vector3f(2.0F, 0.4F, 0.8F);
+  input.sensor_dt_sec = 0.1;
+  input.base_center_gate_m = 0.30F;
+  input.maximum_shape_relative_error = 0.30F;
+  input.maximum_axial_yaw_error_rad = 0.40F;
+  EXPECT_FALSE(evaluateCargoPredictedAssociation(input).accepted);
+}
+
 }  // namespace
 }  // namespace ndt_slam

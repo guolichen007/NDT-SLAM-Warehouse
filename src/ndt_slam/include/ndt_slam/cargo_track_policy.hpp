@@ -3,10 +3,45 @@
 #include <Eigen/Core>
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#include "ndt_slam/hook_load_evidence_policy.hpp"
+
 namespace ndt_slam {
+
+enum class CargoLockAuthoritySource : std::uint8_t {
+  NONE = 0,
+  GRAVITY_LOADED = 1,
+  LIDAR_SUSPENDED = 2,
+  LIFT_FROM_ORIGIN = 3
+};
+
+const char* cargoLockAuthoritySourceName(CargoLockAuthoritySource source);
+
+struct CargoPhysicalLockAuthorityInput {
+  HookLoadSignalRole signal_role = HookLoadSignalRole::AUXILIARY;
+  bool gravity_valid = false;
+  HookLoadState gravity_state = HookLoadState::UNKNOWN;
+  float ground_clearance_m = 0.0F;
+  float minimum_ground_clearance_m = 0.30F;
+  float lift_from_origin_m = 0.0F;
+  float minimum_lift_from_origin_m = 0.25F;
+  int suspension_confirm_frames = 0;
+  int lift_confirm_frames = 0;
+  int required_lidar_confirm_frames = 3;
+};
+
+struct CargoPhysicalLockAuthorityDecision {
+  bool allowed = false;
+  CargoLockAuthoritySource source = CargoLockAuthoritySource::NONE;
+  bool gravity_conflict = false;
+  std::string reason = "physical_authority_missing";
+};
+
+CargoPhysicalLockAuthorityDecision evaluateCargoPhysicalLockAuthority(
+    const CargoPhysicalLockAuthorityInput& input);
 
 struct CargoCandidateDescriptor {
   int component_id = -1;
@@ -43,6 +78,18 @@ struct CargoCandidateIdentityScore {
   float overall_lock_confidence = 0.0F;
   std::string reason = "not_evaluated";
 };
+
+struct CargoCandidateRanking {
+  bool valid = false;
+  CargoCandidateIdentityScore top1;
+  CargoCandidateIdentityScore top2;
+  float top1_rank = 0.0F;
+  float top2_rank = 0.0F;
+  float margin = 0.0F;
+};
+
+CargoCandidateRanking rankCargoCandidateIdentityScores(
+    const std::vector<CargoCandidateIdentityScore>& scores);
 
 struct CargoAssociationInput {
   CargoCandidateDescriptor candidate;

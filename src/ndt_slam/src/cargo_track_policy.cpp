@@ -53,6 +53,91 @@ Eigen::Vector2f projectHalfExtents(
 
 }  // namespace
 
+const char* cargoLockAuthoritySourceName(CargoLockAuthoritySource source) {
+  switch (source) {
+    case CargoLockAuthoritySource::NONE: return "NONE";
+    case CargoLockAuthoritySource::GRAVITY_LOADED:
+      return "GRAVITY_LOADED";
+    case CargoLockAuthoritySource::LIDAR_SUSPENDED:
+      return "LIDAR_SUSPENDED";
+    case CargoLockAuthoritySource::LIFT_FROM_ORIGIN:
+      return "LIFT_FROM_ORIGIN";
+  }
+  return "NONE";
+}
+
+CargoPhysicalLockAuthorityDecision evaluateCargoPhysicalLockAuthority(
+    const CargoPhysicalLockAuthorityInput& input) {
+  CargoPhysicalLockAuthorityDecision decision;
+  const bool gravity_loaded = input.gravity_valid &&
+      input.gravity_state == HookLoadState::LOADED;
+  const bool gravity_empty = input.gravity_valid &&
+      input.gravity_state == HookLoadState::EMPTY;
+  if (gravity_loaded && input.signal_role != HookLoadSignalRole::DISABLED) {
+    decision.allowed = true;
+    decision.source = CargoLockAuthoritySource::GRAVITY_LOADED;
+    decision.reason = "gravity_loaded";
+    return decision;
+  }
+  if (input.signal_role == HookLoadSignalRole::REQUIRED) {
+    decision.reason = "required_gravity_not_loaded";
+    return decision;
+  }
+
+  const int required_frames = std::max(1, input.required_lidar_confirm_frames);
+  const bool suspended = std::isfinite(input.ground_clearance_m) &&
+      input.ground_clearance_m >= input.minimum_ground_clearance_m &&
+      input.suspension_confirm_frames >= required_frames;
+  const bool lifted_from_origin =
+      std::isfinite(input.lift_from_origin_m) &&
+      input.lift_from_origin_m >= input.minimum_lift_from_origin_m &&
+      input.lift_confirm_frames >= required_frames;
+  if (lifted_from_origin) {
+    decision.allowed = true;
+    decision.source = CargoLockAuthoritySource::LIFT_FROM_ORIGIN;
+    decision.gravity_conflict = gravity_empty;
+    decision.reason = gravity_empty
+        ? "lidar_lift_overrides_auxiliary_empty" : "lidar_lift_from_origin";
+    return decision;
+  }
+  if (suspended) {
+    decision.allowed = true;
+    decision.source = CargoLockAuthoritySource::LIDAR_SUSPENDED;
+    decision.gravity_conflict = gravity_empty;
+    decision.reason = gravity_empty
+        ? "lidar_suspended_overrides_auxiliary_empty" : "lidar_suspended";
+    return decision;
+  }
+  decision.gravity_conflict = gravity_empty;
+  decision.reason = gravity_empty
+      ? "auxiliary_empty_requires_independent_lift"
+      : "lidar_physical_authority_unconfirmed";
+  return decision;
+}
+
+CargoCandidateRanking rankCargoCandidateIdentityScores(
+    const std::vector<CargoCandidateIdentityScore>& scores) {
+  CargoCandidateRanking ranking;
+  for (const CargoCandidateIdentityScore& score : scores) {
+    if (!score.valid) continue;
+    const float rank = score.identity_confidence +
+        0.25F * score.overall_lock_confidence;
+    if (!ranking.valid || rank > ranking.top1_rank) {
+      ranking.top2 = ranking.top1;
+      ranking.top2_rank = ranking.top1_rank;
+      ranking.top1 = score;
+      ranking.top1_rank = rank;
+      ranking.valid = true;
+    } else if (!ranking.top2.valid || rank > ranking.top2_rank) {
+      ranking.top2 = score;
+      ranking.top2_rank = rank;
+    }
+  }
+  ranking.margin = ranking.valid
+      ? ranking.top1_rank - ranking.top2_rank : 0.0F;
+  return ranking;
+}
+
 float cargoOrientedOverlapRatio(
     const CargoCandidateDescriptor& lhs,
     const CargoCandidateDescriptor& rhs) {
