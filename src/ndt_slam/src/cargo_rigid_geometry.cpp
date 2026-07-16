@@ -74,6 +74,111 @@ Eigen::Vector3f limitCargoPoseResidualByRate(
     return limited;
 }
 
+CargoLivePoseStepResult updateCargoLivePoseStep(
+    const CargoLivePoseStepInput& input) {
+    CargoLivePoseStepResult result;
+    if (!input.previous_center.allFinite() ||
+        !input.previous_velocity.allFinite() ||
+        !input.measured_center.allFinite() ||
+        !std::isfinite(input.sensor_dt_sec) ||
+        input.sensor_dt_sec <= 0.0 ||
+        !std::isfinite(input.center_alpha) ||
+        input.center_alpha < 0.0F || input.center_alpha > 1.0F ||
+        !std::isfinite(input.velocity_alpha) ||
+        input.velocity_alpha < 0.0F || input.velocity_alpha > 1.0F ||
+        !std::isfinite(input.max_xy_speed_mps) ||
+        input.max_xy_speed_mps < 0.0F ||
+        !std::isfinite(input.max_z_speed_mps) ||
+        input.max_z_speed_mps < 0.0F ||
+        !std::isfinite(input.step_margin_m) ||
+        input.step_margin_m < 0.0F) {
+        return result;
+    }
+
+    const Eigen::Vector3f bounded_previous_velocity =
+        limitCargoPoseResidualByRate(
+            input.previous_velocity, 1.0,
+            input.max_xy_speed_mps, input.max_z_speed_mps, 0.0F);
+    const float dt = static_cast<float>(input.sensor_dt_sec);
+    result.predicted_center = input.previous_center +
+        bounded_previous_velocity * dt;
+    result.measurement_residual =
+        input.measured_center - result.predicted_center;
+    const Eigen::Vector3f limited_residual =
+        limitCargoPoseResidualByRate(
+            result.measurement_residual, input.sensor_dt_sec,
+            input.max_xy_speed_mps, input.max_z_speed_mps,
+            input.step_margin_m);
+    const Eigen::Vector3f proposed_center = result.predicted_center +
+        input.center_alpha * limited_residual;
+    const Eigen::Vector3f final_step = limitCargoPoseResidualByRate(
+        proposed_center - input.previous_center, input.sensor_dt_sec,
+        input.max_xy_speed_mps, input.max_z_speed_mps,
+        input.step_margin_m);
+    result.filtered_center = input.previous_center + final_step;
+
+    const Eigen::Vector3f observed_velocity = final_step / dt;
+    const Eigen::Vector3f blended_velocity =
+        (1.0F - input.velocity_alpha) * bounded_previous_velocity +
+        input.velocity_alpha * observed_velocity;
+    result.filtered_velocity = limitCargoPoseResidualByRate(
+        blended_velocity, 1.0,
+        input.max_xy_speed_mps, input.max_z_speed_mps, 0.0F);
+    result.valid = result.predicted_center.allFinite() &&
+        result.measurement_residual.allFinite() &&
+        result.filtered_center.allFinite() &&
+        result.filtered_velocity.allFinite();
+    return result;
+}
+
+LiveCargoPose propagateHeldCargoPose(
+    const LiveCargoPose& pose,
+    const Eigen::Vector3f& velocity_base,
+    double evaluation_stamp_sec,
+    double max_prediction_sec,
+    float max_xy_speed_mps,
+    float max_z_speed_mps,
+    float uncertainty_per_sec,
+    float max_uncertainty_m) {
+    LiveCargoPose result;
+    if (!pose.valid || !pose.center_base.allFinite() ||
+        !velocity_base.allFinite() ||
+        !std::isfinite(pose.evidence_stamp_sec) ||
+        pose.evidence_stamp_sec <= 0.0 ||
+        !std::isfinite(evaluation_stamp_sec) ||
+        evaluation_stamp_sec + 1.0e-4 < pose.evidence_stamp_sec ||
+        !std::isfinite(max_prediction_sec) || max_prediction_sec < 0.0 ||
+        !std::isfinite(max_xy_speed_mps) || max_xy_speed_mps < 0.0F ||
+        !std::isfinite(max_z_speed_mps) || max_z_speed_mps < 0.0F ||
+        !std::isfinite(uncertainty_per_sec) || uncertainty_per_sec < 0.0F ||
+        !std::isfinite(max_uncertainty_m) || max_uncertainty_m < 0.0F ||
+        !std::isfinite(pose.position_uncertainty_m) ||
+        pose.position_uncertainty_m < 0.0F) {
+        return result;
+    }
+
+    result = pose;
+    const double age_sec = std::max(
+        0.0, evaluation_stamp_sec - pose.evidence_stamp_sec);
+    const double prediction_sec = std::min(age_sec, max_prediction_sec);
+    const Eigen::Vector3f bounded_velocity = limitCargoPoseResidualByRate(
+        velocity_base, 1.0, max_xy_speed_mps, max_z_speed_mps, 0.0F);
+    if (prediction_sec > 0.0 && bounded_velocity.norm() > 1.0e-6F) {
+        result.center_base += bounded_velocity *
+            static_cast<float>(prediction_sec);
+        result.source = CargoPoseSource::MOTION_PREDICTION;
+    } else {
+        result.source = CargoPoseSource::RECENT_STABLE_HOLD;
+    }
+    result.evaluation_stamp_sec = evaluation_stamp_sec;
+    const float grown_uncertainty = pose.position_uncertainty_m +
+        static_cast<float>(age_sec) * uncertainty_per_sec;
+    result.position_uncertainty_m = std::max(
+        pose.position_uncertainty_m,
+        std::min(max_uncertainty_m, grown_uncertainty));
+    return result;
+}
+
 std::array<Eigen::Vector3f, 8> buildCargoObbCornersBase(
     const LockedCargoShape& shape,
     const Eigen::Vector3f& center_base) {
@@ -210,20 +315,20 @@ CargoFormalUseDecision evaluateCargoFormalUse(
     }
     decision.display_valid = true;
     decision.horizontal_uncertainty_m = horizontal_uncertainty_m;
-    if (!lost_hold) {
-        decision.formal_safety_valid = true;
-        decision.formal_removal_valid = true;
-        decision.reason = "current_locked_track";
-        return decision;
-    }
     const bool within_hold =
         decision.pose_age_sec <= formal_hold_sec + 1.0e-4 &&
         decision.height_age_sec <= formal_hold_sec + 1.0e-4;
     decision.formal_safety_valid = within_hold;
     decision.formal_removal_valid = within_hold;
-    decision.reason = within_hold
-        ? "lost_hold_formal_window"
-        : "lost_hold_display_only_evidence_expired";
+    if (within_hold) {
+        decision.reason = lost_hold
+            ? "lost_hold_formal_window"
+            : "locked_formal_window";
+    } else {
+        decision.reason = lost_hold
+            ? "lost_hold_display_only_evidence_expired"
+            : "locked_display_only_evidence_expired";
+    }
     return decision;
 }
 

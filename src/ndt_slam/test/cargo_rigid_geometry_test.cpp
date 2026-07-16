@@ -43,6 +43,58 @@ TEST(CargoRigidGeometryTest, LostHoldExpiresFormalUseButKeepsDisplay) {
     EXPECT_EQ(expired.reason, "lost_hold_display_only_evidence_expired");
 }
 
+TEST(CargoRigidGeometryTest, LockedStateCannotBypassFormalEvidenceCutoff) {
+    const CargoFormalUseDecision expired_while_locked =
+        evaluateCargoFormalUse(
+            true, false, 10.6, 10.0, 10.0, 0.5, 0.18F);
+    EXPECT_TRUE(expired_while_locked.display_valid);
+    EXPECT_FALSE(expired_while_locked.formal_safety_valid);
+    EXPECT_FALSE(expired_while_locked.formal_removal_valid);
+    EXPECT_EQ(expired_while_locked.reason,
+              "locked_display_only_evidence_expired");
+
+    const CargoFormalUseDecision expired_after_state_transition =
+        evaluateCargoFormalUse(
+            true, true, 10.6, 10.0, 10.0, 0.5, 0.18F);
+    EXPECT_FALSE(expired_after_state_transition.formal_safety_valid);
+    EXPECT_FALSE(expired_after_state_transition.formal_removal_valid);
+}
+
+TEST(CargoRigidGeometryTest, MissingObservationPredictsImmediatelyButPreservesEvidenceAge) {
+    LiveCargoPose observed = pose(Eigen::Vector3f(1.0F, 2.0F, 3.0F));
+    observed.position_uncertainty_m = 0.10F;
+    const Eigen::Vector3f velocity(0.5F, 0.0F, 0.2F);
+
+    const LiveCargoPose held_short = propagateHeldCargoPose(
+        observed, velocity, 10.4, 0.5, 2.0F, 1.5F, 0.05F, 0.50F);
+    ASSERT_TRUE(held_short.valid);
+    EXPECT_EQ(held_short.source, CargoPoseSource::MOTION_PREDICTION);
+    EXPECT_DOUBLE_EQ(held_short.evidence_stamp_sec, 10.0);
+    EXPECT_DOUBLE_EQ(held_short.evaluation_stamp_sec, 10.4);
+    EXPECT_NEAR(held_short.center_base.x(), 1.20F, 1.0e-5F);
+    EXPECT_NEAR(held_short.center_base.z(), 3.08F, 1.0e-5F);
+    EXPECT_NEAR(held_short.position_uncertainty_m, 0.12F, 1.0e-5F);
+    const CargoFormalUseDecision short_use = evaluateCargoFormalUse(
+        true, false, 10.4, held_short.evidence_stamp_sec,
+        held_short.evidence_stamp_sec, 0.5, held_short.position_uncertainty_m);
+    EXPECT_TRUE(short_use.formal_safety_valid);
+    EXPECT_TRUE(short_use.formal_removal_valid);
+
+    const LiveCargoPose held_expired = propagateHeldCargoPose(
+        observed, velocity, 10.6, 0.5, 2.0F, 1.5F, 0.05F, 0.50F);
+    ASSERT_TRUE(held_expired.valid);
+    // Prediction is capped by the formal window, while evidence age continues.
+    EXPECT_NEAR(held_expired.center_base.x(), 1.25F, 1.0e-5F);
+    EXPECT_DOUBLE_EQ(held_expired.evidence_stamp_sec, 10.0);
+    const CargoFormalUseDecision expired_use = evaluateCargoFormalUse(
+        true, false, 10.6, held_expired.evidence_stamp_sec,
+        held_expired.evidence_stamp_sec, 0.5,
+        held_expired.position_uncertainty_m);
+    EXPECT_TRUE(expired_use.display_valid);
+    EXPECT_FALSE(expired_use.formal_safety_valid);
+    EXPECT_FALSE(expired_use.formal_removal_valid);
+}
+
 TEST(CargoRigidGeometryTest, PositionUncertaintyExpandsFormalFootprint) {
     const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
         shape(), pose(Eigen::Vector3f::Zero()),
@@ -67,6 +119,37 @@ TEST(CargoRigidGeometryTest, LivePoseRateLimitScalesWithSensorDt) {
         residual, 0.20, 2.0F, 1.5F, 0.05F);
     EXPECT_NEAR(slower_sensor.x(), 0.45F, 1.0e-5F);
     EXPECT_NEAR(slower_sensor.z(), 0.35F, 1.0e-5F);
+}
+
+TEST(CargoRigidGeometryTest, RepeatedAbnormalObservationsCannotExceedTotalSpeed) {
+    CargoLivePoseStepInput input;
+    input.previous_center = Eigen::Vector3f::Zero();
+    input.previous_velocity = Eigen::Vector3f(20.0F, 0.0F, 20.0F);
+    input.measured_center = Eigen::Vector3f(100.0F, 0.0F, 100.0F);
+    input.sensor_dt_sec = 0.10;
+    input.center_alpha = 1.0F;
+    input.velocity_alpha = 1.0F;
+    input.max_xy_speed_mps = 2.0F;
+    input.max_z_speed_mps = 1.5F;
+    input.step_margin_m = 0.05F;
+
+    const CargoLivePoseStepResult first = updateCargoLivePoseStep(input);
+    ASSERT_TRUE(first.valid);
+    EXPECT_LE(first.filtered_center.head<2>().norm(), 0.25F + 1.0e-5F);
+    EXPECT_LE(std::abs(first.filtered_center.z()), 0.20F + 1.0e-5F);
+    EXPECT_LE(first.filtered_velocity.head<2>().norm(), 2.0F + 1.0e-5F);
+    EXPECT_LE(std::abs(first.filtered_velocity.z()), 1.5F + 1.0e-5F);
+
+    input.previous_center = first.filtered_center;
+    input.previous_velocity = first.filtered_velocity;
+    const CargoLivePoseStepResult second = updateCargoLivePoseStep(input);
+    ASSERT_TRUE(second.valid);
+    const Eigen::Vector3f second_step =
+        second.filtered_center - first.filtered_center;
+    EXPECT_LE(second_step.head<2>().norm(), 0.25F + 1.0e-5F);
+    EXPECT_LE(std::abs(second_step.z()), 0.20F + 1.0e-5F);
+    EXPECT_LE(second.filtered_velocity.head<2>().norm(), 2.0F + 1.0e-5F);
+    EXPECT_LE(std::abs(second.filtered_velocity.z()), 1.5F + 1.0e-5F);
 }
 
 TEST(CargoRigidGeometryTest, ShapeStaysFixedWhilePoseMovesAndHoists) {

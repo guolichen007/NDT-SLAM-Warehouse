@@ -320,6 +320,8 @@ def runtime_visualization_contract_failures() -> list[str]:
         "evaluateCargoFormalUse",
         "evidence_stamp_sec",
         "formal_hold_sec",
+        "propagateHeldCargoPose",
+        "updateCargoLivePoseStep",
     )
     for token in required:
         if token not in combined:
@@ -341,10 +343,52 @@ def runtime_visualization_contract_failures() -> list[str]:
             "if (ground_map_->empty()) return",
             "if (objects_map_->empty()) return",
             "if (objects_clean_map_->empty()) return",
-            "rebuildCleanMap(!force_timeslice)"):
+            "rebuildCleanMap(!force_timeslice)",
+            "void NdtSlamNode::publishMap()",
+            "void NdtSlamNode::publishDisplayMap()",
+            "void NdtSlamNode::publishGroundMap()",
+            "void NdtSlamNode::publishObjectsMap()",
+            "void NdtSlamNode::publishObjectsCleanMap()"):
         if forbidden in node:
             failures.append(
                 f"latched map publication still skips empty layer: {forbidden!r}")
+
+    for legacy_declaration in (
+            "void publishMap();",
+            "void publishDisplayMap();",
+            "void publishGroundMap();",
+            "void publishObjectsMap();",
+            "void publishObjectsCleanMap();"):
+        if legacy_declaration in header:
+            failures.append(
+                f"legacy direct map publisher remains declared: "
+                f"{legacy_declaration!r}")
+
+    for publisher in (
+            "map_pub_.publish(",
+            "display_map_pub_.publish(",
+            "ground_map_pub_.publish(",
+            "objects_map_pub_.publish(",
+            "objects_clean_map_pub_.publish("):
+        call_count = len(re.findall(
+            rf"(?<![A-Za-z0-9_]){re.escape(publisher)}", node))
+        if call_count != 1:
+            failures.append(
+                f"map publisher must have exactly one bundled call site: "
+                f"{publisher!r}")
+
+    formal_function = re.search(
+        r"CargoFormalUseDecision evaluateCargoFormalUse\(.*?\n\}",
+        (ROOT / Path(
+            "src/ndt_slam/src/cargo_rigid_geometry.cpp")).read_text(
+                encoding="utf-8"),
+        re.DOTALL,
+    )
+    if formal_function is None:
+        failures.append("formal Cargo evidence-age policy is missing")
+    elif "if (!lost_hold)" in formal_function.group(0):
+        failures.append(
+            "LOCKED lifecycle state still bypasses formal evidence age")
     return failures
 
 

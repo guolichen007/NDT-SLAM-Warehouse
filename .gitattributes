@@ -25,3 +25,7 @@ CMakeLists.txt text eol=lf
 # Preserve vendored byte-for-byte content; do not renormalize third-party
 # sources while introducing repository-wide rules for first-party files.
 src/ndt_slam/3rdparty/** -text
+
+# This legacy header still contains mixed historical line endings. Preserve it
+# byte-for-byte until a dedicated normalization commit avoids unrelated churn.
+src/ndt_slam/include/ndt_slam/ndt_slam.hpp -text

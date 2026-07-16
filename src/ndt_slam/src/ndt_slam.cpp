@@ -5700,62 +5700,6 @@ void NdtSlamNode::rebuildGlobalMapFromSnapshot(
 }
 
 
-void NdtSlamNode::publishDisplayMap() {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr snapshot(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    sensor_msgs::PointCloud2 map_msg;
-    {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        if (display_map_) *snapshot = *display_map_;
-    }
-    pcl::toROSMsg(*snapshot, map_msg);
-    map_msg.header.stamp = ros::Time::now();
-    map_msg.header.frame_id = map_frame_;
-    display_map_pub_.publish(map_msg);
-}
-
-void NdtSlamNode::publishGroundMap() {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr snapshot(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    sensor_msgs::PointCloud2 msg;
-    {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        if (ground_map_) *snapshot = *ground_map_;
-    }
-    pcl::toROSMsg(*snapshot, msg);
-    msg.header.stamp = ros::Time::now();
-    msg.header.frame_id = map_frame_;
-    ground_map_pub_.publish(msg);
-}
-
-void NdtSlamNode::publishObjectsMap() {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr snapshot(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    sensor_msgs::PointCloud2 msg;
-    {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        if (objects_map_) *snapshot = *objects_map_;
-    }
-    pcl::toROSMsg(*snapshot, msg);
-    msg.header.stamp = ros::Time::now();
-    msg.header.frame_id = map_frame_;
-    objects_map_pub_.publish(msg);
-}
-
-void NdtSlamNode::publishObjectsCleanMap() {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr snapshot(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    sensor_msgs::PointCloud2 msg;
-    {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        if (objects_clean_map_) *snapshot = *objects_clean_map_;
-    }
-    pcl::toROSMsg(*snapshot, msg);
-    msg.header.stamp = ros::Time::now();
-    msg.header.frame_id = map_frame_;
-    objects_clean_map_pub_.publish(msg);
-}
-
 void NdtSlamNode::separateGroundByGrid(const pcl::PointCloud<pcl::PointXYZ>& input,
                                      pcl::PointCloud<pcl::PointXYZ>& ground_out,
                                      pcl::PointCloud<pcl::PointXYZ>& objects_out) {
@@ -6544,17 +6488,13 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
             }
         }
 
-        publishMap();
+        requestMapPublication(ros::Time::now());
 
         // 显示地图每3个关键帧更新一次，解耦实时处理和可视化
         static int display_publish_counter = 0;
         display_publish_counter++;
         if (display_publish_counter >= 3) {
             display_publish_counter = 0;
-            publishDisplayMap();
-            publishGroundMap();
-            publishObjectsMap();
-
             // clean map 异步构建（不阻塞主处理线程）
             startCleanMapRebuildJob();
         }
@@ -6566,20 +6506,6 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
     }
 }
 #endif  // 旧代码结束
-
-void NdtSlamNode::publishMap() {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr snapshot(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    sensor_msgs::PointCloud2 map_msg;
-    {
-        std::lock_guard<std::mutex> lock(map_mutex_);
-        if (global_map_) *snapshot = *global_map_;
-    }
-    pcl::toROSMsg(*snapshot, map_msg);
-    map_msg.header.stamp = ros::Time::now();
-    map_msg.header.frame_id = map_frame_;
-    map_pub_.publish(map_msg);
-}
 
 void NdtSlamNode::publishCurrentCloud() {
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr snapshot;
@@ -9624,25 +9550,19 @@ void NdtSlamNode::updateLiveCargoPose(
         const double dt = stamp_sec -
             hook_lock_.live_pose.evidence_stamp_sec;
         if (!std::isfinite(dt) || dt <= 0.0) return;
-        const float dt_f = static_cast<float>(dt);
         const Eigen::Vector3f previous = hook_lock_.live_pose.center_base;
-        const Eigen::Vector3f predicted = previous +
-            hook_lock_.live_pose_velocity_base * dt_f;
-        const Eigen::Vector3f delta = limitCargoPoseResidualByRate(
-            measured - predicted, dt,
+        const CargoLivePoseStepResult step = updateCargoLivePoseStep({
+            previous, hook_lock_.live_pose_velocity_base, measured, dt,
+            hook_lock_config_.live_pose_center_alpha,
+            hook_lock_config_.live_pose_velocity_alpha,
             hook_lock_config_.live_pose_max_xy_speed_mps,
             hook_lock_config_.live_pose_max_z_speed_mps,
-            hook_lock_config_.live_pose_step_margin_m);
-        hook_lock_.live_pose.center_base = predicted +
-            hook_lock_config_.live_pose_center_alpha * delta;
-        const Eigen::Vector3f observed_velocity =
-            (hook_lock_.live_pose.center_base - previous) / dt_f;
-        hook_lock_.live_pose_velocity_base =
-            (1.0F - hook_lock_config_.live_pose_velocity_alpha) *
-                hook_lock_.live_pose_velocity_base +
-            hook_lock_config_.live_pose_velocity_alpha * observed_velocity;
-        hook_lock_.live_pose_predicted_base = predicted;
-        hook_lock_.live_pose_residual_base = measured - predicted;
+            hook_lock_config_.live_pose_step_margin_m});
+        if (!step.valid) return;
+        hook_lock_.live_pose.center_base = step.filtered_center;
+        hook_lock_.live_pose_velocity_base = step.filtered_velocity;
+        hook_lock_.live_pose_predicted_base = step.predicted_center;
+        hook_lock_.live_pose_residual_base = step.measurement_residual;
         hook_lock_.live_pose_dt_sec = dt;
     }
     hook_lock_.live_pose_measured_base = measured;
@@ -9659,25 +9579,17 @@ RigidCargoGeometry NdtSlamNode::buildCurrentRigidCargoGeometryForPose(
     const Sophus::SE3d& pose_map_base,
     const ros::Time& stamp) {
     LiveCargoPose live_pose = hook_lock_.live_pose;
-    if (hook_lock_.state == HookCargoLockState::LOST_HOLD &&
-        live_pose.valid) {
-        const double age = std::max(0.0, stamp.toSec() -
-            live_pose.evidence_stamp_sec);
-        const double prediction_age = std::min(
-            age, static_cast<double>(hook_lock_config_.formal_hold_sec));
-        if (hook_lock_.live_pose_velocity_base.allFinite() &&
-            prediction_age > 0.0) {
-            live_pose.center_base += hook_lock_.live_pose_velocity_base *
-                static_cast<float>(prediction_age);
-            live_pose.source = CargoPoseSource::MOTION_PREDICTION;
-        } else {
-            live_pose.source = CargoPoseSource::RECENT_STABLE_HOLD;
-        }
-        live_pose.position_uncertainty_m = std::min(
-            hook_lock_config_.lost_position_uncertainty_max_m,
-            live_pose.position_uncertainty_m +
-                static_cast<float>(age) *
-                    hook_lock_config_.lost_position_uncertainty_per_sec);
+    const bool current_association =
+        hook_observation_associated_current_ &&
+        hook_observation_association_stamp_ == stamp;
+    if (cargoTrackRetained() && live_pose.valid && !current_association) {
+        live_pose = propagateHeldCargoPose(
+            live_pose, hook_lock_.live_pose_velocity_base, stamp.toSec(),
+            hook_lock_config_.formal_hold_sec,
+            hook_lock_config_.live_pose_max_xy_speed_mps,
+            hook_lock_config_.live_pose_max_z_speed_mps,
+            hook_lock_config_.lost_position_uncertainty_per_sec,
+            hook_lock_config_.lost_position_uncertainty_max_m);
     }
     live_pose.evaluation_stamp_sec = stamp.toSec();
     Eigen::Isometry3f transform = Eigen::Isometry3f::Identity();

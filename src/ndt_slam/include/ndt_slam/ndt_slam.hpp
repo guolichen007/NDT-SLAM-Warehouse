@@ -176,10 +176,6 @@ private:
         const std::string& reason);
 
     void rebuildGlobalMapFromSnapshot(std::uint64_t expected_generation);
-    void publishDisplayMap();     // 发布显示地图
-    void publishGroundMap();
-    void publishObjectsMap();
-    void publishObjectsCleanMap();
 
     // 网格局部地面分割：将点云分为 ground 和 objects
     // 使用 XY 网格，每个格子独立计算局部地面高度
@@ -191,7 +187,6 @@ private:
                                   const Sophus::SE3d& pose,
                                   const ros::Time& stamp);
 
-    void publishMap();
     void publishCurrentCloud();
 
     void processLoopClosure();

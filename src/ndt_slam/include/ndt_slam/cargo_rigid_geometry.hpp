@@ -40,6 +40,26 @@ struct LiveCargoPose {
     float position_uncertainty_m = 0.0F;
 };
 
+struct CargoLivePoseStepInput {
+    Eigen::Vector3f previous_center = Eigen::Vector3f::Zero();
+    Eigen::Vector3f previous_velocity = Eigen::Vector3f::Zero();
+    Eigen::Vector3f measured_center = Eigen::Vector3f::Zero();
+    double sensor_dt_sec = 0.0;
+    float center_alpha = 0.0F;
+    float velocity_alpha = 0.0F;
+    float max_xy_speed_mps = 0.0F;
+    float max_z_speed_mps = 0.0F;
+    float step_margin_m = 0.0F;
+};
+
+struct CargoLivePoseStepResult {
+    bool valid = false;
+    Eigen::Vector3f predicted_center = Eigen::Vector3f::Zero();
+    Eigen::Vector3f measurement_residual = Eigen::Vector3f::Zero();
+    Eigen::Vector3f filtered_center = Eigen::Vector3f::Zero();
+    Eigen::Vector3f filtered_velocity = Eigen::Vector3f::Zero();
+};
+
 struct CargoObbFootprint {
     bool valid = false;
     Eigen::Vector2f center_base = Eigen::Vector2f::Zero();
@@ -81,8 +101,9 @@ struct CargoFormalUseDecision {
 };
 
 // Display retention and formal safety/removal authority are deliberately
-// separate. A LOST_HOLD marker may remain visible after physical evidence has
-// become too old to produce code 14/17/18 or authorize map removal.
+// separate. A retained marker may remain visible after physical evidence has
+// become too old to produce code 14/17/18 or authorize map removal, even when
+// the lifecycle state has not yet transitioned from LOCKED to LOST_HOLD.
 CargoFormalUseDecision evaluateCargoFormalUse(
     bool geometry_valid,
     bool lost_hold,
@@ -125,5 +146,22 @@ Eigen::Vector3f limitCargoPoseResidualByRate(
     float max_xy_speed_mps,
     float max_z_speed_mps,
     float step_margin_m);
+
+// Advances the live center while bounding the historical prediction, the
+// measurement correction, the final center step, and the stored velocity.
+CargoLivePoseStepResult updateCargoLivePoseStep(
+    const CargoLivePoseStepInput& input);
+
+// Propagates retained evidence for display and the short formal-use window.
+// The physical evidence timestamp is deliberately preserved.
+LiveCargoPose propagateHeldCargoPose(
+    const LiveCargoPose& pose,
+    const Eigen::Vector3f& velocity_base,
+    double evaluation_stamp_sec,
+    double max_prediction_sec,
+    float max_xy_speed_mps,
+    float max_z_speed_mps,
+    float uncertainty_per_sec,
+    float max_uncertainty_m);
 
 }  // namespace ndt_slam
