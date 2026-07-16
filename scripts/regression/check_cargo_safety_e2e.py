@@ -318,10 +318,19 @@ def main() -> int:
             "17/18 do not require fresh spatially continuous cluster evidence",
             failures)
     require("axis_aligned_yaw_after_lock: true" in live_config and
-            "freeze_vertical_position_after_lock: true" in live_config and
+            "freeze_vertical_position_after_lock: false" in live_config and
+            "track_vertical_from_top_surface: true" in live_config and
             "quantizeCargoAxialYawToOrthogonal" in node and
-            "CargoVerticalPoseSource::DISPLAY_FROZEN" in node,
+            "evaluateCargoTopSurfaceHeight" in node and
+            "CargoVerticalPoseSource::DIRECT_TOP" in node,
             "formal cargo OBB yaw/vertical stability contract is missing",
+            failures)
+    require("top_surface_minus_frozen_thickness" in cargo_track_policy and
+            "case CargoBottomSource::ORIGIN_HEIGHT: return 5" in
+                read("src/ndt_slam/src/cargo_bottom_fusion.cpp") and
+            "consistent_partial_height_observation" in node and
+            "rigid_shape_height_mismatch" not in node,
+            "pre-lift thickness/top-surface height authority is incomplete",
             failures)
     require("live_vertical_pose_evidence_stamp" in node and
             "tracking_residual" in read(

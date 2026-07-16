@@ -219,4 +219,27 @@ CargoProvisionalLockSummary summarizeCargoProvisionalLock(
 /** Snap an axial OBB yaw to the nearest installation axis (0 or +/- pi/2). */
 float quantizeCargoAxialYawToOrthogonal(float yaw_rad);
 
+struct CargoTopSurfaceHeightInput {
+  float frozen_thickness_m = 0.0F;
+  bool top_valid = false;
+  float top_z_base = 0.0F;
+  bool direct_bottom_valid = false;
+  float direct_bottom_z_base = 0.0F;
+  float top_bottom_agreement_m = 0.25F;
+};
+
+struct CargoTopSurfaceHeightResult {
+  bool valid = false;
+  bool used_top_surface = false;
+  bool bottom_corroborated = false;
+  float center_z_base = 0.0F;
+  float bottom_z_base = 0.0F;
+  float top_z_base = 0.0F;
+  std::string reason = "invalid_height_evidence";
+};
+
+/** Derive absolute cargo bottom from robust top and frozen physical thickness. */
+CargoTopSurfaceHeightResult evaluateCargoTopSurfaceHeight(
+    const CargoTopSurfaceHeightInput& input);
+
 }  // namespace ndt_slam

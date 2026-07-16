@@ -1566,10 +1566,11 @@ private:
         // Quantize the frozen OBB to the installation axes so a partial
         // diagonal point return cannot permanently rotate the displayed box.
         bool axis_aligned_yaw_after_lock = true;
-        // Once a formal lock is established, associated detections refresh
-        // evidence and X/Y motion but cannot move the box vertically.  The
-        // next EMPTY/rearm cycle establishes a new vertical anchor.
-        bool freeze_vertical_position_after_lock = true;
+        // Emergency compatibility mode only. Production tracks vertical pose
+        // from the visible top surface while freezing physical thickness.
+        bool freeze_vertical_position_after_lock = false;
+        bool track_vertical_from_top_surface = true;
+        float top_bottom_center_agreement_m = 0.25F;
         float bottom_alpha_points = 0.30f;
         float bottom_alpha_memory = 0.15f;
         float bottom_hold_uncertainty_growth = 0.02f;

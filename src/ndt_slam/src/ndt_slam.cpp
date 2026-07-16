@@ -1698,7 +1698,12 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.axis_aligned_yaw_after_lock =
                 hcl["axis_aligned_yaw_after_lock"].as<bool>(true);
             hook_lock_config_.freeze_vertical_position_after_lock =
-                hcl["freeze_vertical_position_after_lock"].as<bool>(true);
+                hcl["freeze_vertical_position_after_lock"].as<bool>(false);
+            hook_lock_config_.track_vertical_from_top_surface =
+                hcl["track_vertical_from_top_surface"].as<bool>(true);
+            hook_lock_config_.top_bottom_center_agreement_m = std::max(
+                0.05F, hcl["top_bottom_center_agreement_m"]
+                           .as<float>(0.25F));
             hook_lock_config_.bottom_alpha_points = hcl["bottom_alpha_points"].as<float>(0.30f);
             hook_lock_config_.bottom_alpha_memory = hcl["bottom_alpha_memory"].as<float>(0.15f);
             hook_lock_config_.bottom_hold_uncertainty_growth = hcl["bottom_hold_uncertainty_growth"].as<float>(0.02f);
@@ -10035,19 +10040,24 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
         hook_lock_.yaw_used_as_hard_gate = false;
     }
 
-    if (bottom.valid && hook_lock_.locked_shape.height_m > 0.0F) {
+    bool partial_height_mismatch = false;
+    if (bottom.valid && hook_lock_.locked_shape.height_m > 0.0F &&
+        std::isfinite(bottom.height)) {
         const float height_error = std::abs(
             bottom.height - hook_lock_.locked_shape.height_m) /
             hook_lock_.locked_shape.height_m;
-        if (!std::isfinite(height_error) ||
-            height_error > hook_lock_config_.size_change_max_ratio) {
-            *reject_reason = "rigid_shape_height_mismatch";
-            return false;
-        }
+        partial_height_mismatch =
+            height_error > hook_lock_config_.size_change_max_ratio;
     }
 
+    // A partial side view changes raw z05/z95 span without changing the rigid
+    // cargo. Keep it associated; frozen thickness and the robust top surface
+    // determine vertical pose instead of dropping into LOST_HOLD.
     *reject_reason = hook_lock_.yaw_residual_rad > 0.35F
-        ? "consistent_soft_yaw_mismatch" : "consistent";
+        ? "consistent_soft_yaw_mismatch"
+        : (partial_height_mismatch
+               ? "consistent_partial_height_observation"
+               : "consistent");
     return true;
 }
 
@@ -10200,6 +10210,19 @@ void NdtSlamNode::updateLiveCargoPose(
     const bool direct_bottom = frozen_height_valid && bottom.valid &&
         bottom.source == "points_visible_side" &&
         std::isfinite(bottom.bottom_z_base);
+    const CargoTopSurfaceHeightResult vertical_measurement =
+        evaluateCargoTopSurfaceHeight({
+            frozen_height_valid
+                ? hook_lock_.locked_shape.height_m : 0.0F,
+            hook_lock_config_.track_vertical_from_top_surface &&
+                std::isfinite(det.z95),
+            det.z95,
+            direct_bottom,
+            bottom.bottom_z_base,
+            hook_lock_config_.top_bottom_center_agreement_m});
+    const bool accepted_direct_bottom = direct_bottom &&
+        (!vertical_measurement.used_top_surface ||
+         vertical_measurement.bottom_corroborated);
     const bool freeze_vertical =
         hook_lock_config_.freeze_vertical_position_after_lock &&
         hook_lock_.live_pose.valid &&
@@ -10211,26 +10234,23 @@ void NdtSlamNode::updateLiveCargoPose(
         // cargo or create a negative-bottom excursion.
         measured.z() = hook_lock_.live_pose.center_base.z();
         vertical_source = CargoVerticalPoseSource::DISPLAY_FROZEN;
-        if (direct_bottom) {
+        if (accepted_direct_bottom) {
             hook_lock_.direct_bottom_evidence_stamp = stamp;
         }
-    } else if (direct_bottom) {
-        measured.z() = bottom.bottom_z_base +
-            0.5F * hook_lock_.locked_shape.height_m;
+    } else if (vertical_measurement.valid &&
+               vertical_measurement.used_top_surface) {
+        // The overhead sensors consistently see the upper face while the
+        // lower edge is frequently occluded. Derive absolute bottom/center
+        // from robust z95 and the thickness frozen from the pre-lift window.
+        measured.z() = vertical_measurement.center_z_base;
+        vertical_source = CargoVerticalPoseSource::DIRECT_TOP;
+        if (accepted_direct_bottom) {
+            hook_lock_.direct_bottom_evidence_stamp = stamp;
+        }
+    } else if (vertical_measurement.valid) {
+        measured.z() = vertical_measurement.center_z_base;
         vertical_source = CargoVerticalPoseSource::DIRECT_BOTTOM;
         hook_lock_.direct_bottom_evidence_stamp = stamp;
-    } else if (frozen_height_valid && std::isfinite(det.z95)) {
-        const float top_center = det.z95 -
-            0.5F * hook_lock_.locked_shape.height_m;
-        const float top_gate = std::min(
-            0.30F, std::max(0.10F, hook_lock_.association_z_gate_m));
-        if (!hook_lock_.live_pose.valid ||
-            std::abs(top_center - predicted_z) <= top_gate) {
-            measured.z() = top_center;
-            vertical_source = CargoVerticalPoseSource::DIRECT_TOP;
-        } else {
-            measured.z() = predicted_z;
-        }
     } else if (frozen_height_valid && det.core_points_base &&
                !det.core_points_base->empty() &&
                hook_lock_.live_pose.valid) {
@@ -10336,14 +10356,14 @@ void NdtSlamNode::updateLiveCargoPose(
             0.0, direct_bottom_age -
                 hook_lock_config_.direct_bottom_soft_stale_sec)));
     hook_lock_.vertical_pose_uncertainty_m = std::max(
-        direct_bottom ? bottom.uncertainty : bottom_age_uncertainty,
+        accepted_direct_bottom ? bottom.uncertainty : bottom_age_uncertainty,
         hook_lock_.vertical_tracking_residual_m);
     // Any independently-stamped, associated cargo core refreshes its live
     // vertical pose. Direct bottom-band support improves uncertainty, but is
     // not the only authority for center_z +/- frozen_height/2.
     hook_lock_.live_vertical_pose_valid = true;
     hook_lock_.live_vertical_pose_evidence_stamp = stamp;
-    hook_lock_.direct_bottom_support_valid = direct_bottom;
+    hook_lock_.direct_bottom_support_valid = accepted_direct_bottom;
     hook_lock_.locked_center_base = hook_lock_.live_pose.center_base;
 }
 
@@ -11869,15 +11889,47 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                     cargo_origin_height_valid_ = true;
                     cargo_origin_height_m_ = pending_origin_height_m_;
                     cargo_origin_height_track_id_ = cargo_fusion_track_id_;
+                    if (hook_lock_.locked_shape.valid &&
+                        hook_lock_.live_pose.valid &&
+                        std::isfinite(cargo_origin_height_m_) &&
+                        cargo_origin_height_m_ >=
+                            cargo_bottom_fusion_.config()
+                                .minimum_prior_height &&
+                        cargo_origin_height_m_ <=
+                            cargo_bottom_fusion_.config()
+                                .maximum_prior_height) {
+                        // Calibrate the one frozen thickness from the stable
+                        // EMPTY-phase history. Preserve the currently observed
+                        // top face while moving the derived center/bottom.
+                        const float previous_height =
+                            hook_lock_.locked_shape.height_m;
+                        const float previous_top =
+                            hook_lock_.live_pose.center_base.z() +
+                            0.5F * previous_height;
+                        hook_lock_.locked_shape.height_m =
+                            cargo_origin_height_m_;
+                        hook_lock_.locked_size.z() = cargo_origin_height_m_;
+                        hook_lock_.stable_height = cargo_origin_height_m_;
+                        hook_lock_.stable_top_z = previous_top;
+                        hook_lock_.stable_bottom_z = previous_top -
+                            cargo_origin_height_m_;
+                        hook_lock_.live_pose.center_base.z() =
+                            previous_top - 0.5F * cargo_origin_height_m_;
+                        hook_lock_.live_pose_measured_base.z() =
+                            hook_lock_.live_pose.center_base.z();
+                        hook_lock_.live_pose_predicted_base.z() =
+                            hook_lock_.live_pose.center_base.z();
+                        hook_lock_.live_pose_velocity_base.z() = 0.0F;
+                    }
                     ROS_INFO(
                         "[OriginBinding] action=%s track=%llu age=%.3f "
-                        "distance=%.3f",
+                        "distance=%.3f frozen_thickness=%.3f",
                         pendingOriginActionName(action),
                         static_cast<unsigned long long>(
                             cargo_fusion_track_id_),
                         std::max(0.0,
                                  (stamp - pending_origin_stamp_).toSec()),
-                        origin_distance);
+                        origin_distance, cargo_origin_height_m_);
                     clear_pending_origin();
                     break;
                 case PendingOriginAction::DISCARD_EXPIRED:
@@ -15488,6 +15540,14 @@ void NdtSlamNode::logCargoHealthPeriodic() {
         current_rigid_cargo_geometry_.valid
             ? current_rigid_cargo_geometry_.pose.source
             : hook_lock_.live_pose.source);
+    rec.vertical_position_source = cargoVerticalPoseSourceName(
+        hook_lock_.live_pose.vertical_source);
+    rec.observed_top_z = hook_fixed_cargo_.valid &&
+            std::isfinite(hook_fixed_cargo_.z95)
+        ? hook_fixed_cargo_.z95
+        : std::numeric_limits<double>::quiet_NaN();
+    rec.frozen_thickness_m = hook_lock_.locked_shape.valid
+        ? hook_lock_.locked_shape.height_m : 0.0;
     const double evaluation_stamp = rec.stamp;
     rec.pose_evidence_age_sec =
         hook_lock_.live_pose.evidence_stamp_sec > 0.0

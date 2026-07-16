@@ -783,9 +783,14 @@ hook_cargo_lock:
   # A diagonal partial return may refine the provisional fit, but formal OBB
   # yaw is snapped to the nearest 0/90-degree axial direction at lock time.
   axis_aligned_yaw_after_lock: true
-  # During one lifting cycle the rigid cargo height and vertical center are
-  # fixed. Fresh associated frames refresh authority and move the box in X/Y.
-  freeze_vertical_position_after_lock: true
+  # Freeze physical thickness, not absolute Z. The overhead LiDAR observes the
+  # upper surface far more reliably than the occluded lower edge, so each
+  # associated frame derives bottom_z = robust_top_z - frozen_thickness.
+  freeze_vertical_position_after_lock: false
+  track_vertical_from_top_surface: true
+  # Direct lower-edge points may corroborate the top-derived center only when
+  # both estimates agree; otherwise the robust upper surface remains primary.
+  top_bottom_center_agreement_m: 0.25
   candidate_hold_sec: 1.0
   candidate_max_weak_frames: 10
   bottom_alpha_points: 0.30

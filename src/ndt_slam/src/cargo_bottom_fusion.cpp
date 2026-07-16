@@ -526,10 +526,14 @@ const char* cargoBottomSourceName(CargoBottomSource source) noexcept {
 
 int cargoBottomSourcePriority(CargoBottomSource source) noexcept {
     switch (source) {
+        // Map difference and the pre-lift thickness both combine a stable
+        // physical thickness with the current robust upper surface. For an
+        // overhead LiDAR they are more trustworthy than an intermittently
+        // visible lower edge in the current points.
+        case CargoBottomSource::MAP_DIFF: return 6;
+        case CargoBottomSource::ORIGIN_HEIGHT: return 5;
         case CargoBottomSource::POINTS: return 4;
-        case CargoBottomSource::MAP_DIFF: return 3;
-        case CargoBottomSource::MAP_STATIC: return 2;
-        case CargoBottomSource::ORIGIN_HEIGHT: return 2;
+        case CargoBottomSource::MAP_STATIC: return 3;
         case CargoBottomSource::RECENT_STABLE: return 1;
         default: return 0;
     }

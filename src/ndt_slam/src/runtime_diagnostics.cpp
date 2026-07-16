@@ -92,7 +92,8 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
                << "measured_center_x,measured_center_y,measured_center_z,"
                << "predicted_center_x,predicted_center_y,predicted_center_z,"
                << "center_residual_x,center_residual_y,center_residual_z,"
-               << "pose_sensor_dt_sec,position_source,pose_evidence_age_sec,"
+               << "pose_sensor_dt_sec,position_source,vertical_position_source,"
+               << "observed_top_z,frozen_thickness_m,pose_evidence_age_sec,"
                << "height_evidence_age_sec,"
                << "locked_length_m,locked_width_m,locked_height_m,locked_yaw_deg,"
                << "raw_bottom_z,filtered_bottom_z,conservative_bottom_z,"
@@ -459,6 +460,8 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << rec.center_residual_x << "," << rec.center_residual_y << ","
                << rec.center_residual_z << ","
                << rec.pose_sensor_dt_sec << "," << rec.position_source << ","
+               << rec.vertical_position_source << ","
+               << rec.observed_top_z << "," << rec.frozen_thickness_m << ","
                << rec.pose_evidence_age_sec << ","
                << rec.height_evidence_age_sec << ","
                << rec.size_x << "," << rec.size_y << "," << rec.size_z << ","
@@ -577,6 +580,9 @@ void RuntimeDiagnostics::logCargoHealth(const CargoFrameRecord& rec) {
             << "," << rec.center_y << "," << rec.center_z << ")"
             << " locked_shape=(" << rec.size_x << "," << rec.size_y
             << "," << rec.size_z << ")"
+            << " vertical_source=" << rec.vertical_position_source
+            << " observed_top=" << rec.observed_top_z
+            << " frozen_thickness=" << rec.frozen_thickness_m
             << " locked_yaw_deg=" << std::setprecision(1)
             << rec.footprint_yaw_deg
             << " conservative_bottom=" << std::setprecision(3)

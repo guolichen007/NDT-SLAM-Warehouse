@@ -289,6 +289,9 @@ struct CargoFrameRecord {
          center_residual_z = 0.0;
   double pose_sensor_dt_sec = 0.0;
   std::string position_source;
+  std::string vertical_position_source;
+  double observed_top_z = std::numeric_limits<double>::quiet_NaN();
+  double frozen_thickness_m = 0.0;
   double pose_evidence_age_sec = 0.0;
   double height_evidence_age_sec = 0.0;
   double size_x = 0.0, size_y = 0.0, size_z = 0.0;

@@ -124,6 +124,24 @@ TEST(CargoBottomFusion, OriginHeightIsNotReportedAsMapEvidence) {
     EXPECT_TRUE(result.origin_height_stats.valid);
 }
 
+TEST(CargoBottomFusion, PreLiftThicknessOverridesOccludedLowerEdge) {
+    CargoBottomFusion fusion;
+    CargoBottomObservation obs = observation(
+        32, 2.0, boxPoints(0.20F, 1.20F));
+    obs.current_top_valid = true;
+    obs.current_top_z_base = 2.40F;
+    obs.origin_height_valid = true;
+    obs.origin_height_m = 0.60F;
+
+    const CargoBottomResult result = fusion.update(obs);
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.source, CargoBottomSource::ORIGIN_HEIGHT);
+    EXPECT_EQ(result.reason, "pre_lift_frozen_height_prior");
+    EXPECT_NEAR(result.geometry.top_z_base, 2.40F, 0.08F);
+    EXPECT_NEAR(result.geometry.bottom_z_base, 1.80F, 0.08F);
+    EXPECT_NEAR(result.height, 0.60F, 0.08F);
+}
+
 TEST(CargoBottomFusion, RejectsVisibleUpperPatchAsPhysicalBottom) {
     CargoBottomFusion fusion;
     CargoBottomObservation obs = observation(4, 2.0, {});

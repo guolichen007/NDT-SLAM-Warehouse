@@ -63,6 +63,53 @@ float quantizeCargoAxialYawToOrthogonal(float yaw_rad) {
   return std::copysign(kHalfPi, axial_yaw);
 }
 
+CargoTopSurfaceHeightResult evaluateCargoTopSurfaceHeight(
+    const CargoTopSurfaceHeightInput& input) {
+  CargoTopSurfaceHeightResult result;
+  if (!std::isfinite(input.frozen_thickness_m) ||
+      input.frozen_thickness_m <= 0.0F ||
+      !std::isfinite(input.top_bottom_agreement_m) ||
+      input.top_bottom_agreement_m < 0.0F) {
+    result.reason = "invalid_frozen_thickness";
+    return result;
+  }
+  const float half_height = 0.5F * input.frozen_thickness_m;
+  if (input.top_valid && std::isfinite(input.top_z_base)) {
+    const float top_derived_bottom =
+        input.top_z_base - input.frozen_thickness_m;
+    result.bottom_z_base = top_derived_bottom;
+    result.top_z_base = input.top_z_base;
+    result.used_top_surface = true;
+    result.reason = "top_surface_minus_frozen_thickness";
+    if (input.direct_bottom_valid &&
+        std::isfinite(input.direct_bottom_z_base) &&
+        std::abs(input.direct_bottom_z_base - top_derived_bottom) <=
+            input.top_bottom_agreement_m) {
+      result.bottom_z_base = 0.80F * top_derived_bottom +
+          0.20F * input.direct_bottom_z_base;
+      result.top_z_base = result.bottom_z_base +
+          input.frozen_thickness_m;
+      result.bottom_corroborated = true;
+      result.reason = "top_surface_with_bottom_corroboration";
+    }
+    result.center_z_base = result.bottom_z_base + half_height;
+    result.valid = std::isfinite(result.center_z_base) &&
+        std::isfinite(result.bottom_z_base) &&
+        std::isfinite(result.top_z_base);
+    return result;
+  }
+  if (input.direct_bottom_valid &&
+      std::isfinite(input.direct_bottom_z_base)) {
+    result.bottom_z_base = input.direct_bottom_z_base;
+    result.top_z_base = input.direct_bottom_z_base +
+        input.frozen_thickness_m;
+    result.center_z_base = input.direct_bottom_z_base + half_height;
+    result.reason = "direct_bottom_fallback";
+    result.valid = true;
+  }
+  return result;
+}
+
 const char* cargoLockAuthoritySourceName(CargoLockAuthoritySource source) {
   switch (source) {
     case CargoLockAuthoritySource::NONE: return "NONE";

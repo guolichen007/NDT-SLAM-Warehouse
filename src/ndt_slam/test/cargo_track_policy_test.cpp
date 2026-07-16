@@ -44,6 +44,28 @@ TEST(CargoTrackPolicy, FormalYawSnapsToNearestWarehouseAxis) {
       -90.0F * kDegToRad, 1.0e-6F);
 }
 
+TEST(CargoTrackPolicy, RobustTopAndFrozenThicknessRecoverAbsoluteBottom) {
+  const CargoTopSurfaceHeightResult result =
+      evaluateCargoTopSurfaceHeight({
+          0.60F, true, 2.40F, true, 0.20F, 0.25F});
+  ASSERT_TRUE(result.valid);
+  EXPECT_TRUE(result.used_top_surface);
+  EXPECT_FALSE(result.bottom_corroborated);
+  EXPECT_NEAR(result.bottom_z_base, 1.80F, 1.0e-6F);
+  EXPECT_NEAR(result.center_z_base, 2.10F, 1.0e-6F);
+  EXPECT_EQ(result.reason, "top_surface_minus_frozen_thickness");
+}
+
+TEST(CargoTrackPolicy, DirectBottomOnlyCorroboratesWhenConsistent) {
+  const CargoTopSurfaceHeightResult result =
+      evaluateCargoTopSurfaceHeight({
+          0.60F, true, 2.40F, true, 1.75F, 0.25F});
+  ASSERT_TRUE(result.valid);
+  EXPECT_TRUE(result.bottom_corroborated);
+  EXPECT_NEAR(result.bottom_z_base, 1.79F, 1.0e-6F);
+  EXPECT_NEAR(result.top_z_base - result.bottom_z_base, 0.60F, 1.0e-6F);
+}
+
 TEST(CargoTrackPolicy, OrientationConcentrationAloneCannotLock) {
   std::vector<CargoCandidateDescriptor> observations;
   std::vector<CargoCandidateIdentityScore> scores;
