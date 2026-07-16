@@ -62,6 +62,21 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::currentDecision(
   decision.stable = confirmed_valid_;
   decision.pending = !confirmed_valid_;
   decision.code = confirmed_valid_ ? confirmed_code_ : 0U;
+  decision.candidate_code = candidate_valid_ ? candidate_code_ : 0U;
+  decision.confirmed_code = confirmed_valid_ ? confirmed_code_ : 0U;
+  decision.evidence_count = candidate_count_;
+  decision.reason = reason;
+  return decision;
+}
+
+CargoSafetyTemporalDecision CargoSafetyTemporalFilter::pendingDecision(
+    const std::string& reason) const {
+  CargoSafetyTemporalDecision decision;
+  decision.stable = false;
+  decision.pending = true;
+  decision.code = 0U;
+  decision.candidate_code = candidate_valid_ ? candidate_code_ : 0U;
+  decision.confirmed_code = confirmed_valid_ ? confirmed_code_ : 0U;
   decision.evidence_count = candidate_count_;
   decision.reason = reason;
   return decision;
@@ -74,7 +89,7 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::update(
       !isProtocolCode(input.raw_code)) {
     candidate_valid_ = false;
     candidate_count_ = 0;
-    return currentDecision("invalid_raw_evidence");
+    return pendingDecision("invalid_raw_evidence");
   }
 
   if (has_source_stamp_ &&
@@ -86,7 +101,9 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::update(
   } else if (has_source_stamp_ &&
              input.stamp_sec <=
                  last_source_stamp_sec_ + kStampEpsilonSec) {
-    return currentDecision("repeated_source_stamp_ignored");
+    // A repeated callback is not current physical evidence. In particular it
+    // must not keep a previously confirmed 17/18 alive indefinitely.
+    return pendingDecision("repeated_source_stamp_ignored");
   }
   has_source_stamp_ = true;
   last_source_stamp_sec_ = input.stamp_sec;
@@ -101,21 +118,18 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::update(
   if (hazard && !robust_hazard) {
     candidate_valid_ = false;
     candidate_count_ = 0;
-    if (!confirmed_valid_ || confirmed_code_ == kClear) {
-      CargoSafetyTemporalDecision decision;
-      decision.pending = true;
-      decision.reason = "hazard_cluster_too_sparse";
-      return decision;
-    }
-    return currentDecision("hazard_cluster_too_sparse");
+    return pendingDecision("hazard_cluster_too_sparse");
   }
 
-  bool continuous = candidate_valid_ &&
-      candidate_code_ == input.raw_code &&
+  const bool same_candidate = candidate_valid_ &&
+      candidate_code_ == input.raw_code;
+  const bool gap_continuous = same_candidate &&
       input.stamp_sec - candidate_stamp_sec_ <=
           config_.maximum_evidence_gap_sec + kStampEpsilonSec;
+  bool spatially_continuous = true;
+  bool continuous = gap_continuous;
   if (continuous && hazard) {
-    continuous =
+    spatially_continuous =
         (input.cluster_centroid - candidate_centroid_).norm() <=
             config_.maximum_centroid_step_m &&
         std::abs(input.footprint_distance_m - candidate_distance_m_) <=
@@ -123,6 +137,17 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::update(
         std::abs(input.conservative_clearance_m -
                  candidate_clearance_m_) <=
             config_.maximum_clearance_step_m;
+    continuous = spatially_continuous;
+  }
+
+  std::string pending_reason;
+  if (hazard && same_candidate && !gap_continuous) {
+    pending_reason = "hazard_evidence_gap";
+  } else if (hazard && gap_continuous && !spatially_continuous) {
+    pending_reason = "hazard_spatial_discontinuity";
+  } else if (hazard && candidate_valid_ &&
+             candidate_code_ != input.raw_code) {
+    pending_reason = "hazard_level_transition_pending";
   }
 
   if (continuous) {
@@ -156,22 +181,12 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::update(
     return decision;
   }
 
-  if (confirmed_valid_) {
-    if (confirmed_code_ == kClear && hazard) {
-      CargoSafetyTemporalDecision decision;
-      decision.pending = true;
-      decision.evidence_count = candidate_count_;
-      decision.reason =
-          "hazard_spatiotemporal_confirmation_pending";
-      return decision;
-    }
-    return currentDecision(
-        hazard ? "hazard_transition_pending_hold_previous"
-               : "clear_pending_hold_previous_hazard");
+  if (pending_reason.empty()) {
+    pending_reason = hazard
+        ? "hazard_spatiotemporal_confirmation_pending"
+        : "clear_confirmation_pending";
   }
-  return currentDecision(
-      hazard ? "hazard_spatiotemporal_confirmation_pending"
-             : "clear_confirmation_pending");
+  return pendingDecision(pending_reason);
 }
 
 }  // namespace ndt_slam

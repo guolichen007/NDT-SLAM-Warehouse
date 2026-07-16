@@ -446,6 +446,17 @@ bool containsPointInSweptCargoObbBase(
     return false;
 }
 
+bool isCargoIdentityPointMatch(
+    float nearest_distance_squared,
+    float match_radius_m,
+    bool inside_cargo_neighborhood) {
+    return inside_cargo_neighborhood &&
+        std::isfinite(nearest_distance_squared) &&
+        nearest_distance_squared >= 0.0F &&
+        std::isfinite(match_radius_m) && match_radius_m > 0.0F &&
+        nearest_distance_squared <= match_radius_m * match_radius_m;
+}
+
 float pointToCargoObbDistance2D(
     const Eigen::Vector2f& point_base,
     const CargoObbFootprint& footprint) {

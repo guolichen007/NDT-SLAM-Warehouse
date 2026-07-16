@@ -34,6 +34,8 @@ struct CargoSafetyTemporalDecision {
   bool newly_confirmed = false;
   bool use_current_evidence = false;
   std::uint16_t code = 0U;
+  std::uint16_t candidate_code = 0U;
+  std::uint16_t confirmed_code = 0U;
   int evidence_count = 0;
   std::string reason = "not_evaluated";
 };
@@ -42,7 +44,10 @@ struct CargoSafetyTemporalDecision {
  * Confirms 17/18 only from spatially continuous, independently stamped
  * clusters. Sparse or jumping returns remain fail-safe pending evidence (34
  * at the integration layer) instead of becoming an immediate collision
- * alarm. A confirmed alarm is held until two fresh CLEAR observations.
+ * alarm. Every published 14/17/18 is backed by the current confirmation
+ * window. While a new CLEAR, alarm level, or cluster identity is still being
+ * confirmed, integration publishes evidence-invalid (34), never a stale
+ * previously confirmed alarm.
  */
 class CargoSafetyTemporalFilter {
  public:
@@ -72,6 +77,8 @@ class CargoSafetyTemporalFilter {
   std::uint16_t confirmed_code_ = 0U;
 
   CargoSafetyTemporalDecision currentDecision(
+      const std::string& reason) const;
+  CargoSafetyTemporalDecision pendingDecision(
       const std::string& reason) const;
 };
 

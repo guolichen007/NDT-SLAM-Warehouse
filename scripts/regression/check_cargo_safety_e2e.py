@@ -70,6 +70,9 @@ def main() -> int:
             "bottom estimate publisher is not advertised", failures)
     require('"/cargo_avoidance/safety_status"' in node,
             "safety status publisher is not advertised", failures)
+    require('"/cargo_avoidance/raw_safety_status"' in node and
+            '"/cargo_avoidance/raw_status_code"' in node,
+            "raw cargo safety diagnostics are not advertised", failures)
     require("cargo_bottom_fusion_.update(observation)" in node,
             "CargoBottomFusion is not invoked by the runtime", failures)
     require("cargo_safety_evaluator_.evaluate(safety_input)" in node,
@@ -312,6 +315,11 @@ def main() -> int:
     require("minimum_hazard_cluster_points" in temporal_filter and
             "maximum_centroid_step_m" in temporal_filter and
             "repeated_source_stamp_ignored" in temporal_filter and
+            "pendingDecision(\"hazard_cluster_too_sparse\")" in
+                temporal_filter and
+            "hazard_transition_pending_hold_previous" not in
+                temporal_filter and
+            "clear_pending_hold_previous_hazard" not in temporal_filter and
             "hazard_confirm_frames: 3" in live_config and
             "clear_confirm_frames: 2" in live_config and
             "cargo_safety_temporal_filter_.update" in node,
@@ -350,8 +358,11 @@ def main() -> int:
             "CargoSafetyProtocol::kSystemNotReady" in node,
             "pre-authority cargo startup is not mapped to code 30", failures)
     require("self_cargo_point_match_radius_m" in node + live_config and
+            "self_cargo_point_match_radius_m: 0.15" in live_config and
             "self_rigging_radius_m" in node + live_config and
             "identity_self_tree.nearestKSearch" in node and
+            "inside_identity_neighborhood" in node and
+            "isCargoIdentityPointMatch" in node and
             "inside_rigging" in node and
             "cargo_identity_self_removed_points_" in node,
             "identity-selected cargo returns can still leak into obstacles",
@@ -359,6 +370,10 @@ def main() -> int:
     require("dangerous_cluster_points" in runtime_header and
             "nearest_obstacle_x" in runtime_header and
             "conservative_clearance_m" in runtime_header and
+            "raw_warning_code" in runtime_header and
+            "confirmed_warning_code" in runtime_header and
+            "temporal_candidate_code" in runtime_header and
+            "used_previous_confirmation" in runtime_header and
             "requested_alarm_code" in runtime_header,
             "cargo safety evidence is incomplete in frame diagnostics",
             failures)

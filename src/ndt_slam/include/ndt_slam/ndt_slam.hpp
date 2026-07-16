@@ -12,6 +12,7 @@
 #include <tf2_ros/transform_listener.h>
 #include <std_srvs/Empty.h>
 #include <std_msgs/String.h>
+#include <std_msgs/Int32.h>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
@@ -1614,7 +1615,7 @@ private:
         // Matches only points that are spatially coincident with the current
         // identity-selected cargo component.  It closes the downsampling gap
         // without expanding the OBB enough to hide a nearby real obstacle.
-        float self_cargo_point_match_radius_m = 0.06F;
+        float self_cargo_point_match_radius_m = 0.15F;
         float self_rigging_radius_m = 0.10F;
         float lost_position_uncertainty_per_sec = 0.05F;
         float lost_position_uncertainty_max_m = 0.50F;
@@ -1816,6 +1817,8 @@ private:
     ros::Publisher cargo_warning_obstacle_marker_pub_;
     ros::Publisher cargo_bottom_estimate_pub_;
     ros::Publisher cargo_safety_status_pub_;
+    ros::Publisher cargo_raw_safety_status_pub_;
+    ros::Publisher cargo_raw_status_code_pub_;
     ros::Publisher cargo_fused_box_marker_pub_;
 
     CargoBottomFusion cargo_bottom_fusion_;
@@ -1847,6 +1850,11 @@ private:
         std::numeric_limits<float>::quiet_NaN();
     float cargo_conservative_clearance_m_ =
         std::numeric_limits<float>::quiet_NaN();
+    std::int32_t cargo_raw_warning_code_ = 0;
+    std::int32_t cargo_confirmed_warning_code_ = 0;
+    std::int32_t cargo_temporal_candidate_code_ = 0;
+    int cargo_temporal_candidate_count_ = 0;
+    bool cargo_used_previous_confirmation_ = false;
     std::int32_t cargo_last_requested_code_ =
         CargoSafetyProtocol::kSystemNotReady;
     std::string cargo_last_safety_reason_ = "startup";

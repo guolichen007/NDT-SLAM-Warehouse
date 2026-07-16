@@ -279,6 +279,12 @@ struct CargoFrameRecord {
   double conservative_clearance_m =
       std::numeric_limits<double>::quiet_NaN();
   int requested_alarm_code = 30;
+  int raw_warning_code = 0;
+  int confirmed_warning_code = 0;
+  int temporal_candidate_code = 0;
+  int temporal_candidate_count = 0;
+  double temporal_hold_age_sec = 0.0;
+  bool used_previous_confirmation = false;
   std::string safety_reason = "system_not_ready";
   double center_x = 0.0, center_y = 0.0, center_z = 0.0;
   double measured_center_x = 0.0, measured_center_y = 0.0,

@@ -837,11 +837,10 @@ hook_cargo_lock:
   self_cargo_base_margin_z_m: 0.12
   self_cargo_max_margin_xy_m: 0.40
   self_cargo_max_margin_z_m: 0.30
-  # Spatial correspondence with the current selected component removes the
-  # same physical cargo returns after feature/downsampling shifts them.  This
-  # radius is deliberately much smaller than the OBB margin so external
-  # obstacles touching the cargo boundary remain visible to safety.
-  self_cargo_point_match_radius_m: 0.06
+  # The merged input uses 0.15 m voxels. Match at that same scale, but only
+  # inside the current/previous/swept OBB neighborhood; this closes voxel
+  # centroid jitter without deleting nearby external obstacles globally.
+  self_cargo_point_match_radius_m: 0.15
   # A narrow line mask follows the suspension path from cargo top to the
   # configured hook anchor; it removes rope/hook returns, not a broad volume.
   self_rigging_radius_m: 0.10

@@ -160,6 +160,14 @@ bool containsPointInSweptCargoObbBase(
     float margin_z_m = 0.0F,
     float maximum_sample_step_m = 0.08F);
 
+// Identity correspondence may remove a point only inside the live/previous
+// cargo neighborhood. This lets the radius cover input voxel quantization
+// without turning it into a global nearest-neighbor deletion rule.
+bool isCargoIdentityPointMatch(
+    float nearest_distance_squared,
+    float match_radius_m,
+    bool inside_cargo_neighborhood);
+
 float pointToCargoObbDistance2D(
     const Eigen::Vector2f& point_base,
     const CargoObbFootprint& footprint);

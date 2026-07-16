@@ -298,6 +298,40 @@ TEST(CargoRigidGeometryTest, RealObstacleNearCargoEdgeRemainsExternal) {
         Eigen::Vector3f(1.45F, 0.0F, 1.0F), footprint, 0.15F, 0.12F));
 }
 
+TEST(CargoRigidGeometryTest, VoxelScaleIdentityMatchRequiresCargoNeighborhood) {
+    // A 12 cm centroid shift is normal for independently voxelized 15 cm
+    // input frames and must remain the same physical cargo identity.
+    EXPECT_TRUE(isCargoIdentityPointMatch(
+        0.12F * 0.12F, 0.15F, true));
+    EXPECT_FALSE(isCargoIdentityPointMatch(
+        0.12F * 0.12F, 0.15F, false));
+    EXPECT_FALSE(isCargoIdentityPointMatch(
+        0.16F * 0.16F, 0.15F, true));
+}
+
+TEST(CargoRigidGeometryTest, IdentityShellRecoversSurfaceWithoutBroadMask) {
+    const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
+        shape(), pose(Eigen::Vector3f(0.0F, 0.0F, 1.0F)),
+        Eigen::Isometry3f::Identity(), 25U, 0.05F, 0.08F);
+    ASSERT_TRUE(geometry.valid);
+    const CargoObbFootprint footprint = toCargoObbFootprint(geometry);
+    const Eigen::Vector3f shifted_surface(
+        0.0F, 0.0F, footprint.min_z - 0.20F);
+    EXPECT_FALSE(containsPointInCargoObbBase(
+        shifted_surface, footprint, 0.15F, 0.12F));
+    EXPECT_TRUE(containsPointInCargoObbBase(
+        shifted_surface, footprint, 0.30F, 0.27F));
+    EXPECT_TRUE(isCargoIdentityPointMatch(
+        0.12F * 0.12F, 0.15F, true));
+
+    const Eigen::Vector3f real_obstacle(
+        0.0F, 0.0F, footprint.min_z - 0.50F);
+    EXPECT_FALSE(containsPointInCargoObbBase(
+        real_obstacle, footprint, 0.30F, 0.27F));
+    EXPECT_FALSE(isCargoIdentityPointMatch(
+        0.12F * 0.12F, 0.15F, false));
+}
+
 TEST(CargoRigidGeometryTest, HorizontalResidualDoesNotInflateBottomUncertainty) {
     const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
         shape(), pose(Eigen::Vector3f(0.0F, 0.0F, 1.0F)),
