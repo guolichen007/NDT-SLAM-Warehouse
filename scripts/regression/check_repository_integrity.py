@@ -575,6 +575,42 @@ def runtime_console_contract_failures() -> list[str]:
     return failures
 
 
+def asynchronous_map_commit_contract_failures() -> list[str]:
+    failures: list[str] = []
+    node_path = Path("src/ndt_slam/src/ndt_slam.cpp")
+    header_path = Path("src/ndt_slam/include/ndt_slam/ndt_slam.hpp")
+    try:
+        node = (ROOT / node_path).read_text(encoding="utf-8")
+        header = (ROOT / header_path).read_text(encoding="utf-8")
+    except OSError as error:
+        return [f"asynchronous MapCommit contract cannot be read: {error}"]
+
+    combined = node + header
+    required = (
+        "struct MapCommitJob",
+        "map_commit_queue_capacity_ = 2U",
+        "enqueueMapCommitJob(filtered_cloud, final_pose, publish_time)",
+        "std::thread(&NdtSlamNode::mapCommitThread, this)",
+        "map_commit_lifecycle_mutex_",
+        "job.lifecycle_epoch",
+        "map_commit_queue_.back() = std::move(job)",
+        "consumeMapCommitCompletion()",
+        "job.formal_footprint",
+    )
+    for token in required:
+        if token not in combined:
+            failures.append(
+                f"asynchronous MapCommit contract missing {token!r}")
+
+    owner_gate = node.find("if (allow_map_commit)")
+    owner_call_window = (
+        node[owner_gate:owner_gate + 1200] if owner_gate >= 0 else "")
+    if "commitKeyFrameWithDynamicFiltering(" in owner_call_window:
+        failures.append(
+            "LiDAR owner thread still invokes the synchronous MapCommit pipeline")
+    return failures
+
+
 def main() -> int:
     failures: list[str] = runtime_so3_contract_failures()
     failures.extend(pending_origin_contract_failures())
@@ -583,6 +619,7 @@ def main() -> int:
     failures.extend(ndt_observability_contract_failures())
     failures.extend(runtime_console_contract_failures())
     failures.extend(runtime_visualization_contract_failures())
+    failures.extend(asynchronous_map_commit_contract_failures())
     try:
         paths = tracked_paths()
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:

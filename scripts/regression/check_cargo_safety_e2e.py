@@ -212,12 +212,17 @@ def main() -> int:
             "suspended_min_ground_clearance_m: 0.30" in live_config,
             "compact cargo lock is not role-aware", failures)
     candidate_branch = node.find("case HookCargoLockState::CANDIDATE:")
-    locked_branch = node.find("case HookCargoLockState::LOCKED:", candidate_branch)
-    candidate_code = node[candidate_branch:locked_branch]
-    require(candidate_branch >= 0 and locked_branch > candidate_branch and
+    geometry_branch = node.find(
+        "case HookCargoLockState::GEOMETRY_CONFIRMING:", candidate_branch)
+    locked_branch = node.find("case HookCargoLockState::LOCKED:", geometry_branch)
+    candidate_code = node[candidate_branch:geometry_branch]
+    geometry_code = node[geometry_branch:locked_branch]
+    require(candidate_branch >= 0 and
+            geometry_branch > candidate_branch and
+            locked_branch > geometry_branch and
             "if (!candidate_policy.allow_candidate)" in candidate_code and
-            "if (!candidate_policy.allow_lock)" in candidate_code and
-            "clearHookLock();" in candidate_code,
+            "clearHookLock();" in candidate_code and
+            "!candidate_policy.allow_lock" in geometry_code,
             "REQUIRED policy is not enforced inside the candidate state",
             failures)
     lock_function = node.find("void NdtSlamNode::updateHookCargoLock(")

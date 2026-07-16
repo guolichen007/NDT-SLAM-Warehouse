@@ -598,6 +598,63 @@ private:
     // localization-frame transaction.
     std::mutex runtime_state_mutex_;
 
+    // MapCommit is deliberately separated from the LiDAR owner thread.  A
+    // queued job contains every authority/input value that may otherwise
+    // change on the next frame.  The bounded queue keeps latency finite: when
+    // it is full, only the newest waiting job is replaced.
+    struct MapCommitJob {
+        std::uint64_t sequence = 0U;
+        std::uint64_t lifecycle_epoch = 0U;
+        ros::Time stamp;
+        Sophus::SE3d pose;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud;
+        HookLoadSignalRole hook_role = HookLoadSignalRole::REQUIRED;
+        bool hook_valid = false;
+        int hook_state = static_cast<int>(HookLoadState::UNKNOWN);
+        bool lidar_removal_authorized = false;
+        bool formal_footprint_valid = false;
+        CargoObbFootprint formal_footprint;
+        bool allow_persistent_map_commit = false;
+        bool has_raw_ndt_pose = false;
+        Sophus::SE3d raw_ndt_pose;
+        Sophus::SE3d refined_pose;
+        Sophus::SE3d runtime_pose;
+    };
+    struct MapCommitCompletion {
+        bool pending = false;
+        std::uint64_t lifecycle_epoch = 0U;
+        Sophus::SE3d pose;
+        bool has_raw_ndt_pose = false;
+        Sophus::SE3d raw_ndt_pose;
+        Sophus::SE3d refined_pose;
+        Sophus::SE3d runtime_pose;
+    };
+    std::thread map_commit_thread_;
+    std::mutex map_commit_queue_mutex_;
+    std::condition_variable map_commit_cv_;
+    std::deque<MapCommitJob> map_commit_queue_;
+    bool map_commit_shutdown_ = false;
+    std::size_t map_commit_queue_capacity_ = 2U;
+    std::uint64_t map_commit_next_sequence_ = 1U;
+    std::atomic<std::uint64_t> map_commit_submitted_{0U};
+    std::atomic<std::uint64_t> map_commit_completed_{0U};
+    std::atomic<std::uint64_t> map_commit_coalesced_{0U};
+    std::atomic<std::uint64_t> map_commit_stale_{0U};
+    std::atomic<std::uint64_t> map_commit_dropped_{0U};
+    // Destructive reset/load/rebuild transitions take this mutex before
+    // changing the lifecycle epoch.  The worker therefore cannot publish an
+    // old-epoch keyframe after a new map has become authoritative.
+    std::mutex map_commit_lifecycle_mutex_;
+    std::mutex map_commit_completion_mutex_;
+    MapCommitCompletion map_commit_completion_;
+
+    void enqueueMapCommitJob(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const Sophus::SE3d& pose,
+        const ros::Time& stamp);
+    void mapCommitThread();
+    void consumeMapCommitCompletion();
+
     // NDT_OMP 配准器
     pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>::Ptr ndt_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr local_map_;
@@ -661,7 +718,7 @@ private:
     // completed cloud pointers under map_mutex_.
     std::atomic<bool> map_maintenance_pending_{false};
     std::atomic<bool> clean_map_rebuild_pending_{false};
-    bool map_maintenance_has_run_ = false;
+    std::atomic<bool> map_maintenance_has_run_{false};
     std::atomic<bool> loop_closure_pending_{false};
     bool shadow_target_pending_ = false;
     bool release_keyframes_pending_ = false;
@@ -748,7 +805,7 @@ private:
     LoopClosureDetector loop_closure_detector_;
     bool loop_closure_enabled_ = false;
     int loop_detection_interval_ = 10;
-    int keyframe_count_ = 0;
+    std::atomic<int> keyframe_count_{0};
 
     struct LoopClosureResult {
         bool valid = false;
@@ -936,10 +993,7 @@ private:
     // 3. 吊货点删除
     // 4. HumanFilter
     // 5. MapCommit（最后）
-    void commitKeyFrameWithDynamicFiltering(
-        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-        const Sophus::SE3d& pose,
-        const ros::Time& stamp);
+    bool commitKeyFrameWithDynamicFiltering(const MapCommitJob& job);
 
     // 从 objects 中删除吊货 remove_box 内的点（3D 检查）
     void removePointsInsideCargoRemoveBoxes3D(
@@ -1075,6 +1129,7 @@ private:
         pcl::PointCloud<pcl::PointXYZ>::Ptr objects;
     };
     std::map<std::string, TileLayers> dirty_tiles_;
+    std::mutex dirty_tiles_mutex_;
     std::thread tile_flush_thread_;
     std::atomic<bool> tile_flush_running_{false};
     std::mutex failed_tile_flush_mutex_;
@@ -1091,7 +1146,7 @@ private:
     int total_frames_ = 0;
     int total_keyframes_ = 0;
     int active_keyframes_ = 0;
-    int dirty_tile_count_ = 0;
+    std::atomic<int> dirty_tile_count_{0};
     std::atomic<int> flushed_tile_count_{0};
     double delta_translation_ = 0.0;
     double delta_yaw_ = 0.0;

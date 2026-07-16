@@ -309,8 +309,10 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     shutdown_ = false;
     running_ = true;
     map_publication_shutdown_ = false;
+    map_commit_shutdown_ = false;
     map_publication_thread_ =
         std::thread(&NdtSlamNode::mapPublicationThread, this);
+    map_commit_thread_ = std::thread(&NdtSlamNode::mapCommitThread, this);
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
 
     timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
@@ -474,8 +476,10 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     shutdown_ = false;
     running_ = true;
     map_publication_shutdown_ = false;
+    map_commit_shutdown_ = false;
     map_publication_thread_ =
         std::thread(&NdtSlamNode::mapPublicationThread, this);
+    map_commit_thread_ = std::thread(&NdtSlamNode::mapCommitThread, this);
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
 
     timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
@@ -496,10 +500,18 @@ NdtSlamNode::~NdtSlamNode() {
         std::lock_guard<std::mutex> lock(map_publication_mutex_);
         map_publication_shutdown_ = true;
     }
+    {
+        std::lock_guard<std::mutex> lock(map_commit_queue_mutex_);
+        map_commit_shutdown_ = true;
+    }
     map_publication_cv_.notify_all();
+    map_commit_cv_.notify_all();
 
     if (process_thread_.joinable()) {
         process_thread_.join();
+    }
+    if (map_commit_thread_.joinable()) {
+        map_commit_thread_.join();
     }
     if (map_publication_thread_.joinable()) {
         map_publication_thread_.join();
@@ -553,6 +565,156 @@ NdtSlamNode::~NdtSlamNode() {
     }
     runtime_diag_.flushCsv();
     ROS_WARN("[Shutdown] Complete");
+}
+
+void NdtSlamNode::enqueueMapCommitJob(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    const Sophus::SE3d& pose,
+    const ros::Time& stamp) {
+    if (!cloud || cloud->empty()) {
+        map_commit_dropped_.fetch_add(1U, std::memory_order_relaxed);
+        return;
+    }
+
+    MapCommitJob job;
+    job.lifecycle_epoch =
+        map_rebuild_generation_.load(std::memory_order_acquire);
+    job.stamp = stamp;
+    job.pose = pose;
+    job.cloud = cloud;
+    const HookLoadSnapshot hook = currentHookLoadSnapshot();
+    job.hook_role = hook_load_signal_role_;
+    job.hook_valid = hook.valid;
+    job.hook_state = hook.state;
+    job.lidar_removal_authorized = shouldRemoveHookCargo();
+    job.formal_footprint_valid =
+        job.lidar_removal_authorized &&
+        current_rigid_cargo_geometry_.valid;
+    if (job.formal_footprint_valid) {
+        job.formal_footprint =
+            toCargoObbFootprint(current_rigid_cargo_geometry_);
+    }
+    job.allow_persistent_map_commit =
+        allow_persistent_map_commit_ && canCommit();
+    job.has_raw_ndt_pose = has_last_raw_ndt_pose_;
+    if (job.has_raw_ndt_pose) {
+        job.raw_ndt_pose = last_raw_ndt_pose_;
+    }
+    job.refined_pose = pose;
+    job.runtime_pose = current_pose_;
+
+    {
+        std::lock_guard<std::mutex> lock(map_commit_queue_mutex_);
+        if (map_commit_shutdown_) {
+            map_commit_dropped_.fetch_add(1U, std::memory_order_relaxed);
+            return;
+        }
+        job.sequence = map_commit_next_sequence_++;
+        if (map_commit_queue_.size() >= map_commit_queue_capacity_) {
+            map_commit_queue_.back() = std::move(job);
+            map_commit_coalesced_.fetch_add(1U, std::memory_order_relaxed);
+        } else {
+            map_commit_queue_.push_back(std::move(job));
+        }
+        map_commit_submitted_.fetch_add(1U, std::memory_order_relaxed);
+    }
+    map_commit_cv_.notify_one();
+}
+
+void NdtSlamNode::mapCommitThread() {
+    ROS_DEBUG("[MapCommitWorker] started capacity=%zu",
+              map_commit_queue_capacity_);
+    while (true) {
+        MapCommitJob job;
+        {
+            std::unique_lock<std::mutex> lock(map_commit_queue_mutex_);
+            map_commit_cv_.wait(lock, [this]() {
+                return map_commit_shutdown_ || !map_commit_queue_.empty();
+            });
+            if (map_commit_shutdown_ && map_commit_queue_.empty()) {
+                break;
+            }
+            job = std::move(map_commit_queue_.front());
+            map_commit_queue_.pop_front();
+        }
+
+        if (job.lifecycle_epoch !=
+            map_rebuild_generation_.load(std::memory_order_acquire)) {
+            map_commit_stale_.fetch_add(1U, std::memory_order_relaxed);
+            continue;
+        }
+
+        bool committed = false;
+        {
+            // Reset/load/rebuild takes the same mutex before changing the
+            // epoch or any MapCommit-owned tracker/map state.
+            std::lock_guard<std::mutex> lifecycle_lock(
+                map_commit_lifecycle_mutex_);
+            if (job.lifecycle_epoch ==
+                map_rebuild_generation_.load(std::memory_order_acquire)) {
+                committed = commitKeyFrameWithDynamicFiltering(job);
+            }
+        }
+        if (!committed) {
+            continue;
+        }
+
+        map_commit_completed_.fetch_add(1U, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(map_commit_completion_mutex_);
+            map_commit_completion_.pending = true;
+            map_commit_completion_.lifecycle_epoch = job.lifecycle_epoch;
+            map_commit_completion_.pose = job.pose;
+            map_commit_completion_.has_raw_ndt_pose = job.has_raw_ndt_pose;
+            map_commit_completion_.raw_ndt_pose = job.raw_ndt_pose;
+            map_commit_completion_.refined_pose = job.refined_pose;
+            map_commit_completion_.runtime_pose = job.runtime_pose;
+        }
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            map_maintenance_pending_ = true;
+        }
+        queue_cv_.notify_one();
+    }
+    ROS_DEBUG("[MapCommitWorker] stopped submitted=%llu completed=%llu "
+              "coalesced=%llu stale=%llu dropped=%llu",
+              static_cast<unsigned long long>(
+                  map_commit_submitted_.load(std::memory_order_relaxed)),
+              static_cast<unsigned long long>(
+                  map_commit_completed_.load(std::memory_order_relaxed)),
+              static_cast<unsigned long long>(
+                  map_commit_coalesced_.load(std::memory_order_relaxed)),
+              static_cast<unsigned long long>(
+                  map_commit_stale_.load(std::memory_order_relaxed)),
+              static_cast<unsigned long long>(
+                  map_commit_dropped_.load(std::memory_order_relaxed)));
+}
+
+void NdtSlamNode::consumeMapCommitCompletion() {
+    MapCommitCompletion completion;
+    {
+        std::lock_guard<std::mutex> lock(map_commit_completion_mutex_);
+        if (!map_commit_completion_.pending) {
+            return;
+        }
+        completion = map_commit_completion_;
+        map_commit_completion_.pending = false;
+    }
+    if (completion.lifecycle_epoch !=
+        map_rebuild_generation_.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    if (localization_target_enabled_) {
+        shadow_target_pose_ = completion.pose;
+        shadow_target_pending_ = true;
+    }
+    if (completion.has_raw_ndt_pose) {
+        last_commit_raw_pose_ = completion.raw_ndt_pose;
+    }
+    last_commit_refined_pose_ = completion.refined_pose;
+    last_commit_runtime_pose_ = completion.runtime_pose;
+    has_commit_gate_reference_ = true;
 }
 
 void NdtSlamNode::timerCallback(const ros::TimerEvent&) {
@@ -2402,14 +2564,20 @@ bool NdtSlamNode::localizationInputPending() {
 }
 
 void NdtSlamNode::requestMapMaintenance() {
-    ++map_maintenance_commit_count_;
-    if (!map_maintenance_has_run_ ||
-        map_maintenance_commit_count_ >= map_maintenance_interval_commits_) {
-        map_maintenance_commit_count_ = 0;
-        map_maintenance_pending_ = true;
-        clean_map_rebuild_pending_ = true;
-        queue_cv_.notify_one();
+    bool notify = false;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        ++map_maintenance_commit_count_;
+        if (!map_maintenance_has_run_.load(std::memory_order_acquire) ||
+            map_maintenance_commit_count_ >=
+                map_maintenance_interval_commits_) {
+            map_maintenance_commit_count_ = 0;
+            map_maintenance_pending_ = true;
+            clean_map_rebuild_pending_ = true;
+            notify = true;
+        }
     }
+    if (notify) queue_cv_.notify_one();
 }
 
 void NdtSlamNode::requestMapPublication(const ros::Time& stamp) {
@@ -2769,7 +2937,7 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
     }
 
     last_commit_clean_map_ms_ = result.duration_ms;
-    map_maintenance_has_run_ = true;
+    map_maintenance_has_run_.store(true, std::memory_order_release);
     shadow_target_pending_ = shadow_target_pending_ || installed_as_current;
     map_maintenance_pending_ = true;
     requestMapPublication(
@@ -2963,6 +3131,7 @@ void NdtSlamNode::processCloudThread() {
 
         std::unique_lock<std::mutex> runtime_state_lock(
             runtime_state_mutex_);
+        consumeMapCommitCompletion();
         if (run_map_maintenance) {
             consumeLoopClosureResult(last_stamp_);
             consumeCleanMapRebuildResult(last_stamp_);
@@ -4595,16 +4764,13 @@ void NdtSlamNode::processCloudThread() {
 
             if (allow_map_commit) {
                 const auto map_commit_start = DiagClock::now();
-                commitKeyFrameWithDynamicFiltering(filtered_cloud, final_pose, publish_time);
+                enqueueMapCommitJob(filtered_cloud, final_pose, publish_time);
                 diag_stage.map_commit_ms = elapsedMs(map_commit_start);
-                diag_stage.clean_map_ms = last_commit_clean_map_ms_;
-                diag_stage.display_map_ms = last_commit_display_map_ms_;
-
-                // V3: 更新 Localization Target（只在 accepted keyframe 时更新）
-                if (localization_target_enabled_) {
-                    shadow_target_pose_ = final_pose;
-                    shadow_target_pending_ = true;
-                }
+                // Filtering and map writes now run on the bounded worker.
+                // Only a completed, current-epoch job advances the owner-side
+                // target and gate references.
+                diag_stage.clean_map_ms = 0.0;
+                diag_stage.display_map_ms = 0.0;
             } else {
                 ROS_DEBUG("[MapCommit] skipped: ndt_accepted=%d require_accept=%d fitness=%.3f max_fitness=%.3f motion_gate=%d",
                          ndt_accepted_for_commit ? 1 : 0,
@@ -5089,7 +5255,7 @@ void NdtSlamNode::processCloudThread() {
                      "keyframes=%d, tiles_flushed=%d, "
                      "local_map=%zu, active_map=%zu, process=%.2fs",
                      success_frames, total_frames, pos.x(), pos.y(), pos.z(),
-                     keyframe_count_,
+                     keyframe_count_.load(std::memory_order_relaxed),
                      flushed_tile_count_.load(std::memory_order_relaxed),
                      local_map_->size(), global_map_->size(), elapsed);
             last_log_time = ros::Time::now();
@@ -6156,7 +6322,8 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
         keyframe_count_++;
         Eigen::Vector3d pos = pose.translation();
         ROS_DEBUG("[MapCommit] keyframe #%d added | pos=(%.1f, %.1f, %.1f) | tiles=%d",
-                 keyframe_count_, pos.x(), pos.y(), pos.z(),
+                 keyframe_count_.load(std::memory_order_relaxed),
+                 pos.x(), pos.y(), pos.z(),
                  flushed_tile_count_.load(std::memory_order_relaxed));
 
         std::lock_guard<std::mutex> lock(map_mutex_);
@@ -6584,7 +6751,8 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 dirty_tile_count_ = dirty_tiles_.size();
 
                 ROS_DEBUG("[PersistentMap] Added points to tile %s layers, dirty_tiles=%d",
-                          tile_key.c_str(), dirty_tile_count_);
+                          tile_key.c_str(),
+                          dirty_tile_count_.load(std::memory_order_relaxed));
             }
 
             // 发布 debug 话题
@@ -6913,6 +7081,8 @@ void NdtSlamNode::updatePoseFromLoopClosure(
 bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
     ROS_INFO("Resetting SLAM system...");
     std::lock_guard<std::mutex> runtime_state_lock(runtime_state_mutex_);
+    std::lock_guard<std::mutex> map_commit_lifecycle_lock(
+        map_commit_lifecycle_mutex_);
     keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
     loop_closure_result_ready_.store(false, std::memory_order_release);
 
@@ -6948,6 +7118,14 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         local_map_version_ = 0;
         bootstrap_local_map_complete_ = false;
         bootstrap_local_map_frames_ = 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(map_commit_queue_mutex_);
+        map_commit_queue_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(map_commit_completion_mutex_);
+        map_commit_completion_.pending = false;
     }
 
     // V3: 清理 Localization Target
@@ -7165,6 +7343,8 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
         }
 
         std::lock_guard<std::mutex> runtime_state_lock(runtime_state_mutex_);
+        std::lock_guard<std::mutex> map_commit_lifecycle_lock(
+            map_commit_lifecycle_mutex_);
 
         const ros::Time load_stamp = ros::Time::now();
         keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
@@ -7211,6 +7391,14 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
             // seed a new local map through the startup bootstrap bypass.
             bootstrap_local_map_complete_ = true;
             bootstrap_local_map_frames_ = 0;
+        }
+        {
+            std::lock_guard<std::mutex> lock(map_commit_queue_mutex_);
+            map_commit_queue_.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(map_commit_completion_mutex_);
+            map_commit_completion_.pending = false;
         }
         {
             std::lock_guard<std::mutex> lock(localization_target_mutex_);
@@ -7354,6 +7542,8 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
 bool NdtSlamNode::rebuildMapService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
     ROS_INFO("Rebuilding map from keyframes with edge-preserving fusion...");
     std::lock_guard<std::mutex> runtime_state_lock(runtime_state_mutex_);
+    std::lock_guard<std::mutex> map_commit_lifecycle_lock(
+        map_commit_lifecycle_mutex_);
     keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
     loop_closure_result_ready_.store(false, std::memory_order_release);
     map_rebuild_generation_.fetch_add(1U, std::memory_order_acq_rel);
@@ -8431,6 +8621,7 @@ void NdtSlamNode::flushDirtyTiles() {
     if (!persistent_map_enabled_) return;
     {
         std::lock_guard<std::mutex> lock(failed_tile_flush_mutex_);
+        std::lock_guard<std::mutex> dirty_lock(dirty_tiles_mutex_);
         for (auto& [tile_key, failed] : failed_tile_flush_batch_) {
             auto& target = dirty_tiles_[tile_key];
             const auto merge_cloud = [](auto& destination, const auto& source) {
@@ -8446,9 +8637,10 @@ void NdtSlamNode::flushDirtyTiles() {
             merge_cloud(target.objects, failed.objects);
         }
         failed_tile_flush_batch_.clear();
-        dirty_tile_count_ = dirty_tiles_.size();
+        dirty_tile_count_.store(
+            static_cast<int>(dirty_tiles_.size()),
+            std::memory_order_release);
     }
-    if (dirty_tiles_.empty()) return;
     if (tile_flush_running_.load(std::memory_order_acquire)) return;
 
     // 检查磁盘保护
@@ -8460,8 +8652,12 @@ void NdtSlamNode::flushDirtyTiles() {
     if (tile_flush_thread_.joinable()) tile_flush_thread_.join();
 
     std::map<std::string, TileLayers> flush_batch;
-    flush_batch.swap(dirty_tiles_);
-    dirty_tile_count_ = 0;
+    {
+        std::lock_guard<std::mutex> dirty_lock(dirty_tiles_mutex_);
+        if (dirty_tiles_.empty()) return;
+        flush_batch.swap(dirty_tiles_);
+        dirty_tile_count_.store(0, std::memory_order_release);
+    }
     last_flush_time_ = ros::Time::now();
     last_flush_time_local_ = last_flush_time_;
     tile_flush_running_.store(true, std::memory_order_release);
@@ -8668,7 +8864,8 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"ground_map_points\": " << ground_pts << ",\n";
     f << "  \"objects_map_points\": " << objects_pts << ",\n";
     f << "  \"local_map_points\": " << local_pts << ",\n";
-    f << "  \"dirty_tile_count\": " << dirty_tile_count_ << ",\n";
+    f << "  \"dirty_tile_count\": "
+      << dirty_tile_count_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"flushed_tile_count\": "
       << flushed_tile_count_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"channel_candidate_points\": "
@@ -10705,6 +10902,7 @@ void NdtSlamNode::updateHookCargoLock(
             hook_lock_.provisional_summary.overall_lock_confidence,
             hook_lock_.provisional_summary.reason.c_str());
         if (!hook_lock_.provisional_summary.formal_lock_allowed ||
+            !candidate_policy.allow_lock ||
             !physical_authority.allowed) {
             ROS_DEBUG_THROTTLE(
                 1.0,
@@ -10720,9 +10918,11 @@ void NdtSlamNode::updateHookCargoLock(
                 hook_lock_.suspension_confirm_count,
                 hook_lock_.lift_confirm_count,
                 det.candidate_score_margin,
-                physical_authority.allowed
-                    ? hook_lock_.provisional_summary.reason.c_str()
-                    : physical_authority.reason.c_str());
+                !candidate_policy.allow_lock
+                    ? candidate_policy.reason.c_str()
+                    : (physical_authority.allowed
+                        ? hook_lock_.provisional_summary.reason.c_str()
+                        : physical_authority.reason.c_str()));
             break;
         }
 
@@ -13195,21 +13395,20 @@ bool NdtSlamNode::isDuplicateFrameBySignature(const FrameSignature& cur) const
 // the later MapCommit gate remains read-only.
 // raw_ndt_pose is allowed only as MapCommit evidence.
 // Do NOT route raw_pose/tracking_pose to odom/TF/runtime_path/current_cloud.
-void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-    const Sophus::SE3d& pose,
-    const ros::Time& stamp)
+bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
+    const MapCommitJob& job)
 {
-    last_commit_clean_map_ms_ = 0.0;
-    last_commit_display_map_ms_ = 0.0;
+    if (!job.cloud || job.cloud->empty()) {
+        ROS_WARN_THROTTLE(1.0, "[KeyFrameCommit] empty cloud, skip");
+        return false;
+    }
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
+        new pcl::PointCloud<pcl::PointXYZ>(*job.cloud));
+    const Sophus::SE3d& pose = job.pose;
+    const ros::Time& stamp = job.stamp;
     // ------------------------------------------------------------------------
     // 0. 基础准备 + DuplicateFrameGuard（内容指纹）+ MotionGate
     // ------------------------------------------------------------------------
-    if (!cloud || cloud->empty()) {
-        ROS_WARN_THROTTLE(1.0, "[KeyFrameCommit] empty cloud, skip");
-        return;
-    }
-
     // P0: DuplicateFrameGuard 使用内容指纹（在 NDT 之前拦截）
     auto sig = computeFrameSignature(cloud, stamp, pose);
 
@@ -13218,7 +13417,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         ROS_WARN_THROTTLE(2.0,
             "[DuplicateFrameGuard] skip duplicate frame stamp=%.3f cloud_size=%zu hash=%lu skipped=%lu",
             sig.stamp, sig.cloud_size, sig.hash, skipped_duplicate_frames_);
-        return;
+        return false;
     }
 
     last_frame_signature_ = sig;
@@ -13633,7 +13832,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     int skipped_no_box = 0, skipped_no_overlap = 0, skipped_state = 0;
     int overlap_total = 0;
     const bool legacy_removal_authorized =
-        run_legacy_cargo && shouldRemoveHookCargo();
+        run_legacy_cargo && job.lidar_removal_authorized;
 
     for (const auto& track : payload_tracker_.getTracks()) {
         if (!legacy_removal_authorized) break;
@@ -13683,12 +13882,11 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     // 4. CargoCommit：当前帧吊货点删除（必须在 MapCommit 前）
     // ------------------------------------------------------------------------
     pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_cargo_base(new pcl::PointCloud<pcl::PointXYZ>);
-    const HookLoadSnapshot commit_hook = currentHookLoadSnapshot();
     const HookLoadMapCommitDecision hook_map_policy =
         evaluateHookLoadMapCommit({
-            hook_load_signal_role_, commit_hook.valid,
-            static_cast<HookLoadState>(commit_hook.state),
-            shouldRemoveHookCargo(),
+            job.hook_role, job.hook_valid,
+            static_cast<HookLoadState>(job.hook_state),
+            job.lidar_removal_authorized && job.formal_footprint_valid,
             payload_candidates && !payload_candidates->empty()});
     const pcl::PointCloud<pcl::PointXYZ>::Ptr cargo_commit_source =
         hook_map_policy.exclude_candidate_region
@@ -13704,8 +13902,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     if (hook_map_policy.use_formal_remove_box) {
         pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_hook_base(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr hook_cargo_removed_base(new pcl::PointCloud<pcl::PointXYZ>);
-        const CargoObbFootprint removal_footprint =
-            toCargoObbFootprint(current_rigid_cargo_geometry_);
+        const CargoObbFootprint& removal_footprint = job.formal_footprint;
 
         for (const auto& p : objects_after_cargo_base->points) {
             if (containsPointInCargoObbBase(
@@ -13729,7 +13926,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                  removal_footprint.center_base.y(),
                  removal_footprint.length_m,
                  removal_footprint.width_m,
-                 hook_lock_.locked_shape.height_m,
+                 removal_footprint.max_z_base - removal_footprint.min_z_base,
                  removal_footprint.yaw_base_rad * 180.0F /
                      3.14159265358979323846F);
     }
@@ -13912,15 +14109,15 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     // ------------------------------------------------------------------------
     if (!loop_closure_detector_.addKeyFrame(
             pose, commit_cloud_base, stamp)) {
-        return;
+        return false;
     }
 
     keyframe_count_++;
 
     // [MapCommit] 日志（要求的格式）
     ROS_DEBUG("[MapCommit] seq=%d keyframe=%d commit_total=%zu commit_objects=%zu cargo_removed=%zu human_removed=%zu",
-             keyframe_count_,
-             keyframe_count_,
+             keyframe_count_.load(std::memory_order_relaxed),
+             keyframe_count_.load(std::memory_order_relaxed),
              commit_cloud_base->size(),
              objects_after_human_base->size(),
              cargo_removed_base->size(),
@@ -13994,7 +14191,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     // [MapWrite] 日志：debug_map_commit 开启时输出
     if (debug_cfg_.debug_map_commit) {
         ROS_INFO("[MapWrite] seq=%d registration_added=%zu ground_added=%zu objects_added=%zu display_added=%zu",
-                 keyframe_count_,
+                 keyframe_count_.load(std::memory_order_relaxed),
                  registration_added,
                  ground_added,
                  objects_added,
@@ -14024,7 +14221,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         }
 
         ROS_INFO("[DynamicHistoryEraser] kf=%d new_volumes=%zu erased_objects=%zu erased_display=%zu objects_left=%zu display_left=%zu",
-                 keyframe_count_,
+                 keyframe_count_.load(std::memory_order_relaxed),
                  new_cargo_volumes_this_frame_.size(),
                  erased_objects,
                  erased_display,
@@ -14052,19 +14249,21 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         }
 
         ROS_DEBUG("[BevObsUpdate] seq=%d object_points=%zu unique_cells=%zu total_obs_cells=%zu",
-                  keyframe_count_,
+                  keyframe_count_.load(std::memory_order_relaxed),
                   objects_transformed.size(),
                   seen_cells.size(),
                   bev_observation_count_.size());
     }
 
     // 长期建图：写入 tiles
-    if (longterm_mapping_enabled_ && persistent_map_enabled_ && canCommit()) {
+    if (longterm_mapping_enabled_ && persistent_map_enabled_ &&
+        job.allow_persistent_map_commit) {
         Eigen::Vector3d kf_pos = pose.translation();
         int tile_x = std::floor(kf_pos.x() / tile_size_m_);
         int tile_y = std::floor(kf_pos.y() / tile_size_m_);
         std::string tile_key = "x" + std::to_string(tile_x) + "_y" + std::to_string(tile_y);
 
+        std::lock_guard<std::mutex> dirty_lock(dirty_tiles_mutex_);
         if (dirty_tiles_.find(tile_key) == dirty_tiles_.end()) {
             dirty_tiles_[tile_key].registration.reset(new pcl::PointCloud<pcl::PointXYZ>);
             dirty_tiles_[tile_key].display.reset(new pcl::PointCloud<pcl::PointXYZ>);
@@ -14078,7 +14277,9 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         *dirty_tiles_[tile_key].ground += ground_transformed;
         *dirty_tiles_[tile_key].objects += objects_transformed;
 
-        dirty_tile_count_ = dirty_tiles_.size();
+        dirty_tile_count_.store(
+            static_cast<int>(dirty_tiles_.size()),
+            std::memory_order_release);
     }
 
     // ------------------------------------------------------------------------
@@ -14144,17 +14345,10 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     requestMapMaintenance();
     last_clean_points_ = objects_clean_map_ ? objects_clean_map_->size() : 0;
 
-    // P0-3: gate reference 只能在 MapCommit 成功后更新
-    if (has_last_raw_ndt_pose_) {
-        last_commit_raw_pose_ = last_raw_ndt_pose_;
-    }
-    last_commit_refined_pose_ = current_pose_;
-    last_commit_runtime_pose_ = current_pose_;
-    has_commit_gate_reference_ = true;
-
     // 闭环检测
     if (loop_closure_enabled_ &&
         keyframe_count_ % loop_detection_interval_ == 0) {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
         loop_closure_pending_ = true;
         map_maintenance_pending_ = true;
         queue_cv_.notify_one();
@@ -14177,7 +14371,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                      "active_boxes=%zu cargo_removed=%zu human_removed=%zu "
                      "commit_obj=%zu clean_points=%zu",
                      frame_seq_,
-                     keyframe_count_,
+                     keyframe_count_.load(std::memory_order_relaxed),
                      stamp.toSec(),
                      cloud->size(),
                  ground_base->size(),
@@ -14192,6 +14386,7 @@ void NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                  last_clean_points_);
         }
     }
+    return true;
 }
 
 // ============================================================================
