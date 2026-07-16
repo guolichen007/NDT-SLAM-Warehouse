@@ -162,6 +162,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.last_observation_cycle = cycle_;
       track.observed_this_cycle = true;
       track.current_source_index = observation.source_index;
+      track.current_source_validated = observation.source_validated;
       tracks_.push_back(track);
       track_assigned.push_back(true);
       continue;
@@ -195,6 +196,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         track.velocity_map.head<2>().norm() <=
             config_.static_velocity_threshold_mps;
     track.current_source_index = observation.source_index;
+    track.current_source_validated = observation.source_validated;
     track_assigned[best_index] = true;
   }
 
@@ -206,7 +208,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     if (candidate == nullptr || moreDangerous(track, *candidate)) {
       candidate = &track;
     }
-    if (track.confirmed &&
+    if (track.confirmed && track.current_source_validated &&
         (selected == nullptr || moreDangerous(track, *selected))) {
       selected = &track;
     }

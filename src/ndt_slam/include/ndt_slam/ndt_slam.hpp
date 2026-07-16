@@ -51,6 +51,7 @@
 #include <ndt_slam/cargo_safety_evaluator.hpp>
 #include <ndt_slam/cargo_obstacle_tracker.hpp>
 #include <ndt_slam/cargo_motion_corridor.hpp>
+#include <ndt_slam/cargo_residual_classifier.hpp>
 #include <ndt_slam/cargo_safety_temporal_filter.hpp>
 #include <ndt_slam/cargo_track_policy.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
@@ -1828,6 +1829,9 @@ private:
     CargoSafetyEvaluator cargo_safety_evaluator_;
     CargoObstacleTracker cargo_obstacle_tracker_;
     CargoMotionCorridorConfig cargo_motion_corridor_config_;
+    CargoResidualClassifierConfig cargo_residual_classifier_config_;
+    float cargo_residual_surface_band_below_m_ = 0.60F;
+    float cargo_residual_surface_band_above_m_ = 0.20F;
     CargoSafetyTemporalFilter cargo_safety_temporal_filter_;
     CargoBottomResult last_cargo_bottom_result_;
     CargoSafetyResult last_cargo_safety_result_;
@@ -1872,6 +1876,8 @@ private:
     std::string cargo_safety_spatial_mode_ = "RADIAL_FALLBACK";
     std::size_t cargo_corridor_eligible_clusters_ = 0U;
     std::size_t cargo_corridor_rejected_clusters_ = 0U;
+    std::size_t cargo_residual_self_clusters_ = 0U;
+    std::size_t cargo_residual_unknown_clusters_ = 0U;
     std::int32_t cargo_last_requested_code_ =
         CargoSafetyProtocol::kSystemNotReady;
     std::string cargo_last_safety_reason_ = "startup";

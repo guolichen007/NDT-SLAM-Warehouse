@@ -64,5 +64,22 @@ TEST(CargoObstacleTracker, MissingCycleBreaksConsecutiveEvidence) {
   EXPECT_EQ(decision.selected_confirm_count, 2);
 }
 
+TEST(CargoObstacleTracker, UnresolvedNearZeroTrackCannotPublishHazard) {
+  CargoObstacleTracker tracker;
+  CargoObstacleObservation unresolved = hazard(0U, 0.0F, 0.0F);
+  unresolved.source_validated = false;
+  tracker.update(1.0, {unresolved});
+  tracker.update(1.2, {unresolved});
+  const CargoObstacleTrackerDecision pending =
+      tracker.update(1.4, {unresolved});
+  EXPECT_FALSE(pending.confirmed_hazard);
+  EXPECT_EQ(pending.selected_confirm_count, 3);
+
+  unresolved.source_validated = true;
+  const CargoObstacleTrackerDecision validated =
+      tracker.update(1.6, {unresolved});
+  EXPECT_TRUE(validated.confirmed_hazard);
+}
+
 }  // namespace
 }  // namespace ndt_slam

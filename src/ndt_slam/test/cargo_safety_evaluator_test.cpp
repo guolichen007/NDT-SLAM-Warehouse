@@ -294,7 +294,7 @@ TEST(CargoSafetyEvaluator, ValidObservationWithNoObstacleIsClear) {
     EXPECT_EQ(result.reason, "clear_no_external_obstacle");
 }
 
-TEST(CargoSafetyEvaluator, CargoSelfPointsCannotProduceDistanceZero) {
+TEST(CargoSafetyEvaluator, EvaluatorNeverSilentlyRemovesRuntimeInput) {
     CargoSafetyInput input = baseInput();
     auto cloud = mutableObstacleCloud(&input);
 
@@ -306,11 +306,10 @@ TEST(CargoSafetyEvaluator, CargoSelfPointsCannotProduceDistanceZero) {
     const CargoSafetyResult result = CargoSafetyEvaluator().evaluate(input);
     EXPECT_TRUE(result.input_valid);
     EXPECT_TRUE(result.warning_valid);
-    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kSafeCode);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel1Code);
     EXPECT_EQ(result.fault, CargoSafetyFault::NONE);
-    EXPECT_FALSE(result.has_cluster_evidence);
-    EXPECT_EQ(result.self_cargo_points_removed, 8U);
-    EXPECT_EQ(result.reason, "clear_no_external_obstacle");
+    EXPECT_TRUE(result.has_cluster_evidence);
+    EXPECT_EQ(result.self_cargo_points_removed, 0U);
 }
 
 TEST(CargoSafetyEvaluator, InvalidConfigAndInputAreInternalErrors) {
@@ -365,7 +364,7 @@ TEST(CargoSafetyEvaluator, NeverExcludesObstacleBelowFusedBottom) {
     EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel1Code);
 }
 
-TEST(CargoSafetyEvaluator, RotatedFootprintUsesObbDistanceAndSelfRemoval) {
+TEST(CargoSafetyEvaluator, RotatedFootprintUsesObbDistanceWithoutSelfRemoval) {
     CargoSafetyInput input = baseInput();
     input.footprint_base.length_m = 2.0F;
     input.footprint_base.width_m = 0.6F;
@@ -378,8 +377,8 @@ TEST(CargoSafetyEvaluator, RotatedFootprintUsesObbDistanceAndSelfRemoval) {
     }
     const CargoSafetyResult result = CargoSafetyEvaluator().evaluate(input);
     EXPECT_TRUE(result.warning_valid);
-    EXPECT_EQ(result.self_cargo_points_removed, 8U);
-    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kSafeCode);
+    EXPECT_EQ(result.self_cargo_points_removed, 0U);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel1Code);
 }
 
 }  // namespace

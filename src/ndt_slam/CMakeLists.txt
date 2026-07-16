@@ -128,6 +128,7 @@ set(LIBRARY_SOURCES
   src/cargo_safety_temporal_filter.cpp
   src/cargo_obstacle_tracker.cpp
   src/cargo_motion_corridor.cpp
+  src/cargo_residual_classifier.cpp
   src/hook_load_state_filter.cpp
   src/hook_load_evidence_policy.cpp
   src/pending_origin_binding_policy.cpp
@@ -271,6 +272,13 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_motion_corridor_test.cpp)
   if(TARGET cargo_motion_corridor_test)
     target_link_libraries(cargo_motion_corridor_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_residual_classifier_test
+    test/cargo_residual_classifier_test.cpp)
+  if(TARGET cargo_residual_classifier_test)
+    target_link_libraries(cargo_residual_classifier_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 

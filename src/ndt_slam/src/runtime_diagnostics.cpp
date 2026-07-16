@@ -96,6 +96,7 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
                << "obstacle_track_velocity_y,obstacle_track_velocity_z,"
                << "safety_spatial_mode,cargo_map_speed_mps,"
                << "corridor_eligible_clusters,corridor_rejected_clusters,"
+               << "residual_self_clusters,residual_unknown_clusters,"
                << "safety_reason,"
                << "live_center_x,live_center_y,live_center_z,"
                << "measured_center_x,measured_center_y,measured_center_z,"
@@ -477,6 +478,8 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << rec.cargo_map_speed_mps << ","
                << rec.corridor_eligible_clusters << ","
                << rec.corridor_rejected_clusters << ","
+               << rec.residual_self_clusters << ","
+               << rec.residual_unknown_clusters << ","
                << rec.safety_reason << ","
                << std::setprecision(4)
                << rec.center_x << "," << rec.center_y << "," << rec.center_z << ","

@@ -316,6 +316,8 @@ def main() -> int:
         "src/ndt_slam/src/cargo_obstacle_tracker.cpp")
     motion_corridor = read(
         "src/ndt_slam/src/cargo_motion_corridor.cpp")
+    residual_classifier = read(
+        "src/ndt_slam/src/cargo_residual_classifier.cpp")
     require("minimum_hazard_cluster_points" in temporal_filter and
             "maximum_centroid_step_m" in temporal_filter and
             "repeated_source_stamp_ignored" in temporal_filter and
@@ -344,6 +346,15 @@ def main() -> int:
             "MOTION_CORRIDOR" in motion_corridor and
             "clear_no_hazard_in_motion_corridor" in node,
             "cargo safety does not gate radial structures by a swept corridor",
+            failures)
+    require("src/cargo_residual_classifier.cpp" in cmake and
+            "classifyCargoResidual" in node and
+            "near_zero_source_unresolved" in residual_classifier and
+            "confirmed_static_track_match" in residual_classifier and
+            "minimum_motion_match_score" in residual_classifier and
+            "isInsideExpandedCargo" not in safety_evaluator and
+            "external_obstacle_cloud" in node,
+            "near-zero cargo residual provenance is not fail-safe",
             failures)
     require("axis_aligned_yaw_after_lock: true" in live_config and
             "freeze_vertical_position_after_lock: false" in live_config and
@@ -398,6 +409,7 @@ def main() -> int:
             "obstacle_track_velocity" in runtime_header and
             "safety_spatial_mode" in runtime_header and
             "corridor_rejected_clusters" in runtime_header and
+            "residual_unknown_clusters" in runtime_header and
             "requested_alarm_code" in runtime_header,
             "cargo safety evidence is incomplete in frame diagnostics",
             failures)

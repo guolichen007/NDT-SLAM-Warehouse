@@ -48,10 +48,7 @@ bool isValidConfig(const CargoSafetyConfig& config) {
            config.obstacle_min_cluster_points > 0 &&
            config.obstacle_max_cluster_points >= config.obstacle_min_cluster_points &&
            config.obstacle_max_cluster_points <=
-               static_cast<std::size_t>(std::numeric_limits<int>::max()) &&
-           isFinite(config.self_cargo_margin_x_m) && config.self_cargo_margin_x_m >= 0.0f &&
-           isFinite(config.self_cargo_margin_y_m) && config.self_cargo_margin_y_m >= 0.0f &&
-           isFinite(config.self_cargo_margin_z_m) && config.self_cargo_margin_z_m >= 0.0f;
+               static_cast<std::size_t>(std::numeric_limits<int>::max());
 }
 
 bool isValidFootprint(const CargoBaseFootprint& footprint) {
@@ -65,22 +62,6 @@ bool isValidFootprint(const CargoBaseFootprint& footprint) {
 
 bool isFinitePoint(const pcl::PointXYZ& point) {
     return isFinite(point.x) && isFinite(point.y) && isFinite(point.z);
-}
-
-bool isInsideExpandedCargo(const pcl::PointXYZ& point,
-                           const CargoBaseFootprint& footprint,
-                           const CargoSafetyConfig& config,
-                           float fused_bottom_z) {
-    CargoBaseFootprint conservative = footprint;
-    conservative.min_z = std::max(
-        footprint.min_z - config.self_cargo_margin_z_m, fused_bottom_z);
-    conservative.max_z =
-        footprint.max_z + config.self_cargo_margin_z_m;
-    return containsPointInCargoObbBase(
-        Eigen::Vector3f(point.x, point.y, point.z), conservative,
-        std::max(config.self_cargo_margin_x_m,
-                 config.self_cargo_margin_y_m),
-        0.0F);
 }
 
 float pointToFootprintDistance(const pcl::PointXYZ& point,
@@ -280,12 +261,6 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
             continue;
         }
         ++result.finite_input_points;
-        if (config_.exclude_self_cargo &&
-            isInsideExpandedCargo(point, input.footprint_base, config_,
-                                  input.height.bottom_z)) {
-            ++result.self_cargo_points_removed;
-            continue;
-        }
         obstacle_candidates->push_back(point);
     }
 
@@ -341,6 +316,7 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         evidence.valid = true;
         evidence.cluster_index = cluster_index;
         evidence.point_count = indices.indices.size();
+        evidence.point_indices = indices.indices;
 
         std::vector<float> z_values;
         z_values.reserve(indices.indices.size());

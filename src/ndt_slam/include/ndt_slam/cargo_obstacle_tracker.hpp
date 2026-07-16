@@ -29,6 +29,7 @@ struct CargoObstacleObservation {
       std::numeric_limits<float>::quiet_NaN();
   std::size_t point_count = 0U;
   std::uint16_t warning_code = 0U;
+  bool source_validated = true;
 };
 
 struct CargoObstacleTrack {
@@ -48,6 +49,7 @@ struct CargoObstacleTrack {
   bool observed_this_cycle = false;
   bool confirmed = false;
   bool static_obstacle = false;
+  bool current_source_validated = false;
   std::size_t current_source_index = 0U;
 };
 

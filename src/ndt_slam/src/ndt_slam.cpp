@@ -2223,10 +2223,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         safety_config.minimum_roi_coverage_ratio = cargo_safety
             ? cargo_safety["minimum_roi_coverage_ratio"].as<float>(0.05F)
             : 0.05F;
-        // Self points are removed explicitly against the unexpanded locked
-        // OBB immediately before evaluation.  The evaluator must not apply a
-        // second, much larger implicit removal volume to external obstacles.
-        safety_config.exclude_self_cargo = false;
+        // Runtime identity/motion classification is the sole self-removal
+        // authority. CargoSafetyEvaluator is intentionally stateless and
+        // never applies a second geometry-only deletion volume.
 
         const auto nearly_equal = [](double lhs, double rhs) {
             return std::isfinite(lhs) && std::abs(lhs - rhs) <= 1.0e-6;
@@ -2348,6 +2347,38 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     cargo_safety[
                         "motion_corridor_maximum_velocity_sample_gap_sec"]
                         .as<double>(0.80));
+            cargo_residual_classifier_config_.near_zero_distance_m =
+                std::max(0.0F,
+                    cargo_safety["residual_near_zero_distance_m"]
+                        .as<float>(0.05F));
+            cargo_residual_classifier_config_.minimum_inside_xy_ratio =
+                std::clamp(
+                    cargo_safety["residual_minimum_inside_xy_ratio"]
+                        .as<float>(0.60F),
+                    0.0F, 1.0F);
+            cargo_residual_classifier_config_.minimum_identity_match_ratio =
+                std::clamp(
+                    cargo_safety["residual_minimum_identity_match_ratio"]
+                        .as<float>(0.35F),
+                    0.0F, 1.0F);
+            cargo_residual_classifier_config_.minimum_surface_band_ratio =
+                std::clamp(
+                    cargo_safety["residual_minimum_surface_band_ratio"]
+                        .as<float>(0.50F),
+                    0.0F, 1.0F);
+            cargo_residual_classifier_config_.minimum_motion_match_score =
+                std::clamp(
+                    cargo_safety["residual_minimum_motion_match_score"]
+                        .as<float>(0.70F),
+                    0.0F, 1.0F);
+            cargo_residual_surface_band_below_m_ = std::max(
+                0.0F,
+                cargo_safety["residual_surface_band_below_m"]
+                    .as<float>(0.60F));
+            cargo_residual_surface_band_above_m_ = std::max(
+                0.0F,
+                cargo_safety["residual_surface_band_above_m"]
+                    .as<float>(0.20F));
         }
 
     } catch (const YAML::Exception& e) {
@@ -2644,6 +2675,8 @@ void NdtSlamNode::resetCargoForHookState(bool preserve_origin_height) {
     cargo_safety_spatial_mode_ = "RADIAL_FALLBACK";
     cargo_corridor_eligible_clusters_ = 0U;
     cargo_corridor_rejected_clusters_ = 0U;
+    cargo_residual_self_clusters_ = 0U;
+    cargo_residual_unknown_clusters_ = 0U;
     has_stable_height_ = false;
     stable_height_ = 0.0F;
     if (!preserve_origin_height) {
@@ -12603,10 +12636,6 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         message.header.frame_id = "base_link";
         publisher.publish(message);
     };
-    publish_safety_debug_cloud(
-        self_removed_cloud, cargo_self_removed_pub_);
-    publish_safety_debug_cloud(
-        external_obstacle_cloud, cargo_external_obstacle_pub_);
     safety_input.obstacle_cloud_base = external_obstacle_cloud;
     safety_input.obstacle_observation_valid =
         static_cast<bool>(obstacle_cloud_base) &&
@@ -12740,13 +12769,226 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 "clear_no_hazard_in_motion_corridor";
         }
     }
+    cargo_residual_self_clusters_ = 0U;
+    cargo_residual_unknown_clusters_ = 0U;
+    std::set<int> residual_self_point_indices;
+    if (raw_cargo_safety_result.input_valid &&
+        raw_cargo_safety_result.warning_valid &&
+        raw_cargo_safety_result.fault == CargoSafetyFault::NONE &&
+        (raw_cargo_safety_result.warning_code ==
+             CargoSafetyEvaluator::kLevel1Code ||
+         raw_cargo_safety_result.warning_code ==
+             CargoSafetyEvaluator::kLevel2Code)) {
+        std::vector<CargoSafetyClusterEvidence> classified_clusters;
+        classified_clusters.reserve(
+            raw_cargo_safety_result.cluster_evidence.size());
+        bool has_validated_hazard = false;
+        bool has_unresolved_residual = false;
+        CargoSafetyClusterEvidence most_dangerous_validated;
+        const float identity_radius_sq =
+            hook_lock_config_.self_cargo_point_match_radius_m *
+            hook_lock_config_.self_cargo_point_match_radius_m;
+        for (CargoSafetyClusterEvidence evidence :
+             raw_cargo_safety_result.cluster_evidence) {
+            if (evidence.warning_code !=
+                    CargoSafetyEvaluator::kLevel1Code &&
+                evidence.warning_code !=
+                    CargoSafetyEvaluator::kLevel2Code) {
+                continue;
+            }
+            std::size_t valid_cluster_points = 0U;
+            std::size_t inside_xy_points = 0U;
+            std::size_t identity_points = 0U;
+            std::size_t surface_band_points = 0U;
+            for (int point_index : evidence.point_indices) {
+                if (point_index < 0 ||
+                    static_cast<std::size_t>(point_index) >=
+                        external_obstacle_cloud->size()) {
+                    continue;
+                }
+                const pcl::PointXYZ& point =
+                    external_obstacle_cloud->points[
+                        static_cast<std::size_t>(point_index)];
+                ++valid_cluster_points;
+                if (predicted_self_footprint.valid &&
+                    pointToCargoObbDistance2D(
+                        Eigen::Vector2f(point.x, point.y),
+                        predicted_self_footprint) <= 1.0e-4F) {
+                    ++inside_xy_points;
+                }
+                if (predicted_self_footprint.valid &&
+                    point.z >= predicted_self_footprint.min_z -
+                        cargo_residual_surface_band_below_m_ &&
+                    point.z <= predicted_self_footprint.max_z +
+                        cargo_residual_surface_band_above_m_) {
+                    ++surface_band_points;
+                }
+                if (identity_self_mask_valid &&
+                    identity_self_tree.nearestKSearch(
+                        point, 1, identity_nearest_index,
+                        identity_nearest_distance_sq) > 0 &&
+                    !identity_nearest_distance_sq.empty() &&
+                    identity_nearest_distance_sq.front() <=
+                        identity_radius_sq) {
+                    ++identity_points;
+                }
+            }
+            const float denominator = static_cast<float>(
+                std::max<std::size_t>(1U, valid_cluster_points));
+            evidence.inside_xy_obb_ratio =
+                static_cast<float>(inside_xy_points) / denominator;
+            evidence.identity_match_ratio =
+                static_cast<float>(identity_points) / denominator;
+            evidence.surface_band_ratio =
+                static_cast<float>(surface_band_points) / denominator;
+
+            const Eigen::Vector3d centroid_map_3d = pose_map_base *
+                evidence.centroid_base.getVector3fMap().cast<double>();
+            const CargoObstacleTrack* prior_track = nullptr;
+            float prior_distance = std::numeric_limits<float>::infinity();
+            for (const CargoObstacleTrack& track :
+                 cargo_obstacle_tracker_.tracks()) {
+                if (!track.confirmed) continue;
+                const float distance =
+                    (track.centroid_map -
+                     centroid_map_3d.cast<float>()).norm();
+                if (distance < prior_distance &&
+                    distance <= cargo_obstacle_tracker_.config()
+                        .association_max_centroid_distance_m) {
+                    prior_distance = distance;
+                    prior_track = &track;
+                }
+            }
+            float motion_match_score = 0.0F;
+            if (prior_track != nullptr && cargo_map_velocity_valid &&
+                cargo_velocity_map_.norm() >=
+                    cargo_motion_corridor_config_.minimum_motion_speed_mps) {
+                const float scale = std::max(
+                    0.10F, cargo_velocity_map_.norm());
+                motion_match_score = std::clamp(
+                    1.0F -
+                        (prior_track->velocity_map.head<2>() -
+                         cargo_velocity_map_).norm() / scale,
+                    0.0F, 1.0F);
+            }
+            evidence.moves_with_cargo_score = motion_match_score;
+            CargoResidualClassifierInput classifier_input;
+            classifier_input.footprint_distance_m =
+                evidence.footprint_distance_m;
+            classifier_input.inside_xy_ratio =
+                evidence.inside_xy_obb_ratio;
+            classifier_input.identity_match_ratio =
+                evidence.identity_match_ratio;
+            classifier_input.surface_band_ratio =
+                evidence.surface_band_ratio;
+            classifier_input.moves_with_cargo_score = motion_match_score;
+            classifier_input.confirmed_static_track_match =
+                prior_track != nullptr && prior_track->static_obstacle;
+            const CargoResidualClassifierDecision classifier_decision =
+                classifyCargoResidual(
+                    cargo_residual_classifier_config_, classifier_input);
+            evidence.source_validated =
+                classifier_decision.source_validated;
+            evidence.source_reason = classifier_decision.reason;
+            if (classifier_decision.classification ==
+                CargoResidualClass::CARGO_SELF) {
+                ++cargo_residual_self_clusters_;
+                for (int point_index : evidence.point_indices) {
+                    residual_self_point_indices.insert(point_index);
+                }
+                continue;
+            }
+            if (!classifier_decision.source_validated) {
+                ++cargo_residual_unknown_clusters_;
+                has_unresolved_residual = true;
+            } else if (!has_validated_hazard) {
+                most_dangerous_validated = evidence;
+                has_validated_hazard = true;
+            } else {
+                const int candidate_priority =
+                    evidence.warning_code ==
+                            CargoSafetyEvaluator::kLevel1Code
+                        ? 2 : 1;
+                const int current_priority =
+                    most_dangerous_validated.warning_code ==
+                            CargoSafetyEvaluator::kLevel1Code
+                        ? 2 : 1;
+                if (candidate_priority > current_priority ||
+                    (candidate_priority == current_priority &&
+                     evidence.conservative_clearance_m <
+                         most_dangerous_validated
+                             .conservative_clearance_m)) {
+                    most_dangerous_validated = evidence;
+                }
+            }
+            classified_clusters.push_back(evidence);
+        }
+        raw_cargo_safety_result.cluster_evidence =
+            std::move(classified_clusters);
+        raw_cargo_safety_result.evaluated_cluster_count =
+            raw_cargo_safety_result.cluster_evidence.size();
+        if (has_validated_hazard) {
+            raw_cargo_safety_result.has_cluster_evidence = true;
+            raw_cargo_safety_result.most_dangerous_cluster =
+                most_dangerous_validated;
+            raw_cargo_safety_result.warning_code =
+                most_dangerous_validated.warning_code;
+            raw_cargo_safety_result.reason =
+                most_dangerous_validated.source_reason;
+        } else if (has_unresolved_residual) {
+            raw_cargo_safety_result.input_valid = false;
+            raw_cargo_safety_result.warning_valid = false;
+            raw_cargo_safety_result.warning_code = 0U;
+            raw_cargo_safety_result.has_cluster_evidence = true;
+            raw_cargo_safety_result.fault =
+                CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
+            raw_cargo_safety_result.reason =
+                "near_zero_obstacle_source_unresolved";
+        } else {
+            raw_cargo_safety_result.has_cluster_evidence = false;
+            raw_cargo_safety_result.warning_valid = true;
+            raw_cargo_safety_result.warning_code =
+                CargoSafetyEvaluator::kSafeCode;
+            raw_cargo_safety_result.fault = CargoSafetyFault::NONE;
+            raw_cargo_safety_result.reason =
+                "clear_cargo_residuals_classified_self";
+        }
+    }
+
+    if (!residual_self_point_indices.empty()) {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr classified_external(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        classified_external->reserve(
+            external_obstacle_cloud->size() -
+            std::min<std::size_t>(
+                external_obstacle_cloud->size(),
+                residual_self_point_indices.size()));
+        for (std::size_t point_index = 0U;
+             point_index < external_obstacle_cloud->size(); ++point_index) {
+            const pcl::PointXYZ& point =
+                external_obstacle_cloud->points[point_index];
+            if (residual_self_point_indices.count(
+                    static_cast<int>(point_index)) > 0U) {
+                self_removed_cloud->push_back(point);
+            } else {
+                classified_external->push_back(point);
+            }
+        }
+        external_obstacle_cloud = classified_external;
+        cargo_self_removed_points_ = self_removed_cloud->size();
+        cargo_external_obstacle_points_ = external_obstacle_cloud->size();
+    }
+    publish_safety_debug_cloud(
+        self_removed_cloud, cargo_self_removed_pub_);
+    publish_safety_debug_cloud(
+        external_obstacle_cloud, cargo_external_obstacle_pub_);
     cargo_raw_warning_code_ = raw_cargo_safety_result.warning_valid
         ? raw_cargo_safety_result.warning_code : 0;
     last_cargo_safety_result_ = raw_cargo_safety_result;
     std::vector<CargoObstacleObservation> obstacle_track_observations;
-    if (raw_cargo_safety_result.input_valid &&
-        raw_cargo_safety_result.warning_valid &&
-        raw_cargo_safety_result.fault == CargoSafetyFault::NONE) {
+    if (radial_safety_result.input_valid &&
+        radial_safety_result.warning_valid &&
+        radial_safety_result.fault == CargoSafetyFault::NONE) {
         obstacle_track_observations.reserve(
             raw_cargo_safety_result.cluster_evidence.size());
         for (std::size_t evidence_index = 0U;
@@ -12773,6 +13015,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 evidence.conservative_clearance_m;
             observation.point_count = evidence.point_count;
             observation.warning_code = evidence.warning_code;
+            observation.source_validated = evidence.source_validated;
             obstacle_track_observations.push_back(observation);
         }
     }
@@ -16038,6 +16281,14 @@ void NdtSlamNode::logCargoHealthPeriodic() {
     rec.corridor_rejected_clusters = static_cast<int>(
         std::min<std::size_t>(
             cargo_corridor_rejected_clusters_,
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.residual_self_clusters = static_cast<int>(
+        std::min<std::size_t>(
+            cargo_residual_self_clusters_,
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.residual_unknown_clusters = static_cast<int>(
+        std::min<std::size_t>(
+            cargo_residual_unknown_clusters_,
             static_cast<std::size_t>(std::numeric_limits<int>::max())));
     rec.safety_reason = cargo_last_safety_reason_;
     rec.support_points = static_cast<int>(std::min<std::size_t>(

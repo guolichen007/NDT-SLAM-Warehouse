@@ -44,10 +44,6 @@ struct CargoSafetyConfig {
     std::size_t obstacle_min_cluster_points = 5;
     std::size_t obstacle_max_cluster_points = 10000;
 
-    bool exclude_self_cargo = true;
-    float self_cargo_margin_x_m = 0.45f;
-    float self_cargo_margin_y_m = 0.45f;
-    float self_cargo_margin_z_m = 0.35f;
 };
 
 struct CargoSafetyInput {
@@ -77,6 +73,13 @@ struct CargoSafetyClusterEvidence {
 
     pcl::PointXYZ centroid_base;
     pcl::PointXYZ nearest_point_base;
+    std::vector<int> point_indices;
+    bool source_validated = true;
+    float inside_xy_obb_ratio = 0.0F;
+    float identity_match_ratio = 0.0F;
+    float surface_band_ratio = 0.0F;
+    float moves_with_cargo_score = 0.0F;
+    std::string source_reason = "ordinary_external_cluster";
     std::string uncertainty_reason;
 };
 
@@ -145,6 +148,8 @@ struct CargoSafetyResult {
     double height_age_sec = std::numeric_limits<double>::quiet_NaN();
 
     std::size_t finite_input_points = 0;
+    // Always zero: runtime identity/motion classification is the sole
+    // authority allowed to remove cargo returns before this evaluator.
     std::size_t self_cargo_points_removed = 0;
     std::size_t evaluated_cluster_count = 0;
 
