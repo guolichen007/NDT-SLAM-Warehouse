@@ -48,6 +48,7 @@
 #include <ndt_slam/cargo_oriented_footprint.hpp>
 #include <ndt_slam/cargo_rigid_geometry.hpp>
 #include <ndt_slam/cargo_safety_evaluator.hpp>
+#include <ndt_slam/cargo_safety_temporal_filter.hpp>
 #include <ndt_slam/cargo_track_policy.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
 #include <set>
@@ -1561,6 +1562,14 @@ private:
         int size_update_confirm_frames = 5;
         float size_update_alpha = 0.15f;
         bool freeze_geometry_after_lock = true;
+        // Warehouse crane loads keep a rigid box during one lifting cycle.
+        // Quantize the frozen OBB to the installation axes so a partial
+        // diagonal point return cannot permanently rotate the displayed box.
+        bool axis_aligned_yaw_after_lock = true;
+        // Once a formal lock is established, associated detections refresh
+        // evidence and X/Y motion but cannot move the box vertically.  The
+        // next EMPTY/rearm cycle establishes a new vertical anchor.
+        bool freeze_vertical_position_after_lock = true;
         float bottom_alpha_points = 0.30f;
         float bottom_alpha_memory = 0.15f;
         float bottom_hold_uncertainty_growth = 0.02f;
@@ -1585,7 +1594,7 @@ private:
         float live_pose_max_z_speed_mps = 1.5F;
         float live_pose_step_margin_m = 0.05F;
         float live_pose_velocity_alpha = 0.35F;
-        float formal_pose_hold_sec = 0.60F;
+        float formal_pose_hold_sec = 2.00F;
         float direct_bottom_soft_stale_sec = 1.50F;
         float velocity_model_uncertainty_mps = 0.05F;
         float association_max_xy_gate_m = 0.80F;
@@ -1811,8 +1820,10 @@ private:
     CargoBottomFusion cargo_bottom_fusion_;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
+    CargoSafetyTemporalFilter cargo_safety_temporal_filter_;
     CargoBottomResult last_cargo_bottom_result_;
     CargoSafetyResult last_cargo_safety_result_;
+    CargoSafetyResult confirmed_cargo_safety_result_;
     std::size_t cargo_self_removed_points_ = 0U;
     std::size_t cargo_identity_self_removed_points_ = 0U;
     std::size_t cargo_rigging_self_removed_points_ = 0U;

@@ -678,6 +678,16 @@ cargo_safety:
   minimum_roi_coverage_ratio: 0.05
   maximum_height_age_sec: 0.50
   maximum_obstacle_cloud_age_sec: 0.50
+  # 17/18 need three independent, spatially continuous obstacle clusters.
+  # Sparse/jumping returns remain fail-safe evidence-invalid (34). A confirmed
+  # hazard is released only after two fresh CLEAR evaluations.
+  hazard_confirm_frames: 3
+  clear_confirm_frames: 2
+  minimum_hazard_cluster_points: 20
+  maximum_evidence_gap_sec: 0.60
+  maximum_centroid_step_m: 0.75
+  maximum_distance_step_m: 0.75
+  maximum_clearance_step_m: 0.75
 
 status_codes:
   clear: 14
@@ -769,6 +779,13 @@ hook_cargo_lock:
   # A suspended cargo is a rigid body. Once lock confirmation finishes, keep
   # its base-relative box dimensions/height fixed until EMPTY or LOST_CLEAR.
   freeze_geometry_after_lock: true
+  # The installation only permits horizontal/vertical cargo orientations.
+  # A diagonal partial return may refine the provisional fit, but formal OBB
+  # yaw is snapped to the nearest 0/90-degree axial direction at lock time.
+  axis_aligned_yaw_after_lock: true
+  # During one lifting cycle the rigid cargo height and vertical center are
+  # fixed. Fresh associated frames refresh authority and move the box in X/Y.
+  freeze_vertical_position_after_lock: true
   candidate_hold_sec: 1.0
   candidate_max_weak_frames: 10
   bottom_alpha_points: 0.30
@@ -799,8 +816,8 @@ hook_cargo_lock:
   live_pose_velocity_alpha: 0.35
   # LOST_HOLD remains visible for lost_clear_sec, but formal safety/removal may
   # only use prediction/held evidence inside this short window.
-  formal_pose_hold_sec: 0.60
-  direct_bottom_soft_stale_sec: 1.50
+  formal_pose_hold_sec: 2.00
+  direct_bottom_soft_stale_sec: 2.00
   velocity_model_uncertainty_mps: 0.05
   association_max_xy_gate_m: 0.80
   reacquisition_max_xy_gate_m: 0.55

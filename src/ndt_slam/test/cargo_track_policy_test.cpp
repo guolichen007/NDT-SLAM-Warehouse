@@ -33,6 +33,17 @@ CargoCandidateIdentityScore strongScore(int id) {
   return score;
 }
 
+TEST(CargoTrackPolicy, FormalYawSnapsToNearestWarehouseAxis) {
+  constexpr float kDegToRad = 3.14159265358979323846F / 180.0F;
+  EXPECT_FLOAT_EQ(quantizeCargoAxialYawToOrthogonal(20.0F * kDegToRad), 0.0F);
+  EXPECT_NEAR(
+      quantizeCargoAxialYawToOrthogonal(72.7F * kDegToRad),
+      90.0F * kDegToRad, 1.0e-6F);
+  EXPECT_NEAR(
+      quantizeCargoAxialYawToOrthogonal(-70.0F * kDegToRad),
+      -90.0F * kDegToRad, 1.0e-6F);
+}
+
 TEST(CargoTrackPolicy, OrientationConcentrationAloneCannotLock) {
   std::vector<CargoCandidateDescriptor> observations;
   std::vector<CargoCandidateIdentityScore> scores;

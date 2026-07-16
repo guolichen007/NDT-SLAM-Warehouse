@@ -216,4 +216,7 @@ CargoProvisionalLockSummary summarizeCargoProvisionalLock(
     const std::vector<CargoCandidateIdentityScore>& scores,
     const CargoProvisionalLockConfig& config);
 
+/** Snap an axial OBB yaw to the nearest installation axis (0 or +/- pi/2). */
+float quantizeCargoAxialYawToOrthogonal(float yaw_rad);
+
 }  // namespace ndt_slam

@@ -74,6 +74,7 @@ struct CargoSafetyClusterEvidence {
     float obstacle_uncertainty_m = std::numeric_limits<float>::quiet_NaN();
     float conservative_clearance_m = std::numeric_limits<float>::quiet_NaN();
 
+    pcl::PointXYZ centroid_base;
     pcl::PointXYZ nearest_point_base;
     std::string uncertainty_reason;
 };

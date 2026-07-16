@@ -282,6 +282,8 @@ def runtime_visualization_contract_failures() -> list[str]:
         "max_deferral_frames: 5",
         "CargoMarkerLifecycle",
         "freeze_geometry_after_lock: true",
+        "axis_aligned_yaw_after_lock: true",
+        "freeze_vertical_position_after_lock: true",
         "current_rigid_cargo_geometry_",
         "rigid_suspended_track",
         "last_good_height_hold",

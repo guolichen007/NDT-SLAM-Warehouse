@@ -9,6 +9,9 @@
 namespace ndt_slam {
 namespace {
 
+constexpr float kHalfPi = 1.57079632679489661923F;
+constexpr float kQuarterPi = 0.78539816339744830962F;
+
 float unitScore(float value, float limit) {
   if (!std::isfinite(value) || !std::isfinite(limit) || limit <= 0.0F) {
     return 0.0F;
@@ -52,6 +55,13 @@ Eigen::Vector2f projectHalfExtents(
 }
 
 }  // namespace
+
+float quantizeCargoAxialYawToOrthogonal(float yaw_rad) {
+  if (!std::isfinite(yaw_rad)) return 0.0F;
+  const float axial_yaw = normalizeCargoAxialYaw(yaw_rad);
+  if (std::abs(axial_yaw) < kQuarterPi) return 0.0F;
+  return std::copysign(kHalfPi, axial_yaw);
+}
 
 const char* cargoLockAuthoritySourceName(CargoLockAuthoritySource source) {
   switch (source) {

@@ -5,6 +5,7 @@
 #include <limits>
 #include <vector>
 
+#include <Eigen/Core>
 #include <pcl/search/kdtree.h>
 #include <pcl/segmentation/extract_clusters.h>
 
@@ -343,10 +344,12 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
 
         std::vector<float> z_values;
         z_values.reserve(indices.indices.size());
+        Eigen::Vector3f centroid_sum = Eigen::Vector3f::Zero();
         for (int point_index : indices.indices) {
             const pcl::PointXYZ& point = obstacle_candidates->points[
                 static_cast<std::size_t>(point_index)];
             z_values.push_back(point.z);
+            centroid_sum += point.getVector3fMap();
 
             const float distance = pointToFootprintDistance(point, input.footprint_base);
             if (distance < evidence.footprint_distance_m) {
@@ -354,6 +357,11 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
                 evidence.nearest_point_base = point;
             }
         }
+        const Eigen::Vector3f centroid = centroid_sum /
+            static_cast<float>(indices.indices.size());
+        evidence.centroid_base.x = centroid.x();
+        evidence.centroid_base.y = centroid.y();
+        evidence.centroid_base.z = centroid.z();
 
         evidence.obstacle_max_z_m =
             *std::max_element(z_values.begin(), z_values.end());

@@ -1,0 +1,78 @@
+#pragma once
+
+#include <Eigen/Core>
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+namespace ndt_slam {
+
+struct CargoSafetyTemporalConfig {
+  int hazard_confirm_frames = 3;
+  int clear_confirm_frames = 2;
+  std::size_t minimum_hazard_cluster_points = 20U;
+  double maximum_evidence_gap_sec = 0.60;
+  float maximum_centroid_step_m = 0.75F;
+  float maximum_distance_step_m = 0.75F;
+  float maximum_clearance_step_m = 0.75F;
+};
+
+struct CargoSafetyTemporalInput {
+  double stamp_sec = 0.0;
+  bool raw_valid = false;
+  std::uint16_t raw_code = 0U;
+  std::size_t cluster_points = 0U;
+  Eigen::Vector3f cluster_centroid = Eigen::Vector3f::Zero();
+  float footprint_distance_m = 0.0F;
+  float conservative_clearance_m = 0.0F;
+};
+
+struct CargoSafetyTemporalDecision {
+  bool stable = false;
+  bool pending = false;
+  bool newly_confirmed = false;
+  bool use_current_evidence = false;
+  std::uint16_t code = 0U;
+  int evidence_count = 0;
+  std::string reason = "not_evaluated";
+};
+
+/**
+ * Confirms 17/18 only from spatially continuous, independently stamped
+ * clusters. Sparse or jumping returns remain fail-safe pending evidence (34
+ * at the integration layer) instead of becoming an immediate collision
+ * alarm. A confirmed alarm is held until two fresh CLEAR observations.
+ */
+class CargoSafetyTemporalFilter {
+ public:
+  explicit CargoSafetyTemporalFilter(
+      const CargoSafetyTemporalConfig& config = CargoSafetyTemporalConfig());
+
+  void setConfig(const CargoSafetyTemporalConfig& config);
+  const CargoSafetyTemporalConfig& config() const noexcept { return config_; }
+  void reset();
+  CargoSafetyTemporalDecision update(
+      const CargoSafetyTemporalInput& input);
+
+ private:
+  CargoSafetyTemporalConfig config_;
+  bool has_source_stamp_ = false;
+  double last_source_stamp_sec_ = 0.0;
+
+  bool candidate_valid_ = false;
+  std::uint16_t candidate_code_ = 0U;
+  int candidate_count_ = 0;
+  double candidate_stamp_sec_ = 0.0;
+  Eigen::Vector3f candidate_centroid_ = Eigen::Vector3f::Zero();
+  float candidate_distance_m_ = 0.0F;
+  float candidate_clearance_m_ = 0.0F;
+
+  bool confirmed_valid_ = false;
+  std::uint16_t confirmed_code_ = 0U;
+
+  CargoSafetyTemporalDecision currentDecision(
+      const std::string& reason) const;
+};
+
+}  // namespace ndt_slam

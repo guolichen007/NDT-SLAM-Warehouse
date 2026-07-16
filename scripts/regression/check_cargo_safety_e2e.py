@@ -302,10 +302,26 @@ def main() -> int:
             "cluster_indices.assign(1U, selected_component)" in node,
             "cargo detector does not score each component before OBB selection",
             failures)
-    require("evaluateCargoPredictedAssociation" in node and
-            "dynamic_xy_gate_m" in cargo_track_policy and
-            "strict_reacquisition" in cargo_track_policy,
-            "retained cargo association is not predicted-OBB based",
+    require("reference_center = hook_lock_.live_pose.center_base" in node and
+            '"center_too_far"' in node and
+            "velocity extrapolation must not drag the gate" in node,
+            "retained cargo association is not anchored to the last filtered pose",
+            failures)
+    temporal_filter = read(
+        "src/ndt_slam/src/cargo_safety_temporal_filter.cpp")
+    require("minimum_hazard_cluster_points" in temporal_filter and
+            "maximum_centroid_step_m" in temporal_filter and
+            "repeated_source_stamp_ignored" in temporal_filter and
+            "hazard_confirm_frames: 3" in live_config and
+            "clear_confirm_frames: 2" in live_config and
+            "cargo_safety_temporal_filter_.update" in node,
+            "17/18 do not require fresh spatially continuous cluster evidence",
+            failures)
+    require("axis_aligned_yaw_after_lock: true" in live_config and
+            "freeze_vertical_position_after_lock: true" in live_config and
+            "quantizeCargoAxialYawToOrthogonal" in node and
+            "CargoVerticalPoseSource::DISPLAY_FROZEN" in node,
+            "formal cargo OBB yaw/vertical stability contract is missing",
             failures)
     require("live_vertical_pose_evidence_stamp" in node and
             "tracking_residual" in read(
