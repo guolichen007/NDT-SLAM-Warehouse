@@ -57,6 +57,9 @@ struct CargoLivePoseStepResult {
     Eigen::Vector3f predicted_center = Eigen::Vector3f::Zero();
     Eigen::Vector3f measurement_residual = Eigen::Vector3f::Zero();
     Eigen::Vector3f filtered_center = Eigen::Vector3f::Zero();
+    // Residual left after the bounded filter correction.  This is the
+    // uncertainty that the formal safety footprint must cover.
+    Eigen::Vector3f tracking_residual = Eigen::Vector3f::Zero();
     Eigen::Vector3f filtered_velocity = Eigen::Vector3f::Zero();
 };
 

@@ -1,0 +1,355 @@
+#include "ndt_slam/cargo_track_policy.hpp"
+
+#include "ndt_slam/cargo_oriented_footprint.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace ndt_slam {
+namespace {
+
+float unitScore(float value, float limit) {
+  if (!std::isfinite(value) || !std::isfinite(limit) || limit <= 0.0F) {
+    return 0.0F;
+  }
+  return std::clamp(1.0F - value / limit, 0.0F, 1.0F);
+}
+
+float relativeError(float value, float reference) {
+  if (!std::isfinite(value) || !std::isfinite(reference) ||
+      value <= 0.0F || reference <= 0.0F) {
+    return std::numeric_limits<float>::infinity();
+  }
+  return std::abs(value - reference) / reference;
+}
+
+float median(std::vector<float> values) {
+  if (values.empty()) return 0.0F;
+  std::sort(values.begin(), values.end());
+  return values[values.size() / 2U];
+}
+
+bool validDescriptor(const CargoCandidateDescriptor& descriptor) {
+  return descriptor.component_id >= 0 && descriptor.center.allFinite() &&
+      descriptor.size.allFinite() && descriptor.size.minCoeff() > 0.0F &&
+      descriptor.size.x() >= descriptor.size.y() &&
+      std::isfinite(descriptor.yaw_rad) &&
+      std::isfinite(descriptor.orientation_confidence) &&
+      descriptor.orientation_confidence >= 0.0F &&
+      descriptor.orientation_confidence <= 1.0F &&
+      descriptor.point_count > 0U;
+}
+
+Eigen::Vector2f projectHalfExtents(
+    const CargoCandidateDescriptor& box, float reference_yaw) {
+  const float delta = box.yaw_rad - reference_yaw;
+  const float cosine = std::abs(std::cos(delta));
+  const float sine = std::abs(std::sin(delta));
+  return Eigen::Vector2f(
+      0.5F * (cosine * box.size.x() + sine * box.size.y()),
+      0.5F * (sine * box.size.x() + cosine * box.size.y()));
+}
+
+}  // namespace
+
+float cargoOrientedOverlapRatio(
+    const CargoCandidateDescriptor& lhs,
+    const CargoCandidateDescriptor& rhs) {
+  if (!validDescriptor(lhs) || !validDescriptor(rhs)) return 0.0F;
+  const float cosine = std::cos(lhs.yaw_rad);
+  const float sine = std::sin(lhs.yaw_rad);
+  const Eigen::Vector2f delta = rhs.center.head<2>() - lhs.center.head<2>();
+  const Eigen::Vector2f local_delta(
+      cosine * delta.x() + sine * delta.y(),
+      -sine * delta.x() + cosine * delta.y());
+  const Eigen::Vector2f lhs_half = 0.5F * lhs.size.head<2>();
+  const Eigen::Vector2f rhs_half = projectHalfExtents(rhs, lhs.yaw_rad);
+  const float intersection_x = std::max(
+      0.0F, lhs_half.x() + rhs_half.x() - std::abs(local_delta.x()));
+  const float intersection_y = std::max(
+      0.0F, lhs_half.y() + rhs_half.y() - std::abs(local_delta.y()));
+  const float intersection = intersection_x * intersection_y;
+  const float smaller_area = std::min(
+      lhs.size.x() * lhs.size.y(), rhs.size.x() * rhs.size.y());
+  return smaller_area > 1.0e-6F
+      ? std::clamp(intersection / smaller_area, 0.0F, 1.0F)
+      : 0.0F;
+}
+
+CargoCandidateIdentityScore scoreCargoCandidateIdentity(
+    const CargoCandidateDescriptor& candidate,
+    const CargoCandidateIdentityContext& context) {
+  CargoCandidateIdentityScore score;
+  score.component_id = candidate.component_id;
+  if (!validDescriptor(candidate) || !context.hook_center.allFinite() ||
+      !std::isfinite(context.hook_region_radius_m) ||
+      context.hook_region_radius_m <= 0.0F) {
+    score.reason = "invalid_candidate_or_context";
+    return score;
+  }
+  score.hook_distance_score = unitScore(
+      (candidate.center.head<2>() - context.hook_center).norm(),
+      context.hook_region_radius_m);
+  score.point_support_confidence = std::clamp(
+      static_cast<float>(candidate.point_count) /
+          static_cast<float>(std::max<std::size_t>(1U,
+                                                   context.strong_point_count)),
+      0.0F, 1.0F);
+  score.suspension_confidence = candidate.suspension_evidence ? 1.0F : 0.35F;
+  score.shape_confidence = std::clamp(
+      0.50F * candidate.orientation_confidence +
+          0.50F * unitScore(candidate.size.y() / candidate.size.x(), 1.0F),
+      0.0F, 1.0F);
+
+  if (context.predicted_track_valid &&
+      context.predicted_center.allFinite() &&
+      context.predicted_size.allFinite() &&
+      context.predicted_size.minCoeff() > 0.0F) {
+    score.predicted_center_score = unitScore(
+        (candidate.center.head<2>() -
+         context.predicted_center.head<2>()).norm(),
+        std::max(0.05F, context.association_radius_m));
+    CargoCandidateDescriptor predicted = candidate;
+    predicted.component_id = 0;
+    predicted.center = context.predicted_center;
+    predicted.size = context.predicted_size;
+    predicted.yaw_rad = context.predicted_yaw_rad;
+    predicted.orientation_confidence = 1.0F;
+    predicted.point_count = 1U;
+    score.overlap_score = cargoOrientedOverlapRatio(predicted, candidate);
+    const float length_error = relativeError(
+        candidate.size.x(), context.predicted_size.x());
+    const float width_error = relativeError(
+        candidate.size.y(), context.predicted_size.y());
+    const float height_error = relativeError(
+        candidate.size.z(), context.predicted_size.z());
+    score.shape_confidence = std::min(
+        score.shape_confidence,
+        unitScore(std::max({length_error, width_error, height_error}), 0.75F));
+    score.motion_confidence = score.predicted_center_score;
+    score.identity_confidence =
+        0.30F * score.predicted_center_score +
+        0.25F * score.overlap_score +
+        0.25F * score.shape_confidence +
+        0.20F * unitScore(
+            std::abs(normalizeCargoAxialYaw(
+                candidate.yaw_rad - context.predicted_yaw_rad)),
+            0.70F);
+  } else {
+    score.predicted_center_score = score.hook_distance_score;
+    score.overlap_score = 0.0F;
+    score.motion_confidence = score.hook_distance_score;
+    score.identity_confidence =
+        0.45F * score.hook_distance_score +
+        0.25F * score.point_support_confidence +
+        0.20F * score.suspension_confidence +
+        0.10F * score.shape_confidence;
+  }
+  score.overall_lock_confidence = std::clamp(
+      0.35F * score.identity_confidence +
+          0.20F * score.shape_confidence +
+          0.15F * candidate.orientation_confidence +
+          0.15F * score.motion_confidence +
+          0.15F * score.suspension_confidence,
+      0.0F, 1.0F);
+  score.valid = true;
+  score.reason = "scored";
+  return score;
+}
+
+CargoAssociationDecision evaluateCargoPredictedAssociation(
+    const CargoAssociationInput& input) {
+  CargoAssociationDecision decision;
+  if (!validDescriptor(input.candidate) ||
+      !input.previous_center.allFinite() || !input.velocity.allFinite() ||
+      !input.locked_size.allFinite() || input.locked_size.minCoeff() <= 0.0F ||
+      !std::isfinite(input.sensor_dt_sec) || input.sensor_dt_sec < 0.0 ||
+      !std::isfinite(input.locked_yaw_rad)) {
+    decision.reason = "invalid_association_input";
+    return decision;
+  }
+  const float dt = static_cast<float>(input.sensor_dt_sec);
+  Eigen::Vector3f bounded_velocity = input.velocity;
+  const float xy_speed = bounded_velocity.head<2>().norm();
+  if (xy_speed > input.max_xy_speed_mps && xy_speed > 1.0e-6F) {
+    bounded_velocity.head<2>() *= input.max_xy_speed_mps / xy_speed;
+  }
+  bounded_velocity.z() = std::clamp(
+      bounded_velocity.z(), -input.max_z_speed_mps, input.max_z_speed_mps);
+  decision.predicted_center = input.previous_center + bounded_velocity * dt;
+  decision.dynamic_xy_gate_m = input.base_center_gate_m +
+      input.max_xy_speed_mps * dt + input.horizontal_uncertainty_m +
+      input.horizontal_tracking_residual_m;
+  decision.dynamic_z_gate_m = input.base_center_gate_m +
+      input.max_z_speed_mps * dt + input.vertical_uncertainty_m +
+      input.vertical_tracking_residual_m;
+  if (input.strict_reacquisition) {
+    decision.dynamic_xy_gate_m *= 0.80F;
+    decision.dynamic_z_gate_m *= 0.80F;
+  }
+  const Eigen::Vector3f center_residual =
+      input.candidate.center - decision.predicted_center;
+  decision.center_residual_xy_m = center_residual.head<2>().norm();
+  decision.center_residual_z_m = std::abs(center_residual.z());
+  if (decision.center_residual_xy_m > decision.dynamic_xy_gate_m) {
+    decision.reason = "predicted_center_too_far";
+    return decision;
+  }
+  if (decision.center_residual_z_m > decision.dynamic_z_gate_m) {
+    decision.reason = "predicted_vertical_too_far";
+    return decision;
+  }
+
+  CargoCandidateDescriptor predicted = input.candidate;
+  predicted.component_id = 0;
+  predicted.center = decision.predicted_center;
+  predicted.size = input.locked_size;
+  predicted.yaw_rad = input.locked_yaw_rad;
+  predicted.orientation_confidence = 1.0F;
+  predicted.point_count = 1U;
+  decision.overlap_ratio = cargoOrientedOverlapRatio(predicted, input.candidate);
+  decision.length_relative_error = relativeError(
+      input.candidate.size.x(), input.locked_size.x());
+  decision.width_relative_error = relativeError(
+      input.candidate.size.y(), input.locked_size.y());
+  decision.height_relative_error = relativeError(
+      input.candidate.size.z(), input.locked_size.z());
+  decision.axial_yaw_error_rad = std::abs(normalizeCargoAxialYaw(
+      input.candidate.yaw_rad - input.locked_yaw_rad));
+  const float shape_limit = input.strict_reacquisition
+      ? 0.75F * input.maximum_shape_relative_error
+      : input.maximum_shape_relative_error;
+  if (std::max({decision.length_relative_error,
+                decision.width_relative_error,
+                decision.height_relative_error}) > shape_limit) {
+    decision.reason = "predicted_shape_mismatch";
+    return decision;
+  }
+  const float yaw_limit = input.strict_reacquisition
+      ? 0.75F * input.maximum_axial_yaw_error_rad
+      : input.maximum_axial_yaw_error_rad;
+  if (decision.axial_yaw_error_rad > yaw_limit) {
+    decision.reason = "predicted_yaw_mismatch";
+    return decision;
+  }
+  const float overlap_limit = input.minimum_overlap_ratio;
+  if (decision.overlap_ratio < overlap_limit) {
+    decision.reason = "predicted_obb_overlap_low";
+    return decision;
+  }
+  decision.accepted = true;
+  decision.reason = input.strict_reacquisition
+      ? "strict_reacquisition_match" : "predicted_obb_match";
+  return decision;
+}
+
+CargoProvisionalLockSummary summarizeCargoProvisionalLock(
+    const std::vector<CargoCandidateDescriptor>& observations,
+    const std::vector<CargoCandidateIdentityScore>& scores,
+    const CargoProvisionalLockConfig& config) {
+  CargoProvisionalLockSummary summary;
+  if (observations.size() < config.minimum_frames ||
+      observations.size() != scores.size()) {
+    summary.reason = "insufficient_provisional_frames";
+    return summary;
+  }
+  std::vector<float> xs, ys, zs, lengths, widths, heights, yaws;
+  float identity_sum = 0.0F;
+  float suspension_sum = 0.0F;
+  float maximum_step = 0.0F;
+  for (std::size_t i = 0U; i < observations.size(); ++i) {
+    if (!validDescriptor(observations[i]) || !scores[i].valid) {
+      summary.reason = "invalid_provisional_observation";
+      return summary;
+    }
+    const auto& observation = observations[i];
+    xs.push_back(observation.center.x());
+    ys.push_back(observation.center.y());
+    zs.push_back(observation.center.z());
+    lengths.push_back(observation.size.x());
+    widths.push_back(observation.size.y());
+    heights.push_back(observation.size.z());
+    yaws.push_back(observation.yaw_rad);
+    identity_sum += scores[i].identity_confidence;
+    suspension_sum += scores[i].suspension_confidence;
+    if (i > 0U) {
+      maximum_step = std::max(
+          maximum_step,
+          (observation.center - observations[i - 1U].center).norm());
+    }
+  }
+  summary.median_center = Eigen::Vector3f(
+      median(xs), median(ys), median(zs));
+  summary.median_size = Eigen::Vector3f(
+      median(lengths), median(widths), median(heights));
+  const CargoAxialYawSummary yaw = summarizeCargoAxialYaw(yaws);
+  summary.axial_yaw_rad = yaw.mean_yaw_rad;
+  summary.orientation_confidence = yaw.concentration;
+  const float length_cv = median(lengths) > 1.0e-6F
+      ? median([&]() {
+          std::vector<float> deviations;
+          for (float value : lengths) deviations.push_back(
+              std::abs(value - summary.median_size.x()));
+          return deviations;
+        }()) / summary.median_size.x() : 1.0F;
+  const float width_cv = median(widths) > 1.0e-6F
+      ? median([&]() {
+          std::vector<float> deviations;
+          for (float value : widths) deviations.push_back(
+              std::abs(value - summary.median_size.y()));
+          return deviations;
+        }()) / summary.median_size.y() : 1.0F;
+  const float height_cv = median(heights) > 1.0e-6F
+      ? median([&]() {
+          std::vector<float> deviations;
+          for (float value : heights) deviations.push_back(
+              std::abs(value - summary.median_size.z()));
+          return deviations;
+        }()) / summary.median_size.z() : 1.0F;
+  summary.shape_confidence = unitScore(
+      std::max({length_cv, width_cv, height_cv}),
+      std::max(1.0e-3F, config.maximum_shape_cv));
+  summary.motion_confidence = unitScore(
+      maximum_step, std::max(1.0e-3F, config.maximum_center_step_m));
+  summary.identity_confidence = identity_sum /
+      static_cast<float>(observations.size());
+  summary.suspension_confidence = suspension_sum /
+      static_cast<float>(observations.size());
+  summary.overall_lock_confidence = std::clamp(
+      0.30F * summary.identity_confidence +
+          0.25F * summary.shape_confidence +
+          0.20F * summary.orientation_confidence +
+          0.15F * summary.motion_confidence +
+          0.10F * summary.suspension_confidence,
+      0.0F, 1.0F);
+  if (!yaw.valid ||
+      summary.orientation_confidence <
+          config.minimum_orientation_concentration) {
+    summary.reason = "orientation_not_concentrated";
+    return summary;
+  }
+  if (summary.identity_confidence < config.minimum_identity_confidence) {
+    summary.reason = "identity_confidence_low";
+    return summary;
+  }
+  if (std::max({length_cv, width_cv, height_cv}) >
+      config.maximum_shape_cv) {
+    summary.reason = "shape_spread_high";
+    return summary;
+  }
+  if (maximum_step > config.maximum_center_step_m) {
+    summary.reason = "motion_discontinuous";
+    return summary;
+  }
+  if (summary.overall_lock_confidence <
+      config.minimum_overall_lock_confidence) {
+    summary.reason = "overall_lock_confidence_low";
+    return summary;
+  }
+  summary.formal_lock_allowed = true;
+  summary.reason = "formal_lock_confirmed";
+  return summary;
+}
+
+}  // namespace ndt_slam

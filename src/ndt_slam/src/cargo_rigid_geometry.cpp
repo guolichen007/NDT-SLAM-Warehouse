@@ -116,6 +116,8 @@ CargoLivePoseStepResult updateCargoLivePoseStep(
         input.max_xy_speed_mps, input.max_z_speed_mps,
         input.step_margin_m);
     result.filtered_center = input.previous_center + final_step;
+    result.tracking_residual =
+        input.measured_center - result.filtered_center;
 
     const Eigen::Vector3f observed_velocity = final_step / dt;
     const Eigen::Vector3f blended_velocity =
@@ -127,6 +129,7 @@ CargoLivePoseStepResult updateCargoLivePoseStep(
     result.valid = result.predicted_center.allFinite() &&
         result.measurement_residual.allFinite() &&
         result.filtered_center.allFinite() &&
+        result.tracking_residual.allFinite() &&
         result.filtered_velocity.allFinite();
     return result;
 }

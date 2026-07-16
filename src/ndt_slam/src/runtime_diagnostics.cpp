@@ -56,7 +56,7 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
              << "channel_filter_ms,human_filter_ms,registration_build_ms,target_bind_ms,"
              << "publish_odom_ms,current_cloud_ms,icp_prepare_ms,clean_map_ms,"
              << "display_map_ms,shadow_target_ms,csv_log_ms,"
-             << "ndt_converged,ndt_iterations,fitness,transformation_probability,"
+             << "ndt_execution_state,ndt_converged,ndt_iterations,fitness,transformation_probability,"
              << "initial_guess_x,initial_guess_y,initial_guess_yaw_deg,"
              << "raw_x,raw_y,raw_z,raw_yaw_deg,ekf_x,ekf_y,"
              << "output_x,output_y,output_z,output_yaw_deg,"
@@ -72,7 +72,12 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
 
     cargo_csv_.open(output_dir_ + "/cargo_frames.csv");
     cargo_csv_ << "stamp,track_state,track_id,lock_state,observation_valid,"
-               << "cluster_points,support_points,live_center_x,live_center_y,live_center_z,"
+               << "cluster_points,support_points,candidate_count,selected_candidate_id,"
+               << "identity_score,orientation_confidence,shape_confidence,"
+               << "motion_confidence,overall_lock_confidence,self_removed_points,"
+               << "external_obstacle_points,nearest_cluster_center_x,"
+               << "nearest_cluster_center_y,nearest_cluster_center_z,"
+               << "nearest_cluster_distance,live_center_x,live_center_y,live_center_z,"
                << "measured_center_x,measured_center_y,measured_center_z,"
                << "predicted_center_x,predicted_center_y,predicted_center_z,"
                << "center_residual_x,center_residual_y,center_residual_z,"
@@ -352,6 +357,7 @@ void RuntimeDiagnostics::writeNdtFrame(const NdtFrameRecord& rec) {
              << rec.stage.display_map_ms << ","
              << rec.stage.shadow_target_ms << ","
              << rec.stage.csv_log_ms << ","
+             << rec.ndt_execution_state << ","
              << (rec.ndt_converged ? 1 : 0) << "," << rec.ndt_iterations << ","
              << std::setprecision(6) << rec.fitness << ","
              << rec.transformation_probability << ","
@@ -389,7 +395,10 @@ void RuntimeDiagnostics::writeNdtFrame(const NdtFrameRecord& rec) {
   // Update rolling stats
   total_ms_stats_.add(rec.total_ms);
   ndt_ms_stats_.add(rec.ndt_align_ms);
-  fitness_stats_.add(rec.fitness);
+  if (rec.ndt_execution_state.find("NDT_ATTEMPTED") == 0U &&
+      rec.ndt_converged && std::isfinite(rec.fitness)) {
+    fitness_stats_.add(rec.fitness);
+  }
 
   if (cfg_.csv_enabled) maybeFlushCsv();
 }
@@ -403,6 +412,16 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << rec.track_state << "," << rec.track_id << ","
                << rec.lock_state << "," << (rec.observation_valid ? 1 : 0) << ","
                << rec.cluster_points << "," << rec.support_points << ","
+               << rec.candidate_count << "," << rec.selected_candidate_id << ","
+               << rec.identity_score << "," << rec.orientation_confidence << ","
+               << rec.shape_confidence << "," << rec.motion_confidence << ","
+               << rec.overall_lock_confidence << ","
+               << rec.self_removed_points << ","
+               << rec.external_obstacle_points << ","
+               << rec.nearest_cluster_center_x << ","
+               << rec.nearest_cluster_center_y << ","
+               << rec.nearest_cluster_center_z << ","
+               << rec.nearest_cluster_distance << ","
                << std::setprecision(4)
                << rec.center_x << "," << rec.center_y << "," << rec.center_z << ","
                << rec.measured_center_x << "," << rec.measured_center_y << ","

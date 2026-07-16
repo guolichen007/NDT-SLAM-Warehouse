@@ -281,6 +281,43 @@ def main() -> int:
             "RViz does not display the authoritative fused cargo marker",
             failures)
 
+    cargo_track_policy = read(
+        "src/ndt_slam/src/cargo_track_policy.cpp")
+    require("GEOMETRY_CONFIRMING" in node and
+            "summarizeCargoProvisionalLock" in node and
+            "overall_lock_confidence" in node and
+            "legacy_candidate_confirmation_disabled" not in node,
+            "cargo can still reach formal lock without provisional identity confirmation",
+            failures)
+    require("scoreCargoCandidateIdentity" in node and
+            "candidate_components_base" in node and
+            "cluster_indices.assign(1U, selected_component)" in node,
+            "cargo detector does not score each component before OBB selection",
+            failures)
+    require("evaluateCargoPredictedAssociation" in node and
+            "dynamic_xy_gate_m" in cargo_track_policy and
+            "strict_reacquisition" in cargo_track_policy,
+            "retained cargo association is not predicted-OBB based",
+            failures)
+    require("live_vertical_pose_evidence_stamp" in node and
+            "tracking_residual" in read(
+                "src/ndt_slam/src/cargo_rigid_geometry.cpp") and
+            "horizontal_tracking_residual_m" in node,
+            "live vertical evidence or tracking residual uncertainty is missing",
+            failures)
+    for topic in ("/cargo_avoidance/candidate_components",
+                  "/cargo_avoidance/selected_candidate_cloud",
+                  "/cargo_avoidance/predicted_obb",
+                  "/cargo_avoidance/self_removed_cloud",
+                  "/cargo_avoidance/external_obstacle_cloud",
+                  "/cargo_avoidance/most_dangerous_cluster"):
+        require(topic in node, f"cargo debug topic missing: {topic}", failures)
+    require("NDT_SKIPPED_BOOTSTRAP" in node and
+            "fitnessStats().count() >= 30U" in node and
+            "last_ndt_fitness_ >= map_commit_max_fitness_" in node,
+            "NDT skipped-state or mature absolute fitness spike gate is missing",
+            failures)
+
     require("cargo_alarm_heartbeat_node" in launch,
             "production launch does not start heartbeat", failures)
     for value in ("/cargo_avoidance/safety_status",

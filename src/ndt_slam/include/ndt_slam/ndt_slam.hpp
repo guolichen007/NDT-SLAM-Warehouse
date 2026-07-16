@@ -48,6 +48,7 @@
 #include <ndt_slam/cargo_oriented_footprint.hpp>
 #include <ndt_slam/cargo_rigid_geometry.hpp>
 #include <ndt_slam/cargo_safety_evaluator.hpp>
+#include <ndt_slam/cargo_track_policy.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
 #include <set>
 
@@ -1200,6 +1201,13 @@ private:
         std::size_t hag_candidate_points = 0U;
         bool lidar_lift_evidence = false;
         int local_id = 0;
+        std::size_t candidate_count = 0U;
+        int selected_candidate_id = -1;
+        float identity_confidence = 0.0F;
+        float shape_confidence = 0.0F;
+        float motion_confidence = 0.0F;
+        float suspension_confidence = 0.0F;
+        float overall_lock_confidence = 0.0F;
         Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f size_visible = Eigen::Vector3f::Zero();
         bool oriented_footprint_valid = false;
@@ -1213,6 +1221,7 @@ private:
         float visible_height = 0.0f;
         float xy_area = 0.0f;  // XY 面积
         pcl::PointCloud<pcl::PointXYZ>::Ptr core_points_base;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr candidate_components_base;
         float raw_roi_min_z = std::numeric_limits<float>::quiet_NaN();
         float hag_filtered_min_z = std::numeric_limits<float>::quiet_NaN();
         float ground_z = std::numeric_limits<float>::quiet_NaN();
@@ -1455,6 +1464,12 @@ private:
     bool has_stable_height_ = false;
 
     ros::Publisher cargo_selected_core_points_pub_;
+    ros::Publisher cargo_candidate_components_pub_;
+    ros::Publisher cargo_selected_candidate_pub_;
+    ros::Publisher cargo_predicted_obb_pub_;
+    ros::Publisher cargo_self_removed_pub_;
+    ros::Publisher cargo_external_obstacle_pub_;
+    ros::Publisher cargo_most_dangerous_cluster_pub_;
 
     HookCargoBottomEstimate estimateCargoBottom(const HookCargoDetection& detection);
     void publishSelectedCorePoints(const HookCargoDetection& detection, const ros::Time& stamp);
@@ -1466,13 +1481,15 @@ private:
     enum class HookCargoLockState {
         EMPTY = 0,
         CANDIDATE = 1,
-        LOCKED = 2,
-        LOST_HOLD = 3
+        GEOMETRY_CONFIRMING = 2,
+        LOCKED = 3,
+        LOST_HOLD = 4
     };
 
     struct HookCargoLockConfig {
         bool enabled = true;
         int lock_confirm_frames = 3;
+        int geometry_confirm_frames = 4;
         int size_init_window = 5;
         float lost_hold_sec = 3.0f;
         float lost_clear_sec = 8.0f;
@@ -1496,6 +1513,11 @@ private:
         float locked_update_max_z_jump = 0.45f;
         float locked_update_max_top_jump = 0.60f;
         int locked_update_min_points = 20;
+        float minimum_identity_confidence = 0.62F;
+        float minimum_overall_lock_confidence = 0.68F;
+        float maximum_provisional_shape_cv = 0.20F;
+        float reacquisition_overlap_extra = 0.10F;
+        float residual_uncertainty_decay = 0.80F;
         float live_pose_center_alpha = 0.45F;
         float live_pose_max_xy_speed_mps = 2.0F;
         float live_pose_max_z_speed_mps = 1.5F;
@@ -1580,6 +1602,7 @@ private:
 
         ros::Time last_seen_stamp;
         ros::Time last_good_height_stamp;
+        ros::Time live_vertical_pose_evidence_stamp;
         ros::Time locked_stamp;
 
         Eigen::Vector3f locked_size = Eigen::Vector3f::Zero();
@@ -1589,6 +1612,7 @@ private:
         Eigen::Vector3f live_pose_velocity_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f live_pose_measured_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f live_pose_predicted_base = Eigen::Vector3f::Zero();
+        Eigen::Vector3f live_pose_innovation_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f live_pose_residual_base = Eigen::Vector3f::Zero();
         double live_pose_dt_sec = 0.0;
 
@@ -1596,14 +1620,22 @@ private:
         float stable_top_z = 0.0f;
         float stable_height = 0.0f;
         float bottom_uncertainty = 0.30f;
+        float horizontal_tracking_residual_m = 0.0F;
+        float vertical_tracking_residual_m = 0.0F;
+        float vertical_pose_uncertainty_m = 0.30F;
 
         bool has_locked_size = false;
         bool has_good_height = false;
+        bool shape_height_valid = false;
+        bool live_vertical_pose_valid = false;
+        bool direct_bottom_support_valid = false;
 
         std::deque<Eigen::Vector3f> init_size_buffer;
         std::deque<Eigen::Vector2f> init_oriented_size_buffer;
         std::vector<float> init_oriented_yaw_buffer;
         std::vector<float> init_orientation_confidence_buffer;
+        std::vector<CargoCandidateDescriptor> provisional_observations;
+        std::vector<CargoCandidateIdentityScore> provisional_scores;
         std::deque<Eigen::Vector3f> size_candidate_buffer;
 
         // 重复帧检测
@@ -1616,10 +1648,16 @@ private:
         bool has_last_accepted = false;
         Eigen::Vector3f last_accepted_size = Eigen::Vector3f::Zero();
         bool candidate_compact_profile = false;
+        CargoProvisionalLockSummary provisional_summary;
     };
 
     HookCargoLockConfig hook_lock_config_;
     HookCargoLock hook_lock_;
+    LockedCargoShape retired_cargo_shape_;
+    Eigen::Vector3f retired_cargo_center_base_ = Eigen::Vector3f::Zero();
+    Eigen::Vector3f retired_cargo_velocity_base_ = Eigen::Vector3f::Zero();
+    ros::Time retired_cargo_stamp_;
+    bool retired_cargo_signature_valid_ = false;
 
     // ========== Cargo Warning 数据结构 ==========
     struct CargoWarningData {
@@ -1671,6 +1709,11 @@ private:
     CargoSafetyEvaluator cargo_safety_evaluator_;
     CargoBottomResult last_cargo_bottom_result_;
     CargoSafetyResult last_cargo_safety_result_;
+    std::size_t cargo_self_removed_points_ = 0U;
+    std::size_t cargo_external_obstacle_points_ = 0U;
+    Eigen::Vector3f cargo_nearest_cluster_center_ = Eigen::Vector3f::Zero();
+    float cargo_nearest_cluster_distance_m_ =
+        std::numeric_limits<float>::infinity();
     RigidCargoGeometry current_rigid_cargo_geometry_;
     bool cargo_safety_config_error_ = false;
     std::uint64_t cargo_fusion_track_id_ = 0;

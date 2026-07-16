@@ -753,6 +753,9 @@ hook_fixed_cargo_detector:
 hook_cargo_lock:
   enabled: true
   lock_confirm_frames: 3
+  # Discovery is followed by an identity-aware provisional window. Formal
+  # shape/yaw freezing cannot happen from orientation concentration alone.
+  geometry_confirm_frames: 4
   size_init_window: 5
   lost_hold_sec: 3.0
   lost_clear_sec: 8.0
@@ -778,6 +781,11 @@ hook_cargo_lock:
   locked_update_max_z_jump: 0.45
   locked_update_max_top_jump: 0.60
   locked_update_min_points: 20
+  minimum_identity_confidence: 0.62
+  minimum_overall_lock_confidence: 0.68
+  maximum_provisional_shape_cv: 0.20
+  reacquisition_overlap_extra: 0.10
+  residual_uncertainty_decay: 0.80
   live_pose_center_alpha: 0.45
   # Physical rate limits are sensor-dt based; the margin absorbs quantization
   # and association noise without imposing a frame-rate-dependent speed cap.

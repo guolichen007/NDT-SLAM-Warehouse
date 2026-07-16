@@ -152,6 +152,25 @@ TEST(CargoRigidGeometryTest, RepeatedAbnormalObservationsCannotExceedTotalSpeed)
     EXPECT_LE(std::abs(second.filtered_velocity.z()), 1.5F + 1.0e-5F);
 }
 
+TEST(CargoRigidGeometryTest, TrackingResidualRemainsAfterBoundedCorrection) {
+    CargoLivePoseStepInput input;
+    input.previous_center = Eigen::Vector3f::Zero();
+    input.measured_center = Eigen::Vector3f(1.0F, 0.0F, 0.8F);
+    input.sensor_dt_sec = 0.10;
+    input.center_alpha = 0.5F;
+    input.velocity_alpha = 0.3F;
+    input.max_xy_speed_mps = 2.0F;
+    input.max_z_speed_mps = 1.5F;
+    input.step_margin_m = 0.05F;
+    const CargoLivePoseStepResult result = updateCargoLivePoseStep(input);
+    ASSERT_TRUE(result.valid);
+    EXPECT_GT(result.tracking_residual.head<2>().norm(), 0.70F);
+    EXPECT_GT(std::abs(result.tracking_residual.z()), 0.60F);
+    EXPECT_TRUE((result.tracking_residual -
+                 (input.measured_center - result.filtered_center))
+                    .isMuchSmallerThan(1.0F));
+}
+
 TEST(CargoRigidGeometryTest, ShapeStaysFixedWhilePoseMovesAndHoists) {
     const LockedCargoShape locked = shape(0.4F);
     const RigidCargoGeometry first = buildCurrentRigidCargoGeometry(

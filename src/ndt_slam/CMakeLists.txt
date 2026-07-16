@@ -121,6 +121,7 @@ set(LIBRARY_SOURCES
   src/cargo_bottom_fusion.cpp
   src/clean_map_builder.cpp
   src/cargo_oriented_footprint.cpp
+  src/cargo_track_policy.cpp
   src/cargo_rigid_geometry.cpp
   src/cargo_marker_lifecycle.cpp
   src/cargo_safety_evaluator.cpp
@@ -226,6 +227,13 @@ if(CATKIN_ENABLE_TESTING)
       ${catkin_LIBRARIES}
       ${PCL_LIBRARIES}
       gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_track_policy_test
+    test/cargo_track_policy_test.cpp)
+  if(TARGET cargo_track_policy_test)
+    target_link_libraries(cargo_track_policy_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(clean_map_builder_test

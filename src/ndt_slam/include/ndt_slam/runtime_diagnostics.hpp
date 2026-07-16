@@ -14,6 +14,7 @@
 #include <map>
 #include <vector>
 #include <cstdint>
+#include <limits>
 
 namespace ndt_slam {
 
@@ -199,6 +200,7 @@ struct NdtFrameRecord {
   double total_ms = 0.0;
   RuntimeStageTimes stage;
   bool ndt_converged = false;
+  std::string ndt_execution_state = "NDT_NOT_ATTEMPTED";
   int ndt_iterations = 0;
   double fitness = 0.0;
   double transformation_probability = 0.0;
@@ -242,6 +244,20 @@ struct CargoFrameRecord {
   bool observation_valid = false;
   int cluster_points = 0;
   int support_points = 0;
+  int candidate_count = 0;
+  int selected_candidate_id = -1;
+  double identity_score = 0.0;
+  double orientation_confidence = 0.0;
+  double shape_confidence = 0.0;
+  double motion_confidence = 0.0;
+  double overall_lock_confidence = 0.0;
+  int self_removed_points = 0;
+  int external_obstacle_points = 0;
+  double nearest_cluster_center_x = 0.0;
+  double nearest_cluster_center_y = 0.0;
+  double nearest_cluster_center_z = 0.0;
+  double nearest_cluster_distance =
+      std::numeric_limits<double>::infinity();
   double center_x = 0.0, center_y = 0.0, center_z = 0.0;
   double measured_center_x = 0.0, measured_center_y = 0.0,
          measured_center_z = 0.0;
