@@ -203,5 +203,85 @@ TEST(CargoTrackPolicy, DifferentComponentsCannotShareProvisionalWindow) {
   EXPECT_FALSE(evaluateCargoPredictedAssociation(input).accepted);
 }
 
+TEST(CargoTrackPolicy, LockedYawNoiseDoesNotRejectSameCargo) {
+  CargoAssociationInput input;
+  input.candidate = candidate(
+      1, 0.02F, 0.0F, 2.5F, 1.3F, 0.6F, 0.8F, 1.20F);
+  input.previous_center = Eigen::Vector3f(0.0F, 0.0F, 2.5F);
+  input.locked_size = Eigen::Vector3f(2.0F, 0.4F, 0.8F);
+  input.sensor_dt_sec = 0.10;
+  input.minimum_overlap_ratio = 0.0F;
+  input.use_shape_as_hard_gate = false;
+  input.use_yaw_as_hard_gate = false;
+  const CargoAssociationDecision decision =
+      evaluateCargoPredictedAssociation(input);
+  EXPECT_TRUE(decision.accepted) << decision.reason;
+  EXPECT_FALSE(decision.yaw_used_as_hard_gate);
+  EXPECT_GT(decision.axial_yaw_error_rad, 1.0F);
+}
+
+TEST(CargoTrackPolicy, PredictionGateDoesNotDoubleCountVelocity) {
+  CargoAssociationInput input;
+  input.candidate = candidate(
+      1, 1.24F, 0.0F, 2.5F, 2.0F, 0.4F, 0.8F, 0.0F);
+  input.previous_center = Eigen::Vector3f(0.0F, 0.0F, 2.5F);
+  input.velocity = Eigen::Vector3f(1.0F, 0.0F, 0.0F);
+  input.locked_size = input.candidate.size;
+  input.sensor_dt_sec = 1.0;
+  input.base_center_gate_m = 0.20F;
+  input.velocity_model_uncertainty_mps = 0.05F;
+  const CargoAssociationDecision decision =
+      evaluateCargoPredictedAssociation(input);
+  EXPECT_TRUE(decision.accepted) << decision.reason;
+  EXPECT_NEAR(decision.dynamic_xy_gate_m, 0.25F, 1.0e-5F);
+}
+
+TEST(CargoTrackPolicy, ReacquisitionGateHasHardMaximum) {
+  CargoAssociationInput input;
+  input.candidate = candidate(
+      1, 0.50F, 0.0F, 2.5F, 2.0F, 0.4F, 0.8F, 0.0F);
+  input.previous_center = Eigen::Vector3f(0.0F, 0.0F, 2.5F);
+  input.locked_size = input.candidate.size;
+  input.sensor_dt_sec = 4.0;
+  input.horizontal_uncertainty_m = 2.0F;
+  input.horizontal_tracking_residual_m = 2.0F;
+  input.maximum_xy_gate_m = 0.55F;
+  input.maximum_z_gate_m = 0.65F;
+  input.strict_reacquisition = true;
+  const CargoAssociationDecision decision =
+      evaluateCargoPredictedAssociation(input);
+  EXPECT_LE(decision.dynamic_xy_gate_m, 0.55F);
+  EXPECT_LE(decision.dynamic_z_gate_m, 0.65F);
+}
+
+TEST(CargoTrackPolicy, SparseLongCargoMaintainsLockedYaw) {
+  CargoFrozenObbSupportInput input;
+  input.predicted_center = Eigen::Vector3f(0.0F, 0.0F, 2.0F);
+  input.locked_size = Eigen::Vector3f(2.0F, 0.5F, 0.8F);
+  input.locked_yaw_rad = 0.0F;
+  for (int i = 0; i < 20; ++i) {
+    input.points.emplace_back(
+        -0.8F + 0.08F * static_cast<float>(i),
+        0.18F + 0.01F * static_cast<float>(i % 3), 2.1F);
+  }
+  const CargoFrozenObbSupport support =
+      evaluateCargoFrozenObbSupport(input);
+  EXPECT_TRUE(support.valid);
+  EXPECT_GT(support.inside_ratio, 0.95F);
+  EXPECT_GT(support.long_axis_coverage_ratio, 0.70F);
+}
+
+TEST(CargoTrackPolicy, ClearRequiresRearmBeforeNewCandidate) {
+  CargoRearmInput input;
+  input.candidate_valid = true;
+  input.independent_suspension_evidence = false;
+  input.candidate_score_margin = 0.50F;
+  input.retired_identity_confidence = 0.20F;
+  EXPECT_FALSE(evaluateCargoRearm(input).allowed);
+
+  input.independent_suspension_evidence = true;
+  EXPECT_TRUE(evaluateCargoRearm(input).allowed);
+}
+
 }  // namespace
 }  // namespace ndt_slam

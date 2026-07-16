@@ -115,6 +115,40 @@ CargoPhysicalLockAuthorityDecision evaluateCargoPhysicalLockAuthority(
   return decision;
 }
 
+CargoRearmDecision evaluateCargoRearm(const CargoRearmInput& input) {
+  CargoRearmDecision decision;
+  if (!std::isfinite(input.rearm_age_sec) || input.rearm_age_sec < 0.0 ||
+      !std::isfinite(input.minimum_empty_confirm_sec) ||
+      input.minimum_empty_confirm_sec < 0.0 ||
+      !std::isfinite(input.candidate_score_margin) ||
+      !std::isfinite(input.minimum_score_margin) ||
+      !std::isfinite(input.retired_identity_confidence) ||
+      !std::isfinite(input.maximum_retired_identity_confidence)) {
+    decision.reason = "invalid_rearm_input";
+    return decision;
+  }
+  if (input.empty_confirmed &&
+      input.rearm_age_sec >= input.minimum_empty_confirm_sec) {
+    decision.allowed = true;
+    decision.reason = "confirmed_empty";
+    return decision;
+  }
+  if (input.gravity_valid && input.gravity_state == HookLoadState::LOADED &&
+      input.gravity_state_at_clear != HookLoadState::LOADED) {
+    decision.allowed = true;
+    decision.reason = "new_gravity_loaded_edge";
+    return decision;
+  }
+  if (input.candidate_valid && input.independent_suspension_evidence &&
+      input.candidate_score_margin >= input.minimum_score_margin &&
+      input.retired_identity_confidence <
+          input.maximum_retired_identity_confidence) {
+    decision.allowed = true;
+    decision.reason = "independent_suspended_candidate";
+  }
+  return decision;
+}
+
 CargoCandidateRanking rankCargoCandidateIdentityScores(
     const std::vector<CargoCandidateIdentityScore>& scores) {
   CargoCandidateRanking ranking;
@@ -250,7 +284,10 @@ CargoAssociationDecision evaluateCargoPredictedAssociation(
       !input.previous_center.allFinite() || !input.velocity.allFinite() ||
       !input.locked_size.allFinite() || input.locked_size.minCoeff() <= 0.0F ||
       !std::isfinite(input.sensor_dt_sec) || input.sensor_dt_sec < 0.0 ||
-      !std::isfinite(input.locked_yaw_rad)) {
+      !std::isfinite(input.locked_yaw_rad) ||
+      !std::isfinite(input.maximum_xy_gate_m) ||
+      !std::isfinite(input.maximum_z_gate_m) ||
+      input.maximum_xy_gate_m <= 0.0F || input.maximum_z_gate_m <= 0.0F) {
     decision.reason = "invalid_association_input";
     return decision;
   }
@@ -263,16 +300,18 @@ CargoAssociationDecision evaluateCargoPredictedAssociation(
   bounded_velocity.z() = std::clamp(
       bounded_velocity.z(), -input.max_z_speed_mps, input.max_z_speed_mps);
   decision.predicted_center = input.previous_center + bounded_velocity * dt;
-  decision.dynamic_xy_gate_m = input.base_center_gate_m +
-      input.max_xy_speed_mps * dt + input.horizontal_uncertainty_m +
-      input.horizontal_tracking_residual_m;
-  decision.dynamic_z_gate_m = input.base_center_gate_m +
-      input.max_z_speed_mps * dt + input.vertical_uncertainty_m +
-      input.vertical_tracking_residual_m;
-  if (input.strict_reacquisition) {
-    decision.dynamic_xy_gate_m *= 0.80F;
-    decision.dynamic_z_gate_m *= 0.80F;
-  }
+  const float model_uncertainty = std::max(
+      0.0F, input.velocity_model_uncertainty_mps) * dt;
+  decision.dynamic_xy_gate_m = std::min(
+      input.maximum_xy_gate_m,
+      input.base_center_gate_m + model_uncertainty +
+          input.horizontal_uncertainty_m +
+          input.horizontal_tracking_residual_m);
+  decision.dynamic_z_gate_m = std::min(
+      input.maximum_z_gate_m,
+      input.base_center_gate_m + model_uncertainty +
+          input.vertical_uncertainty_m +
+          input.vertical_tracking_residual_m);
   const Eigen::Vector3f center_residual =
       input.candidate.center - decision.predicted_center;
   decision.center_residual_xy_m = center_residual.head<2>().norm();
@@ -302,10 +341,12 @@ CargoAssociationDecision evaluateCargoPredictedAssociation(
       input.candidate.size.z(), input.locked_size.z());
   decision.axial_yaw_error_rad = std::abs(normalizeCargoAxialYaw(
       input.candidate.yaw_rad - input.locked_yaw_rad));
+  decision.yaw_used_as_hard_gate = input.use_yaw_as_hard_gate;
   const float shape_limit = input.strict_reacquisition
       ? 0.75F * input.maximum_shape_relative_error
       : input.maximum_shape_relative_error;
-  if (std::max({decision.length_relative_error,
+  if (input.use_shape_as_hard_gate &&
+      std::max({decision.length_relative_error,
                 decision.width_relative_error,
                 decision.height_relative_error}) > shape_limit) {
     decision.reason = "predicted_shape_mismatch";
@@ -314,7 +355,8 @@ CargoAssociationDecision evaluateCargoPredictedAssociation(
   const float yaw_limit = input.strict_reacquisition
       ? 0.75F * input.maximum_axial_yaw_error_rad
       : input.maximum_axial_yaw_error_rad;
-  if (decision.axial_yaw_error_rad > yaw_limit) {
+  if (input.use_yaw_as_hard_gate &&
+      decision.axial_yaw_error_rad > yaw_limit) {
     decision.reason = "predicted_yaw_mismatch";
     return decision;
   }
@@ -327,6 +369,65 @@ CargoAssociationDecision evaluateCargoPredictedAssociation(
   decision.reason = input.strict_reacquisition
       ? "strict_reacquisition_match" : "predicted_obb_match";
   return decision;
+}
+
+CargoFrozenObbSupport evaluateCargoFrozenObbSupport(
+    const CargoFrozenObbSupportInput& input) {
+  CargoFrozenObbSupport support;
+  if (!input.predicted_center.allFinite() ||
+      !input.locked_size.allFinite() || input.locked_size.minCoeff() <= 0.0F ||
+      !std::isfinite(input.locked_yaw_rad) ||
+      !std::isfinite(input.horizontal_margin_m) ||
+      !std::isfinite(input.vertical_margin_m) ||
+      input.horizontal_margin_m < 0.0F || input.vertical_margin_m < 0.0F) {
+    support.reason = "invalid_locked_obb_support_input";
+    return support;
+  }
+  const float cosine = std::cos(input.locked_yaw_rad);
+  const float sine = std::sin(input.locked_yaw_rad);
+  float min_x = std::numeric_limits<float>::infinity();
+  float max_x = -std::numeric_limits<float>::infinity();
+  float min_y = std::numeric_limits<float>::infinity();
+  float max_y = -std::numeric_limits<float>::infinity();
+  float min_z = std::numeric_limits<float>::infinity();
+  float max_z = -std::numeric_limits<float>::infinity();
+  for (const Eigen::Vector3f& point : input.points) {
+    if (!point.allFinite()) continue;
+    ++support.finite_points;
+    const Eigen::Vector3f delta = point - input.predicted_center;
+    const float local_x = cosine * delta.x() + sine * delta.y();
+    const float local_y = -sine * delta.x() + cosine * delta.y();
+    const bool inside =
+        std::abs(local_x) <= 0.5F * input.locked_size.x() +
+            input.horizontal_margin_m &&
+        std::abs(local_y) <= 0.5F * input.locked_size.y() +
+            input.horizontal_margin_m &&
+        std::abs(delta.z()) <= 0.5F * input.locked_size.z() +
+            input.vertical_margin_m;
+    if (!inside) continue;
+    ++support.inside_points;
+    min_x = std::min(min_x, local_x);
+    max_x = std::max(max_x, local_x);
+    min_y = std::min(min_y, local_y);
+    max_y = std::max(max_y, local_y);
+    min_z = std::min(min_z, delta.z());
+    max_z = std::max(max_z, delta.z());
+  }
+  if (support.finite_points == 0U || support.inside_points == 0U) {
+    support.reason = "no_locked_obb_point_support";
+    return support;
+  }
+  support.inside_ratio = static_cast<float>(support.inside_points) /
+      static_cast<float>(support.finite_points);
+  support.long_axis_coverage_ratio = std::clamp(
+      (max_x - min_x) / input.locked_size.x(), 0.0F, 1.0F);
+  support.short_axis_coverage_ratio = std::clamp(
+      (max_y - min_y) / input.locked_size.y(), 0.0F, 1.0F);
+  support.vertical_coverage_ratio = std::clamp(
+      (max_z - min_z) / input.locked_size.z(), 0.0F, 1.0F);
+  support.valid = true;
+  support.reason = "locked_obb_point_support";
+  return support;
 }
 
 CargoProvisionalLockSummary summarizeCargoProvisionalLock(

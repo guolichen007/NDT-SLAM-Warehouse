@@ -798,7 +798,18 @@ hook_cargo_lock:
   live_pose_velocity_alpha: 0.35
   # LOST_HOLD remains visible for lost_clear_sec, but formal safety/removal may
   # only use prediction/held evidence inside this short window.
-  formal_hold_sec: 0.50
+  formal_pose_hold_sec: 0.60
+  direct_bottom_soft_stale_sec: 1.50
+  velocity_model_uncertainty_mps: 0.05
+  association_max_xy_gate_m: 0.80
+  reacquisition_max_xy_gate_m: 0.55
+  association_max_z_gate_m: 0.90
+  reacquisition_max_z_gate_m: 0.65
+  locked_obb_min_support_ratio: 0.30
+  locked_obb_min_long_axis_coverage: 0.12
+  locked_obb_min_short_axis_coverage: 0.12
+  lost_velocity_decay_tau_sec: 0.30
+  rearm_empty_confirm_sec: 1.0
   lost_position_uncertainty_per_sec: 0.05
   lost_position_uncertainty_max_m: 0.50
 

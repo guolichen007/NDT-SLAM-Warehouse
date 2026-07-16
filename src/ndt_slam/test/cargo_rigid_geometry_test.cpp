@@ -60,19 +60,32 @@ TEST(CargoRigidGeometryTest, LockedStateCannotBypassFormalEvidenceCutoff) {
     EXPECT_FALSE(expired_after_state_transition.formal_removal_valid);
 }
 
+TEST(CargoRigidGeometryTest, FrozenHeightDoesNotExpireWithDirectBottomGap) {
+    const CargoFormalUseDecision decision = evaluateCargoFormalUse(
+        true, false, 20.0, 19.7, 10.0, 0.60, 0.15F);
+    EXPECT_TRUE(decision.formal_safety_valid);
+    EXPECT_TRUE(decision.formal_removal_valid);
+    EXPECT_GT(decision.height_age_sec, 9.0);
+}
+
 TEST(CargoRigidGeometryTest, MissingObservationPredictsImmediatelyButPreservesEvidenceAge) {
     LiveCargoPose observed = pose(Eigen::Vector3f(1.0F, 2.0F, 3.0F));
     observed.position_uncertainty_m = 0.10F;
     const Eigen::Vector3f velocity(0.5F, 0.0F, 0.2F);
 
     const LiveCargoPose held_short = propagateHeldCargoPose(
-        observed, velocity, 10.4, 0.5, 2.0F, 1.5F, 0.05F, 0.50F);
+        observed, velocity, 10.4, 0.5, 2.0F, 1.5F,
+        0.30, 0.05F, 0.50F);
     ASSERT_TRUE(held_short.valid);
     EXPECT_EQ(held_short.source, CargoPoseSource::MOTION_PREDICTION);
     EXPECT_DOUBLE_EQ(held_short.evidence_stamp_sec, 10.0);
     EXPECT_DOUBLE_EQ(held_short.evaluation_stamp_sec, 10.4);
-    EXPECT_NEAR(held_short.center_base.x(), 1.20F, 1.0e-5F);
-    EXPECT_NEAR(held_short.center_base.z(), 3.08F, 1.0e-5F);
+    const float short_prediction = 0.30F *
+        (1.0F - std::exp(-0.40F / 0.30F));
+    EXPECT_NEAR(held_short.center_base.x(),
+                1.0F + 0.5F * short_prediction, 1.0e-5F);
+    EXPECT_NEAR(held_short.center_base.z(),
+                3.0F + 0.2F * short_prediction, 1.0e-5F);
     EXPECT_NEAR(held_short.position_uncertainty_m, 0.12F, 1.0e-5F);
     const CargoFormalUseDecision short_use = evaluateCargoFormalUse(
         true, false, 10.4, held_short.evidence_stamp_sec,
@@ -81,10 +94,16 @@ TEST(CargoRigidGeometryTest, MissingObservationPredictsImmediatelyButPreservesEv
     EXPECT_TRUE(short_use.formal_removal_valid);
 
     const LiveCargoPose held_expired = propagateHeldCargoPose(
-        observed, velocity, 10.6, 0.5, 2.0F, 1.5F, 0.05F, 0.50F);
+        observed, velocity, 10.6, 0.5, 2.0F, 1.5F,
+        0.30, 0.05F, 0.50F);
     ASSERT_TRUE(held_expired.valid);
     // Prediction is capped by the formal window, while evidence age continues.
-    EXPECT_NEAR(held_expired.center_base.x(), 1.25F, 1.0e-5F);
+    const float capped_prediction = 0.30F *
+        (1.0F - std::exp(-0.50F / 0.30F));
+    EXPECT_NEAR(held_expired.center_base.x(),
+                1.0F + 0.5F * capped_prediction, 1.0e-5F);
+    EXPECT_EQ(held_expired.vertical_source,
+              CargoVerticalPoseSource::DISPLAY_FROZEN);
     EXPECT_DOUBLE_EQ(held_expired.evidence_stamp_sec, 10.0);
     const CargoFormalUseDecision expired_use = evaluateCargoFormalUse(
         true, false, 10.6, held_expired.evidence_stamp_sec,
@@ -187,6 +206,45 @@ TEST(CargoRigidGeometryTest, ShapeStaysFixedWhilePoseMovesAndHoists) {
     EXPECT_FLOAT_EQ(first.shape.yaw_base_rad, moved.shape.yaw_base_rad);
     EXPECT_NEAR(moved.bottom_z_base - first.bottom_z_base, 1.0F, 1.0e-5F);
     EXPECT_NEAR(moved.top_z_base - first.top_z_base, 1.0F, 1.0e-5F);
+}
+
+TEST(CargoRigidGeometryTest, NormalHoistUpdatesCenterWithoutChangingHeight) {
+    const LockedCargoShape locked = shape(0.2F);
+    const RigidCargoGeometry low = buildCurrentRigidCargoGeometry(
+        locked, pose(Eigen::Vector3f(0.0F, 0.0F, 1.2F)),
+        Eigen::Isometry3f::Identity(), 13U, 0.05F);
+    const RigidCargoGeometry high = buildCurrentRigidCargoGeometry(
+        locked, pose(Eigen::Vector3f(0.0F, 0.0F, 2.2F)),
+        Eigen::Isometry3f::Identity(), 13U, 0.05F);
+    ASSERT_TRUE(low.valid);
+    ASSERT_TRUE(high.valid);
+    EXPECT_FLOAT_EQ(low.shape.height_m, high.shape.height_m);
+    EXPECT_NEAR(high.pose.center_base.z() - low.pose.center_base.z(),
+                1.0F, 1.0e-5F);
+}
+
+TEST(CargoRigidGeometryTest, PoseEvidenceRefreshesFromAssociatedCore) {
+    const CargoFormalUseDecision decision = evaluateCargoFormalUse(
+        true, false, 30.0, 29.7, 20.0, 0.60, 0.12F);
+    EXPECT_TRUE(decision.formal_safety_valid);
+    EXPECT_LT(decision.pose_age_sec, 0.60);
+    EXPECT_GT(decision.height_age_sec, 9.0);
+}
+
+TEST(CargoRigidGeometryTest, LostDisplayPredictionStopsAfterFormalHold) {
+    LiveCargoPose observed = pose(Eigen::Vector3f::Zero());
+    const Eigen::Vector3f velocity(1.0F, 0.0F, 0.0F);
+    const LiveCargoPose first = propagateHeldCargoPose(
+        observed, velocity, 10.5, 0.5, 2.0F, 1.5F,
+        0.30, 0.05F, 0.50F);
+    const LiveCargoPose later = propagateHeldCargoPose(
+        observed, velocity, 17.0, 0.5, 2.0F, 1.5F,
+        0.30, 0.05F, 0.50F);
+    ASSERT_TRUE(first.valid);
+    ASSERT_TRUE(later.valid);
+    EXPECT_NEAR(first.center_base.x(), later.center_base.x(), 1.0e-5F);
+    EXPECT_EQ(later.vertical_source,
+              CargoVerticalPoseSource::DISPLAY_FROZEN);
 }
 
 TEST(CargoRigidGeometryTest, ContainsAndDistanceUseOrientedCoordinates) {

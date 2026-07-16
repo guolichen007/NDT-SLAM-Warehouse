@@ -1583,8 +1583,39 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.live_pose_velocity_alpha = std::clamp(
                 hcl["live_pose_velocity_alpha"].as<float>(0.35F),
                 0.0F, 1.0F);
-            hook_lock_config_.formal_hold_sec = std::max(
-                0.0F, hcl["formal_hold_sec"].as<float>(0.50F));
+            hook_lock_config_.formal_pose_hold_sec = std::max(
+                0.10F, hcl["formal_pose_hold_sec"].as<float>(
+                    hcl["formal_hold_sec"].as<float>(0.60F)));
+            hook_lock_config_.direct_bottom_soft_stale_sec = std::max(
+                hook_lock_config_.formal_pose_hold_sec,
+                hcl["direct_bottom_soft_stale_sec"].as<float>(1.50F));
+            hook_lock_config_.velocity_model_uncertainty_mps = std::max(
+                0.0F,
+                hcl["velocity_model_uncertainty_mps"].as<float>(0.05F));
+            hook_lock_config_.association_max_xy_gate_m = std::max(
+                0.10F, hcl["association_max_xy_gate_m"].as<float>(0.80F));
+            hook_lock_config_.reacquisition_max_xy_gate_m = std::clamp(
+                hcl["reacquisition_max_xy_gate_m"].as<float>(0.55F),
+                0.10F, hook_lock_config_.association_max_xy_gate_m);
+            hook_lock_config_.association_max_z_gate_m = std::max(
+                0.10F, hcl["association_max_z_gate_m"].as<float>(0.90F));
+            hook_lock_config_.reacquisition_max_z_gate_m = std::clamp(
+                hcl["reacquisition_max_z_gate_m"].as<float>(0.65F),
+                0.10F, hook_lock_config_.association_max_z_gate_m);
+            hook_lock_config_.locked_obb_min_support_ratio = std::clamp(
+                hcl["locked_obb_min_support_ratio"].as<float>(0.30F),
+                0.05F, 0.95F);
+            hook_lock_config_.locked_obb_min_long_axis_coverage = std::clamp(
+                hcl["locked_obb_min_long_axis_coverage"].as<float>(0.12F),
+                0.02F, 1.0F);
+            hook_lock_config_.locked_obb_min_short_axis_coverage = std::clamp(
+                hcl["locked_obb_min_short_axis_coverage"].as<float>(0.12F),
+                0.02F, 1.0F);
+            hook_lock_config_.lost_velocity_decay_tau_sec = std::max(
+                0.05F,
+                hcl["lost_velocity_decay_tau_sec"].as<float>(0.30F));
+            hook_lock_config_.rearm_empty_confirm_sec = std::max(
+                0.0F, hcl["rearm_empty_confirm_sec"].as<float>(1.0F));
             hook_lock_config_.lost_position_uncertainty_per_sec = std::max(
                 0.0F,
                 hcl["lost_position_uncertainty_per_sec"].as<float>(0.05F));
@@ -9234,22 +9265,35 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     if (cargoTrackRetained() && hook_lock_.live_pose.valid &&
         hook_lock_.locked_shape.valid) {
         identity_context.predicted_track_valid = true;
-        const double dt = std::max(
-            0.0, stamp.toSec() - hook_lock_.live_pose.evidence_stamp_sec);
+        const double dt = std::min(
+            static_cast<double>(hook_lock_config_.formal_pose_hold_sec),
+            std::max(
+                0.0,
+                stamp.toSec() -
+                    hook_lock_.live_pose.evidence_stamp_sec));
+        const double decayed_dt =
+            hook_lock_config_.lost_velocity_decay_tau_sec *
+            (1.0 - std::exp(
+                -dt / hook_lock_config_.lost_velocity_decay_tau_sec));
         identity_context.predicted_center =
             hook_lock_.live_pose.center_base +
-            hook_lock_.live_pose_velocity_base * static_cast<float>(dt);
+            hook_lock_.live_pose_velocity_base *
+                static_cast<float>(decayed_dt);
         identity_context.predicted_size = Eigen::Vector3f(
             hook_lock_.locked_shape.length_m,
             hook_lock_.locked_shape.width_m,
             hook_lock_.locked_shape.height_m);
         identity_context.predicted_yaw_rad =
             hook_lock_.locked_shape.yaw_base_rad;
-        identity_context.association_radius_m +=
-            hook_lock_config_.live_pose_max_xy_speed_mps *
-                static_cast<float>(dt) +
-            hook_lock_.live_pose.position_uncertainty_m +
-            hook_lock_.horizontal_tracking_residual_m;
+        identity_context.association_radius_m = std::min(
+            hook_lock_.state == HookCargoLockState::LOST_HOLD
+                ? hook_lock_config_.reacquisition_max_xy_gate_m
+                : hook_lock_config_.association_max_xy_gate_m,
+            identity_context.association_radius_m +
+                hook_lock_config_.velocity_model_uncertainty_mps *
+                    static_cast<float>(dt) +
+                hook_lock_.live_pose.position_uncertainty_m +
+                hook_lock_.horizontal_tracking_residual_m);
     } else if (!hook_lock_.provisional_observations.empty()) {
         const CargoCandidateDescriptor& previous =
             hook_lock_.provisional_observations.back();
@@ -9265,12 +9309,18 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
                (stamp - retired_cargo_stamp_).toSec() >= 0.0 &&
                (stamp - retired_cargo_stamp_).toSec() <=
                    hook_lock_config_.lost_clear_sec) {
-        const double retired_dt =
-            (stamp - retired_cargo_stamp_).toSec();
+        const double retired_dt = std::min(
+            static_cast<double>(hook_lock_config_.formal_pose_hold_sec),
+            (stamp - retired_cargo_stamp_).toSec());
+        const double retired_decayed_dt =
+            hook_lock_config_.lost_velocity_decay_tau_sec *
+            (1.0 - std::exp(
+                -retired_dt /
+                    hook_lock_config_.lost_velocity_decay_tau_sec));
         identity_context.predicted_track_valid = true;
         identity_context.predicted_center =
             retired_cargo_center_base_ + retired_cargo_velocity_base_ *
-                static_cast<float>(retired_dt);
+                static_cast<float>(retired_decayed_dt);
         identity_context.predicted_size = Eigen::Vector3f(
             retired_cargo_shape_.length_m,
             retired_cargo_shape_.width_m,
@@ -9278,9 +9328,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         identity_context.predicted_yaw_rad =
             retired_cargo_shape_.yaw_base_rad;
         identity_context.association_radius_m =
-            hook_lock_config_.locked_update_max_center_dist +
-            hook_lock_config_.live_pose_max_xy_speed_mps *
-                static_cast<float>(retired_dt);
+            hook_lock_config_.reacquisition_max_xy_gate_m;
     }
 
     CargoOrientedFootprintConfig candidate_footprint_config;
@@ -9669,31 +9717,62 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
         return false;
     }
 
-    if (!det.oriented_footprint_valid ||
-        !hook_lock_.locked_shape.valid) {
+    if (!hook_lock_.locked_shape.valid || !hook_lock_.live_pose.valid) {
         *reject_reason = "association_obb_unavailable";
         return false;
     }
     CargoCandidateDescriptor candidate;
     candidate.component_id = std::max(0, det.selected_candidate_id);
     candidate.center = det.center_base;
-    candidate.center.x() = det.footprint_center_base.x();
-    candidate.center.y() = det.footprint_center_base.y();
-    candidate.size = Eigen::Vector3f(
-        det.footprint_length_width.x(), det.footprint_length_width.y(),
-        bottom.valid ? bottom.height : hook_lock_.locked_shape.height_m);
-    candidate.yaw_rad = det.footprint_yaw_base_rad;
-    candidate.orientation_confidence = det.orientation_confidence;
+    if (det.oriented_footprint_valid) {
+        candidate.center.x() = det.footprint_center_base.x();
+        candidate.center.y() = det.footprint_center_base.y();
+    }
+    const double raw_dt = std::max(
+        0.0, hook_observation_association_stamp_.toSec() -
+            hook_lock_.live_pose.evidence_stamp_sec);
+    const double dt = std::min(
+        raw_dt,
+        static_cast<double>(hook_lock_config_.formal_pose_hold_sec));
+    Eigen::Vector3f association_velocity =
+        hook_lock_.live_pose_velocity_base;
+    if (dt > 1.0e-6) {
+        const double decayed_dt =
+            hook_lock_config_.lost_velocity_decay_tau_sec *
+            (1.0 - std::exp(
+                -dt / hook_lock_config_.lost_velocity_decay_tau_sec));
+        association_velocity *= static_cast<float>(decayed_dt / dt);
+    }
+    const float predicted_z = hook_lock_.live_pose.center_base.z() +
+        std::clamp(
+            association_velocity.z(),
+            -hook_lock_config_.live_pose_max_z_speed_mps,
+            hook_lock_config_.live_pose_max_z_speed_mps) *
+            static_cast<float>(dt);
+    const bool direct_bottom_for_association = bottom.valid &&
+        bottom.source == "points_visible_side";
+    candidate.center.z() = direct_bottom_for_association
+        ? bottom.bottom_z_base + 0.5F * hook_lock_.locked_shape.height_m
+        : predicted_z;
+    candidate.size = det.oriented_footprint_valid
+        ? Eigen::Vector3f(
+              det.footprint_length_width.x(),
+              det.footprint_length_width.y(),
+              hook_lock_.locked_shape.height_m)
+        : Eigen::Vector3f(
+              hook_lock_.locked_shape.length_m,
+              hook_lock_.locked_shape.width_m,
+              hook_lock_.locked_shape.height_m);
+    candidate.yaw_rad = det.oriented_footprint_valid
+        ? det.footprint_yaw_base_rad
+        : hook_lock_.locked_shape.yaw_base_rad;
+    candidate.orientation_confidence = det.oriented_footprint_valid
+        ? det.orientation_confidence : 0.0F;
     candidate.point_count = det.core_points_base->size();
     candidate.suspension_evidence = det.lidar_lift_evidence;
 
     const bool strict_reacquisition =
         hook_lock_.state == HookCargoLockState::LOST_HOLD;
-    const double dt = hook_lock_.live_pose.valid
-        ? std::max(
-            0.0, hook_observation_association_stamp_.toSec() -
-                hook_lock_.live_pose.evidence_stamp_sec)
-        : 0.0;
     constexpr float kDegToRad =
         3.14159265358979323846F / 180.0F;
     const CargoAssociationDecision decision =
@@ -9702,7 +9781,7 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
             hook_lock_.live_pose.valid
                 ? hook_lock_.live_pose.center_base
                 : hook_lock_.last_accepted_center,
-            hook_lock_.live_pose_velocity_base,
+            association_velocity,
             Eigen::Vector3f(
                 hook_lock_.locked_shape.length_m,
                 hook_lock_.locked_shape.width_m,
@@ -9716,20 +9795,69 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
             hook_lock_.vertical_pose_uncertainty_m,
             hook_lock_.horizontal_tracking_residual_m,
             hook_lock_.vertical_tracking_residual_m,
-            std::min(
-                0.95F,
-                hook_lock_config_.locked_update_min_overlap_ratio +
-                    (strict_reacquisition
-                         ? hook_lock_config_.reacquisition_overlap_extra
-                         : 0.0F)),
+            hook_lock_config_.velocity_model_uncertainty_mps,
+            strict_reacquisition
+                ? hook_lock_config_.reacquisition_max_xy_gate_m
+                : hook_lock_config_.association_max_xy_gate_m,
+            strict_reacquisition
+                ? hook_lock_config_.reacquisition_max_z_gate_m
+                : hook_lock_config_.association_max_z_gate_m,
+            0.0F,
             hook_lock_config_.size_change_max_ratio,
             std::max(
                 20.0F,
                 2.0F * odom_anchor_config_.tight_box
                     .orientation_max_yaw_spread_deg) * kDegToRad,
+            false,
+            false,
             strict_reacquisition});
-    *reject_reason = decision.reason;
-    return decision.accepted;
+    hook_lock_.association_xy_gate_m = decision.dynamic_xy_gate_m;
+    hook_lock_.association_z_gate_m = decision.dynamic_z_gate_m;
+    hook_lock_.observed_yaw_rad = candidate.yaw_rad;
+    hook_lock_.yaw_residual_rad = decision.axial_yaw_error_rad;
+    hook_lock_.yaw_used_as_hard_gate = decision.yaw_used_as_hard_gate;
+    if (!decision.accepted) {
+        *reject_reason = decision.reason;
+        return false;
+    }
+
+    CargoFrozenObbSupportInput support_input;
+    support_input.predicted_center = decision.predicted_center;
+    support_input.locked_size = Eigen::Vector3f(
+        hook_lock_.locked_shape.length_m,
+        hook_lock_.locked_shape.width_m,
+        hook_lock_.locked_shape.height_m);
+    support_input.locked_yaw_rad = hook_lock_.locked_shape.yaw_base_rad;
+    support_input.horizontal_margin_m = 0.15F +
+        hook_lock_.live_pose.position_uncertainty_m;
+    support_input.vertical_margin_m = 0.20F +
+        hook_lock_.vertical_pose_uncertainty_m;
+    support_input.points.reserve(det.core_points_base->size());
+    for (const pcl::PointXYZ& point : det.core_points_base->points) {
+        support_input.points.push_back(point.getVector3fMap());
+    }
+    hook_lock_.locked_obb_support =
+        evaluateCargoFrozenObbSupport(support_input);
+    const float required_support = std::min(
+        0.95F, hook_lock_config_.locked_obb_min_support_ratio +
+            (strict_reacquisition ? 0.10F : 0.0F));
+    if (!hook_lock_.locked_obb_support.valid ||
+        hook_lock_.locked_obb_support.inside_ratio < required_support ||
+        hook_lock_.locked_obb_support.long_axis_coverage_ratio <
+            hook_lock_config_.locked_obb_min_long_axis_coverage ||
+        hook_lock_.locked_obb_support.short_axis_coverage_ratio <
+            hook_lock_config_.locked_obb_min_short_axis_coverage) {
+        *reject_reason = "locked_obb_point_support_low";
+        return false;
+    }
+    *reject_reason = det.oriented_footprint_valid &&
+            decision.axial_yaw_error_rad >
+                std::max(20.0F,
+                         2.0F * odom_anchor_config_.tight_box
+                             .orientation_max_yaw_spread_deg) * kDegToRad
+        ? "accepted_with_soft_yaw_mismatch"
+        : "locked_obb_point_support";
+    return true;
 }
 
 bool NdtSlamNode::isWeakDetection(const HookCargoDetection& det) {
@@ -9856,18 +9984,86 @@ void NdtSlamNode::updateLiveCargoPose(
         measured.x() = det.footprint_center_base.x();
         measured.y() = det.footprint_center_base.y();
     }
-    if (bottom.valid) {
-        measured.z() = 0.5F *
-            (bottom.bottom_z_base + bottom.top_z_base);
-    }
-    if (!measured.allFinite()) return;
-
     const double stamp_sec = stamp.toSec();
     if (hook_lock_.live_pose.valid &&
         stamp_sec <= hook_lock_.live_pose.evidence_stamp_sec + 1.0e-4) {
         // A repeated physical sample is not a new motion observation.
         return;
     }
+    const double measurement_dt = hook_lock_.live_pose.valid
+        ? std::max(
+              0.0, stamp_sec - hook_lock_.live_pose.evidence_stamp_sec)
+        : 0.0;
+    const float predicted_z = hook_lock_.live_pose.valid
+        ? hook_lock_.live_pose.center_base.z() +
+              std::clamp(
+                  hook_lock_.live_pose_velocity_base.z(),
+                  -hook_lock_config_.live_pose_max_z_speed_mps,
+                  hook_lock_config_.live_pose_max_z_speed_mps) *
+                  static_cast<float>(measurement_dt)
+        : det.center_base.z();
+    CargoVerticalPoseSource vertical_source =
+        CargoVerticalPoseSource::PREDICTION;
+    const bool frozen_height_valid = hook_lock_.locked_shape.valid &&
+        hook_lock_.locked_shape.height_m > 0.0F;
+    const bool direct_bottom = frozen_height_valid && bottom.valid &&
+        bottom.source == "points_visible_side" &&
+        std::isfinite(bottom.bottom_z_base);
+    if (direct_bottom) {
+        measured.z() = bottom.bottom_z_base +
+            0.5F * hook_lock_.locked_shape.height_m;
+        vertical_source = CargoVerticalPoseSource::DIRECT_BOTTOM;
+        hook_lock_.direct_bottom_evidence_stamp = stamp;
+    } else if (frozen_height_valid && std::isfinite(det.z95)) {
+        const float top_center = det.z95 -
+            0.5F * hook_lock_.locked_shape.height_m;
+        const float top_gate = std::min(
+            0.30F, std::max(0.10F, hook_lock_.association_z_gate_m));
+        if (!hook_lock_.live_pose.valid ||
+            std::abs(top_center - predicted_z) <= top_gate) {
+            measured.z() = top_center;
+            vertical_source = CargoVerticalPoseSource::DIRECT_TOP;
+        } else {
+            measured.z() = predicted_z;
+        }
+    } else if (frozen_height_valid && det.core_points_base &&
+               !det.core_points_base->empty() &&
+               hook_lock_.live_pose.valid) {
+        std::vector<float> supported_z;
+        supported_z.reserve(det.core_points_base->size());
+        const float cosine = std::cos(hook_lock_.locked_shape.yaw_base_rad);
+        const float sine = std::sin(hook_lock_.locked_shape.yaw_base_rad);
+        for (const pcl::PointXYZ& point : det.core_points_base->points) {
+            if (!pcl::isFinite(point)) continue;
+            const Eigen::Vector2f delta = point.getVector3fMap().head<2>() -
+                hook_lock_.live_pose.center_base.head<2>();
+            const float local_x = cosine * delta.x() + sine * delta.y();
+            const float local_y = -sine * delta.x() + cosine * delta.y();
+            if (std::abs(local_x) <=
+                    0.5F * hook_lock_.locked_shape.length_m + 0.15F &&
+                std::abs(local_y) <=
+                    0.5F * hook_lock_.locked_shape.width_m + 0.15F &&
+                std::abs(point.z - predicted_z) <=
+                    0.5F * hook_lock_.locked_shape.height_m + 0.20F) {
+                supported_z.push_back(point.z);
+            }
+        }
+        if (!supported_z.empty()) {
+            const auto middle = supported_z.begin() +
+                static_cast<std::ptrdiff_t>(supported_z.size() / 2U);
+            std::nth_element(supported_z.begin(), middle, supported_z.end());
+            const float weak_residual = std::clamp(
+                *middle - predicted_z, -0.08F, 0.08F);
+            measured.z() = predicted_z + weak_residual;
+            vertical_source =
+                CargoVerticalPoseSource::LOCKED_OBB_POINT_SUPPORT;
+        } else {
+            measured.z() = predicted_z;
+        }
+    } else {
+        measured.z() = predicted_z;
+    }
+    if (!measured.allFinite()) return;
     if (!hook_lock_.live_pose.valid ||
         !hook_lock_.live_pose.center_base.allFinite()) {
         hook_lock_.live_pose.center_base = measured;
@@ -9901,6 +10097,7 @@ void NdtSlamNode::updateLiveCargoPose(
     hook_lock_.live_pose.evidence_stamp_sec = stamp_sec;
     hook_lock_.live_pose.evaluation_stamp_sec = stamp_sec;
     hook_lock_.live_pose.source = source;
+    hook_lock_.live_pose.vertical_source = vertical_source;
     const float horizontal_residual =
         hook_lock_.live_pose_residual_base.head<2>().norm();
     const float vertical_residual =
@@ -9915,16 +10112,26 @@ void NdtSlamNode::updateLiveCargoPose(
             hook_lock_.vertical_tracking_residual_m);
     hook_lock_.live_pose.position_uncertainty_m = std::max(
         0.08F, hook_lock_.horizontal_tracking_residual_m);
+    const double direct_bottom_age =
+        hook_lock_.direct_bottom_evidence_stamp.isZero()
+            ? hook_lock_config_.direct_bottom_soft_stale_sec
+            : std::max(
+                  0.0, (stamp -
+                        hook_lock_.direct_bottom_evidence_stamp).toSec());
+    const float bottom_age_uncertainty = std::min(
+        hook_lock_config_.bottom_max_uncertainty,
+        0.10F + 0.05F * static_cast<float>(std::max(
+            0.0, direct_bottom_age -
+                hook_lock_config_.direct_bottom_soft_stale_sec)));
     hook_lock_.vertical_pose_uncertainty_m = std::max(
-        bottom.valid ? bottom.uncertainty : 0.15F,
+        direct_bottom ? bottom.uncertainty : bottom_age_uncertainty,
         hook_lock_.vertical_tracking_residual_m);
     // Any independently-stamped, associated cargo core refreshes its live
     // vertical pose. Direct bottom-band support improves uncertainty, but is
     // not the only authority for center_z +/- frozen_height/2.
     hook_lock_.live_vertical_pose_valid = true;
     hook_lock_.live_vertical_pose_evidence_stamp = stamp;
-    hook_lock_.direct_bottom_support_valid =
-        bottom.valid && bottom.source == "points_visible_side";
+    hook_lock_.direct_bottom_support_valid = direct_bottom;
     hook_lock_.locked_center_base = hook_lock_.live_pose.center_base;
 }
 
@@ -9938,9 +10145,10 @@ RigidCargoGeometry NdtSlamNode::buildCurrentRigidCargoGeometryForPose(
     if (cargoTrackRetained() && live_pose.valid && !current_association) {
         live_pose = propagateHeldCargoPose(
             live_pose, hook_lock_.live_pose_velocity_base, stamp.toSec(),
-            hook_lock_config_.formal_hold_sec,
+            hook_lock_config_.formal_pose_hold_sec,
             hook_lock_config_.live_pose_max_xy_speed_mps,
             hook_lock_config_.live_pose_max_z_speed_mps,
+            hook_lock_config_.lost_velocity_decay_tau_sec,
             hook_lock_config_.lost_position_uncertainty_per_sec,
             hook_lock_config_.lost_position_uncertainty_max_m);
     }
@@ -9954,10 +10162,11 @@ RigidCargoGeometry NdtSlamNode::buildCurrentRigidCargoGeometryForPose(
                   hook_lock_.horizontal_tracking_residual_m,
                   live_pose.position_uncertainty_m}));
     current_rigid_cargo_geometry_.height_evidence_stamp_sec =
-        hook_lock_.live_vertical_pose_valid &&
-                !hook_lock_.live_vertical_pose_evidence_stamp.isZero()
-            ? hook_lock_.live_vertical_pose_evidence_stamp.toSec()
-            : 0.0;
+        !hook_lock_.direct_bottom_evidence_stamp.isZero()
+            ? hook_lock_.direct_bottom_evidence_stamp.toSec()
+            : (!hook_lock_.locked_stamp.isZero()
+                   ? hook_lock_.locked_stamp.toSec()
+                   : live_pose.evidence_stamp_sec);
     return current_rigid_cargo_geometry_;
 }
 
@@ -10034,6 +10243,16 @@ void NdtSlamNode::clearHookLock() {
     hook_lock_.live_vertical_pose_valid = false;
     hook_lock_.direct_bottom_support_valid = false;
     hook_lock_.live_vertical_pose_evidence_stamp = ros::Time();
+    hook_lock_.direct_bottom_evidence_stamp = ros::Time();
+    hook_lock_.locked_obb_support = CargoFrozenObbSupport{};
+    hook_lock_.association_xy_gate_m = 0.0F;
+    hook_lock_.association_z_gate_m = 0.0F;
+    hook_lock_.observed_yaw_rad = 0.0F;
+    hook_lock_.yaw_residual_rad = 0.0F;
+    hook_lock_.yaw_used_as_hard_gate = false;
+    hook_lock_.rearm_start_stamp = ros::Time();
+    hook_lock_.rearm_gravity_state =
+        lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN;
     current_rigid_cargo_geometry_ = RigidCargoGeometry{};
     hook_lock_.has_good_height = false;
     hook_lock_.size_update_count = 0;
@@ -10321,9 +10540,14 @@ void NdtSlamNode::updateHookCargoLock(
                 hook_lock_config_.live_pose_max_xy_speed_mps,
                 hook_lock_config_.live_pose_max_z_speed_mps,
                 0.0F, 0.0F, 0.0F, 0.0F,
+                hook_lock_config_.velocity_model_uncertainty_mps,
+                hook_lock_config_.association_max_xy_gate_m,
+                hook_lock_config_.association_max_z_gate_m,
                 0.25F,
                 hook_lock_config_.compact_max_size_relative_step,
                 35.0F * 3.14159265358979323846F / 180.0F,
+                true,
+                true,
                 false});
         }
         const bool same_provisional_identity =
@@ -10636,6 +10860,10 @@ void NdtSlamNode::updateHookCargoLock(
                     lost_age, reject_reason.c_str());
                 if (lost_age > hook_lock_config_.lost_clear_sec) {
                     clearHookLock();
+                    hook_lock_.state =
+                        HookCargoLockState::CLEAR_WAIT_REARM;
+                    hook_lock_.rearm_start_stamp = stamp;
+                    hook_lock_.rearm_gravity_state = hook.state;
                     ROS_WARN("[CARGO_STATE] LOST_HOLD->CLEAR reason=timeout");
                 }
             }
@@ -10644,11 +10872,49 @@ void NdtSlamNode::updateHookCargoLock(
             growUncertainty();
             if (lost_age > hook_lock_config_.lost_clear_sec) {
                 clearHookLock();
+                hook_lock_.state = HookCargoLockState::CLEAR_WAIT_REARM;
+                hook_lock_.rearm_start_stamp = stamp;
+                hook_lock_.rearm_gravity_state = hook.state;
                 ROS_WARN("[CARGO_STATE] LOST_HOLD->CLEAR reason=timeout "
                          "age=%.1f", lost_age);
             }
         }
         break;
+
+    case HookCargoLockState::CLEAR_WAIT_REARM: {
+        const LidarNoCargoEvidenceResult empty_evidence =
+            lidar_no_cargo_evidence_.result();
+        const double rearm_age = hook_lock_.rearm_start_stamp.isZero()
+            ? 0.0 : std::max(
+                0.0, (stamp - hook_lock_.rearm_start_stamp).toSec());
+        const CargoRearmDecision rearm = evaluateCargoRearm({
+            empty_evidence.confirmed,
+            rearm_age,
+            hook_lock_config_.rearm_empty_confirm_sec,
+            hook.valid,
+            gravity_state,
+            static_cast<HookLoadState>(
+                hook_lock_.rearm_gravity_state),
+            det.valid,
+            det.lidar_lift_evidence,
+            det.candidate_score_margin,
+            hook_lock_config_.minimum_candidate_score_margin,
+            det.identity_confidence,
+            hook_lock_config_.minimum_identity_confidence});
+        if (rearm.allowed) {
+            hook_lock_.state = HookCargoLockState::EMPTY;
+            hook_lock_.rearm_start_stamp = ros::Time();
+            retired_cargo_shape_ = LockedCargoShape{};
+            retired_cargo_center_base_.setZero();
+            retired_cargo_velocity_base_.setZero();
+            retired_cargo_stamp_ = ros::Time();
+            retired_cargo_signature_valid_ = false;
+            ROS_INFO(
+                "[CargoLock] CLEAR_WAIT_REARM->EMPTY reason=%s age=%.2f",
+                rearm.reason.c_str(), rearm_age);
+        }
+        break;
+    }
     }
 
     // ========== 更新 CargoState ==========
@@ -10675,6 +10941,7 @@ void NdtSlamNode::updateCargoState(
     // 同步状态
     switch (hook_lock_.state) {
     case HookCargoLockState::EMPTY:
+    case HookCargoLockState::CLEAR_WAIT_REARM:
         cargo_state_.state = CargoState::EMPTY;
         cargo_state_.valid_geometry = false;
         cargo_state_.valid_height = false;
@@ -11370,7 +11637,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         hook_lock_.state == HookCargoLockState::LOST_HOLD,
         stamp.toSec(), rigid_geometry.pose_evidence_stamp_sec,
         rigid_geometry.height_evidence_stamp_sec,
-        hook_lock_config_.formal_hold_sec,
+        hook_lock_config_.formal_pose_hold_sec,
         rigid_geometry.pose.position_uncertainty_m);
     if (rigid_geometry.valid) {
         CargoBoxGeometry formal_geometry;
@@ -11406,8 +11673,11 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         // evaluator uses evidence_stamp_sec and must never see a held sample
         // refreshed to the current tick.
         last_cargo_bottom_result_.stamp_sec = stamp.toSec();
+        // The bottom is center_z minus the frozen rigid height. Its formal
+        // evidence therefore advances with an associated live pose; direct
+        // bottom age only affects vertical uncertainty.
         last_cargo_bottom_result_.evidence_stamp_sec =
-            rigid_geometry.height_evidence_stamp_sec;
+            rigid_geometry.pose_evidence_stamp_sec;
         if (!current_bottom_evidence) {
             last_cargo_bottom_result_.valid =
                 formal_use.formal_safety_valid;
@@ -14768,6 +15038,9 @@ void NdtSlamNode::logCargoHealthPeriodic() {
         case HookCargoLockState::LOCKED: rec.lock_state = "LOCKED"; break;
         case HookCargoLockState::LOST_HOLD:
             rec.lock_state = "LOST_HOLD";
+            break;
+        case HookCargoLockState::CLEAR_WAIT_REARM:
+            rec.lock_state = "CLEAR_WAIT_REARM";
             break;
     }
 

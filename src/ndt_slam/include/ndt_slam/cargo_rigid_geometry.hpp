@@ -28,6 +28,17 @@ enum class CargoPoseSource : std::uint8_t {
 
 const char* cargoPoseSourceName(CargoPoseSource source) noexcept;
 
+enum class CargoVerticalPoseSource : std::uint8_t {
+    DIRECT_BOTTOM = 0,
+    DIRECT_TOP = 1,
+    LOCKED_OBB_POINT_SUPPORT = 2,
+    PREDICTION = 3,
+    DISPLAY_FROZEN = 4
+};
+
+const char* cargoVerticalPoseSourceName(
+    CargoVerticalPoseSource source) noexcept;
+
 struct LiveCargoPose {
     bool valid = false;
     Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
@@ -37,6 +48,8 @@ struct LiveCargoPose {
     // Timestamp at which this pose (possibly predicted/held) was evaluated.
     double evaluation_stamp_sec = 0.0;
     CargoPoseSource source = CargoPoseSource::RECENT_STABLE_HOLD;
+    CargoVerticalPoseSource vertical_source =
+        CargoVerticalPoseSource::DISPLAY_FROZEN;
     float position_uncertainty_m = 0.0F;
 };
 
@@ -164,6 +177,7 @@ LiveCargoPose propagateHeldCargoPose(
     double max_prediction_sec,
     float max_xy_speed_mps,
     float max_z_speed_mps,
+    double velocity_decay_tau_sec,
     float uncertainty_per_sec,
     float max_uncertainty_m);
 

@@ -1486,7 +1486,8 @@ private:
         CANDIDATE = 1,
         GEOMETRY_CONFIRMING = 2,
         LOCKED = 3,
-        LOST_HOLD = 4
+        LOST_HOLD = 4,
+        CLEAR_WAIT_REARM = 5
     };
 
     struct HookCargoLockConfig {
@@ -1529,7 +1530,18 @@ private:
         float live_pose_max_z_speed_mps = 1.5F;
         float live_pose_step_margin_m = 0.05F;
         float live_pose_velocity_alpha = 0.35F;
-        float formal_hold_sec = 0.50F;
+        float formal_pose_hold_sec = 0.60F;
+        float direct_bottom_soft_stale_sec = 1.50F;
+        float velocity_model_uncertainty_mps = 0.05F;
+        float association_max_xy_gate_m = 0.80F;
+        float reacquisition_max_xy_gate_m = 0.55F;
+        float association_max_z_gate_m = 0.90F;
+        float reacquisition_max_z_gate_m = 0.65F;
+        float locked_obb_min_support_ratio = 0.30F;
+        float locked_obb_min_long_axis_coverage = 0.12F;
+        float locked_obb_min_short_axis_coverage = 0.12F;
+        float lost_velocity_decay_tau_sec = 0.30F;
+        float rearm_empty_confirm_sec = 1.0F;
         float lost_position_uncertainty_per_sec = 0.05F;
         float lost_position_uncertainty_max_m = 0.50F;
 
@@ -1609,7 +1621,9 @@ private:
         ros::Time last_seen_stamp;
         ros::Time last_good_height_stamp;
         ros::Time live_vertical_pose_evidence_stamp;
+        ros::Time direct_bottom_evidence_stamp;
         ros::Time locked_stamp;
+        ros::Time rearm_start_stamp;
 
         Eigen::Vector3f locked_size = Eigen::Vector3f::Zero();
         Eigen::Vector3f locked_center_base = Eigen::Vector3f::Zero();  // CargoState 同步
@@ -1653,6 +1667,14 @@ private:
         float lift_from_origin_m = 0.0F;
         CargoLockAuthoritySource lock_authority_source =
             CargoLockAuthoritySource::NONE;
+        CargoFrozenObbSupport locked_obb_support;
+        float association_xy_gate_m = 0.0F;
+        float association_z_gate_m = 0.0F;
+        float observed_yaw_rad = 0.0F;
+        float yaw_residual_rad = 0.0F;
+        bool yaw_used_as_hard_gate = false;
+        std::uint8_t rearm_gravity_state =
+            lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN;
         std::deque<Eigen::Vector3f> size_candidate_buffer;
 
         // 重复帧检测

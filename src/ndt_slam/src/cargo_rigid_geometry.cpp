@@ -45,6 +45,23 @@ const char* cargoPoseSourceName(CargoPoseSource source) noexcept {
     return "UNKNOWN";
 }
 
+const char* cargoVerticalPoseSourceName(
+    CargoVerticalPoseSource source) noexcept {
+    switch (source) {
+        case CargoVerticalPoseSource::DIRECT_BOTTOM:
+            return "DIRECT_BOTTOM";
+        case CargoVerticalPoseSource::DIRECT_TOP:
+            return "DIRECT_TOP";
+        case CargoVerticalPoseSource::LOCKED_OBB_POINT_SUPPORT:
+            return "LOCKED_OBB_POINT_SUPPORT";
+        case CargoVerticalPoseSource::PREDICTION:
+            return "PREDICTION";
+        case CargoVerticalPoseSource::DISPLAY_FROZEN:
+            return "DISPLAY_FROZEN";
+    }
+    return "DISPLAY_FROZEN";
+}
+
 float cargoAxialYawDifference(float lhs_rad, float rhs_rad) {
     return std::abs(normalizeCargoAxialYaw(lhs_rad - rhs_rad));
 }
@@ -141,6 +158,7 @@ LiveCargoPose propagateHeldCargoPose(
     double max_prediction_sec,
     float max_xy_speed_mps,
     float max_z_speed_mps,
+    double velocity_decay_tau_sec,
     float uncertainty_per_sec,
     float max_uncertainty_m) {
     LiveCargoPose result;
@@ -153,6 +171,8 @@ LiveCargoPose propagateHeldCargoPose(
         !std::isfinite(max_prediction_sec) || max_prediction_sec < 0.0 ||
         !std::isfinite(max_xy_speed_mps) || max_xy_speed_mps < 0.0F ||
         !std::isfinite(max_z_speed_mps) || max_z_speed_mps < 0.0F ||
+        !std::isfinite(velocity_decay_tau_sec) ||
+        velocity_decay_tau_sec <= 0.0 ||
         !std::isfinite(uncertainty_per_sec) || uncertainty_per_sec < 0.0F ||
         !std::isfinite(max_uncertainty_m) || max_uncertainty_m < 0.0F ||
         !std::isfinite(pose.position_uncertainty_m) ||
@@ -167,11 +187,20 @@ LiveCargoPose propagateHeldCargoPose(
     const Eigen::Vector3f bounded_velocity = limitCargoPoseResidualByRate(
         velocity_base, 1.0, max_xy_speed_mps, max_z_speed_mps, 0.0F);
     if (prediction_sec > 0.0 && bounded_velocity.norm() > 1.0e-6F) {
+        const double decayed_prediction_sec = velocity_decay_tau_sec *
+            (1.0 - std::exp(-prediction_sec / velocity_decay_tau_sec));
         result.center_base += bounded_velocity *
-            static_cast<float>(prediction_sec);
-        result.source = CargoPoseSource::MOTION_PREDICTION;
+            static_cast<float>(decayed_prediction_sec);
+        if (age_sec <= max_prediction_sec + 1.0e-4) {
+            result.source = CargoPoseSource::MOTION_PREDICTION;
+            result.vertical_source = CargoVerticalPoseSource::PREDICTION;
+        } else {
+            result.source = CargoPoseSource::RECENT_STABLE_HOLD;
+            result.vertical_source = CargoVerticalPoseSource::DISPLAY_FROZEN;
+        }
     } else {
         result.source = CargoPoseSource::RECENT_STABLE_HOLD;
+        result.vertical_source = CargoVerticalPoseSource::DISPLAY_FROZEN;
     }
     result.evaluation_stamp_sec = evaluation_stamp_sec;
     const float grown_uncertainty = pose.position_uncertainty_m +
@@ -318,9 +347,11 @@ CargoFormalUseDecision evaluateCargoFormalUse(
     }
     decision.display_valid = true;
     decision.horizontal_uncertainty_m = horizontal_uncertainty_m;
+    // Frozen shape height remains authoritative for the lifetime of the
+    // retained track. Direct bottom age is diagnostic/uncertainty evidence;
+    // only the live pose evidence window gates formal safety and removal.
     const bool within_hold =
-        decision.pose_age_sec <= formal_hold_sec + 1.0e-4 &&
-        decision.height_age_sec <= formal_hold_sec + 1.0e-4;
+        decision.pose_age_sec <= formal_hold_sec + 1.0e-4;
     decision.formal_safety_valid = within_hold;
     decision.formal_removal_valid = within_hold;
     if (within_hold) {

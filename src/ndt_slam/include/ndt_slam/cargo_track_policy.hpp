@@ -43,6 +43,28 @@ struct CargoPhysicalLockAuthorityDecision {
 CargoPhysicalLockAuthorityDecision evaluateCargoPhysicalLockAuthority(
     const CargoPhysicalLockAuthorityInput& input);
 
+struct CargoRearmInput {
+  bool empty_confirmed = false;
+  double rearm_age_sec = 0.0;
+  double minimum_empty_confirm_sec = 1.0;
+  bool gravity_valid = false;
+  HookLoadState gravity_state = HookLoadState::UNKNOWN;
+  HookLoadState gravity_state_at_clear = HookLoadState::UNKNOWN;
+  bool candidate_valid = false;
+  bool independent_suspension_evidence = false;
+  float candidate_score_margin = 0.0F;
+  float minimum_score_margin = 0.08F;
+  float retired_identity_confidence = 1.0F;
+  float maximum_retired_identity_confidence = 0.62F;
+};
+
+struct CargoRearmDecision {
+  bool allowed = false;
+  std::string reason = "rearm_evidence_missing";
+};
+
+CargoRearmDecision evaluateCargoRearm(const CargoRearmInput& input);
+
 struct CargoCandidateDescriptor {
   int component_id = -1;
   Eigen::Vector3f center = Eigen::Vector3f::Zero();
@@ -105,9 +127,14 @@ struct CargoAssociationInput {
   float vertical_uncertainty_m = 0.0F;
   float horizontal_tracking_residual_m = 0.0F;
   float vertical_tracking_residual_m = 0.0F;
+  float velocity_model_uncertainty_mps = 0.05F;
+  float maximum_xy_gate_m = 0.80F;
+  float maximum_z_gate_m = 0.90F;
   float minimum_overlap_ratio = 0.30F;
   float maximum_shape_relative_error = 0.60F;
   float maximum_axial_yaw_error_rad = 0.35F;
+  bool use_shape_as_hard_gate = true;
+  bool use_yaw_as_hard_gate = true;
   bool strict_reacquisition = false;
 };
 
@@ -123,8 +150,32 @@ struct CargoAssociationDecision {
   float width_relative_error = 0.0F;
   float height_relative_error = 0.0F;
   float axial_yaw_error_rad = 0.0F;
+  bool yaw_used_as_hard_gate = true;
   std::string reason = "not_evaluated";
 };
+
+struct CargoFrozenObbSupportInput {
+  std::vector<Eigen::Vector3f> points;
+  Eigen::Vector3f predicted_center = Eigen::Vector3f::Zero();
+  Eigen::Vector3f locked_size = Eigen::Vector3f::Zero();
+  float locked_yaw_rad = 0.0F;
+  float horizontal_margin_m = 0.15F;
+  float vertical_margin_m = 0.20F;
+};
+
+struct CargoFrozenObbSupport {
+  bool valid = false;
+  std::size_t finite_points = 0U;
+  std::size_t inside_points = 0U;
+  float inside_ratio = 0.0F;
+  float long_axis_coverage_ratio = 0.0F;
+  float short_axis_coverage_ratio = 0.0F;
+  float vertical_coverage_ratio = 0.0F;
+  std::string reason = "not_evaluated";
+};
+
+CargoFrozenObbSupport evaluateCargoFrozenObbSupport(
+    const CargoFrozenObbSupportInput& input);
 
 struct CargoProvisionalLockConfig {
   std::size_t minimum_frames = 3U;
