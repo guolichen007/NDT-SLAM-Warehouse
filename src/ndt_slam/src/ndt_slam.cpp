@@ -12259,7 +12259,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     std::size_t rigging_self_removed = 0U;
     const Eigen::Vector2f hook_anchor = getCargoAnchorXY();
     const float rigging_lower_z = predicted_self_footprint.valid
-        ? predicted_self_footprint.max_z_base - self_margin_z
+        ? predicted_self_footprint.max_z - self_margin_z
         : std::numeric_limits<float>::infinity();
     const float rigging_upper_z = std::max(
         rigging_lower_z + 0.10F,
@@ -14129,7 +14129,7 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                  removal_footprint.center_base.y(),
                  removal_footprint.length_m,
                  removal_footprint.width_m,
-                 removal_footprint.max_z_base - removal_footprint.min_z_base,
+                 removal_footprint.max_z - removal_footprint.min_z,
                  removal_footprint.yaw_base_rad * 180.0F /
                      3.14159265358979323846F);
     }
