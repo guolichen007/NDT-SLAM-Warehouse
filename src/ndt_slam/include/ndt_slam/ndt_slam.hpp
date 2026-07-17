@@ -1268,6 +1268,8 @@ private:
         float visible_long_axis_span_m = 0.0F;
         float long_axis_coverage_ratio = 0.0F;
         float short_axis_coverage_ratio = 0.0F;
+        std::size_t top_support_points = 0U;
+        float top_surface_coverage_ratio = 0.0F;
         float candidate_top1_score = 0.0F;
         float candidate_top2_score = 0.0F;
         float candidate_score_margin = 0.0F;
@@ -1773,6 +1775,8 @@ private:
         CargoLockAuthoritySource lock_authority_source =
             CargoLockAuthoritySource::NONE;
         CargoFrozenObbSupport locked_obb_support;
+        std::string vertical_reject_reason = "not_evaluated";
+        std::string association_reject_reason = "not_evaluated";
         float association_xy_gate_m = 0.0F;
         float association_z_gate_m = 0.0F;
         float observed_yaw_rad = 0.0F;

@@ -10233,6 +10233,25 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     result.z95 = z95;
     result.visible_height = z95 - z05;
     result.xy_area = sx * sy;
+    const float top_band_height = std::max(
+        0.05F, hook_fixed_config_.bottom_band_height);
+    const float top_cell_size = std::max(
+        0.05F, hook_fixed_config_.bottom_xy_cell_size);
+    std::set<std::pair<int, int>> top_cells;
+    for (const pcl::PointXYZ& point : result.core_points_base->points) {
+        if (point.z < z95 - top_band_height) continue;
+        ++result.top_support_points;
+        top_cells.emplace(
+            static_cast<int>(std::floor(point.x / top_cell_size)),
+            static_cast<int>(std::floor(point.y / top_cell_size)));
+    }
+    const std::size_t expected_top_cells = static_cast<std::size_t>(
+        std::max(1.0, std::ceil(static_cast<double>(sx / top_cell_size))) *
+        std::max(1.0, std::ceil(static_cast<double>(sy / top_cell_size))));
+    result.top_surface_coverage_ratio = std::clamp(
+        static_cast<float>(top_cells.size()) /
+            static_cast<float>(std::max<std::size_t>(1U, expected_top_cells)),
+        0.0F, 1.0F);
     if (result.oriented_footprint_valid) {
         CargoCandidateDescriptor selected_descriptor;
         selected_descriptor.component_id =
@@ -10379,6 +10398,37 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
         std::numeric_limits<float>::infinity();
     if (!std::isfinite(center_distance) || center_distance > center_gate) {
         *reject_reason = "center_too_far";
+        return false;
+    }
+
+    CargoFrozenObbSupportInput support_input;
+    support_input.points.reserve(det.core_points_base->size());
+    for (const pcl::PointXYZ& point : det.core_points_base->points) {
+        support_input.points.push_back(point.getVector3fMap());
+    }
+    support_input.predicted_center = hook_lock_.live_pose.valid
+        ? hook_lock_.live_pose.center_base
+        : hook_lock_.last_accepted_center;
+    support_input.locked_size = Eigen::Vector3f(
+        hook_lock_.locked_shape.length_m,
+        hook_lock_.locked_shape.width_m,
+        hook_lock_.locked_shape.height_m);
+    support_input.locked_yaw_rad = hook_lock_.locked_shape.yaw_base_rad;
+    support_input.horizontal_margin_m =
+        hook_lock_config_.self_cargo_base_margin_xy_m;
+    support_input.vertical_margin_m =
+        hook_lock_config_.self_cargo_base_margin_z_m;
+    hook_lock_.locked_obb_support =
+        evaluateCargoFrozenObbSupport(support_input);
+    const CargoFrozenObbSupport& support = hook_lock_.locked_obb_support;
+    if (!support.valid ||
+        support.inside_ratio <
+            hook_lock_config_.locked_obb_min_support_ratio ||
+        support.long_axis_coverage_ratio <
+            hook_lock_config_.locked_obb_min_long_axis_coverage ||
+        support.short_axis_coverage_ratio <
+            hook_lock_config_.locked_obb_min_short_axis_coverage) {
+        *reject_reason = "locked_obb_support_insufficient";
         return false;
     }
 
@@ -10593,6 +10643,9 @@ void NdtSlamNode::updateLiveCargoPose(
             direct_bottom,
             bottom.bottom_z_base,
             hook_lock_config_.top_bottom_center_agreement_m});
+    hook_lock_.vertical_reject_reason = vertical_measurement.valid
+        ? std::string("accepted:") + vertical_measurement.reason
+        : vertical_measurement.reason;
     const bool accepted_direct_bottom = direct_bottom &&
         (!vertical_measurement.used_top_surface ||
          vertical_measurement.bottom_corroborated);
@@ -10867,6 +10920,8 @@ void NdtSlamNode::clearHookLock() {
     hook_lock_.live_vertical_pose_evidence_stamp = ros::Time();
     hook_lock_.direct_bottom_evidence_stamp = ros::Time();
     hook_lock_.locked_obb_support = CargoFrozenObbSupport{};
+    hook_lock_.vertical_reject_reason = "not_evaluated";
+    hook_lock_.association_reject_reason = "not_evaluated";
     hook_lock_.association_xy_gate_m = 0.0F;
     hook_lock_.association_z_gate_m = 0.0F;
     hook_lock_.observed_yaw_rad = 0.0F;
@@ -11528,6 +11583,7 @@ void NdtSlamNode::updateHookCargoLock(
             // Association gate：检查检测是否与 locked box 一致
             std::string reject_reason;
             bool accepted = isDetectionConsistentWithLockedBox(det, bottom, &reject_reason);
+            hook_lock_.association_reject_reason = reject_reason;
 
             if (accepted) {
                 observation_associated = true;
@@ -11593,6 +11649,7 @@ void NdtSlamNode::updateHookCargoLock(
             std::string reject_reason;
             const bool accepted =
                 isDetectionConsistentWithLockedBox(det, bottom, &reject_reason);
+            hook_lock_.association_reject_reason = reject_reason;
             if (accepted) {
                 observation_associated = true;
                 hook_lock_.state = HookCargoLockState::LOCKED;
@@ -16755,6 +16812,32 @@ void NdtSlamNode::logCargoHealthPeriodic() {
         static_cast<std::size_t>(std::numeric_limits<int>::max())));
     rec.selected_candidate_id =
         hook_fixed_cargo_.selected_candidate_id;
+    rec.candidate_present = hook_fixed_cargo_.candidate_count > 0U ||
+        hook_lock_.state == HookCargoLockState::CANDIDATE ||
+        hook_lock_.state == HookCargoLockState::GEOMETRY_CONFIRMING;
+    rec.candidate_authoritative = cargoTrackRetained() &&
+        last_cargo_bottom_result_.valid;
+    rec.candidate_points = rec.cluster_points;
+    rec.candidate_age_sec = !hook_lock_.candidate_started_stamp.isZero()
+        ? std::max(
+              0.0, rec.stamp - hook_lock_.candidate_started_stamp.toSec())
+        : 0.0;
+    rec.candidate_consistent_frames = static_cast<int>(
+        std::min<std::size_t>(
+            hook_lock_.provisional_observations.size(),
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.candidate_required_frames =
+        hook_lock_config_.candidate_required_consistent_frames;
+    rec.candidate_merged_components = static_cast<int>(
+        std::min<std::size_t>(
+            hook_fixed_cargo_.merged_component_count,
+            static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.candidate_long_axis_coverage =
+        hook_fixed_cargo_.long_axis_coverage_ratio;
+    rec.candidate_short_axis_coverage =
+        hook_fixed_cargo_.short_axis_coverage_ratio;
+    rec.candidate_gate_failure = hook_fixed_cargo_.reject_reason.empty()
+        ? "none" : hook_fixed_cargo_.reject_reason;
     rec.identity_score = hook_fixed_cargo_.identity_confidence;
     rec.orientation_confidence =
         hook_fixed_cargo_.orientation_confidence;
@@ -16812,6 +16895,8 @@ void NdtSlamNode::logCargoHealthPeriodic() {
     rec.obstacle_uncertainty_m = cargo_obstacle_uncertainty_m_;
     rec.conservative_clearance_m = cargo_conservative_clearance_m_;
     rec.requested_alarm_code = cargo_last_requested_code_;
+    rec.safety_evidence_state =
+        static_cast<int>(cargo_last_safety_evidence_state_);
     rec.raw_warning_code = cargo_raw_warning_code_;
     rec.confirmed_warning_code = cargo_confirmed_warning_code_;
     rec.temporal_candidate_code = cargo_temporal_candidate_code_;
@@ -16856,6 +16941,22 @@ void NdtSlamNode::logCargoHealthPeriodic() {
     rec.filter_accepted = last_cargo_bottom_result_.valid;
     rec.filter_reason = last_cargo_bottom_result_.reason;
     rec.lost_frames = hook_lock_.lost_count;
+    rec.vertical_evidence_age_sec =
+        !hook_lock_.live_vertical_pose_evidence_stamp.isZero()
+            ? std::max(
+                  0.0, rec.stamp -
+                      hook_lock_.live_vertical_pose_evidence_stamp.toSec())
+            : std::numeric_limits<double>::infinity();
+    rec.top_support_points = static_cast<int>(std::min<std::size_t>(
+        hook_fixed_cargo_.top_support_points,
+        static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    rec.top_surface_coverage =
+        hook_fixed_cargo_.top_surface_coverage_ratio;
+    rec.locked_obb_support_ratio =
+        hook_lock_.locked_obb_support.inside_ratio;
+    rec.vertical_reject_reason = hook_lock_.vertical_reject_reason;
+    rec.association_reject_reason =
+        hook_lock_.association_reject_reason;
 
     switch (cargo_state_.state) {
         case CargoState::EMPTY: rec.track_state = "EMPTY"; break;

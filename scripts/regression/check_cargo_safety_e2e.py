@@ -429,7 +429,18 @@ def main() -> int:
             "safety_spatial_mode" in runtime_header and
             "corridor_rejected_clusters" in runtime_header and
             "residual_unknown_clusters" in runtime_header and
-            "requested_alarm_code" in runtime_header,
+            "requested_alarm_code" in runtime_header and
+            "candidate_present" in runtime_header and
+            "candidate_authoritative" in runtime_header and
+            "candidate_merged_components" in runtime_header and
+            "candidate_gate_failure" in runtime_header and
+            "vertical_evidence_age_sec" in runtime_header and
+            "top_support_points" in runtime_header and
+            "top_surface_coverage" in runtime_header and
+            "locked_obb_support_ratio" in runtime_header and
+            "vertical_reject_reason" in runtime_header and
+            "association_reject_reason" in runtime_header and
+            "evaluateCargoFrozenObbSupport" in node,
             "cargo safety evidence is incomplete in frame diagnostics",
             failures)
     require("NDT_SKIPPED_BOOTSTRAP" in node and

@@ -246,6 +246,16 @@ struct CargoFrameRecord {
   int support_points = 0;
   int candidate_count = 0;
   int selected_candidate_id = -1;
+  bool candidate_present = false;
+  bool candidate_authoritative = false;
+  int candidate_points = 0;
+  double candidate_age_sec = 0.0;
+  int candidate_consistent_frames = 0;
+  int candidate_required_frames = 0;
+  int candidate_merged_components = 0;
+  double candidate_long_axis_coverage = 0.0;
+  double candidate_short_axis_coverage = 0.0;
+  std::string candidate_gate_failure = "none";
   double identity_score = 0.0;
   double orientation_confidence = 0.0;
   double shape_confidence = 0.0;
@@ -279,6 +289,7 @@ struct CargoFrameRecord {
   double conservative_clearance_m =
       std::numeric_limits<double>::quiet_NaN();
   int requested_alarm_code = 30;
+  int safety_evidence_state = 0;
   int raw_warning_code = 0;
   int confirmed_warning_code = 0;
   int temporal_candidate_code = 0;
@@ -313,6 +324,12 @@ struct CargoFrameRecord {
   double frozen_thickness_m = 0.0;
   double pose_evidence_age_sec = 0.0;
   double height_evidence_age_sec = 0.0;
+  double vertical_evidence_age_sec = 0.0;
+  int top_support_points = 0;
+  double top_surface_coverage = 0.0;
+  double locked_obb_support_ratio = 0.0;
+  std::string vertical_reject_reason = "not_evaluated";
+  std::string association_reject_reason = "not_evaluated";
   double size_x = 0.0, size_y = 0.0, size_z = 0.0;
   double footprint_yaw_deg = 0.0;
   double raw_bottom_z = 0.0;
