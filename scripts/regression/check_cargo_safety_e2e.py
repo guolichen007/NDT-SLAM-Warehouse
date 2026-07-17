@@ -50,7 +50,7 @@ def main() -> int:
     require("CargoBottomEstimate.msg" in messages and
             "CargoSafetyStatus.msg" in messages,
             "typed Cargo messages are not generated", failures)
-    require("SCHEMA_VERSION=5" in safety_message and
+    require("SCHEMA_VERSION=6" in safety_message and
             all(f"CODE_{name}" in safety_message for name in (
                 "CLEAR", "LEVEL1_WARNING", "LEVEL2_WARNING",
                 "SYSTEM_NOT_READY", "LOCALIZATION_INVALID",
@@ -63,7 +63,7 @@ def main() -> int:
                 "EVIDENCE_TRACK_CONFIRMATION_PENDING",
                 "EVIDENCE_SPARSE_PENDING", "EVIDENCE_SOURCE_UNRESOLVED",
                 "evidence_state", "obstacle_track_id")),
-            "CargoSafetyStatus v5 role/code/evidence contract is incomplete",
+            "CargoSafetyStatus v6 role/code/evidence contract is incomplete",
             failures)
 
     for include in ("cargo_bottom_fusion.hpp", "cargo_safety_evaluator.hpp",
@@ -258,8 +258,9 @@ def main() -> int:
     require("publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_" in node,
             "legacy payload compatibility output does not consume fusion", failures)
     require("SOURCE_ORIGIN_HEIGHT=5" in bottom_message and
-            "SCHEMA_VERSION=2" in bottom_message,
-            "origin height source is missing from message schema v2", failures)
+            "SOURCE_DIRECT_TOP_FROZEN_THICKNESS=6" in bottom_message and
+            "SCHEMA_VERSION=3" in bottom_message,
+            "formal height sources are missing from message schema v3", failures)
     require("observation.origin_height_valid" in node and
             "observation.map_static_height_valid = origin_height" not in node,
             "track origin height is mislabeled as static-map evidence", failures)
@@ -347,7 +348,9 @@ def main() -> int:
             "require_static_cargo_for_warning: true" in live_config and
             "static_cargo_min_voxel_points: 80" in live_config and
             "static_cargo_min_occupied_cells: 12" in live_config and
-            "independent_external_provenance" in obstacle_tracker and
+            "ExternalProvenance" in obstacle_tracker and
+            "CARGO_MOVED_AWAY_PERSISTENCE" in obstacle_tracker and
+            "cellOverlap" in obstacle_tracker and
             "centroid_map" in obstacle_tracker,
             "hazards are not confirmed by persistent map-frame identity",
             failures)
@@ -378,9 +381,16 @@ def main() -> int:
             "CargoVerticalPoseSource::DIRECT_TOP" in node,
             "formal cargo OBB yaw/vertical stability contract is missing",
             failures)
+    require("marker.color.r = bottom.source" not in node and
+            "marker.color.g = bottom.source" not in node and
+            "Green means formal geometry + vertical authority" in node and
+            'name="use_cargo_visualizer" default="false"' in launch,
+            "RViz cargo authority color or single-marker contract regressed",
+            failures)
     require("top_surface_minus_frozen_thickness" in cargo_track_policy and
-            "case CargoBottomSource::ORIGIN_HEIGHT: return 5" in
+            "CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS" in
                 read("src/ndt_slam/src/cargo_bottom_fusion.cpp") and
+            "evaluateCargoFormalHeight" in node and
             "consistent_partial_height_observation" in node and
             "rigid_shape_height_mismatch" not in node,
             "pre-lift thickness/top-surface height authority is incomplete",
@@ -432,6 +442,9 @@ def main() -> int:
             "used_previous_confirmation" in runtime_header and
             "obstacle_track_id" in runtime_header and
             "obstacle_track_velocity" in runtime_header and
+            "obstacle_static_provenance_streak" in runtime_header and
+            "obstacle_provenance_type" in runtime_header and
+            "obstacle_track_cell_overlap" in runtime_header and
             "safety_spatial_mode" in runtime_header and
             "corridor_rejected_clusters" in runtime_header and
             "residual_unknown_clusters" in runtime_header and
@@ -465,9 +478,10 @@ def main() -> int:
             "pending_repeat_sec" in heartbeat + launch and
             "SAFETY_WARN" in heartbeat and
             "warning_repeat_sec" in heartbeat + launch and
-            "CARGO_SAFETY_PENDING_SUMMARY" in node and
+            "CARGO_SAFETY_INTERNAL" in node and
+            "CARGO_SAFETY_PENDING_SUMMARY" not in node and
             "CARGO_SAFETY_PERSISTENT" not in node,
-            "typed pending summaries or immediate/periodic 17/18 logs are missing",
+            "heartbeat operator ownership or urgent warning logs are missing",
             failures)
     for value in ("/cargo_avoidance/safety_status",
                   "/cargo_avoidance/status_code",

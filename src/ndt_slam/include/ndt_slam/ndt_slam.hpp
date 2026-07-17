@@ -1594,6 +1594,8 @@ private:
         // from the visible top surface while freezing physical thickness.
         bool freeze_vertical_position_after_lock = false;
         bool track_vertical_from_top_surface = true;
+        int formal_top_min_support_points = 8;
+        float formal_top_min_coverage_ratio = 0.02F;
         float top_bottom_center_agreement_m = 0.25F;
         float bottom_alpha_points = 0.30f;
         float bottom_alpha_memory = 0.15f;
@@ -1898,6 +1900,16 @@ private:
     double cargo_obstacle_track_age_sec_ = 0.0;
     int cargo_obstacle_track_confirm_count_ = 0;
     bool cargo_obstacle_track_static_ = false;
+    int cargo_obstacle_static_provenance_streak_ = 0;
+    double cargo_obstacle_static_age_sec_ = 0.0;
+    bool cargo_obstacle_large_geometry_valid_ = false;
+    ExternalProvenance cargo_obstacle_provenance_ =
+        ExternalProvenance::NONE;
+    bool cargo_obstacle_provenance_valid_ = false;
+    float cargo_obstacle_track_cell_overlap_ = 0.0F;
+    float cargo_obstacle_track_iou_ = 0.0F;
+    float cargo_obstacle_association_cost_ = 0.0F;
+    std::string cargo_obstacle_association_reset_reason_;
     Eigen::Vector3f cargo_obstacle_track_velocity_map_ =
         Eigen::Vector3f::Zero();
     bool cargo_map_motion_sample_valid_ = false;

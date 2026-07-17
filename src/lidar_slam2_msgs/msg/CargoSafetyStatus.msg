@@ -1,7 +1,7 @@
 # Authoritative cargo safety evidence and final status consumed by the main
 # controller.  Warning codes describe physical hazards only; system faults use
 # a separate code range and fault mask.
-uint16 SCHEMA_VERSION=5
+uint16 SCHEMA_VERSION=6
 
 int32 CODE_CLEAR=14
 int32 CODE_LEVEL1_WARNING=17
@@ -41,6 +41,13 @@ uint8 EVIDENCE_SPARSE_PENDING=5
 uint8 EVIDENCE_SOURCE_UNRESOLVED=6
 uint8 EVIDENCE_HARD_FAULT=7
 
+uint8 PROVENANCE_NONE=0
+uint8 PROVENANCE_OUTSIDE_CARGO_SHELL_ONLY=1
+uint8 PROVENANCE_PRE_CARGO_OCCUPANCY=2
+uint8 PROVENANCE_STATIC_MAP_MATCH=3
+uint8 PROVENANCE_CARGO_MOVED_AWAY_PERSISTENCE=4
+uint8 PROVENANCE_DUAL_LIDAR_CONSENSUS=5
+
 std_msgs/Header header
 uint16 schema_version
 
@@ -59,6 +66,16 @@ bool hook_signal_conflict
 bool cargo_valid
 uint32 cargo_track_id
 uint32 obstacle_track_id
+uint32 obstacle_validated_streak
+uint32 obstacle_static_provenance_streak
+float32 obstacle_static_age_sec
+bool obstacle_large_geometry_valid
+uint8 obstacle_provenance_type
+bool obstacle_provenance_valid
+float32 obstacle_track_cell_overlap
+float32 obstacle_track_iou
+float32 obstacle_association_cost
+string obstacle_association_reset_reason
 uint8 cargo_source
 uint8 hook_load_state
 float32 hook_voltage

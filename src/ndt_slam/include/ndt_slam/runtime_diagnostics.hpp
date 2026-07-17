@@ -300,6 +300,15 @@ struct CargoFrameRecord {
   double obstacle_track_age_sec = 0.0;
   int obstacle_track_confirm_count = 0;
   bool obstacle_track_static = false;
+  int obstacle_static_provenance_streak = 0;
+  double obstacle_static_age_sec = 0.0;
+  bool obstacle_large_geometry_valid = false;
+  std::string obstacle_provenance_type = "NONE";
+  bool obstacle_provenance_valid = false;
+  double obstacle_track_cell_overlap = 0.0;
+  double obstacle_track_iou = 0.0;
+  double obstacle_association_cost = 0.0;
+  std::string obstacle_association_reset_reason;
   double obstacle_track_velocity_x = 0.0;
   double obstacle_track_velocity_y = 0.0;
   double obstacle_track_velocity_z = 0.0;

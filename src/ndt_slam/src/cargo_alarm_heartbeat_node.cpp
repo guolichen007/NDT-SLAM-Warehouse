@@ -412,8 +412,8 @@ private:
     }
 
     void statusCallback(const lidar_slam2_msgs::CargoSafetyStatus::ConstPtr& msg) {
-        static_assert(lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION == 5,
-                      "CargoSafetyStatus schema v5 is required");
+        static_assert(lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION == 6,
+                      "CargoSafetyStatus schema v6 is required");
         static_assert(
             lidar_slam2_msgs::CargoSafetyStatus::HOOK_ROLE_DISABLED ==
                 AlarmStateMachine::kHookRoleDisabled &&
@@ -457,15 +457,13 @@ private:
             msg->conservative_vertical_clearance_m,
             contract.clear_without_obstacle_geometry);
         const bool fresh_status = std::string(result.reason) == "fresh_status";
-        const bool urgent_details_changed = fresh_status && contract.valid &&
-            (result.code == AlarmStateMachine::kLevel1Warning ||
-             result.code == AlarmStateMachine::kLevel2Warning) &&
+        const bool pending_episode_changed = fresh_status &&
+            contract.code == AlarmStateMachine::kObstacleInvalid &&
             (!has_last_status_ ||
              last_status_.requested_alarm_code !=
                  accepted_status.requested_alarm_code ||
-             last_status_.obstacle_track_id !=
-                 accepted_status.obstacle_track_id ||
-             last_status_.reason != accepted_status.reason);
+             last_status_.evidence_state != accepted_status.evidence_state ||
+             last_status_.cargo_track_id != accepted_status.cargo_track_id);
         // A retransmitted source stamp is not a new geometry/evidence frame.
         // Keep the last accepted status so periodic 17/18 logs cannot pair a
         // retained alarm code with fields from a duplicate CLEAR message.
@@ -473,7 +471,7 @@ private:
             last_status_ = accepted_status;
             has_last_status_ = true;
         }
-        if (result.changed || urgent_details_changed) {
+        if (result.changed || pending_episode_changed) {
             publishCode(result.code, result.reason, true);
         }
     }
@@ -522,19 +520,29 @@ private:
                      pending_repeat_sec_);
             if (persistent_due) {
                 ROS_WARN("[SAFETY_PENDING_SUMMARY] code=34 age=%.2f "
-                         "evidence=%u track=%u reason=%s",
+                         "evidence=%u cargo_track=%u obstacle_track=%u "
+                         "validated=%u static=%u provenance=%u/%d "
+                         "cell_overlap=%.2f reason=%s",
                          pending_age,
                          static_cast<unsigned int>(
                              last_status_.evidence_state),
+                         last_status_.cargo_track_id,
                          last_status_.obstacle_track_id,
+                         last_status_.obstacle_validated_streak,
+                         last_status_.obstacle_static_provenance_streak,
+                         static_cast<unsigned int>(
+                             last_status_.obstacle_provenance_type),
+                         last_status_.obstacle_provenance_valid ? 1 : 0,
+                         last_status_.obstacle_track_cell_overlap,
                          status_reason.c_str());
                 pending_error_reported_ = true;
                 last_pending_log_wall_sec_ = wall_now_sec;
             } else if (log_change) {
-                ROS_WARN("[SAFETY_PENDING] code=34 evidence=%u track=%u "
-                         "reason=%s",
+                ROS_WARN("[SAFETY_PENDING] code=34 evidence=%u "
+                         "cargo_track=%u obstacle_track=%u reason=%s",
                          static_cast<unsigned int>(
                              last_status_.evidence_state),
+                         last_status_.cargo_track_id,
                          last_status_.obstacle_track_id,
                          status_reason.c_str());
                 last_pending_log_wall_sec_ = wall_now_sec;
@@ -549,9 +557,16 @@ private:
             code == AlarmStateMachine::kLevel2Warning;
         const bool warning_repeat_due = urgent_warning &&
             (last_warning_log_wall_sec_ <= 0.0 ||
-             wall_now_sec - last_warning_log_wall_sec_ >=
+                 wall_now_sec - last_warning_log_wall_sec_ >=
                  warning_repeat_sec_);
-        if (!log_change && !warning_repeat_due) return;
+        const bool periodic_fault =
+            code == AlarmStateMachine::kCargoInvalid ||
+            code == AlarmStateMachine::kObstacleInvalid;
+        const bool fault_repeat_due = periodic_fault &&
+            (last_fault_log_wall_sec_ <= 0.0 ||
+             wall_now_sec - last_fault_log_wall_sec_ >=
+                 pending_repeat_sec_);
+        if (!log_change && !warning_repeat_due && !fault_repeat_due) return;
         if (code == AlarmStateMachine::kClear) {
             ROS_INFO("[SAFETY] code=14 state=CLEAR "
                      "localization_valid=%d gravity_valid=%d "
@@ -585,9 +600,11 @@ private:
                 ROS_WARN("[SAFETY_FAULT] code=%d reason=%s",
                          code, fault_reason.c_str());
             } else {
-                ROS_ERROR("[SAFETY_FAULT] code=%d reason=%s",
+                ROS_ERROR("[SAFETY_FAULT%s] code=%d reason=%s",
+                          !log_change && fault_repeat_due ? "_SUMMARY" : "",
                           code, fault_reason.c_str());
             }
+            if (periodic_fault) last_fault_log_wall_sec_ = wall_now_sec;
         }
     }
 
@@ -615,6 +632,7 @@ private:
     double pending_since_wall_sec_ = 0.0;
     double last_pending_log_wall_sec_ = 0.0;
     double last_warning_log_wall_sec_ = 0.0;
+    double last_fault_log_wall_sec_ = 0.0;
 };
 
 }  // namespace cargo_alarm

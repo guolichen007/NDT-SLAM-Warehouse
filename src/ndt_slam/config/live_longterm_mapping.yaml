@@ -691,6 +691,14 @@ cargo_safety:
   maximum_clearance_step_m: 0.75
   obstacle_track_association_distance_m: 0.75
   obstacle_track_association_top_step_m: 0.75
+  # Large warehouse stacks retain identity by stable map-frame occupied cells,
+  # even when their visible centroid changes with viewpoint.
+  static_track_cell_overlap_min: 0.20
+  static_track_iou_min: 0.10
+  # OUTSIDE_CARGO_SHELL_ONLY is diagnostic. A static stack can become
+  # independent only after the cargo moves while the stack stays on the same
+  # map cells (or when a future map/pre-cargo source explicitly proves it).
+  static_provenance_min_cargo_motion_m: 0.30
   obstacle_track_stale_sec: 1.00
   require_static_cargo_for_warning: true
   static_cargo_min_voxel_points: 80
@@ -825,6 +833,11 @@ hook_cargo_lock:
   # associated frame derives bottom_z = robust_top_z - frozen_thickness.
   freeze_vertical_position_after_lock: false
   track_vertical_from_top_surface: true
+  # A top-derived formal bottom still requires fresh, associated physical
+  # support. These gates reject isolated high returns without requiring the
+  # overhead LiDAR to see the occluded lower edge.
+  formal_top_min_support_points: 8
+  formal_top_min_coverage_ratio: 0.02
   # Direct lower-edge points may corroborate the top-derived center only when
   # both estimates agree; otherwise the robust upper surface remains primary.
   top_bottom_center_agreement_m: 0.25
