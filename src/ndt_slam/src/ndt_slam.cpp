@@ -158,6 +158,23 @@ void logSO3GuardPose(const char* stage, std::uint64_t frame,
                      finite ? "ok" : "pose_non_finite");
 }
 
+std::string persistentMapUuid(const std::string& root_path) {
+    // Stable FNV-1a identifier. std::hash is intentionally avoided because
+    // its cross-process/cross-library stability is not part of the standard.
+    std::uint64_t value = 14695981039346656037ULL;
+    for (const unsigned char byte : root_path) {
+        value ^= static_cast<std::uint64_t>(byte);
+        value *= 1099511628211ULL;
+    }
+    return std::to_string(value);
+}
+
+std::string staticEvidenceIndexFileName(
+    std::uint64_t generation, std::uint64_t revision) {
+    return "static_evidence_index_v1_g" + std::to_string(generation) +
+        "_r" + std::to_string(revision) + ".csv";
+}
+
 }  // namespace
 
 static_assert(static_cast<std::uint8_t>(CargoBottomSource::INVALID) ==
@@ -188,6 +205,8 @@ static_assert(
 NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     : nh_(nh) {
     initializeParameters();
+    static_obstacle_evidence_index_.reset(
+        static_evidence_epoch_.load(std::memory_order_acquire));
 
     pointcloud_sub_ = nh_.subscribe(pointcloud_topic_, 10, &NdtSlamNode::pointCloudCallback, this);
     if (hook_load_signal_enabled_) {
@@ -327,6 +346,11 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
 
     timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
+    if (memory_guard_enabled_) {
+        memory_guard_timer_ = nh_.createWallTimer(
+            ros::WallDuration(std::max(1, memory_check_interval_sec_)),
+            &NdtSlamNode::memoryGuardTimerCallback, this);
+    }
 
     ROS_DEBUG("NdtSlamNode initialized with NDT_OMP");
     ROS_DEBUG("Services: reset, set_pose, relocalize, save_map, load_map, rebuild_map");
@@ -499,6 +523,11 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
 
     timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
+    if (memory_guard_enabled_) {
+        memory_guard_timer_ = nh_.createWallTimer(
+            ros::WallDuration(std::max(1, memory_check_interval_sec_)),
+            &NdtSlamNode::memoryGuardTimerCallback, this);
+    }
 
     ROS_DEBUG("NdtSlamNode initialized with NDT_OMP");
     ROS_DEBUG("Config file: %s", config_file_path.c_str());
@@ -509,6 +538,7 @@ NdtSlamNode::~NdtSlamNode() {
     pointcloud_sub_.shutdown();
     hook_load_state_sub_.shutdown();
     timer_.stop();
+    memory_guard_timer_.stop();
     shutdown_ = true;
     queue_cv_.notify_all();
     tracking_cv_.notify_all();
@@ -560,7 +590,9 @@ NdtSlamNode::~NdtSlamNode() {
         has_failed_tile_batch = !failed_tile_flush_batch_.empty();
     }
     if (persistent_map_enabled_ &&
-        (!dirty_tiles_.empty() || has_failed_tile_batch)) {
+        (!dirty_tiles_.empty() || has_failed_tile_batch ||
+         static_evidence_persistence_dirty_.load(
+             std::memory_order_acquire))) {
         flushDirtyTiles();
     }
     if (tile_flush_thread_.joinable()) {
@@ -595,6 +627,8 @@ void NdtSlamNode::enqueueMapCommitJob(
     MapCommitJob job;
     job.lifecycle_epoch =
         map_rebuild_generation_.load(std::memory_order_acquire);
+    job.static_evidence_epoch =
+        static_evidence_epoch_.load(std::memory_order_acquire);
     job.stamp = stamp;
     job.pose = pose;
     job.cloud = cloud;
@@ -1196,10 +1230,27 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         if (config["memory_guard"]) {
             auto mg = config["memory_guard"];
             memory_guard_enabled_ = mg["enabled"].as<bool>(false);
-            soft_threshold_mb_ = mg["soft_threshold_mb"].as<int>(6000);
-            hard_threshold_mb_ = mg["hard_threshold_mb"].as<int>(7000);
-            emergency_threshold_mb_ = mg["emergency_threshold_mb"].as<int>(8000);
-            memory_check_interval_sec_ = mg["check_interval_sec"].as<int>(30);
+            soft_threshold_mb_ = std::max(
+                1, mg["soft_threshold_mb"].as<int>(6000));
+            soft_recover_mb_ = mg["soft_recover_mb"].as<int>(5500);
+            hard_threshold_mb_ = std::max(
+                soft_threshold_mb_,
+                mg["hard_threshold_mb"].as<int>(7000));
+            hard_recover_mb_ = mg["hard_recover_mb"].as<int>(6500);
+            emergency_threshold_mb_ = std::max(
+                hard_threshold_mb_,
+                mg["emergency_threshold_mb"].as<int>(8000));
+            emergency_recover_mb_ =
+                mg["emergency_recover_mb"].as<int>(7200);
+            memory_check_interval_sec_ = std::max(
+                1, mg["check_interval_sec"].as<int>(30));
+            soft_recover_mb_ = std::clamp(
+                soft_recover_mb_, 0, soft_threshold_mb_);
+            hard_recover_mb_ = std::clamp(
+                hard_recover_mb_, soft_recover_mb_, hard_threshold_mb_);
+            emergency_recover_mb_ = std::clamp(
+                emergency_recover_mb_, hard_recover_mb_,
+                emergency_threshold_mb_);
         }
 
         // Crane Motion Constraint 配置
@@ -2405,6 +2456,55 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 std::max(0.0F,
                     cargo_safety["obstacle_track_static_velocity_mps"]
                         .as<float>(0.08F));
+
+            StaticObstacleEvidenceConfig static_map_config;
+            static_map_config.cell_size_m = std::max(
+                0.05F, cargo_safety["static_map_cell_size_m"]
+                           .as<float>(0.25F));
+            static_map_config.minimum_observations =
+                static_cast<std::uint32_t>(std::max(
+                    1, cargo_safety["static_map_minimum_observations"]
+                           .as<int>(4)));
+            static_map_config.minimum_stable_duration_sec = std::max(
+                0.0, cargo_safety[
+                         "static_map_minimum_stable_duration_sec"]
+                         .as<double>(1.0));
+            static_map_config.minimum_cell_overlap = std::clamp(
+                cargo_safety["static_map_minimum_cell_overlap"]
+                    .as<float>(0.60F),
+                0.01F, 1.0F);
+            static_map_config.minimum_iou = std::clamp(
+                cargo_safety["static_map_minimum_iou"]
+                    .as<float>(0.45F),
+                0.01F, 1.0F);
+            static_map_config.minimum_height_overlap = std::clamp(
+                cargo_safety["static_map_minimum_height_overlap"]
+                    .as<float>(0.50F),
+                0.01F, 1.0F);
+            static_map_config.height_tolerance_m = std::clamp(
+                cargo_safety["static_map_height_tolerance_m"]
+                    .as<float>(0.10F),
+                0.0F, 0.50F);
+            static_map_config.minimum_matched_cells =
+                static_cast<std::size_t>(std::max(
+                    1, std::min(
+                           65536,
+                           cargo_safety["static_map_minimum_matched_cells"]
+                               .as<int>(6))));
+            static_map_config.maximum_query_area_cells =
+                static_cast<std::size_t>(std::max(
+                    static_cast<int>(
+                        static_map_config.minimum_matched_cells),
+                    std::min(
+                        65536,
+                        cargo_safety[
+                            "static_map_maximum_query_area_cells"]
+                            .as<int>(4096))));
+            static_map_config.pre_cargo_minimum_sequence_gap =
+                static_cast<std::uint64_t>(std::max(
+                    0, cargo_safety["static_map_pre_cargo_sequence_gap"]
+                           .as<int>(2)));
+            static_obstacle_evidence_index_.setConfig(static_map_config);
         }
         cargo_obstacle_tracker_.setConfig(obstacle_tracker_config);
         if (cargo_safety) {
@@ -2482,6 +2582,41 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 cargo_safety["safety_pending_error_sec"]
                     .as<double>(1.0));
         }
+
+        // Launch arguments are explicit production overrides. Read them only
+        // after YAML so a declared launch switch cannot silently lose to the
+        // repository default configuration.
+        ros::NodeHandle private_nh("~");
+        const bool persistent_overridden = private_nh.getParam(
+            "persistent_map_enabled", persistent_map_enabled_);
+        const bool odom_box_overridden = private_nh.getParam(
+            "odom_anchored_cargo_box_enabled", odom_anchor_config_.enabled);
+        const bool removal_overridden = private_nh.getParam(
+            "hook_cargo_removal_enabled",
+            hook_lock_config_.enable_hook_cargo_removal);
+        const bool warning_overridden = private_nh.getParam(
+            "cargo_warning_enabled",
+            odom_anchor_config_.cargo_warning.enabled);
+
+        static_obstacle_evidence_index_.reset(
+            static_evidence_epoch_.load(std::memory_order_acquire));
+        if (persistent_map_enabled_) {
+            loadPersistentStaticEvidence();
+        }
+        ROS_INFO(
+            "[ConfigFinal] persistent_map_enabled=%d source=%s root=%s "
+            "commit_enabled=%d memory_guard_enabled=%d odom_cargo_box=%d/%s "
+            "hook_removal=%d/%s cargo_warning=%d/%s",
+            persistent_map_enabled_ ? 1 : 0,
+            persistent_overridden ? "launch" : "yaml",
+            persistent_map_root_dir_.c_str(), commit_enabled_ ? 1 : 0,
+            memory_guard_enabled_ ? 1 : 0,
+            odom_anchor_config_.enabled ? 1 : 0,
+            odom_box_overridden ? "launch" : "yaml",
+            hook_lock_config_.enable_hook_cargo_removal ? 1 : 0,
+            removal_overridden ? "launch" : "yaml",
+            odom_anchor_config_.cargo_warning.enabled ? 1 : 0,
+            warning_overridden ? "launch" : "yaml");
 
     } catch (const YAML::Exception& e) {
         ROS_ERROR("YAML parse error: %s", e.what());
@@ -2759,6 +2894,7 @@ void NdtSlamNode::resetCargoForHookState(bool preserve_origin_height) {
     hook_observation_associated_current_ = false;
     cargo_bottom_fusion_.reset();
     cargo_fusion_track_active_ = false;
+    cargo_static_evidence_track_start_sequence_ = 0U;
     formal_cargo_removal_authorized_ = false;
     formal_cargo_removal_track_id_ = 0U;
     formal_cargo_removal_stamp_ = ros::Time();
@@ -2966,6 +3102,16 @@ void NdtSlamNode::advanceObjectsMapContentVersionLocked() {
     }
 }
 
+std::uint64_t NdtSlamNode::advanceStaticEvidenceEpoch() {
+    std::uint64_t next = static_evidence_epoch_.fetch_add(
+        1U, std::memory_order_acq_rel) + 1U;
+    if (next == 0U) {
+        static_evidence_epoch_.store(1U, std::memory_order_release);
+        next = 1U;
+    }
+    return next;
+}
+
 void NdtSlamNode::startCleanMapRebuildJob() {
     if (clean_map_rebuild_running_.load(std::memory_order_acquire)) {
         // The in-flight immutable snapshot remains publishable even if a newer
@@ -2983,6 +3129,8 @@ void NdtSlamNode::startCleanMapRebuildJob() {
     CleanMapBuildInput input;
     input.cell_size_m = kCleanCellSize;
     std::uint64_t source_objects_version = 0U;
+    const std::uint64_t source_static_evidence_epoch =
+        static_evidence_epoch_.load(std::memory_order_acquire);
     MapLayerBundle source_bundle;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
@@ -3017,9 +3165,13 @@ void NdtSlamNode::startCleanMapRebuildJob() {
                 point.x, point.y, point.z);
         }
     }
-    for (const auto& item : bev_observation_count_) {
-        input.observation_counts.emplace(
-            CleanMapCell{item.first.x, item.first.y}, item.second);
+    {
+        std::lock_guard<std::mutex> observation_lock(
+            bev_observation_mutex_);
+        for (const auto& item : bev_observation_count_) {
+            input.observation_counts.emplace(
+                CleanMapCell{item.first.x, item.first.y}, item.second);
+        }
     }
 
     if (dynamic_event_config_.enabled &&
@@ -3082,16 +3234,59 @@ void NdtSlamNode::startCleanMapRebuildJob() {
 
     clean_map_rebuild_running_.store(true, std::memory_order_release);
     clean_map_rebuild_thread_ = std::thread(
-        [this, source_objects_version, source_bundle = std::move(source_bundle),
+        [this, source_objects_version, source_static_evidence_epoch,
+         source_bundle = std::move(source_bundle),
          input = std::move(input)]() mutable {
             CleanMapWorkerResult result;
             result.source_objects_version = source_objects_version;
+            result.static_evidence_epoch = source_static_evidence_epoch;
             result.bundle = std::move(source_bundle);
             const auto started = std::chrono::steady_clock::now();
             try {
                 result.build = buildCleanMapFromSnapshot(input);
                 result.valid = result.build.valid;
                 if (result.valid) {
+                    result.static_clean_cells =
+                        buildStaticEvidenceCellGeometry(
+                            result.build.clean_points,
+                            static_obstacle_evidence_index_.config()
+                                .cell_size_m);
+                    const auto add_invalidated_cell =
+                        [&input, &result, this](const CleanMapCell& cell) {
+                        const float static_cell_size =
+                            static_obstacle_evidence_index_.config()
+                                .cell_size_m;
+                        const double x_min = cell.first * input.cell_size_m;
+                        const double y_min = cell.second * input.cell_size_m;
+                        const double x_max =
+                            (cell.first + 1) * input.cell_size_m - 1.0e-9;
+                        const double y_max =
+                            (cell.second + 1) * input.cell_size_m - 1.0e-9;
+                        const int static_x_min = static_cast<int>(
+                            std::floor(x_min / static_cell_size));
+                        const int static_y_min = static_cast<int>(
+                            std::floor(y_min / static_cell_size));
+                        const int static_x_max = static_cast<int>(
+                            std::floor(x_max / static_cell_size));
+                        const int static_y_max = static_cast<int>(
+                            std::floor(y_max / static_cell_size));
+                        for (int x = static_x_min; x <= static_x_max; ++x) {
+                            for (int y = static_y_min; y <= static_y_max;
+                                 ++y) {
+                                result.static_invalidated_cells.insert(
+                                    packStaticEvidenceCell(x, y));
+                            }
+                        }
+                    };
+                    for (const auto& cell : input.deny_cells) {
+                        add_invalidated_cell(cell);
+                    }
+                    for (const auto& cell : input.human_deny_cells) {
+                        add_invalidated_cell(cell);
+                    }
+                    for (const auto& item : input.deny_ranges) {
+                        add_invalidated_cell(item.first);
+                    }
                     auto clean_cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(
                         new pcl::PointCloud<pcl::PointXYZ>);
                     clean_cloud->reserve(result.build.clean_points.size());
@@ -3191,6 +3386,18 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
     }
 
     last_commit_clean_map_ms_ = result.duration_ms;
+    if (installed_as_current) {
+        const double evidence_stamp = result.bundle.source_stamp.isZero()
+            ? stamp.toSec() : result.bundle.source_stamp.toSec();
+        if (result.static_evidence_epoch ==
+            static_evidence_epoch_.load(std::memory_order_acquire)) {
+            static_obstacle_evidence_index_.confirmCleanCells(
+                result.static_clean_cells, result.static_invalidated_cells,
+                evidence_stamp, result.static_evidence_epoch);
+            static_evidence_persistence_dirty_.store(
+                true, std::memory_order_release);
+        }
+    }
     map_maintenance_has_run_.store(true, std::memory_order_release);
     shadow_target_pending_ = shadow_target_pending_ || installed_as_current;
     map_maintenance_pending_ = true;
@@ -3229,8 +3436,10 @@ void NdtSlamNode::runMapMaintenanceIfIdle(bool force_timeslice) {
     // Remaining stateful owner-thread tasks stay pending for the next bounded
     // timeslice; map serialization has already moved to its own worker.
     if (clean_rebuild_requested && localizationInputPending()) {
-        if (release_keyframes_pending_ || flush_tiles_pending_ ||
-            runtime_status_pending_ || memory_guard_pending_ ||
+        if (release_keyframes_pending_.load(std::memory_order_acquire) ||
+            flush_tiles_pending_.load(std::memory_order_acquire) ||
+            runtime_status_pending_.load(std::memory_order_acquire) ||
+            memory_guard_pending_.load(std::memory_order_acquire) ||
             active_map_rebuild_pending_.load(std::memory_order_acquire) ||
             loop_closure_pending_) {
             map_maintenance_pending_ = true;
@@ -3281,26 +3490,23 @@ void NdtSlamNode::runMapMaintenanceIfIdle(bool force_timeslice) {
         return true;
     };
     if (yield_if_localization_waiting()) return;
-    if (release_keyframes_pending_) {
-        release_keyframes_pending_ = false;
+    if (release_keyframes_pending_.exchange(
+            false, std::memory_order_acq_rel)) {
         releaseOldKeyframeClouds();
         if (finish_forced_phase()) return;
     }
     if (yield_if_localization_waiting()) return;
-    if (flush_tiles_pending_) {
-        flush_tiles_pending_ = false;
+    if (flush_tiles_pending_.exchange(false, std::memory_order_acq_rel)) {
         flushDirtyTiles();
         if (finish_forced_phase()) return;
     }
     if (yield_if_localization_waiting()) return;
-    if (runtime_status_pending_) {
-        runtime_status_pending_ = false;
+    if (runtime_status_pending_.exchange(false, std::memory_order_acq_rel)) {
         writeRuntimeStatus();
         if (finish_forced_phase()) return;
     }
     if (yield_if_localization_waiting()) return;
-    if (memory_guard_pending_) {
-        memory_guard_pending_ = false;
+    if (memory_guard_pending_.exchange(false, std::memory_order_acq_rel)) {
         checkMemoryGuard();
         if (finish_forced_phase()) return;
     }
@@ -5522,7 +5728,8 @@ void NdtSlamNode::processCloudThread() {
                 static int release_check_count = 0;
                 release_check_count++;
                 if (release_check_count >= keyframe_release_interval_) {
-                    release_keyframes_pending_ = true;
+                    release_keyframes_pending_.store(
+                        true, std::memory_order_release);
                     map_maintenance_pending_ = true;
                     release_check_count = 0;
                 }
@@ -5531,7 +5738,8 @@ void NdtSlamNode::processCloudThread() {
                 if (persistent_map_enabled_) {
                     double time_since_flush = (ros::Time::now() - last_flush_time_).toSec();
                     if (time_since_flush >= flush_interval_sec_ || dirty_tile_count_ >= max_dirty_tiles_) {
-                        flush_tiles_pending_ = true;
+                        flush_tiles_pending_.store(
+                            true, std::memory_order_release);
                         map_maintenance_pending_ = true;
                     }
 
@@ -5539,19 +5747,10 @@ void NdtSlamNode::processCloudThread() {
                     static ros::Time last_status_write_time;
                     double time_since_status = (ros::Time::now() - last_status_write_time).toSec();
                     if (time_since_status >= 5.0) {
-                        runtime_status_pending_ = true;
+                        runtime_status_pending_.store(
+                            true, std::memory_order_release);
                         map_maintenance_pending_ = true;
                         last_status_write_time = ros::Time::now();
-                    }
-                }
-
-                // 内存保护检查
-                if (memory_guard_enabled_) {
-                    double time_since_check = (ros::Time::now() - last_memory_check_time_).toSec();
-                    if (time_since_check >= memory_check_interval_sec_) {
-                        memory_guard_pending_ = true;
-                        map_maintenance_pending_ = true;
-                        last_memory_check_time_ = ros::Time::now();
                     }
                 }
 
@@ -6978,32 +7177,8 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
 
             // ========== 长期建图：写入 tiles ==========
             if (longterm_mapping_enabled_ && persistent_map_enabled_ && canCommit()) {
-                // 计算 tile 索引
-                Eigen::Vector3d kf_pos = pose.translation();
-                int tile_x = std::floor(kf_pos.x() / tile_size_m_);
-                int tile_y = std::floor(kf_pos.y() / tile_size_m_);
-                std::string tile_key = "x" + std::to_string(tile_x) + "_y" + std::to_string(tile_y);
-
-                // 初始化 tile layers（如果不存在）
-                if (dirty_tiles_.find(tile_key) == dirty_tiles_.end()) {
-                    dirty_tiles_[tile_key].registration.reset(new pcl::PointCloud<pcl::PointXYZ>);
-                    dirty_tiles_[tile_key].display.reset(new pcl::PointCloud<pcl::PointXYZ>);
-                    dirty_tiles_[tile_key].ground.reset(new pcl::PointCloud<pcl::PointXYZ>);
-                    dirty_tiles_[tile_key].objects.reset(new pcl::PointCloud<pcl::PointXYZ>);
-                }
-
-                // 添加到各层
-                *dirty_tiles_[tile_key].registration += safe_transformed;
-                *dirty_tiles_[tile_key].display += safe_transformed;
-                *dirty_tiles_[tile_key].display += ground_transformed;
-                *dirty_tiles_[tile_key].ground += ground_transformed;
-                *dirty_tiles_[tile_key].objects += safe_transformed;
-
-                dirty_tile_count_ = dirty_tiles_.size();
-
-                ROS_DEBUG("[PersistentMap] Added points to tile %s layers, dirty_tiles=%d",
-                          tile_key.c_str(),
-                          dirty_tile_count_.load(std::memory_order_relaxed));
+                appendPersistentTileLayers(
+                    safe_transformed, ground_transformed, safe_transformed);
             }
 
             // 发布 debug 话题
@@ -7319,6 +7494,15 @@ void NdtSlamNode::updatePoseFromLoopClosure(
         last_bound_ndt_target_source_ = "none";
         last_target_reason_ = "loop_closure_rebind";
     }
+    static_obstacle_evidence_index_.reset(advanceStaticEvidenceEpoch());
+    cargo_static_evidence_track_start_sequence_ = 0U;
+    static_evidence_persistence_dirty_.store(
+        true, std::memory_order_release);
+    if (persistent_map_enabled_) {
+        flush_tiles_pending_.store(true, std::memory_order_release);
+    }
+    clean_map_rebuild_pending_.store(true, std::memory_order_release);
+    map_maintenance_pending_.store(true, std::memory_order_release);
     resetCargoAfterPoseDiscontinuity();
     relocalization_pose_reliable_ = false;
     relocalization_good_frames_ = 0;
@@ -7369,6 +7553,14 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         local_map_version_ = 0;
         bootstrap_local_map_complete_ = false;
         bootstrap_local_map_frames_ = 0;
+    }
+    static_obstacle_evidence_index_.reset(advanceStaticEvidenceEpoch());
+    static_evidence_persistence_dirty_.store(
+        true, std::memory_order_release);
+    if (persistent_map_enabled_) {
+        flush_tiles_pending_.store(true, std::memory_order_release);
+        map_maintenance_pending_.store(true, std::memory_order_release);
+        queue_cv_.notify_one();
     }
     {
         std::lock_guard<std::mutex> lock(map_commit_queue_mutex_);
@@ -7468,7 +7660,11 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     cargo_swept_history_.clear();
     new_cargo_volumes_this_frame_.clear();
     cargo_deny_history_.clear();
-    bev_observation_count_.clear();
+    {
+        std::lock_guard<std::mutex> observation_lock(
+            bev_observation_mutex_);
+        bev_observation_count_.clear();
+    }
     cargo_fusion_track_id_ = 0U;
     relocalization_force_global_.store(false, std::memory_order_release);
     relocalization_state_ = RelocalizationState::IDLE;
@@ -7643,6 +7839,15 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
             bootstrap_local_map_complete_ = true;
             bootstrap_local_map_frames_ = 0;
         }
+        static_obstacle_evidence_index_.reset(
+            advanceStaticEvidenceEpoch());
+        static_evidence_persistence_dirty_.store(
+            true, std::memory_order_release);
+        if (persistent_map_enabled_) {
+            flush_tiles_pending_.store(true, std::memory_order_release);
+            map_maintenance_pending_.store(true, std::memory_order_release);
+            queue_cv_.notify_one();
+        }
         {
             std::lock_guard<std::mutex> lock(map_commit_queue_mutex_);
             map_commit_queue_.clear();
@@ -7747,7 +7952,11 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
         cargo_swept_history_.clear();
         new_cargo_volumes_this_frame_.clear();
         cargo_deny_history_.clear();
-        bev_observation_count_.clear();
+        {
+            std::lock_guard<std::mutex> observation_lock(
+                bev_observation_mutex_);
+            bev_observation_count_.clear();
+        }
 
         relocalization_confirmation_count_ = 0;
         relocalization_confirmation_pose_ = Sophus::SE3d();
@@ -7798,6 +8007,15 @@ bool NdtSlamNode::rebuildMapService(std_srvs::Empty::Request& request, std_srvs:
     keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
     loop_closure_result_ready_.store(false, std::memory_order_release);
     map_rebuild_generation_.fetch_add(1U, std::memory_order_acq_rel);
+    static_obstacle_evidence_index_.reset(advanceStaticEvidenceEpoch());
+    cargo_static_evidence_track_start_sequence_ = 0U;
+    static_evidence_persistence_dirty_.store(
+        true, std::memory_order_release);
+    if (persistent_map_enabled_) {
+        flush_tiles_pending_.store(true, std::memory_order_release);
+        map_maintenance_pending_.store(true, std::memory_order_release);
+        queue_cv_.notify_one();
+    }
     {
         std::lock_guard<std::mutex> lock(processed_loops_mutex_);
         processed_loops_.clear();
@@ -8881,8 +9099,247 @@ void NdtSlamNode::releaseOldKeyframeClouds() {
     }
 }
 
+bool NdtSlamNode::appendPersistentTileLayers(
+    const pcl::PointCloud<pcl::PointXYZ>& registration,
+    const pcl::PointCloud<pcl::PointXYZ>& ground,
+    const pcl::PointCloud<pcl::PointXYZ>& objects) {
+    if (!persistent_map_enabled_ || !std::isfinite(tile_size_m_) ||
+        tile_size_m_ <= 0.0) {
+        return false;
+    }
+
+    const auto tile_key_for = [this](const pcl::PointXYZ& point) {
+        const int tile_x = static_cast<int>(std::floor(point.x / tile_size_m_));
+        const int tile_y = static_cast<int>(std::floor(point.y / tile_size_m_));
+        return std::string("x") + std::to_string(tile_x) + "_y" +
+            std::to_string(tile_y);
+    };
+    const auto point_allowed = [this](const pcl::PointXYZ& point) {
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+            !std::isfinite(point.z) ||
+            std::abs(point.x) > max_map_size_ ||
+            std::abs(point.y) > max_map_size_ ||
+            std::abs(point.z) > max_map_size_) {
+            return false;
+        }
+        const double tile_x = std::floor(point.x / tile_size_m_);
+        const double tile_y = std::floor(point.y / tile_size_m_);
+        return tile_x >= std::numeric_limits<int>::lowest() &&
+            tile_x <= std::numeric_limits<int>::max() &&
+            tile_y >= std::numeric_limits<int>::lowest() &&
+            tile_y <= std::numeric_limits<int>::max();
+    };
+    const auto ensure_tile = [this](const std::string& key)
+        -> TileLayers& {
+        TileLayers& tile = dirty_tiles_[key];
+        if (!tile.registration) {
+            tile.registration.reset(new pcl::PointCloud<pcl::PointXYZ>);
+            tile.display.reset(new pcl::PointCloud<pcl::PointXYZ>);
+            tile.ground.reset(new pcl::PointCloud<pcl::PointXYZ>);
+            tile.objects.reset(new pcl::PointCloud<pcl::PointXYZ>);
+        }
+        return tile;
+    };
+
+    {
+        std::lock_guard<std::mutex> dirty_lock(dirty_tiles_mutex_);
+        for (const auto& point : registration.points) {
+            if (!point_allowed(point)) continue;
+            TileLayers& tile = ensure_tile(tile_key_for(point));
+            tile.registration->push_back(point);
+            tile.display->push_back(point);
+        }
+        for (const auto& point : ground.points) {
+            if (!point_allowed(point)) continue;
+            TileLayers& tile = ensure_tile(tile_key_for(point));
+            tile.ground->push_back(point);
+            tile.display->push_back(point);
+        }
+        for (const auto& point : objects.points) {
+            if (!point_allowed(point)) continue;
+            ensure_tile(tile_key_for(point)).objects->push_back(point);
+        }
+        dirty_tile_count_.store(
+            static_cast<int>(dirty_tiles_.size()),
+            std::memory_order_release);
+    }
+
+    const bool limit_reached = dirty_tile_count_.load(
+        std::memory_order_acquire) >= std::max(1, max_dirty_tiles_);
+    if (limit_reached) {
+        flush_tiles_pending_.store(true, std::memory_order_release);
+        map_maintenance_pending_.store(true, std::memory_order_release);
+        queue_cv_.notify_one();
+    }
+    return limit_reached;
+}
+
+bool NdtSlamNode::loadPersistentStaticEvidence() {
+    const std::string manifest_path =
+        persistent_map_root_dir_ + "/static_evidence_manifest.json";
+    const std::string objects_layer_path =
+        persistent_map_root_dir_ + "/tiles_objects";
+    boost::system::error_code cleanup_error;
+    boost::filesystem::remove(manifest_path + ".tmp", cleanup_error);
+    if (!boost::filesystem::exists(manifest_path) ||
+        !boost::filesystem::is_directory(objects_layer_path)) {
+        ROS_INFO("[StaticMapEvidence] versioned index/layer unavailable in %s; "
+                 "map provenance remains fail-safe pending",
+                 persistent_map_root_dir_.c_str());
+        return false;
+    }
+    try {
+        const YAML::Node manifest = YAML::LoadFile(manifest_path);
+        const std::uint32_t schema =
+            manifest["schema_version"].as<std::uint32_t>(0U);
+        const float cell_size =
+            manifest["cell_size_m"].as<float>(0.0F);
+        const double manifest_tile_size =
+            manifest["tile_size_m"].as<double>(0.0);
+        const std::uint64_t source_generation =
+            manifest["generation"].as<std::uint64_t>(
+                std::numeric_limits<std::uint64_t>::max());
+        const std::uint64_t source_revision =
+            manifest["revision"].as<std::uint64_t>(0U);
+        const std::string map_uuid =
+            manifest["map_uuid"].as<std::string>("");
+        const std::string objects_layer = manifest["layers"]
+            ? manifest["layers"]["objects"].as<std::string>("") : "";
+        const std::string index_name =
+            manifest["static_index"].as<std::string>("");
+        const std::string expected_index_name =
+            staticEvidenceIndexFileName(source_generation, source_revision);
+        if (schema != StaticEvidenceSnapshot::kSchemaVersion ||
+            index_name != expected_index_name ||
+            source_revision == 0U ||
+            map_uuid != persistentMapUuid(persistent_map_root_dir_) ||
+            objects_layer != "tiles_objects" ||
+            std::abs(cell_size -
+                     static_obstacle_evidence_index_.config().cell_size_m) >
+                1.0e-5F ||
+            std::abs(manifest_tile_size - tile_size_m_) > 1.0e-6) {
+            ROS_ERROR("[StaticMapEvidence] manifest mismatch; refusing "
+                      "persistent provenance");
+            return false;
+        }
+        const std::string index_path =
+            persistent_map_root_dir_ + "/" + index_name;
+        cleanup_error.clear();
+        boost::filesystem::remove(index_path + ".tmp", cleanup_error);
+        if (!boost::filesystem::is_regular_file(index_path)) {
+            ROS_ERROR("[StaticMapEvidence] manifest index missing: %s",
+                      index_name.c_str());
+            return false;
+        }
+        std::string reason;
+        const bool loaded = static_obstacle_evidence_index_.loadSnapshot(
+            index_path,
+            static_evidence_epoch_.load(std::memory_order_acquire),
+            source_generation,
+            source_revision,
+            &reason);
+        if (!loaded) {
+            ROS_ERROR("[StaticMapEvidence] index load rejected reason=%s",
+                      reason.c_str());
+            return false;
+        }
+        static_evidence_persistence_dirty_.store(
+            false, std::memory_order_release);
+        const auto snapshot = static_obstacle_evidence_index_.snapshot();
+        ROS_INFO("[StaticMapEvidence] loaded schema=%u cells=%zu "
+                 "observations=%llu",
+                 schema, snapshot ? snapshot->cells.size() : 0U,
+                 static_cast<unsigned long long>(
+                     snapshot ? snapshot->latest_observation_sequence : 0U));
+        return true;
+    } catch (const std::exception& error) {
+        ROS_ERROR("[StaticMapEvidence] manifest/index parse failed: %s",
+                  error.what());
+        return false;
+    }
+}
+
+bool NdtSlamNode::writePersistentStaticEvidence() {
+    const auto snapshot = static_obstacle_evidence_index_.snapshot();
+    if (!snapshot) return false;
+    try {
+        boost::filesystem::create_directories(persistent_map_root_dir_);
+        const std::string index_name = staticEvidenceIndexFileName(
+            snapshot->map_generation, snapshot->revision);
+        const std::string index_path =
+            persistent_map_root_dir_ + "/" + index_name;
+        std::string reason;
+        if (!static_obstacle_evidence_index_.saveSnapshot(
+                snapshot, index_path, &reason)) {
+            ROS_ERROR("[StaticMapEvidence] index write failed reason=%s",
+                      reason.c_str());
+            return false;
+        }
+
+        const std::string manifest_path =
+            persistent_map_root_dir_ + "/static_evidence_manifest.json";
+        const std::string temporary = manifest_path + ".tmp";
+        std::ofstream output(temporary, std::ios::out | std::ios::trunc);
+        if (!output.is_open()) return false;
+        output << "{\n"
+               << "  \"schema_version\": " << snapshot->schema_version
+               << ",\n"
+               << "  \"map_uuid\": \""
+               << persistentMapUuid(persistent_map_root_dir_)
+               << "\",\n"
+               << "  \"generation\": " << snapshot->map_generation
+               << ",\n"
+               << "  \"revision\": " << snapshot->revision
+               << ",\n"
+               << "  \"created_at_sec\": " << std::setprecision(17)
+               << ros::WallTime::now().toSec() << ",\n"
+               << "  \"tile_size_m\": " << tile_size_m_ << ",\n"
+               << "  \"cell_size_m\": " << snapshot->cell_size_m
+               << ",\n"
+               << "  \"layers\": {\"objects\": \"tiles_objects\"},\n"
+               << "  \"static_index\": \"" << index_name << "\"\n"
+               << "}\n";
+        output.flush();
+        const bool stream_ok = output.good();
+        output.close();
+        if (!stream_ok ||
+            std::rename(temporary.c_str(), manifest_path.c_str()) != 0) {
+            std::remove(temporary.c_str());
+            return false;
+        }
+
+        // The manifest is the commit point. Once it names the new immutable
+        // index, older index generations and crash orphans are no longer
+        // reachable and can be removed without affecting recovery.
+        const std::string prefix = "static_evidence_index_v1_g";
+        boost::system::error_code iterator_error;
+        for (boost::filesystem::directory_iterator it(
+                 persistent_map_root_dir_, iterator_error), end;
+             !iterator_error && it != end; it.increment(iterator_error)) {
+            boost::system::error_code status_error;
+            if (!boost::filesystem::is_regular_file(
+                    it->path(), status_error) || status_error) {
+                continue;
+            }
+            const std::string candidate = it->path().filename().string();
+            if (candidate != index_name &&
+                candidate.compare(0, prefix.size(), prefix) == 0) {
+                boost::system::error_code remove_error;
+                boost::filesystem::remove(it->path(), remove_error);
+            }
+        }
+        return true;
+    } catch (const std::exception& error) {
+        ROS_ERROR("[StaticMapEvidence] persistence failed: %s", error.what());
+        return false;
+    }
+}
+
 void NdtSlamNode::flushDirtyTiles() {
     if (!persistent_map_enabled_) return;
+    const bool persist_static_evidence =
+        static_evidence_persistence_dirty_.exchange(
+            false, std::memory_order_acq_rel);
     {
         std::lock_guard<std::mutex> lock(failed_tile_flush_mutex_);
         std::lock_guard<std::mutex> dirty_lock(dirty_tiles_mutex_);
@@ -8905,10 +9362,20 @@ void NdtSlamNode::flushDirtyTiles() {
             static_cast<int>(dirty_tiles_.size()),
             std::memory_order_release);
     }
-    if (tile_flush_running_.load(std::memory_order_acquire)) return;
+    if (tile_flush_running_.load(std::memory_order_acquire)) {
+        if (persist_static_evidence) {
+            static_evidence_persistence_dirty_.store(
+                true, std::memory_order_release);
+        }
+        return;
+    }
 
     // 检查磁盘保护
     if (!checkDiskGuard()) {
+        if (persist_static_evidence) {
+            static_evidence_persistence_dirty_.store(
+                true, std::memory_order_release);
+        }
         ROS_WARN_THROTTLE(60, "[DiskGuard] Skipping flush, disk low");
         return;
     }
@@ -8918,7 +9385,7 @@ void NdtSlamNode::flushDirtyTiles() {
     std::map<std::string, TileLayers> flush_batch;
     {
         std::lock_guard<std::mutex> dirty_lock(dirty_tiles_mutex_);
-        if (dirty_tiles_.empty()) return;
+        if (dirty_tiles_.empty() && !persist_static_evidence) return;
         flush_batch.swap(dirty_tiles_);
         dirty_tile_count_.store(0, std::memory_order_release);
     }
@@ -8927,7 +9394,8 @@ void NdtSlamNode::flushDirtyTiles() {
     tile_flush_running_.store(true, std::memory_order_release);
 
     tile_flush_thread_ = std::thread(
-        [this, flush_batch = std::move(flush_batch)]() mutable {
+        [this, flush_batch = std::move(flush_batch),
+         persist_static_evidence]() mutable {
     try {
 
     // 创建目录
@@ -9063,16 +9531,36 @@ void NdtSlamNode::flushDirtyTiles() {
         flushed_tile_count_.fetch_add(flushed, std::memory_order_relaxed) +
         flushed;
 
+    if (persist_static_evidence) {
+        if (!failed_layers.empty() || !writePersistentStaticEvidence()) {
+            // The sidecar is authoritative only when its corresponding tile
+            // batch is durable. Any partial tile failure keeps the previous
+            // manifest/index pair and retries the newer snapshot later.
+            static_evidence_persistence_dirty_.store(
+                true, std::memory_order_release);
+        }
+    }
+
     ROS_INFO("[TileFlush] %d tiles flushed to disk | total_flushed=%d",
              flushed, total_flushed);
     } catch (const std::exception& error) {
         ROS_ERROR("[TileFlush] worker failed: %s", error.what());
+        if (persist_static_evidence) {
+            static_evidence_persistence_dirty_.store(
+                true, std::memory_order_release);
+        }
         std::lock_guard<std::mutex> lock(failed_tile_flush_mutex_);
         for (auto& entry : flush_batch) {
             failed_tile_flush_batch_[entry.first] = std::move(entry.second);
         }
     }
     tile_flush_running_.store(false, std::memory_order_release);
+    if (dirty_tile_count_.load(std::memory_order_acquire) >=
+        std::max(1, max_dirty_tiles_)) {
+        flush_tiles_pending_.store(true, std::memory_order_release);
+        map_maintenance_pending_.store(true, std::memory_order_release);
+        queue_cv_.notify_one();
+    }
         });
 }
 
@@ -9166,8 +9654,6 @@ void NdtSlamNode::writeRuntimeStatus() {
     // 原子重命名
     boost::filesystem::rename(tmp_file, status_file);
 
-    // 内存保护检查
-    checkMemoryGuard();
 }
 
 // ========== 统一提交检查 ==========
@@ -9198,22 +9684,38 @@ long NdtSlamNode::getProcessMemoryMB() {
 void NdtSlamNode::checkMemoryGuard() {
     if (!memory_guard_enabled_) return;
 
-    ros::Time now = ros::Time::now();
-    if ((now - last_memory_check_time_).toSec() < memory_check_interval_sec_) return;
-    last_memory_check_time_ = now;
+    last_memory_check_wall_time_ = ros::WallTime::now();
 
     long mem_mb = getProcessMemoryMB();
     MemoryGuardLevel prev_level = memory_guard_level_;
 
-    // 分级判定
-    if (mem_mb >= emergency_threshold_mb_) {
+    // Apply recovery hysteresis according to the current state. A direct
+    // OK->EMERGENCY jump therefore pauses commit immediately, while recovery
+    // cannot flap on one threshold crossing.
+    if (mem_mb >= emergency_threshold_mb_ ||
+        (prev_level == MemoryGuardLevel::EMERGENCY &&
+         mem_mb >= emergency_recover_mb_)) {
         memory_guard_level_ = MemoryGuardLevel::EMERGENCY;
-    } else if (mem_mb >= hard_threshold_mb_) {
+    } else if (mem_mb >= hard_threshold_mb_ ||
+               ((prev_level == MemoryGuardLevel::HARD ||
+                 prev_level == MemoryGuardLevel::EMERGENCY) &&
+                mem_mb >= hard_recover_mb_)) {
         memory_guard_level_ = MemoryGuardLevel::HARD;
-    } else if (mem_mb >= soft_threshold_mb_) {
+    } else if (mem_mb >= soft_threshold_mb_ ||
+               (prev_level == MemoryGuardLevel::SOFT &&
+                mem_mb >= soft_recover_mb_)) {
         memory_guard_level_ = MemoryGuardLevel::SOFT;
     } else {
         memory_guard_level_ = MemoryGuardLevel::OK;
+    }
+
+    mapping_paused_by_memory_guard_ =
+        memory_guard_level_ == MemoryGuardLevel::HARD ||
+        memory_guard_level_ == MemoryGuardLevel::EMERGENCY;
+
+    // SOFT maintenance is periodic, not a one-shot transition action.
+    if (memory_guard_level_ == MemoryGuardLevel::SOFT) {
+        releaseMemoryCache();
     }
 
     // 状态变化时输出日志
@@ -9221,19 +9723,14 @@ void NdtSlamNode::checkMemoryGuard() {
         switch (memory_guard_level_) {
             case MemoryGuardLevel::OK:
                 ROS_INFO("[MemoryGuard] OK: %ldMB, resuming normal operation", mem_mb);
-                mapping_paused_by_memory_guard_ = false;
                 break;
             case MemoryGuardLevel::SOFT:
-                ROS_WARN("[MemoryGuard] SOFT: %ldMB > %dMB, releasing cache + flush tiles",
+                ROS_WARN("[MemoryGuard] SOFT: %ldMB > %dMB, periodic cache maintenance active",
                          mem_mb, soft_threshold_mb_);
-                releaseMemoryCache();
-                if (persistent_map_enabled_) flushDirtyTiles();
-                mapping_paused_by_memory_guard_ = false;  // SOFT 级别恢复提交
                 break;
             case MemoryGuardLevel::HARD:
                 ROS_ERROR("[MemoryGuard] HARD: %ldMB > %dMB, pausing map commit",
                          mem_mb, hard_threshold_mb_);
-                mapping_paused_by_memory_guard_ = true;
                 break;
             case MemoryGuardLevel::EMERGENCY:
                 ROS_ERROR("[MemoryGuard] EMERGENCY: %ldMB > %dMB, forcing downsample",
@@ -9247,9 +9744,17 @@ void NdtSlamNode::checkMemoryGuard() {
     memory_guard_triggered_ = (memory_guard_level_ != MemoryGuardLevel::OK);
 }
 
+void NdtSlamNode::memoryGuardTimerCallback(const ros::WallTimerEvent&) {
+    if (!memory_guard_enabled_ || shutdown_) return;
+    memory_guard_pending_.store(true, std::memory_order_release);
+    map_maintenance_pending_.store(true, std::memory_order_release);
+    queue_cv_.notify_one();
+}
+
 void NdtSlamNode::releaseMemoryCache() {
     // 1. flush dirty tiles
-    if (persistent_map_enabled_ && !dirty_tiles_.empty()) {
+    if (persistent_map_enabled_ &&
+        dirty_tile_count_.load(std::memory_order_acquire) > 0) {
         flushDirtyTiles();
     }
 
@@ -12416,6 +12921,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     if (active_track && !cargo_fusion_track_active_) {
         ++cargo_fusion_track_id_;
         if (cargo_fusion_track_id_ == 0U) ++cargo_fusion_track_id_;
+        cargo_static_evidence_track_start_sequence_ =
+            static_obstacle_evidence_index_.latestObservationSequence();
         cargo_bottom_fusion_.reset();
         cargo_origin_height_valid_ = false;
         cargo_origin_height_m_ = 0.0F;
@@ -12424,6 +12931,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_bottom_fusion_.reset();
         cargo_origin_height_valid_ = false;
         formal_cargo_removal_authorized_ = false;
+        cargo_static_evidence_track_start_sequence_ = 0U;
     }
     cargo_fusion_track_active_ = active_track;
     if (!active_track) {
@@ -13534,8 +14042,11 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             float max_y = -std::numeric_limits<float>::infinity();
             float min_z = std::numeric_limits<float>::infinity();
             float max_z = -std::numeric_limits<float>::infinity();
+            double min_z_map = std::numeric_limits<double>::infinity();
+            double max_z_map = -std::numeric_limits<double>::infinity();
             std::set<std::int64_t> occupied_map_cells;
-            constexpr float kStaticCargoCellM = 0.25F;
+            const float static_map_cell_m =
+                static_obstacle_evidence_index_.config().cell_size_m;
             for (int point_index : evidence.point_indices) {
                 if (point_index < 0 ||
                     static_cast<std::size_t>(point_index) >=
@@ -13553,16 +14064,23 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 max_z = std::max(max_z, point.z);
                 const Eigen::Vector3d point_map = pose_map_base *
                     point.getVector3fMap().cast<double>();
+                const double maximum_cell_coordinate =
+                    static_cast<double>(
+                        std::numeric_limits<std::int32_t>::max()) *
+                    static_map_cell_m;
+                if (!point_map.allFinite() ||
+                    std::abs(point_map.x()) > maximum_cell_coordinate ||
+                    std::abs(point_map.y()) > maximum_cell_coordinate) {
+                    continue;
+                }
+                min_z_map = std::min(min_z_map, point_map.z());
+                max_z_map = std::max(max_z_map, point_map.z());
                 const std::int32_t cell_x = static_cast<std::int32_t>(
-                    std::floor(point_map.x() / kStaticCargoCellM));
+                    std::floor(point_map.x() / static_map_cell_m));
                 const std::int32_t cell_y = static_cast<std::int32_t>(
-                    std::floor(point_map.y() / kStaticCargoCellM));
-                const std::uint64_t packed =
-                    (static_cast<std::uint64_t>(
-                         static_cast<std::uint32_t>(cell_x)) << 32U) |
-                    static_cast<std::uint32_t>(cell_y);
+                    std::floor(point_map.y() / static_map_cell_m));
                 occupied_map_cells.insert(
-                    static_cast<std::int64_t>(packed));
+                    packStaticEvidenceCell(cell_x, cell_y));
             }
             if (std::isfinite(min_x) && std::isfinite(max_x) &&
                 std::isfinite(min_y) && std::isfinite(max_y) &&
@@ -13587,12 +14105,33 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 hook_fixed_config_.voxel_leaf +
                     formal_use.horizontal_uncertainty_m +
                     hook_lock_.horizontal_tracking_residual_m});
-            observation.provenance =
-                evidence.source_validated &&
-                        evidence.footprint_distance_m >
-                            residual_validation_shell_m
-                    ? ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY
-                    : ExternalProvenance::NONE;
+            StaticProvenanceDecision static_decision;
+            if (evidence.source_validated &&
+                std::isfinite(min_z_map) && std::isfinite(max_z_map)) {
+                StaticProvenanceQuery static_query;
+                static_query.occupied_map_cells =
+                    observation.occupied_map_cells;
+                static_query.min_z_map = static_cast<float>(
+                    min_z_map);
+                static_query.max_z_map = static_cast<float>(
+                    max_z_map);
+                static_query.cargo_track_start_sequence =
+                    cargo_static_evidence_track_start_sequence_;
+                static_query.expected_map_generation =
+                    static_evidence_epoch_.load(std::memory_order_acquire);
+                static_decision =
+                    static_obstacle_evidence_index_.query(static_query);
+            }
+            if (static_decision.authorized) {
+                observation.provenance = static_decision.provenance;
+            } else {
+                observation.provenance =
+                    evidence.source_validated &&
+                            evidence.footprint_distance_m >
+                                residual_validation_shell_m
+                        ? ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY
+                        : ExternalProvenance::NONE;
+            }
             obstacle_track_observations.push_back(observation);
         }
     }
@@ -15813,52 +16352,79 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     {
         const double clean_bev_cell = 0.15;
         std::set<BevKey> seen_cells;
+        StaticEvidenceCellGeometryMap observed_static_cells;
+        const float static_cell_size =
+            static_obstacle_evidence_index_.config().cell_size_m;
 
         for (const auto& p : objects_transformed.points) {
-            if (!std::isfinite(p.x) || !std::isfinite(p.y)) continue;
+            if (!std::isfinite(p.x) || !std::isfinite(p.y) ||
+                !std::isfinite(p.z)) continue;
+            if (std::abs(p.x) > max_map_size_ ||
+                std::abs(p.y) > max_map_size_ ||
+                std::abs(p.z) > max_map_size_) {
+                continue;
+            }
+
+            const double clean_x = std::floor(p.x / clean_bev_cell);
+            const double clean_y = std::floor(p.y / clean_bev_cell);
+            const double static_x = std::floor(p.x / static_cell_size);
+            const double static_y = std::floor(p.y / static_cell_size);
+            if (clean_x < std::numeric_limits<int>::lowest() ||
+                clean_x > std::numeric_limits<int>::max() ||
+                clean_y < std::numeric_limits<int>::lowest() ||
+                clean_y > std::numeric_limits<int>::max() ||
+                static_x < std::numeric_limits<std::int32_t>::lowest() ||
+                static_x > std::numeric_limits<std::int32_t>::max() ||
+                static_y < std::numeric_limits<std::int32_t>::lowest() ||
+                static_y > std::numeric_limits<std::int32_t>::max()) {
+                continue;
+            }
 
             BevKey bk;
-            bk.x = static_cast<int>(std::floor(p.x / clean_bev_cell));
-            bk.y = static_cast<int>(std::floor(p.y / clean_bev_cell));
+            bk.x = static_cast<int>(clean_x);
+            bk.y = static_cast<int>(clean_y);
             seen_cells.insert(bk);
+
+            const std::int64_t static_key = packStaticEvidenceCell(
+                static_cast<std::int32_t>(static_x),
+                static_cast<std::int32_t>(static_y));
+            auto inserted = observed_static_cells.emplace(
+                static_key, StaticEvidenceCellGeometry{p.z, p.z});
+            if (!inserted.second) {
+                inserted.first->second.min_z = std::min(
+                    inserted.first->second.min_z, p.z);
+                inserted.first->second.max_z = std::max(
+                    inserted.first->second.max_z, p.z);
+            }
         }
 
-        for (const auto& bk : seen_cells) {
-            bev_observation_count_[bk]++;
+        std::size_t total_observation_cells = 0U;
+        {
+            std::lock_guard<std::mutex> observation_lock(
+                bev_observation_mutex_);
+            for (const auto& bk : seen_cells) {
+                bev_observation_count_[bk]++;
+            }
+            total_observation_cells = bev_observation_count_.size();
+        }
+        if (job.allow_persistent_map_commit) {
+            static_obstacle_evidence_index_.observeFilteredCells(
+                observed_static_cells, stamp.toSec(),
+                job.static_evidence_epoch);
         }
 
         ROS_DEBUG("[BevObsUpdate] seq=%d object_points=%zu unique_cells=%zu total_obs_cells=%zu",
                   keyframe_count_.load(std::memory_order_relaxed),
                   objects_transformed.size(),
                   seen_cells.size(),
-                  bev_observation_count_.size());
+                  total_observation_cells);
     }
 
     // 长期建图：写入 tiles
     if (longterm_mapping_enabled_ && persistent_map_enabled_ &&
         job.allow_persistent_map_commit) {
-        Eigen::Vector3d kf_pos = pose.translation();
-        int tile_x = std::floor(kf_pos.x() / tile_size_m_);
-        int tile_y = std::floor(kf_pos.y() / tile_size_m_);
-        std::string tile_key = "x" + std::to_string(tile_x) + "_y" + std::to_string(tile_y);
-
-        std::lock_guard<std::mutex> dirty_lock(dirty_tiles_mutex_);
-        if (dirty_tiles_.find(tile_key) == dirty_tiles_.end()) {
-            dirty_tiles_[tile_key].registration.reset(new pcl::PointCloud<pcl::PointXYZ>);
-            dirty_tiles_[tile_key].display.reset(new pcl::PointCloud<pcl::PointXYZ>);
-            dirty_tiles_[tile_key].ground.reset(new pcl::PointCloud<pcl::PointXYZ>);
-            dirty_tiles_[tile_key].objects.reset(new pcl::PointCloud<pcl::PointXYZ>);
-        }
-
-        *dirty_tiles_[tile_key].registration += commit_transformed;
-        *dirty_tiles_[tile_key].display += commit_transformed;
-        *dirty_tiles_[tile_key].display += ground_transformed;
-        *dirty_tiles_[tile_key].ground += ground_transformed;
-        *dirty_tiles_[tile_key].objects += objects_transformed;
-
-        dirty_tile_count_.store(
-            static_cast<int>(dirty_tiles_.size()),
-            std::memory_order_release);
+        appendPersistentTileLayers(
+            commit_transformed, ground_transformed, objects_transformed);
     }
 
     // ------------------------------------------------------------------------

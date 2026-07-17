@@ -128,6 +128,7 @@ set(LIBRARY_SOURCES
   src/cargo_safety_evaluator.cpp
   src/cargo_safety_temporal_filter.cpp
   src/cargo_obstacle_tracker.cpp
+  src/static_obstacle_evidence_index.cpp
   src/cargo_motion_corridor.cpp
   src/cargo_residual_classifier.cpp
   src/hook_load_state_filter.cpp
@@ -273,6 +274,13 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_obstacle_tracker_test.cpp)
   if(TARGET cargo_obstacle_tracker_test)
     target_link_libraries(cargo_obstacle_tracker_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(static_obstacle_evidence_index_test
+    test/static_obstacle_evidence_index_test.cpp)
+  if(TARGET static_obstacle_evidence_index_test)
+    target_link_libraries(static_obstacle_evidence_index_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 

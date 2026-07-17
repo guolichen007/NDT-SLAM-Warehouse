@@ -232,8 +232,11 @@ disk_guard:
 memory_guard:
   enabled: true
   soft_threshold_mb: 6000      # 6GB: 释放缓存 + flush dirty tiles
+  soft_recover_mb: 5500
   hard_threshold_mb: 7000      # 7GB: 暂停地图 commit（NDT/TF 继续）
+  hard_recover_mb: 6500
   emergency_threshold_mb: 8000 # 8GB: 降采样 active map
+  emergency_recover_mb: 7200
   check_interval_sec: 30       # 每 30 秒检查一次
 
 # Active map 重建策略
@@ -712,6 +715,19 @@ cargo_safety:
   static_cargo_confirm_frames: 8
   static_cargo_confirm_sec: 1.0
   obstacle_track_static_velocity_mps: 0.08
+  # Long-term static evidence is built only from the clean objects stream
+  # after Human/Cargo/swept-volume removal. Safety performs a bounded cell
+  # lookup against an immutable snapshot; it never scans tiles per frame.
+  static_map_cell_size_m: 0.25
+  static_map_minimum_observations: 4
+  static_map_minimum_stable_duration_sec: 1.0
+  static_map_minimum_cell_overlap: 0.60
+  static_map_minimum_iou: 0.45
+  static_map_minimum_height_overlap: 0.50
+  static_map_height_tolerance_m: 0.10
+  static_map_minimum_matched_cells: 6
+  static_map_maximum_query_area_cells: 4096
+  static_map_pre_cargo_sequence_gap: 2
   motion_corridor_enabled: true
   motion_corridor_immediate_near_field_m: 0.30
   motion_corridor_minimum_speed_mps: 0.05

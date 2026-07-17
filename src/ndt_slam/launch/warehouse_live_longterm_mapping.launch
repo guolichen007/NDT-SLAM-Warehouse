@@ -32,6 +32,15 @@
     <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen">
         <param name="config_file" value="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
         <param name="ndt_publish_cargo_markers" value="$(arg ndt_publish_cargo_markers)"/>
+        <!-- YAML supplies conservative defaults; these launch arguments are
+             explicit production overrides and must be visible in ~params. -->
+        <param name="persistent_map_enabled" value="$(arg persistent_map)"/>
+        <param name="odom_anchored_cargo_box_enabled"
+               value="$(arg odom_anchored_cargo_box_enabled)"/>
+        <param name="hook_cargo_removal_enabled"
+               value="$(arg hook_cargo_removal_enabled)"/>
+        <param name="cargo_warning_enabled"
+               value="$(arg cargo_warning_enabled)"/>
     </node>
 
     <!-- Formal status heartbeat. safety_status is authoritative; status_code

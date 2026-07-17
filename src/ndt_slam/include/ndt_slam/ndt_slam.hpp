@@ -50,6 +50,7 @@
 #include <ndt_slam/cargo_rigid_geometry.hpp>
 #include <ndt_slam/cargo_safety_evaluator.hpp>
 #include <ndt_slam/cargo_obstacle_tracker.hpp>
+#include <ndt_slam/static_obstacle_evidence_index.hpp>
 #include <ndt_slam/cargo_motion_corridor.hpp>
 #include <ndt_slam/cargo_residual_classifier.hpp>
 #include <ndt_slam/cargo_safety_temporal_filter.hpp>
@@ -598,7 +599,7 @@ private:
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::condition_variable tracking_cv_;
-    bool shutdown_ = false;
+    std::atomic<bool> shutdown_{false};
     std::thread process_thread_;
     // Serializes destructive lifecycle transitions against a complete
     // localization-frame transaction.
@@ -611,6 +612,7 @@ private:
     struct MapCommitJob {
         std::uint64_t sequence = 0U;
         std::uint64_t lifecycle_epoch = 0U;
+        std::uint64_t static_evidence_epoch = 0U;
         ros::Time stamp;
         Sophus::SE3d pose;
         pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud;
@@ -717,6 +719,7 @@ private:
     // clean map 时间一致性：每个 BEV cell 被多少个关键帧观测到
     struct BevKey { int x, y; bool operator<(const BevKey& o) const { return x<o.x||(x==o.x&&y<o.y); } };
     std::map<BevKey, int> bev_observation_count_;
+    std::mutex bev_observation_mutex_;
     int clean_min_observations_ = 2;  // 至少被 2 个关键帧观测到
 
     // Stateful maintenance remains on the localization owner thread. Pure map
@@ -727,10 +730,10 @@ private:
     std::atomic<bool> map_maintenance_has_run_{false};
     std::atomic<bool> loop_closure_pending_{false};
     bool shadow_target_pending_ = false;
-    bool release_keyframes_pending_ = false;
-    bool flush_tiles_pending_ = false;
-    bool runtime_status_pending_ = false;
-    bool memory_guard_pending_ = false;
+    std::atomic<bool> release_keyframes_pending_{false};
+    std::atomic<bool> flush_tiles_pending_{false};
+    std::atomic<bool> runtime_status_pending_{false};
+    std::atomic<bool> memory_guard_pending_{false};
     std::atomic<bool> active_map_rebuild_pending_{false};
     std::atomic<bool> clean_rebuild_requested_from_worker_{false};
     std::thread clean_map_rebuild_thread_;
@@ -752,8 +755,11 @@ private:
     struct CleanMapWorkerResult {
         bool valid = false;
         std::uint64_t source_objects_version = 0U;
+        std::uint64_t static_evidence_epoch = 0U;
         double duration_ms = 0.0;
         CleanMapBuildResult build;
+        StaticEvidenceCellGeometryMap static_clean_cells;
+        StaticEvidenceCellKeySet static_invalidated_cells;
         MapLayerBundle bundle;
     };
     CleanMapWorkerResult clean_map_worker_result_;
@@ -1159,17 +1165,24 @@ private:
     double average_process_time_ms_ = 0.0;
     double average_ndt_time_ms_ = 0.0;
     double last_ndt_time_ms_ = 0.0;
-    bool memory_guard_triggered_ = false;
-    bool disk_guard_triggered_ = false;
+    std::atomic<bool> memory_guard_triggered_{false};
+    std::atomic<bool> disk_guard_triggered_{false};
     ros::Time last_flush_time_local_;
     std::atomic<double> last_active_map_rebuild_time_sec_{0.0};
 
     void writeRuntimeStatus();
     void flushDirtyTiles();
+    bool appendPersistentTileLayers(
+        const pcl::PointCloud<pcl::PointXYZ>& registration,
+        const pcl::PointCloud<pcl::PointXYZ>& ground,
+        const pcl::PointCloud<pcl::PointXYZ>& objects);
+    bool loadPersistentStaticEvidence();
+    bool writePersistentStaticEvidence();
+    std::atomic<bool> static_evidence_persistence_dirty_{false};
 
     // ========== 统一提交检查 ==========
     bool commit_enabled_ = true;              // observe_only 模式时为 false
-    bool mapping_paused_by_memory_guard_ = false;
+    std::atomic<bool> mapping_paused_by_memory_guard_{false};
     bool ndt_health_bad_ = false;
     bool canCommit();                         // 统一检查是否可以提交
 
@@ -1179,11 +1192,16 @@ private:
     int soft_threshold_mb_ = 6000;            // 6GB: 释放缓存 + flush
     int hard_threshold_mb_ = 7000;            // 7GB: 暂停地图 commit
     int emergency_threshold_mb_ = 8000;       // 8GB: 降采样 active map
+    int soft_recover_mb_ = 5500;
+    int hard_recover_mb_ = 6500;
+    int emergency_recover_mb_ = 7200;
     int memory_check_interval_sec_ = 30;
-    ros::Time last_memory_check_time_;
+    ros::WallTime last_memory_check_wall_time_;
     MemoryGuardLevel memory_guard_level_ = MemoryGuardLevel::OK;
+    ros::WallTimer memory_guard_timer_;
 
     void checkMemoryGuard();
+    void memoryGuardTimerCallback(const ros::WallTimerEvent&);
     void forceDownsampleAllMaps();
     void releaseMemoryCache();
     long getProcessMemoryMB();
@@ -1861,6 +1879,10 @@ private:
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
     CargoObstacleTracker cargo_obstacle_tracker_;
+    StaticObstacleEvidenceIndex static_obstacle_evidence_index_;
+    std::atomic<std::uint64_t> static_evidence_epoch_{1U};
+    std::uint64_t cargo_static_evidence_track_start_sequence_ = 0U;
+    std::uint64_t advanceStaticEvidenceEpoch();
     CargoMotionCorridorConfig cargo_motion_corridor_config_;
     CargoResidualClassifierConfig cargo_residual_classifier_config_;
     float cargo_residual_surface_band_below_m_ = 0.60F;
