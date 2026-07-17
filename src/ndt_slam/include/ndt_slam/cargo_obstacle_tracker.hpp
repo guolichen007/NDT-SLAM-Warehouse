@@ -10,6 +10,18 @@
 
 namespace ndt_slam {
 
+enum class ExternalProvenance : std::uint8_t {
+  NONE = 0,
+  OUTSIDE_CARGO_SHELL_ONLY = 1,
+  PRE_CARGO_OCCUPANCY = 2,
+  STATIC_MAP_MATCH = 3,
+  CARGO_MOVED_AWAY_PERSISTENCE = 4,
+  DUAL_LIDAR_CONSENSUS = 5,
+};
+
+const char* externalProvenanceName(ExternalProvenance provenance) noexcept;
+bool authorizesStaticObstacle(ExternalProvenance provenance) noexcept;
+
 struct CargoObstacleTrackerConfig {
   int confirm_frames = 3;
   std::size_t minimum_points = 20U;
@@ -17,6 +29,9 @@ struct CargoObstacleTrackerConfig {
   double stale_track_sec = 1.00;
   float association_max_centroid_distance_m = 0.75F;
   float association_max_top_step_m = 0.75F;
+  float static_track_cell_overlap_min = 0.20F;
+  float static_track_iou_min = 0.10F;
+  float static_provenance_min_cargo_motion_m = 0.30F;
   // Phase-one production policy: 20-point clusters may retain a diagnostic
   // identity, but only independently proven warehouse cargo stacks can issue
   // a formal 17/18. Small-object warning can be enabled after its dedicated
@@ -46,9 +61,12 @@ struct CargoObstacleObservation {
   float long_side_m = 0.0F;
   float height_span_m = 0.0F;
   std::size_t occupied_cells = 0U;
+  std::vector<std::int64_t> occupied_map_cells;
+  Eigen::Vector2f cargo_center_map = Eigen::Vector2f::Zero();
+  bool cargo_center_valid = false;
   std::uint16_t warning_code = 0U;
   bool source_validated = true;
-  bool independent_external_provenance = false;
+  ExternalProvenance provenance = ExternalProvenance::NONE;
 };
 
 struct CargoObstacleTrack {
@@ -74,7 +92,18 @@ struct CargoObstacleTrack {
   bool confirmed = false;
   bool static_obstacle = false;
   bool large_cluster_geometry_valid = false;
-  bool independent_external_provenance = false;
+  ExternalProvenance provenance = ExternalProvenance::NONE;
+  bool provenance_valid = false;
+  std::vector<std::int64_t> occupied_map_cells;
+  std::vector<std::int64_t> identity_anchor_map_cells;
+  Eigen::Vector2f first_cargo_center_map = Eigen::Vector2f::Zero();
+  bool first_cargo_center_valid = false;
+  float maximum_cargo_displacement_m = 0.0F;
+  float last_cell_overlap = 0.0F;
+  float last_cell_iou = 0.0F;
+  float last_anchor_cell_overlap = 0.0F;
+  float last_association_cost = 0.0F;
+  std::string association_reset_reason;
   bool current_source_validated = false;
   std::size_t current_source_index = 0U;
 };
@@ -89,6 +118,15 @@ struct CargoObstacleTrackerDecision {
   int selected_confirm_count = 0;
   double selected_track_age_sec = 0.0;
   bool selected_track_static = false;
+  bool selected_large_geometry_valid = false;
+  ExternalProvenance selected_provenance = ExternalProvenance::NONE;
+  bool selected_provenance_valid = false;
+  int selected_static_provenance_streak = 0;
+  double selected_static_age_sec = 0.0;
+  float selected_track_cell_overlap = 0.0F;
+  float selected_track_iou = 0.0F;
+  float selected_association_cost = 0.0F;
+  std::string selected_association_reset_reason;
   Eigen::Vector3f selected_track_velocity = Eigen::Vector3f::Zero();
   std::string reason = "not_evaluated";
 };

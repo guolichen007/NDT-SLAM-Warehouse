@@ -27,7 +27,9 @@ CargoObstacleObservation staticCargo(
   observation.long_side_m = 1.60F;
   observation.height_span_m = 0.80F;
   observation.occupied_cells = 24U;
-  observation.independent_external_provenance = true;
+  observation.occupied_map_cells = {1, 2, 3, 4, 5, 6};
+  observation.cargo_center_valid = true;
+  observation.provenance = ExternalProvenance::STATIC_MAP_MATCH;
   return observation;
 }
 
@@ -120,7 +122,7 @@ TEST(CargoObstacleTracker, UnvalidatedFrameResetsValidatedStreak) {
 TEST(CargoObstacleTracker, TwentyPointTrackCannotBecomeStaticCargo) {
   CargoObstacleTracker tracker;
   CargoObstacleObservation observation = hazard(0U, 0.0F, 0.0F);
-  observation.independent_external_provenance = true;
+  observation.provenance = ExternalProvenance::STATIC_MAP_MATCH;
   for (int i = 0; i < 12; ++i) {
     const CargoObstacleTrackerDecision decision = tracker.update(
         1.0 + 0.2 * i, {observation});
@@ -147,7 +149,8 @@ TEST(CargoObstacleTracker, LargePersistentCargoStackCanWarn) {
 TEST(CargoObstacleTracker, StaticCargoRequiresIndependentProvenance) {
   CargoObstacleTracker tracker;
   CargoObstacleObservation observation = staticCargo(0U, 0.0F, 0.0F);
-  observation.independent_external_provenance = false;
+  observation.provenance =
+      ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY;
   CargoObstacleTrackerDecision decision;
   for (int i = 0; i < 12; ++i) {
     decision = tracker.update(1.0 + 0.2 * i, {observation});
@@ -163,15 +166,68 @@ TEST(CargoObstacleTracker, StaticDurationStartsWithIndependentProvenance) {
   config.static_cargo_confirm_sec = 1.0;
   CargoObstacleTracker tracker(config);
   CargoObstacleObservation observation = staticCargo(0U, 0.0F, 0.0F);
-  observation.independent_external_provenance = false;
+  observation.provenance =
+      ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY;
   tracker.update(1.0, {observation});
   tracker.update(1.4, {observation});
 
-  observation.independent_external_provenance = true;
+  observation.provenance = ExternalProvenance::STATIC_MAP_MATCH;
   EXPECT_FALSE(tracker.update(2.0, {observation}).confirmed_hazard);
   EXPECT_FALSE(tracker.update(2.2, {observation}).confirmed_hazard);
   EXPECT_FALSE(tracker.update(2.4, {observation}).confirmed_hazard);
   EXPECT_TRUE(tracker.update(3.0, {observation}).confirmed_hazard);
+}
+
+TEST(CargoObstacleTracker, OutsideCargoShellAloneIsNotIndependentProvenance) {
+  CargoObstacleTracker tracker;
+  CargoObstacleObservation observation = staticCargo(0U, 0.0F, 0.0F);
+  observation.provenance =
+      ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY;
+  observation.cargo_center_map.setZero();
+  CargoObstacleTrackerDecision decision;
+  for (int i = 0; i < 12; ++i) {
+    decision = tracker.update(1.0 + 0.2 * i, {observation});
+  }
+  EXPECT_FALSE(decision.confirmed_hazard);
+  EXPECT_EQ(decision.reason, "static_provenance_unavailable");
+  EXPECT_EQ(decision.selected_provenance,
+            ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY);
+}
+
+TEST(CargoObstacleTracker, CargoMovesAwayPersistenceAuthorizesStaticCargo) {
+  CargoObstacleTrackerConfig config;
+  config.static_cargo_confirm_frames = 3;
+  config.static_cargo_confirm_sec = 0.4;
+  config.static_provenance_min_cargo_motion_m = 0.30F;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation observation = staticCargo(0U, 0.0F, 0.0F);
+  observation.provenance =
+      ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY;
+  CargoObstacleTrackerDecision decision;
+  for (int i = 0; i < 8; ++i) {
+    observation.cargo_center_map =
+        Eigen::Vector2f(0.12F * static_cast<float>(i), 0.0F);
+    decision = tracker.update(1.0 + 0.2 * i, {observation});
+  }
+  EXPECT_TRUE(decision.confirmed_hazard) << decision.reason;
+  EXPECT_EQ(decision.selected_provenance,
+            ExternalProvenance::CARGO_MOVED_AWAY_PERSISTENCE);
+}
+
+TEST(CargoObstacleTracker, CellOverlapPreservesStaticTrackIdentity) {
+  CargoObstacleTrackerConfig config;
+  config.association_max_centroid_distance_m = 0.20F;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation first = staticCargo(0U, 0.0F, 0.0F);
+  const CargoObstacleTrackerDecision initial = tracker.update(1.0, {first});
+  CargoObstacleObservation shifted = first;
+  shifted.centroid_map.x() = 0.55F;
+  shifted.occupied_map_cells = {2, 3, 4, 5, 6, 7};
+  const CargoObstacleTrackerDecision associated =
+      tracker.update(1.2, {shifted});
+  EXPECT_EQ(associated.selected_track_id, initial.selected_track_id);
+  ASSERT_EQ(tracker.tracks().size(), 1U);
+  EXPECT_GT(associated.selected_track_cell_overlap, 0.70F);
 }
 
 }  // namespace
