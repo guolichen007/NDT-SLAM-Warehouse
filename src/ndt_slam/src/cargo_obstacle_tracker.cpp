@@ -198,6 +198,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
                   track.large_cluster_geometry_valid &&
                   observation.independent_external_provenance
               ? 1 : 0;
+      if (track.static_provenance_consecutive_observations > 0) {
+        track.static_provenance_first_stamp_sec = stamp_sec;
+      }
       track.first_stamp_sec = stamp_sec;
       track.last_stamp_sec = stamp_sec;
       track.last_observation_cycle = cycle_;
@@ -245,12 +248,18 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         observation.independent_external_provenance &&
         track.velocity_map.head<2>().norm() <=
             config_.static_velocity_threshold_mps;
-    track.static_provenance_consecutive_observations =
-        static_provenance_frame
-            ? (consecutive
-                   ? track.static_provenance_consecutive_observations + 1
-                   : 1)
-            : 0;
+    if (static_provenance_frame) {
+      if (!consecutive ||
+          track.static_provenance_consecutive_observations == 0) {
+        track.static_provenance_consecutive_observations = 1;
+        track.static_provenance_first_stamp_sec = stamp_sec;
+      } else {
+        ++track.static_provenance_consecutive_observations;
+      }
+    } else {
+      track.static_provenance_consecutive_observations = 0;
+      track.static_provenance_first_stamp_sec = 0.0;
+    }
     track.last_stamp_sec = stamp_sec;
     track.last_observation_cycle = cycle_;
     track.observed_this_cycle = true;
@@ -259,7 +268,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.static_obstacle = track.confirmed &&
         track.static_provenance_consecutive_observations >=
             config_.static_cargo_confirm_frames &&
-        stamp_sec - track.first_stamp_sec + kStampEpsilonSec >=
+        track.static_provenance_first_stamp_sec > 0.0 &&
+        stamp_sec - track.static_provenance_first_stamp_sec +
+                kStampEpsilonSec >=
             config_.static_cargo_confirm_sec;
     track.current_source_index = observation.source_index;
     track.current_source_validated = observation.source_validated;

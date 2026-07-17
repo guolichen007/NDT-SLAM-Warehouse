@@ -342,6 +342,12 @@ def main() -> int:
             "cluster_evidence.push_back" in safety_evaluator and
             "current_source_index" in obstacle_tracker and
             "consecutive_observations" in obstacle_tracker and
+            "validated_consecutive_observations" in obstacle_tracker and
+            "static_provenance_first_stamp_sec" in obstacle_tracker and
+            "require_static_cargo_for_warning: true" in live_config and
+            "static_cargo_min_voxel_points: 80" in live_config and
+            "static_cargo_min_occupied_cells: 12" in live_config and
+            "independent_external_provenance" in obstacle_tracker and
             "centroid_map" in obstacle_tracker,
             "hazards are not confirmed by persistent map-frame identity",
             failures)

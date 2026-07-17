@@ -157,5 +157,22 @@ TEST(CargoObstacleTracker, StaticCargoRequiresIndependentProvenance) {
   EXPECT_FALSE(tracker.tracks().front().static_obstacle);
 }
 
+TEST(CargoObstacleTracker, StaticDurationStartsWithIndependentProvenance) {
+  CargoObstacleTrackerConfig config;
+  config.static_cargo_confirm_frames = 3;
+  config.static_cargo_confirm_sec = 1.0;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation observation = staticCargo(0U, 0.0F, 0.0F);
+  observation.independent_external_provenance = false;
+  tracker.update(1.0, {observation});
+  tracker.update(1.4, {observation});
+
+  observation.independent_external_provenance = true;
+  EXPECT_FALSE(tracker.update(2.0, {observation}).confirmed_hazard);
+  EXPECT_FALSE(tracker.update(2.2, {observation}).confirmed_hazard);
+  EXPECT_FALSE(tracker.update(2.4, {observation}).confirmed_hazard);
+  EXPECT_TRUE(tracker.update(3.0, {observation}).confirmed_hazard);
+}
+
 }  // namespace
 }  // namespace ndt_slam

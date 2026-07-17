@@ -64,6 +64,7 @@ struct CargoObstacleTrack {
   int total_consecutive_observations = 0;
   int validated_consecutive_observations = 0;
   int static_provenance_consecutive_observations = 0;
+  double static_provenance_first_stamp_sec = 0.0;
   // Compatibility diagnostic: mirrors total_consecutive_observations.
   int consecutive_observations = 0;
   double first_stamp_sec = 0.0;
