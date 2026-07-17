@@ -11068,7 +11068,7 @@ void NdtSlamNode::updateHookCargoLock(
         }
         break;
 
-    case HookCargoLockState::CANDIDATE:
+    case HookCargoLockState::CANDIDATE: {
         if (!candidate_policy.allow_candidate) {
             clearHookLock();
             ROS_WARN_THROTTLE(
@@ -11201,6 +11201,7 @@ void NdtSlamNode::updateHookCargoLock(
         }
         // Orientation concentration alone cannot grant formal lock authority.
         break;
+    }
 
     case HookCargoLockState::GEOMETRY_CONFIRMING: {
         if (!candidate_policy.allow_candidate) {
