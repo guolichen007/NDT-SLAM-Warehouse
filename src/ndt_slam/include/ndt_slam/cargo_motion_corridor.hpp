@@ -10,6 +10,7 @@ namespace ndt_slam {
 enum class CargoSafetySpatialMode : std::uint8_t {
   RADIAL_FALLBACK = 0,
   MOTION_CORRIDOR = 1,
+  STATIONARY_GUARD = 2,
 };
 
 const char* cargoSafetySpatialModeName(CargoSafetySpatialMode mode) noexcept;
@@ -29,7 +30,9 @@ struct CargoMotionCorridorInput {
   Eigen::Vector2f cargo_center_map = Eigen::Vector2f::Zero();
   Eigen::Vector2f cargo_velocity_map = Eigen::Vector2f::Zero();
   bool velocity_valid = false;
-  float cargo_half_diagonal_m = 0.0F;
+  float cargo_length_m = 0.0F;
+  float cargo_width_m = 0.0F;
+  float cargo_yaw_map_rad = 0.0F;
   float horizontal_uncertainty_m = 0.0F;
   Eigen::Vector2f obstacle_nearest_map = Eigen::Vector2f::Zero();
   Eigen::Vector2f obstacle_centroid_map = Eigen::Vector2f::Zero();

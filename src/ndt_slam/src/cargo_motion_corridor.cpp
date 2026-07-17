@@ -28,6 +28,8 @@ const char* cargoSafetySpatialModeName(CargoSafetySpatialMode mode) noexcept {
   switch (mode) {
     case CargoSafetySpatialMode::MOTION_CORRIDOR:
       return "MOTION_CORRIDOR";
+    case CargoSafetySpatialMode::STATIONARY_GUARD:
+      return "STATIONARY_GUARD";
     case CargoSafetySpatialMode::RADIAL_FALLBACK:
     default:
       return "RADIAL_FALLBACK";
@@ -42,8 +44,9 @@ CargoMotionCorridorDecision evaluateCargoMotionCorridor(
       !input.cargo_velocity_map.allFinite() ||
       !input.obstacle_nearest_map.allFinite() ||
       !input.obstacle_centroid_map.allFinite() ||
-      !std::isfinite(input.cargo_half_diagonal_m) ||
-      input.cargo_half_diagonal_m < 0.0F ||
+      !std::isfinite(input.cargo_length_m) || input.cargo_length_m <= 0.0F ||
+      !std::isfinite(input.cargo_width_m) || input.cargo_width_m <= 0.0F ||
+      !std::isfinite(input.cargo_yaw_map_rad) ||
       !std::isfinite(input.horizontal_uncertainty_m) ||
       input.horizontal_uncertainty_m < 0.0F ||
       !std::isfinite(input.current_footprint_distance_m) ||
@@ -54,16 +57,25 @@ CargoMotionCorridorDecision evaluateCargoMotionCorridor(
   }
   decision.valid = true;
   decision.speed_mps = input.cargo_velocity_map.norm();
-  decision.corridor_half_width_m = input.cargo_half_diagonal_m +
-      input.horizontal_uncertainty_m + config.lateral_margin_m;
 
-  if (!config.enabled || !input.velocity_valid ||
-      decision.speed_mps < config.minimum_motion_speed_mps) {
+  if (!config.enabled || !input.velocity_valid) {
     decision.mode = CargoSafetySpatialMode::RADIAL_FALLBACK;
     decision.eligible = true;
     decision.reason = config.enabled
         ? "motion_unavailable_radial_fallback"
         : "motion_corridor_disabled_radial_fallback";
+    return decision;
+  }
+
+  if (decision.speed_mps < config.minimum_motion_speed_mps) {
+    decision.mode = CargoSafetySpatialMode::STATIONARY_GUARD;
+    decision.corridor_half_width_m =
+        config.immediate_near_field_m + input.horizontal_uncertainty_m;
+    decision.eligible = input.current_footprint_distance_m <=
+        config.immediate_near_field_m;
+    decision.reason = decision.eligible
+        ? "stationary_emergency_shell"
+        : "stationary_structure_outside_guard";
     return decision;
   }
 
@@ -77,6 +89,17 @@ CargoMotionCorridorDecision evaluateCargoMotionCorridor(
 
   const Eigen::Vector2f direction =
       input.cargo_velocity_map / decision.speed_mps;
+  const Eigen::Vector2f normal(-direction.y(), direction.x());
+  const Eigen::Vector2f cargo_long_axis(
+      std::cos(input.cargo_yaw_map_rad),
+      std::sin(input.cargo_yaw_map_rad));
+  const Eigen::Vector2f cargo_short_axis(
+      -cargo_long_axis.y(), cargo_long_axis.x());
+  const float projected_half_width =
+      0.5F * (std::abs(normal.dot(cargo_long_axis)) * input.cargo_length_m +
+              std::abs(normal.dot(cargo_short_axis)) * input.cargo_width_m);
+  decision.corridor_half_width_m = projected_half_width +
+      input.horizontal_uncertainty_m + config.lateral_margin_m;
   const float corridor_length =
       decision.speed_mps * config.prediction_horizon_sec;
   const auto inside_corridor = [&](const Eigen::Vector2f& point,

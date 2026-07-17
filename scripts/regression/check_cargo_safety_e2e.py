@@ -345,14 +345,16 @@ def main() -> int:
             "evaluateCargoMotionCorridor" in node and
             "immediate_near_field_m" in motion_corridor and
             "RADIAL_FALLBACK" in motion_corridor and
+            "STATIONARY_GUARD" in motion_corridor and
             "MOTION_CORRIDOR" in motion_corridor and
             "clear_no_hazard_in_motion_corridor" in node,
             "cargo safety does not gate radial structures by a swept corridor",
             failures)
     require("src/cargo_residual_classifier.cpp" in cmake and
             "classifyCargoResidual" in node and
-            "near_zero_source_unresolved" in residual_classifier and
-            "confirmed_static_track_match" in residual_classifier and
+            "cargo_boundary_source_unresolved" in residual_classifier and
+            "independent_external_static_provenance" in residual_classifier and
+            "validation_shell_m" in residual_classifier and
             "minimum_motion_match_score" in residual_classifier and
             "isInsideExpandedCargo" not in safety_evaluator and
             "external_obstacle_cloud" in node,

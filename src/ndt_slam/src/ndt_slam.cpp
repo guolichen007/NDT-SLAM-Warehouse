@@ -2416,10 +2416,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     cargo_safety[
                         "motion_corridor_maximum_velocity_sample_gap_sec"]
                         .as<double>(0.80));
-            cargo_residual_classifier_config_.near_zero_distance_m =
+            cargo_residual_classifier_config_.validation_shell_m =
                 std::max(0.0F,
-                    cargo_safety["residual_near_zero_distance_m"]
-                        .as<float>(0.05F));
+                    cargo_safety["residual_validation_shell_min_m"]
+                        .as<float>(0.30F));
             cargo_residual_classifier_config_.minimum_inside_xy_ratio =
                 std::clamp(
                     cargo_safety["residual_minimum_inside_xy_ratio"]
@@ -12787,6 +12787,22 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_previous_center_map_ = cargo_center_map;
         cargo_previous_center_stamp_sec_ = current_stamp_sec;
         cargo_map_motion_sample_valid_ = true;
+
+        // The cargo is rigidly carried by the crane for the dominant map
+        // motion. Prefer the EKF velocity when it is backed by a current NDT
+        // update: it remains a valid zero-speed observation while stationary
+        // and does not turn small cargo-centre fitting jitter into a false
+        // swept-corridor direction. The centre finite difference above is
+        // retained as the fallback for relative cargo motion or unavailable
+        // localization velocity.
+        const CraneMotionEKFStatus& ekf_status = crane_motion_ekf_.status();
+        if (ekf_status.initialized && ekf_status.ndt_accepted &&
+            !ekf_status.prediction_only &&
+            ekf_status.velocity.allFinite()) {
+            cargo_velocity_map_ =
+                ekf_status.velocity.cast<float>();
+            cargo_map_velocity_valid = true;
+        }
     } else {
         cargo_map_motion_sample_valid_ = false;
         cargo_velocity_map_.setZero();
@@ -13083,15 +13099,18 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     cargo_corridor_eligible_clusters_ = 0U;
     cargo_corridor_rejected_clusters_ = 0U;
     const float cargo_map_speed = cargo_velocity_map_.norm();
-    const bool motion_corridor_authoritative =
+    const bool motion_velocity_authoritative =
         cargo_motion_corridor_config_.enabled &&
-        cargo_map_velocity_valid && std::isfinite(cargo_map_speed) &&
-        cargo_map_speed >=
+        cargo_map_velocity_valid && std::isfinite(cargo_map_speed);
+    const bool motion_corridor_authoritative =
+        motion_velocity_authoritative && cargo_map_speed >=
             cargo_motion_corridor_config_.minimum_motion_speed_mps;
     cargo_safety_spatial_mode_ = cargoSafetySpatialModeName(
         motion_corridor_authoritative
             ? CargoSafetySpatialMode::MOTION_CORRIDOR
-            : CargoSafetySpatialMode::RADIAL_FALLBACK);
+            : (motion_velocity_authoritative
+                   ? CargoSafetySpatialMode::STATIONARY_GUARD
+                   : CargoSafetySpatialMode::RADIAL_FALLBACK));
     if (radial_safety_result.input_valid &&
         radial_safety_result.warning_valid &&
         radial_safety_result.fault == CargoSafetyFault::NONE &&
@@ -13102,9 +13121,10 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         raw_cargo_safety_result.cluster_evidence.clear();
         raw_cargo_safety_result.has_cluster_evidence = false;
         raw_cargo_safety_result.evaluated_cluster_count = 0U;
-        const float cargo_half_diagonal = 0.5F * std::hypot(
-            rigid_geometry.shape.length_m,
-            rigid_geometry.shape.width_m);
+        const Eigen::Matrix3d map_base_rotation =
+            pose_map_base.so3().matrix();
+        const float map_base_yaw = static_cast<float>(std::atan2(
+            map_base_rotation(1, 0), map_base_rotation(0, 0)));
         const auto more_dangerous = [](
             const CargoSafetyClusterEvidence& candidate,
             const CargoSafetyClusterEvidence& current) {
@@ -13141,7 +13161,12 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             corridor_input.cargo_center_map = cargo_center_map;
             corridor_input.cargo_velocity_map = cargo_velocity_map_;
             corridor_input.velocity_valid = cargo_map_velocity_valid;
-            corridor_input.cargo_half_diagonal_m = cargo_half_diagonal;
+            corridor_input.cargo_length_m =
+                rigid_geometry.shape.length_m;
+            corridor_input.cargo_width_m =
+                rigid_geometry.shape.width_m;
+            corridor_input.cargo_yaw_map_rad = map_base_yaw +
+                rigid_geometry.shape.yaw_base_rad;
             corridor_input.horizontal_uncertainty_m =
                 formal_use.horizontal_uncertainty_m;
             corridor_input.obstacle_nearest_map =
@@ -13303,11 +13328,20 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             classifier_input.surface_band_ratio =
                 evidence.surface_band_ratio;
             classifier_input.moves_with_cargo_score = motion_match_score;
-            classifier_input.confirmed_static_track_match =
-                prior_track != nullptr && prior_track->static_obstacle;
+            classifier_input.independent_external_static_provenance =
+                prior_track != nullptr && prior_track->static_obstacle &&
+                prior_track->independent_external_provenance;
+            CargoResidualClassifierConfig residual_config =
+                cargo_residual_classifier_config_;
+            residual_config.validation_shell_m = std::max({
+                cargo_residual_classifier_config_.validation_shell_m,
+                cargo_motion_corridor_config_.immediate_near_field_m,
+                hook_fixed_config_.voxel_leaf +
+                    formal_use.horizontal_uncertainty_m +
+                    hook_lock_.horizontal_tracking_residual_m});
             const CargoResidualClassifierDecision classifier_decision =
                 classifyCargoResidual(
-                    cargo_residual_classifier_config_, classifier_input);
+                    residual_config, classifier_input);
             evidence.source_validated =
                 classifier_decision.source_validated;
             evidence.source_reason = classifier_decision.reason;
@@ -13364,7 +13398,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             raw_cargo_safety_result.fault =
                 CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
             raw_cargo_safety_result.reason =
-                "near_zero_obstacle_source_unresolved";
+                "cargo_boundary_source_unresolved";
         } else {
             raw_cargo_safety_result.has_cluster_evidence = false;
             raw_cargo_safety_result.warning_valid = true;
@@ -13479,11 +13513,12 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             }
             observation.warning_code = evidence.warning_code;
             observation.source_validated = evidence.source_validated;
-            const float residual_validation_shell_m = std::max(
+            const float residual_validation_shell_m = std::max({
+                cargo_residual_classifier_config_.validation_shell_m,
                 cargo_motion_corridor_config_.immediate_near_field_m,
                 hook_fixed_config_.voxel_leaf +
                     formal_use.horizontal_uncertainty_m +
-                    hook_lock_.horizontal_tracking_residual_m);
+                    hook_lock_.horizontal_tracking_residual_m});
             observation.independent_external_provenance =
                 evidence.source_validated &&
                 evidence.footprint_distance_m >

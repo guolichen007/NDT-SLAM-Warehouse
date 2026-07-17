@@ -12,7 +12,7 @@ enum class CargoResidualClass : std::uint8_t {
 };
 
 struct CargoResidualClassifierConfig {
-  float near_zero_distance_m = 0.05F;
+  float validation_shell_m = 0.30F;
   float minimum_inside_xy_ratio = 0.60F;
   float minimum_identity_match_ratio = 0.35F;
   float minimum_surface_band_ratio = 0.50F;
@@ -25,7 +25,7 @@ struct CargoResidualClassifierInput {
   float identity_match_ratio = 0.0F;
   float surface_band_ratio = 0.0F;
   float moves_with_cargo_score = 0.0F;
-  bool confirmed_static_track_match = false;
+  bool independent_external_static_provenance = false;
 };
 
 struct CargoResidualClassifierDecision {
@@ -35,9 +35,10 @@ struct CargoResidualClassifierDecision {
   std::string reason = "not_evaluated";
 };
 
-// A distance-near-zero cluster cannot become 17/18 without provenance.
+// A cluster anywhere inside the cargo boundary uncertainty shell cannot
+// become 17/18 without provenance.
 // Cargo deletion requires both identity and motion agreement; a confirmed
-// static map-frame track remains an external obstacle.
+// independently sourced static map-frame track remains an external obstacle.
 CargoResidualClassifierDecision classifyCargoResidual(
     const CargoResidualClassifierConfig& config,
     const CargoResidualClassifierInput& input);

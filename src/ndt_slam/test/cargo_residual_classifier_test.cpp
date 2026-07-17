@@ -5,9 +5,9 @@
 namespace ndt_slam {
 namespace {
 
-TEST(CargoResidualClassifier, NonzeroClusterIsExternal) {
+TEST(CargoResidualClassifier, ClusterOutsideShellIsExternal) {
   CargoResidualClassifierInput input;
-  input.footprint_distance_m = 0.20F;
+  input.footprint_distance_m = 0.31F;
   const auto decision = classifyCargoResidual(
       CargoResidualClassifierConfig{}, input);
   EXPECT_TRUE(decision.source_validated);
@@ -40,18 +40,45 @@ TEST(CargoResidualClassifier, IdentityAndMotionClassifyCargoSelf) {
   EXPECT_EQ(decision.classification, CargoResidualClass::CARGO_SELF);
 }
 
-TEST(CargoResidualClassifier, StaticTrackRemainsExternalBelowCargo) {
+TEST(CargoResidualClassifier, IndependentStaticProvenanceRemainsExternal) {
   CargoResidualClassifierInput input;
   input.footprint_distance_m = 0.0F;
   input.inside_xy_ratio = 1.0F;
   input.identity_match_ratio = 0.80F;
   input.surface_band_ratio = 0.80F;
   input.moves_with_cargo_score = 0.10F;
-  input.confirmed_static_track_match = true;
+  input.independent_external_static_provenance = true;
   const auto decision = classifyCargoResidual(
       CargoResidualClassifierConfig{}, input);
   EXPECT_TRUE(decision.source_validated);
   EXPECT_EQ(decision.classification, CargoResidualClass::EXTERNAL_OBSTACLE);
+}
+
+TEST(CargoResidualClassifier, ResidualBetweenFiveAndThirtyCmNeedsProof) {
+  CargoResidualClassifierInput input;
+  input.footprint_distance_m = 0.20F;
+  input.inside_xy_ratio = 0.20F;
+  input.identity_match_ratio = 0.20F;
+  input.surface_band_ratio = 0.70F;
+  input.moves_with_cargo_score = 0.20F;
+  const auto decision = classifyCargoResidual(
+      CargoResidualClassifierConfig{}, input);
+  EXPECT_FALSE(decision.source_validated);
+  EXPECT_EQ(decision.classification, CargoResidualClass::UNKNOWN);
+  EXPECT_EQ(decision.reason, "cargo_boundary_source_unresolved");
+}
+
+TEST(CargoResidualClassifier, CargoIdentityPrecedesStaticHint) {
+  CargoResidualClassifierInput input;
+  input.footprint_distance_m = 0.02F;
+  input.inside_xy_ratio = 0.95F;
+  input.identity_match_ratio = 0.90F;
+  input.surface_band_ratio = 0.90F;
+  input.moves_with_cargo_score = 0.90F;
+  input.independent_external_static_provenance = true;
+  const auto decision = classifyCargoResidual(
+      CargoResidualClassifierConfig{}, input);
+  EXPECT_EQ(decision.classification, CargoResidualClass::CARGO_SELF);
 }
 
 }  // namespace

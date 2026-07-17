@@ -712,7 +712,9 @@ cargo_safety:
   motion_corridor_rear_margin_m: 0.30
   motion_corridor_velocity_alpha: 0.35
   motion_corridor_maximum_velocity_sample_gap_sec: 0.80
-  residual_near_zero_distance_m: 0.05
+  # Every cluster inside the complete 0.30 m cargo boundary/uncertainty shell
+  # requires identity-motion or independent static-map provenance.
+  residual_validation_shell_min_m: 0.30
   residual_minimum_inside_xy_ratio: 0.60
   residual_minimum_identity_match_ratio: 0.35
   residual_minimum_surface_band_ratio: 0.50
