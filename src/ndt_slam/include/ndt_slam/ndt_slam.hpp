@@ -756,6 +756,7 @@ private:
         bool valid = false;
         std::uint64_t source_objects_version = 0U;
         std::uint64_t static_evidence_epoch = 0U;
+        std::uint64_t static_clean_build_version = 0U;
         double duration_ms = 0.0;
         CleanMapBuildResult build;
         StaticEvidenceCellGeometryMap static_clean_cells;
@@ -764,6 +765,14 @@ private:
     };
     CleanMapWorkerResult clean_map_worker_result_;
     std::uint64_t objects_map_content_version_ = 1U;
+    std::atomic<std::uint64_t> static_clean_build_version_{1U};
+    std::atomic<std::uint64_t> static_clean_build_started_{0U};
+    std::atomic<std::uint64_t> static_clean_build_applied_{0U};
+    std::atomic<std::uint64_t> static_clean_build_snapshot_only_{0U};
+    std::atomic<std::uint64_t> static_clean_build_discarded_{0U};
+    std::atomic<std::uint64_t> static_clean_confirmed_cells_{0U};
+    std::atomic<std::uint64_t> static_clean_invalidated_cells_{0U};
+    std::atomic<std::uint64_t> static_clean_snapshot_cells_{0U};
     std::uint64_t clean_map_content_version_ = 0U;
     std::uint64_t shadow_target_source_version_ = 0U;
     Sophus::SE3d shadow_target_pose_;
@@ -1178,7 +1187,11 @@ private:
         const pcl::PointCloud<pcl::PointXYZ>& objects);
     bool loadPersistentStaticEvidence();
     bool writePersistentStaticEvidence();
+    void suspendPersistentStaticEvidence(const char* reason);
     std::atomic<bool> static_evidence_persistence_dirty_{false};
+    std::mutex static_evidence_persistence_mutex_;
+    bool static_evidence_manifest_active_ = false;
+    std::uint64_t static_evidence_last_committed_revision_ = 0U;
 
     // ========== 统一提交检查 ==========
     bool commit_enabled_ = true;              // observe_only 模式时为 false
@@ -1874,12 +1887,23 @@ private:
     ros::Publisher cargo_raw_safety_status_pub_;
     ros::Publisher cargo_raw_status_code_pub_;
     ros::Publisher cargo_fused_box_marker_pub_;
+    ros::Publisher cargo_static_evidence_debug_pub_;
 
     CargoBottomFusion cargo_bottom_fusion_;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
     CargoObstacleTracker cargo_obstacle_tracker_;
     StaticObstacleEvidenceIndex static_obstacle_evidence_index_;
+    StaticProvenanceDecision cargo_static_evidence_decision_;
+    bool cargo_diagnostic_source_evidence_valid_ = false;
+    CargoSafetyClusterEvidence cargo_diagnostic_source_evidence_;
+    bool cargo_diagnostic_observation_valid_ = false;
+    CargoObstacleObservation cargo_diagnostic_observation_;
+    std::uint64_t cargo_static_source_unvalidated_count_ = 0U;
+    std::uint64_t cargo_static_geometry_rejected_count_ = 0U;
+    std::uint64_t cargo_obstacle_track_created_count_ = 0U;
+    std::uint64_t cargo_obstacle_track_reset_count_ = 0U;
+    ros::WallTime cargo_static_summary_last_wall_;
     std::atomic<std::uint64_t> static_evidence_epoch_{1U};
     std::uint64_t cargo_static_evidence_track_start_sequence_ = 0U;
     std::uint64_t advanceStaticEvidenceEpoch();

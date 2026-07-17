@@ -34,3 +34,5 @@ src/ndt_slam/include/ndt_slam/ndt_slam.hpp -text
 src/ndt_slam/config/live_longterm_mapping.yaml -text whitespace=cr-at-eol
 src/ndt_slam/include/ndt_slam/runtime_diagnostics.hpp -text whitespace=cr-at-eol
 src/ndt_slam/src/runtime_diagnostics.cpp -text whitespace=cr-at-eol
+src/ndt_slam/include/ndt_slam/dynamic_event_manager.hpp -text whitespace=cr-at-eol
+CHANGELOG.md -text whitespace=cr-at-eol

@@ -171,8 +171,43 @@ std::string persistentMapUuid(const std::string& root_path) {
 
 std::string staticEvidenceIndexFileName(
     std::uint64_t generation, std::uint64_t revision) {
-    return "static_evidence_index_v1_g" + std::to_string(generation) +
+    return "static_evidence_index_v2_g" + std::to_string(generation) +
         "_r" + std::to_string(revision) + ".csv";
+}
+
+template <typename CellRange>
+void appendStaticEvidenceInvalidations(
+    const CellRange& cells,
+    float clean_cell_size_m,
+    float static_cell_size_m,
+    StaticEvidenceCellKeySet* output) {
+    if (!output || !std::isfinite(clean_cell_size_m) ||
+        clean_cell_size_m <= 0.0F || !std::isfinite(static_cell_size_m) ||
+        static_cell_size_m <= 0.0F) {
+        return;
+    }
+    for (const auto& entry : cells) {
+        const CleanMapCell& cell = entry;
+        const double x_min = cell.first * clean_cell_size_m;
+        const double y_min = cell.second * clean_cell_size_m;
+        const double x_max =
+            (cell.first + 1) * clean_cell_size_m - 1.0e-9;
+        const double y_max =
+            (cell.second + 1) * clean_cell_size_m - 1.0e-9;
+        const int static_x_min = static_cast<int>(
+            std::floor(x_min / static_cell_size_m));
+        const int static_y_min = static_cast<int>(
+            std::floor(y_min / static_cell_size_m));
+        const int static_x_max = static_cast<int>(
+            std::floor(x_max / static_cell_size_m));
+        const int static_y_max = static_cast<int>(
+            std::floor(y_max / static_cell_size_m));
+        for (int x = static_x_min; x <= static_x_max; ++x) {
+            for (int y = static_y_min; y <= static_y_max; ++y) {
+                output->insert(packStaticEvidenceCell(x, y));
+            }
+        }
+    }
 }
 
 }  // namespace
@@ -262,6 +297,8 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
         "/cargo_avoidance/raw_status_code", 1);
     cargo_fused_box_marker_pub_ = nh_.advertise<visualization_msgs::Marker>(
         "/cargo_avoidance/fused_box_marker", 2);
+    cargo_static_evidence_debug_pub_ = nh_.advertise<std_msgs::String>(
+        "/cargo_avoidance/static_evidence_debug", 1);
 
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
@@ -414,6 +451,8 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         "/cargo_avoidance/raw_status_code", 1);
     cargo_fused_box_marker_pub_ = nh_.advertise<visualization_msgs::Marker>(
         "/cargo_avoidance/fused_box_marker", 2);
+    cargo_static_evidence_debug_pub_ = nh_.advertise<std_msgs::String>(
+        "/cargo_avoidance/static_evidence_debug", 1);
 
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
@@ -1060,6 +1099,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             if (dem["human_use_track_height"]) dynamic_event_config_.human_use_track_height = dem["human_use_track_height"].as<bool>();
             if (dem["human_z_margin"]) dynamic_event_config_.human_z_margin = dem["human_z_margin"].as<double>();
             if (dem["clean_deny_enabled"]) dynamic_event_config_.clean_deny_enabled = dem["clean_deny_enabled"].as<bool>();
+            if (dem["enable_cargo_history_clean"]) dynamic_event_config_.enable_cargo_history_clean = dem["enable_cargo_history_clean"].as<bool>();
+            if (dem["enable_human_history_clean"]) dynamic_event_config_.enable_human_history_clean = dem["enable_human_history_clean"].as<bool>();
             if (dem["max_dynamic_ratio"]) dynamic_event_config_.max_dynamic_ratio = dem["max_dynamic_ratio"].as<double>();
             if (dem["placed_to_objects_clean"]) dynamic_event_config_.placed_to_objects_clean = dem["placed_to_objects_clean"].as<bool>();
             if (dem["placed_to_display_map"]) dynamic_event_config_.placed_to_display_map = dem["placed_to_display_map"].as<bool>();
@@ -2504,6 +2545,13 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 static_cast<std::uint64_t>(std::max(
                     0, cargo_safety["static_map_pre_cargo_sequence_gap"]
                            .as<int>(2)));
+            static_map_config.maximum_observation_gap_sec = std::max(
+                0.05, cargo_safety["static_map_max_observation_gap_sec"]
+                          .as<double>(0.8));
+            static_map_config.maximum_observation_sequence_gap =
+                static_cast<std::uint64_t>(std::max(
+                    1, cargo_safety["static_map_max_sequence_gap"]
+                           .as<int>(1)));
             static_obstacle_evidence_index_.setConfig(static_map_config);
         }
         cargo_obstacle_tracker_.setConfig(obstacle_tracker_config);
@@ -3232,14 +3280,61 @@ void NdtSlamNode::startCleanMapRebuildJob() {
         }
     }
 
+    std::uint64_t source_clean_build_version =
+        static_clean_build_version_.fetch_add(
+            1U, std::memory_order_acq_rel) + 1U;
+    if (source_clean_build_version == 0U) {
+        static_clean_build_version_.store(1U, std::memory_order_release);
+        source_clean_build_version = 1U;
+    }
+    static_clean_build_started_.fetch_add(1U, std::memory_order_relaxed);
+    StaticEvidenceCellKeySet source_invalidated_cells;
+    const float static_cell_size =
+        static_obstacle_evidence_index_.config().cell_size_m;
+    appendStaticEvidenceInvalidations(
+        input.deny_cells, input.cell_size_m, static_cell_size,
+        &source_invalidated_cells);
+    appendStaticEvidenceInvalidations(
+        input.human_deny_cells, input.cell_size_m, static_cell_size,
+        &source_invalidated_cells);
+    std::set<CleanMapCell> deny_range_cells;
+    for (const auto& item : input.deny_ranges) {
+        deny_range_cells.insert(item.first);
+    }
+    appendStaticEvidenceInvalidations(
+        deny_range_cells, input.cell_size_m, static_cell_size,
+        &source_invalidated_cells);
+    const StaticEvidenceMutationResult invalidation =
+        static_obstacle_evidence_index_.invalidateCells(
+            source_invalidated_cells, source_clean_build_version,
+            current_time, source_static_evidence_epoch);
+    static_clean_invalidated_cells_.fetch_add(
+        invalidation.invalidated_cells, std::memory_order_relaxed);
+    static_clean_snapshot_cells_.store(
+        invalidation.snapshot_cells, std::memory_order_relaxed);
+    if (invalidation.invalidated_cells > 0U) {
+        static_evidence_persistence_dirty_.store(
+            true, std::memory_order_release);
+        if (persistent_map_enabled_) {
+            flush_tiles_pending_.store(true, std::memory_order_release);
+            map_maintenance_pending_.store(true, std::memory_order_release);
+        }
+    }
+
     clean_map_rebuild_running_.store(true, std::memory_order_release);
     clean_map_rebuild_thread_ = std::thread(
         [this, source_objects_version, source_static_evidence_epoch,
+         source_clean_build_version,
+         source_invalidated_cells = std::move(source_invalidated_cells),
          source_bundle = std::move(source_bundle),
          input = std::move(input)]() mutable {
             CleanMapWorkerResult result;
             result.source_objects_version = source_objects_version;
             result.static_evidence_epoch = source_static_evidence_epoch;
+            result.static_clean_build_version =
+                source_clean_build_version;
+            result.static_invalidated_cells =
+                std::move(source_invalidated_cells);
             result.bundle = std::move(source_bundle);
             const auto started = std::chrono::steady_clock::now();
             try {
@@ -3251,42 +3346,6 @@ void NdtSlamNode::startCleanMapRebuildJob() {
                             result.build.clean_points,
                             static_obstacle_evidence_index_.config()
                                 .cell_size_m);
-                    const auto add_invalidated_cell =
-                        [&input, &result, this](const CleanMapCell& cell) {
-                        const float static_cell_size =
-                            static_obstacle_evidence_index_.config()
-                                .cell_size_m;
-                        const double x_min = cell.first * input.cell_size_m;
-                        const double y_min = cell.second * input.cell_size_m;
-                        const double x_max =
-                            (cell.first + 1) * input.cell_size_m - 1.0e-9;
-                        const double y_max =
-                            (cell.second + 1) * input.cell_size_m - 1.0e-9;
-                        const int static_x_min = static_cast<int>(
-                            std::floor(x_min / static_cell_size));
-                        const int static_y_min = static_cast<int>(
-                            std::floor(y_min / static_cell_size));
-                        const int static_x_max = static_cast<int>(
-                            std::floor(x_max / static_cell_size));
-                        const int static_y_max = static_cast<int>(
-                            std::floor(y_max / static_cell_size));
-                        for (int x = static_x_min; x <= static_x_max; ++x) {
-                            for (int y = static_y_min; y <= static_y_max;
-                                 ++y) {
-                                result.static_invalidated_cells.insert(
-                                    packStaticEvidenceCell(x, y));
-                            }
-                        }
-                    };
-                    for (const auto& cell : input.deny_cells) {
-                        add_invalidated_cell(cell);
-                    }
-                    for (const auto& cell : input.human_deny_cells) {
-                        add_invalidated_cell(cell);
-                    }
-                    for (const auto& item : input.deny_ranges) {
-                        add_invalidated_cell(item.first);
-                    }
                     auto clean_cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(
                         new pcl::PointCloud<pcl::PointXYZ>);
                     clean_cloud->reserve(result.build.clean_points.size());
@@ -3317,10 +3376,10 @@ void NdtSlamNode::startCleanMapRebuildJob() {
                     clean_map_rebuild_result_mutex_);
                 clean_map_worker_result_ = std::move(result);
             }
-            clean_map_rebuild_result_ready_.store(
-                true, std::memory_order_release);
             clean_map_rebuild_running_.store(
                 false, std::memory_order_release);
+            clean_map_rebuild_result_ready_.store(
+                true, std::memory_order_release);
             queue_cv_.notify_one();
         });
 }
@@ -3337,6 +3396,8 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
     }
     if (result.bundle.lifecycle_epoch !=
         map_rebuild_generation_.load(std::memory_order_acquire)) {
+        static_clean_build_discarded_.fetch_add(
+            1U, std::memory_order_relaxed);
         ROS_DEBUG("[CleanMapWorker] discarded previous lifecycle epoch");
         return;
     }
@@ -3350,12 +3411,16 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
         clean_map_rebuild_pending_.load(std::memory_order_acquire),
         result.source_objects_version, current_objects_version);
     if (initial_action == CleanMapBuildAction::DISCARD_INVALID) {
+        static_clean_build_discarded_.fetch_add(
+            1U, std::memory_order_relaxed);
         ROS_DEBUG("[CleanMapWorker] rejected reason=%s duration_ms=%.1f",
                   result.build.reason.c_str(), result.duration_ms);
         return;
     }
 
     bool installed_as_current = false;
+    CleanMapBuildAction completed_action =
+        CleanMapBuildAction::DISCARD_INVALID;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
         const CleanMapBuildAction final_action = evaluateCleanMapBuildAction(
@@ -3376,6 +3441,7 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
             clean_map_rebuild_pending_ = true;
             map_maintenance_pending_ = true;
         }
+        completed_action = final_action;
         // Publish the completed raw+clean snapshot even when the working map
         // advanced during the build. This removes clean-worker starvation
         // without ever installing stale clean content into the working map.
@@ -3387,15 +3453,43 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
 
     last_commit_clean_map_ms_ = result.duration_ms;
     if (installed_as_current) {
-        const double evidence_stamp = result.bundle.source_stamp.isZero()
-            ? stamp.toSec() : result.bundle.source_stamp.toSec();
-        if (result.static_evidence_epoch ==
-            static_evidence_epoch_.load(std::memory_order_acquire)) {
+        static_clean_build_applied_.fetch_add(
+            1U, std::memory_order_relaxed);
+    } else if (completed_action ==
+               CleanMapBuildAction::PUBLISH_SNAPSHOT_ONLY) {
+        static_clean_build_snapshot_only_.fetch_add(
+            1U, std::memory_order_relaxed);
+        // Capture the current deny state before applying the older clean
+        // result. The new build's higher tombstone version prevents stale
+        // worker output from re-authorizing cells invalidated meanwhile.
+        clean_map_rebuild_pending_ = false;
+        startCleanMapRebuildJob();
+    }
+    const double evidence_stamp = result.bundle.source_stamp.isZero()
+        ? stamp.toSec() : result.bundle.source_stamp.toSec();
+    if (result.static_evidence_epoch ==
+        static_evidence_epoch_.load(std::memory_order_acquire)) {
+        const StaticEvidenceMutationResult mutation =
             static_obstacle_evidence_index_.confirmCleanCells(
-                result.static_clean_cells, result.static_invalidated_cells,
-                evidence_stamp, result.static_evidence_epoch);
+                result.static_clean_cells,
+                result.static_invalidated_cells,
+                evidence_stamp,
+                result.static_evidence_epoch,
+                result.static_clean_build_version);
+        static_clean_confirmed_cells_.fetch_add(
+            mutation.confirmed_cells, std::memory_order_relaxed);
+        static_clean_invalidated_cells_.fetch_add(
+            mutation.invalidated_cells, std::memory_order_relaxed);
+        static_clean_snapshot_cells_.store(
+            mutation.snapshot_cells, std::memory_order_relaxed);
+        if (mutation.confirmed_cells > 0U ||
+            mutation.invalidated_cells > 0U) {
             static_evidence_persistence_dirty_.store(
                 true, std::memory_order_release);
+            if (persistent_map_enabled_) {
+                flush_tiles_pending_.store(
+                    true, std::memory_order_release);
+            }
         }
     }
     map_maintenance_has_run_.store(true, std::memory_order_release);
@@ -7494,10 +7588,9 @@ void NdtSlamNode::updatePoseFromLoopClosure(
         last_bound_ndt_target_source_ = "none";
         last_target_reason_ = "loop_closure_rebind";
     }
+    suspendPersistentStaticEvidence("loop_closure");
     static_obstacle_evidence_index_.reset(advanceStaticEvidenceEpoch());
     cargo_static_evidence_track_start_sequence_ = 0U;
-    static_evidence_persistence_dirty_.store(
-        true, std::memory_order_release);
     if (persistent_map_enabled_) {
         flush_tiles_pending_.store(true, std::memory_order_release);
     }
@@ -7554,9 +7647,8 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         bootstrap_local_map_complete_ = false;
         bootstrap_local_map_frames_ = 0;
     }
+    suspendPersistentStaticEvidence("reset");
     static_obstacle_evidence_index_.reset(advanceStaticEvidenceEpoch());
-    static_evidence_persistence_dirty_.store(
-        true, std::memory_order_release);
     if (persistent_map_enabled_) {
         flush_tiles_pending_.store(true, std::memory_order_release);
         map_maintenance_pending_.store(true, std::memory_order_release);
@@ -7839,10 +7931,9 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
             bootstrap_local_map_complete_ = true;
             bootstrap_local_map_frames_ = 0;
         }
+        suspendPersistentStaticEvidence("load_map");
         static_obstacle_evidence_index_.reset(
             advanceStaticEvidenceEpoch());
-        static_evidence_persistence_dirty_.store(
-            true, std::memory_order_release);
         if (persistent_map_enabled_) {
             flush_tiles_pending_.store(true, std::memory_order_release);
             map_maintenance_pending_.store(true, std::memory_order_release);
@@ -8007,10 +8098,9 @@ bool NdtSlamNode::rebuildMapService(std_srvs::Empty::Request& request, std_srvs:
     keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
     loop_closure_result_ready_.store(false, std::memory_order_release);
     map_rebuild_generation_.fetch_add(1U, std::memory_order_acq_rel);
+    suspendPersistentStaticEvidence("rebuild_map");
     static_obstacle_evidence_index_.reset(advanceStaticEvidenceEpoch());
     cargo_static_evidence_track_start_sequence_ = 0U;
-    static_evidence_persistence_dirty_.store(
-        true, std::memory_order_release);
     if (persistent_map_enabled_) {
         flush_tiles_pending_.store(true, std::memory_order_release);
         map_maintenance_pending_.store(true, std::memory_order_release);
@@ -9175,6 +9265,8 @@ bool NdtSlamNode::appendPersistentTileLayers(
 }
 
 bool NdtSlamNode::loadPersistentStaticEvidence() {
+    std::lock_guard<std::mutex> persistence_lock(
+        static_evidence_persistence_mutex_);
     const std::string manifest_path =
         persistent_map_root_dir_ + "/static_evidence_manifest.json";
     const std::string objects_layer_path =
@@ -9246,6 +9338,9 @@ bool NdtSlamNode::loadPersistentStaticEvidence() {
         static_evidence_persistence_dirty_.store(
             false, std::memory_order_release);
         const auto snapshot = static_obstacle_evidence_index_.snapshot();
+        static_evidence_manifest_active_ = true;
+        static_evidence_last_committed_revision_ =
+            snapshot ? snapshot->revision : source_revision;
         ROS_INFO("[StaticMapEvidence] loaded schema=%u cells=%zu "
                  "observations=%llu",
                  schema, snapshot ? snapshot->cells.size() : 0U,
@@ -9260,8 +9355,28 @@ bool NdtSlamNode::loadPersistentStaticEvidence() {
 }
 
 bool NdtSlamNode::writePersistentStaticEvidence() {
+    std::lock_guard<std::mutex> persistence_lock(
+        static_evidence_persistence_mutex_);
     const auto snapshot = static_obstacle_evidence_index_.snapshot();
     if (!snapshot) return false;
+    if (snapshot->map_generation !=
+        static_evidence_epoch_.load(std::memory_order_acquire)) {
+        ROS_WARN("[StaticMapEvidence] refusing stale lifecycle snapshot");
+        return false;
+    }
+    const std::size_t minimum_persisted_cells =
+        static_obstacle_evidence_index_.config().minimum_matched_cells;
+    if (!static_evidence_manifest_active_ &&
+        snapshot->cells.size() < minimum_persisted_cells) {
+        ROS_INFO_THROTTLE(
+            10.0,
+            "[StaticMapEvidence] rebuild not mature cells=%zu required=%zu",
+            snapshot->cells.size(), minimum_persisted_cells);
+        return false;
+    }
+    if (snapshot->revision <= static_evidence_last_committed_revision_) {
+        return true;
+    }
     try {
         boost::filesystem::create_directories(persistent_map_root_dir_);
         const std::string index_name = staticEvidenceIndexFileName(
@@ -9311,7 +9426,15 @@ bool NdtSlamNode::writePersistentStaticEvidence() {
         // The manifest is the commit point. Once it names the new immutable
         // index, older index generations and crash orphans are no longer
         // reachable and can be removed without affecting recovery.
-        const std::string prefix = "static_evidence_index_v1_g";
+        static_evidence_manifest_active_ = true;
+        static_evidence_last_committed_revision_ = snapshot->revision;
+        boost::system::error_code archive_remove_error;
+        boost::filesystem::remove(
+            persistent_map_root_dir_ +
+                "/static_evidence_manifest.last_good.json",
+            archive_remove_error);
+
+        const std::string prefix = "static_evidence_index_v2_g";
         boost::system::error_code iterator_error;
         for (boost::filesystem::directory_iterator it(
                  persistent_map_root_dir_, iterator_error), end;
@@ -9333,6 +9456,33 @@ bool NdtSlamNode::writePersistentStaticEvidence() {
         ROS_ERROR("[StaticMapEvidence] persistence failed: %s", error.what());
         return false;
     }
+}
+
+void NdtSlamNode::suspendPersistentStaticEvidence(const char* reason) {
+    static_evidence_persistence_dirty_.store(
+        false, std::memory_order_release);
+    if (!persistent_map_enabled_) return;
+    std::lock_guard<std::mutex> persistence_lock(
+        static_evidence_persistence_mutex_);
+    const std::string manifest_path =
+        persistent_map_root_dir_ + "/static_evidence_manifest.json";
+    const std::string archive_path = persistent_map_root_dir_ +
+        "/static_evidence_manifest.last_good.json";
+    try {
+        if (boost::filesystem::is_regular_file(manifest_path)) {
+            boost::system::error_code remove_error;
+            boost::filesystem::remove(archive_path, remove_error);
+            boost::filesystem::rename(manifest_path, archive_path);
+        }
+    } catch (const std::exception& error) {
+        ROS_ERROR("[StaticMapEvidence] failed to suspend manifest: %s",
+                  error.what());
+    }
+    static_evidence_manifest_active_ = false;
+    static_evidence_last_committed_revision_ = 0U;
+    ROS_WARN("[StaticMapEvidence] runtime epoch rebuilding reason=%s; "
+             "last-good manifest retained but inactive",
+             reason ? reason : "lifecycle_change");
 }
 
 void NdtSlamNode::flushDirtyTiles() {
@@ -9647,6 +9797,38 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"last_active_map_rebuild_sec\": "
       << last_active_map_rebuild_time_sec_.load(std::memory_order_relaxed)
       << ",\n";
+    const auto static_snapshot = static_obstacle_evidence_index_.snapshot();
+    f << "  \"static_evidence_epoch\": "
+      << static_evidence_epoch_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"static_evidence_revision\": "
+      << (static_snapshot ? static_snapshot->revision : 0U) << ",\n";
+    f << "  \"static_evidence_cells\": "
+      << (static_snapshot ? static_snapshot->cells.size() : 0U) << ",\n";
+    f << "  \"static_evidence_latest_sequence\": "
+      << (static_snapshot
+              ? static_snapshot->latest_observation_sequence : 0U)
+      << ",\n";
+    f << "  \"static_query_reason\": \""
+      << cargo_static_evidence_decision_.reason << "\",\n";
+    f << "  \"static_query_authorized\": "
+      << (cargo_static_evidence_decision_.authorized ? "true" : "false")
+      << ",\n";
+    f << "  \"static_clean_build_started\": "
+      << static_clean_build_started_.load() << ",\n";
+    f << "  \"static_clean_build_applied\": "
+      << static_clean_build_applied_.load() << ",\n";
+    f << "  \"static_clean_build_snapshot_only\": "
+      << static_clean_build_snapshot_only_.load() << ",\n";
+    f << "  \"static_clean_build_discarded\": "
+      << static_clean_build_discarded_.load() << ",\n";
+    f << "  \"static_cells_confirmed\": "
+      << static_clean_confirmed_cells_.load() << ",\n";
+    f << "  \"static_cells_invalidated\": "
+      << static_clean_invalidated_cells_.load() << ",\n";
+    f << "  \"obstacle_track_created_count\": "
+      << cargo_obstacle_track_created_count_ << ",\n";
+    f << "  \"obstacle_track_reset_count\": "
+      << cargo_obstacle_track_reset_count_ << ",\n";
     f << "  \"last_update\": \"" << ros::Time::now() << "\"\n";
     f << "}\n";
     f.close();
@@ -14002,6 +14184,25 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     cargo_raw_warning_code_ = raw_cargo_safety_result.warning_valid
         ? raw_cargo_safety_result.warning_code : 0;
     last_cargo_safety_result_ = raw_cargo_safety_result;
+    cargo_static_evidence_decision_ = StaticProvenanceDecision{};
+    {
+        const auto static_snapshot =
+            static_obstacle_evidence_index_.snapshot();
+        cargo_static_evidence_decision_.expected_map_generation =
+            static_evidence_epoch_.load(std::memory_order_acquire);
+        if (static_snapshot) {
+            cargo_static_evidence_decision_.map_generation =
+                static_snapshot->map_generation;
+            cargo_static_evidence_decision_.index_revision =
+                static_snapshot->revision;
+            cargo_static_evidence_decision_.index_cell_count =
+                static_snapshot->cells.size();
+            cargo_static_evidence_decision_.index_latest_observation_sequence =
+                static_snapshot->latest_observation_sequence;
+        }
+        cargo_static_evidence_decision_.reason =
+            "static_query_not_attempted";
+    }
     std::vector<CargoObstacleObservation> obstacle_track_observations;
     if (radial_safety_result.input_valid &&
         radial_safety_result.warning_valid &&
@@ -14105,6 +14306,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 hook_fixed_config_.voxel_leaf +
                     formal_use.horizontal_uncertainty_m +
                     hook_lock_.horizontal_tracking_residual_m});
+            observation.validation_shell_m = residual_validation_shell_m;
             StaticProvenanceDecision static_decision;
             if (evidence.source_validated &&
                 std::isfinite(min_z_map) && std::isfinite(max_z_map)) {
@@ -14121,6 +14323,23 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                     static_evidence_epoch_.load(std::memory_order_acquire);
                 static_decision =
                     static_obstacle_evidence_index_.query(static_query);
+            } else if (!evidence.source_validated) {
+                static_decision = cargo_static_evidence_decision_;
+                static_decision.reason =
+                    "static_query_skipped_current_source_unvalidated";
+                ++cargo_static_source_unvalidated_count_;
+            } else {
+                static_decision = cargo_static_evidence_decision_;
+                static_decision.reason =
+                    "static_query_skipped_height_nonfinite";
+            }
+            if (static_decision.authorized ||
+                (!cargo_static_evidence_decision_.authorized &&
+                 (static_decision.matched_cell_count >
+                      cargo_static_evidence_decision_.matched_cell_count ||
+                  static_decision.matched_cell_ratio >=
+                      cargo_static_evidence_decision_.matched_cell_ratio))) {
+                cargo_static_evidence_decision_ = static_decision;
             }
             if (static_decision.authorized) {
                 observation.provenance = static_decision.provenance;
@@ -14165,6 +14384,184 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         obstacle_track_decision.selected_association_reset_reason;
     cargo_obstacle_track_velocity_map_ =
         obstacle_track_decision.selected_track_velocity;
+    cargo_obstacle_track_created_count_ =
+        obstacle_track_decision.created_track_count;
+    cargo_obstacle_track_reset_count_ =
+        obstacle_track_decision.association_reset_count;
+    if (obstacle_track_decision.reason ==
+        "static_geometry_below_threshold") {
+        ++cargo_static_geometry_rejected_count_;
+    }
+    const CargoSafetyClusterEvidence* selected_source_evidence = nullptr;
+    const CargoObstacleObservation* selected_observation = nullptr;
+    cargo_diagnostic_source_evidence_valid_ = false;
+    cargo_diagnostic_observation_valid_ = false;
+    if (obstacle_track_decision.selected_source_index <
+        raw_cargo_safety_result.cluster_evidence.size()) {
+        selected_source_evidence =
+            &raw_cargo_safety_result.cluster_evidence[
+                obstacle_track_decision.selected_source_index];
+        cargo_diagnostic_source_evidence_ = *selected_source_evidence;
+        cargo_diagnostic_source_evidence_valid_ = true;
+    }
+    const auto selected_observation_it = std::find_if(
+        obstacle_track_observations.begin(),
+        obstacle_track_observations.end(),
+        [&obstacle_track_decision](const CargoObstacleObservation& value) {
+            return value.source_index ==
+                obstacle_track_decision.selected_source_index;
+        });
+    if (selected_observation_it != obstacle_track_observations.end()) {
+        selected_observation = &*selected_observation_it;
+        cargo_diagnostic_observation_ = *selected_observation;
+        cargo_diagnostic_observation_valid_ = true;
+    }
+    {
+        std_msgs::String debug_message;
+        std::ostringstream stream;
+        stream << "stamp=" << std::setprecision(17) << stamp.toSec()
+               << " source_validated="
+               << (selected_source_evidence &&
+                   selected_source_evidence->source_validated ? 1 : 0)
+               << " source_validation_reason="
+               << (selected_source_evidence
+                       ? selected_source_evidence->source_reason
+                       : "source_unavailable")
+               << " inside_xy_ratio="
+               << (selected_source_evidence
+                       ? selected_source_evidence->inside_xy_obb_ratio
+                       : 0.0F)
+               << " identity_match_ratio="
+               << (selected_source_evidence
+                       ? selected_source_evidence->identity_match_ratio
+                       : 0.0F)
+               << " surface_band_ratio="
+               << (selected_source_evidence
+                       ? selected_source_evidence->surface_band_ratio
+                       : 0.0F)
+               << " motion_match_score="
+               << (selected_source_evidence
+                       ? selected_source_evidence->moves_with_cargo_score
+                       : 0.0F)
+               << " footprint_distance="
+               << (selected_source_evidence
+                       ? selected_source_evidence->footprint_distance_m
+                       : std::numeric_limits<float>::infinity())
+               << " validation_shell="
+               << (selected_observation
+                       ? selected_observation->validation_shell_m : 0.0F)
+               << " index_epoch="
+               << cargo_static_evidence_decision_.map_generation
+               << " expected_epoch="
+               << cargo_static_evidence_decision_.expected_map_generation
+               << " index_revision="
+               << cargo_static_evidence_decision_.index_revision
+               << " index_cells="
+               << cargo_static_evidence_decision_.index_cell_count
+               << " latest_sequence="
+               << cargo_static_evidence_decision_
+                      .index_latest_observation_sequence
+               << " query_reason="
+               << cargo_static_evidence_decision_.reason
+               << " query_cells="
+               << cargo_static_evidence_decision_.query_cell_count
+               << " matched_cells="
+               << cargo_static_evidence_decision_.matched_cell_count
+               << " spatial_cells="
+               << cargo_static_evidence_decision_
+                      .spatially_matched_cell_count
+               << " matched_ratio="
+               << cargo_static_evidence_decision_.matched_cell_ratio
+               << " matched_iou="
+               << cargo_static_evidence_decision_.matched_iou
+               << " height_overlap="
+               << cargo_static_evidence_decision_.height_overlap
+               << " min_observations="
+               << cargo_static_evidence_decision_
+                      .stable_observation_count
+               << " min_stable_age_sec="
+               << cargo_static_evidence_decision_.stable_age_sec
+               << " cargo_track_start_sequence="
+               << cargo_static_evidence_decision_
+                      .cargo_track_start_sequence
+               << " authorized="
+               << (cargo_static_evidence_decision_.authorized ? 1 : 0)
+               << " obstacle_point_count="
+               << (selected_observation
+                       ? selected_observation->point_count : 0U)
+               << " obstacle_xy_area_m2="
+               << (selected_observation
+                       ? selected_observation->xy_area_m2 : 0.0F)
+               << " obstacle_long_side_m="
+               << (selected_observation
+                       ? selected_observation->long_side_m : 0.0F)
+               << " obstacle_height_span_m="
+               << (selected_observation
+                       ? selected_observation->height_span_m : 0.0F)
+               << " obstacle_occupied_cells="
+               << (selected_observation
+                       ? selected_observation->occupied_cells : 0U)
+               << " required_point_count="
+               << cargo_obstacle_tracker_.config().
+                      static_cargo_min_voxel_points
+               << " required_xy_area_m2="
+               << cargo_obstacle_tracker_.config().
+                      static_cargo_min_xy_area_m2
+               << " required_long_side_m="
+               << cargo_obstacle_tracker_.config().
+                      static_cargo_min_long_side_m
+               << " required_height_span_m="
+               << cargo_obstacle_tracker_.config().
+                      static_cargo_min_height_span_m
+               << " required_occupied_cells="
+               << cargo_obstacle_tracker_.config().
+                      static_cargo_min_occupied_cells
+               << " obstacle_track_id="
+               << obstacle_track_decision.selected_track_id
+               << " association_reset_reason="
+               << obstacle_track_decision
+                      .selected_association_reset_reason
+               << " tracker_reason=" << obstacle_track_decision.reason;
+        debug_message.data = stream.str();
+        cargo_static_evidence_debug_pub_.publish(debug_message);
+    }
+    const ros::WallTime summary_now = ros::WallTime::now();
+    if (cargo_static_summary_last_wall_.isZero() ||
+        (summary_now - cargo_static_summary_last_wall_).toSec() >= 10.0) {
+        cargo_static_summary_last_wall_ = summary_now;
+        ROS_INFO("[STATIC_EVIDENCE_SUMMARY] index_cells=%zu revision=%llu "
+                 "query=%s authorized=%d source_unvalidated=%llu "
+                 "geometry_rejected=%llu track_created=%llu "
+                 "track_resets=%llu clean_build=%llu/%llu/%llu/%llu "
+                 "static_cells=%llu/%llu snapshot_cells=%llu",
+                 cargo_static_evidence_decision_.index_cell_count,
+                 static_cast<unsigned long long>(
+                     cargo_static_evidence_decision_.index_revision),
+                 cargo_static_evidence_decision_.reason.c_str(),
+                 cargo_static_evidence_decision_.authorized ? 1 : 0,
+                 static_cast<unsigned long long>(
+                     cargo_static_source_unvalidated_count_),
+                 static_cast<unsigned long long>(
+                     cargo_static_geometry_rejected_count_),
+                 static_cast<unsigned long long>(
+                     cargo_obstacle_track_created_count_),
+                 static_cast<unsigned long long>(
+                     cargo_obstacle_track_reset_count_),
+                 static_cast<unsigned long long>(
+                     static_clean_build_started_.load()),
+                 static_cast<unsigned long long>(
+                     static_clean_build_applied_.load()),
+                 static_cast<unsigned long long>(
+                     static_clean_build_snapshot_only_.load()),
+                 static_cast<unsigned long long>(
+                     static_clean_build_discarded_.load()),
+                 static_cast<unsigned long long>(
+                     static_clean_confirmed_cells_.load()),
+                 static_cast<unsigned long long>(
+                     static_clean_invalidated_cells_.load()),
+                 static_cast<unsigned long long>(
+                     static_clean_snapshot_cells_.load()));
+    }
 
     const auto make_obstacle_pending = [&] (
         const std::string& reason,
@@ -16408,9 +16805,14 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
             total_observation_cells = bev_observation_count_.size();
         }
         if (job.allow_persistent_map_commit) {
+            std::uint64_t observed_objects_version = 0U;
+            {
+                std::lock_guard<std::mutex> lock(map_mutex_);
+                observed_objects_version = objects_map_content_version_;
+            }
             static_obstacle_evidence_index_.observeFilteredCells(
                 observed_static_cells, stamp.toSec(),
-                job.static_evidence_epoch);
+                job.static_evidence_epoch, observed_objects_version);
         }
 
         ROS_DEBUG("[BevObsUpdate] seq=%d object_points=%zu unique_cells=%zu total_obs_cells=%zu",
@@ -17514,6 +17916,89 @@ void NdtSlamNode::logCargoHealthPeriodic() {
         cargo_obstacle_association_cost_;
     rec.obstacle_association_reset_reason =
         cargo_obstacle_association_reset_reason_;
+    rec.obstacle_source_validated =
+        cargo_diagnostic_source_evidence_valid_ &&
+        cargo_diagnostic_source_evidence_.source_validated;
+    rec.obstacle_source_validation_reason =
+        cargo_diagnostic_source_evidence_valid_
+            ? cargo_diagnostic_source_evidence_.source_reason
+            : "source_unavailable";
+    rec.obstacle_inside_xy_ratio =
+        cargo_diagnostic_source_evidence_valid_
+            ? cargo_diagnostic_source_evidence_.inside_xy_obb_ratio : 0.0;
+    rec.obstacle_identity_match_ratio =
+        cargo_diagnostic_source_evidence_valid_
+            ? cargo_diagnostic_source_evidence_.identity_match_ratio : 0.0;
+    rec.obstacle_surface_band_ratio =
+        cargo_diagnostic_source_evidence_valid_
+            ? cargo_diagnostic_source_evidence_.surface_band_ratio : 0.0;
+    rec.obstacle_motion_match_score =
+        cargo_diagnostic_source_evidence_valid_
+            ? cargo_diagnostic_source_evidence_.moves_with_cargo_score : 0.0;
+    rec.obstacle_validation_shell_m = cargo_diagnostic_observation_valid_
+        ? cargo_diagnostic_observation_.validation_shell_m : 0.0;
+    rec.static_index_epoch = cargo_static_evidence_decision_.map_generation;
+    rec.static_expected_epoch =
+        cargo_static_evidence_decision_.expected_map_generation;
+    rec.static_index_revision =
+        cargo_static_evidence_decision_.index_revision;
+    rec.static_index_latest_sequence =
+        cargo_static_evidence_decision_.index_latest_observation_sequence;
+    rec.static_cargo_track_start_sequence =
+        cargo_static_evidence_decision_.cargo_track_start_sequence;
+    rec.static_index_cell_count =
+        cargo_static_evidence_decision_.index_cell_count;
+    rec.static_query_cell_count =
+        cargo_static_evidence_decision_.query_cell_count;
+    rec.static_matched_cell_count =
+        cargo_static_evidence_decision_.matched_cell_count;
+    rec.static_spatial_cell_count =
+        cargo_static_evidence_decision_.spatially_matched_cell_count;
+    rec.static_matched_ratio =
+        cargo_static_evidence_decision_.matched_cell_ratio;
+    rec.static_matched_iou = cargo_static_evidence_decision_.matched_iou;
+    rec.static_height_overlap =
+        cargo_static_evidence_decision_.height_overlap;
+    rec.static_min_observation_count =
+        cargo_static_evidence_decision_.stable_observation_count;
+    rec.static_min_stable_age_sec =
+        cargo_static_evidence_decision_.stable_age_sec;
+    rec.static_authorized = cargo_static_evidence_decision_.authorized;
+    rec.static_query_reason = cargo_static_evidence_decision_.reason;
+    rec.obstacle_point_count = cargo_diagnostic_observation_valid_
+        ? cargo_diagnostic_observation_.point_count : 0U;
+    rec.obstacle_xy_occupied_cells =
+        cargo_diagnostic_observation_valid_
+            ? cargo_diagnostic_observation_.occupied_cells : 0U;
+    rec.obstacle_xy_area_m2 = cargo_diagnostic_observation_valid_
+        ? cargo_diagnostic_observation_.xy_area_m2 : 0.0;
+    rec.obstacle_long_side_m = cargo_diagnostic_observation_valid_
+        ? cargo_diagnostic_observation_.long_side_m : 0.0;
+    rec.obstacle_height_span_m = cargo_diagnostic_observation_valid_
+        ? cargo_diagnostic_observation_.height_span_m : 0.0;
+    rec.obstacle_required_point_count =
+        cargo_obstacle_tracker_.config().static_cargo_min_voxel_points;
+    rec.obstacle_required_xy_area_m2 =
+        cargo_obstacle_tracker_.config().static_cargo_min_xy_area_m2;
+    rec.obstacle_required_long_side_m =
+        cargo_obstacle_tracker_.config().static_cargo_min_long_side_m;
+    rec.obstacle_required_height_span_m =
+        cargo_obstacle_tracker_.config().static_cargo_min_height_span_m;
+    rec.obstacle_required_occupied_cells =
+        cargo_obstacle_tracker_.config().static_cargo_min_occupied_cells;
+    rec.obstacle_track_created_count = cargo_obstacle_track_created_count_;
+    rec.obstacle_track_reset_count = cargo_obstacle_track_reset_count_;
+    rec.static_clean_build_started = static_clean_build_started_.load();
+    rec.static_clean_build_applied = static_clean_build_applied_.load();
+    rec.static_clean_build_snapshot_only =
+        static_clean_build_snapshot_only_.load();
+    rec.static_clean_build_discarded =
+        static_clean_build_discarded_.load();
+    rec.static_clean_confirmed_cells =
+        static_clean_confirmed_cells_.load();
+    rec.static_clean_invalidated_cells =
+        static_clean_invalidated_cells_.load();
+    rec.static_clean_snapshot_cells = static_clean_snapshot_cells_.load();
     rec.obstacle_track_velocity_x =
         cargo_obstacle_track_velocity_map_.x();
     rec.obstacle_track_velocity_y =

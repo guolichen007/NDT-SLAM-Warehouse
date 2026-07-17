@@ -42,3 +42,17 @@ EMPTY 阶段可采集起吊前高度，但无抬升/运动证据不得把地面�
 | 30-35 | 系统、定位、Gravity、吊物、障碍或内部证据故障 |
 
 17/18 只表达真实空间碰撞风险。新鲜正式状态立即生效；重复 stamp、heartbeat tick 和单帧 CLEAR 都不能伪造恢复证据。
+
+## 静态障碍 provenance 与 34 决策
+
+正式 provenance 包括 `PRE_CARGO_OCCUPANCY`、`STATIC_MAP_MATCH`、
+`CARGO_MOVED_AWAY_PERSISTENCE` 和 `DUAL_LIDAR_CONSENSUS`。
+`OUTSIDE_CARGO_SHELL_ONLY` 仅说明点位于当前吊物壳层之外，不能独立证明它是
+外部静态障碍，因此不能单独授权 17/18。
+
+每条障碍 track 独立维护关联、连续帧、持续时间、大簇几何和 provenance。
+大簇门同时检查点数、XY 面积、长边、高度跨度与占用网格；关联检查中心距离、
+top step、cell overlap 和 IoU。任一来源未验证、静态来源不足、几何不足、连续
+帧不足或持续时间不足均输出 34，并在 `static_evidence.csv` 中记录实际值、门限和
+reset reason。长期地图不能覆盖 `current_source_unvalidated` 或
+`cargo_residual_source_unresolved`。

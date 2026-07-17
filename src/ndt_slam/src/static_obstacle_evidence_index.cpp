@@ -34,7 +34,10 @@ bool validConfig(const StaticObstacleEvidenceConfig& config) {
       config.height_tolerance_m >= 0.0F &&
       config.minimum_matched_cells > 0U &&
       config.maximum_query_area_cells >= config.minimum_matched_cells &&
-      config.maximum_query_area_cells <= kMaximumBoundedQueryCells;
+      config.maximum_query_area_cells <= kMaximumBoundedQueryCells &&
+      std::isfinite(config.maximum_observation_gap_sec) &&
+      config.maximum_observation_gap_sec > 0.0 &&
+      config.maximum_observation_sequence_gap > 0U;
 }
 
 float intervalOverlapRatio(float query_min, float query_max,
@@ -122,6 +125,7 @@ void StaticObstacleEvidenceIndex::setConfig(
   std::lock_guard<std::mutex> lock(mutex_);
   config_ = validConfig(config) ? config : StaticObstacleEvidenceConfig{};
   working_cells_.clear();
+  invalidated_versions_.clear();
   working_generation_ = 0U;
   latest_observation_sequence_ = 0U;
   revision_ = 0U;
@@ -136,6 +140,7 @@ void StaticObstacleEvidenceIndex::setConfig(
 void StaticObstacleEvidenceIndex::reset(std::uint64_t map_generation) {
   std::lock_guard<std::mutex> lock(mutex_);
   working_cells_.clear();
+  invalidated_versions_.clear();
   working_generation_ = map_generation;
   latest_observation_sequence_ = 0U;
   last_observation_stamp_sec_ = 0.0;
@@ -145,7 +150,8 @@ void StaticObstacleEvidenceIndex::reset(std::uint64_t map_generation) {
 void StaticObstacleEvidenceIndex::observeFilteredCells(
     const StaticEvidenceCellGeometryMap& cells,
     double stamp_sec,
-    std::uint64_t map_generation) {
+    std::uint64_t map_generation,
+    std::uint64_t objects_version) {
   if (!std::isfinite(stamp_sec) || stamp_sec <= 0.0 || cells.empty()) return;
   std::lock_guard<std::mutex> lock(mutex_);
   if (working_generation_ != map_generation) {
@@ -183,36 +189,95 @@ void StaticObstacleEvidenceIndex::observeFilteredCells(
       cell.max_z = geometry.max_z;
     } else {
       const double delta = stamp_sec - cell.last_seen_sec;
-      if (std::isfinite(delta) && delta > kStampEpsilonSec &&
-          delta <= 3600.0) {
-        cell.stable_duration_sec += delta;
+      const std::uint64_t sequence_gap =
+          latest_observation_sequence_ > cell.last_observation_sequence
+              ? latest_observation_sequence_ -
+                    cell.last_observation_sequence
+              : 0U;
+      const bool continuous = std::isfinite(delta) &&
+          delta > kStampEpsilonSec &&
+          delta <= config_.maximum_observation_gap_sec &&
+          sequence_gap > 0U &&
+          sequence_gap <= config_.maximum_observation_sequence_gap;
+      if (continuous) {
+        cell.consecutive_stable_duration_sec += delta;
+      } else if (!cell.clean_map_confirmed) {
+        // Sparse sightings must not accumulate into a mature static object.
+        // A previously clean-confirmed cell remains durable until a deny
+        // tombstone invalidates it, but a pending streak starts over.
+        cell.consecutive_observation_count = 0U;
+        cell.consecutive_stable_duration_sec = 0.0;
+        cell.first_seen_sec = stamp_sec;
+        cell.first_observation_sequence = latest_observation_sequence_;
+        cell.min_z = geometry.min_z;
+        cell.max_z = geometry.max_z;
       }
       cell.min_z = std::min(cell.min_z, geometry.min_z);
       cell.max_z = std::max(cell.max_z, geometry.max_z);
     }
-    if (cell.observation_count <
+    if (cell.consecutive_observation_count <
         std::numeric_limits<std::uint32_t>::max()) {
-      ++cell.observation_count;
+      ++cell.consecutive_observation_count;
+    }
+    if (cell.total_observation_count <
+        std::numeric_limits<std::uint64_t>::max()) {
+      ++cell.total_observation_count;
     }
     cell.last_seen_sec = stamp_sec;
     cell.last_observation_sequence = latest_observation_sequence_;
+    cell.last_observed_objects_version = objects_version;
     cell.map_generation = map_generation;
   }
 }
 
-void StaticObstacleEvidenceIndex::confirmCleanCells(
+StaticEvidenceMutationResult StaticObstacleEvidenceIndex::invalidateCells(
+    const StaticEvidenceCellKeySet& invalidated_cells,
+    std::uint64_t clean_build_version,
+    double stamp_sec,
+    std::uint64_t map_generation) {
+  StaticEvidenceMutationResult result;
+  if (clean_build_version == 0U) return result;
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (working_generation_ != map_generation) return result;
+  for (const auto key : invalidated_cells) {
+    std::uint64_t& tombstone = invalidated_versions_[key];
+    tombstone = std::max(tombstone, clean_build_version);
+    result.invalidated_cells += working_cells_.erase(key);
+  }
+  if (!invalidated_cells.empty()) publishSnapshotLocked(stamp_sec);
+  const auto current = std::atomic_load_explicit(
+      &snapshot_, std::memory_order_acquire);
+  result.snapshot_cells = current ? current->cells.size() : 0U;
+  result.revision = current ? current->revision : 0U;
+  return result;
+}
+
+StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
     const StaticEvidenceCellGeometryMap& clean_cells,
     const StaticEvidenceCellKeySet& invalidated_cells,
     double stamp_sec,
-    std::uint64_t map_generation) {
+    std::uint64_t map_generation,
+    std::uint64_t clean_build_version) {
+  StaticEvidenceMutationResult result;
+  if (clean_build_version == 0U) return result;
   std::lock_guard<std::mutex> lock(mutex_);
   if (working_generation_ != map_generation) {
-    return;
+    return result;
   }
+  // Invalidation is monotonic and always wins over clean evidence from the
+  // same or any older asynchronous build.
   for (const auto key : invalidated_cells) {
-    working_cells_.erase(key);
+    std::uint64_t& tombstone = invalidated_versions_[key];
+    tombstone = std::max(tombstone, clean_build_version);
+    result.invalidated_cells += working_cells_.erase(key);
   }
   for (const auto& item : clean_cells) {
+    const auto tombstone = invalidated_versions_.find(item.first);
+    if (invalidated_cells.find(item.first) != invalidated_cells.end() ||
+        (tombstone != invalidated_versions_.end() &&
+         tombstone->second >= clean_build_version)) {
+      continue;
+    }
     auto inserted = working_cells_.emplace(item.first, StaticEvidenceCell{});
     StaticEvidenceCell& cell = inserted.first->second;
     if (inserted.second) {
@@ -231,8 +296,18 @@ void StaticObstacleEvidenceIndex::confirmCleanCells(
       cell.max_z = std::max(cell.max_z, item.second.max_z);
     }
     cell.clean_map_confirmed = true;
+    cell.last_clean_confirmed_version = std::max(
+        cell.last_clean_confirmed_version, clean_build_version);
+    cell.last_invalidated_version = tombstone == invalidated_versions_.end()
+        ? 0U : tombstone->second;
+    ++result.confirmed_cells;
   }
   publishSnapshotLocked(stamp_sec);
+  const auto current = std::atomic_load_explicit(
+      &snapshot_, std::memory_order_acquire);
+  result.snapshot_cells = current ? current->cells.size() : 0U;
+  result.revision = current ? current->revision : 0U;
+  return result;
 }
 
 void StaticObstacleEvidenceIndex::publishSnapshotLocked(double stamp_sec) {
@@ -268,9 +343,17 @@ std::uint64_t StaticObstacleEvidenceIndex::latestObservationSequence()
 StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
     const StaticProvenanceQuery& input) const {
   StaticProvenanceDecision decision;
+  decision.expected_map_generation = input.expected_map_generation;
+  decision.cargo_track_start_sequence =
+      input.cargo_track_start_sequence;
   const auto current = snapshot();
-  if (!current || current->cells.empty()) return decision;
+  if (!current) return decision;
   decision.map_generation = current->map_generation;
+  decision.index_revision = current->revision;
+  decision.index_latest_observation_sequence =
+      current->latest_observation_sequence;
+  decision.index_cell_count = current->cells.size();
+  if (current->cells.empty()) return decision;
   if (current->map_generation != input.expected_map_generation) {
     decision.reason = "static_index_generation_mismatch";
     return decision;
@@ -283,6 +366,7 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
 
   std::set<std::int64_t> query_cells(
       input.occupied_map_cells.begin(), input.occupied_map_cells.end());
+  decision.query_cell_count = query_cells.size();
   std::int32_t min_x = std::numeric_limits<std::int32_t>::max();
   std::int32_t max_x = std::numeric_limits<std::int32_t>::min();
   std::int32_t min_y = std::numeric_limits<std::int32_t>::max();
@@ -313,6 +397,7 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
   std::size_t pre_cargo_matched = 0U;
   std::size_t local_evidence = 0U;
   std::size_t local_pre_cargo = 0U;
+  std::size_t spatially_matched = 0U;
   float minimum_height_ratio = 1.0F;
   std::uint32_t minimum_observations =
       std::numeric_limits<std::uint32_t>::max();
@@ -327,11 +412,16 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
       const float height_ratio = intervalOverlapRatio(
           input.min_z_map, input.max_z_map, cell.min_z, cell.max_z,
           config_.height_tolerance_m);
-      const bool stable = cell.clean_map_confirmed &&
+      const bool stable_history = cell.clean_map_confirmed &&
           cell.map_generation == input.expected_map_generation &&
-          cell.observation_count >= config_.minimum_observations &&
-          cell.stable_duration_sec + kStampEpsilonSec >=
-              config_.minimum_stable_duration_sec &&
+          cell.consecutive_observation_count >=
+              config_.minimum_observations &&
+          cell.consecutive_stable_duration_sec + kStampEpsilonSec >=
+              config_.minimum_stable_duration_sec;
+      if (stable_history && query_cells.find(key) != query_cells.end()) {
+        ++spatially_matched;
+      }
+      const bool stable = stable_history &&
           height_ratio >= config_.minimum_height_overlap;
       if (!stable) continue;
       ++local_evidence;
@@ -348,9 +438,9 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
       if (pre_cargo) ++pre_cargo_matched;
       minimum_height_ratio = std::min(minimum_height_ratio, height_ratio);
       minimum_observations = std::min(
-          minimum_observations, cell.observation_count);
+          minimum_observations, cell.consecutive_observation_count);
       minimum_stable_age = std::min(
-          minimum_stable_age, cell.stable_duration_sec);
+          minimum_stable_age, cell.consecutive_stable_duration_sec);
     }
   }
 
@@ -368,6 +458,8 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
   };
   decision.matched_cell_ratio = ratio(matched);
   decision.matched_iou = iou(matched, local_evidence);
+  decision.matched_cell_count = matched;
+  decision.spatially_matched_cell_count = spatially_matched;
   decision.height_overlap = matched > 0U ? minimum_height_ratio : 0.0F;
   decision.stable_observation_count = matched > 0U
       ? minimum_observations : 0U;
@@ -377,8 +469,7 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
   const float pre_iou = iou(pre_cargo_matched, local_pre_cargo);
   const bool enough_pre_cargo =
       pre_cargo_matched >= config_.minimum_matched_cells &&
-      pre_ratio >= config_.minimum_cell_overlap &&
-      pre_iou >= config_.minimum_iou;
+      pre_ratio >= config_.minimum_cell_overlap;
   if (enough_pre_cargo) {
     decision.provenance = ExternalProvenance::PRE_CARGO_OCCUPANCY;
     decision.authorized = true;
@@ -389,17 +480,20 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
   }
   const bool enough_static_map =
       matched >= config_.minimum_matched_cells &&
-      decision.matched_cell_ratio >= config_.minimum_cell_overlap &&
-      decision.matched_iou >= config_.minimum_iou;
+      decision.matched_cell_ratio >= config_.minimum_cell_overlap;
   if (enough_static_map) {
     decision.provenance = ExternalProvenance::STATIC_MAP_MATCH;
     decision.authorized = true;
     decision.reason = "static_map_match_confirmed";
     return decision;
   }
-  decision.reason = matched == 0U
-      ? "static_map_no_height_consistent_cells"
-      : "static_map_overlap_below_threshold";
+  if (spatially_matched > 0U && matched == 0U) {
+    decision.reason = "static_map_height_mismatch";
+  } else if (matched < config_.minimum_matched_cells) {
+    decision.reason = "static_map_insufficient_matched_cells";
+  } else {
+    decision.reason = "static_map_query_coverage_below_threshold";
+  }
   return decision;
 }
 
@@ -423,12 +517,17 @@ bool StaticObstacleEvidenceIndex::saveSnapshot(
          << std::setprecision(17) << current->source_stamp_sec << '\n';
   for (const auto& item : current->cells) {
     const StaticEvidenceCell& cell = item.second;
-    output << cell.key << ',' << cell.observation_count << ','
+    output << cell.key << ',' << cell.consecutive_observation_count << ','
+           << cell.total_observation_count << ','
            << std::setprecision(17) << cell.first_seen_sec << ','
-           << cell.last_seen_sec << ',' << cell.stable_duration_sec << ','
+           << cell.last_seen_sec << ','
+           << cell.consecutive_stable_duration_sec << ','
            << std::setprecision(9) << cell.min_z << ',' << cell.max_z << ','
            << cell.first_observation_sequence << ','
-           << cell.last_observation_sequence << '\n';
+           << cell.last_observation_sequence << ','
+           << cell.last_observed_objects_version << ','
+           << cell.last_clean_confirmed_version << ','
+           << cell.last_invalidated_version << '\n';
   }
   output.flush();
   const bool stream_ok = output.good();
@@ -485,7 +584,7 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
     while (std::getline(input, line)) {
       if (line.empty()) continue;
       const auto fields = splitCsv(line);
-      if (fields.size() != 9U) {
+      if (fields.size() != 13U) {
         if (reason) *reason = "index_cell_invalid";
         return false;
       }
@@ -497,23 +596,30 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
         if (reason) *reason = "index_observation_count_invalid";
         return false;
       }
-      cell.observation_count =
+      cell.consecutive_observation_count =
           static_cast<std::uint32_t>(parsed_observation_count);
-      cell.first_seen_sec = std::stod(fields[2]);
-      cell.last_seen_sec = std::stod(fields[3]);
-      cell.stable_duration_sec = std::stod(fields[4]);
-      cell.min_z = std::stof(fields[5]);
-      cell.max_z = std::stof(fields[6]);
-      cell.first_observation_sequence = std::stoull(fields[7]);
-      cell.last_observation_sequence = std::stoull(fields[8]);
+      cell.total_observation_count = std::stoull(fields[2]);
+      cell.first_seen_sec = std::stod(fields[3]);
+      cell.last_seen_sec = std::stod(fields[4]);
+      cell.consecutive_stable_duration_sec = std::stod(fields[5]);
+      cell.min_z = std::stof(fields[6]);
+      cell.max_z = std::stof(fields[7]);
+      cell.first_observation_sequence = std::stoull(fields[8]);
+      cell.last_observation_sequence = std::stoull(fields[9]);
+      cell.last_observed_objects_version = std::stoull(fields[10]);
+      cell.last_clean_confirmed_version = std::stoull(fields[11]);
+      cell.last_invalidated_version = std::stoull(fields[12]);
       cell.clean_map_confirmed = true;
       cell.map_generation = current_map_generation;
       if (!std::isfinite(cell.first_seen_sec) ||
           !std::isfinite(cell.last_seen_sec) ||
-          !std::isfinite(cell.stable_duration_sec) ||
+          !std::isfinite(cell.consecutive_stable_duration_sec) ||
           !std::isfinite(cell.min_z) || !std::isfinite(cell.max_z) ||
-          cell.stable_duration_sec < 0.0 || cell.max_z < cell.min_z ||
-          cell.observation_count == 0U ||
+          cell.consecutive_stable_duration_sec < 0.0 ||
+          cell.max_z < cell.min_z ||
+          cell.consecutive_observation_count == 0U ||
+          cell.total_observation_count <
+              cell.consecutive_observation_count ||
           cell.last_observation_sequence <
               cell.first_observation_sequence) {
         if (reason) *reason = "index_cell_nonfinite";
@@ -528,6 +634,7 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
     }
     std::lock_guard<std::mutex> lock(mutex_);
     working_cells_ = std::move(loaded);
+    invalidated_versions_.clear();
     working_generation_ = current_map_generation;
     latest_observation_sequence_ = latest_sequence;
     revision_ = source_revision;

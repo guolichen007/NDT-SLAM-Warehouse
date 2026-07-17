@@ -1,0 +1,31 @@
+name: Bug report
+description: Report a reproducible localization, mapping, cargo, or safety issue
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: input
+    id: sha
+    attributes:
+      label: Exact Git SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Subsystem
+      options: [Localization, Mapping, Cargo tracking, Cargo safety, Persistence, Diagnostics]
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior and evidence
+      description: Include timestamps, topics, codes/reasons, and minimal logs.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true

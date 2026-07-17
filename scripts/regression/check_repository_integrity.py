@@ -619,6 +619,62 @@ def asynchronous_map_commit_contract_failures() -> list[str]:
     return failures
 
 
+def static_evidence_contract_failures() -> list[str]:
+    failures: list[str] = []
+    paths = (
+        Path("src/ndt_slam/include/ndt_slam/static_obstacle_evidence_index.hpp"),
+        Path("src/ndt_slam/src/static_obstacle_evidence_index.cpp"),
+        Path("src/ndt_slam/src/ndt_slam.cpp"),
+        Path("src/ndt_slam/src/runtime_diagnostics.cpp"),
+        Path("src/ndt_slam/config/live_longterm_mapping.yaml"),
+        Path("src/ndt_slam/test/static_obstacle_evidence_index_test.cpp"),
+    )
+    try:
+        combined = "\n".join(
+            (ROOT / path).read_text(encoding="utf-8") for path in paths)
+    except OSError as error:
+        return [f"static evidence contract cannot be read: {error}"]
+
+    required = (
+        "last_observed_objects_version",
+        "last_clean_confirmed_version",
+        "last_invalidated_version",
+        "invalidated_versions_",
+        "consecutive_observation_count",
+        "consecutive_stable_duration_sec",
+        "maximum_observation_gap_sec",
+        "maximum_observation_sequence_gap",
+        "static_map_max_observation_gap_sec: 0.8",
+        "static_map_max_sequence_gap: 1",
+        "StaticEvidenceMutationResult",
+        "static_clean_build_snapshot_only_",
+        "static_query_skipped_current_source_unvalidated",
+        "static_evidence.csv",
+        "suspendPersistentStaticEvidence",
+        "static_evidence_manifest.last_good.json",
+        "InvalidatedCellCannotBeReauthorizedInSameBuild",
+        "ObservationGapResetsAuthorizationStreak",
+        "StaleCleanResultCannotUndoNewerInvalidation",
+        "SparseCurrentObservationMatchesDenseStaticMap",
+    )
+    for token in required:
+        if token not in combined:
+            failures.append(f"static evidence contract missing {token!r}")
+
+    confirm_start = combined.find(
+        "StaticObstacleEvidenceIndex::confirmCleanCells")
+    confirm_end = combined.find(
+        "StaticObstacleEvidenceIndex::publishSnapshotLocked", confirm_start)
+    confirm_body = combined[confirm_start:confirm_end]
+    if ("invalidated_cells.find(item.first)" not in confirm_body or
+            "tombstone->second >= clean_build_version" not in confirm_body):
+        failures.append(
+            "clean confirmation does not give same/newer invalidation priority")
+    if "decision.matched_iou >= config_.minimum_iou" in combined:
+        failures.append("static IoU is still a hard authorization gate")
+    return failures
+
+
 def main() -> int:
     failures: list[str] = runtime_so3_contract_failures()
     failures.extend(pending_origin_contract_failures())
@@ -628,6 +684,7 @@ def main() -> int:
     failures.extend(runtime_console_contract_failures())
     failures.extend(runtime_visualization_contract_failures())
     failures.extend(asynchronous_map_commit_contract_failures())
+    failures.extend(static_evidence_contract_failures())
     try:
         paths = tracked_paths()
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:

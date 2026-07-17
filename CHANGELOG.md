@@ -1,5 +1,37 @@
 # CHANGELOG
 
+## [Unreleased] - Server Validation RC
+
+### Added
+
+- Persistent static-obstacle evidence with immutable bounded query snapshots,
+  clean-map provenance, versioned sidecar manifests, and point-coordinate tile
+  partitioning.
+- Per-cell clean/invalidation versions, consecutive observation streaks, and
+  detailed `static_evidence.csv`, cargo CSV, topic, runtime-status, and
+  periodic summary diagnostics.
+- Top-derived frozen-thickness formal cargo height and an independent periodic
+  MemoryGuard timer.
+
+### Changed
+
+- Stale clean workers may confirm cells that were not invalidated by a newer
+  build; newer invalidation tombstones always win.
+- Lifecycle changes make the previous manifest inactive and retain it as a
+  last-good archive until a mature current-epoch snapshot is atomically
+  committed.
+- Static-map authorization uses current-query coverage, cell count, height,
+  source validation, and observation history. IoU remains diagnostic so
+  partial visibility does not reject a valid dense static map.
+
+### Known limitations
+
+- Main-controller integration is not accepted and no production tag is issued.
+- Ubuntu clean build/tests and sequential/long-duration Bag results remain
+  release gates to be executed on the ROS Noetic validation host.
+- Source, geometry, association, formal-height, tile, and memory thresholds
+  remain field-validation parameters; this RC does not lower safety gates.
+
 ## Cargo safety and localization production hardening (2026-07)
 
 ### Added
@@ -32,7 +64,7 @@
 
 - Windows 静态合同可执行；
 - Ubuntu clean build、gtest 与顺序 bag 验收仍是发布准入项；
-- 根目录 LICENSE 仍需仓库所有者依据实际授权补齐，工具未擅自选择许可证。
+- 根目录 LICENSE 与 package.xml 的 MIT 声明现已一致。
 
 ## master cargo v1 - OdomAnchorBox clean pipeline
 

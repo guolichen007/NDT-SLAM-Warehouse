@@ -26,6 +26,8 @@ struct StaticObstacleEvidenceConfig {
   std::size_t minimum_matched_cells = 6U;
   std::size_t maximum_query_area_cells = 4096U;
   std::uint64_t pre_cargo_minimum_sequence_gap = 2U;
+  double maximum_observation_gap_sec = 5.0;
+  std::uint64_t maximum_observation_sequence_gap = 2U;
 };
 
 struct StaticEvidenceCellGeometry {
@@ -39,20 +41,24 @@ using StaticEvidenceCellKeySet = std::set<std::int64_t>;
 
 struct StaticEvidenceCell {
   std::int64_t key = 0;
-  std::uint32_t observation_count = 0U;
+  std::uint32_t consecutive_observation_count = 0U;
+  std::uint64_t total_observation_count = 0U;
   double first_seen_sec = 0.0;
   double last_seen_sec = 0.0;
-  double stable_duration_sec = 0.0;
+  double consecutive_stable_duration_sec = 0.0;
   float min_z = 0.0F;
   float max_z = 0.0F;
   bool clean_map_confirmed = false;
   std::uint64_t first_observation_sequence = 0U;
   std::uint64_t last_observation_sequence = 0U;
+  std::uint64_t last_observed_objects_version = 0U;
+  std::uint64_t last_clean_confirmed_version = 0U;
+  std::uint64_t last_invalidated_version = 0U;
   std::uint64_t map_generation = 0U;
 };
 
 struct StaticEvidenceSnapshot {
-  static constexpr std::uint32_t kSchemaVersion = 1U;
+  static constexpr std::uint32_t kSchemaVersion = 2U;
 
   std::uint32_t schema_version = kSchemaVersion;
   std::uint64_t map_generation = 0U;
@@ -80,7 +86,22 @@ struct StaticProvenanceDecision {
   std::uint32_t stable_observation_count = 0U;
   double stable_age_sec = 0.0;
   std::uint64_t map_generation = 0U;
-  std::string reason = "static_index_unavailable";
+  std::uint64_t expected_map_generation = 0U;
+  std::uint64_t index_revision = 0U;
+  std::uint64_t index_latest_observation_sequence = 0U;
+  std::uint64_t cargo_track_start_sequence = 0U;
+  std::size_t index_cell_count = 0U;
+  std::size_t query_cell_count = 0U;
+  std::size_t matched_cell_count = 0U;
+  std::size_t spatially_matched_cell_count = 0U;
+  std::string reason = "static_index_empty";
+};
+
+struct StaticEvidenceMutationResult {
+  std::size_t confirmed_cells = 0U;
+  std::size_t invalidated_cells = 0U;
+  std::size_t snapshot_cells = 0U;
+  std::uint64_t revision = 0U;
 };
 
 std::int64_t packStaticEvidenceCell(std::int32_t x, std::int32_t y) noexcept;
@@ -108,12 +129,19 @@ class StaticObstacleEvidenceIndex {
   void observeFilteredCells(
       const StaticEvidenceCellGeometryMap& cells,
       double stamp_sec,
+      std::uint64_t map_generation,
+      std::uint64_t objects_version = 0U);
+  StaticEvidenceMutationResult invalidateCells(
+      const StaticEvidenceCellKeySet& invalidated_cells,
+      std::uint64_t clean_build_version,
+      double stamp_sec,
       std::uint64_t map_generation);
-  void confirmCleanCells(
+  StaticEvidenceMutationResult confirmCleanCells(
       const StaticEvidenceCellGeometryMap& clean_cells,
       const StaticEvidenceCellKeySet& invalidated_cells,
       double stamp_sec,
-      std::uint64_t map_generation);
+      std::uint64_t map_generation,
+      std::uint64_t clean_build_version = 1U);
 
   StaticProvenanceDecision query(
       const StaticProvenanceQuery& query) const;
@@ -136,6 +164,9 @@ class StaticObstacleEvidenceIndex {
   StaticObstacleEvidenceConfig config_;
   mutable std::mutex mutex_;
   std::map<std::int64_t, StaticEvidenceCell> working_cells_;
+  // Tombstones survive erasing a contaminated working cell. They prevent an
+  // older asynchronous clean result from recreating/confirming that cell.
+  std::map<std::int64_t, std::uint64_t> invalidated_versions_;
   std::uint64_t working_generation_ = 0U;
   std::uint64_t latest_observation_sequence_ = 0U;
   std::uint64_t revision_ = 0U;

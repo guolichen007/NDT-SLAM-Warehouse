@@ -186,6 +186,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     double stamp_sec,
     const std::vector<CargoObstacleObservation>& observations) {
   CargoObstacleTrackerDecision decision;
+  decision.created_track_count = created_track_count_;
+  decision.association_reset_count = association_reset_count_;
   if (!validConfig(config_) || !std::isfinite(stamp_sec) ||
       stamp_sec <= 0.0) {
     decision.reason = "invalid_obstacle_track_input";
@@ -193,6 +195,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
   }
   if (has_stamp_ && stamp_sec + kStampEpsilonSec < last_stamp_sec_) {
     reset();
+    decision.created_track_count = created_track_count_;
+    decision.association_reset_count = association_reset_count_;
   } else if (has_stamp_ &&
              stamp_sec <= last_stamp_sec_ + kStampEpsilonSec) {
     decision.valid = true;
@@ -301,6 +305,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.association_reset_reason = tracks_.empty()
           ? "new_obstacle_track"
           : "static_track_association_reset";
+      ++created_track_count_;
+      if (!tracks_.empty()) ++association_reset_count_;
+      decision.created_track_count = created_track_count_;
+      decision.association_reset_count = association_reset_count_;
       track.static_provenance_consecutive_observations =
           observation.source_validated &&
                   track.large_cluster_geometry_valid &&

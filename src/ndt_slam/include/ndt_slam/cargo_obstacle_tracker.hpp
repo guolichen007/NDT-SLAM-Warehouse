@@ -66,6 +66,7 @@ struct CargoObstacleObservation {
   bool cargo_center_valid = false;
   std::uint16_t warning_code = 0U;
   bool source_validated = true;
+  float validation_shell_m = 0.0F;
   ExternalProvenance provenance = ExternalProvenance::NONE;
 };
 
@@ -127,6 +128,8 @@ struct CargoObstacleTrackerDecision {
   float selected_track_iou = 0.0F;
   float selected_association_cost = 0.0F;
   std::string selected_association_reset_reason;
+  std::uint64_t created_track_count = 0U;
+  std::uint64_t association_reset_count = 0U;
   Eigen::Vector3f selected_track_velocity = Eigen::Vector3f::Zero();
   std::string reason = "not_evaluated";
 };
@@ -157,6 +160,8 @@ class CargoObstacleTracker {
   std::uint64_t cycle_ = 0U;
   bool has_stamp_ = false;
   double last_stamp_sec_ = 0.0;
+  std::uint64_t created_track_count_ = 0U;
+  std::uint64_t association_reset_count_ = 0U;
 };
 
 }  // namespace ndt_slam

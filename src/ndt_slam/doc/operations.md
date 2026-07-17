@@ -22,3 +22,15 @@ raw 提交快于 clean 时允许发布较旧但完整的 bundle。不得看到�
 ## 关机与保存
 
 先调用保存服务并确认 PCD 写盘成功，再停止节点。正式五层来自 completed bundle；调试层不应用作生产定位地图。
+
+## 持久化静态证据检查
+
+现场启动使用 `use_sim_time:=false persistent_map:=true`。检查 persistent root
+可写、`tiles_objects` 持续增长、`static_evidence_manifest.json` 指向存在的 v2
+index，且目录中没有长期残留 `.tmp`。生命周期重建期间允许出现
+`static_evidence_manifest.last_good.json`，但该文件不参与运行时授权。
+
+每班次记录 RSS、磁盘余量、dirty/flushed tile 数、Manifest revision、index
+cell 数、clean build applied/snapshot-only/discarded、33/34 reason 分布和 obstacle
+track churn。`cargo_frames.csv` 与 `static_evidence.csv` 必须持续写入；终端仅保留
+安全事件、吊物状态变化和十秒静态证据摘要。

@@ -31,6 +31,21 @@
 - 34：检查障碍 ROI 覆盖、有限点和聚类；
 - 30：检查超时或时间回退；下一条新 epoch 前进时间戳应恢复。
 
+### 34 原因决策表
+
+| reason | 含义 | 首查内容 |
+|---|---|---|
+| `cargo_residual_source_unresolved` | 吊物残余来源未解析 | residual classifier ratios/score |
+| `current_source_unvalidated` | 当前簇未证明独立于吊物 | source reason、shell distance |
+| `static_geometry_below_threshold` | 大簇几何门失败 | 点数/面积/长边/高度/网格实际值与门限 |
+| `static_provenance_unavailable` | 没有独立长期来源 | index epoch/revision、clean counters、query reason |
+| `static_frames_pending` | provenance 已有但帧数不足 | track ID 与连续计数 |
+| `static_duration_pending` | 静态持续时间不足 | track age 与 source stamp |
+| `static_track_association_reset` | 障碍身份被重建 | centroid/top step/cell overlap/IoU/reset reason |
+
+优先读取 `/cargo_avoidance/static_evidence_debug`、`static_evidence.csv` 和
+`runtime_status.json`，不要在拿到实际分布前降低几何或来源安全门。
+
 ## 终端日志过多或过少
 
 生产保持 health=false、risk=true、cargo=true、CSV=true。risk 应只有 ENTER/CHANGE/REPEAT/CLEAR；如果仍逐帧输出，搜索旧 `[PIPELINE_RISK] reason=FRAME_OVERRUN` 路径。

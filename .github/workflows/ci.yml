@@ -3,10 +3,16 @@ name: repository-and-catkin
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   noetic:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     container: ros:noetic-ros-base-focal
     steps:
       - uses: actions/checkout@v4

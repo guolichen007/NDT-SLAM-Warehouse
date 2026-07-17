@@ -309,6 +309,8 @@ dynamic_event_manager:
   placed_bbox_expand_xy: 0.3
   placed_bbox_expand_z: 0.3
   clean_deny_enabled: true
+  enable_cargo_history_clean: true
+  enable_human_history_clean: true
 
 # ========== 人体过滤配置 ==========
 
@@ -728,6 +730,8 @@ cargo_safety:
   static_map_minimum_matched_cells: 6
   static_map_maximum_query_area_cells: 4096
   static_map_pre_cargo_sequence_gap: 2
+  static_map_max_observation_gap_sec: 0.8
+  static_map_max_sequence_gap: 1
   motion_corridor_enabled: true
   motion_corridor_immediate_near_field_m: 0.30
   motion_corridor_minimum_speed_mps: 0.05

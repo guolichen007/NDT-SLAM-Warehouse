@@ -230,5 +230,16 @@ TEST(CargoObstacleTracker, CellOverlapPreservesStaticTrackIdentity) {
   EXPECT_GT(associated.selected_track_cell_overlap, 0.70F);
 }
 
+TEST(CargoObstacleTracker, TrackCreationAndAssociationResetAreCounted) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  const auto first = tracker.update(1.0, {hazard(0U, 0.0F, 0.0F)});
+  EXPECT_EQ(first.created_track_count, 1U);
+  EXPECT_EQ(first.association_reset_count, 0U);
+
+  const auto jumped = tracker.update(1.2, {hazard(0U, 5.0F, 0.0F)});
+  EXPECT_EQ(jumped.created_track_count, 2U);
+  EXPECT_EQ(jumped.association_reset_count, 1U);
+}
+
 }  // namespace
 }  // namespace ndt_slam

@@ -1,5 +1,9 @@
 # NDT-SLAM Warehouse
 
+> Release status: **Server Validation RC candidate**. Main-controller
+> integration is disabled/not accepted, no production tag has been issued,
+> and the typed cargo-safety contract remains schema v6.
+
 面向室内仓库和天车作业的 ROS1 NDT 定位、长期建图、吊物跟踪与避障工程。
 
 当前生产链路同时维护定位、五层地图和一条正式吊物安全协议。吊物一旦确认，系统冻结稳健二维定向包围框的长、宽、方向和高度；作业期间只更新刚体中心，因此框会随平移与起升实时移动，不会因单帧稀疏点云改变形状。
@@ -21,7 +25,9 @@ Ubuntu / ROS Noetic：
 
 ```bash
 cd ~/NDT-slam-ws
-catkin_make --pkg ndt_slam
+catkin config --extend /opt/ros/noetic --cmake-args -DCMAKE_BUILD_TYPE=Release
+catkin clean -y
+catkin build --no-status
 source devel/setup.bash
 ```
 
@@ -29,13 +35,21 @@ Windows 只用于源码修改和静态合同检查，不能替代 ROS/PCL/Sophus
 
 ## 启动
 
+现场服务器（真实传感器时间、持久化地图）：
+
 ```bash
 roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
-  use_sim_time:=true \
-  persistent_map:=false
+  use_sim_time:=false use_rviz:=false persistent_map:=true
 ```
 
-随后播放带 `/clock` 的 bag：
+Bag 验收（仿真时间、非持久化测试地图）：
+
+```bash
+roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
+  use_sim_time:=true use_rviz:=true persistent_map:=false
+```
+
+随后必须使用 `--clock` 播放 bag：
 
 ```bash
 rosbag play /path/to/warehouse.bag --clock
@@ -71,17 +85,25 @@ src/ndt_slam/config/merger_params.yaml
 
 ## 安全协议
 
-输入：
+NDT-SLAM 权威类型化输出（主系统必须订阅）：
 
 ```text
 /cargo_avoidance/safety_status
+lidar_slam2_msgs/CargoSafetyStatus schema v6
 ```
 
-输出：
+Heartbeat 派生简码输出（兼容显示与冗余心跳）：
 
 ```text
 /cargo_avoidance/status_code
+std_msgs/Int32
 ```
+
+长时静态证据链为 `MapCommit objects -> 连续观测 -> clean-map 确认 ->
+immutable StaticEvidenceSnapshot -> PRE_CARGO_OCCUPANCY/STATIC_MAP_MATCH ->
+CargoObstacleTracker -> 17/18 或 34`。长期地图只提供独立静态 provenance，
+绝不能绕过 `current_source_unvalidated` 或
+`cargo_residual_source_unresolved` 的 fail-safe 34。
 
 状态定义：
 

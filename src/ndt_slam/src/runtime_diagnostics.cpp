@@ -26,6 +26,10 @@ RuntimeDiagnostics::~RuntimeDiagnostics() {
     cargo_csv_.flush();
     cargo_csv_.close();
   }
+  if (static_evidence_csv_.is_open()) {
+    static_evidence_csv_.flush();
+    static_evidence_csv_.close();
+  }
 }
 
 void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
@@ -103,6 +107,31 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
                << "obstacle_track_cell_overlap,obstacle_track_iou,"
                << "obstacle_association_cost,"
                << "obstacle_association_reset_reason,"
+               << "obstacle_source_validated,obstacle_source_validation_reason,"
+               << "obstacle_inside_xy_ratio,obstacle_identity_match_ratio,"
+               << "obstacle_surface_band_ratio,obstacle_motion_match_score,"
+               << "obstacle_validation_shell_m,"
+               << "static_index_epoch,static_expected_epoch,"
+               << "static_index_revision,static_index_latest_sequence,"
+               << "static_cargo_track_start_sequence,static_index_cell_count,"
+               << "static_query_cell_count,static_matched_cell_count,"
+               << "static_spatial_cell_count,static_matched_ratio,"
+               << "static_matched_iou,static_height_overlap,"
+               << "static_min_observation_count,static_min_stable_age_sec,"
+               << "static_authorized,static_query_reason,"
+               << "obstacle_point_count,obstacle_xy_occupied_cells,"
+               << "obstacle_xy_area_m2,"
+               << "obstacle_long_side_m,obstacle_height_span_m,"
+               << "obstacle_required_point_count,"
+               << "obstacle_required_xy_area_m2,"
+               << "obstacle_required_long_side_m,"
+               << "obstacle_required_height_span_m,"
+               << "obstacle_required_occupied_cells,"
+               << "obstacle_track_created_count,obstacle_track_reset_count,"
+               << "static_clean_build_started,static_clean_build_applied,"
+               << "static_clean_build_snapshot_only,"
+               << "static_clean_build_discarded,static_clean_confirmed_cells,"
+               << "static_clean_invalidated_cells,static_clean_snapshot_cells,"
                << "obstacle_track_velocity_x,"
                << "obstacle_track_velocity_y,obstacle_track_velocity_z,"
                << "safety_spatial_mode,cargo_map_speed_mps,"
@@ -123,6 +152,23 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
                << "raw_bottom_z,filtered_bottom_z,conservative_bottom_z,"
                << "top_z,height_m,bottom_valid,height_valid,filter_accepted,filter_reason,"
                << "lost_frames,odom_x,odom_y,odom_z\n";
+
+    static_evidence_csv_.open(output_dir_ + "/static_evidence.csv");
+    static_evidence_csv_
+        << "stamp,index_epoch,expected_epoch,index_revision,index_cells,"
+        << "latest_sequence,cargo_track_start_sequence,query_reason,"
+        << "query_cells,matched_cells,spatial_cells,matched_ratio,matched_iou,"
+        << "height_overlap,min_observation_count,min_stable_age_sec,authorized,"
+        << "source_validated,source_reason,inside_xy_ratio,identity_match_ratio,"
+        << "surface_band_ratio,motion_match_score,validation_shell_m,"
+        << "obstacle_point_count,"
+        << "obstacle_xy_area_m2,obstacle_long_side_m,obstacle_height_span_m,"
+        << "obstacle_occupied_cells,required_point_count,required_xy_area_m2,"
+        << "required_long_side_m,required_height_span_m,required_occupied_cells,"
+        << "track_id,association_reset_reason,track_created_count,track_reset_count,"
+        << "clean_build_started,clean_build_applied,clean_build_snapshot_only,"
+        << "clean_build_discarded,static_cells_confirmed,static_cells_invalidated,"
+        << "static_snapshot_cells,safety_reason\n";
   }
 
   last_csv_flush_ = std::chrono::steady_clock::now();
@@ -504,6 +550,48 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << rec.obstacle_track_iou << ","
                << rec.obstacle_association_cost << ","
                << rec.obstacle_association_reset_reason << ","
+               << (rec.obstacle_source_validated ? 1 : 0) << ","
+               << rec.obstacle_source_validation_reason << ","
+               << rec.obstacle_inside_xy_ratio << ","
+               << rec.obstacle_identity_match_ratio << ","
+               << rec.obstacle_surface_band_ratio << ","
+               << rec.obstacle_motion_match_score << ","
+               << rec.obstacle_validation_shell_m << ","
+               << rec.static_index_epoch << ","
+               << rec.static_expected_epoch << ","
+               << rec.static_index_revision << ","
+               << rec.static_index_latest_sequence << ","
+               << rec.static_cargo_track_start_sequence << ","
+               << rec.static_index_cell_count << ","
+               << rec.static_query_cell_count << ","
+               << rec.static_matched_cell_count << ","
+               << rec.static_spatial_cell_count << ","
+               << rec.static_matched_ratio << ","
+               << rec.static_matched_iou << ","
+               << rec.static_height_overlap << ","
+               << rec.static_min_observation_count << ","
+               << rec.static_min_stable_age_sec << ","
+               << (rec.static_authorized ? 1 : 0) << ","
+               << rec.static_query_reason << ","
+               << rec.obstacle_point_count << ","
+               << rec.obstacle_xy_occupied_cells << ","
+               << rec.obstacle_xy_area_m2 << ","
+               << rec.obstacle_long_side_m << ","
+               << rec.obstacle_height_span_m << ","
+               << rec.obstacle_required_point_count << ","
+               << rec.obstacle_required_xy_area_m2 << ","
+               << rec.obstacle_required_long_side_m << ","
+               << rec.obstacle_required_height_span_m << ","
+               << rec.obstacle_required_occupied_cells << ","
+               << rec.obstacle_track_created_count << ","
+               << rec.obstacle_track_reset_count << ","
+               << rec.static_clean_build_started << ","
+               << rec.static_clean_build_applied << ","
+               << rec.static_clean_build_snapshot_only << ","
+               << rec.static_clean_build_discarded << ","
+               << rec.static_clean_confirmed_cells << ","
+               << rec.static_clean_invalidated_cells << ","
+               << rec.static_clean_snapshot_cells << ","
                << rec.obstacle_track_velocity_x << ","
                << rec.obstacle_track_velocity_y << ","
                << rec.obstacle_track_velocity_z << ","
@@ -544,6 +632,50 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << rec.lost_frames << "," << rec.odom_x << "," << rec.odom_y
                << "," << rec.odom_z << "\n";
   }
+  if (static_evidence_csv_.is_open()) {
+    static_evidence_csv_
+        << std::fixed << std::setprecision(6) << rec.stamp << ","
+        << rec.static_index_epoch << "," << rec.static_expected_epoch << ","
+        << rec.static_index_revision << "," << rec.static_index_cell_count
+        << "," << rec.static_index_latest_sequence << ","
+        << rec.static_cargo_track_start_sequence << ","
+        << rec.static_query_reason << "," << rec.static_query_cell_count << ","
+        << rec.static_matched_cell_count << ","
+        << rec.static_spatial_cell_count << "," << rec.static_matched_ratio
+        << "," << rec.static_matched_iou << ","
+        << rec.static_height_overlap << ","
+        << rec.static_min_observation_count << ","
+        << rec.static_min_stable_age_sec << ","
+        << (rec.static_authorized ? 1 : 0) << ","
+        << (rec.obstacle_source_validated ? 1 : 0) << ","
+        << rec.obstacle_source_validation_reason << ","
+        << rec.obstacle_inside_xy_ratio << ","
+        << rec.obstacle_identity_match_ratio << ","
+        << rec.obstacle_surface_band_ratio << ","
+        << rec.obstacle_motion_match_score << ","
+        << rec.obstacle_validation_shell_m << ","
+        << rec.obstacle_point_count << ","
+        << rec.obstacle_xy_area_m2 << "," << rec.obstacle_long_side_m << ","
+        << rec.obstacle_height_span_m << ","
+        << rec.obstacle_xy_occupied_cells << ","
+        << rec.obstacle_required_point_count << ","
+        << rec.obstacle_required_xy_area_m2 << ","
+        << rec.obstacle_required_long_side_m << ","
+        << rec.obstacle_required_height_span_m << ","
+        << rec.obstacle_required_occupied_cells << ","
+        << rec.obstacle_track_id << ","
+        << rec.obstacle_association_reset_reason << ","
+        << rec.obstacle_track_created_count << ","
+        << rec.obstacle_track_reset_count << ","
+        << rec.static_clean_build_started << ","
+        << rec.static_clean_build_applied << ","
+        << rec.static_clean_build_snapshot_only << ","
+        << rec.static_clean_build_discarded << ","
+        << rec.static_clean_confirmed_cells << ","
+        << rec.static_clean_invalidated_cells << ","
+        << rec.static_clean_snapshot_cells << ","
+        << rec.safety_reason << "\n";
+  }
   maybeFlushCsv();
 }
 
@@ -553,6 +685,7 @@ void RuntimeDiagnostics::maybeFlushCsv() {
   if (elapsed >= cfg_.csv_flush_period_sec) {
     if (ndt_csv_.is_open()) ndt_csv_.flush();
     if (cargo_csv_.is_open()) cargo_csv_.flush();
+    if (static_evidence_csv_.is_open()) static_evidence_csv_.flush();
     last_csv_flush_ = now;
   }
 }
@@ -561,6 +694,7 @@ void RuntimeDiagnostics::flushCsv() {
   std::lock_guard<std::mutex> lock(csv_mutex_);
   if (ndt_csv_.is_open()) ndt_csv_.flush();
   if (cargo_csv_.is_open()) cargo_csv_.flush();
+  if (static_evidence_csv_.is_open()) static_evidence_csv_.flush();
 }
 
 void RuntimeDiagnostics::logNdtHealth(int frame, double stamp, double input_hz,

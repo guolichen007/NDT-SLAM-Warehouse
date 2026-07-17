@@ -1,0 +1,5 @@
+* @guolichen007
+
+src/ndt_slam/include/ndt_slam/cargo_* @guolichen007
+src/ndt_slam/src/cargo_* @guolichen007
+src/lidar_slam2_msgs/msg/CargoSafetyStatus.msg @guolichen007
