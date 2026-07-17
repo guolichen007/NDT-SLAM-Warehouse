@@ -340,7 +340,8 @@ public:
           heartbeat_hz_(readPositiveParam("heartbeat_hz", 5.0)),
           stale_timeout_sec_(readPositiveParam("stale_timeout_sec", 0.8)),
           pending_error_sec_(readPositiveParam("pending_error_sec", 1.0)),
-          pending_repeat_sec_(readPositiveParam("pending_repeat_sec", 2.0)),
+          pending_repeat_sec_(readPositiveParam("pending_repeat_sec", 10.0)),
+          warning_repeat_sec_(readPositiveParam("warning_repeat_sec", 5.0)),
           contract_config_(readStatusContractConfig()),
           state_machine_(stale_timeout_sec_) {
         pnh_.param<std::string>("status_topic", status_topic_,
@@ -411,8 +412,8 @@ private:
     }
 
     void statusCallback(const lidar_slam2_msgs::CargoSafetyStatus::ConstPtr& msg) {
-        static_assert(lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION == 4,
-                      "CargoSafetyStatus schema v4 is required");
+        static_assert(lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION == 5,
+                      "CargoSafetyStatus schema v5 is required");
         static_assert(
             lidar_slam2_msgs::CargoSafetyStatus::HOOK_ROLE_DISABLED ==
                 AlarmStateMachine::kHookRoleDisabled &&
@@ -448,6 +449,13 @@ private:
         const StatusContractResult contract =
             validateStatusContract(input, contract_config_);
 
+        const bool urgent_details_changed =
+            (msg->requested_alarm_code == AlarmStateMachine::kLevel1Warning ||
+             msg->requested_alarm_code == AlarmStateMachine::kLevel2Warning) &&
+            (!has_last_status_ ||
+             last_status_.requested_alarm_code != msg->requested_alarm_code ||
+             last_status_.obstacle_track_id != msg->obstacle_track_id ||
+             last_status_.reason != msg->reason);
         last_status_ = *msg;
         if (!contract.valid) last_status_.reason = contract.reason;
         has_last_status_ = true;
@@ -456,7 +464,9 @@ private:
             msg->header.stamp.toSec(), msg->nearest_obstacle_distance_m,
             msg->conservative_vertical_clearance_m,
             contract.clear_without_obstacle_geometry);
-        if (result.changed) publishCode(result.code, result.reason, true);
+        if (result.changed || urgent_details_changed) {
+            publishCode(result.code, result.reason, true);
+        }
     }
 
     void heartbeatCallback(const ros::WallTimerEvent& event) {
@@ -476,17 +486,19 @@ private:
             ? last_status_.reason : std::string(reason);
         const bool pending_evidence =
             code == AlarmStateMachine::kObstacleInvalid &&
-            (status_reason.find("pending") != std::string::npos ||
-             status_reason.find("too_sparse") != std::string::npos ||
-             status_reason.find("spatial_discontinuity") !=
-                 std::string::npos ||
-             status_reason.find("source_unresolved") != std::string::npos ||
-             status_reason.find("evidence_gap") != std::string::npos);
-        const bool noisy_pending =
-            status_reason.find("too_sparse") != std::string::npos ||
-            status_reason.find("spatial_discontinuity") !=
-                std::string::npos ||
-            status_reason.find("source_unresolved") != std::string::npos;
+            has_last_status_ &&
+            (last_status_.evidence_state ==
+                 lidar_slam2_msgs::CargoSafetyStatus::
+                     EVIDENCE_HAZARD_CANDIDATE ||
+             last_status_.evidence_state ==
+                 lidar_slam2_msgs::CargoSafetyStatus::
+                     EVIDENCE_TRACK_CONFIRMATION_PENDING ||
+             last_status_.evidence_state ==
+                 lidar_slam2_msgs::CargoSafetyStatus::
+                     EVIDENCE_SPARSE_PENDING ||
+             last_status_.evidence_state ==
+                 lidar_slam2_msgs::CargoSafetyStatus::
+                     EVIDENCE_SOURCE_UNRESOLVED);
         if (pending_evidence) {
             if (!pending_active_ || log_change) {
                 pending_active_ = true;
@@ -500,25 +512,37 @@ private:
                  wall_now_sec - last_pending_log_wall_sec_ >=
                      pending_repeat_sec_);
             if (persistent_due) {
-                ROS_ERROR("[SAFETY_FAULT_PERSISTENT] code=34 age=%.2f "
-                          "reason=%s",
-                          pending_age, status_reason.c_str());
+                ROS_WARN("[SAFETY_PENDING_SUMMARY] code=34 age=%.2f "
+                         "evidence=%u track=%u reason=%s",
+                         pending_age,
+                         static_cast<unsigned int>(
+                             last_status_.evidence_state),
+                         last_status_.obstacle_track_id,
+                         status_reason.c_str());
                 pending_error_reported_ = true;
                 last_pending_log_wall_sec_ = wall_now_sec;
-            } else if (log_change && noisy_pending) {
-                ROS_WARN("[SAFETY_PENDING] code=34 reason=%s",
+            } else if (log_change) {
+                ROS_WARN("[SAFETY_PENDING] code=34 evidence=%u track=%u "
+                         "reason=%s",
+                         static_cast<unsigned int>(
+                             last_status_.evidence_state),
+                         last_status_.obstacle_track_id,
                          status_reason.c_str());
                 last_pending_log_wall_sec_ = wall_now_sec;
-            } else if (log_change) {
-                ROS_DEBUG("[SAFETY_PENDING] code=34 reason=%s",
-                          status_reason.c_str());
             }
             return;
         }
         pending_active_ = false;
         pending_since_wall_sec_ = 0.0;
         pending_error_reported_ = false;
-        if (!log_change) return;
+        const bool urgent_warning =
+            code == AlarmStateMachine::kLevel1Warning ||
+            code == AlarmStateMachine::kLevel2Warning;
+        const bool warning_repeat_due = urgent_warning &&
+            (last_warning_log_wall_sec_ <= 0.0 ||
+             wall_now_sec - last_warning_log_wall_sec_ >=
+                 warning_repeat_sec_);
+        if (!log_change && !warning_repeat_due) return;
         if (code == AlarmStateMachine::kClear) {
             ROS_INFO("[SAFETY] code=14 state=CLEAR "
                      "localization_valid=%d gravity_valid=%d "
@@ -531,14 +555,18 @@ private:
                    code == AlarmStateMachine::kLevel2Warning) {
             ROS_WARN("[SAFETY_WARN] code=%d level=%d distance=%.2f "
                      "clearance=%.2f cargo_bottom=%.2f obstacle_top=%.2f "
-                     "track=%u confidence=%.2f reason=%s",
+                     "cargo_track=%u obstacle_track=%u confidence=%.2f "
+                     "reason=%s",
                      code, code == AlarmStateMachine::kLevel1Warning ? 1 : 2,
                      last_status_.nearest_obstacle_distance_m,
                      last_status_.conservative_vertical_clearance_m,
                      last_status_.cargo_bottom_z_map,
                      last_status_.obstacle_top_z_map,
-                     last_status_.cargo_track_id, last_status_.confidence,
+                     last_status_.cargo_track_id,
+                     last_status_.obstacle_track_id,
+                     last_status_.confidence,
                      last_status_.reason.c_str());
+            last_warning_log_wall_sec_ = wall_now_sec;
         } else {
             const bool message_reason = std::string(reason) == "fresh_status" ||
                 std::string(reason) == "heartbeat";
@@ -568,6 +596,7 @@ private:
     const double stale_timeout_sec_;
     const double pending_error_sec_;
     const double pending_repeat_sec_;
+    const double warning_repeat_sec_;
     const StatusContractConfig contract_config_;
     AlarmStateMachine state_machine_;
     lidar_slam2_msgs::CargoSafetyStatus last_status_;
@@ -576,6 +605,7 @@ private:
     bool pending_error_reported_ = false;
     double pending_since_wall_sec_ = 0.0;
     double last_pending_log_wall_sec_ = 0.0;
+    double last_warning_log_wall_sec_ = 0.0;
 };
 
 }  // namespace cargo_alarm

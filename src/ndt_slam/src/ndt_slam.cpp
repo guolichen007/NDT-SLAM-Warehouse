@@ -12135,36 +12135,53 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
     status.fault_code = decision.fault_code;
     status.fault_mask = decision.fault_mask;
     status.reason = decision.reason;
+    if (decision.requested_code >= CargoSafetyProtocol::kSystemNotReady &&
+        decision.requested_code != CargoSafetyProtocol::kObstacleInvalid) {
+        status.evidence_state = Status::EVIDENCE_HARD_FAULT;
+    } else if (status.evidence_state == Status::EVIDENCE_UNKNOWN) {
+        if (decision.requested_code == CargoSafetyProtocol::kClear) {
+            status.evidence_state = Status::EVIDENCE_CLEAR;
+        } else if (decision.requested_code ==
+                       CargoSafetyProtocol::kLevel1Warning ||
+                   decision.requested_code ==
+                       CargoSafetyProtocol::kLevel2Warning) {
+            status.evidence_state = Status::EVIDENCE_HAZARD_CONFIRMED;
+        } else {
+            status.evidence_state = Status::EVIDENCE_HARD_FAULT;
+        }
+    }
     return status;
 }
 
 void NdtSlamNode::logCargoSafetyStatus(
     const lidar_slam2_msgs::CargoSafetyStatus& status) {
+    using Status = lidar_slam2_msgs::CargoSafetyStatus;
     const bool code_changed =
         status.requested_alarm_code != cargo_last_requested_code_;
+    const bool reason_changed = status.reason != cargo_last_safety_reason_;
+    const bool evidence_changed =
+        status.evidence_state != cargo_last_safety_evidence_state_;
+    const bool obstacle_track_changed =
+        status.obstacle_track_id != cargo_last_console_obstacle_track_id_;
     const bool pending_evidence =
-        status.requested_alarm_code ==
-            CargoSafetyProtocol::kObstacleInvalid &&
-        (status.reason.find("pending") != std::string::npos ||
-         status.reason.find("too_sparse") != std::string::npos ||
-         status.reason.find("spatial_discontinuity") != std::string::npos ||
-         status.reason.find("source_unresolved") != std::string::npos ||
-         status.reason.find("evidence_gap") != std::string::npos);
-    const bool noisy_pending =
-        status.reason.find("too_sparse") != std::string::npos ||
-        status.reason.find("spatial_discontinuity") != std::string::npos ||
-        status.reason.find("source_unresolved") != std::string::npos;
+        status.evidence_state == Status::EVIDENCE_HAZARD_CANDIDATE ||
+        status.evidence_state ==
+            Status::EVIDENCE_TRACK_CONFIRMATION_PENDING ||
+        status.evidence_state == Status::EVIDENCE_SPARSE_PENDING ||
+        status.evidence_state == Status::EVIDENCE_SOURCE_UNRESOLVED;
+    const bool event_changed = code_changed || reason_changed ||
+        evidence_changed || obstacle_track_changed;
     cargo_last_requested_code_ = status.requested_alarm_code;
     cargo_last_safety_reason_ = status.reason;
+    cargo_last_safety_evidence_state_ = status.evidence_state;
+    cargo_last_console_obstacle_track_id_ = status.obstacle_track_id;
 
     if (pending_evidence) {
-        if (cargo_safety_pending_since_stamp_.isZero() || code_changed) {
+        if (cargo_safety_pending_since_stamp_.isZero() || evidence_changed) {
             cargo_safety_pending_since_stamp_ = status.header.stamp;
-            cargo_safety_pending_error_reported_ = false;
         }
     } else {
         cargo_safety_pending_since_stamp_ = ros::Time();
-        cargo_safety_pending_error_reported_ = false;
     }
     const double elapsed = cargo_last_safety_console_stamp_.isZero()
         ? std::numeric_limits<double>::infinity()
@@ -12178,9 +12195,8 @@ void NdtSlamNode::logCargoSafetyStatus(
               (status.header.stamp - cargo_safety_pending_since_stamp_)
                   .toSec())
         : 0.0;
-    const bool persistent_due = pending_evidence &&
-        pending_age >= cargo_safety_pending_error_sec_ &&
-        !cargo_safety_pending_error_reported_;
+    const bool persistent_pending = pending_evidence &&
+        pending_age >= cargo_safety_pending_error_sec_;
     const bool one_shot_hard_fault =
         status.requested_alarm_code ==
             CargoSafetyProtocol::kCargoInvalid ||
@@ -12190,11 +12206,11 @@ void NdtSlamNode::logCargoSafetyStatus(
             CargoSafetyProtocol::kGravityInvalid ||
         status.requested_alarm_code ==
             CargoSafetyProtocol::kInternalError;
-    if (pending_evidence && !periodic && !code_changed && !persistent_due) {
+    if (pending_evidence && !periodic && !event_changed) {
         return;
     }
     if (one_shot_hard_fault && !code_changed) return;
-    if (!pending_evidence && !code_changed && !periodic) return;
+    if (!pending_evidence && !event_changed && !periodic) return;
 
     std::ostringstream message;
     message << "[CARGO_SAFETY] code=" << status.requested_alarm_code
@@ -12223,26 +12239,26 @@ void NdtSlamNode::logCargoSafetyStatus(
             << " horizontal_unc=" << cargo_horizontal_uncertainty_m_
             << " vertical_unc=" << cargo_vertical_uncertainty_m_
             << " spatial_mode=" << cargo_safety_spatial_mode_
-            << " obstacle_track=" << cargo_obstacle_track_id_
+            << " evidence=" << static_cast<int>(status.evidence_state)
+            << " obstacle_track=" << status.obstacle_track_id
             << " confirm=" << cargo_obstacle_track_confirm_count_
             << " pending_age=" << pending_age
             << " ground_valid="
             << (hook_fixed_cargo_.ground_reference_valid ? 1 : 0)
             << " ground_z=" << hook_fixed_cargo_.ground_z;
-    if (pending_evidence &&
-        pending_age >= cargo_safety_pending_error_sec_) {
-        ROS_ERROR_STREAM("[CARGO_SAFETY_PERSISTENT] " << message.str());
-        cargo_safety_pending_error_reported_ = true;
-    } else if (pending_evidence && noisy_pending) {
-        ROS_WARN_STREAM("[CARGO_SAFETY_PENDING] " << message.str());
-    } else if (pending_evidence) {
-        ROS_DEBUG_STREAM("[CARGO_SAFETY_PENDING] " << message.str());
+    if (pending_evidence) {
+        ROS_WARN_STREAM(
+            (persistent_pending ? "[CARGO_SAFETY_PENDING_SUMMARY] "
+                                : "[CARGO_SAFETY_PENDING] ")
+            << message.str());
     } else if (status.requested_alarm_code ==
                    CargoSafetyProtocol::kCargoInvalid) {
         ROS_ERROR_STREAM(message.str());
     } else if (status.requested_alarm_code == CargoSafetyProtocol::kLevel1Warning ||
-        status.requested_alarm_code == CargoSafetyProtocol::kLevel2Warning ||
-        status.requested_alarm_code >= CargoSafetyProtocol::kSystemNotReady) {
+               status.requested_alarm_code == CargoSafetyProtocol::kLevel2Warning) {
+        ROS_WARN_STREAM("[CARGO_SAFETY_WARN] " << message.str());
+    } else if (status.requested_alarm_code >=
+               CargoSafetyProtocol::kSystemNotReady) {
         ROS_WARN_STREAM(message.str());
     } else {
         ROS_INFO_STREAM(message.str());
@@ -12276,6 +12292,9 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
     status.no_cargo_confirmed = safe_empty;
     status.obstacle_valid = false;
     status.confidence = safe_empty ? 1.0F : 0.0F;
+    status.evidence_state = safe_empty
+        ? lidar_slam2_msgs::CargoSafetyStatus::EVIDENCE_CLEAR
+        : lidar_slam2_msgs::CargoSafetyStatus::EVIDENCE_HARD_FAULT;
     status = composeCargoSafetyStatus(
         status, visual_conflict, CargoSafetyFault::NONE,
         safe_empty ? CargoSafetyEvaluator::kSafeCode : 0U,
@@ -13198,6 +13217,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         if (raw_cargo_safety_result.has_cluster_evidence) {
             raw_cargo_safety_result.warning_code =
                 raw_cargo_safety_result.most_dangerous_cluster.warning_code;
+            raw_cargo_safety_result.evidence_state =
+                CargoSafetyEvidenceState::HAZARD_CANDIDATE;
             raw_cargo_safety_result.reason =
                 cargo_safety_spatial_mode_ == "MOTION_CORRIDOR"
                     ? "hazard_inside_motion_corridor"
@@ -13207,6 +13228,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 CargoSafetyEvaluator::kSafeCode;
             raw_cargo_safety_result.warning_valid = true;
             raw_cargo_safety_result.fault = CargoSafetyFault::NONE;
+            raw_cargo_safety_result.evidence_state =
+                CargoSafetyEvidenceState::CLEAR;
             raw_cargo_safety_result.reason =
                 "clear_no_hazard_in_motion_corridor";
         }
@@ -13388,6 +13411,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 most_dangerous_validated;
             raw_cargo_safety_result.warning_code =
                 most_dangerous_validated.warning_code;
+            raw_cargo_safety_result.evidence_state =
+                CargoSafetyEvidenceState::HAZARD_CANDIDATE;
             raw_cargo_safety_result.reason =
                 most_dangerous_validated.source_reason;
         } else if (has_unresolved_residual) {
@@ -13397,6 +13422,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             raw_cargo_safety_result.has_cluster_evidence = true;
             raw_cargo_safety_result.fault =
                 CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
+            raw_cargo_safety_result.evidence_state =
+                CargoSafetyEvidenceState::SOURCE_UNRESOLVED;
             raw_cargo_safety_result.reason =
                 "cargo_boundary_source_unresolved";
         } else {
@@ -13405,6 +13432,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             raw_cargo_safety_result.warning_code =
                 CargoSafetyEvaluator::kSafeCode;
             raw_cargo_safety_result.fault = CargoSafetyFault::NONE;
+            raw_cargo_safety_result.evidence_state =
+                CargoSafetyEvidenceState::CLEAR;
             raw_cargo_safety_result.reason =
                 "clear_cargo_residuals_classified_self";
         }
@@ -13539,12 +13568,15 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     cargo_obstacle_track_velocity_map_ =
         obstacle_track_decision.selected_track_velocity;
 
-    const auto make_obstacle_pending = [&](const std::string& reason) {
+    const auto make_obstacle_pending = [&] (
+        const std::string& reason,
+        CargoSafetyEvidenceState evidence_state) {
         last_cargo_safety_result_.input_valid = false;
         last_cargo_safety_result_.warning_valid = false;
         last_cargo_safety_result_.warning_code = 0U;
         last_cargo_safety_result_.fault =
             CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
+        last_cargo_safety_result_.evidence_state = evidence_state;
         last_cargo_safety_result_.reason = reason;
     };
 
@@ -13572,6 +13604,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             last_cargo_safety_result_.most_dangerous_cluster = selected;
             last_cargo_safety_result_.warning_code =
                 obstacle_track_decision.warning_code;
+            last_cargo_safety_result_.evidence_state =
+                CargoSafetyEvidenceState::HAZARD_CONFIRMED;
             last_cargo_safety_result_.reason =
                 obstacle_track_decision.reason;
             cargo_confirmed_warning_code_ =
@@ -13579,7 +13613,15 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             confirmed_cargo_safety_result_ = last_cargo_safety_result_;
         } else {
             cargo_confirmed_warning_code_ = 0;
-            make_obstacle_pending(obstacle_track_decision.reason);
+            const bool sparse_cluster =
+                obstacle_track_observations.empty() &&
+                !raw_cargo_safety_result.cluster_evidence.empty();
+            make_obstacle_pending(
+                sparse_cluster ? "hazard_cluster_too_sparse" :
+                    obstacle_track_decision.reason,
+                sparse_cluster
+                    ? CargoSafetyEvidenceState::SPARSE_PENDING
+                    : CargoSafetyEvidenceState::TRACK_CONFIRMATION_PENDING);
         }
     } else if (raw_cargo_safety_result.input_valid &&
                raw_cargo_safety_result.warning_valid &&
@@ -13598,10 +13640,14 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             temporal_decision.stable &&
             !temporal_decision.use_current_evidence;
         if (!temporal_decision.stable) {
-            make_obstacle_pending(temporal_decision.reason);
+            make_obstacle_pending(
+                temporal_decision.reason,
+                CargoSafetyEvidenceState::TRACK_CONFIRMATION_PENDING);
         } else {
             last_cargo_safety_result_.warning_code =
                 temporal_decision.code;
+            last_cargo_safety_result_.evidence_state =
+                CargoSafetyEvidenceState::CLEAR;
             last_cargo_safety_result_.reason = temporal_decision.reason;
             confirmed_cargo_safety_result_ = last_cargo_safety_result_;
         }
@@ -13665,6 +13711,12 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION;
         message.cargo_valid = last_cargo_bottom_result_.valid;
         message.cargo_track_id = bottom_msg.track_id;
+        message.obstacle_track_id = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(
+                cargo_obstacle_track_id_,
+                std::numeric_limits<std::uint32_t>::max()));
+        message.evidence_state =
+            static_cast<std::uint8_t>(result.evidence_state);
         message.cargo_source = bottom_msg.source;
         message.hook_signal_valid = hook.valid;
         message.hook_load_state = hook.state;

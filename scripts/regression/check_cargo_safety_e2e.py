@@ -50,7 +50,7 @@ def main() -> int:
     require("CargoBottomEstimate.msg" in messages and
             "CargoSafetyStatus.msg" in messages,
             "typed Cargo messages are not generated", failures)
-    require("SCHEMA_VERSION=4" in safety_message and
+    require("SCHEMA_VERSION=5" in safety_message and
             all(f"CODE_{name}" in safety_message for name in (
                 "CLEAR", "LEVEL1_WARNING", "LEVEL2_WARNING",
                 "SYSTEM_NOT_READY", "LOCALIZATION_INVALID",
@@ -59,8 +59,12 @@ def main() -> int:
             all(name in safety_message for name in (
                 "HOOK_ROLE_DISABLED", "HOOK_ROLE_REQUIRED",
                 "HOOK_ROLE_AUXILIARY", "hook_signal_role",
-                "hook_signal_conflict")),
-            "CargoSafetyStatus v4 role/code contract is incomplete", failures)
+                "hook_signal_conflict", "EVIDENCE_HAZARD_CONFIRMED",
+                "EVIDENCE_TRACK_CONFIRMATION_PENDING",
+                "EVIDENCE_SPARSE_PENDING", "EVIDENCE_SOURCE_UNRESOLVED",
+                "evidence_state", "obstacle_track_id")),
+            "CargoSafetyStatus v5 role/code/evidence contract is incomplete",
+            failures)
 
     for include in ("cargo_bottom_fusion.hpp", "cargo_safety_evaluator.hpp",
                     "CargoBottomEstimate.h", "CargoSafetyStatus.h"):
@@ -437,12 +441,16 @@ def main() -> int:
     require("cargo_alarm_heartbeat_node" in launch,
             "production launch does not start heartbeat", failures)
     require("SAFETY_PENDING" in heartbeat and
-            "SAFETY_FAULT_PERSISTENT" in heartbeat and
+            "SAFETY_PENDING_SUMMARY" in heartbeat and
+            "SAFETY_FAULT_PERSISTENT" not in heartbeat and
+            "reason.find" not in heartbeat and
             "pending_error_sec" in heartbeat + launch and
             "pending_repeat_sec" in heartbeat + launch and
-            "CARGO_SAFETY_PERSISTENT" in node and
-            "cargo_safety_pending_error_sec_" in node,
-            "pending evidence is still logged as an immediate persistent fault",
+            "SAFETY_WARN" in heartbeat and
+            "warning_repeat_sec" in heartbeat + launch and
+            "CARGO_SAFETY_PENDING_SUMMARY" in node and
+            "CARGO_SAFETY_PERSISTENT" not in node,
+            "typed pending summaries or immediate/periodic 17/18 logs are missing",
             failures)
     for value in ("/cargo_avoidance/safety_status",
                   "/cargo_avoidance/status_code",

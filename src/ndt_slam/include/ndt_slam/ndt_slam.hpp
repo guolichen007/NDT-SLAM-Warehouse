@@ -1908,6 +1908,8 @@ private:
     std::int32_t cargo_last_requested_code_ =
         CargoSafetyProtocol::kSystemNotReady;
     std::string cargo_last_safety_reason_ = "startup";
+    std::uint8_t cargo_last_safety_evidence_state_ = 0U;
+    std::uint64_t cargo_last_console_obstacle_track_id_ = 0U;
     ros::Time cargo_last_safety_console_stamp_;
     ros::Time cargo_safety_pending_since_stamp_;
     double cargo_safety_console_period_sec_ = 2.0;

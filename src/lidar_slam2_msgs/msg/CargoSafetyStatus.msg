@@ -1,7 +1,7 @@
 # Authoritative cargo safety evidence and final status consumed by the main
 # controller.  Warning codes describe physical hazards only; system faults use
 # a separate code range and fault mask.
-uint16 SCHEMA_VERSION=4
+uint16 SCHEMA_VERSION=5
 
 int32 CODE_CLEAR=14
 int32 CODE_LEVEL1_WARNING=17
@@ -30,6 +30,17 @@ uint8 HOOK_ROLE_DISABLED=0
 uint8 HOOK_ROLE_REQUIRED=1
 uint8 HOOK_ROLE_AUXILIARY=2
 
+# Typed evidence lifecycle. Consumers must not infer safety semantics by
+# searching the free-form reason string.
+uint8 EVIDENCE_UNKNOWN=0
+uint8 EVIDENCE_CLEAR=1
+uint8 EVIDENCE_HAZARD_CONFIRMED=2
+uint8 EVIDENCE_HAZARD_CANDIDATE=3
+uint8 EVIDENCE_TRACK_CONFIRMATION_PENDING=4
+uint8 EVIDENCE_SPARSE_PENDING=5
+uint8 EVIDENCE_SOURCE_UNRESOLVED=6
+uint8 EVIDENCE_HARD_FAULT=7
+
 std_msgs/Header header
 uint16 schema_version
 
@@ -47,6 +58,7 @@ bool hook_signal_valid
 bool hook_signal_conflict
 bool cargo_valid
 uint32 cargo_track_id
+uint32 obstacle_track_id
 uint8 cargo_source
 uint8 hook_load_state
 float32 hook_voltage
@@ -61,4 +73,5 @@ float32 obstacle_top_z_map
 float32 obstacle_uncertainty_m
 float32 conservative_vertical_clearance_m
 float32 confidence
+uint8 evidence_state
 string reason

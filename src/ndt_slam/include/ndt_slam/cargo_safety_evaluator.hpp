@@ -89,6 +89,17 @@ enum class CargoSafetyFault : std::uint8_t {
     INTERNAL_ERROR
 };
 
+enum class CargoSafetyEvidenceState : std::uint8_t {
+    UNKNOWN = 0,
+    CLEAR,
+    HAZARD_CONFIRMED,
+    HAZARD_CANDIDATE,
+    TRACK_CONFIRMATION_PENDING,
+    SPARSE_PENDING,
+    SOURCE_UNRESOLVED,
+    HARD_FAULT
+};
+
 struct CargoSafetyProtocol {
     static constexpr std::int32_t kClear = 14;
     static constexpr std::int32_t kLevel1Warning = 17;
@@ -142,6 +153,8 @@ struct CargoSafetyResult {
     bool warning_valid = false;
     std::uint16_t warning_code = 0;
     CargoSafetyFault fault = CargoSafetyFault::NONE;
+    CargoSafetyEvidenceState evidence_state =
+        CargoSafetyEvidenceState::HARD_FAULT;
     bool height_stale = false;
     bool has_cluster_evidence = false;
     double height_age_sec = std::numeric_limits<double>::quiet_NaN();

@@ -241,6 +241,7 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         !isFinite(input.obstacle_roi_coverage_ratio) ||
         input.obstacle_roi_coverage_ratio < config_.minimum_roi_coverage_ratio) {
         result.fault = CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
+        result.evidence_state = CargoSafetyEvidenceState::SPARSE_PENDING;
         result.reason = "obstacle_observation_insufficient";
         return result;
     }
@@ -267,12 +268,14 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         result.warning_valid = true;
         result.warning_code = kSafeCode;
         result.fault = CargoSafetyFault::NONE;
+        result.evidence_state = CargoSafetyEvidenceState::CLEAR;
         result.reason = "clear_no_external_obstacle";
         return result;
     }
     if (obstacle_candidates->size() < config_.obstacle_min_cluster_points) {
         result.input_valid = false;
         result.fault = CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
+        result.evidence_state = CargoSafetyEvidenceState::SPARSE_PENDING;
         result.reason = "sparse_obstacle_returns";
         return result;
     }
@@ -391,6 +394,7 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         result.warning_valid = false;
         result.warning_code = 0;
         result.fault = CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
+        result.evidence_state = CargoSafetyEvidenceState::SPARSE_PENDING;
         result.reason = "obstacle_clusters_insufficient";
         return result;
     }
@@ -399,10 +403,13 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
     result.warning_code = result.most_dangerous_cluster.warning_code;
     result.fault = CargoSafetyFault::NONE;
     if (result.warning_code == kLevel1Code) {
+        result.evidence_state = CargoSafetyEvidenceState::HAZARD_CANDIDATE;
         result.reason = "level1_low_clearance";
     } else if (result.warning_code == kLevel2Code) {
+        result.evidence_state = CargoSafetyEvidenceState::HAZARD_CANDIDATE;
         result.reason = "level2_low_clearance";
     } else {
+        result.evidence_state = CargoSafetyEvidenceState::CLEAR;
         result.reason = "clear";
     }
     return result;
