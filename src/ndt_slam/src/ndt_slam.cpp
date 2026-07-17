@@ -10409,6 +10409,11 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
     support_input.predicted_center = hook_lock_.live_pose.valid
         ? hook_lock_.live_pose.center_base
         : hook_lock_.last_accepted_center;
+    // This gate proves frozen XY identity/coverage. Do not turn it into a
+    // hidden vertical-motion gate: a legitimately lifted load may change Z
+    // faster than the previous display pose, while its formal height is still
+    // decided independently by the top/bottom evidence contract below.
+    support_input.predicted_center.z() = det.center_base.z();
     support_input.locked_size = Eigen::Vector3f(
         hook_lock_.locked_shape.length_m,
         hook_lock_.locked_shape.width_m,
