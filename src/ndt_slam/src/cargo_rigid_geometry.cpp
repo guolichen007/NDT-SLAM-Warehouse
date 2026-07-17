@@ -381,6 +381,57 @@ CargoFormalUseDecision evaluateCargoFormalUse(
     return decision;
 }
 
+CargoFormalHeightDecision evaluateCargoFormalHeight(
+    const CargoBottomResult& fusion,
+    const RigidCargoGeometry& rigid,
+    const CargoFormalUseDecision& lifetime) {
+    CargoFormalHeightDecision decision;
+    if (!rigid.valid || !std::isfinite(rigid.bottom_z_base) ||
+        !std::isfinite(rigid.top_z_base) ||
+        rigid.top_z_base <= rigid.bottom_z_base) {
+        decision.reason = "formal_rigid_geometry_invalid";
+        return decision;
+    }
+    if (!lifetime.formal_safety_valid) {
+        decision.reason = lifetime.reason;
+        return decision;
+    }
+    if (!std::isfinite(rigid.height_evidence_stamp_sec) ||
+        rigid.height_evidence_stamp_sec <= 0.0) {
+        decision.reason = "formal_vertical_evidence_stamp_invalid";
+        return decision;
+    }
+
+    decision.bottom_z_base = rigid.bottom_z_base;
+    decision.top_z_base = rigid.top_z_base;
+    decision.evidence_stamp_sec = rigid.height_evidence_stamp_sec;
+    decision.uncertainty_m = std::max(
+        rigid.vertical_uncertainty_m,
+        fusion.valid && std::isfinite(fusion.uncertainty)
+            ? fusion.uncertainty : 0.0F);
+    if (!std::isfinite(decision.uncertainty_m) ||
+        decision.uncertainty_m < 0.0F) {
+        decision.reason = "formal_vertical_uncertainty_invalid";
+        return decision;
+    }
+
+    if (fusion.valid) {
+        decision.source = fusion.source;
+        decision.confidence = std::clamp(fusion.confidence, 0.0F, 1.0F);
+        decision.reason = std::string("formal_height:") + fusion.reason;
+    } else {
+        // The rigid lifetime may outlive the estimator's short display hold.
+        // This is still the same physical evidence stamp, never a refreshed
+        // sample, and expires at the formal vertical lifetime gate above.
+        decision.source = CargoBottomSource::RECENT_STABLE;
+        decision.confidence = 0.35F;
+        decision.reason = std::string("formal_height_hold:") +
+            lifetime.reason;
+    }
+    decision.valid = true;
+    return decision;
+}
+
 bool containsPointInCargoObbBase(
     const Eigen::Vector3f& point_base,
     const CargoObbFootprint& footprint,

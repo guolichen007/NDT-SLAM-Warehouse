@@ -28,6 +28,45 @@ LiveCargoPose pose(const Eigen::Vector3f& center) {
     return value;
 }
 
+TEST(CargoRigidGeometryTest, FormalHeightUsesOneAuthorityDecision) {
+    const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
+        shape(), pose(Eigen::Vector3f(0.0F, 0.0F, 2.0F)),
+        Eigen::Isometry3f::Identity(), 7U, 0.10F, 0.08F);
+    ASSERT_TRUE(geometry.valid);
+    CargoBottomResult fusion;
+    fusion.valid = true;
+    fusion.source = CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS;
+    fusion.reason = "fresh_top_with_track_frozen_thickness";
+    fusion.uncertainty = 0.06F;
+    fusion.confidence = 0.80F;
+    const CargoFormalUseDecision lifetime = evaluateCargoFormalUse(
+        true, false, 10.2, 10.0, 10.0, 0.5, 0.5, 0.10F);
+    const CargoFormalHeightDecision decision =
+        evaluateCargoFormalHeight(fusion, geometry, lifetime);
+    ASSERT_TRUE(decision.valid) << decision.reason;
+    EXPECT_EQ(decision.source,
+              CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS);
+    EXPECT_NEAR(decision.bottom_z_base, 1.4F, 1.0e-5F);
+    EXPECT_NEAR(decision.top_z_base, 2.6F, 1.0e-5F);
+}
+
+TEST(CargoRigidGeometryTest, ExpiredTopEvidenceCannotBeAuthorized) {
+    RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
+        shape(), pose(Eigen::Vector3f(0.0F, 0.0F, 2.0F)),
+        Eigen::Isometry3f::Identity(), 8U, 0.10F, 0.08F);
+    ASSERT_TRUE(geometry.valid);
+    geometry.height_evidence_stamp_sec = 10.0;
+    CargoBottomResult fusion;
+    fusion.valid = true;
+    fusion.source = CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS;
+    const CargoFormalUseDecision lifetime = evaluateCargoFormalUse(
+        true, false, 11.0, 10.8, 10.0, 0.5, 0.5, 0.10F);
+    const CargoFormalHeightDecision decision =
+        evaluateCargoFormalHeight(fusion, geometry, lifetime);
+    EXPECT_FALSE(decision.valid);
+    EXPECT_EQ(decision.reason, "formal_vertical_evidence_expired");
+}
+
 TEST(CargoRigidGeometryTest, LostHoldExpiresFormalUseButKeepsDisplay) {
     const CargoFormalUseDecision short_hold = evaluateCargoFormalUse(
         true, true, 10.4, 10.0, 10.0, 0.5, 0.5, 0.12F);

@@ -24,11 +24,14 @@ The implementation branch is
 source/API/static-contract consistency; the runtime verdict remains `FAIL /
 AWAITING_UBUNTU_EVIDENCE` until the mandatory 1.0x replay passes.
 
-Cargo source semantics are explicit in message schema v2:
+Cargo source semantics are explicit in message schema v3:
 
 - `POINTS` is strongly supported physical point evidence.
 - `ORIGIN_HEIGHT` is height learned from the first supported POINTS estimate
   of the current track; it is never reported as map evidence.
+- `DIRECT_TOP_FROZEN_THICKNESS` combines a fresh, associated upper surface
+  with the physical thickness frozen for the current track. It never relies
+  on prediction to refresh its evidence timestamp.
 - `MAP_DIFF` and `MAP_STATIC` are reserved for real map-derived height priors
   and are not synthesized from a historical current-footprint crop.
 - `RECENT_STABLE` is a short, age-bounded hold and cannot cross track, stale or

@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <string>
 
+#include "ndt_slam/cargo_bottom_fusion.hpp"
+
 namespace ndt_slam {
 
 struct LockedCargoShape {
@@ -117,6 +119,20 @@ struct CargoFormalUseDecision {
     std::string reason = "not_evaluated";
 };
 
+// Single vertical-authority result consumed by safety, removal, messages and
+// visualization. It prevents the estimator and rigid-lifetime gates from
+// independently overwriting each other's validity.
+struct CargoFormalHeightDecision {
+    bool valid = false;
+    CargoBottomSource source = CargoBottomSource::INVALID;
+    double evidence_stamp_sec = 0.0;
+    float bottom_z_base = 0.0F;
+    float top_z_base = 0.0F;
+    float uncertainty_m = 1.0F;
+    float confidence = 0.0F;
+    std::string reason = "not_evaluated";
+};
+
 // Display retention and formal safety/removal authority are deliberately
 // separate. A retained marker may remain visible after physical evidence has
 // become too old to produce code 14/17/18 or authorize map removal, even when
@@ -130,6 +146,11 @@ CargoFormalUseDecision evaluateCargoFormalUse(
     double formal_xy_evidence_hold_sec,
     double formal_vertical_evidence_hold_sec,
     float horizontal_uncertainty_m);
+
+CargoFormalHeightDecision evaluateCargoFormalHeight(
+    const CargoBottomResult& fusion,
+    const RigidCargoGeometry& rigid,
+    const CargoFormalUseDecision& lifetime);
 
 RigidCargoGeometry buildCurrentRigidCargoGeometry(
     const LockedCargoShape& shape,

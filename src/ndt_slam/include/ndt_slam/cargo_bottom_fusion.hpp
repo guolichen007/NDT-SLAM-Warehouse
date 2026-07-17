@@ -26,6 +26,11 @@ enum class CargoBottomSource : std::uint8_t {
     // EMPTY->LOADED hook transition. It is never learned from a post-lift
     // fallback result of the current track.
     ORIGIN_HEIGHT = 5,
+    // A fresh, associated upper-surface observation combined with the
+    // physical thickness frozen for this cargo track. This is a current
+    // absolute bottom measurement; it is not a historical hold and does not
+    // require the lower edge to be visible from an overhead LiDAR.
+    DIRECT_TOP_FROZEN_THICKNESS = 6,
 };
 
 const char* cargoBottomSourceName(CargoBottomSource source) noexcept;
@@ -111,6 +116,7 @@ struct CargoBottomFusionConfig {
     float map_diff_uncertainty_min = 0.070F;
     float map_static_uncertainty_min = 0.120F;
     float origin_height_uncertainty_min = 0.100F;
+    float direct_top_frozen_uncertainty_min = 0.060F;
     float recent_stable_uncertainty_min = 0.100F;
     float invalid_uncertainty = 1.0F;
     float tail_uncertainty_gain = 1.5F;
@@ -121,6 +127,7 @@ struct CargoBottomFusionConfig {
     float map_diff_confidence_base = 0.67F;
     float map_static_confidence_base = 0.52F;
     float origin_height_confidence_base = 0.58F;
+    float direct_top_frozen_confidence_base = 0.74F;
     float recent_stable_confidence_base = 0.45F;
     float ema_alpha = 0.35F;
 
@@ -156,7 +163,14 @@ struct CargoBottomObservation {
     // an old point cloud cropped by the cargo's current footprint.  Both
     // priors require a current top observation from the same sensor stamp.
     bool current_top_valid = false;
+    bool current_top_support_valid = false;
     float current_top_z_base = 0.0F;
+    // Frozen thickness belongs to track_id and may persist for the locked
+    // track. It never refreshes current_top evidence time by itself.
+    bool frozen_thickness_valid = false;
+    float frozen_thickness_m = 0.0F;
+    double frozen_thickness_stamp_sec = 0.0;
+    float frozen_thickness_confidence = 0.0F;
     bool map_diff_height_valid = false;
     float map_diff_height_m = 0.0F;
     bool map_static_height_valid = false;
@@ -207,6 +221,7 @@ struct CargoBottomResult {
     CargoVerticalStats map_diff_stats;
     CargoVerticalStats map_static_stats;
     CargoVerticalStats origin_height_stats;
+    CargoVerticalStats direct_top_frozen_stats;
     CargoBoxGeometry geometry;
 };
 

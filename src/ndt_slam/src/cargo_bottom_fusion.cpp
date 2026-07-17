@@ -93,11 +93,14 @@ bool validConfig(const CargoBottomFusionConfig& config, std::string* reason) {
         !finiteNonNegative(config.map_diff_uncertainty_min) ||
         !finiteNonNegative(config.map_static_uncertainty_min) ||
         !finiteNonNegative(config.origin_height_uncertainty_min) ||
+        !finiteNonNegative(config.direct_top_frozen_uncertainty_min) ||
         !finiteNonNegative(config.recent_stable_uncertainty_min) ||
         config.points_uncertainty_min > config.invalid_uncertainty ||
         config.map_diff_uncertainty_min > config.invalid_uncertainty ||
         config.map_static_uncertainty_min > config.invalid_uncertainty ||
         config.origin_height_uncertainty_min > config.invalid_uncertainty ||
+        config.direct_top_frozen_uncertainty_min >
+            config.invalid_uncertainty ||
         config.recent_stable_uncertainty_min > config.invalid_uncertainty)
         return reject("uncertainty_bounds");
     if (!finiteNonNegative(config.tail_uncertainty_gain) ||
@@ -108,6 +111,7 @@ bool validConfig(const CargoBottomFusionConfig& config, std::string* reason) {
         !unitInterval(config.map_diff_confidence_base) ||
         !unitInterval(config.map_static_confidence_base) ||
         !unitInterval(config.origin_height_confidence_base) ||
+        !unitInterval(config.direct_top_frozen_confidence_base) ||
         !unitInterval(config.recent_stable_confidence_base) ||
         !unitInterval(config.ema_alpha))
         return reject("confidence_or_ema");
@@ -520,6 +524,8 @@ const char* cargoBottomSourceName(CargoBottomSource source) noexcept {
         case CargoBottomSource::MAP_STATIC: return "MAP_STATIC";
         case CargoBottomSource::RECENT_STABLE: return "RECENT_STABLE";
         case CargoBottomSource::ORIGIN_HEIGHT: return "ORIGIN_HEIGHT";
+        case CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS:
+            return "DIRECT_TOP_FROZEN_THICKNESS";
         case CargoBottomSource::INVALID: default: return "INVALID";
     }
 }
@@ -531,9 +537,10 @@ int cargoBottomSourcePriority(CargoBottomSource source) noexcept {
         // overhead LiDAR they are more trustworthy than an intermittently
         // visible lower edge in the current points.
         case CargoBottomSource::MAP_DIFF: return 6;
-        case CargoBottomSource::ORIGIN_HEIGHT: return 5;
-        case CargoBottomSource::POINTS: return 4;
-        case CargoBottomSource::MAP_STATIC: return 3;
+        case CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS: return 5;
+        case CargoBottomSource::ORIGIN_HEIGHT: return 4;
+        case CargoBottomSource::POINTS: return 3;
+        case CargoBottomSource::MAP_STATIC: return 2;
         case CargoBottomSource::RECENT_STABLE: return 1;
         default: return 0;
     }
@@ -725,6 +732,12 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
                           observation.map_static_height_m) ||
         !validHeightPrior(observation.origin_height_valid,
                           observation.origin_height_m) ||
+        !validHeightPrior(observation.frozen_thickness_valid,
+                          observation.frozen_thickness_m) ||
+        (observation.frozen_thickness_valid &&
+         (!std::isfinite(observation.frozen_thickness_stamp_sec) ||
+          observation.frozen_thickness_stamp_sec < 0.0 ||
+          !unitInterval(observation.frozen_thickness_confidence))) ||
         (observation.current_top_valid &&
          !std::isfinite(observation.current_top_z_base))) {
         result.reason = "invalid_height_prior";
@@ -836,6 +849,15 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
         observation.map_static_height_valid, observation.map_static_height_m);
     result.origin_height_stats = heightPriorStats(
         observation.origin_height_valid, observation.origin_height_m);
+    result.direct_top_frozen_stats = heightPriorStats(
+        observation.frozen_thickness_valid &&
+            observation.current_top_support_valid,
+        observation.frozen_thickness_m);
+    if (observation.frozen_thickness_valid &&
+        !observation.current_top_support_valid) {
+        result.direct_top_frozen_stats.reject_reason =
+            "current_top_support_insufficient";
+    }
 
     SelectedCandidate selected;
     auto selectFromPoints = [&](CargoBottomSource source,
@@ -888,6 +910,13 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
                           config_.map_diff_uncertainty_min,
                           config_.map_diff_confidence_base,
                           "map_difference_height_prior");
+    selectFromHeightPrior(
+        CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS,
+        result.direct_top_frozen_stats,
+        config_.direct_top_frozen_uncertainty_min,
+        std::min(config_.direct_top_frozen_confidence_base,
+                 observation.frozen_thickness_confidence),
+        "fresh_top_with_track_frozen_thickness");
     selectFromHeightPrior(CargoBottomSource::MAP_STATIC,
                           result.map_static_stats,
                           config_.map_static_uncertainty_min,
@@ -898,6 +927,15 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
                           config_.origin_height_uncertainty_min,
                           config_.origin_height_confidence_base,
                           "pre_lift_frozen_height_prior");
+
+    if (selected.source ==
+            CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS &&
+        result.points_stats.support_strong &&
+        std::abs(result.points_stats.z05 - selected.bottom_z_base) > 0.25F) {
+        // Fragmented low returns are diagnostic corroboration only. They must
+        // never pull a top-derived rigid bottom below the physical cargo.
+        selected.reason += ";inconsistent_lower_edge_rejected";
+    }
 
     if (!selected.valid && stable_.valid &&
         stable_.track_id == observation.track_id) {
@@ -941,7 +979,8 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
     if (!selected.valid) {
         result.reason = "no_supported_height_source:points=" +
             result.points_stats.reject_reason + ";map_diff=" +
-            result.map_diff_stats.reject_reason + ";map_static=" +
+            result.map_diff_stats.reject_reason + ";direct_top_frozen=" +
+            result.direct_top_frozen_stats.reject_reason + ";map_static=" +
             result.map_static_stats.reject_reason + ";origin_height=" +
             result.origin_height_stats.reject_reason;
         result.source_name = cargoBottomSourceName(result.source);

@@ -40,6 +40,68 @@ CargoBottomObservation observation(std::uint64_t track,
     return obs;
 }
 
+CargoBottomObservation supportedTopObservation(
+    std::uint64_t track, double stamp, float top, float thickness) {
+    CargoBottomObservation obs = observation(track, stamp, {});
+    obs.current_top_valid = true;
+    obs.current_top_support_valid = true;
+    obs.current_top_z_base = top;
+    obs.frozen_thickness_valid = true;
+    obs.frozen_thickness_m = thickness;
+    obs.frozen_thickness_stamp_sec = 0.5;
+    obs.frozen_thickness_confidence = 0.90F;
+    return obs;
+}
+
+TEST(CargoBottomFusion, DirectTopAndFrozenThicknessProducesFormalBottom) {
+    CargoBottomFusion fusion;
+    const CargoBottomResult result = fusion.update(
+        supportedTopObservation(41U, 1.0, 2.4F, 0.6F));
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.source,
+              CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS);
+    EXPECT_NEAR(result.geometry.bottom_z_base, 1.8F, 1.0e-4F);
+    EXPECT_NEAR(result.geometry.top_z_base, 2.4F, 1.0e-4F);
+    EXPECT_DOUBLE_EQ(result.evidence_stamp_sec, 1.0);
+}
+
+TEST(CargoBottomFusion, DirectTopDoesNotRequireBottomBandSupport) {
+    CargoBottomFusion fusion;
+    CargoBottomObservation obs =
+        supportedTopObservation(42U, 1.0, 2.0F, 0.5F);
+    obs.points_base.assign(60U, Eigen::Vector3f(0.0F, 0.0F, 2.0F));
+    const CargoBottomResult result = fusion.update(obs);
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_FALSE(result.points_stats.support_strong);
+    EXPECT_EQ(result.source,
+              CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS);
+}
+
+TEST(CargoBottomFusion, InconsistentLowPointsCannotPullDerivedBottomDown) {
+    CargoBottomFusion fusion;
+    CargoBottomObservation obs =
+        supportedTopObservation(43U, 1.0, 2.4F, 0.6F);
+    obs.points_base = boxPoints(0.5F, 2.4F);
+    const CargoBottomResult result = fusion.update(obs);
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.source,
+              CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS);
+    EXPECT_NEAR(result.geometry.bottom_z_base, 1.8F, 1.0e-4F);
+}
+
+TEST(CargoBottomFusion, HeldPredictionDoesNotRefreshTopEvidence) {
+    CargoBottomFusion fusion;
+    ASSERT_TRUE(fusion.update(
+        supportedTopObservation(44U, 1.0, 2.4F, 0.6F)).valid);
+    const CargoBottomResult held = fusion.update(observation(44U, 1.3, {}));
+    ASSERT_TRUE(held.valid) << held.reason;
+    EXPECT_EQ(held.source, CargoBottomSource::RECENT_STABLE);
+    EXPECT_DOUBLE_EQ(held.evidence_stamp_sec, 1.0);
+    const CargoBottomResult expired =
+        fusion.update(observation(44U, 1.6, {}));
+    EXPECT_FALSE(expired.valid);
+}
+
 TEST(CargoBottomFusion, RobustPercentileRejectsSingleLowOutlier) {
     CargoBottomFusion fusion;
     auto points = boxPoints(1.0F, 2.0F);
