@@ -22,6 +22,17 @@ bool validConfig(const CargoObstacleTrackerConfig& config) {
       config.association_max_centroid_distance_m > 0.0F &&
       std::isfinite(config.association_max_top_step_m) &&
       config.association_max_top_step_m > 0.0F &&
+      config.static_cargo_min_voxel_points >= config.minimum_points &&
+      std::isfinite(config.static_cargo_min_xy_area_m2) &&
+      config.static_cargo_min_xy_area_m2 > 0.0F &&
+      std::isfinite(config.static_cargo_min_long_side_m) &&
+      config.static_cargo_min_long_side_m > 0.0F &&
+      std::isfinite(config.static_cargo_min_height_span_m) &&
+      config.static_cargo_min_height_span_m > 0.0F &&
+      config.static_cargo_min_occupied_cells > 0U &&
+      config.static_cargo_confirm_frames >= config.confirm_frames &&
+      std::isfinite(config.static_cargo_confirm_sec) &&
+      config.static_cargo_confirm_sec >= 0.0 &&
       std::isfinite(config.static_velocity_threshold_mps) &&
       config.static_velocity_threshold_mps >= 0.0F;
 }
@@ -36,6 +47,23 @@ bool validObservation(const CargoObstacleObservation& observation,
       observation.point_count >= minimum_points &&
       (observation.warning_code == kLevel1 ||
        observation.warning_code == kLevel2);
+}
+
+bool hasLargeStaticCargoGeometry(
+    const CargoObstacleObservation& observation,
+    const CargoObstacleTrackerConfig& config) {
+  const bool raw_support_valid =
+      config.static_cargo_min_raw_equivalent_points == 0U ||
+      observation.raw_equivalent_point_count >=
+          config.static_cargo_min_raw_equivalent_points;
+  return observation.point_count >= config.static_cargo_min_voxel_points &&
+      raw_support_valid && std::isfinite(observation.xy_area_m2) &&
+      observation.xy_area_m2 >= config.static_cargo_min_xy_area_m2 &&
+      std::isfinite(observation.long_side_m) &&
+      observation.long_side_m >= config.static_cargo_min_long_side_m &&
+      std::isfinite(observation.height_span_m) &&
+      observation.height_span_m >= config.static_cargo_min_height_span_m &&
+      observation.occupied_cells >= config.static_cargo_min_occupied_cells;
 }
 
 int warningPriority(std::uint16_t code) {
@@ -156,7 +184,20 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
           observation.conservative_clearance_m;
       track.point_count = observation.point_count;
       track.warning_code = observation.warning_code;
-      track.consecutive_observations = 1;
+      track.total_consecutive_observations = 1;
+      track.validated_consecutive_observations =
+          observation.source_validated ? 1 : 0;
+      track.consecutive_observations =
+          track.total_consecutive_observations;
+      track.large_cluster_geometry_valid =
+          hasLargeStaticCargoGeometry(observation, config_);
+      track.independent_external_provenance =
+          observation.independent_external_provenance;
+      track.static_provenance_consecutive_observations =
+          observation.source_validated &&
+                  track.large_cluster_geometry_valid &&
+                  observation.independent_external_provenance
+              ? 1 : 0;
       track.first_stamp_sec = stamp_sec;
       track.last_stamp_sec = stamp_sec;
       track.last_observation_cycle = cycle_;
@@ -174,8 +215,16 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     const bool consecutive =
         track.last_observation_cycle + 1U == cycle_ &&
         dt_sec <= config_.maximum_observation_gap_sec + kStampEpsilonSec;
-    track.consecutive_observations = consecutive
-        ? track.consecutive_observations + 1 : 1;
+    track.total_consecutive_observations = consecutive
+        ? track.total_consecutive_observations + 1 : 1;
+    track.consecutive_observations =
+        track.total_consecutive_observations;
+    track.validated_consecutive_observations =
+        observation.source_validated
+            ? (consecutive
+                   ? track.validated_consecutive_observations + 1
+                   : 1)
+            : 0;
     if (dt_sec > kStampEpsilonSec) {
       track.velocity_map =
           (observation.centroid_map - previous_centroid) /
@@ -187,14 +236,31 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.conservative_clearance_m = observation.conservative_clearance_m;
     track.point_count = observation.point_count;
     track.warning_code = observation.warning_code;
+    track.large_cluster_geometry_valid =
+        hasLargeStaticCargoGeometry(observation, config_);
+    track.independent_external_provenance =
+        observation.independent_external_provenance;
+    const bool static_provenance_frame = observation.source_validated &&
+        track.large_cluster_geometry_valid &&
+        observation.independent_external_provenance &&
+        track.velocity_map.head<2>().norm() <=
+            config_.static_velocity_threshold_mps;
+    track.static_provenance_consecutive_observations =
+        static_provenance_frame
+            ? (consecutive
+                   ? track.static_provenance_consecutive_observations + 1
+                   : 1)
+            : 0;
     track.last_stamp_sec = stamp_sec;
     track.last_observation_cycle = cycle_;
     track.observed_this_cycle = true;
-    track.confirmed =
-        track.consecutive_observations >= config_.confirm_frames;
+    track.confirmed = track.validated_consecutive_observations >=
+        config_.confirm_frames;
     track.static_obstacle = track.confirmed &&
-        track.velocity_map.head<2>().norm() <=
-            config_.static_velocity_threshold_mps;
+        track.static_provenance_consecutive_observations >=
+            config_.static_cargo_confirm_frames &&
+        stamp_sec - track.first_stamp_sec + kStampEpsilonSec >=
+            config_.static_cargo_confirm_sec;
     track.current_source_index = observation.source_index;
     track.current_source_validated = observation.source_validated;
     track_assigned[best_index] = true;
@@ -208,7 +274,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     if (candidate == nullptr || moreDangerous(track, *candidate)) {
       candidate = &track;
     }
-    if (track.confirmed && track.current_source_validated &&
+    const bool warning_authorized = track.confirmed &&
+        track.current_source_validated &&
+        (!config_.require_static_cargo_for_warning || track.static_obstacle);
+    if (warning_authorized &&
         (selected == nullptr || moreDangerous(track, *selected))) {
       selected = &track;
     }
@@ -219,7 +288,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.selected_track_id = diagnostic->track_id;
     decision.selected_source_index = diagnostic->current_source_index;
     decision.selected_confirm_count =
-        diagnostic->consecutive_observations;
+        diagnostic->validated_consecutive_observations;
     decision.selected_track_age_sec =
         stamp_sec - diagnostic->first_stamp_sec;
     decision.selected_track_static = diagnostic->static_obstacle;
@@ -230,9 +299,11 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.warning_code = selected->warning_code;
     decision.reason = "persistent_obstacle_track_confirmed";
   } else if (decision.hazard_observed) {
-    decision.reason = "persistent_obstacle_track_pending";
+    decision.reason = config_.require_static_cargo_for_warning
+        ? "large_static_cargo_confirmation_pending"
+        : "persistent_obstacle_track_pending";
   } else {
-    decision.reason = "no_hazard_observation";
+    decision.reason = "clear_no_hazard_cluster";
   }
   return decision;
 }

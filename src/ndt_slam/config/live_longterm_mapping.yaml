@@ -682,6 +682,8 @@ cargo_safety:
   # hazard is released only after two fresh CLEAR evaluations.
   hazard_confirm_frames: 3
   clear_confirm_frames: 2
+  # 20 points only keep a diagnostic candidate identity. Phase one authorizes
+  # formal 17/18 only for a large, independently proven static cargo stack.
   minimum_hazard_cluster_points: 20
   maximum_evidence_gap_sec: 0.60
   maximum_centroid_step_m: 0.75
@@ -690,7 +692,18 @@ cargo_safety:
   obstacle_track_association_distance_m: 0.75
   obstacle_track_association_top_step_m: 0.75
   obstacle_track_stale_sec: 1.00
-  obstacle_track_static_velocity_mps: 0.15
+  require_static_cargo_for_warning: true
+  static_cargo_min_voxel_points: 80
+  # Disabled until the upstream merged-cloud message carries an honest raw
+  # return count; never synthesize a raw count from voxelized points.
+  static_cargo_min_raw_equivalent_points: 0
+  static_cargo_min_xy_area_m2: 0.50
+  static_cargo_min_long_side_m: 0.80
+  static_cargo_min_height_span_m: 0.40
+  static_cargo_min_occupied_cells: 12
+  static_cargo_confirm_frames: 8
+  static_cargo_confirm_sec: 1.0
+  obstacle_track_static_velocity_mps: 0.08
   motion_corridor_enabled: true
   motion_corridor_immediate_near_field_m: 0.30
   motion_corridor_minimum_speed_mps: 0.05

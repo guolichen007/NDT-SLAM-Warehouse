@@ -2306,10 +2306,42 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             obstacle_tracker_config.stale_track_sec = std::max(
                 obstacle_tracker_config.maximum_observation_gap_sec,
                 cargo_safety["obstacle_track_stale_sec"].as<double>(1.00));
+            obstacle_tracker_config.require_static_cargo_for_warning =
+                cargo_safety["require_static_cargo_for_warning"]
+                    .as<bool>(true);
+            obstacle_tracker_config.static_cargo_min_voxel_points =
+                static_cast<std::size_t>(std::max(
+                    static_cast<int>(obstacle_tracker_config.minimum_points),
+                    cargo_safety["static_cargo_min_voxel_points"]
+                        .as<int>(80)));
+            obstacle_tracker_config.static_cargo_min_raw_equivalent_points =
+                static_cast<std::size_t>(std::max(
+                    0, cargo_safety[
+                           "static_cargo_min_raw_equivalent_points"]
+                           .as<int>(0)));
+            obstacle_tracker_config.static_cargo_min_xy_area_m2 = std::max(
+                0.01F, cargo_safety["static_cargo_min_xy_area_m2"]
+                           .as<float>(0.50F));
+            obstacle_tracker_config.static_cargo_min_long_side_m = std::max(
+                0.10F, cargo_safety["static_cargo_min_long_side_m"]
+                           .as<float>(0.80F));
+            obstacle_tracker_config.static_cargo_min_height_span_m = std::max(
+                0.10F, cargo_safety["static_cargo_min_height_span_m"]
+                           .as<float>(0.40F));
+            obstacle_tracker_config.static_cargo_min_occupied_cells =
+                static_cast<std::size_t>(std::max(
+                    1, cargo_safety["static_cargo_min_occupied_cells"]
+                           .as<int>(12)));
+            obstacle_tracker_config.static_cargo_confirm_frames = std::max(
+                obstacle_tracker_config.confirm_frames,
+                cargo_safety["static_cargo_confirm_frames"].as<int>(8));
+            obstacle_tracker_config.static_cargo_confirm_sec = std::max(
+                0.0, cargo_safety["static_cargo_confirm_sec"]
+                         .as<double>(1.0));
             obstacle_tracker_config.static_velocity_threshold_mps =
                 std::max(0.0F,
                     cargo_safety["obstacle_track_static_velocity_mps"]
-                        .as<float>(0.15F));
+                        .as<float>(0.08F));
         }
         cargo_obstacle_tracker_.setConfig(obstacle_tracker_config);
         if (cargo_safety) {
@@ -12838,6 +12870,10 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     }
     cargo_residual_self_clusters_ = 0U;
     cargo_residual_unknown_clusters_ = 0U;
+    // Cluster point_indices always refer to the evaluator input. Preserve that
+    // index space even if residual self-points are removed for publication.
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr obstacle_cluster_source_cloud =
+        external_obstacle_cloud;
     std::set<int> residual_self_point_indices;
     if (raw_cargo_safety_result.input_valid &&
         raw_cargo_safety_result.warning_valid &&
@@ -12870,11 +12906,11 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             for (int point_index : evidence.point_indices) {
                 if (point_index < 0 ||
                     static_cast<std::size_t>(point_index) >=
-                        external_obstacle_cloud->size()) {
+                        obstacle_cluster_source_cloud->size()) {
                     continue;
                 }
                 const pcl::PointXYZ& point =
-                    external_obstacle_cloud->points[
+                    obstacle_cluster_source_cloud->points[
                         static_cast<std::size_t>(point_index)];
                 ++valid_cluster_points;
                 if (predicted_self_footprint.valid &&
@@ -13081,8 +13117,59 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             observation.conservative_clearance_m =
                 evidence.conservative_clearance_m;
             observation.point_count = evidence.point_count;
+            // The subscribed obstacle cloud is already voxelized, so an
+            // honest raw-return count is unavailable. Keep raw-equivalent at
+            // zero; production can enable that gate only when an upstream raw
+            // count is carried explicitly.
+            observation.raw_equivalent_point_count = 0U;
+            float min_x = std::numeric_limits<float>::infinity();
+            float max_x = -std::numeric_limits<float>::infinity();
+            float min_y = std::numeric_limits<float>::infinity();
+            float max_y = -std::numeric_limits<float>::infinity();
+            float min_z = std::numeric_limits<float>::infinity();
+            float max_z = -std::numeric_limits<float>::infinity();
+            std::set<std::pair<int, int>> occupied_cells;
+            constexpr float kStaticCargoCellM = 0.25F;
+            for (int point_index : evidence.point_indices) {
+                if (point_index < 0 ||
+                    static_cast<std::size_t>(point_index) >=
+                        obstacle_cluster_source_cloud->size()) {
+                    continue;
+                }
+                const pcl::PointXYZ& point =
+                    obstacle_cluster_source_cloud->points[
+                        static_cast<std::size_t>(point_index)];
+                min_x = std::min(min_x, point.x);
+                max_x = std::max(max_x, point.x);
+                min_y = std::min(min_y, point.y);
+                max_y = std::max(max_y, point.y);
+                min_z = std::min(min_z, point.z);
+                max_z = std::max(max_z, point.z);
+                occupied_cells.emplace(
+                    static_cast<int>(std::floor(point.x / kStaticCargoCellM)),
+                    static_cast<int>(std::floor(point.y / kStaticCargoCellM)));
+            }
+            if (std::isfinite(min_x) && std::isfinite(max_x) &&
+                std::isfinite(min_y) && std::isfinite(max_y) &&
+                std::isfinite(min_z) && std::isfinite(max_z)) {
+                const float extent_x = std::max(0.0F, max_x - min_x);
+                const float extent_y = std::max(0.0F, max_y - min_y);
+                observation.xy_area_m2 = extent_x * extent_y;
+                observation.long_side_m = std::max(extent_x, extent_y);
+                observation.height_span_m = std::max(0.0F, max_z - min_z);
+                observation.occupied_cells = occupied_cells.size();
+            }
             observation.warning_code = evidence.warning_code;
             observation.source_validated = evidence.source_validated;
+            const float residual_validation_shell_m = std::max(
+                cargo_motion_corridor_config_.immediate_near_field_m,
+                hook_fixed_config_.voxel_leaf +
+                    formal_use.horizontal_uncertainty_m +
+                    hook_lock_.horizontal_tracking_residual_m);
+            observation.independent_external_provenance =
+                evidence.source_validated &&
+                evidence.footprint_distance_m >
+                    residual_validation_shell_m;
             obstacle_track_observations.push_back(observation);
         }
     }
