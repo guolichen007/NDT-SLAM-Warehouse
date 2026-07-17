@@ -171,8 +171,20 @@ std::string persistentMapUuid(const std::string& root_path) {
 
 std::string staticEvidenceIndexFileName(
     std::uint64_t generation, std::uint64_t revision) {
-    return "static_evidence_index_v2_g" + std::to_string(generation) +
+    return "static_evidence_index_v3_g" + std::to_string(generation) +
         "_r" + std::to_string(revision) + ".csv";
+}
+
+std::size_t countMatureStaticEvidenceCells(
+    const std::shared_ptr<const StaticEvidenceSnapshot>& snapshot) {
+    if (!snapshot) return 0U;
+    return static_cast<std::size_t>(std::count_if(
+        snapshot->cells.begin(), snapshot->cells.end(),
+        [generation = snapshot->map_generation](const auto& item) {
+            const auto& cell = item.second;
+            return cell.clean_map_confirmed && cell.temporally_mature &&
+                cell.map_generation == generation;
+        }));
 }
 
 template <typename CellRange>
@@ -7588,7 +7600,10 @@ void NdtSlamNode::updatePoseFromLoopClosure(
         last_bound_ndt_target_source_ = "none";
         last_target_reason_ = "loop_closure_rebind";
     }
-    suspendPersistentStaticEvidence("loop_closure");
+    if (!suspendPersistentStaticEvidence("loop_closure")) {
+        ROS_ERROR("[StaticMapEvidence] loop-closure suspend incomplete; "
+                  "persistent provenance remains fail-safe blocked");
+    }
     static_obstacle_evidence_index_.reset(advanceStaticEvidenceEpoch());
     cargo_static_evidence_track_start_sequence_ = 0U;
     if (persistent_map_enabled_) {
@@ -7647,7 +7662,10 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         bootstrap_local_map_complete_ = false;
         bootstrap_local_map_frames_ = 0;
     }
-    suspendPersistentStaticEvidence("reset");
+    if (!suspendPersistentStaticEvidence("reset")) {
+        ROS_ERROR("[StaticMapEvidence] reset suspend incomplete; persistent "
+                  "provenance remains fail-safe blocked");
+    }
     static_obstacle_evidence_index_.reset(advanceStaticEvidenceEpoch());
     if (persistent_map_enabled_) {
         flush_tiles_pending_.store(true, std::memory_order_release);
@@ -7931,7 +7949,10 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
             bootstrap_local_map_complete_ = true;
             bootstrap_local_map_frames_ = 0;
         }
-        suspendPersistentStaticEvidence("load_map");
+        if (!suspendPersistentStaticEvidence("load_map")) {
+            ROS_ERROR("[StaticMapEvidence] load-map suspend incomplete; "
+                      "persistent provenance remains fail-safe blocked");
+        }
         static_obstacle_evidence_index_.reset(
             advanceStaticEvidenceEpoch());
         if (persistent_map_enabled_) {
@@ -8098,7 +8119,10 @@ bool NdtSlamNode::rebuildMapService(std_srvs::Empty::Request& request, std_srvs:
     keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
     loop_closure_result_ready_.store(false, std::memory_order_release);
     map_rebuild_generation_.fetch_add(1U, std::memory_order_acq_rel);
-    suspendPersistentStaticEvidence("rebuild_map");
+    if (!suspendPersistentStaticEvidence("rebuild_map")) {
+        ROS_ERROR("[StaticMapEvidence] rebuild suspend incomplete; persistent "
+                  "provenance remains fail-safe blocked");
+    }
     static_obstacle_evidence_index_.reset(advanceStaticEvidenceEpoch());
     cargo_static_evidence_track_start_sequence_ = 0U;
     if (persistent_map_enabled_) {
@@ -9269,10 +9293,17 @@ bool NdtSlamNode::loadPersistentStaticEvidence() {
         static_evidence_persistence_mutex_);
     const std::string manifest_path =
         persistent_map_root_dir_ + "/static_evidence_manifest.json";
+    const std::string suspension_marker_path =
+        persistent_map_root_dir_ + "/static_evidence_manifest.suspended";
     const std::string objects_layer_path =
         persistent_map_root_dir_ + "/tiles_objects";
     boost::system::error_code cleanup_error;
     boost::filesystem::remove(manifest_path + ".tmp", cleanup_error);
+    if (boost::filesystem::is_regular_file(suspension_marker_path)) {
+        ROS_WARN("[StaticMapEvidence] suspension marker active; refusing "
+                 "previous epoch manifest until current epoch matures");
+        return false;
+    }
     if (!boost::filesystem::exists(manifest_path) ||
         !boost::filesystem::is_directory(objects_layer_path)) {
         ROS_INFO("[StaticMapEvidence] versioned index/layer unavailable in %s; "
@@ -9293,6 +9324,10 @@ bool NdtSlamNode::loadPersistentStaticEvidence() {
                 std::numeric_limits<std::uint64_t>::max());
         const std::uint64_t source_revision =
             manifest["revision"].as<std::uint64_t>(0U);
+        const std::size_t manifest_total_cells =
+            manifest["total_cells"].as<std::size_t>(0U);
+        const std::size_t manifest_mature_cells =
+            manifest["mature_cells"].as<std::size_t>(0U);
         const std::string map_uuid =
             manifest["map_uuid"].as<std::string>("");
         const std::string objects_layer = manifest["layers"]
@@ -9304,6 +9339,9 @@ bool NdtSlamNode::loadPersistentStaticEvidence() {
         if (schema != StaticEvidenceSnapshot::kSchemaVersion ||
             index_name != expected_index_name ||
             source_revision == 0U ||
+            manifest_mature_cells <
+                static_obstacle_evidence_index_.config().minimum_matched_cells ||
+            manifest_total_cells < manifest_mature_cells ||
             map_uuid != persistentMapUuid(persistent_map_root_dir_) ||
             objects_layer != "tiles_objects" ||
             std::abs(cell_size -
@@ -9338,12 +9376,25 @@ bool NdtSlamNode::loadPersistentStaticEvidence() {
         static_evidence_persistence_dirty_.store(
             false, std::memory_order_release);
         const auto snapshot = static_obstacle_evidence_index_.snapshot();
+        const std::size_t loaded_mature_cells =
+            countMatureStaticEvidenceCells(snapshot);
+        if (!snapshot || snapshot->cells.size() != manifest_total_cells ||
+            loaded_mature_cells != manifest_mature_cells) {
+            ROS_ERROR("[StaticMapEvidence] manifest maturity mismatch "
+                      "total=%zu/%zu mature=%zu/%zu",
+                      snapshot ? snapshot->cells.size() : 0U,
+                      manifest_total_cells, loaded_mature_cells,
+                      manifest_mature_cells);
+            static_obstacle_evidence_index_.reset(
+                static_evidence_epoch_.load(std::memory_order_acquire));
+            return false;
+        }
         static_evidence_manifest_active_ = true;
         static_evidence_last_committed_revision_ =
             snapshot ? snapshot->revision : source_revision;
-        ROS_INFO("[StaticMapEvidence] loaded schema=%u cells=%zu "
+        ROS_INFO("[StaticMapEvidence] loaded schema=%u cells=%zu mature=%zu "
                  "observations=%llu",
-                 schema, snapshot ? snapshot->cells.size() : 0U,
+                 schema, snapshot->cells.size(), loaded_mature_cells,
                  static_cast<unsigned long long>(
                      snapshot ? snapshot->latest_observation_sequence : 0U));
         return true;
@@ -9366,12 +9417,15 @@ bool NdtSlamNode::writePersistentStaticEvidence() {
     }
     const std::size_t minimum_persisted_cells =
         static_obstacle_evidence_index_.config().minimum_matched_cells;
+    const std::size_t mature_cells =
+        countMatureStaticEvidenceCells(snapshot);
     if (!static_evidence_manifest_active_ &&
-        snapshot->cells.size() < minimum_persisted_cells) {
+        mature_cells < minimum_persisted_cells) {
         ROS_INFO_THROTTLE(
             10.0,
-            "[StaticMapEvidence] rebuild not mature cells=%zu required=%zu",
-            snapshot->cells.size(), minimum_persisted_cells);
+            "[StaticMapEvidence] activation=PENDING_TEMPORAL_MATURITY "
+            "total_cells=%zu mature_cells=%zu required_mature_cells=%zu",
+            snapshot->cells.size(), mature_cells, minimum_persisted_cells);
         return false;
     }
     if (snapshot->revision <= static_evidence_last_committed_revision_) {
@@ -9393,6 +9447,9 @@ bool NdtSlamNode::writePersistentStaticEvidence() {
 
         const std::string manifest_path =
             persistent_map_root_dir_ + "/static_evidence_manifest.json";
+        const std::string suspension_marker_path =
+            persistent_map_root_dir_ +
+                "/static_evidence_manifest.suspended";
         const std::string temporary = manifest_path + ".tmp";
         std::ofstream output(temporary, std::ios::out | std::ios::trunc);
         if (!output.is_open()) return false;
@@ -9406,6 +9463,14 @@ bool NdtSlamNode::writePersistentStaticEvidence() {
                << ",\n"
                << "  \"revision\": " << snapshot->revision
                << ",\n"
+               << "  \"total_cells\": " << snapshot->cells.size()
+               << ",\n"
+               << "  \"mature_cells\": " << mature_cells
+               << ",\n"
+               << "  \"required_mature_cells\": "
+               << minimum_persisted_cells << ",\n"
+               << "  \"activation_reason\": "
+               << "\"mature_current_epoch\",\n"
                << "  \"created_at_sec\": " << std::setprecision(17)
                << ros::WallTime::now().toSec() << ",\n"
                << "  \"tile_size_m\": " << tile_size_m_ << ",\n"
@@ -9423,6 +9488,22 @@ bool NdtSlamNode::writePersistentStaticEvidence() {
             return false;
         }
 
+        // A lifecycle suspension marker is the cross-restart fail-safe. The
+        // newly committed manifest becomes authoritative only after that
+        // marker can be removed. Failure leaves the new file intentionally
+        // blocked rather than resurrecting an old epoch.
+        boost::system::error_code marker_remove_error;
+        boost::filesystem::remove(
+            suspension_marker_path, marker_remove_error);
+        if (marker_remove_error ||
+            boost::filesystem::exists(suspension_marker_path)) {
+            ROS_ERROR("[StaticMapEvidence] activation blocked: unable to "
+                      "clear suspension marker error=%s",
+                      marker_remove_error.message().c_str());
+            static_evidence_manifest_active_ = false;
+            return false;
+        }
+
         // The manifest is the commit point. Once it names the new immutable
         // index, older index generations and crash orphans are no longer
         // reachable and can be removed without affecting recovery.
@@ -9434,7 +9515,12 @@ bool NdtSlamNode::writePersistentStaticEvidence() {
                 "/static_evidence_manifest.last_good.json",
             archive_remove_error);
 
-        const std::string prefix = "static_evidence_index_v2_g";
+        ROS_INFO("[StaticMapEvidence] activation=MATURE_CURRENT_EPOCH "
+                 "total_cells=%zu mature_cells=%zu "
+                 "required_mature_cells=%zu",
+                 snapshot->cells.size(), mature_cells,
+                 minimum_persisted_cells);
+        const std::string prefix = "static_evidence_index_v3_g";
         boost::system::error_code iterator_error;
         for (boost::filesystem::directory_iterator it(
                  persistent_map_root_dir_, iterator_error), end;
@@ -9458,23 +9544,72 @@ bool NdtSlamNode::writePersistentStaticEvidence() {
     }
 }
 
-void NdtSlamNode::suspendPersistentStaticEvidence(const char* reason) {
+bool NdtSlamNode::suspendPersistentStaticEvidence(const char* reason) {
     static_evidence_persistence_dirty_.store(
         false, std::memory_order_release);
-    if (!persistent_map_enabled_) return;
+    if (!persistent_map_enabled_) return true;
     std::lock_guard<std::mutex> persistence_lock(
         static_evidence_persistence_mutex_);
     const std::string manifest_path =
         persistent_map_root_dir_ + "/static_evidence_manifest.json";
     const std::string archive_path = persistent_map_root_dir_ +
         "/static_evidence_manifest.last_good.json";
+    const std::string suspension_marker_path = persistent_map_root_dir_ +
+        "/static_evidence_manifest.suspended";
+    const std::string marker_temporary = suspension_marker_path + ".tmp";
+    bool suspended = true;
     try {
+        boost::filesystem::create_directories(persistent_map_root_dir_);
+        {
+            std::ofstream marker(marker_temporary,
+                                 std::ios::out | std::ios::trunc);
+            if (!marker.is_open()) {
+                throw std::runtime_error("suspension_marker_open_failed");
+            }
+            marker << "{\"reason\":\""
+                   << (reason ? reason : "lifecycle_change")
+                   << "\",\"created_at_sec\":" << std::setprecision(17)
+                   << ros::WallTime::now().toSec() << "}\n";
+            marker.flush();
+            const bool marker_ok = marker.good();
+            marker.close();
+            if (!marker_ok ||
+                std::rename(marker_temporary.c_str(),
+                            suspension_marker_path.c_str()) != 0) {
+                std::remove(marker_temporary.c_str());
+                throw std::runtime_error("suspension_marker_commit_failed");
+            }
+        }
         if (boost::filesystem::is_regular_file(manifest_path)) {
-            boost::system::error_code remove_error;
-            boost::filesystem::remove(archive_path, remove_error);
-            boost::filesystem::rename(manifest_path, archive_path);
+            const std::string archive_temporary = archive_path + ".tmp";
+            boost::system::error_code copy_error;
+            boost::filesystem::copy_file(
+                manifest_path, archive_temporary,
+                boost::filesystem::copy_option::overwrite_if_exists,
+                copy_error);
+            if (copy_error ||
+                std::rename(archive_temporary.c_str(),
+                            archive_path.c_str()) != 0) {
+                std::remove(archive_temporary.c_str());
+                suspended = false;
+                ROS_ERROR("[StaticMapEvidence] manifest archive failed; "
+                          "active file remains blocked by suspension marker "
+                          "error=%s",
+                          copy_error.message().c_str());
+            } else {
+                boost::system::error_code remove_error;
+                boost::filesystem::remove(manifest_path, remove_error);
+                if (remove_error) {
+                    suspended = false;
+                    ROS_ERROR("[StaticMapEvidence] active manifest removal "
+                              "failed; suspension marker remains authoritative "
+                              "error=%s",
+                              remove_error.message().c_str());
+                }
+            }
         }
     } catch (const std::exception& error) {
+        suspended = false;
         ROS_ERROR("[StaticMapEvidence] failed to suspend manifest: %s",
                   error.what());
     }
@@ -9483,6 +9618,7 @@ void NdtSlamNode::suspendPersistentStaticEvidence(const char* reason) {
     ROS_WARN("[StaticMapEvidence] runtime epoch rebuilding reason=%s; "
              "last-good manifest retained but inactive",
              reason ? reason : "lifecycle_change");
+    return suspended;
 }
 
 void NdtSlamNode::flushDirtyTiles() {
@@ -16810,9 +16946,21 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                 std::lock_guard<std::mutex> lock(map_mutex_);
                 observed_objects_version = objects_map_content_version_;
             }
-            static_obstacle_evidence_index_.observeFilteredCells(
-                observed_static_cells, stamp.toSec(),
-                job.static_evidence_epoch, observed_objects_version);
+            const bool static_maturity_changed =
+                static_obstacle_evidence_index_.observeFilteredCells(
+                    observed_static_cells, stamp.toSec(),
+                    job.static_evidence_epoch, observed_objects_version);
+            if (static_maturity_changed) {
+                static_evidence_persistence_dirty_.store(
+                    true, std::memory_order_release);
+                if (persistent_map_enabled_) {
+                    flush_tiles_pending_.store(
+                        true, std::memory_order_release);
+                    map_maintenance_pending_.store(
+                        true, std::memory_order_release);
+                    queue_cv_.notify_one();
+                }
+            }
         }
 
         ROS_DEBUG("[BevObsUpdate] seq=%d object_points=%zu unique_cells=%zu total_obs_cells=%zu",

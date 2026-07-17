@@ -1187,7 +1187,7 @@ private:
         const pcl::PointCloud<pcl::PointXYZ>& objects);
     bool loadPersistentStaticEvidence();
     bool writePersistentStaticEvidence();
-    void suspendPersistentStaticEvidence(const char* reason);
+    bool suspendPersistentStaticEvidence(const char* reason);
     std::atomic<bool> static_evidence_persistence_dirty_{false};
     std::mutex static_evidence_persistence_mutex_;
     bool static_evidence_manifest_active_ = false;

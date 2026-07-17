@@ -147,17 +147,17 @@ void StaticObstacleEvidenceIndex::reset(std::uint64_t map_generation) {
   publishSnapshotLocked(0.0);
 }
 
-void StaticObstacleEvidenceIndex::observeFilteredCells(
+bool StaticObstacleEvidenceIndex::observeFilteredCells(
     const StaticEvidenceCellGeometryMap& cells,
     double stamp_sec,
     std::uint64_t map_generation,
     std::uint64_t objects_version) {
-  if (!std::isfinite(stamp_sec) || stamp_sec <= 0.0 || cells.empty()) return;
+  if (!std::isfinite(stamp_sec) || stamp_sec <= 0.0) return false;
   std::lock_guard<std::mutex> lock(mutex_);
   if (working_generation_ != map_generation) {
     // Only an explicit lifecycle reset may change the active epoch. A delayed
     // MapCommit from an older pose graph must never roll the index backwards.
-    return;
+    return false;
   }
   if (last_observation_stamp_sec_ > 0.0 &&
       stamp_sec <= last_observation_stamp_sec_ + kStampEpsilonSec) {
@@ -167,11 +167,12 @@ void StaticObstacleEvidenceIndex::observeFilteredCells(
       // stamps from being counted twice in one epoch.
       last_observation_stamp_sec_ = stamp_sec;
     }
-    return;
+    return false;
   }
   last_observation_stamp_sec_ = stamp_sec;
   ++latest_observation_sequence_;
   if (latest_observation_sequence_ == 0U) ++latest_observation_sequence_;
+  bool snapshot_changed = false;
 
   for (const auto& item : cells) {
     const auto& geometry = item.second;
@@ -201,10 +202,11 @@ void StaticObstacleEvidenceIndex::observeFilteredCells(
           sequence_gap <= config_.maximum_observation_sequence_gap;
       if (continuous) {
         cell.consecutive_stable_duration_sec += delta;
-      } else if (!cell.clean_map_confirmed) {
+      } else if (!cell.temporally_mature) {
         // Sparse sightings must not accumulate into a mature static object.
-        // A previously clean-confirmed cell remains durable until a deny
-        // tombstone invalidates it, but a pending streak starts over.
+        // Clean-map confirmation alone is not maturity. Only a cell which has
+        // already completed the temporal contract remains durable across a
+        // gap; a pending clean-confirmed streak starts over here.
         cell.consecutive_observation_count = 0U;
         cell.consecutive_stable_duration_sec = 0.0;
         cell.first_seen_sec = stamp_sec;
@@ -227,7 +229,13 @@ void StaticObstacleEvidenceIndex::observeFilteredCells(
     cell.last_observation_sequence = latest_observation_sequence_;
     cell.last_observed_objects_version = objects_version;
     cell.map_generation = map_generation;
+    if (!cell.temporally_mature && isTemporallyMatureLocked(cell)) {
+      cell.temporally_mature = true;
+      snapshot_changed = true;
+    }
   }
+  if (snapshot_changed) publishSnapshotLocked(stamp_sec);
+  return snapshot_changed;
 }
 
 StaticEvidenceMutationResult StaticObstacleEvidenceIndex::invalidateCells(
@@ -300,6 +308,9 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
         cell.last_clean_confirmed_version, clean_build_version);
     cell.last_invalidated_version = tombstone == invalidated_versions_.end()
         ? 0U : tombstone->second;
+    if (!cell.temporally_mature && isTemporallyMatureLocked(cell)) {
+      cell.temporally_mature = true;
+    }
     ++result.confirmed_cells;
   }
   publishSnapshotLocked(stamp_sec);
@@ -308,6 +319,15 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
   result.snapshot_cells = current ? current->cells.size() : 0U;
   result.revision = current ? current->revision : 0U;
   return result;
+}
+
+bool StaticObstacleEvidenceIndex::isTemporallyMatureLocked(
+    const StaticEvidenceCell& cell) const {
+  return cell.clean_map_confirmed &&
+      cell.map_generation == working_generation_ &&
+      cell.consecutive_observation_count >= config_.minimum_observations &&
+      cell.consecutive_stable_duration_sec + kStampEpsilonSec >=
+          config_.minimum_stable_duration_sec;
 }
 
 void StaticObstacleEvidenceIndex::publishSnapshotLocked(double stamp_sec) {
@@ -338,6 +358,18 @@ std::uint64_t StaticObstacleEvidenceIndex::latestObservationSequence()
     const {
   std::lock_guard<std::mutex> lock(mutex_);
   return latest_observation_sequence_;
+}
+
+std::size_t StaticObstacleEvidenceIndex::matureCellCount() const {
+  const auto current = snapshot();
+  if (!current) return 0U;
+  return static_cast<std::size_t>(std::count_if(
+      current->cells.begin(), current->cells.end(),
+      [generation = current->map_generation](const auto& item) {
+        return item.second.clean_map_confirmed &&
+            item.second.temporally_mature &&
+            item.second.map_generation == generation;
+      }));
 }
 
 StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
@@ -413,6 +445,7 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
           input.min_z_map, input.max_z_map, cell.min_z, cell.max_z,
           config_.height_tolerance_m);
       const bool stable_history = cell.clean_map_confirmed &&
+          cell.temporally_mature &&
           cell.map_generation == input.expected_map_generation &&
           cell.consecutive_observation_count >=
               config_.minimum_observations &&
@@ -527,7 +560,8 @@ bool StaticObstacleEvidenceIndex::saveSnapshot(
            << cell.last_observation_sequence << ','
            << cell.last_observed_objects_version << ','
            << cell.last_clean_confirmed_version << ','
-           << cell.last_invalidated_version << '\n';
+           << cell.last_invalidated_version << ','
+           << (cell.temporally_mature ? 1 : 0) << '\n';
   }
   output.flush();
   const bool stream_ok = output.good();
@@ -584,7 +618,7 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
     while (std::getline(input, line)) {
       if (line.empty()) continue;
       const auto fields = splitCsv(line);
-      if (fields.size() != 13U) {
+      if (fields.size() != 14U) {
         if (reason) *reason = "index_cell_invalid";
         return false;
       }
@@ -609,6 +643,12 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
       cell.last_observed_objects_version = std::stoull(fields[10]);
       cell.last_clean_confirmed_version = std::stoull(fields[11]);
       cell.last_invalidated_version = std::stoull(fields[12]);
+      const unsigned long mature_value = std::stoul(fields[13]);
+      if (mature_value > 1UL) {
+        if (reason) *reason = "index_temporal_maturity_invalid";
+        return false;
+      }
+      cell.temporally_mature = mature_value == 1UL;
       cell.clean_map_confirmed = true;
       cell.map_generation = current_map_generation;
       if (!std::isfinite(cell.first_seen_sec) ||
@@ -621,7 +661,12 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
           cell.total_observation_count <
               cell.consecutive_observation_count ||
           cell.last_observation_sequence <
-              cell.first_observation_sequence) {
+              cell.first_observation_sequence ||
+          (cell.temporally_mature &&
+           (cell.consecutive_observation_count <
+                config_.minimum_observations ||
+            cell.consecutive_stable_duration_sec + kStampEpsilonSec <
+                config_.minimum_stable_duration_sec))) {
         if (reason) *reason = "index_cell_nonfinite";
         return false;
       }

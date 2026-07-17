@@ -226,5 +226,67 @@ TEST(StaticObstacleEvidenceIndexTest,
   std::remove(path.c_str());
 }
 
+TEST(StaticObstacleEvidenceIndexTest,
+     CleanConfirmedButImmatureCellCannotAccumulateAcrossGaps) {
+  auto config = testConfig();
+  config.minimum_observations = 3U;
+  config.minimum_stable_duration_sec = 1.0;
+  config.maximum_observation_gap_sec = 0.5;
+  StaticObstacleEvidenceIndex index(config);
+  index.reset(21U);
+  index.observeFilteredCells(twoCells(), 1.0, 21U, 1U);
+  index.confirmCleanCells(twoCells(), {}, 1.0, 21U, 1U);
+  ASSERT_EQ(index.matureCellCount(), 0U);
+
+  index.observeFilteredCells(twoCells(), 2.0, 21U, 2U);
+  index.observeFilteredCells(twoCells(), 2.4, 21U, 3U);
+  index.confirmCleanCells(twoCells(), {}, 2.4, 21U, 2U);
+
+  EXPECT_EQ(index.matureCellCount(), 0U);
+  EXPECT_FALSE(index.query(queryFor(21U)).authorized);
+  const auto snapshot = index.snapshot();
+  ASSERT_TRUE(snapshot);
+  EXPECT_FALSE(snapshot->cells.begin()->second.temporally_mature);
+  EXPECT_EQ(snapshot->cells.begin()->second.consecutive_observation_count,
+            2U);
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
+     EmptyMapCommitBreaksConsecutiveObservation) {
+  auto config = testConfig();
+  config.minimum_stable_duration_sec = 0.3;
+  StaticObstacleEvidenceIndex index(config);
+  index.reset(22U);
+  index.observeFilteredCells(twoCells(), 1.0, 22U, 1U);
+  index.observeFilteredCells({}, 1.2, 22U, 2U);
+  index.observeFilteredCells(twoCells(), 1.4, 22U, 3U);
+  index.confirmCleanCells(twoCells(), {}, 1.4, 22U, 1U);
+
+  EXPECT_EQ(index.latestObservationSequence(), 3U);
+  EXPECT_EQ(index.matureCellCount(), 0U);
+  EXPECT_FALSE(index.query(queryFor(22U)).authorized);
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
+     MatureCellRemainsAuthorizedUntilInvalidated) {
+  StaticObstacleEvidenceIndex index(testConfig());
+  index.reset(23U);
+  index.observeFilteredCells(twoCells(), 1.0, 23U, 1U);
+  index.observeFilteredCells(twoCells(), 2.0, 23U, 2U);
+  index.confirmCleanCells(twoCells(), {}, 2.0, 23U, 1U);
+  ASSERT_EQ(index.matureCellCount(), 2U);
+  ASSERT_TRUE(index.query(queryFor(23U)).authorized);
+
+  index.observeFilteredCells({}, 3.0, 23U, 3U);
+  index.observeFilteredCells(twoCells(), 10.0, 23U, 4U);
+  index.confirmCleanCells(twoCells(), {}, 10.0, 23U, 2U);
+  EXPECT_EQ(index.matureCellCount(), 2U);
+  EXPECT_TRUE(index.query(queryFor(23U)).authorized);
+
+  index.invalidateCells(
+      {packStaticEvidenceCell(4, 8)}, 3U, 10.1, 23U);
+  EXPECT_FALSE(index.query(queryFor(23U)).authorized);
+}
+
 }  // namespace
 }  // namespace ndt_slam

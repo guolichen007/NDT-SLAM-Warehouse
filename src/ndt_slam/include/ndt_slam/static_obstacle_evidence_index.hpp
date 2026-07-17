@@ -49,6 +49,11 @@ struct StaticEvidenceCell {
   float min_z = 0.0F;
   float max_z = 0.0F;
   bool clean_map_confirmed = false;
+  // Clean-map confirmation and temporal maturity are deliberately separate.
+  // Once mature, a cell stays authorized until an explicit deny tombstone;
+  // an immature clean cell must still build one uninterrupted observation
+  // streak.
+  bool temporally_mature = false;
   std::uint64_t first_observation_sequence = 0U;
   std::uint64_t last_observation_sequence = 0U;
   std::uint64_t last_observed_objects_version = 0U;
@@ -58,7 +63,7 @@ struct StaticEvidenceCell {
 };
 
 struct StaticEvidenceSnapshot {
-  static constexpr std::uint32_t kSchemaVersion = 2U;
+  static constexpr std::uint32_t kSchemaVersion = 3U;
 
   std::uint32_t schema_version = kSchemaVersion;
   std::uint64_t map_generation = 0U;
@@ -126,7 +131,9 @@ class StaticObstacleEvidenceIndex {
   }
 
   void reset(std::uint64_t map_generation);
-  void observeFilteredCells(
+  // Returns true only when a clean-confirmed cell crosses the temporal
+  // maturity boundary and the immutable safety snapshot changes.
+  bool observeFilteredCells(
       const StaticEvidenceCellGeometryMap& cells,
       double stamp_sec,
       std::uint64_t map_generation,
@@ -147,6 +154,7 @@ class StaticObstacleEvidenceIndex {
       const StaticProvenanceQuery& query) const;
   std::shared_ptr<const StaticEvidenceSnapshot> snapshot() const;
   std::uint64_t latestObservationSequence() const;
+  std::size_t matureCellCount() const;
 
   bool saveSnapshot(
       const std::shared_ptr<const StaticEvidenceSnapshot>& snapshot,
@@ -160,6 +168,7 @@ class StaticObstacleEvidenceIndex {
 
  private:
   void publishSnapshotLocked(double stamp_sec);
+  bool isTemporallyMatureLocked(const StaticEvidenceCell& cell) const;
 
   StaticObstacleEvidenceConfig config_;
   mutable std::mutex mutex_;
