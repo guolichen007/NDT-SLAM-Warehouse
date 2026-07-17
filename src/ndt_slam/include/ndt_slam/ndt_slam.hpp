@@ -54,6 +54,7 @@
 #include <ndt_slam/cargo_residual_classifier.hpp>
 #include <ndt_slam/cargo_safety_temporal_filter.hpp>
 #include <ndt_slam/cargo_track_policy.hpp>
+#include <ndt_slam/cargo_component_fusion.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
 #include <set>
 
@@ -1263,6 +1264,10 @@ private:
         int local_id = 0;
         std::size_t candidate_count = 0U;
         int selected_candidate_id = -1;
+        std::size_t merged_component_count = 0U;
+        float visible_long_axis_span_m = 0.0F;
+        float long_axis_coverage_ratio = 0.0F;
+        float short_axis_coverage_ratio = 0.0F;
         float candidate_top1_score = 0.0F;
         float candidate_top2_score = 0.0F;
         float candidate_score_margin = 0.0F;
@@ -1411,6 +1416,12 @@ private:
             bool sub_cluster_enabled = true;
             float sub_cluster_tolerance_m = 0.10f;
             int sub_cluster_min_points = 20;
+            float component_cluster_tolerance_m = 0.20F;
+            float component_merge_longitudinal_gap_m = 0.60F;
+            float component_merge_lateral_gap_m = 0.35F;
+            float component_merge_max_yaw_difference_deg = 15.0F;
+            float component_merge_min_z_overlap_ratio = 0.30F;
+            int component_merge_max_components = 3;
             bool orientation_enabled = true;
             int orientation_min_points = 20;
             float orientation_min_geometric_aspect_ratio = 1.20F;
@@ -1561,6 +1572,13 @@ private:
         int weak_min_points = 5;
         float candidate_hold_sec = 1.0f;
         int candidate_max_weak_frames = 10;
+        int candidate_window_frames = 12;
+        int candidate_required_consistent_frames = 7;
+        int candidate_max_gap_frames = 2;
+        float candidate_progress_timeout_sec = 3.0F;
+        float candidate_absolute_timeout_sec = 8.0F;
+        int candidate_switch_confirm_frames = 3;
+        float candidate_switch_margin = 0.08F;
         float size_change_min_ratio = 0.20f;
         float size_change_max_ratio = 0.60f;
         int size_update_confirm_frames = 5;
@@ -1698,6 +1716,10 @@ private:
         int size_update_count = 0;
 
         ros::Time last_seen_stamp;
+        ros::Time candidate_started_stamp;
+        ros::Time last_any_candidate_stamp;
+        ros::Time last_identity_consistent_stamp;
+        ros::Time last_candidate_progress_stamp;
         ros::Time last_good_height_stamp;
         ros::Time live_vertical_pose_evidence_stamp;
         ros::Time direct_bottom_evidence_stamp;
@@ -1741,6 +1763,10 @@ private:
         double provisional_last_evidence_stamp_sec = 0.0;
         int suspension_confirm_count = 0;
         int lift_confirm_count = 0;
+        int candidate_gap_frames = 0;
+        int candidate_progress_count = 0;
+        int challenger_confirm_count = 0;
+        int challenger_candidate_id = -1;
         float ground_clearance_m =
             std::numeric_limits<float>::quiet_NaN();
         float lift_from_origin_m = 0.0F;

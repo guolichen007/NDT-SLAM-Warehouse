@@ -302,8 +302,10 @@ def main() -> int:
             failures)
     require("scoreCargoCandidateIdentity" in node and
             "candidate_components_base" in node and
-            "cluster_indices.assign(1U, selected_component)" in node,
-            "cargo detector does not score each component before OBB selection",
+            "buildCargoComponentHypotheses" in node and
+            "hypothesis_point_indices" in node and
+            "cluster_indices.assign(1U, selected_component)" not in node,
+            "cargo detector does not score single/merged component hypotheses",
             failures)
     require("reference_center = hook_lock_.live_pose.center_base" in node and
             '"center_too_far"' in node and

@@ -826,6 +826,15 @@ hook_cargo_lock:
   top_bottom_center_agreement_m: 0.25
   candidate_hold_sec: 1.0
   candidate_max_weak_frames: 10
+  # Window consensus tolerates two short gaps, but weak detections cannot keep
+  # a non-progressing candidate alive indefinitely.
+  candidate_window_frames: 12
+  candidate_required_consistent_frames: 7
+  candidate_max_gap_frames: 2
+  candidate_progress_timeout_sec: 3.0
+  candidate_absolute_timeout_sec: 8.0
+  candidate_switch_confirm_frames: 3
+  candidate_switch_margin: 0.08
   bottom_alpha_points: 0.30
   bottom_alpha_memory: 0.15
   bottom_hold_uncertainty_growth: 0.02
@@ -945,7 +954,7 @@ odom_anchored_cargo_box:
   min_size_x: 0.60
   min_size_y: 0.40
   min_size_z: 0.20
-  max_size_x: 2.50
+  max_size_x: 4.00
   max_size_y: 1.60
   max_size_z: 2.00
 
@@ -1006,6 +1015,14 @@ odom_anchored_cargo_box:
     sub_cluster_enabled: false
     sub_cluster_tolerance_m: 0.10
     sub_cluster_min_points: 20
+    # Keep local Euclidean components conservative. Disconnected returns from
+    # one long cargo are fused only by axial/z-overlap hypotheses.
+    component_cluster_tolerance_m: 0.20
+    component_merge_longitudinal_gap_m: 0.60
+    component_merge_lateral_gap_m: 0.35
+    component_merge_max_yaw_difference_deg: 15.0
+    component_merge_min_z_overlap_ratio: 0.30
+    component_merge_max_components: 3
     # Preserve the detected cargo's own footprint direction. Square/ambiguous
     # observations fall back to the conservative axis-aligned box.
     orientation_enabled: true
