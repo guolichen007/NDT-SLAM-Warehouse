@@ -449,21 +449,30 @@ private:
         const StatusContractResult contract =
             validateStatusContract(input, contract_config_);
 
-        const bool urgent_details_changed =
-            (msg->requested_alarm_code == AlarmStateMachine::kLevel1Warning ||
-             msg->requested_alarm_code == AlarmStateMachine::kLevel2Warning) &&
-            (!has_last_status_ ||
-             last_status_.requested_alarm_code != msg->requested_alarm_code ||
-             last_status_.obstacle_track_id != msg->obstacle_track_id ||
-             last_status_.reason != msg->reason);
-        last_status_ = *msg;
-        if (!contract.valid) last_status_.reason = contract.reason;
-        has_last_status_ = true;
+        lidar_slam2_msgs::CargoSafetyStatus accepted_status = *msg;
+        if (!contract.valid) accepted_status.reason = contract.reason;
         const AlarmStateMachine::Result result = state_machine_.ingest(
             contract.code, ros::WallTime::now().toSec(),
             msg->header.stamp.toSec(), msg->nearest_obstacle_distance_m,
             msg->conservative_vertical_clearance_m,
             contract.clear_without_obstacle_geometry);
+        const bool fresh_status = std::string(result.reason) == "fresh_status";
+        const bool urgent_details_changed = fresh_status && contract.valid &&
+            (result.code == AlarmStateMachine::kLevel1Warning ||
+             result.code == AlarmStateMachine::kLevel2Warning) &&
+            (!has_last_status_ ||
+             last_status_.requested_alarm_code !=
+                 accepted_status.requested_alarm_code ||
+             last_status_.obstacle_track_id !=
+                 accepted_status.obstacle_track_id ||
+             last_status_.reason != accepted_status.reason);
+        // A retransmitted source stamp is not a new geometry/evidence frame.
+        // Keep the last accepted status so periodic 17/18 logs cannot pair a
+        // retained alarm code with fields from a duplicate CLEAR message.
+        if (!has_last_status_ || fresh_status) {
+            last_status_ = accepted_status;
+            has_last_status_ = true;
+        }
         if (result.changed || urgent_details_changed) {
             publishCode(result.code, result.reason, true);
         }
