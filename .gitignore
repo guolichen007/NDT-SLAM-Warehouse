@@ -16,6 +16,7 @@ __pycache__/
 maps/
 output/
 payload_debug/
+server_runs/
 *.bag
 *.pcd
 *.pgm

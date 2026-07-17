@@ -18,3 +18,9 @@ ROS Noetic builds/tests and Bag/server results must be reported separately;
 do not mark them passed from a Windows-only checkout. Never force-push master.
 Release candidates are reviewed by PR and then integrated with
 `git merge --ff-only` after required checks pass.
+
+Server validation evidence must include `run_manifest.json`,
+`reports/final_summary.json`, and `reports/final_report.md`. Attach the exact
+SHA and preserve PASS/FAIL/NOT_RUN values; never label an unexecuted Ubuntu,
+Bag, or soak item as passed. Generated maps, bags, and `server_runs/` do not
+belong in Git.

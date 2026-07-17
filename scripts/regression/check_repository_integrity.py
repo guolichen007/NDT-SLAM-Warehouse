@@ -628,6 +628,7 @@ def static_evidence_contract_failures() -> list[str]:
         Path("src/ndt_slam/src/runtime_diagnostics.cpp"),
         Path("src/ndt_slam/config/live_longterm_mapping.yaml"),
         Path("src/ndt_slam/test/static_obstacle_evidence_index_test.cpp"),
+        Path("tests/test_static_manifest_contract.py"),
     )
     try:
         combined = "\n".join(
@@ -644,6 +645,9 @@ def static_evidence_contract_failures() -> list[str]:
         "consecutive_stable_duration_sec",
         "maximum_observation_gap_sec",
         "maximum_observation_sequence_gap",
+        "temporally_mature",
+        "kSchemaVersion = 3U",
+        "matureCellCount",
         "static_map_max_observation_gap_sec: 0.8",
         "static_map_max_sequence_gap: 1",
         "StaticEvidenceMutationResult",
@@ -652,10 +656,18 @@ def static_evidence_contract_failures() -> list[str]:
         "static_evidence.csv",
         "suspendPersistentStaticEvidence",
         "static_evidence_manifest.last_good.json",
+        "static_evidence_manifest.suspended",
         "InvalidatedCellCannotBeReauthorizedInSameBuild",
         "ObservationGapResetsAuthorizationStreak",
         "StaleCleanResultCannotUndoNewerInvalidation",
         "SparseCurrentObservationMatchesDenseStaticMap",
+        "CleanConfirmedButImmatureCellCannotAccumulateAcrossGaps",
+        "EmptyMapCommitBreaksConsecutiveObservation",
+        "MatureCellRemainsAuthorizedUntilInvalidated",
+        "ImmatureSnapshotDoesNotReplaceLastGoodManifest",
+        "MatureCurrentEpochActivatesManifest",
+        "ManifestRenameFailureCannotLeaveOldManifestLoadable",
+        "SuspendedManifestIsNotLoadedAfterRestart",
     )
     for token in required:
         if token not in combined:
@@ -672,6 +684,81 @@ def static_evidence_contract_failures() -> list[str]:
             "clean confirmation does not give same/newer invalidation priority")
     if "decision.matched_iou >= config_.minimum_iou" in combined:
         failures.append("static IoU is still a hard authorization gate")
+    if "stamp_sec <= 0.0 || cells.empty()" in combined:
+        failures.append("empty MapCommit still bypasses observation sequence")
+    return failures
+
+
+def server_operations_contract_failures() -> list[str]:
+    failures: list[str] = []
+    paths = {
+        "monitor": Path("src/ndt_slam/scripts/ops/server_runtime_monitor.py"),
+        "control": Path("src/ndt_slam/scripts/ops/server_monitorctl.sh"),
+        "preflight": Path("src/ndt_slam/scripts/ops/server_preflight.sh"),
+        "validation": Path("src/ndt_slam/scripts/ops/run_server_validation.sh"),
+        "artifacts": Path(
+            "src/ndt_slam/scripts/ops/collect_server_artifacts.sh"),
+        "report": Path("src/ndt_slam/scripts/ops/summarize_server_run.py"),
+        "soak": Path("src/ndt_slam/scripts/ops/server_soak.sh"),
+        "slam_service": Path("src/ndt_slam/scripts/ops/ndt-slam.service.in"),
+        "monitor_service": Path(
+            "src/ndt_slam/scripts/ops/ndt-slam-monitor.service.in"),
+        "cmake": Path("src/ndt_slam/CMakeLists.txt"),
+    }
+    texts: dict[str, str] = {}
+    for name, path in paths.items():
+        try:
+            texts[name] = (ROOT / path).read_text(encoding="utf-8")
+        except OSError as error:
+            failures.append(f"server ops {name} cannot be read: {error}")
+    if failures:
+        return failures
+
+    monitor = texts["monitor"]
+    required_monitor = (
+        '"/cargo_avoidance/safety_status"',
+        '"/cargo_avoidance/status_code"',
+        '"/cargo_avoidance/static_evidence_debug"',
+        "SafetyAggregator",
+        "AsyncRunWriter",
+        "atomic_write_json",
+        "SOURCE_TIME_ROLLBACK",
+        "STATUS_CODE_MISMATCH",
+        "recovery_34_to_14_sec",
+        "confirmation_34_to_warning_sec",
+    )
+    for token in required_monitor:
+        if token not in monitor:
+            failures.append(f"server monitor contract missing {token!r}")
+    if "rospy.Publisher" in monitor or ".Publisher(" in monitor:
+        failures.append("server monitor must remain read-only (Publisher found)")
+
+    combined = "\n".join(texts.values())
+    required_combined = (
+        "--expected-sha",
+        "static_evidence_manifest.suspended",
+        "PREFLIGHT=PASS",
+        "final_summary.json",
+        "final_report.md",
+        "tar.zst",
+        "sha256sum",
+        'if [[ "$status" -eq 124 ]]',
+        "use_sim_time:=false use_rviz:=false persistent_map:=true",
+        "flock --no-fork --exclusive --nonblock",
+        "catkin_install_python",
+    )
+    for token in required_combined:
+        if token not in combined:
+            failures.append(f"server operations contract missing {token!r}")
+    forbidden = (
+        "/home/ydkj/NDT-slam-ws",
+        "catkin_make --pkg ndt_slam",
+        "! /usr/bin/flock",
+        "active_map_points",
+    )
+    for token in forbidden:
+        if token in combined:
+            failures.append(f"obsolete server operations token remains: {token!r}")
     return failures
 
 
@@ -685,6 +772,7 @@ def main() -> int:
     failures.extend(runtime_visualization_contract_failures())
     failures.extend(asynchronous_map_commit_contract_failures())
     failures.extend(static_evidence_contract_failures())
+    failures.extend(server_operations_contract_failures())
     try:
         paths = tracked_paths()
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:

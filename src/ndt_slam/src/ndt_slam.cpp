@@ -9877,6 +9877,7 @@ void NdtSlamNode::writeRuntimeStatus() {
     std::size_t display_pts = 0U;
     std::size_t ground_pts = 0U;
     std::size_t objects_pts = 0U;
+    std::size_t objects_clean_pts = 0U;
     std::size_t local_pts = 0U;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
@@ -9884,6 +9885,7 @@ void NdtSlamNode::writeRuntimeStatus() {
         display_pts = display_map_ ? display_map_->size() : 0U;
         ground_pts = ground_map_ ? ground_map_->size() : 0U;
         objects_pts = objects_map_ ? objects_map_->size() : 0U;
+        objects_clean_pts = objects_clean_map_ ? objects_clean_map_->size() : 0U;
         local_pts = local_map_ ? local_map_->size() : 0U;
     }
 
@@ -9901,7 +9903,14 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"display_map_points\": " << display_pts << ",\n";
     f << "  \"ground_map_points\": " << ground_pts << ",\n";
     f << "  \"objects_map_points\": " << objects_pts << ",\n";
+    f << "  \"objects_clean_map_points\": " << objects_clean_pts << ",\n";
     f << "  \"local_map_points\": " << local_pts << ",\n";
+    f << "  \"local_map_update_allowed\": "
+      << (allow_runtime_local_map_update_ ? "true" : "false") << ",\n";
+    f << "  \"persistent_map_commit_allowed\": "
+      << (allow_persistent_map_commit_ ? "true" : "false") << ",\n";
+    f << "  \"prediction_only_consecutive_frames\": "
+      << diag_consecutive_prediction_only_ << ",\n";
     f << "  \"dirty_tile_count\": "
       << dirty_tile_count_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"flushed_tile_count\": "
@@ -9940,9 +9949,10 @@ void NdtSlamNode::writeRuntimeStatus() {
       << (static_snapshot ? static_snapshot->revision : 0U) << ",\n";
     f << "  \"static_evidence_cells\": "
       << (static_snapshot ? static_snapshot->cells.size() : 0U) << ",\n";
+    f << "  \"static_evidence_mature_cells\": "
+      << static_obstacle_evidence_index_.matureCellCount() << ",\n";
     f << "  \"static_evidence_latest_sequence\": "
-      << (static_snapshot
-              ? static_snapshot->latest_observation_sequence : 0U)
+      << static_obstacle_evidence_index_.latestObservationSequence()
       << ",\n";
     f << "  \"static_query_reason\": \""
       << cargo_static_evidence_decision_.reason << "\",\n";

@@ -21,10 +21,12 @@ jobs:
 
       - name: Static repository contracts
         run: |
-          python3 scripts/regression/check_yaml_duplicate_keys.py
+          python3 scripts/regression/check_yaml_duplicate_keys.py \
+            $(find .github src/ndt_slam/config -type f \( -name '*.yml' -o -name '*.yaml' \))
           python3 scripts/regression/check_repository_integrity.py
           python3 scripts/regression/check_cargo_safety_e2e.py
           python3 -m compileall -q scripts src/ndt_slam/scripts
+          python3 -m unittest discover -v
 
       - name: Install ROS build dependencies
         run: |

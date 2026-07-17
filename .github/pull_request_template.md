@@ -19,6 +19,7 @@
 - [ ] Ubuntu unit tests
 - [ ] Sequential Bag validation (if applicable)
 - [ ] Server validation (if applicable)
+- [ ] Server evidence includes run manifest/final report and preserves NOT_RUN
 
 Unavailable environment-specific checks must be marked **not run**, never
 reported as passed.

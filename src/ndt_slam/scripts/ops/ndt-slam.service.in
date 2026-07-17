@@ -1,0 +1,23 @@
+[Unit]
+Description=NDT-SLAM long-term mapping
+After=network-online.target roscore.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@WORKSPACE@
+EnvironmentFile=@ENV_FILE@
+ExecStartPre=/bin/bash -lc 'mkdir -p "$NDT_SLAM_DATA_ROOT" "$ROS_LOG_DIR"'
+ExecStart=/usr/bin/flock --no-fork --exclusive --nonblock @DATA_ROOT@/.ndt-slam.lock /bin/bash -lc 'source "$NDT_SLAM_WORKSPACE/devel/setup.bash" && exec roslaunch ndt_slam warehouse_live_longterm_mapping.launch use_sim_time:=false use_rviz:=false persistent_map:=true'
+Restart=on-failure
+RestartSec=15
+StartLimitIntervalSec=300
+StartLimitBurst=5
+KillMode=mixed
+TimeoutStopSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -82,11 +82,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Check YAML files for duplicate top-level mapping keys."
     )
-    parser.add_argument("files", metavar="FILE", nargs="+", type=Path)
+    parser.add_argument("files", metavar="FILE", nargs="*", type=Path,
+                        help="Defaults to repository YAML/YML files.")
     args = parser.parse_args()
 
+    paths = list(args.files)
+    if not paths:
+        root = Path(__file__).resolve().parents[2]
+        skipped = {".git", "3rdparty", "build", "devel", "install", "log"}
+        paths = sorted(
+            path for pattern in ("*.yaml", "*.yml")
+            for path in root.rglob(pattern)
+            if not any(part in skipped for part in path.relative_to(root).parts)
+        )
+
     failed = False
-    for path in args.files:
+    for path in paths:
         try:
             duplicates = find_duplicate_keys(path)
         except (OSError, UnicodeError) as error:

@@ -7,6 +7,7 @@ git diff --check
 python scripts/regression/check_yaml_duplicate_keys.py
 python scripts/regression/check_repository_integrity.py
 python scripts/regression/check_cargo_safety_e2e.py
+python -m unittest tests.test_server_monitor
 ```
 
 这些检查覆盖源码完整性、UTF-8、YAML 重复键、关键安全链和静态架构合同，不替代 C++ 编译。
@@ -29,3 +30,8 @@ python scripts/regression/check_cargo_safety_e2e.py
 ## 通过标准
 
 无崩溃、无非有限位姿、无 full-ground fallback、无单帧 CLEAR、安全码与几何一致、五层同代、CSV 字段完整、终端无逐帧洪泛。
+
+服务器运行必须保留 `run_manifest.json`、`final_summary.json` 和
+`final_report.md`。报告中的 Ubuntu build、gtest、Bag、soak 若未实际执行，
+必须为 `NOT_RUN`，不得用监控采样自动替代。操作顺序见
+[Server Validation Runbook](server_validation_runbook.md)。

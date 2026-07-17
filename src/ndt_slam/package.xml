@@ -31,6 +31,9 @@
   <depend>ndt_omp</depend>
   
   <exec_depend>roslaunch</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <export>
   </export>

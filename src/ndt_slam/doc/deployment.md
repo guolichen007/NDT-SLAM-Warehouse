@@ -28,7 +28,17 @@ catkin run_tests
 catkin_test_results --verbose
 ```
 
-安装规则会安装节点/库、头文件、launch、config、rviz、doc、scripts 和 systemd service 模板。服务文件中的工作区、用户和日志路径必须在部署机上复核后再启用。
+安装规则会安装节点/库、头文件、launch、config、rviz、doc、ops 脚本和
+systemd service 模板。服务文件不再硬编码用户和路径，必须通过显式安装入口：
+
+```bash
+sudo rosrun ndt_slam install_server_services.sh \
+  --workspace ~/NDT-slam-ws --user "$(id -un)" \
+  --data-root ~/NDT-slam-ws/maps/live/current
+```
+
+该入口修正了旧服务反向 `! flock` 的错误；flock 现在覆盖 SLAM 整个
+ExecStart 生命周期。
 
 ## 启动
 
@@ -46,4 +56,7 @@ bag 验收使用 `use_sim_time:=true` 且 `rosbag play --clock`。第二次播�
 - 顺序 bag 验收通过；
 - 正式配置无重复键；
 - 第三方目录无换行噪声；
-- 未决许可证由仓库所有者明确。当前 `package.xml` 声明 MIT，但根目录缺少 LICENSE，不能由维护脚本自行补写授权文本。
+- 根目录 `LICENSE` 与 `package.xml` 的 MIT 声明一致；发布仍需 exact SHA、
+  clean build、gtest 和服务器验收报告。
+
+完整部署到归档流程见 [Server Validation Runbook](server_validation_runbook.md)。

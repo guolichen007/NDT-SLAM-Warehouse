@@ -42,6 +42,18 @@ roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
   use_sim_time:=false use_rviz:=false persistent_map:=true
 ```
 
+服务器验收建议使用统一入口，自动建立独立运行目录、启动只读监控并生成报告：
+
+```bash
+rosrun ndt_slam run_server_validation.sh prepare \
+  --workspace ~/NDT-slam-ws --expected-sha <EXPECTED_SHA> --run-id rc1-live-001
+rosrun ndt_slam run_server_validation.sh start \
+  --workspace ~/NDT-slam-ws --expected-sha <EXPECTED_SHA> --run-id rc1-live-001
+```
+
+完整顺序、停止、报告和归档命令见
+[服务器验收 Runbook](src/ndt_slam/doc/server_validation_runbook.md)。
+
 Bag 验收（仿真时间、非持久化测试地图）：
 
 ```bash
@@ -175,6 +187,8 @@ debug:
 - [配置说明](src/ndt_slam/doc/configuration.md)
 - [部署](src/ndt_slam/doc/deployment.md)
 - [运行与运维](src/ndt_slam/doc/operations.md)
+- [服务器监控](src/ndt_slam/doc/server_monitoring.md)
+- [服务器验收 Runbook](src/ndt_slam/doc/server_validation_runbook.md)
 - [测试与验收](src/ndt_slam/doc/testing_and_acceptance.md)
 - [故障排查](src/ndt_slam/doc/troubleshooting.md)
 

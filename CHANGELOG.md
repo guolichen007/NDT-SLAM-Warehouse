@@ -4,6 +4,12 @@
 
 ### Added
 
+- Unified read-only server monitor, 60/600-second safety windows, append-safe
+  run artifacts, final JSON/Markdown reports, service templates, and a single
+  validation runbook from exact-SHA preflight through archive.
+- Explicit temporal maturity in static-evidence schema v3 and a cross-restart
+  suspension marker which blocks stale Manifest authorization.
+
 - Persistent static-obstacle evidence with immutable bounded query snapshots,
   clean-map provenance, versioned sidecar manifests, and point-coordinate tile
   partitioning.
@@ -14,6 +20,10 @@
   MemoryGuard timer.
 
 ### Changed
+
+- Old hard-coded monitor/deploy scripts are compatibility wrappers around the
+  package ops tools; the SLAM service lock is held for the full process
+  lifetime and launch safety/runtime arguments are explicit.
 
 - Stale clean workers may confirm cells that were not invalidated by a newer
   build; newer invalidation tombstones always win.

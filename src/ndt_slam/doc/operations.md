@@ -7,6 +7,16 @@
 3. `/cargo_avoidance/status_code` 在无风险时为 14；故障码必须有明确 reason。
 4. CSV 持续写入，而终端只出现吊物、安全和事件型风险日志。
 
+统一入口：
+
+```bash
+rosrun ndt_slam server_monitorctl.sh status
+rosrun ndt_slam server_monitorctl.sh follow
+rosrun ndt_slam server_monitorctl.sh snapshot
+```
+
+监控是只读进程，typed safety 是权威源，simple status code 只做一致性校验。
+
 ## 关键事件日志
 
 必须立即输出：SO3Guard、非有限 NDT、首次 prediction-only、定位/重定位切换、Motion 状态切换、安全 code/reason 变化。运行风险使用 `ENTER/CHANGE/REPEAT/CLEAR`；相同风险 10 秒内不重复刷屏。
@@ -26,11 +36,14 @@ raw 提交快于 clean 时允许发布较旧但完整的 bundle。不得看到�
 ## 持久化静态证据检查
 
 现场启动使用 `use_sim_time:=false persistent_map:=true`。检查 persistent root
-可写、`tiles_objects` 持续增长、`static_evidence_manifest.json` 指向存在的 v2
+可写、`tiles_objects` 持续增长、`static_evidence_manifest.json` 指向存在的 v3
 index，且目录中没有长期残留 `.tmp`。生命周期重建期间允许出现
-`static_evidence_manifest.last_good.json`，但该文件不参与运行时授权。
+`static_evidence_manifest.last_good.json` 和 `.suspended` 标记，但二者都不参与
+运行时授权；标记存在时旧 active Manifest 也必须拒绝加载。
 
 每班次记录 RSS、磁盘余量、dirty/flushed tile 数、Manifest revision、index
 cell 数、clean build applied/snapshot-only/discarded、33/34 reason 分布和 obstacle
 track churn。`cargo_frames.csv` 与 `static_evidence.csv` 必须持续写入；终端仅保留
 安全事件、吊物状态变化和十秒静态证据摘要。
+
+每次运行的目录、字段和事件窗口见 [服务器监控](server_monitoring.md)。

@@ -1,0 +1,19 @@
+[Unit]
+Description=NDT-SLAM read-only runtime monitor
+After=ndt-slam.service
+Wants=ndt-slam.service
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@WORKSPACE@
+EnvironmentFile=@ENV_FILE@
+ExecStart=/bin/bash -lc 'source "$NDT_SLAM_WORKSPACE/devel/setup.bash" && exec rosrun ndt_slam server_runtime_monitor.py --workspace "$NDT_SLAM_WORKSPACE" --persistent-root "$NDT_SLAM_DATA_ROOT" --run-id "service-$(cut -c1-8 /proc/sys/kernel/random/boot_id)" --config "$(rospack find ndt_slam)/config/server_monitor.yaml" --lock-file "$NDT_SLAM_WORKSPACE/server_runs/.service-monitor.lock"'
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

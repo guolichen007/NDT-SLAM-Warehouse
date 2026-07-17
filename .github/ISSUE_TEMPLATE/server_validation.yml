@@ -27,3 +27,6 @@ body:
     id: artifacts
     attributes:
       label: Artifact paths or links
+      description: Attach run_manifest.json, final_summary.json, final_report.md, archive SHA256, and list every NOT_RUN item.
+    validations:
+      required: true

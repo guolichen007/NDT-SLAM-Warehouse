@@ -49,3 +49,12 @@
 ## 终端日志过多或过少
 
 生产保持 health=false、risk=true、cargo=true、CSV=true。risk 应只有 ENTER/CHANGE/REPEAT/CLEAR；如果仍逐帧输出，搜索旧 `[PIPELINE_RISK] reason=FRAME_OVERRUN` 路径。
+
+## 服务器监控自身异常
+
+- `monitor already running`：检查 `server_runs/<run>/monitor.pid` 和 lock；不要启动第二实例。
+- `runtime_status_stale`：先检查主节点和 persistent root，监控不会尝试重启或改参数。
+- typed/simple code mismatch：以 `/cargo_avoidance/safety_status` 为准，检查 heartbeat；相同 mismatch 已节流。
+- CSV 没有新行：检查 writer dropped、目录权限和磁盘；重启会 append，不会覆盖历史。
+- service 启动失败：用 `systemctl cat` 确认由安装器生成，旧的反向 `! flock` unit 必须删除。
+- `.suspended` 长期存在：当前 epoch 尚未成熟或文件系统激活失败，保持 fail-safe 34，禁止手工把 last-good 改名为 active。

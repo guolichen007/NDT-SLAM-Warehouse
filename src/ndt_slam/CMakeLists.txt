@@ -404,6 +404,24 @@ install(DIRECTORY scripts/
   USE_SOURCE_PERMISSIONS
 )
 
-install(FILES scripts/ndt-slam.service
+catkin_install_python(PROGRAMS
+  scripts/ops/server_runtime_monitor.py
+  scripts/ops/summarize_server_run.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+install(PROGRAMS
+  scripts/ops/server_monitorctl.sh
+  scripts/ops/server_preflight.sh
+  scripts/ops/run_server_validation.sh
+  scripts/ops/collect_server_artifacts.sh
+  scripts/ops/install_server_services.sh
+  scripts/ops/server_soak.sh
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+install(FILES
+  scripts/ops/ndt-slam.service.in
+  scripts/ops/ndt-slam-monitor.service.in
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/systemd
 )
