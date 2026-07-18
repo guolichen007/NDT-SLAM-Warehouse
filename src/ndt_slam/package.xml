@@ -25,6 +25,7 @@
   <depend>eigen</depend>
   <depend>libboost-filesystem-dev</depend>
   <depend>libg2o</depend>
+  <depend>libfmt-dev</depend>
   <depend>libopencv-dev</depend>
   <depend>libpcl-all-dev</depend>
   <depend>libyaml-cpp-dev</depend>

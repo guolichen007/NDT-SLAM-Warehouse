@@ -61,6 +61,7 @@ find_package(Sophus REQUIRED)
 find_package(PCL REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(g2o REQUIRED)
+find_package(fmt CONFIG REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(ndt_omp REQUIRED)
 find_package(Boost REQUIRED COMPONENTS filesystem)
@@ -147,6 +148,7 @@ target_link_libraries(ndt_slam_lib
   ${Sophus_LIBRARIES}
   yaml-cpp
   g2o::core g2o::stuff g2o::types_slam3d g2o::solver_eigen
+  fmt::fmt
   TBB::tbb
   robin_map
   ${OpenCV_LIBRARIES}
