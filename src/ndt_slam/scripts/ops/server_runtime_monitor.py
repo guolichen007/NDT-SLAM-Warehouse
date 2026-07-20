@@ -921,6 +921,28 @@ class RosRuntimeMonitor:
         sample_period = float(self.config.get("sample_period_sec", 1.0))
         summary_period = float(self.config.get("summary_period_sec", 10.0))
         rate = self.rospy.Rate(max(0.2, 1.0 / max(0.1, sample_period)))
+
+        # ── readiness handshake ──
+        ready_payload: Dict[str, Any] = {
+            "ready": True,
+            "pid": os.getpid(),
+            "ros_node": "/ndt_slam_server_monitor",
+            "workspace_sha": self.args.expected_sha or "unknown",
+            "topics": {},
+        }
+        try:
+            import rosgraph
+            master = rosgraph.Master(self.rospy.get_name())
+            topic_types = master.getTopicTypes()
+            for topic_name, topic_type in topic_types:
+                if topic_name in ("/odom", "/cargo_avoidance/safety_status",
+                                  "/cargo_avoidance/status_code",
+                                  "/cargo_avoidance/static_evidence_debug"):
+                    ready_payload["topics"][topic_name] = topic_type
+        except Exception:
+            pass
+        atomic_write_json(self.run_dir / "reports" / "monitor_ready.json", ready_payload)
+
         while not self.rospy.is_shutdown() and not self.shutdown_requested:
             now = time.time()
             summary = self.snapshot(now)
