@@ -15,6 +15,11 @@ jobs:
     timeout-minutes: 90
     container: ros:noetic-ros-base-focal
     steps:
+      - name: Install checkout prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
       - uses: actions/checkout@v4
         with:
           submodules: recursive

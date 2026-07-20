@@ -59,8 +59,22 @@ find_package(catkin REQUIRED COMPONENTS
 find_package(Eigen3 REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(PCL REQUIRED)
-find_package(yaml-cpp REQUIRED)
+find_package(yaml-cpp CONFIG REQUIRED
+  PATHS /usr/lib/x86_64-linux-gnu/cmake/yaml-cpp
+  NO_DEFAULT_PATH)
+
+# yaml-cpp target naming differs across distributions:
+# Ubuntu 20.04 exports `yaml-cpp`, while newer releases may export
+# `yaml-cpp::yaml-cpp`.
+if(TARGET yaml-cpp::yaml-cpp)
+  set(NDT_SLAM_YAML_CPP_TARGET yaml-cpp::yaml-cpp)
+elseif(TARGET yaml-cpp)
+  set(NDT_SLAM_YAML_CPP_TARGET yaml-cpp)
+else()
+  message(FATAL_ERROR "No usable yaml-cpp CMake target was exported")
+endif()
 find_package(g2o REQUIRED)
+find_package(fmt CONFIG REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(ndt_omp REQUIRED)
 find_package(Boost REQUIRED COMPONENTS filesystem)
@@ -145,8 +159,9 @@ target_link_libraries(ndt_slam_lib
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${Sophus_LIBRARIES}
-  yaml-cpp
+  ${NDT_SLAM_YAML_CPP_TARGET}
   g2o::core g2o::stuff g2o::types_slam3d g2o::solver_eigen
+  fmt::fmt
   TBB::tbb
   robin_map
   ${OpenCV_LIBRARIES}
@@ -186,7 +201,7 @@ add_executable(cargo_forbidden_zone_node src/cargo_forbidden_zone_node.cpp)
 target_link_libraries(cargo_forbidden_zone_node
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
-  yaml-cpp
+  ${NDT_SLAM_YAML_CPP_TARGET}
 )
 
 # Independent wall-clock status heartbeat. This is the sole publisher of the
@@ -200,7 +215,7 @@ add_dependencies(hook_load_state_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(hook_load_state_node
   ndt_slam_lib
   ${catkin_LIBRARIES}
-  yaml-cpp
+  ${NDT_SLAM_YAML_CPP_TARGET}
 )
 
 if(CATKIN_ENABLE_TESTING)
