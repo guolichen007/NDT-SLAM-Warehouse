@@ -1,5 +1,81 @@
 # CHANGELOG
 
+## [Unreleased] - Server Validation RC
+
+### Added
+
+- Unified read-only server monitor, 60/600-second safety windows, append-safe
+  run artifacts, final JSON/Markdown reports, service templates, and a single
+  validation runbook from exact-SHA preflight through archive.
+- Explicit temporal maturity in static-evidence schema v3 and a cross-restart
+  suspension marker which blocks stale Manifest authorization.
+
+- Persistent static-obstacle evidence with immutable bounded query snapshots,
+  clean-map provenance, versioned sidecar manifests, and point-coordinate tile
+  partitioning.
+- Per-cell clean/invalidation versions, consecutive observation streaks, and
+  detailed `static_evidence.csv`, cargo CSV, topic, runtime-status, and
+  periodic summary diagnostics.
+- Top-derived frozen-thickness formal cargo height and an independent periodic
+  MemoryGuard timer.
+
+### Changed
+
+- Old hard-coded monitor/deploy scripts are compatibility wrappers around the
+  package ops tools; the SLAM service lock is held for the full process
+  lifetime and launch safety/runtime arguments are explicit.
+
+- Stale clean workers may confirm cells that were not invalidated by a newer
+  build; newer invalidation tombstones always win.
+- Lifecycle changes make the previous manifest inactive and retain it as a
+  last-good archive until a mature current-epoch snapshot is atomically
+  committed.
+- Static-map authorization uses current-query coverage, cell count, height,
+  source validation, and observation history. IoU remains diagnostic so
+  partial visibility does not reject a valid dense static map.
+
+### Known limitations
+
+- Main-controller integration is not accepted and no production tag is issued.
+- Ubuntu clean build/tests and sequential/long-duration Bag results remain
+  release gates to be executed on the ROS Noetic validation host.
+- Source, geometry, association, formal-height, tile, and memory thresholds
+  remain field-validation parameters; this RC does not lower safety gates.
+
+## Cargo safety and localization production hardening (2026-07)
+
+### Added
+
+- 稳健二维 OBB、冻结 `LockedCargoShape` 与实时 `LiveCargoPose`；
+- 旋转几何统一服务 marker、Cargo Bottom、避障距离、Registration 和 MapCommit 剔除；
+- `pose_evidence_stamp / height_evidence_stamp / evaluation_stamp` 分离；
+- LOST_HOLD 显示/正式安全双生命周期、短时运动预测和不确定度扩张；
+- `STATIONARY_HOLD / MOVING_CONFIRM / CATCH_UP` 状态机；
+- 结构保持 Registration Source、可观测性代理和 EKF 各向异性协方差；
+- 不可变 `MapLayerBundle` 与后台 clean 同代发布；
+- 14/17/18 正式空间合同、heartbeat 新证据/时间 epoch 状态机；
+- 项目级静态与 ROS Noetic catkin CI、完整工程文档。
+
+### Changed
+
+- 吊物中心限制改为 `physical speed * sensor dt + margin`；
+- Gravity AUXILIARY 以 LiDAR 为主，空载使用三态观测和独立确认；
+- 结构不足改为 prediction-only，删除 full-ground fallback；
+- 风险控制台改为 ENTER/CHANGE/REPEAT/CLEAR 事件模式，逐帧数据保留 CSV；
+- 安装规则补齐 rviz、scripts、docs 和 systemd 模板。
+
+### Safety
+
+- 17/18 只表示真实空间碰撞风险；定位、Gravity、吊物高度、障碍证据和内部故障只能输出 30-35；
+- LOST_HOLD 过期后 marker 可继续显示，但输出 33 且停止正式地图剔除；
+- 重复时间戳、heartbeat tick 和单帧 CLEAR 不再推进确认。
+
+### Validation status
+
+- Windows 静态合同可执行；
+- Ubuntu clean build、gtest 与顺序 bag 验收仍是发布准入项；
+- 根目录 LICENSE 与 package.xml 的 MIT 声明现已一致。
+
 ## master cargo v1 - OdomAnchorBox clean pipeline
 
 ### Added

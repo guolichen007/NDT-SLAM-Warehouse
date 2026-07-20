@@ -98,6 +98,7 @@ public:
     bool saveOptimizedPoses(const std::string& filepath) const;
     bool loadOptimizedPoses(const std::string& filepath);
     void updateKeyFramePose(uint64_t id, const Sophus::SE3d& new_pose);
+    void clear();
     size_t getKeyFrameCount() const { return keyframes_.size(); }
 
 private:

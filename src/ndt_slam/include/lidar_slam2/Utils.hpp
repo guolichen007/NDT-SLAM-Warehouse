@@ -24,6 +24,7 @@
 
 #include <Eigen/Core>
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -74,9 +75,19 @@ inline geometry_msgs::Pose sophusToPose(const Sophus::SE3d &T) {
 
 inline Sophus::SE3d transformToSophus(const geometry_msgs::TransformStamped &transform) {
     const auto &t = transform.transform;
-    return Sophus::SE3d(
-        Sophus::SE3d::QuaternionType(t.rotation.w, t.rotation.x, t.rotation.y, t.rotation.z),
-        Sophus::SE3d::Point(t.translation.x, t.translation.y, t.translation.z));
+    Sophus::SE3d::QuaternionType quaternion(
+        t.rotation.w, t.rotation.x, t.rotation.y, t.rotation.z);
+    const Sophus::SE3d::Point translation(
+        t.translation.x, t.translation.y, t.translation.z);
+    if (!quaternion.coeffs().allFinite() ||
+        !translation.allFinite() ||
+        !std::isfinite(quaternion.norm()) ||
+        quaternion.norm() <= 1.0e-12) {
+        ROS_WARN("Rejected non-finite or degenerate TransformStamped");
+        return Sophus::SE3d();
+    }
+    quaternion.normalize();
+    return Sophus::SE3d(quaternion, translation);
 }
 }  // namespace tf2
 

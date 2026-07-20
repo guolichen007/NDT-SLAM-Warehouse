@@ -1,0 +1,8 @@
+{
+  "bag_start_time": 1778303477.49,
+  "failure_start_sensor_stamp": 1778303525.126340,
+  "rosbag_start_offset_sec": 47.64,
+  "duration_sec": 45.0,
+  "playback_rate": 1.0,
+  "notes": "Failure window covers frames 140-210, capturing the catastrophic target switch at frame 163"
+}

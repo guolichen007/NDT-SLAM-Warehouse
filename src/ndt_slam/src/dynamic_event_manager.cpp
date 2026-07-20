@@ -274,24 +274,42 @@ void DynamicEventManager::endHumanEvent(int event_id, double current_time) {
 
 // ========== 查询接口 ==========
 
-std::vector<const PayloadSession*> DynamicEventManager::getActivePayloadSessions() const {
+std::vector<PayloadSession> DynamicEventManager::getPayloadSessions() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<const PayloadSession*> result;
+    return payload_sessions_;
+}
+
+std::vector<HumanEvent> DynamicEventManager::getHumanEvents() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return human_events_;
+}
+
+std::vector<PayloadSession> DynamicEventManager::getActivePayloadSessions() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PayloadSession> result;
     for (const auto& s : payload_sessions_) {
-        if (s.active) result.push_back(&s);
+        if (s.active) result.push_back(s);
     }
     return result;
 }
 
-std::vector<const PayloadSession*> DynamicEventManager::getPlacedSessions() const {
+std::vector<PayloadSession> DynamicEventManager::getPlacedSessions() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<const PayloadSession*> result;
+    std::vector<PayloadSession> result;
     for (const auto& s : payload_sessions_) {
         if (s.state == PayloadSessionState::PLACED_STATIC && s.placed_protected) {
-            result.push_back(&s);
+            result.push_back(s);
         }
     }
     return result;
+}
+
+void DynamicEventManager::reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    payload_sessions_.clear();
+    human_events_.clear();
+    next_session_id_ = 0;
+    next_human_id_ = 0;
 }
 
 // ========== Mask 生成 ==========

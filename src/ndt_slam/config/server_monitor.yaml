@@ -1,0 +1,23 @@
+# Read-only operations monitor. These are observability thresholds only;
+# safety distances, warning codes and SLAM parameters do not belong here.
+monitor:
+  sample_period_sec: 1.0
+  summary_period_sec: 10.0
+  windows_sec: [60, 600]
+  writer_queue_size: 4096
+
+  odom_stale_sec: 1.0
+  runtime_status_stale_sec: 5.0
+  safety_status_stale_sec: 1.0
+  sustained_33_sec: 5.0
+  sustained_34_sec: 5.0
+  repeat_period_sec: 30.0
+
+  disk_minimum_gb: 20.0
+  memory_warning_mb: 7000
+  manifest_warmup_sec: 60.0
+
+  output_retention_runs: 20
+  log_rotation_size_mb: 50
+  log_rotation_count: 5
+  optional_lightweight_rosbag: false

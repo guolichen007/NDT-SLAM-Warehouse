@@ -1,68 +1,35 @@
-# 配置文件说明
+# 配置说明
 
-## 主要配置文件
+生产入口是 `config/live_longterm_mapping.yaml`，双雷达合并使用 `config/merger_params.yaml`。参数修改必须同步静态合同、单元测试和 Ubuntu bag 验收。
 
-| 文件 | 用途 |
-|------|------|
-| `slam_params.yaml` | 主 SLAM 配置（NDT 参数、话题、坐标系） |
-| `live_longterm_mapping.yaml` | 长期建图配置（MotionGate、tile、内存保护） |
-| `merger_params.yaml` | 双雷达合并配置 |
-| `engineering_mapping.yaml` | 工程化建图配置 |
-| `map_postprocess.yaml` | 地图后处理配置 |
+## 定位
 
-## slam_params.yaml 主要参数
+- `registration_input`：静态物体、候选和地面的体素/重复率、地面比例和最小结构点数。`allow_full_ground_fallback` 必须为 false。
+- `ndt_observability`：中度/严重特征值比和弱方向膨胀系数。
+- `stationary_policy`：进入/退出确认、方向余弦、CATCH_UP 步长与完成条件。
+- `motion_gate`：持久关键帧门限；不能代替 stationary policy。
 
-### NDT 配准
-```yaml
-ndt_omp:
-  resolution: 1.0        # NDT 分辨率（米）
-  step_size: 0.1         # 步长
-  max_iterations: 50     # 最大迭代次数
-```
+## 吊物
 
-### 地图参数
-```yaml
-map_voxel_size: 0.30     # 配准地图体素
-display_voxel_size: 0.10 # 显示地图体素
-ground_voxel_size: 0.15  # 地面地图体素
-objects_voxel_size: 0.06 # 物体地图体素
-```
+- `hook_cargo_lock.orientation_*`：OBB 几何和多帧方向确认。
+- `live_pose_max_xy_speed_mps`、`live_pose_max_z_speed_mps`、`live_pose_step_margin_m`：按 sensor dt 的中心约束。
+- `formal_hold_sec`：LOST_HOLD 的正式安全/剔除短窗，不是 marker 显示时长。
+- `lost_hold_sec`、`lost_clear_sec`：锁状态与显示生命周期。
+- `cargo_bottom_fusion`：点支撑、先验、时间窗、跳变确认和最大证据年龄。
+- `cargo_safety`：3 m、5 m、0.8 m 几何阈值与观测质量门限。
 
-### 话题配置
-```yaml
-pointcloud_topic: "/merged_points"
-odom_topic: "/odom"
-map_topic: "/map"
-```
+## Gravity
 
-## live_longterm_mapping.yaml 主要参数
+输入话题固定为 `/gravity`。`hook_load_signal.role` 只能是 `REQUIRED/AUXILIARY/DISABLED`。生产修改角色前必须重新验证空载、紧凑货物、断流和冲突场景。
 
-### MotionGate
-```yaml
-motion_gate:
-  enabled: true
-  min_translation_m: 0.30      # 最小位移（米）
-  min_rotation_deg: 3.0        # 最小旋转（度）
-  min_time_between_keyframes_sec: 2.0
-```
+## 日志
 
-### 内存保护
-```yaml
-memory_guard:
-  enabled: true
-  soft_threshold_mb: 6000      # 6GB: 释放缓存
-  hard_threshold_mb: 7000      # 7GB: 暂停 commit
-  emergency_threshold_mb: 8000 # 8GB: 降采样
-```
+生产默认：`debug_perf: false`、health console 关闭、event-mode risk console 开启、cargo console 开启、CSV 开启。risk 只在 ENTER/CHANGE/REPEAT/CLEAR 输出，重复周期为 10 秒。
 
-### 磁盘 tile
-```yaml
-persistent_map:
-  enabled: true
-  tile_size_m: 20.0
-  flush_interval_sec: 60
-  tile_voxel_registration: 0.30
-  tile_voxel_display: 0.10
-  tile_voxel_ground: 0.15
-  tile_voxel_objects: 0.08
+## 配置准入
+
+```bash
+python3 scripts/regression/check_yaml_duplicate_keys.py
+python3 scripts/regression/check_repository_integrity.py
+python3 scripts/regression/check_cargo_safety_e2e.py
 ```

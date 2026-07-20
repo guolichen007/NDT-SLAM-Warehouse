@@ -6,13 +6,24 @@
     <!-- 参数 -->
     <arg name="use_sim_time" default="false"/>
     <arg name="use_rviz" default="true"/>
-    <arg name="use_cargo_visualizer" default="true"/>
+    <!-- Legacy compatibility visualizer is opt-in. The authoritative marker is
+         /cargo_avoidance/fused_box_marker from the typed fusion pipeline. -->
+    <arg name="use_cargo_visualizer" default="false"/>
     <arg name="ndt_publish_cargo_markers" default="false"/>
     <arg name="publish_rslidar_tf" default="true"/>
     <arg name="persistent_map" default="true"/>
     <arg name="odom_anchored_cargo_box_enabled" default="true"/>
     <arg name="hook_cargo_removal_enabled" default="true"/>
     <arg name="cargo_warning_enabled" default="true"/>
+    <arg name="use_cargo_alarm_heartbeat" default="true"/>
+
+    <!-- Debounce and classify the hook load-cell voltage before SLAM uses it. -->
+    <node name="hook_load_state"
+          pkg="ndt_slam"
+          type="hook_load_state_node"
+          output="screen">
+        <param name="config_file" value="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
+    </node>
 
     <!-- 设置使用真实时间（现场必须） -->
     <param name="/use_sim_time" value="$(arg use_sim_time)"/>
@@ -21,6 +32,37 @@
     <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen">
         <param name="config_file" value="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
         <param name="ndt_publish_cargo_markers" value="$(arg ndt_publish_cargo_markers)"/>
+        <!-- YAML supplies conservative defaults; these launch arguments are
+             explicit production overrides and must be visible in ~params. -->
+        <param name="persistent_map_enabled" value="$(arg persistent_map)"/>
+        <param name="odom_anchored_cargo_box_enabled"
+               value="$(arg odom_anchored_cargo_box_enabled)"/>
+        <param name="hook_cargo_removal_enabled"
+               value="$(arg hook_cargo_removal_enabled)"/>
+        <param name="cargo_warning_enabled"
+               value="$(arg cargo_warning_enabled)"/>
+    </node>
+
+    <!-- Formal status heartbeat. safety_status is authoritative; status_code
+         is the optional simple-code interface. -->
+    <node name="cargo_alarm_heartbeat"
+          pkg="ndt_slam"
+          type="cargo_alarm_heartbeat_node"
+          output="screen"
+          if="$(arg use_cargo_alarm_heartbeat)">
+        <param name="status_topic" value="/cargo_avoidance/safety_status"/>
+        <param name="status_queue_size" value="1"/>
+        <param name="status_code_topic" value="/cargo_avoidance/status_code"/>
+        <param name="publish_legacy_alarm_topic" value="false"/>
+        <param name="legacy_alarm_topic" value="/cargo_avoidance/alarm_code"/>
+        <param name="heartbeat_hz" value="5.0"/>
+        <param name="stale_timeout_sec" value="0.8"/>
+        <param name="pending_error_sec" value="5.0"/>
+        <param name="pending_repeat_sec" value="10.0"/>
+        <param name="warning_repeat_sec" value="5.0"/>
+        <param name="level1_distance_m" value="3.0"/>
+        <param name="level2_distance_m" value="5.0"/>
+        <param name="minimum_vertical_clearance_m" value="0.80"/>
     </node>
 
     <!-- Cargo 可视化节点（只订阅 /payload_track_info，发布 /cargo_core_bbox_marker） -->
@@ -35,25 +77,23 @@
         <param name="publish_debug_markers" value="false"/>
     </node>
 
-    <!-- 点云合并节点 -->
+    <!-- Point-cloud merge and sensor frame. -->
     <node name="pointcloud_merger" pkg="ndt_slam" type="pointcloud_merger" output="screen">
         <rosparam command="load" file="$(find ndt_slam)/config/merger_params.yaml"/>
     </node>
 
-    <!-- 雷达到 base_link 的 TF（唯一名字避免冲突） -->
     <node if="$(arg publish_rslidar_tf)"
           name="ndt_slam_rslidar_tf"
           pkg="tf"
           type="static_transform_publisher"
           args="0 0 0 0 0 0 base_link rslidar 100"/>
 
-    <!-- RViz 可视化（可选） -->
     <group if="$(arg use_rviz)">
         <node name="rviz" pkg="rviz" type="rviz"
               args="-d $(find ndt_slam)/launch/rviz.rviz"/>
     </group>
 
-    <!-- 输出信息 -->
     <param name="mode" value="longterm_mapping"/>
     <param name="config_file" value="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
 </launch>
+

@@ -1,0 +1,38 @@
+* text=auto
+
+*.c       text eol=lf
+*.cc      text eol=lf
+*.cpp     text eol=lf
+*.h       text eol=lf
+*.hpp     text eol=lf
+*.cmake   text eol=lf
+CMakeLists.txt text eol=lf
+*.py      text eol=lf
+*.sh      text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.md      text eol=lf
+*.launch  text eol=lf
+*.rviz    text eol=lf
+
+*.bag binary
+*.pcd binary
+*.pgm binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+
+# Preserve vendored byte-for-byte content; do not renormalize third-party
+# sources while introducing repository-wide rules for first-party files.
+src/ndt_slam/3rdparty/** -text
+
+# This legacy header still contains mixed historical line endings. Preserve it
+# byte-for-byte until a dedicated normalization commit avoids unrelated churn.
+src/ndt_slam/include/ndt_slam/ndt_slam.hpp -text
+# These legacy runtime/config files also retain committed CRLF content. Keep
+# edits byte-stable until line-ending normalization is handled separately.
+src/ndt_slam/config/live_longterm_mapping.yaml -text whitespace=cr-at-eol
+src/ndt_slam/include/ndt_slam/runtime_diagnostics.hpp -text whitespace=cr-at-eol
+src/ndt_slam/src/runtime_diagnostics.cpp -text whitespace=cr-at-eol
+src/ndt_slam/include/ndt_slam/dynamic_event_manager.hpp -text whitespace=cr-at-eol
+CHANGELOG.md -text whitespace=cr-at-eol

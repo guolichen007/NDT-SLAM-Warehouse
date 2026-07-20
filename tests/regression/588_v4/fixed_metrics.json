@@ -1,0 +1,32 @@
+{
+  "status": "FAIL",
+  "test_date": "2026-07-10",
+  "base_sha": "3f7283d2cb0de8612adff31ac51fdf127effac11",
+  "fix_sha": "acd83b3",
+  "bag_sha256": "a6805f48ca0cccf231370045808c60ca1c623ac2c6bf2c7b9ec05b804d7df33c",
+  "playback_rate": 1.0,
+  "mode": "failure-window",
+  "processed_frames": 118,
+  "ndt_convergence_ratio": 0.9915,
+  "total_ms_p50": 392.04,
+  "total_ms_p95": 477.6,
+  "total_ms_p99": 484.24,
+  "fitness_p50": 0.0469,
+  "fitness_p95": 1.0466,
+  "fitness_max": 1.5314,
+  "prediction_only_count": 1,
+  "prediction_only_ratio": 0.0085,
+  "cropped_target_formal_use_count": 0,
+  "cropped_target_disaster_count": 0,
+  "target_source_counts": {
+    "bootstrap_local_map": 1,
+    "local_map": 117
+  },
+  "manual_diagonal_drift": false,
+  "improvement_summary": {
+    "cropped_target_use": "162 -> 0",
+    "prediction_only": "63 -> 1",
+    "fitness_p95": "7.415 -> 1.047",
+    "fitness_max": "7.913 -> 1.531"
+  }
+}

@@ -1,0 +1,77 @@
+name: repository-and-catkin
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  noetic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container: ros:noetic-ros-base-focal
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Static repository contracts
+        run: |
+          python3 scripts/regression/check_yaml_duplicate_keys.py \
+            $(find .github src/ndt_slam/config -type f \( -name '*.yml' -o -name '*.yaml' \))
+          python3 scripts/regression/check_repository_integrity.py
+          python3 scripts/regression/check_cargo_safety_e2e.py
+          python3 -m compileall -q scripts src/ndt_slam/scripts
+          python3 -m unittest discover -v
+
+      - name: Install ROS build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential cmake git \
+            libboost-filesystem-dev libeigen3-dev libopencv-dev \
+            libpcl-dev libsuitesparse-dev libyaml-cpp-dev \
+            python3-catkin-tools python3-rosdep
+          rosdep update
+          rosdep install --from-paths src --ignore-src --rosdistro noetic -r -y
+
+      - name: Install pinned Sophus and g2o CMake dependencies
+        shell: bash
+        run: |
+          git clone https://github.com/strasdat/Sophus.git /tmp/Sophus
+          git -C /tmp/Sophus checkout 593db47500ea1a2de5f0e6579c86147991509c59
+          cmake -S /tmp/Sophus -B /tmp/Sophus/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF
+          cmake --build /tmp/Sophus/build --parallel 2
+          cmake --install /tmp/Sophus/build
+
+          git clone https://github.com/RainerKuemmerle/g2o.git /tmp/g2o
+          git -C /tmp/g2o checkout 2023_02_14
+          cmake -S /tmp/g2o -B /tmp/g2o/build \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_UNITTESTS=OFF -DBUILD_EXAMPLES=OFF \
+            -DG2O_USE_OPENGL=OFF -DBUILD_CSSOLVER=OFF
+          cmake --build /tmp/g2o/build --parallel 2
+          cmake --install /tmp/g2o/build
+          ldconfig
+
+      - name: Clean catkin build
+        shell: bash
+        run: |
+          source /opt/ros/noetic/setup.bash
+          catkin config --extend /opt/ros/noetic --cmake-args -DCMAKE_BUILD_TYPE=Release
+          catkin clean -y
+          catkin build --no-status
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          source /opt/ros/noetic/setup.bash
+          source devel/setup.bash
+          catkin run_tests --no-status
+          catkin_test_results --verbose

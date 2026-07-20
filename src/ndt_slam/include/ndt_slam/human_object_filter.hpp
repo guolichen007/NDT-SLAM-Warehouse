@@ -7,6 +7,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 
 namespace ndt_slam {
 
@@ -130,6 +131,8 @@ public:
                     const HumanTrackingConfig& tracking_config,
                     const HumanEraserConfig& eraser_config);
 
+    void reset();
+
     // 主处理函数：输入 objects_cloud（base_link），输出 safe_objects
     void processFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud_base,
                       const Eigen::Matrix4d& T_map_base,
@@ -157,6 +160,11 @@ public:
 
     // P1: 获取当前 deny cells 数量
     int getDenyCellCount() const;
+
+    // Return an immutable, resolution-normalized view for background map
+    // maintenance. Expired cells are excluded while holding the filter lock.
+    std::set<std::pair<int, int>> getDenyCellsSnapshot(
+        double target_resolution, double current_time) const;
 
 private:
     // 候选检测
