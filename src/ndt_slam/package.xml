@@ -2,7 +2,7 @@
 <package format="2">
   <name>ndt_slam</name>
   <version>1.0.0</version>
-  <description>Lidar SLAM package with ICP frontend and ESKF backend</description>
+  <description>NDT/EKF warehouse SLAM with long-term layered mapping, suspended-cargo tracking, and cargo safety evaluation.</description>
   <maintainer email="user@example.com">user</maintainer>
   <license>MIT</license>
 
@@ -22,8 +22,19 @@
   <depend>message_filters</depend>
   <depend>message_generation</depend>
   <depend>lidar_slam2_msgs</depend>
-  
+  <depend>eigen</depend>
+  <depend>libboost-filesystem-dev</depend>
+  <depend>libg2o</depend>
+  <depend>libfmt-dev</depend>
+  <depend>libopencv-dev</depend>
+  <depend>libpcl-all-dev</depend>
+  <depend>libyaml-cpp-dev</depend>
+  <depend>ndt_omp</depend>
+
   <exec_depend>roslaunch</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <export>
   </export>

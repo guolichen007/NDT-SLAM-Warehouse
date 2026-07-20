@@ -1,0 +1,7 @@
+#pragma once
+
+namespace ndt_slam::build_info {
+inline constexpr const char* kGitSha = "@NDT_SLAM_GIT_SHA@";
+inline constexpr const char* kGitBranch = "@NDT_SLAM_GIT_BRANCH@";
+inline constexpr const char* kSourceRoot = "@CMAKE_CURRENT_SOURCE_DIR@";
+}  // namespace ndt_slam::build_info

@@ -1,0 +1,32 @@
+name: Server validation
+description: Record a pinned release-candidate deployment or soak result
+title: "[Server Validation] "
+labels: [validation]
+body:
+  - type: input
+    id: sha
+    attributes:
+      label: Deployed exact SHA or RC tag
+    validations:
+      required: true
+  - type: input
+    id: mode
+    attributes:
+      label: Time/mapping mode
+      description: For example use_sim_time=false, persistent_map=true.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Build, test, soak, and safety summary
+      description: Include 14/17/18/30-35, reason, track churn, index revision/cells, RSS and disk.
+    validations:
+      required: true
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Artifact paths or links
+      description: Attach run_manifest.json, final_summary.json, final_report.md, archive SHA256, and list every NOT_RUN item.
+    validations:
+      required: true

@@ -18,7 +18,7 @@
 
     <!-- 点云合并节点 -->
     <node name="pointcloud_merger" pkg="ndt_slam" type="pointcloud_merger" output="screen">
-        <param name="config_file" value="$(find ndt_slam)/config/merger_params.yaml"/>
+        <rosparam command="load" file="$(find ndt_slam)/config/merger_params.yaml"/>
     </node>
 
     <!-- 自动播放bag（如果指定） -->

@@ -4,6 +4,49 @@
 # 调试选项
 debug:
   publish_runtime_path: false  # runtime_path 只是显示辅助，不参与算法
+  runtime_diagnostics:
+    enabled: true
+    # Production console is Cargo/Safety focused. Full localization and timing
+    # diagnostics remain available frame-by-frame in CSV.
+    console_health_enabled: false
+    # Operational terminal is reserved for cargo tracking and safety changes.
+    # Localization/pipeline risk samples remain in the per-frame CSV files.
+    # NDT/pipeline risk details remain in runtime_frames.csv. Immediate ROS
+    # errors (SO3/non-finite/relocalization) are unaffected by this switch.
+    console_risk_enabled: false
+    cargo_console_enabled: true
+    health_period_sec: 10.0
+    risk_repeat_period_sec: 10.0
+    csv_enabled: true
+    output_dir: "/tmp/ndt_slam_runtime_data"
+    csv_flush_period_sec: 1.0
+    warn_consecutive_overrun_frames: 3
+    warn_prediction_only_frames: 3
+    warn_target_fallback_frames: 3
+    warn_cargo_bottom_jump_m: 0.20
+    warn_cargo_height_jump_m: 0.20
+
+# 日志配置
+logging:
+  summary_interval_sec: 10.0
+  warn_throttle_sec: 2.0
+
+  debug_config: false
+  debug_frame_start: false
+  debug_ndt_health: false
+  debug_ekf: false
+  debug_motion_gate: false
+  debug_pose_flow: false
+  debug_map_commit: false
+  debug_perf: false          # Per-frame timing stays in runtime_frames.csv.
+  debug_cargo: false
+  debug_cargo_bottom: false
+  debug_cargo_warning: false
+  debug_tight_box: false
+  debug_dynamic_filter: false
+  debug_odom_anchor: false
+  debug_registration_removal: false
+  debug_hook_removal: false
 
 # 点云话题
 pointcloud_topic: "/merged_points"
@@ -11,6 +54,11 @@ odom_topic: "/odom"
 pose_topic: "/current_pose"
 map_topic: "/map"
 current_cloud_topic: "/mapping_current_cloud"
+
+# Main localization queue. Capacity 1 is the production latest-frame policy:
+# an old frame is overwritten instead of building latency under load.
+processing_queue:
+  capacity: 1
 
 # 坐标系
 odom_frame: "odom"
@@ -43,6 +91,46 @@ ndt_omp:
   step_size: 0.1
   transformation_epsilon: 0.01
   max_iterations: 30          # v8-stable-r3-hotfix-minimal: 从 50 改为 30，与 adaptive_ndt.normal 一致
+  num_threads: 4              # V3: NDT_OMP 多线程加速
+  neighbor_search_method: DIRECT7  # V3: DIRECT7 比 KDTREE 快，搜索相同相邻体素集合
+
+# Asynchronous local/global recovery. The live NDT/EKF path continues while a
+# latest-only worker searches; two independent results must agree before the
+# pose, EKF and Cargo state are switched.
+relocalization:
+  enabled: true
+  trigger_frames: 5
+  global_trigger_frames: 15
+  confirm_frames: 2
+  request_interval_frames: 3
+  result_max_age_frames: 8
+  result_max_age_sec: 0.50
+  cooldown_frames: 12
+  local_xy_window_m: 1.5
+  local_xy_step_m: 1.5
+  local_yaw_window_deg: 12.0
+  local_yaw_step_deg: 12.0
+  global_hint_count: 4
+  global_min_similarity: 0.55
+  confirm_translation_m: 0.35
+  confirm_yaw_deg: 5.0
+  min_source_points: 800
+  min_target_points: 1200
+  max_candidates: 12
+  max_iterations: 35
+  num_threads: 2
+  resolution: 1.0
+  step_size: 0.20
+  transformation_epsilon: 0.01
+  target_crop_radius_m: 18.0
+  source_voxel_m: 0.30
+  target_voxel_m: 0.40
+  max_fitness: 2.0
+  min_probability: 0.0
+  max_local_seed_correction_m: 3.0
+  max_local_seed_yaw_correction_deg: 20.0
+  max_roll_pitch_deg: 3.0
+  max_z_correction_m: 0.50
 
 # 动态点过滤
 dynamic_filter:
@@ -62,6 +150,23 @@ loop_closure:
   enabled: true
   detection_interval: 20
 
+scan_context:
+  num_rings: 20
+  num_sectors: 60
+  max_range: 80.0
+  spatial_search_radius: 8.0
+  similarity_threshold: 0.80
+  translation_threshold: 1.0
+  rotation_threshold: 10.0
+  loop_icp_max_correspondence_m: 1.0
+  loop_icp_max_fitness: 0.50
+  loop_icp_max_correction_translation_m: 1.0
+  loop_icp_max_correction_yaw_deg: 15.0
+  global_icp_max_correspondence_m: 1.5
+  global_icp_max_fitness: 0.80
+  global_icp_max_correction_translation_m: 1.5
+  global_icp_max_correction_yaw_deg: 20.0
+
 # ========== 长期建图配置 ==========
 
 # 长期建图模式
@@ -76,6 +181,29 @@ motion_gate:
   min_rotation_deg: 3.0        # 最小旋转（度）
   min_time_between_keyframes_sec: 2.0  # 最小时间间隔（秒）
 
+stationary_policy:
+  enter_confirm_frames: 20
+  enter_max_raw_increment_m: 0.015
+  enter_max_speed_mps: 0.03
+  position_hold_variance: 0.0025
+  velocity_hold_variance: 0.001
+  exit_confirm_frames: 3
+  exit_min_increment_m: 0.02
+  exit_cumulative_motion_m: 0.15
+  exit_direction_cosine_min: 0.80
+  exit_evidence_window_sec: 1.50
+  exit_min_speed_mps: 0.01
+  exit_force_anchor_drift_m: 0.30
+  moving_confirm_timeout_sec: 1.50
+  catch_up_max_step_m: 0.08
+  catch_up_complete_error_m: 0.03
+  catch_up_confirm_frames: 2
+
+# Visualization continuity only. Safety validity and removal authorization
+# continue to use current CargoBottom evidence without this hold.
+cargo_marker:
+  invalid_hold_sec: 2.0
+
 # 关键帧 active window
 online_cache:
   max_active_keyframes: 80     # 最大活跃关键帧数
@@ -83,7 +211,7 @@ online_cache:
 
 # 磁盘增量保存
 persistent_map:
-  enabled: true
+  enabled: false  # fix/588-runtime-localization-stable: 验证时必须 false
   root_dir: "/home/ydkj/NDT-slam-ws/maps/live/current"
   tile_size_m: 20.0            # tile 大小（米）
   flush_interval_sec: 60       # flush 间隔（秒）
@@ -104,8 +232,11 @@ disk_guard:
 memory_guard:
   enabled: true
   soft_threshold_mb: 6000      # 6GB: 释放缓存 + flush dirty tiles
+  soft_recover_mb: 5500
   hard_threshold_mb: 7000      # 7GB: 暂停地图 commit（NDT/TF 继续）
+  hard_recover_mb: 6500
   emergency_threshold_mb: 8000 # 8GB: 降采样 active map
+  emergency_recover_mb: 7200
   check_interval_sec: 30       # 每 30 秒检查一次
 
 # Active map 重建策略
@@ -178,6 +309,8 @@ dynamic_event_manager:
   placed_bbox_expand_xy: 0.3
   placed_bbox_expand_z: 0.3
   clean_deny_enabled: true
+  enable_cargo_history_clean: true
+  enable_human_history_clean: true
 
 # ========== 人体过滤配置 ==========
 
@@ -341,17 +474,27 @@ crane_motion_ekf:
 
   innovation_gate_m: 0.35
   innovation_reject_m: 1.00
+  # Fitness depends on target density.  Inflate EKF R instead of using a
+  # binary reject cliff; innovation/NIS and the output invariant remain active.
+  reject_high_fitness: false
+  ndt_fitness_reject_threshold: 2.00
+  ndt_fitness_recover_threshold: 0.12
 
   max_speed_x: 2.0
   max_speed_y: 2.0
-  max_accel_x: 1.0
-  max_accel_y: 1.0
+  max_accel_x: 1.5
+  max_accel_y: 1.5
 
   commit_requires_ndt_accept: true
+  map_commit_max_fitness: 2.0
   max_rejected_frames_for_commit: 0
 
   diagonal_mode:
-    enabled: true
+    # Independent axes allow a second trolley axis to start without being
+    # damped as a lateral outlier relative to the previous velocity vector.
+    axis_independent_gate: true
+    enabled: false
+    nis_reject_threshold: 13.82
     min_vx: 0.05
     min_vy: 0.05
     min_speed: 0.10
@@ -365,6 +508,20 @@ crane_motion_ekf:
     max_high_fitness_frames: 10
     max_reject_innovation_frames: 5
     high_fitness_threshold: 0.15
+
+  # V3: 慢帧保护
+  ndt_runtime_guard:
+    enabled: true
+    warn_ms: 100.0
+    emergency_ms: 120.0
+    slow_extra_r: 0.30
+
+  # V3: 物理步长保护
+  crane_motion_limit:
+    max_speed_mps: 2.00
+    max_step_safety_factor: 1.10
+    max_step_min_m: 0.05
+    max_step_max_m: 0.25
 
 # ========== v8-stable-r3-final: SoftYawFilter ==========
 soft_yaw_filter:
@@ -382,11 +539,54 @@ soft_yaw_filter:
 
 # ========== v8-stable-r3-final: Registration Input ==========
 registration_input:
-  ndt_input_voxel_size: 0.30
-  object_weight_repeat: 2
-  ground_sample_ratio: 0.20
-  max_ndt_points: 8000
-  min_objects_for_weighting: 500
+  static_object_voxel_size: 0.22
+  uncertain_candidate_voxel_size: 0.30
+  ground_grid_cell_m: 0.50
+  ground_edge_height_change_m: 0.08
+  static_object_repeat: 2
+  uncertain_candidate_repeat: 1
+  ground_max_fraction: 0.35
+  min_static_object_points: 600
+  min_structure_xy_cells: 40
+  min_registration_points: 2500
+  target_registration_points: 4000
+  max_ndt_points: 6000
+  allow_full_ground_fallback: false
+
+ndt_observability:
+  enabled: true
+  moderate_ratio: 0.20
+  severe_ratio: 0.08
+  moderate_weak_inflation: 5.0
+  severe_weak_inflation: 20.0
+  min_structure_points: 600
+  min_occupied_cells: 40
+  min_local_normals: 80
+  max_normal_samples: 800
+  local_neighbor_count: 10
+  occupancy_cell_m: 0.50
+  min_xy_span_m: 2.0
+  normal_search_radius_m: 0.90
+  min_normal_anisotropy: 0.20
+
+# ========== V3: Localization Target ==========
+localization_target:
+  enabled: true              # legacy: maps to build_enabled
+  build_enabled: true        # continue building target in shadow mode
+  use_for_ndt: false         # PRODUCTION DEFAULT: do NOT bind unvalidated target to NDT
+  use_objects_only_initial: true
+  include_ground_edge: false
+  min_points: 3000
+  max_points: 60000
+  voxel_size: 0.30
+
+  # Cropped cached target
+  crop_enabled: true
+  radius_x: 15.0
+  radius_y: 7.0
+  update_distance_m: 0.50
+  update_yaw_deg: 2.0
+  update_min_interval_frames: 3
 
 # ========== v8-stable-r3-final: Adaptive NDT ==========
 adaptive_ndt:
@@ -425,6 +625,7 @@ icp_refine:
   transformation_epsilon: 0.002
   min_object_points: 800
   max_icp_ms: 15.0
+  max_fitness: 0.50
 
 # ========== v8-stable-r3-final: Debug Publish ==========
 debug_publish:
@@ -438,6 +639,139 @@ rviz_publish:
   current_cloud_rate_hz: 3.0
 
 # ========== HookFixedCargoDetector ==========
+# Hook load voltage is classified by hook_load_state_node and consumed by the
+# SLAM cargo lifecycle through the typed /hook/load_state topic.
+hook_load_signal:
+  enabled: true
+  role: "auxiliary"
+  # Legacy compatibility only; role is authoritative when present.
+  required: false
+  topic: "/gravity"
+  state_topic: "/hook/load_state"
+  publish_hz: 10.0
+  low_threshold_v: 1.90
+  high_threshold_v: 2.10
+  hysteresis_v: 0.03
+  confirm_samples: 2
+  stale_timeout_sec: 2.50
+  consumer_timeout_sec: 3.00
+  valid_voltage_min_v: 0.0
+  valid_voltage_max_v: 6.0
+  diagnostic_disconnect_sec: 10.0
+  # Only independent, localization-valid LiDAR detection frames can confirm
+  # the no-cargo state. Rate-limited frames and heartbeat ticks never count.
+  lidar_empty_confirm_frames: 3
+  origin_history_samples: 10
+  # Origin-height evidence is accepted only from a recent, spatially stable
+  # EMPTY interval and may be consumed by one EMPTY->LOADED lifecycle.
+  origin_history_max_age_sec: 2.0
+  # Gravity may lead an older LiDAR frame by this much without consuming or
+  # discarding the pending origin; a later LiDAR frame performs the binding.
+  origin_future_stamp_tolerance_sec: 0.05
+  origin_history_max_position_spread_m: 0.35
+  origin_match_max_distance_m: 0.50
+  origin_height_max_mad_m: 0.10
+  origin_height_max_range_m: 0.25
+  origin_size_max_relative_deviation: 0.30
+  origin_min_confidence: 0.50
+  formal_removal_max_age_sec: 0.80
+
+cargo_safety:
+  level1_distance_m: 3.0
+  level2_distance_m: 5.0
+  minimum_vertical_clearance_m: 0.80
+  minimum_roi_coverage_ratio: 0.05
+  maximum_obstacle_cloud_age_sec: 0.50
+  # 17/18 need three independent, spatially continuous obstacle clusters.
+  # Sparse/jumping returns remain fail-safe evidence-invalid (34). A confirmed
+  # hazard is released only after two fresh CLEAR evaluations.
+  hazard_confirm_frames: 3
+  clear_confirm_frames: 2
+  # 20 points only keep a diagnostic candidate identity. Phase one authorizes
+  # formal 17/18 only for a large, independently proven static cargo stack.
+  minimum_hazard_cluster_points: 20
+  maximum_evidence_gap_sec: 0.60
+  maximum_centroid_step_m: 0.75
+  maximum_distance_step_m: 0.75
+  maximum_clearance_step_m: 0.75
+  obstacle_track_association_distance_m: 0.75
+  obstacle_track_association_top_step_m: 0.75
+  # Large warehouse stacks retain identity by stable map-frame occupied cells,
+  # even when their visible centroid changes with viewpoint.
+  static_track_cell_overlap_min: 0.20
+  static_track_iou_min: 0.10
+  # OUTSIDE_CARGO_SHELL_ONLY is diagnostic. A static stack can become
+  # independent only after the cargo moves while the stack stays on the same
+  # map cells (or when a future map/pre-cargo source explicitly proves it).
+  static_provenance_min_cargo_motion_m: 0.30
+  obstacle_track_stale_sec: 1.00
+  require_static_cargo_for_warning: true
+  static_cargo_min_voxel_points: 80
+  # Disabled until the upstream merged-cloud message carries an honest raw
+  # return count; never synthesize a raw count from voxelized points.
+  static_cargo_min_raw_equivalent_points: 0
+  static_cargo_min_xy_area_m2: 0.50
+  static_cargo_min_long_side_m: 0.80
+  static_cargo_min_height_span_m: 0.40
+  static_cargo_min_occupied_cells: 12
+  static_cargo_confirm_frames: 8
+  static_cargo_confirm_sec: 1.0
+  obstacle_track_static_velocity_mps: 0.08
+  # Long-term static evidence is built only from the clean objects stream
+  # after Human/Cargo/swept-volume removal. Safety performs a bounded cell
+  # lookup against an immutable snapshot; it never scans tiles per frame.
+  static_map_cell_size_m: 0.25
+  static_map_minimum_observations: 4
+  static_map_minimum_stable_duration_sec: 1.0
+  static_map_minimum_cell_overlap: 0.60
+  static_map_minimum_iou: 0.45
+  static_map_minimum_height_overlap: 0.50
+  static_map_height_tolerance_m: 0.10
+  static_map_minimum_matched_cells: 6
+  static_map_maximum_query_area_cells: 4096
+  static_map_pre_cargo_sequence_gap: 2
+  static_map_max_observation_gap_sec: 0.8
+  static_map_max_sequence_gap: 1
+  motion_corridor_enabled: true
+  motion_corridor_immediate_near_field_m: 0.30
+  motion_corridor_minimum_speed_mps: 0.05
+  motion_corridor_prediction_horizon_sec: 3.0
+  motion_corridor_lateral_margin_m: 0.30
+  motion_corridor_rear_margin_m: 0.30
+  motion_corridor_velocity_alpha: 0.35
+  motion_corridor_maximum_velocity_sample_gap_sec: 0.80
+  # Every cluster inside the complete 0.30 m cargo boundary/uncertainty shell
+  # requires identity-motion or independent static-map provenance.
+  residual_validation_shell_min_m: 0.30
+  residual_minimum_inside_xy_ratio: 0.60
+  residual_minimum_identity_match_ratio: 0.35
+  residual_minimum_surface_band_ratio: 0.50
+  residual_minimum_motion_match_score: 0.70
+  residual_surface_band_below_m: 0.60
+  residual_surface_band_above_m: 0.20
+  # Confirmed 17/18 warnings remain immediately visible and repeat every 5 s.
+  # Non-authoritative pending evidence is summarized at low frequency.
+  safety_console_period_sec: 5.0
+  safety_pending_error_sec: 5.0
+
+status_codes:
+  clear: 14
+  level1: 17
+  level2: 18
+  system_not_ready: 30
+  localization_invalid: 31
+  gravity_invalid: 32
+  cargo_invalid: 33
+  obstacle_invalid: 34
+  internal_error: 35
+
+# Clean-map maintenance receives a bounded owner-thread timeslice even when the
+# latest-only localization queue remains continuously occupied. RViz map
+# serialization runs on its own version-driven worker.
+map_maintenance:
+  interval_commits: 3
+  max_deferral_frames: 5
+
 hook_fixed_cargo_detector:
   enabled: true
 
@@ -495,6 +829,9 @@ hook_fixed_cargo_detector:
 hook_cargo_lock:
   enabled: true
   lock_confirm_frames: 3
+  # Discovery is followed by an identity-aware provisional window. Formal
+  # shape/yaw freezing cannot happen from orientation concentration alone.
+  geometry_confirm_frames: 4
   size_init_window: 5
   lost_hold_sec: 3.0
   lost_clear_sec: 8.0
@@ -504,8 +841,37 @@ hook_cargo_lock:
   size_change_max_ratio: 0.60
   size_update_confirm_frames: 5
   size_update_alpha: 0.15
+  # A suspended cargo is a rigid body. Once lock confirmation finishes, keep
+  # its base-relative box dimensions/height fixed until EMPTY or LOST_CLEAR.
+  freeze_geometry_after_lock: true
+  # The installation only permits horizontal/vertical cargo orientations.
+  # A diagonal partial return may refine the provisional fit, but formal OBB
+  # yaw is snapped to the nearest 0/90-degree axial direction at lock time.
+  axis_aligned_yaw_after_lock: true
+  # Freeze physical thickness, not absolute Z. The overhead LiDAR observes the
+  # upper surface far more reliably than the occluded lower edge, so each
+  # associated frame derives bottom_z = robust_top_z - frozen_thickness.
+  freeze_vertical_position_after_lock: false
+  track_vertical_from_top_surface: true
+  # A top-derived formal bottom still requires fresh, associated physical
+  # support. These gates reject isolated high returns without requiring the
+  # overhead LiDAR to see the occluded lower edge.
+  formal_top_min_support_points: 8
+  formal_top_min_coverage_ratio: 0.02
+  # Direct lower-edge points may corroborate the top-derived center only when
+  # both estimates agree; otherwise the robust upper surface remains primary.
+  top_bottom_center_agreement_m: 0.25
   candidate_hold_sec: 1.0
   candidate_max_weak_frames: 10
+  # Window consensus tolerates two short gaps, but weak detections cannot keep
+  # a non-progressing candidate alive indefinitely.
+  candidate_window_frames: 12
+  candidate_required_consistent_frames: 7
+  candidate_max_gap_frames: 2
+  candidate_progress_timeout_sec: 3.0
+  candidate_absolute_timeout_sec: 8.0
+  candidate_switch_confirm_frames: 3
+  candidate_switch_margin: 0.08
   bottom_alpha_points: 0.30
   bottom_alpha_memory: 0.15
   bottom_hold_uncertainty_growth: 0.02
@@ -517,16 +883,71 @@ hook_cargo_lock:
   locked_update_max_z_jump: 0.45
   locked_update_max_top_jump: 0.60
   locked_update_min_points: 20
+  minimum_identity_confidence: 0.62
+  minimum_overall_lock_confidence: 0.68
+  maximum_provisional_shape_cv: 0.20
+  minimum_candidate_score_margin: 0.08
+  suspension_confirm_frames: 3
+  minimum_lift_from_origin_m: 0.25
+  reacquisition_overlap_extra: 0.10
+  residual_uncertainty_decay: 0.80
+  live_pose_center_alpha: 0.45
+  # Physical rate limits are sensor-dt based; the margin absorbs quantization
+  # and association noise without imposing a frame-rate-dependent speed cap.
+  live_pose_max_xy_speed_mps: 2.0
+  live_pose_max_z_speed_mps: 1.5
+  live_pose_step_margin_m: 0.05
+  live_pose_velocity_alpha: 0.35
+  # LOST_HOLD remains visible for lost_clear_sec, but formal safety/removal may
+  # only use prediction/held evidence inside this short window.
+  formal_xy_evidence_hold_sec: 2.00
+  formal_vertical_evidence_hold_sec: 2.00
+  direct_bottom_soft_stale_sec: 2.00
+  velocity_model_uncertainty_mps: 0.05
+  association_max_xy_gate_m: 0.80
+  reacquisition_max_xy_gate_m: 0.55
+  association_max_z_gate_m: 0.90
+  reacquisition_max_z_gate_m: 0.65
+  locked_obb_min_support_ratio: 0.30
+  locked_obb_min_long_axis_coverage: 0.12
+  locked_obb_min_short_axis_coverage: 0.12
+  lost_velocity_decay_tau_sec: 0.30
+  rearm_empty_confirm_sec: 1.0
+  self_cargo_base_margin_xy_m: 0.15
+  self_cargo_base_margin_z_m: 0.12
+  self_cargo_max_margin_xy_m: 0.40
+  self_cargo_max_margin_z_m: 0.30
+  # The merged input uses 0.15 m voxels. Match at that same scale, but only
+  # inside the current/previous/swept OBB neighborhood; this closes voxel
+  # centroid jitter without deleting nearby external obstacles globally.
+  self_cargo_point_match_radius_m: 0.15
+  # A narrow line mask follows the suspension path from cargo top to the
+  # configured hook anchor; it removes rope/hook returns, not a broad volume.
+  self_rigging_radius_m: 0.10
+  lost_position_uncertainty_per_sec: 0.05
+  lost_position_uncertainty_max_m: 0.50
 
   # 锁定时 strong 条件（比更新时更严格）
   lock_strong_min_points: 80
   lock_min_visible_height: 0.50
   lock_min_xy_area: 0.40
+  lock_max_center_step_m: 0.30
+  compact_lock_enabled: true
+  compact_min_points: 40
+  compact_min_visible_height: 0.18
+  compact_min_xy_area: 0.12
+  compact_confirm_frames: 5
+  compact_max_size_relative_step: 0.25
+  # Gravity EMPTY may keep a pre-lift candidate, but cannot lock until the
+  # LiDAR bottom is this far above the external ground reference.
+  suspended_min_ground_clearance_m: 0.30
 
   # locked search margin
   locked_search_margin_x: 0.30
   locked_search_margin_y: 0.30
 
+  # 启用吊物点云去除
+  enable_hook_cargo_removal: true
 
 # ========== OdomAnchorBox 配置 ==========
 odom_anchored_cargo_box:
@@ -570,7 +991,7 @@ odom_anchored_cargo_box:
   min_size_x: 0.60
   min_size_y: 0.40
   min_size_z: 0.20
-  max_size_x: 2.50
+  max_size_x: 4.00
   max_size_y: 1.60
   max_size_z: 2.00
 
@@ -594,112 +1015,83 @@ odom_anchored_cargo_box:
   lost_hold_sec: 5.0
   lost_clear_sec: 15.0
 
-  # ========== Tight Box 配置 ==========
   tight_box:
     enabled: true
-
-    # 软对称模式，避免一侧杂点把整框撑大
-    anchor_symmetry_mode: "soft"     # strict / soft / off
+    anchor_symmetry_mode: "soft"
     max_center_offset_m: 0.35
-
-    # HAG 预过滤，过滤地面反射和高处吊具/绳索
     hag_filter_enabled: true
     hag_min_m: 0.15
     hag_max_m: 2.50
-
-    # 分位数参数，比原 p05/p95 稍微收紧
+    # Never use the payload ROI minimum as ground. Ground is accepted only
+    # from a spatially distributed ring outside the payload crop.
+    ground_ring_width_m: 2.0
+    ground_cell_size_m: 0.50
+    ground_min_cells: 4
+    ground_min_points_per_cell: 3
+    # Reject a geometrically one-sided ring. Three quadrants are preferred;
+    # two directly opposite sides are also sufficient in narrow aisles.
+    ground_min_quadrants: 3
+    ground_allow_opposite_sides: true
+    ground_max_range_m: 0.15
+    # base_link is ground-referenced in this deployment. Reject a coherent
+    # raised shelf/platform that would otherwise look like flat ground.
+    ground_expected_height_enabled: true
+    ground_expected_height_m: 0.0
+    ground_max_expected_height_delta_m: 0.30
+    # Only this many HAG residual points are treated as sensor noise. Any
+    # larger unclustered residual keeps the cargo observation UNKNOWN.
+    empty_max_hag_candidate_points: 2
     percentile_low: 0.08
     percentile_high: 0.92
-
-    # 框扩展 margin
     margin_xy_m: 0.05
     margin_z_m: 0.03
-
-    # LOCKED 后仍允许尺寸自适应
-    size_update_mode: "adaptive"     # locked / adaptive
+    size_update_mode: "adaptive"
     size_update_alpha: 0.30
     max_size_change_per_frame_m: 0.10
-
-    # 子簇重聚类，尽量把吊具/绳索/货物分开
-    sub_cluster_enabled: true
+    # Identity selection and geometry must consume the same full component.
+    sub_cluster_enabled: false
     sub_cluster_tolerance_m: 0.10
     sub_cluster_min_points: 20
+    # Keep local Euclidean components conservative. Disconnected returns from
+    # one long cargo are fused only by axial/z-overlap hypotheses.
+    component_cluster_tolerance_m: 0.20
+    component_merge_longitudinal_gap_m: 0.60
+    component_merge_lateral_gap_m: 0.35
+    component_merge_max_yaw_difference_deg: 15.0
+    component_merge_min_z_overlap_ratio: 0.30
+    component_merge_max_components: 3
+    # Preserve the detected cargo's own footprint direction. Square/ambiguous
+    # observations fall back to the conservative axis-aligned box.
+    orientation_enabled: true
+    orientation_min_points: 20
+    orientation_min_geometric_aspect_ratio: 1.20
+    orientation_min_eigenvalue_ratio: 1.44
+    orientation_min_concentration: 0.70
+    orientation_min_confirm_frames: 3
+    orientation_max_yaw_spread_deg: 12.0
 
-  # ========== Cargo Warning 配置 ==========
-  # 注意：当前版本为 tightbox baseline，正式避障报警仍在开发中
   cargo_warning:
     enabled: true
-    publish_alarm_msg: false  # 不向外发布正式报警，只发布 debug marker
+    publish_alarm_msg: false
     publish_debug_marker: true
-
     level1_distance_m: 3.0
     level2_distance_m: 5.0
     min_vertical_clearance_m: 0.80
-
     cargo_bottom_use_uncertainty: true
     cargo_bottom_extra_margin_m: 0.05
-
     obstacle_top_percentile: 0.95
     obstacle_min_points: 5
     obstacle_cluster_tolerance_m: 0.25
-
+    maximum_obstacle_cloud_age_sec: 0.50
+    minimum_roi_finite_points: 20
+    minimum_roi_coverage_ratio: 0.05
     exclude_ground: true
     ground_hag_min_m: 0.20
-
     exclude_self_cargo: true
     self_cargo_margin_xy_m: 0.45
     self_cargo_margin_z_m: 0.35
-
     debounce_frames: 2
     clear_hold_sec: 0.5
-
     level1_alarm_code: 17
     level2_alarm_code: 18
-    clear_alarm_code: 0
-
-# ========== HookCargoLock 状态机 ==========
-hook_cargo_lock:
-  enabled: true
-  lock_confirm_frames: 3
-  size_init_window: 5
-  lost_hold_sec: 3.0
-  lost_clear_sec: 8.0
-  strong_min_points: 30
-  weak_min_points: 5
-  size_change_min_ratio: 0.20
-  size_change_max_ratio: 0.60
-  size_update_confirm_frames: 5
-  size_update_alpha: 0.15
-  candidate_hold_sec: 1.0
-  candidate_max_weak_frames: 10
-  bottom_alpha_points: 0.30
-  bottom_alpha_memory: 0.15
-  bottom_hold_uncertainty_growth: 0.02
-  bottom_max_uncertainty: 0.35
-
-  # locked association gate
-  locked_update_max_center_dist: 0.65
-  locked_update_min_overlap_ratio: 0.30
-  locked_update_max_z_jump: 0.45
-  locked_update_max_top_jump: 0.60
-  locked_update_min_points: 20
-
-  # 锁定时 strong 条件（比更新时更严格）
-  lock_strong_min_points: 80
-  lock_min_visible_height: 0.50
-  lock_min_xy_area: 0.40
-
-  # locked search margin
-  locked_search_margin_x: 0.30
-  locked_search_margin_y: 0.30
-
-  # 启用吊物点云去除
-  enable_hook_cargo_removal: true
-
-# ========== CraneMotionEKF 配置 ==========
-crane_motion_ekf:
-  innovation_gate_m: 0.35
-  innovation_reject_m: 1.00
-  reject_high_fitness: true
-  ndt_fitness_reject_threshold: 0.30
-  ndt_fitness_recover_threshold: 0.12
+    clear_alarm_code: 14

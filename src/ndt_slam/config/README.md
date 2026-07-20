@@ -113,7 +113,7 @@ ros2 run ndt_slam ndt_slam_node --ros-args \
     odom_neighbor_search_radius: 0.3
     odom_use_corner_extraction: true
     odom_corner_curvature_threshold: 0.12
-    
+
     # 建图参数
     map_voxel_size: 0.2
     max_map_size: 200.0
@@ -205,7 +205,7 @@ ros2 launch ndt_slam mapping.launch 2>&1 | grep -E "ICP|预处理|角点"
 
 ### Q2: 位姿估计漂移大？
 
-**A**: 
+**A**:
 1. 启用角点提取：`odom_use_corner_extraction:=true`
 2. 降低 `odom_corner_curvature_threshold` 到 0.1
 3. 减小 `odom_convergence_threshold` 到 0.0001

@@ -1,9 +1,11 @@
 #include "ndt_slam/keyframe_manager.hpp"
+#include "ndt_slam/rigid_transform_conversion.hpp"
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/common/transforms.h>
 #include <pcl/io/pcd_io.h>
 #include <Eigen/Geometry>
 #include <yaml-cpp/yaml.h>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -175,7 +177,26 @@ bool KeyFrameManager::loadKeyFrameDatabase(const std::string& session_dir) {
                 continue;
             }
 
-            Sophus::SE3d pose(Eigen::Quaterniond(qw, qx, qy, qz), Eigen::Vector3d(tx, ty, tz));
+            Eigen::Quaterniond quaternion(qw, qx, qy, qz);
+            const Eigen::Vector3d translation(tx, ty, tz);
+            if (!quaternion.coeffs().allFinite() ||
+                !translation.allFinite() ||
+                !std::isfinite(quaternion.norm()) ||
+                quaternion.norm() <= 1.0e-12) {
+                ROS_WARN("Skipping invalid serialized keyframe pose id=%llu",
+                         static_cast<unsigned long long>(id));
+                continue;
+            }
+            quaternion.normalize();
+            const SafeSE3Result converted = makeSafeSE3(
+                quaternion.toRotationMatrix(), translation);
+            if (!converted.valid) {
+                ROS_WARN("Skipping keyframe pose id=%llu reason=%s",
+                         static_cast<unsigned long long>(id),
+                         converted.diagnostics.reason.c_str());
+                continue;
+            }
+            const Sophus::SE3d pose = converted.pose;
             ros::Time stamp;
             stamp.sec = static_cast<uint32_t>(timestamp);
             stamp.nsec = static_cast<uint32_t>((timestamp - stamp.sec) * 1e9);
@@ -243,9 +264,29 @@ bool KeyFrameManager::loadOptimizedPoses(const std::string& filepath) {
             continue;
         }
 
+        Eigen::Quaterniond quaternion(qw, qx, qy, qz);
+        const Eigen::Vector3d translation(tx, ty, tz);
+        if (!quaternion.coeffs().allFinite() ||
+            !translation.allFinite() ||
+            !std::isfinite(quaternion.norm()) ||
+            quaternion.norm() <= 1.0e-12) {
+            ROS_WARN("Skipping invalid optimized pose id=%llu",
+                     static_cast<unsigned long long>(id));
+            continue;
+        }
+        quaternion.normalize();
+        const SafeSE3Result converted = makeSafeSE3(
+            quaternion.toRotationMatrix(), translation);
+        if (!converted.valid) {
+            ROS_WARN("Skipping optimized pose id=%llu reason=%s",
+                     static_cast<unsigned long long>(id),
+                     converted.diagnostics.reason.c_str());
+            continue;
+        }
+
         for (auto& kf : keyframes_) {
             if (kf.id_ == id) {
-                kf.pose_refined_ = Sophus::SE3d(Eigen::Quaterniond(qw, qx, qy, qz), Eigen::Vector3d(tx, ty, tz));
+                kf.pose_refined_ = converted.pose;
                 kf.has_refined_pose_ = true;
                 break;
             }
@@ -265,6 +306,14 @@ void KeyFrameManager::updateKeyFramePose(uint64_t id, const Sophus::SE3d& new_po
             break;
         }
     }
+}
+
+void KeyFrameManager::clear() {
+    keyframes_.clear();
+    spatial_index_.clear();
+    last_keyframe_id_ = 0U;
+    last_keyframe_time_ = ros::Time(0);
+    last_keyframe_pose_ = Sophus::SE3d();
 }
 
 } // namespace ndt_slam

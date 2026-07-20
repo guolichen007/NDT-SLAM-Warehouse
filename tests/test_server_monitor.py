@@ -1,0 +1,152 @@
+import csv
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+OPS = Path(__file__).resolve().parents[1] / "src" / "ndt_slam" / "scripts" / "ops"
+sys.path.insert(0, str(OPS))
+
+from server_runtime_monitor import (  # noqa: E402
+    SafetyAggregator,
+    append_csv,
+    atomic_write_json,
+    is_runtime_status_stale,
+    normalize_timeout_status,
+)
+from summarize_server_run import summarize  # noqa: E402
+
+
+def sample(code, reason="ok", track=0, **extra):
+    value = {
+        "requested_alarm_code": code,
+        "reason": reason,
+        "obstacle_track_id": track,
+        "obstacle_provenance_valid": True,
+        "obstacle_large_geometry_valid": True,
+    }
+    value.update(extra)
+    return value
+
+
+class SafetyAggregatorTest(unittest.TestCase):
+    def test_sliding_window_code_duration(self):
+        aggregate = SafetyAggregator((4,))
+        aggregate.ingest(sample(34), source_stamp=1, wall_time=0)
+        aggregate.ingest(sample(14), source_stamp=2, wall_time=2)
+        summary = aggregate.summarize(now=4, window=4)
+        self.assertAlmostEqual(summary["code_duration_sec"]["34"], 2.0)
+        self.assertAlmostEqual(summary["code_duration_sec"]["14"], 2.0)
+
+    def test_code_and_reason_transitions(self):
+        aggregate = SafetyAggregator()
+        first = aggregate.ingest(sample(14, "clear"), source_stamp=1, wall_time=1)
+        reason = aggregate.ingest(sample(14, "new_reason"), source_stamp=2, wall_time=2)
+        warning = aggregate.ingest(sample(17, "hazard"), source_stamp=3, wall_time=3)
+        self.assertEqual(first[0]["event"], "SAFETY_ENTER")
+        self.assertEqual(reason[0]["event"], "SAFETY_REASON_CHANGE")
+        self.assertEqual(warning[0]["event"], "SAFETY_WARNING_ENTER")
+
+    def test_longest_continuous_33_and_34(self):
+        aggregate = SafetyAggregator()
+        aggregate.ingest(sample(33), source_stamp=1, wall_time=0)
+        aggregate.ingest(sample(14), source_stamp=2, wall_time=3)
+        aggregate.ingest(sample(34), source_stamp=3, wall_time=4)
+        aggregate.ingest(sample(14), source_stamp=4, wall_time=9)
+        summary = aggregate.summarize(now=10)
+        self.assertEqual(summary["longest_33_sec"], 3)
+        self.assertEqual(summary["longest_34_sec"], 5)
+
+    def test_34_recovery_and_warning_confirmation(self):
+        aggregate = SafetyAggregator()
+        aggregate.ingest(sample(34), source_stamp=1, wall_time=0)
+        aggregate.ingest(sample(14), source_stamp=2, wall_time=2)
+        aggregate.ingest(sample(34), source_stamp=3, wall_time=4)
+        aggregate.ingest(sample(18), source_stamp=4, wall_time=7)
+        summary = aggregate.summarize(now=8)
+        self.assertEqual(summary["recovery_34_to_14_sec"], [2])
+        self.assertEqual(summary["confirmation_34_to_warning_sec"], [3])
+
+    def test_track_churn_per_minute(self):
+        aggregate = SafetyAggregator()
+        aggregate.ingest(sample(14, track=1), source_stamp=1, wall_time=0)
+        aggregate.ingest(sample(14, track=2), source_stamp=2, wall_time=30)
+        aggregate.ingest(sample(14, track=0), source_stamp=3, wall_time=60)
+        summary = aggregate.summarize(now=60)
+        self.assertGreaterEqual(summary["track_churn_per_min"], 2.0)
+        self.assertEqual(summary["unique_obstacle_tracks"], 2)
+
+    def test_repeated_timestamp_is_not_new_evidence(self):
+        aggregate = SafetyAggregator()
+        aggregate.ingest(sample(34), source_stamp=10, wall_time=1)
+        aggregate.ingest(sample(14), source_stamp=10, wall_time=2)
+        self.assertEqual(len(aggregate.records), 1)
+        self.assertEqual(aggregate.duplicate_stamps, 1)
+        self.assertEqual(aggregate.records[-1].code, 34)
+
+    def test_time_rollback_starts_new_monitor_epoch(self):
+        aggregate = SafetyAggregator()
+        aggregate.ingest(sample(34), source_stamp=100, wall_time=1)
+        events = aggregate.ingest(sample(14), source_stamp=1, wall_time=2)
+        self.assertEqual(len(aggregate.records), 2)
+        self.assertEqual(aggregate.time_rollbacks, 1)
+        self.assertEqual(events[0]["event"], "SOURCE_TIME_ROLLBACK")
+
+    def test_duplicate_status_code_mismatch_is_suppressed(self):
+        aggregate = SafetyAggregator()
+        aggregate.ingest(sample(34), source_stamp=1, wall_time=1)
+        self.assertIsNotNone(aggregate.check_status_code(17, wall_time=1.1))
+        self.assertIsNone(aggregate.check_status_code(17, wall_time=1.2))
+        self.assertEqual(aggregate.status_code_mismatches, 1)
+
+
+class AppendSafeOutputTest(unittest.TestCase):
+    def test_atomic_live_summary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "live_summary.json"
+            atomic_write_json(path, {"generation": 1})
+            atomic_write_json(path, {"generation": 2})
+            self.assertEqual(json.loads(path.read_text())["generation"], 2)
+            self.assertFalse(path.with_name(path.name + ".tmp").exists())
+
+    def test_csv_header_is_not_overwritten_on_restart(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "samples.csv"
+            append_csv(path, ["stamp", "code"], {"stamp": 1, "code": 34})
+            append_csv(path, ["stamp", "code"], {"stamp": 2, "code": 14})
+            with path.open(newline="") as stream:
+                rows = list(csv.reader(stream))
+            self.assertEqual(rows[0], ["stamp", "code"])
+            self.assertEqual(len(rows), 3)
+
+    def test_timeout_124_is_normal_completion(self):
+        self.assertEqual(normalize_timeout_status(124), 0)
+        self.assertEqual(normalize_timeout_status(7), 7)
+
+    def test_stale_runtime_status(self):
+        self.assertTrue(is_runtime_status_stale(None, 10, 5))
+        self.assertTrue(is_runtime_status_stale(1, 10, 5))
+        self.assertFalse(is_runtime_status_stale(8, 10, 5))
+
+    def test_final_report_preserves_not_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            atomic_write_json(run_dir / "run_manifest.json", {
+                "run_id": "offline-test", "expected_sha": "abc",
+                "ubuntu_clean_build": "NOT_RUN", "ubuntu_gtests": "NOT_RUN",
+                "bag_validation": "NOT_RUN", "server_soak": "NOT_RUN"})
+            append_csv(run_dir / "samples/safety_samples.csv",
+                       ["wall_time", "source_stamp", "requested_alarm_code", "reason"],
+                       {"wall_time": 1, "source_stamp": 1,
+                        "requested_alarm_code": 14, "reason": "clear"})
+            append_csv(run_dir / "samples/runtime_samples.csv",
+                       ["wall_time", "rss_mb", "disk_free_gb"],
+                       {"wall_time": 1, "rss_mb": 100, "disk_free_gb": 50})
+            summary = summarize(run_dir)
+            self.assertEqual(summary["overall"], "NOT_RUN")
+            self.assertTrue((run_dir / "reports/final_report.md").is_file())
+
+
+if __name__ == "__main__":
+    unittest.main()

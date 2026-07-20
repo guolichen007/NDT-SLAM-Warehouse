@@ -1,0 +1,36 @@
+{
+  "status": "PASS",
+  "test_date": "2026-07-10",
+  "base_sha": "3f7283d2cb0de8612adff31ac51fdf127effac11",
+  "fix_sha": "acd83b3",
+  "bag_sha256": "a6805f48ca0cccf231370045808c60ca1c623ac2c6bf2c7b9ec05b804d7df33c",
+  "playback_rate": 1.0,
+  "mode": "full",
+  "processed_frames": 348,
+  "ndt_convergence_ratio": 0.9971,
+  "total_ms_p50": 407.93,
+  "total_ms_p95": 486.05,
+  "total_ms_p99": 550.77,
+  "fitness_p50": 0.0563,
+  "fitness_p95": 0.1231,
+  "fitness_max": 0.2266,
+  "prediction_only_count": 5,
+  "prediction_only_ratio": 0.0144,
+  "max_prediction_streak": 4,
+  "cropped_target_formal_use_count": 0,
+  "cropped_target_disaster_count": 0,
+  "target_source_counts": {
+    "bootstrap_local_map": 1,
+    "local_map": 347
+  },
+  "manual_diagonal_drift": false,
+  "absolute_accuracy_verified": false,
+  "improvement_summary": {
+    "fitness_p95": "7.415 -> 0.123",
+    "fitness_max": "7.913 -> 0.227",
+    "prediction_only": "63 -> 5",
+    "prediction_only_ratio": "0.174 -> 0.014",
+    "max_prediction_streak": "34 -> 4",
+    "cropped_target_disasters": "162 -> 0"
+  }
+}
