@@ -311,6 +311,8 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
         "/cargo_avoidance/fused_box_marker", 2);
     cargo_static_evidence_debug_pub_ = nh_.advertise<std_msgs::String>(
         "/cargo_avoidance/static_evidence_debug", 1);
+    cargo_geometry_debug_pub_ = nh_.advertise<std_msgs::String>(
+        "/cargo_avoidance/cargo_geometry_debug", 5);
 
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
@@ -465,6 +467,8 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         "/cargo_avoidance/fused_box_marker", 2);
     cargo_static_evidence_debug_pub_ = nh_.advertise<std_msgs::String>(
         "/cargo_avoidance/static_evidence_debug", 1);
+    cargo_geometry_debug_pub_ = nh_.advertise<std_msgs::String>(
+        "/cargo_avoidance/cargo_geometry_debug", 5);
 
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
@@ -14932,6 +14936,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     cargo_safety_status_pub_.publish(safety_msg);
     logCargoSafetyStatus(safety_msg);
     publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_, stamp);
+    publishCargoGeometryDebug(last_cargo_bottom_result_, stamp);
 }
 
 void NdtSlamNode::publishPayloadTrackInfoFromFusion(
@@ -15247,6 +15252,123 @@ void NdtSlamNode::publishPayloadTrackInfoFromOdomAnchorBox(const ros::Time& stam
     }
 
     payload_track_info_pub_.publish(msg);
+}
+
+void NdtSlamNode::publishCargoGeometryDebug(
+    const CargoBottomResult& bottom,
+    const ros::Time& stamp) {
+    if (cargo_geometry_debug_pub_.getNumSubscribers() == 0) {
+        return;
+    }
+
+    const auto& geo = bottom.geometry;
+    const auto& stats = bottom.selected_stats;
+
+    // CargoBottomSource → string
+    const char* source_str = "UNKNOWN";
+    switch (bottom.source) {
+        case CargoBottomSource::INVALID:      source_str = "INVALID"; break;
+        case CargoBottomSource::POINTS:       source_str = "MEASURED"; break;
+        case CargoBottomSource::MAP_DIFF:     source_str = "MAP_DIFF"; break;
+        case CargoBottomSource::MAP_STATIC:   source_str = "MAP_STATIC"; break;
+        case CargoBottomSource::RECENT_STABLE: source_str = "RECENT_STABLE"; break;
+        case CargoBottomSource::ORIGIN_HEIGHT: source_str = "ORIGIN_HEIGHT"; break;
+        default: break;
+    }
+
+    // CargoState::State → string
+    const char* track_state_str = "UNKNOWN";
+    switch (cargo_state_.state) {
+        case decltype(cargo_state_)::EMPTY:     track_state_str = "EMPTY"; break;
+        case decltype(cargo_state_)::CANDIDATE: track_state_str = "CANDIDATE"; break;
+        case decltype(cargo_state_)::LOCKED:    track_state_str = "LOCKED"; break;
+        case decltype(cargo_state_)::LOST:      track_state_str = "LOST"; break;
+        default: break;
+    }
+
+    // HookCargoLockState → string
+    const char* lock_state_str = "UNKNOWN";
+    switch (hook_lock_.state) {
+        case HookCargoLockState::EMPTY:               lock_state_str = "EMPTY"; break;
+        case HookCargoLockState::CANDIDATE:           lock_state_str = "CANDIDATE"; break;
+        case HookCargoLockState::GEOMETRY_CONFIRMING: lock_state_str = "GEOMETRY_CONFIRMING"; break;
+        case HookCargoLockState::LOCKED:              lock_state_str = "LOCKED"; break;
+        case HookCargoLockState::LOST_HOLD:           lock_state_str = "LOST_HOLD"; break;
+        case HookCargoLockState::CLEAR_WAIT_REARM:    lock_state_str = "CLEAR_WAIT_REARM"; break;
+        default: break;
+    }
+
+    // Compute yaw from corners if geometry is valid
+    double yaw_deg = 0.0;
+    if (geo.valid && bottom.geometry_valid) {
+        Eigen::Vector3f forward = geo.corners_base[1] - geo.corners_base[0];
+        yaw_deg = std::atan2(static_cast<double>(forward.y()),
+                             static_cast<double>(forward.x())) * 180.0 / M_PI;
+    }
+
+    bool is_authoritative = (bottom.source == CargoBottomSource::POINTS &&
+                             bottom.valid && bottom.geometry_valid);
+    bool is_fallback = false;  // reserved for future fallback envelope
+
+    char json_buf[2048];
+    std::snprintf(json_buf, sizeof(json_buf),
+        "{"
+        "\"stamp\":%.6f,"
+        "\"frame_id\":\"odom\","
+        "\"track_id\":%llu,"
+        "\"track_state\":\"%s\","
+        "\"lock_state\":\"%s\","
+        "\"geometry_source\":\"%s\","
+        "\"authoritative\":%s,"
+        "\"observation_valid\":%s,"
+        "\"height_valid\":%s,"
+        "\"points\":%zu,"
+        "\"support\":%zu,"
+        "\"confidence\":%.4f,"
+        "\"center_x\":%.4f,"
+        "\"center_y\":%.4f,"
+        "\"center_z\":%.4f,"
+        "\"length_m\":%.4f,"
+        "\"width_m\":%.4f,"
+        "\"height_m\":%.4f,"
+        "\"yaw_deg\":%.4f,"
+        "\"bottom_z\":%.4f,"
+        "\"top_z\":%.4f,"
+        "\"vertical_source\":\"%s\","
+        "\"failure_reason\":\"%s\","
+        "\"hook_load_state\":\"%s\","
+        "\"gravity_voltage\":0.0,"
+        "\"gravity_age_sec\":0.0,"
+        "\"fallback_active\":%s"
+        "}",
+        stamp.toSec(),
+        static_cast<unsigned long long>(bottom.track_id),
+        track_state_str,
+        lock_state_str,
+        source_str,
+        is_authoritative ? "true" : "false",
+        (bottom.valid && bottom.geometry_valid) ? "true" : "false",
+        bottom.height_valid ? "true" : "false",
+        static_cast<std::size_t>(stats.finite_points),
+        static_cast<std::size_t>(stats.bottom_band_points),
+        static_cast<double>(bottom.valid ? bottom.confidence : 0.0),
+        static_cast<double>(geo.center_base.x()),
+        static_cast<double>(geo.center_base.y()),
+        static_cast<double>(geo.center_base.z()),
+        static_cast<double>(geo.size_base.x()),
+        static_cast<double>(geo.size_base.y()),
+        static_cast<double>(geo.size_base.z()),
+        yaw_deg,
+        static_cast<double>(geo.bottom_z_base),
+        static_cast<double>(geo.top_z_base),
+        bottom.source_name.c_str(),
+        bottom.valid ? bottom.reason.c_str() : "invalid",
+        lock_state_str,  // hook_load_state placeholder - same as lock_state
+        is_fallback ? "true" : "false");
+
+    std_msgs::String msg;
+    msg.data = json_buf;
+    cargo_geometry_debug_pub_.publish(msg);
 }
 
 // ========== 发布无效 payload_track_info ==========

@@ -645,7 +645,89 @@ class RosRuntimeMonitor:
                          self._code_callback, queue_size=100)
         rospy.Subscriber("/cargo_avoidance/static_evidence_debug", String,
                          self._static_callback, queue_size=20)
+        rospy.Subscriber("/cargo_avoidance/cargo_geometry_debug", String,
+                         self._cargo_geometry_callback, queue_size=50)
         rospy.Subscriber("/rosout_agg", Log, self._rosout_callback, queue_size=200)
+
+        # Track-level geometry sample filtering state
+        self._geo_track_samples: Dict[int, int] = {}
+        self._geo_track_episodes: Dict[int, str] = {}
+        self._geo_last_authoritative: Dict[int, float] = {}
+
+    def _cargo_geometry_callback(self, message: Any) -> None:
+        """Filter and save authoritative measured geometry samples only."""
+        wall = time.time()
+        text = str(message.data)
+        self.writer.submit("jsonl", ("samples/cargo_geometry_samples.jsonl",
+                                     {"wall_time": wall, "raw": text}))
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(parsed, dict):
+            return
+
+        # CSV record all samples (for debugging)
+        csv_fields = [
+            "wall_time", "stamp", "track_id", "track_state", "lock_state",
+            "geometry_source", "authoritative", "observation_valid", "height_valid",
+            "points", "support", "confidence",
+            "center_x", "center_y", "center_z",
+            "length_m", "width_m", "height_m", "yaw_deg",
+            "bottom_z", "top_z", "vertical_source", "failure_reason",
+            "hook_load_state", "gravity_voltage", "gravity_age_sec",
+            "fallback_active"
+        ]
+        row = {"wall_time": wall}
+        for field in csv_fields[1:]:  # skip wall_time which we already set
+            row[field] = parsed.get(field, "")
+        self.writer.submit("csv", ("samples/cargo_geometry_samples.csv", csv_fields, row))
+
+        # Filter: only authoritative measured geometry
+        geo_source = str(parsed.get("geometry_source", ""))
+        authoritative = parsed.get("authoritative", False)
+        track_state = str(parsed.get("track_state", ""))
+        height_valid = parsed.get("height_valid", False)
+        observation_valid = parsed.get("observation_valid", False)
+        support = int(parsed.get("support", 0))
+        points = int(parsed.get("points", 0))
+        confidence = float(parsed.get("confidence", 0.0))
+
+        # Rejection rules from plan
+        if geo_source != "MEASURED":
+            return  # DISPLAY_FROZEN, DEFAULT_FALLBACK, NONE rejected
+        if not authoritative:
+            return
+        if track_state != "LOCKED":
+            return  # EMPTY, LOCKING, LOST_HOLD rejected
+        if not observation_valid:
+            return
+        if not height_valid:
+            return
+        if support <= 0:
+            return
+        if points <= 0:
+            return
+        if confidence <= 0.0:
+            return
+        dims = [float(parsed.get(k, 0.0)) for k in ("length_m", "width_m", "height_m")]
+        if any(v <= 0.0 or not math.isfinite(v) for v in dims):
+            return
+
+        # Save filtered authoritative sample
+        filtered = dict(parsed)
+        filtered["wall_time"] = wall
+        self.writer.submit("jsonl", ("samples/cargo_geometry_authoritative.jsonl", filtered))
+        filtered_csv = {"wall_time": wall}
+        for field in csv_fields[1:]:
+            filtered_csv[field] = parsed.get(field, "")
+        self.writer.submit("csv", ("samples/cargo_geometry_authoritative.csv",
+                                   csv_fields, filtered_csv))
+
+        # Track per-track_id sample count
+        track_id = int(parsed.get("track_id", 0))
+        if track_id > 0:
+            self._geo_track_samples[track_id] = self._geo_track_samples.get(track_id, 0) + 1
 
     def _odom_callback(self, message: Any) -> None:
         wall = time.time()

@@ -1888,6 +1888,10 @@ private:
     ros::Publisher cargo_raw_status_code_pub_;
     ros::Publisher cargo_fused_box_marker_pub_;
     ros::Publisher cargo_static_evidence_debug_pub_;
+    ros::Publisher cargo_geometry_debug_pub_;
+
+    void publishCargoGeometryDebug(const CargoBottomResult& bottom,
+                                   const ros::Time& stamp);
 
     CargoBottomFusion cargo_bottom_fusion_;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
