@@ -638,6 +638,24 @@ class RosRuntimeMonitor:
         self.filesystem_cache: Dict[str, Any] = {}
         self.last_cpu_sample: Optional[Tuple[float, int]] = None
 
+        # Motion episode tracking
+        motion_cfg = config.get("motion_capture", {})
+        self._motion_enter_speed = float(motion_cfg.get("enter_speed_mps", 0.08))
+        self._motion_enter_confirm = float(motion_cfg.get("enter_confirm_sec", 0.5))
+        self._motion_exit_speed = float(motion_cfg.get("exit_speed_mps", 0.03))
+        self._motion_exit_confirm = float(motion_cfg.get("exit_confirm_sec", 2.0))
+        self._motion_state: str = "UNKNOWN"
+        self._motion_enter_candidate: Optional[float] = None
+        self._motion_exit_candidate: Optional[float] = None
+        self._motion_episode_start: Optional[float] = None
+        self._motion_episode_start_pose: Optional[Dict[str, float]] = None
+        self._motion_speeds: Deque[float] = deque(maxlen=600)
+        self._motion_episode_count = 0
+
+        # Terminal event classifier state
+        self._last_health_line = 0.0
+        self._terminal_event_counts: Counter[str] = Counter()
+
         rospy.Subscriber("/odom", Odometry, self._odom_callback, queue_size=100)
         rospy.Subscriber("/cargo_avoidance/safety_status", CargoSafetyStatus,
                          self._safety_callback, queue_size=100)
@@ -818,12 +836,99 @@ class RosRuntimeMonitor:
             return
         text = str(message.msg)
         tags = ("SO3", "MemoryGuard", "DiskGuard", "SAFETY", "Relocalization",
-                "non-finite", "StaticMapEvidence")
-        if int(message.level) < int(message.ERROR) and not any(tag in text for tag in tags):
+                "non-finite", "StaticMapEvidence", "CARGO_MONITOR",
+                "CargoAlarmHeartbeat", "HookLoadState", "SAFETY_PENDING",
+                "MotionGate", "NDT", "time rollback", "source stale")
+        level = int(message.level)
+        # ERROR/FATAL always saved
+        if level >= int(message.ERROR):
+            pass
+        # WARN: only if tag matches
+        elif not any(tag in text for tag in tags):
+            # Count suppressed WARNs
+            self._terminal_event_counts["WARN_suppressed"] += 1
             return
-        self.writer.submit("jsonl", ("logs/ros_events.jsonl", {
-            "wall_time": time.time(), "level": int(message.level),
-            "name": message.name, "message": text}))
+        event = {
+            "wall_time": time.time(), "level": level,
+            "name": message.name, "message": text,
+            "tags": [t for t in tags if t in text],
+        }
+        self.writer.submit("jsonl", ("logs/ros_events.jsonl", event))
+        self._terminal_event_counts["ERROR" if level >= int(message.ERROR) else "WARN_matched"] += 1
+
+    def _update_motion_state(self, now: float) -> None:
+        """Track motion episodes based on odom speed."""
+        speed = self.current_pose.get("speed_mps", 0.0) if self.current_pose else 0.0
+        if not math.isfinite(speed):
+            return
+        self._motion_speeds.append(speed)
+
+        if self._motion_state in ("UNKNOWN", "STATIONARY"):
+            if speed >= self._motion_enter_speed:
+                if self._motion_enter_candidate is None:
+                    self._motion_enter_candidate = now
+                elif now - self._motion_enter_candidate >= self._motion_enter_confirm:
+                    self._motion_state = "MOVING"
+                    self._motion_episode_start = now
+                    self._motion_episode_start_pose = dict(self.current_pose) if self.current_pose else None
+                    self._motion_episode_count += 1
+                    event = {
+                        "event": "MOTION_ENTER",
+                        "wall_time": now,
+                        "episode_id": self._motion_episode_count,
+                        "pose": self._motion_episode_start_pose,
+                    }
+                    self.writer.submit("jsonl", ("samples/motion_events.jsonl", event))
+                    self._emit_event({"event": "MOTION_ENTER", "wall_time": now,
+                                      "code": "-", "reason": f"speed={speed:.3f}",
+                                      "obstacle_track_id": 0})
+            else:
+                self._motion_enter_candidate = None
+                self._motion_state = "STATIONARY"
+        elif self._motion_state == "MOVING":
+            if speed < self._motion_exit_speed:
+                if self._motion_exit_candidate is None:
+                    self._motion_exit_candidate = now
+                elif now - self._motion_exit_candidate >= self._motion_exit_confirm:
+                    self._motion_state = "STATIONARY"
+                    self._motion_exit_candidate = None
+                    start_pose = self._motion_episode_start_pose
+                    current_pose = dict(self.current_pose) if self.current_pose else None
+                    displacement = None
+                    if start_pose and current_pose:
+                        displacement = math.sqrt(
+                            (current_pose.get("x", 0) - start_pose.get("x", 0))**2 +
+                            (current_pose.get("y", 0) - start_pose.get("y", 0))**2)
+                    speeds = list(self._motion_speeds)
+                    event = {
+                        "event": "MOTION_EXIT",
+                        "wall_time": now,
+                        "episode_id": self._motion_episode_count,
+                        "duration_sec": now - (self._motion_episode_start or now),
+                        "displacement_m": displacement,
+                        "max_speed_mps": max(speeds) if speeds else 0.0,
+                        "p95_speed_mps": _percentile(speeds, 0.95) if speeds else 0.0,
+                    }
+                    self.writer.submit("jsonl", ("samples/motion_events.jsonl", event))
+                    self._emit_event({"event": "MOTION_EXIT", "wall_time": now,
+                                      "code": "-", "reason": f"displacement={displacement or 0:.2f}m",
+                                      "obstacle_track_id": 0})
+            else:
+                self._motion_exit_candidate = None
+        # Write motion sample CSV
+        self.writer.submit("csv", ("samples/motion_samples.csv", [
+            "wall_time", "speed_mps", "motion_state", "episode_id",
+            "x", "y", "z", "yaw_deg"
+        ], {
+            "wall_time": now,
+            "speed_mps": speed,
+            "motion_state": self._motion_state,
+            "episode_id": self._motion_episode_count,
+            "x": self.current_pose.get("x") if self.current_pose else None,
+            "y": self.current_pose.get("y") if self.current_pose else None,
+            "z": self.current_pose.get("z") if self.current_pose else None,
+            "yaw_deg": self.current_pose.get("yaw_deg") if self.current_pose else None,
+        }))
 
     def _emit_event(self, event: Mapping[str, Any]) -> None:
         line = "[{event}] code={code} reason={reason} track={obstacle_track_id}".format(
@@ -982,6 +1087,7 @@ class RosRuntimeMonitor:
 
     def snapshot(self, now: Optional[float] = None) -> Dict[str, Any]:
         wall = time.time() if now is None else now
+        self._update_motion_state(wall)
         runtime = self._sample_runtime(wall)
         with self.aggregator_lock:
             summary = self.aggregator.full_summary(now=wall)

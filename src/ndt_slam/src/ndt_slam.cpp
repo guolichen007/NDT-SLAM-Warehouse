@@ -313,6 +313,8 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
         "/cargo_avoidance/static_evidence_debug", 1);
     cargo_geometry_debug_pub_ = nh_.advertise<std_msgs::String>(
         "/cargo_avoidance/cargo_geometry_debug", 5);
+    cargo_operational_status_pub_ = nh_.advertise<std_msgs::String>(
+        "/cargo_avoidance/operational_status", 5);
 
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
@@ -469,6 +471,8 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         "/cargo_avoidance/static_evidence_debug", 1);
     cargo_geometry_debug_pub_ = nh_.advertise<std_msgs::String>(
         "/cargo_avoidance/cargo_geometry_debug", 5);
+    cargo_operational_status_pub_ = nh_.advertise<std_msgs::String>(
+        "/cargo_avoidance/operational_status", 5);
 
     human_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_candidate_cloud", 10);
     human_dynamic_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/human_dynamic_cloud", 10);
@@ -14937,6 +14941,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     logCargoSafetyStatus(safety_msg);
     publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_, stamp);
     publishCargoGeometryDebug(last_cargo_bottom_result_, stamp);
+    publishOperationalStatus(safety_msg, stamp);
 }
 
 void NdtSlamNode::publishPayloadTrackInfoFromFusion(
@@ -15369,6 +15374,49 @@ void NdtSlamNode::publishCargoGeometryDebug(
     std_msgs::String msg;
     msg.data = json_buf;
     cargo_geometry_debug_pub_.publish(msg);
+}
+
+void NdtSlamNode::publishOperationalStatus(
+    const lidar_slam2_msgs::CargoSafetyStatus& raw,
+    const ros::Time& stamp) {
+    // Operational debounce is disabled by default; only publish if
+    // the topic has subscribers (someone explicitly wants it).
+    if (cargo_operational_status_pub_.getNumSubscribers() == 0) {
+        return;
+    }
+
+    int raw_code = raw.requested_alarm_code;
+    int op_code = raw_code;
+    bool valid = raw.valid;
+    const char* reason = raw.reason.c_str();
+
+    // Simple debounce: 17/18 passthrough, others as-is for now
+    // Full debounce state machine will be added in a follow-up
+    bool degraded_pending = false;
+    bool held_from_last_valid = false;
+    double hold_age_sec = 0.0;
+
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+        "{"
+        "\"raw_code\":%d,"
+        "\"operational_code\":%d,"
+        "\"valid\":%s,"
+        "\"degraded_pending\":%s,"
+        "\"held_from_last_valid\":%s,"
+        "\"hold_age_sec\":%.2f,"
+        "\"reason\":\"%s\","
+        "\"source_stamp\":%.6f"
+        "}",
+        raw_code, op_code,
+        valid ? "true" : "false",
+        degraded_pending ? "true" : "false",
+        held_from_last_valid ? "true" : "false",
+        hold_age_sec, reason, stamp.toSec());
+
+    std_msgs::String msg;
+    msg.data = buf;
+    cargo_operational_status_pub_.publish(msg);
 }
 
 // ========== 发布无效 payload_track_info ==========

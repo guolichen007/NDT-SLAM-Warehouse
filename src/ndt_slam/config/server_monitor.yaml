@@ -21,3 +21,56 @@ monitor:
   log_rotation_size_mb: 50
   log_rotation_count: 5
   optional_lightweight_rosbag: false
+
+# ── Fallback cargo envelope (disabled by default) ──
+# Requires manual approval of dimensions before enabling.
+fallback_cargo_envelope:
+  enabled: false
+
+  length_m: null
+  width_m: null
+  height_m: null
+
+  margin_x_m: 0.0
+  margin_y_m: 0.0
+  margin_z_m: 0.0
+
+  center_offset_x_m: 0.0
+  center_offset_y_m: 0.0
+  center_offset_z_m: 0.0
+
+  activation_delay_sec: 1.0
+  measured_recovery_confirm_sec: 1.0
+  maximum_fallback_duration_sec: 30.0
+
+  require_hook_loaded: true
+  require_fresh_load_signal: true
+  require_valid_localization: true
+  require_fresh_odom: true
+  require_valid_hook_anchor: true
+  require_valid_vertical_anchor: true
+
+  odom_stale_sec: 0.5
+  load_signal_stale_sec: 1.0
+  hook_anchor_stale_sec: 0.5
+
+  use_last_reliable_yaw: true
+  yaw_uncertainty_deg: 10.0
+  allow_clear_with_fallback: false
+
+# ── Operational code debounce (disabled by default) ──
+operational_output:
+  enabled: false
+  clear_confirm_sec: 0.5
+  transient_hold_sec: 0.5
+  fault_confirm_sec: 0.5
+  immediate_fault_codes: [30, 31, 32, 35]
+  immediate_hazard_codes: [17, 18]
+
+# ── Motion episode capture ──
+motion_capture:
+  enter_speed_mps: 0.08
+  enter_confirm_sec: 0.5
+  exit_speed_mps: 0.03
+  exit_confirm_sec: 2.0
+  require_runtime_stationary_for_exit: true

@@ -1889,9 +1889,12 @@ private:
     ros::Publisher cargo_fused_box_marker_pub_;
     ros::Publisher cargo_static_evidence_debug_pub_;
     ros::Publisher cargo_geometry_debug_pub_;
+    ros::Publisher cargo_operational_status_pub_;
 
     void publishCargoGeometryDebug(const CargoBottomResult& bottom,
                                    const ros::Time& stamp);
+    void publishOperationalStatus(const lidar_slam2_msgs::CargoSafetyStatus& raw,
+                                  const ros::Time& stamp);
 
     CargoBottomFusion cargo_bottom_fusion_;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
