@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -783,15 +784,26 @@ def main() -> int:
     scanned = 0
     for relative in paths:
         absolute = ROOT / relative
-        if not absolute.is_file():
-            failures.append(f"{relative.as_posix()}: tracked file is missing")
-            continue
-        scanned += 1
-        try:
-            payload = absolute.read_bytes()
-        except OSError as error:
-            failures.append(f"{relative.as_posix()}: cannot read: {error}")
-            continue
+        if absolute.is_symlink():
+            scanned += 1
+            try:
+                payload = os.readlink(str(absolute)).encode("utf-8")
+            except OSError as error:
+                failures.append(
+                    f"{relative.as_posix()}: cannot read symlink: {error}")
+                continue
+        else:
+            if not absolute.is_file():
+                failures.append(
+                    f"{relative.as_posix()}: tracked file is missing")
+                continue
+            scanned += 1
+            try:
+                payload = absolute.read_bytes()
+            except OSError as error:
+                failures.append(
+                    f"{relative.as_posix()}: cannot read: {error}")
+                continue
         if b"\0" in payload:
             failures.append(f"{relative.as_posix()}: contains NUL byte")
             continue
