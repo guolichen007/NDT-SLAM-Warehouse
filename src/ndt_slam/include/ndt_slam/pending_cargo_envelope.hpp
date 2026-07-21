@@ -25,6 +25,9 @@ struct PendingCargoEnvelopeConfig {
   float configured_length_m = 4.0F;
   float configured_width_m = 3.0F;
   float configured_height_m = 3.0F;
+  // base_link Z points upward. The configured cargo center is below the
+  // physical hook anchor, so the default offset is negative.
+  float configured_center_offset_z_m = -1.50F;
   float horizontal_margin_m = 0.20F;
   float vertical_margin_m = 0.15F;
   double maximum_candidate_age_sec = 0.50;

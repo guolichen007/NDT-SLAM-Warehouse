@@ -7,12 +7,20 @@ namespace ndt_slam {
 namespace {
 
 bool validConfig(const PendingCargoEnvelopeConfig& config) {
-  return config.configured_length_m > 0.0F &&
+  return std::isfinite(config.configured_length_m) &&
+      config.configured_length_m > 0.0F &&
+      std::isfinite(config.configured_width_m) &&
       config.configured_width_m > 0.0F &&
+      std::isfinite(config.configured_height_m) &&
       config.configured_height_m > 0.0F &&
+      std::isfinite(config.configured_center_offset_z_m) &&
+      std::isfinite(config.horizontal_margin_m) &&
       config.horizontal_margin_m >= 0.0F &&
+      std::isfinite(config.vertical_margin_m) &&
       config.vertical_margin_m >= 0.0F &&
+      std::isfinite(config.maximum_candidate_age_sec) &&
       config.maximum_candidate_age_sec >= 0.0 &&
+      std::isfinite(config.maximum_retired_age_sec) &&
       config.maximum_retired_age_sec >= 0.0;
 }
 
@@ -41,21 +49,25 @@ PendingCargoEnvelope fromCandidate(
     const PendingCargoEnvelopeConfig& config,
     const char* reason) {
   PendingCargoEnvelope result;
+  const float expanded_half_length = 0.5F * candidate.length_m +
+      candidate.horizontal_uncertainty_m + config.horizontal_margin_m;
+  const float expanded_half_width = 0.5F * candidate.width_m +
+      candidate.horizontal_uncertainty_m + config.horizontal_margin_m;
+  const float expanded_half_height = 0.5F * candidate.height_m +
+      candidate.vertical_uncertainty_m + config.vertical_margin_m;
   result.valid = true;
   result.source = source;
   result.center_base = candidate.center_base;
-  result.length_m = candidate.length_m + 2.0F * config.horizontal_margin_m;
-  result.width_m = candidate.width_m + 2.0F * config.horizontal_margin_m;
-  result.height_m = candidate.height_m + 2.0F * config.vertical_margin_m;
+  result.length_m = 2.0F * expanded_half_length;
+  result.width_m = 2.0F * expanded_half_width;
+  result.height_m = 2.0F * expanded_half_height;
   result.yaw_base_rad = candidate.yaw_base_rad;
   result.horizontal_uncertainty_m =
       candidate.horizontal_uncertainty_m + config.horizontal_margin_m;
   result.vertical_uncertainty_m =
       candidate.vertical_uncertainty_m + config.vertical_margin_m;
-  result.bottom_z_base = candidate.center_base.z() -
-      0.5F * candidate.height_m - result.vertical_uncertainty_m;
-  result.top_z_base = candidate.center_base.z() +
-      0.5F * candidate.height_m + result.vertical_uncertainty_m;
+  result.bottom_z_base = candidate.center_base.z() - expanded_half_height;
+  result.top_z_base = candidate.center_base.z() + expanded_half_height;
   result.reason = reason;
   return result;
 }
@@ -120,6 +132,7 @@ PendingCargoEnvelope buildPendingCargoEnvelope(
   PendingCargoEnvelopeCandidate fallback;
   fallback.valid = true;
   fallback.center_base = input.hook_anchor_base;
+  fallback.center_base.z() += config.configured_center_offset_z_m;
   fallback.length_m = config.configured_length_m;
   fallback.width_m = config.configured_width_m;
   fallback.height_m = config.configured_height_m;
