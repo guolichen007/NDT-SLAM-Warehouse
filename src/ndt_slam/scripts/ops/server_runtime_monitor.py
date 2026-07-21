@@ -827,6 +827,11 @@ class RosRuntimeMonitor:
         self.runtime_path = Path(args.persistent_root).expanduser().resolve() / "runtime_status.json"
         self.persistent_root = self.runtime_path.parent
         self.last_odom_wall: Optional[float] = None
+        self.odom_message_count: int = 0
+        self.last_safety_wall: Optional[float] = None
+        self.safety_status_message_count: int = 0
+        self.last_status_code_wall: Optional[float] = None
+        self.status_code_message_count: int = 0
         self.odom_times: Deque[float] = deque(maxlen=6000)
         self.pose_steps: Deque[float] = deque(maxlen=6000)
         self.last_pose: Optional[Tuple[float, float, float]] = None
@@ -895,8 +900,6 @@ class RosRuntimeMonitor:
         self._tile_health_cache: Dict[str, Dict[str, Any]] = {}
         # Readiness tracking
         self._start_requested_at: float = time.time()
-        # Safety callback wall time for real safety_status_age_sec
-        self.last_safety_wall: Optional[float] = None
 
     @staticmethod
     def _read_boot_id() -> str:
@@ -992,6 +995,7 @@ class RosRuntimeMonitor:
             self.pose_steps.append(math.sqrt(sum((a - b) ** 2 for a, b in zip(position, self.last_pose))))
         self.last_pose = position
         self.last_odom_wall = wall
+        self.odom_message_count += 1
         self.odom_times.append(wall)
         q = pose.orientation
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
@@ -1004,6 +1008,7 @@ class RosRuntimeMonitor:
     def _safety_callback(self, message: Any) -> None:
         wall = time.time()
         self.last_safety_wall = wall
+        self.safety_status_message_count += 1
         stamp = float(message.header.stamp.to_sec())
         values = {field: getattr(message, field) for field in (
             "requested_alarm_code", "reason", "warning_valid", "evidence_state",
@@ -1037,9 +1042,12 @@ class RosRuntimeMonitor:
         self.writer.submit("csv", ("samples/safety_samples.csv", fields, row))
 
     def _code_callback(self, message: Any) -> None:
+        wall = time.time()
+        self.last_status_code_wall = wall
+        self.status_code_message_count += 1
         with self.aggregator_lock:
             event = self.aggregator.check_status_code(
-                int(message.data), wall_time=time.time())
+                int(message.data), wall_time=wall)
         if event:
             self._emit_event(event)
 
@@ -1769,6 +1777,10 @@ class RosRuntimeMonitor:
             "ros_node": "/ndt_slam_server_monitor",
             "workspace_sha": self.args.expected_sha or "unknown",
             "created_at": time.time(),
+            "ready_updated_at": time.time(),
+            "odom_message_count": 0,
+            "safety_status_message_count": 0,
+            "status_code_message_count": 0,
             "received_topics": {},
             "first_message_wall": {},
             "last_message_wall": {},
@@ -1805,10 +1817,16 @@ class RosRuntimeMonitor:
                 }
                 _rdy["first_message_wall"] = dict(_first_message_wall)
                 _rdy["last_message_wall"] = dict(_last_message_wall)
-                _rdy["data_ready"] = all(
-                    t in _first_message_wall for t in _required_topics
+                _rdy["odom_message_count"] = self.odom_message_count
+                _rdy["safety_status_message_count"] = self.safety_status_message_count
+                _rdy["status_code_message_count"] = self.status_code_message_count
+                _rdy["data_ready"] = (
+                    self.odom_message_count > 0
+                    and self.safety_status_message_count > 0
+                    and self.status_code_message_count > 0
                 )
-                _rdy["created_at"] = time.time()
+                _rdy["ready_updated_at"] = time.time()
+                # created_at is set once at startup; never rewritten
                 atomic_write_json(
                     self.run_dir / "reports" / "monitor_ready.json", _rdy)
                 next_ready_update = mono_now + 5.0
@@ -1824,13 +1842,12 @@ class RosRuntimeMonitor:
                 _first_message_wall.setdefault(
                     "/cargo_avoidance/safety_status", self.last_safety_wall)
                 _last_message_wall["/cargo_avoidance/safety_status"] = self.last_safety_wall
-            # status_code is tracked via aggregator ingestion wall time
-            if hasattr(self, 'aggregator') and self.aggregator.records:
+            if self.last_status_code_wall:
                 _first_message_wall.setdefault(
                     "/cargo_avoidance/status_code",
-                    self.aggregator.records[-1].wall_time)
+                    self.last_status_code_wall)
                 _last_message_wall["/cargo_avoidance/status_code"] = (
-                    self.aggregator.records[-1].wall_time)
+                    self.last_status_code_wall)
 
             if now - self.last_summary_wall >= summary_period or self.snapshot_requested:
                 current = summary.get("current") or {}

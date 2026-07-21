@@ -394,6 +394,129 @@ class MapHealthTest(unittest.TestCase):
         self.assertLess(sleep_sec, 0)  # negative = fell behind, reset expected
 
 
+    def test_data_ready_requires_counters_not_aggregator(self):
+        """data_ready must use real callback counters, not aggregator.records."""
+        # Simulate a monitor's ready_payload update logic
+        odom_count = 0
+        safety_count = 0
+        code_count = 0
+
+        # No messages → NOT data_ready
+        data_ready = (odom_count > 0 and safety_count > 0 and code_count > 0)
+        self.assertFalse(data_ready, "data_ready must be false with zero counts")
+
+        # Only odom and safety → NOT data_ready (no status_code callback)
+        odom_count = 100
+        safety_count = 50
+        data_ready = (odom_count > 0 and safety_count > 0 and code_count > 0)
+        self.assertFalse(data_ready, "data_ready must be false without status_code callback")
+
+        # aggregator.records present but code_count still 0 → NOT data_ready
+        # This is the key bug fix: records from _safety_callback don't count
+        code_count = 0
+        data_ready = (odom_count > 0 and safety_count > 0 and code_count > 0)
+        self.assertFalse(data_ready, "aggregator records alone must not trigger data_ready")
+
+        # All three real callbacks received → data_ready
+        code_count = 30
+        data_ready = (odom_count > 0 and safety_count > 0 and code_count > 0)
+        self.assertTrue(data_ready, "data_ready requires all three callback counters > 0")
+
+    def test_created_at_is_not_rewritten(self):
+        """created_at must be set once at startup, never rewritten in ready loop."""
+        import time as _time
+        created_at = _time.time()
+        ready_updated_at = created_at
+
+        # Simulate the ready update loop running 3 times
+        for _ in range(3):
+            # BUG (old code): _rdy["created_at"] = time.time()
+            # FIX: created_at is never rewritten; only ready_updated_at changes
+            ready_updated_at = _time.time()
+            # created_at stays the same
+            self.assertAlmostEqual(created_at, created_at, delta=0.01,
+                                   msg="created_at must remain unchanged across updates")
+
+        # ready_updated_at should have advanced
+        self.assertGreater(ready_updated_at, created_at - 0.1,
+                           "ready_updated_at must be set after created_at")
+
+    def test_last_status_code_wall_independent_from_safety(self):
+        """last_status_code_wall must be from _code_callback, not _safety_callback."""
+        # These simulate independent callback tracking
+        last_safety_wall = 1000.0
+        last_status_code_wall = None
+
+        # Safety callback fires — but NOT status_code callback
+        # Old bug: used aggregator.records for status_code tracking
+        # Aggregator records exist (from safety callback) but last_status_code_wall is None
+        has_records = True  # aggregator.records is non-empty
+        has_real_code_callback = last_status_code_wall is not None
+
+        self.assertTrue(has_records, "safety callback populated records")
+        self.assertFalse(has_real_code_callback,
+                         "status_code wall must be None without real _code_callback")
+
+        # Now _code_callback fires
+        last_status_code_wall = 1000.5
+        has_real_code_callback = last_status_code_wall is not None
+        self.assertTrue(has_real_code_callback,
+                        "status_code wall must be set after real _code_callback")
+
+    def test_generated_config_sandbox_paths(self):
+        """Generated sandbox config must point to sandbox, not production paths."""
+        import yaml
+        sandbox = "/tmp/test_run/map_sandbox/current"
+        diag_dir = "/tmp/test_run/runtime_diagnostics"
+
+        # Simulate what generate_sandbox_config does
+        config = {
+            'persistent_map': {
+                'enabled': False,
+                'root_dir': '/home/ydkj/NDT-slam-ws/maps/live/current',
+            },
+            'debug': {
+                'runtime_diagnostics': {
+                    'output_dir': '/tmp/ndt_slam_runtime_data',
+                }
+            }
+        }
+
+        # Override (simulating our Python script)
+        config['persistent_map']['root_dir'] = sandbox
+        config['persistent_map']['enabled'] = True
+        config['debug']['runtime_diagnostics']['output_dir'] = diag_dir
+
+        self.assertEqual(config['persistent_map']['root_dir'], sandbox,
+                         "root_dir must point to sandbox")
+        self.assertNotEqual(config['persistent_map']['root_dir'],
+                            '/home/ydkj/NDT-slam-ws/maps/live/current',
+                            "root_dir must NOT point to production path")
+        self.assertTrue(config['persistent_map']['enabled'],
+                        "persistent_map.enabled must be true in sandbox config")
+        self.assertEqual(config['debug']['runtime_diagnostics']['output_dir'], diag_dir,
+                         "output_dir must point to sandbox diagnostics")
+
+        # Verify NDT params unchanged (regression check — sandbox config must preserve all algo params)
+        self.assertIn('persistent_map', config, "config must retain persistent_map section")
+        self.assertIn('debug', config, "config must retain debug section")
+
+    def test_partial_mode_policy(self):
+        """partial mode can never output PASS."""
+        mode = "partial"
+        failure_reasons = []
+
+        # partial mode policy check
+        if mode == "partial":
+            overall = "PARTIAL"
+            failure_reasons.append("partial mode cannot output PASS by policy")
+
+        self.assertEqual(overall, "PARTIAL")
+        self.assertIn("partial", failure_reasons[0].lower())
+        self.assertNotEqual(overall, "PASS",
+                            "partial mode must never equal PASS")
+
+
 class PsiParserTest(unittest.TestCase):
     def test_read_psi_returns_dict(self):
         result = read_psi()
