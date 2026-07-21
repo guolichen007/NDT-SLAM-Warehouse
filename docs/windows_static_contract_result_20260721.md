@@ -9,32 +9,32 @@ Windows 上伪造为通过。
 代码提交基线：
 
 - base/master：`10eba695faee0775ecdbfd806a7813fb38f69fd4`
-- 修复前 HEAD：`dc129a921cdfcbd53b461cbc58da74b653199490`
-- 本轮代码 HEAD（证据文档提交前）：`d0c2f6b`
+- 第一次修复前 HEAD：`dc129a921cdfcbd53b461cbc58da74b653199490`
+- 第二轮修复前 HEAD：`3be49103b65ab2efc30456b018cda9bf5cbae12b`
 - `src/ndt_omp`：`5495fd9214945afcb4b35d5a1da385e405c52bf9`
 
-## GitHub 原始失败
+## 两轮 CI 失败对比
 
-Run `29806291286`、job `88557420965` 的 `Static repository contracts`
-失败。原始失败行为：
-
-```text
-fatal: detected dubious ownership in repository at '/__w/NDT-SLAM-Warehouse/NDT-SLAM-Warehouse'
-FAIL: cannot enumerate tracked files: Command '['git', 'ls-files', '-z']' returned non-zero exit status 128.
-Process completed with exit code 2.
-```
-
-完整时间戳证据见 `docs/github_ci_failure_dc129a9.md`。根因是 ROS job
-container 内 Git 没有把 bind-mounted `$GITHUB_WORKSPACE` 视为安全目录；
-失败发生在 `git ls-files`，货物安全合同和 catkin 尚未执行。
-
-修复后 CI 在容器内登记该精确目录，并统一调用：
+### 第一轮（run 29806291286, 修复 `dc129a9`）
 
 ```text
-python3 scripts/regression/run_static_contracts.py
+fatal: detected dubious ownership in repository
+FAIL: cannot enumerate tracked files
 ```
+根因：ROS job container 内 Git 不信任 bind-mounted `$GITHUB_WORKSPACE`。
+修复：在 CI 中登记安全目录并统一调用 `run_static_contracts.py`。
 
-## Windows 结果
+### 第二轮（run 29810283921, 修复 `3be4910`）
+
+```text
+TypeError: 'type' object is not subscriptable
+FAIL: unittest discover (test_analyze_map_session.py line 15)
+```
+根因：Python 3.8（ROS Noetic 容器）不支持运行时解析 `list[tuple[...]]` 注解。
+修复：在 `tests/test_analyze_map_session.py` 添加 `from __future__ import annotations`。
+完整记录见 `docs/github_ci_failure_3be4910.md`。
+
+## Windows 结果（HEAD 3be4910 + Python 3.8 fix）
 
 | 命令 | 退出码 | 结果 |
 |---|---:|---|
@@ -45,6 +45,27 @@ python3 scripts/regression/run_static_contracts.py
 | `python -m compileall -q scripts src/ndt_slam/scripts tests` | 0 | PASS_WINDOWS |
 | `python -m unittest discover -v` | 0 | PASS_WINDOWS；25/25 |
 | `git diff --check` | 0 | PASS_WINDOWS |
+
+## Python 版本
+
+- 验证环境 Python：3.10.12
+- Python 3.8 本地验证：NOT_RUN_LOCAL_PY38
+- 最终 Python 3.8 兼容由 GitHub ROS Noetic 容器确认
+
+## 本轮修改
+
+```text
+tests/test_analyze_map_session.py  — 添加 from __future__ import annotations
+```
+
+其他使用 `list[...]`/`dict[...]`/`tuple[...]` 注解的 Python 文件已在之前提交中
+添加了 `from __future__ import annotations`，本轮无需修改：
+
+- `tools/analyze_map_session.py`
+- `scripts/regression/check_cargo_safety_e2e.py`
+- `scripts/regression/check_repository_integrity.py`
+- `scripts/regression/run_static_contracts.py`
+- `src/ndt_slam/scripts/ops/server_runtime_monitor.py`
 
 ## 本轮合同
 
@@ -70,6 +91,7 @@ python3 scripts/regression/run_static_contracts.py
 
 ## 未运行
 
+- `NOT_RUN_LOCAL_PY38`：本地无 Python 3.8，由 GitHub CI 最终验证。
 - `NOT_RUN_REQUIRES_UBUNTU`：ROS Noetic/catkin 编译、全部 C++ gtest、
   ROS 节点/服务/话题验证。
 - `NOT_RUN_REQUIRES_REAL_BAG`：真实 Bag 场景矩阵。
