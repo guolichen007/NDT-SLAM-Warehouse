@@ -533,14 +533,24 @@ def load_config(path: Optional[Path]) -> Dict[str, Any]:
         "runtime_status_stale_sec": 5.0,
         "repeat_period_sec": 30.0,
         "writer_queue_size": 4096,
+        # Root-level keys from server_monitor.yaml
+        "motion_capture": {},
+        "fallback_cargo_envelope": {},
+        "operational_output": {},
     }
     if not path or not path.exists():
         return defaults
     try:
         import yaml  # type: ignore
         loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        monitor = loaded.get("monitor", loaded)
-        defaults.update(monitor)
+        # Merge monitor section (backward compat)
+        monitor = loaded.get("monitor", {})
+        if isinstance(monitor, dict):
+            defaults.update(monitor)
+        # Merge root-level observability keys
+        for key in ("motion_capture", "fallback_cargo_envelope", "operational_output"):
+            if key in loaded and isinstance(loaded[key], dict):
+                defaults[key] = loaded[key]
     except (ImportError, OSError, ValueError):
         pass
     return defaults
@@ -671,6 +681,13 @@ class RosRuntimeMonitor:
         self._geo_track_samples: Dict[int, int] = {}
         self._geo_track_episodes: Dict[int, str] = {}
         self._geo_last_authoritative: Dict[int, float] = {}
+
+    @staticmethod
+    def _read_boot_id() -> str:
+        try:
+            return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        except OSError:
+            return "unknown"
 
     def _cargo_geometry_callback(self, message: Any) -> None:
         """Filter and save authoritative measured geometry samples only."""
@@ -1114,8 +1131,11 @@ class RosRuntimeMonitor:
         ready_payload: Dict[str, Any] = {
             "ready": True,
             "pid": os.getpid(),
+            "run_id": self.args.run_id,
+            "boot_id": self._read_boot_id(),
             "ros_node": "/ndt_slam_server_monitor",
             "workspace_sha": self.args.expected_sha or "unknown",
+            "created_at": time.time(),
             "topics": {},
         }
         try:
