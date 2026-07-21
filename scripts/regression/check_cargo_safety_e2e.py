@@ -42,6 +42,11 @@ def main() -> int:
     merger = read("src/ndt_slam/config/merger_params.yaml")
     live_config = read("src/ndt_slam/config/live_longterm_mapping.yaml")
     rviz = read("src/ndt_slam/launch/rviz.rviz")
+    pending_envelope = read(
+        "src/ndt_slam/src/pending_cargo_envelope.cpp")
+    static_index = read(
+        "src/ndt_slam/src/static_obstacle_evidence_index.cpp")
+    map_session = read("src/ndt_slam/src/map_session_snapshot.cpp")
 
     for source in ("src/cargo_bottom_fusion.cpp", "src/cargo_safety_evaluator.cpp"):
         require(source in cmake, f"CMake does not compile {source}", failures)
@@ -164,7 +169,10 @@ def main() -> int:
             "hook signal role-aware evidence policy is incomplete", failures)
     require("auxiliary_gravity_fault_forbidden" in heartbeat and
             "hook_supports_loaded" in heartbeat and
-            "hook_supports_empty" in heartbeat,
+            "hook_supports_empty" in heartbeat and
+            "provisional_positive_loaded" in heartbeat and
+            "kEvidenceHazardCandidate" in heartbeat and
+            "(!valid_loaded && !provisional_positive_loaded)" in heartbeat,
             "heartbeat is not enforcing the schema-v4 role contract", failures)
     require("exclude_candidate_region" in hook_policy and
             "objects_channel_safe" in node and
@@ -466,6 +474,92 @@ def main() -> int:
             "fitnessStats().count() >= 30U" in node and
             "last_ndt_fitness_ >= map_commit_max_fitness_" in node,
             "NDT skipped-state or mature absolute fitness spike gate is missing",
+            failures)
+
+    for source in (
+            "src/pending_cargo_envelope.cpp",
+            "src/cargo_lift_origin_binder.cpp",
+            "src/cargo_geometry_fusion.cpp"):
+        require(source in cmake,
+                f"Cargo static-height runtime source is missing: {source}",
+                failures)
+    require("pending_cargo_envelope_test" in cmake and
+            "test/pending_cargo_envelope_test.cpp" in cmake,
+            "PendingCargoEnvelope regression target is not registered",
+            failures)
+    pending_update = node.find("updateCargoLiftAndGeometryFusion(")
+    pending_branch = node.find("if (!active_track)", pending_update)
+    pending_run = node.find("runPendingCargoAvoidance(", pending_branch)
+    formal_observation = node.find("CargoBottomObservation observation;")
+    require(pending_update >= 0 and pending_branch > pending_update and
+            pending_run > pending_branch and formal_observation > pending_run,
+            "LOADED pending avoidance does not run before the formal pipeline",
+            failures)
+    pending_function = node.find("void NdtSlamNode::runPendingCargoAvoidance(")
+    next_function = node.find(
+        "void NdtSlamNode::updateAndPublishCargoSafetyPipeline(",
+        pending_function)
+    pending_body = node[pending_function:next_function]
+    require(pending_function >= 0 and next_function > pending_function and
+            "fuseCargoAvoidanceRisk(" in pending_body and
+            "static_height_field_" in pending_body and
+            "cargo_safety_evaluator_.evaluate(live_input)" in pending_body and
+            "formal_cargo_removal_authorized_ = true" not in pending_body and
+            "kSafeCode" not in pending_body,
+            "Pending envelope can clear/remove cargo or skips live/static fusion",
+            failures)
+    require("CURRENT_CANDIDATE" in pending_envelope and
+            "RETIRED_FORMAL_SHAPE" in pending_envelope and
+            "LIFT_ORIGIN_CANDIDATE" in pending_envelope and
+            "CONFIGURED_CONSERVATIVE" in pending_envelope and
+            "hook_not_loaded" in pending_envelope,
+            "PendingCargoEnvelope source/fail-safe policy is incomplete",
+            failures)
+    require("cargo_lift_origin_binder_.update(lift_input)" in node and
+            "cargo_geometry_fusion_.update(geometry_frame)" in node and
+            "cargo_frozen_geometry_.valid &&" in node and
+            "cargo_frozen_geometry_.frozen" in node and
+            "observation.map_static_height_valid = authorized_origin" in node and
+            "observation.map_diff_height_valid = authorized_origin" in node and
+            "observation.map_static_height_valid = false" not in node and
+            "observation.map_diff_height_valid = false" not in node,
+            "lift origin / frozen geometry / map thickness runtime wiring is incomplete",
+            failures)
+    load_function = node.find("bool NdtSlamNode::loadMapService(")
+    load_end = node.find("bool NdtSlamNode::loadMapSessionService(", load_function)
+    load_body = node[load_function:load_end]
+    stage_static = load_body.find("loadSnapshotCandidate(")
+    stage_keyframes = load_body.find("staged_keyframe_manager.loadKeyFrameDatabase")
+    lifecycle_lock = load_body.find("runtime_state_lock(runtime_state_mutex_)")
+    install_static = load_body.find("restoreSnapshotWithoutRevisionIncrement(")
+    install_keyframes = load_body.find("installKeyFrameDatabase(")
+    require(load_function >= 0 and load_end > load_function and
+            0 <= stage_static < lifecycle_lock and
+            0 <= stage_keyframes < lifecycle_lock and
+            install_static > lifecycle_lock and
+            install_keyframes > lifecycle_lock and
+            "loadKeyFrameDatabase(file_path)" not in
+                load_body[lifecycle_lock:],
+            "map session load is not a preload-then-install transaction",
+            failures)
+    require("selectStaticHeightPointsForAuthority" in map_session and
+            "temporally_mature" in map_session and
+            "OPERATOR_APPROVED_BASELINE" in map_session and
+            "UNVERIFIED_LOADED_CLEAN" in map_session and
+            "selectStaticHeightPointsForAuthority(" in load_body,
+            "session static height authority is not restricted by snapshot cells",
+            failures)
+    require("publishSnapshotLocked(candidate.source_stamp_sec, false)" in
+                static_index and
+            "restoreSnapshotWithoutRevisionIncrement" in static_index,
+            "static evidence revision is incremented while restoring",
+            failures)
+    require("maximum_observation_gap_sec: 0.5" in live_config and
+            "loaded_reacquire_min_bottom_uncertainty_m: 0.12" in live_config and
+            "pending_cargo_envelope:" in live_config and
+            "cargo_lift_origin:" in live_config and
+            "cargo_geometry_fusion:" in live_config,
+            "production pending/lift/geometry continuity config is incomplete",
             failures)
 
     require("cargo_alarm_heartbeat_node" in launch,

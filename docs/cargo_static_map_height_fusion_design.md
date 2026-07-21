@@ -12,9 +12,9 @@
 
 ## 会话事务
 
-`/save_map` 现在先创建同文件系统的临时目录，写入正式五层地图、兼容的 `map_display_full.pcd`、静态证据、关键帧、位姿、诊断文件和 `runtime_status_at_save.json`。每个文件计算 SHA-256，最后写 `manifest.yaml`，再用目录重命名发布。任一写入失败都会删除临时目录，不会留下看似成功的半会话。
+`/save_map` 现在先创建同文件系统的临时目录，写入正式五层地图、兼容的 `map_display_full.pcd`、静态证据、关键帧、位姿、诊断文件和 `runtime_status_at_save.json`。每个文件计算 SHA-256，最后写 `manifest.yaml`，再用目录重命名发布。任一写入失败都会删除临时目录，不会留下看似成功的半会话。这是对并发读者的 **visibility-atomic（可见性原子）** 发布；当前实现只有流 `flush` 和目录 `rename`，没有对每个文件、临时目录和父目录执行 Linux `fsync`，因此不宣称断电后的 crash durability。
 
-`/load_map_session` 和向 `/load_map` 传目录都会先验证 schema、complete、UUID、相对路径、点数和全部 SHA-256。正式层同时装载；单 PCD 加载仍保留为兼容入口，但其静态权威会被清空，不会被当成正式安全会话。
+`/load_map_session` 和向 `/load_map` 传目录都会先验证 schema、complete、UUID、相对路径、点数和全部 SHA-256，并在临时对象中解析静态索引、构建按授权格过滤的高度场、加载全部关键帧。只有阶段一全部成功后，才在生命周期锁内纯替换运行对象；提交阶段不再读取文件。单 PCD 加载仍保留为兼容入口，但其静态权威会被清空，不会被当成正式安全会话。
 
 正式层为：
 
@@ -34,9 +34,9 @@
 
 ## 起吊原点、厚度和生命周期
 
-`CargoLiftOriginBinder` 从吊钩附近的候选中按“退役正式形状、批准基线、运行时成熟静态、配置包络”排序。没有当前覆盖、没有揭露支撑面或变化未超过 `max(0.15 m, 3σ)` 时，不能把缺点误判为货物消失。原点和揭露厚度都需要多帧确认。
+`CargoLiftOriginBinder` 已进入 `NdtSlamNode` 的逐帧 LiDAR owner-thread 链路，从吊钩附近的候选中按“退役正式形状、批准基线、运行时成熟静态、配置包络”排序。没有当前覆盖、没有揭露支撑面或变化未超过 `max(0.15 m, 3σ)` 时，不能把缺点误判为货物消失。原点和揭露厚度都要求新鲜、严格连续的多帧确认；重复/回退时间戳、观测间隔超限、覆盖不足、无效 top/support 或 origin 身份变化都会中断相应计数。
 
-`CargoGeometryFusion` 至少要求两个非配置兜底的独立厚度源，使用加权中位数和 Huber 权重，检查源间差异及融合不确定度。确认后冻结 length/width/height/yaw；后续 track segment 只能更新中心、顶面和保守底面。保守底面同时扣除顶面、厚度、跟踪不确定度和配置裕量。
+`CargoGeometryFusion` 也已进入主节点，接收静态 origin、map-diff 揭露支撑、可见高度、退役正式形状和配置兜底。它至少要求两个非配置兜底的独立厚度源，使用加权中位数和 Huber 权重，检查源间差异及融合不确定度。只有 `valid && frozen` 才能覆盖正式冻结形状；确认阶段不能取得正式安全或删除权限。确认后冻结 length/width/height/yaw；后续 track segment 只能更新中心、顶面和保守底面。保守底面同时扣除顶面、厚度、跟踪不确定度和配置裕量。
 
 新增 `LOADED_REACQUIRE`：如果进程或跟踪恢复时重力信号始终为 LOADED，不再等待不存在的 EMPTY 边沿。它只能复用退役正式签名，并通过独立的多帧身份、中心和尺寸门控后回到 LOCKED；期间按候选状态处理，不能授权清空或地图剔除。
 
@@ -57,6 +57,10 @@
 - `/static_evidence/status`
 - `/static_evidence/cell_state_counts`
 - `/static_evidence/streak_histogram`
+- `/cargo_avoidance/pending_status`
+- `/cargo_avoidance/pending_envelope_marker`
+
+当重力已经确认 `LOADED` 但还没有 authoritative track 时，主节点按“当前连续候选、退役正式形状、已绑定起吊原点、配置最大包络”建立 `PendingCargoEnvelope`，执行 live 外壳和静态高度场的正向危险查询并发布 provisional 状态。该包络始终保持 `cargo_valid=false`，不会删除正式货物点、不会写入成熟静态证据、不会授权 MapCommit；默认 `fusion_provisional_warning_to_official_code=false`，即使显式开启也只能把正向危险升级为 17/18，永远不能产生 14。
 
 新增离线工具 `tools/analyze_map_session.py`，可直接读取会话目录、上层目录或 ZIP；它不依赖 ROS/PCL，输出层哈希、点数、非有限点、包围盒、0.25 m XY 格子/XYZ 体素、层间字节相等和点集包含关系。
 
