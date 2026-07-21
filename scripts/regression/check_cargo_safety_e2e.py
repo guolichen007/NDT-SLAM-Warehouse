@@ -46,6 +46,10 @@ def main() -> int:
         "src/ndt_slam/src/pending_cargo_envelope.cpp")
     static_index = read(
         "src/ndt_slam/src/static_obstacle_evidence_index.cpp")
+    static_authorization = read(
+        "src/ndt_slam/include/ndt_slam/static_evidence_authorization.hpp")
+    static_authorization_test = read(
+        "src/ndt_slam/test/static_evidence_authorization_test.cpp")
     map_session = read("src/ndt_slam/src/map_session_snapshot.cpp")
 
     for source in ("src/cargo_bottom_fusion.cpp", "src/cargo_safety_evaluator.cpp"):
@@ -525,34 +529,86 @@ def main() -> int:
             "observation.map_diff_height_valid = false" not in node,
             "lift origin / frozen geometry / map thickness runtime wiring is incomplete",
             failures)
+    stage_function = node.find(
+        "LoadedRuntimeMapCandidate NdtSlamNode::stageRuntimeMap(")
     load_function = node.find("bool NdtSlamNode::loadMapService(")
-    load_end = node.find("bool NdtSlamNode::loadMapSessionService(", load_function)
-    load_body = node[load_function:load_end]
-    stage_static = load_body.find("loadSnapshotCandidate(")
-    stage_keyframes = load_body.find("staged_keyframe_manager.loadKeyFrameDatabase")
-    lifecycle_lock = load_body.find("runtime_state_lock(runtime_state_mutex_)")
-    install_static = load_body.find("restoreSnapshotWithoutRevisionIncrement(")
-    install_keyframes = load_body.find("installKeyFrameDatabase(")
-    require(load_function >= 0 and load_end > load_function and
-            0 <= stage_static < lifecycle_lock and
-            0 <= stage_keyframes < lifecycle_lock and
-            install_static > lifecycle_lock and
-            install_keyframes > lifecycle_lock and
-            "loadKeyFrameDatabase(file_path)" not in
-                load_body[lifecycle_lock:],
-            "map session load is not a preload-then-install transaction",
+    install_function = node.find("bool NdtSlamNode::installLoadedRuntimeMap(")
+    load_session_function = node.find(
+        "bool NdtSlamNode::loadMapSessionService(")
+    rebuild_function = node.find(
+        "bool NdtSlamNode::rebuildMapService(", load_session_function)
+    stage_body = node[stage_function:load_function]
+    load_body = node[load_function:install_function]
+    install_body = node[install_function:load_session_function]
+    load_session_body = node[load_session_function:rebuild_function]
+    suspension = install_body.find(
+        'suspendPersistentStaticEvidence("load_map")')
+    first_map_swap = install_body.find("global_map_ =")
+    require(stage_function >= 0 and load_function > stage_function and
+            install_function > load_function and
+            load_session_function > install_function and
+            "MapSessionSnapshot::loadVerified(source_path)" in stage_body and
+            "loadSnapshotCandidate(" in stage_body and
+            "loadKeyFrameDatabase(source_path)" in stage_body and
+            "prepareSnapshotInstall(" in stage_body and
+            "prepareKeyFrameDatabase(" in stage_body and
+            "stageRuntimeMap(request.file_path, false)" in load_body and
+            "installLoadedRuntimeMap(std::move(candidate), response)" in load_body and
+            "stageRuntimeMap(request.session_directory, true)" in
+                load_session_body and
+            "installLoadedRuntimeMap(std::move(candidate), legacy_response)" in
+                load_session_body and
+            "loadVerified" not in load_body + load_session_body and
+            "loadMapService(" not in load_session_body and
+            0 <= suspension < first_map_swap and
+            "installPreparedSnapshot(" in install_body and
+            "installPreparedKeyFrameDatabase(" in install_body and
+            all(token not in install_body for token in (
+                "loadVerified", "loadSnapshotCandidate(",
+                "loadKeyFrameDatabase(",
+                "restoreSnapshotWithoutRevisionIncrement(")),
+            "map session load is not a single staged failure-atomic transaction",
             failures)
     require("selectStaticHeightPointsForAuthority" in map_session and
             "temporally_mature" in map_session and
             "OPERATOR_APPROVED_BASELINE" in map_session and
             "UNVERIFIED_LOADED_CLEAN" in map_session and
-            "selectStaticHeightPointsForAuthority(" in load_body,
+            "selectStaticHeightPointsForAuthority(" in stage_body,
             "session static height authority is not restricted by snapshot cells",
             failures)
-    require("publishSnapshotLocked(candidate.source_stamp_sec, false)" in
-                static_index and
-            "restoreSnapshotWithoutRevisionIncrement" in static_index,
+    require("restoreSnapshotWithoutRevisionIncrement" in static_index and
+            "prepareSnapshotInstall(" in static_index and
+            "installPreparedSnapshot(" in static_index and
+            "revision_ = prepared.revision" in static_index,
             "static evidence revision is incremented while restoring",
+            failures)
+    require("configured_center_offset_z_m" in pending_envelope + live_config and
+            "fallback.center_base.z() +=" in pending_envelope and
+            "result.height_m = 2.0F * expanded_half_height" in
+                pending_envelope and
+            "result.top_z_base = candidate.center_base.z() +" in
+                pending_envelope and
+            "live_input.height.bottom_uncertainty_m = 0.0F" in node,
+            "pending envelope Z offset/expanded-height contract is incomplete",
+            failures)
+    require("authorizeStaticEvidence(" in static_authorization and
+            all(field in static_authorization for field in (
+                "formal_origin_authorized",
+                "formal_thickness_authorized",
+                "official_static_risk_authorized",
+                "official_clear_authorized")) and
+            all(name in static_authorization_test for name in (
+                "UnverifiedStaticCannotBindFormalOrigin",
+                "UnverifiedStaticCannotCountAsIndependentThicknessSource",
+                "UnverifiedStaticCannotProduceOfficialHazard",
+                "UnverifiedStaticCannotAuthorizeClear")) and
+            "authorizeStaticEvidence(input.static_authority)" in
+                read("src/ndt_slam/src/cargo_avoidance_fusion.cpp") and
+            "formal_thickness_authorized" in node and
+            "official_static_risk_authorized" in node and
+            '\\"static_authority\\"' in node and
+            '\\"origin_authority\\"' in node,
+            "unverified static authority is not enforced by a typed runtime gate",
             failures)
     require("maximum_observation_gap_sec: 0.5" in live_config and
             "loaded_reacquire_min_bottom_uncertainty_m: 0.12" in live_config and

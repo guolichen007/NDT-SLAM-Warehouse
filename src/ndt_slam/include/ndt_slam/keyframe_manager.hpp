@@ -95,7 +95,7 @@ public:
 
     bool saveKeyFrameDatabase(const std::string& session_dir) const;
     bool loadKeyFrameDatabase(const std::string& session_dir);
-    void replaceKeyFrames(std::deque<KeyFrame> keyframes);
+    void replaceKeyFrames(std::deque<KeyFrame> keyframes) noexcept;
     bool saveOptimizedPoses(const std::string& filepath) const;
     bool loadOptimizedPoses(const std::string& filepath);
     void updateKeyFramePose(uint64_t id, const Sophus::SE3d& new_pose);

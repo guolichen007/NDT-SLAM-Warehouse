@@ -95,6 +95,24 @@ TEST(CargoAvoidanceFusion, UnverifiedStaticCannotAuthorizeClearOrHazard) {
   EXPECT_EQ(result.official_code, 34);
 }
 
+TEST(CargoAvoidanceFusion, PendingUnverifiedStaticRemainsAdvisoryOnly) {
+  auto input = validInput();
+  input.formal_cargo_geometry_valid = false;
+  input.formal_cargo_bottom_valid = false;
+  input.pending_envelope_valid = true;
+  input.static_authority =
+      StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+  input.static_map.hazard = true;
+  input.static_map.warning_code = 17;
+  CargoAvoidanceFusionConfig config;
+  config.provisional_positive_warning_to_official_code = true;
+  const auto result = fuseCargoAvoidanceRisk(input, config);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 33);
+  EXPECT_FALSE(result.risk_static);
+  EXPECT_EQ(result.provisional_status, "CLEAR_NOT_AUTHORIZED");
+}
+
 TEST(CargoAvoidanceFusion, MoreSevereSourceWins) {
   auto input = validInput();
   input.live.hazard = true;

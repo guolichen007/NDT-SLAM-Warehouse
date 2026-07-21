@@ -225,7 +225,8 @@ bool KeyFrameManager::loadKeyFrameDatabase(const std::string& session_dir) {
     }
 }
 
-void KeyFrameManager::replaceKeyFrames(std::deque<KeyFrame> keyframes) {
+void KeyFrameManager::replaceKeyFrames(
+    std::deque<KeyFrame> keyframes) noexcept {
     keyframes_ = std::move(keyframes);
     spatial_index_.clear();
     last_keyframe_id_ = 0U;

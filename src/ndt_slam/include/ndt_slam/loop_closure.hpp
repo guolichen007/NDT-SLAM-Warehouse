@@ -83,6 +83,12 @@ struct RelocalizationHint {
     double yaw_offset_rad = 0.0;
 };
 
+struct PreparedKeyFrameDatabase {
+    bool valid = false;
+    std::deque<KeyFrame> keyframes;
+    std::vector<Eigen::MatrixXd> scan_contexts;
+};
+
 // 闭环检测器类
 class LoopClosureDetector {
 public:
@@ -115,6 +121,12 @@ public:
     bool saveKeyFrameDatabase(const std::string& session_dir) const;
     bool loadKeyFrameDatabase(const std::string& session_dir);
     void installKeyFrameDatabase(std::deque<KeyFrame> keyframes);
+    bool prepareKeyFrameDatabase(
+        std::deque<KeyFrame> keyframes,
+        PreparedKeyFrameDatabase* prepared,
+        std::string* reason) const;
+    void installPreparedKeyFrameDatabase(
+        PreparedKeyFrameDatabase&& prepared) noexcept;
     void applyKeyFrameMetrics(
         const std::vector<std::pair<std::uint64_t, KeyFrameMetrics>>& metrics);
     bool setLastKeyFrameLayers(

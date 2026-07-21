@@ -36,6 +36,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -53,6 +54,7 @@
 #include <ndt_slam/static_obstacle_evidence_index.hpp>
 #include <ndt_slam/map_session_snapshot.hpp>
 #include <ndt_slam/static_height_field.hpp>
+#include <ndt_slam/static_evidence_authorization.hpp>
 #include <ndt_slam/cargo_avoidance_fusion.hpp>
 #include <ndt_slam/cargo_lift_origin_binder.hpp>
 #include <ndt_slam/cargo_geometry_fusion.hpp>
@@ -148,6 +150,32 @@ public:
     ~NdtSlamNode();
 
 private:
+    using NdtRegistration = pclomp::NormalDistributionsTransform<
+        pcl::PointXYZ, pcl::PointXYZ>;
+
+    struct LoadedRuntimeMapCandidate {
+        bool valid = false;
+        bool session_mode = false;
+        std::string source_path;
+        std::string reason = "not_staged";
+        MapSessionLoadResult session;
+        PreparedStaticEvidenceInstall static_evidence;
+        std::shared_ptr<const StaticHeightField> height_field;
+        PreparedKeyFrameDatabase keyframes;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr registration;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr display;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr ground;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr objects_raw;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr objects_clean;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr bundle_registration;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr bundle_display;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr bundle_ground;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr bundle_objects_raw;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr bundle_objects_clean;
+        std::array<pcl::PointCloud<pcl::PointXYZ>::Ptr, 12> empty_clouds;
+        NdtRegistration::Ptr ndt;
+    };
+
     void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg);
     void hookLoadStateCallback(
         const lidar_slam2_msgs::HookLoadState::ConstPtr& msg);
@@ -214,6 +242,11 @@ private:
                         lidar_slam2_msgs::SaveMap::Response& response);
     bool loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
                         lidar_slam2_msgs::LoadMap::Response& response);
+    LoadedRuntimeMapCandidate stageRuntimeMap(
+        const std::string& source_path, bool require_session);
+    bool installLoadedRuntimeMap(
+        LoadedRuntimeMapCandidate&& candidate,
+        lidar_slam2_msgs::LoadMap::Response& response);
     bool loadMapSessionService(
         lidar_slam2_msgs::LoadMapSession::Request& request,
         lidar_slam2_msgs::LoadMapSession::Response& response);

@@ -9,6 +9,19 @@
 namespace ndt_slam {
 namespace {
 
+TEST(RelocalizationScanContextTest,
+     KeyframeInstallCandidateValidatedBeforeMutation) {
+  LoopClosureDetector detector;
+  KeyFrame invalid;
+  invalid.id_ = 1U;
+  invalid.cloud_.reset();
+  PreparedKeyFrameDatabase prepared;
+  std::string reason;
+  EXPECT_FALSE(detector.prepareKeyFrameDatabase(
+      std::deque<KeyFrame>{invalid}, &prepared, &reason));
+  EXPECT_EQ(detector.getKeyFrameCount(), 0U);
+}
+
 pcl::PointCloud<pcl::PointXYZ>::Ptr makeAsymmetricCloud() {
     auto cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(
         new pcl::PointCloud<pcl::PointXYZ>);

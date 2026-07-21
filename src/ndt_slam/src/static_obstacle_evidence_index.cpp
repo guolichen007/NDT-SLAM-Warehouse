@@ -840,28 +840,79 @@ bool StaticObstacleEvidenceIndex::restoreSnapshotWithoutRevisionIncrement(
     const StaticEvidenceSnapshot& candidate,
     std::uint64_t current_map_generation,
     std::string* reason) {
+  PreparedStaticEvidenceInstall prepared;
+  if (!prepareSnapshotInstall(
+          candidate, current_map_generation, &prepared, reason)) {
+    return false;
+  }
+  installPreparedSnapshot(std::move(prepared));
+  if (reason) *reason = "restored_exact_revision";
+  return true;
+}
+
+bool StaticObstacleEvidenceIndex::prepareSnapshotInstall(
+    const StaticEvidenceSnapshot& candidate,
+    std::uint64_t current_map_generation,
+    PreparedStaticEvidenceInstall* prepared,
+    std::string* reason) const {
+  if (!prepared) {
+    if (reason) *reason = "prepared_output_missing";
+    return false;
+  }
+  *prepared = PreparedStaticEvidenceInstall{};
   if (candidate.schema_version != StaticEvidenceSnapshot::kSchemaVersion ||
       std::abs(candidate.cell_size_m - config_.cell_size_m) > 1.0e-5F ||
       candidate.revision == 0U || current_map_generation == 0U) {
     if (reason) *reason = "candidate_schema_or_generation_invalid";
     return false;
   }
-  std::map<std::int64_t, StaticEvidenceCell> restored = candidate.cells;
-  for (auto& item : restored) {
+  prepared->working_cells = candidate.cells;
+  for (auto& item : prepared->working_cells) {
     item.second.map_generation = current_map_generation;
   }
+  auto immutable = std::make_shared<StaticEvidenceSnapshot>(candidate);
+  immutable->map_generation = current_map_generation;
+  for (auto& item : immutable->cells) {
+    item.second.map_generation = current_map_generation;
+  }
+  prepared->valid = true;
+  prepared->map_generation = current_map_generation;
+  prepared->latest_observation_sequence =
+      candidate.latest_observation_sequence;
+  prepared->revision = candidate.revision;
+  prepared->authority = candidate.authority;
+  prepared->snapshot = std::move(immutable);
+  if (reason) *reason = "snapshot_install_prepared";
+  return true;
+}
+
+void StaticObstacleEvidenceIndex::installPreparedSnapshot(
+    PreparedStaticEvidenceInstall&& prepared,
+    std::uint64_t current_map_generation) noexcept {
+  if (!prepared.valid || !prepared.snapshot) return;
+  if (current_map_generation != 0U &&
+      current_map_generation != prepared.map_generation) {
+    prepared.map_generation = current_map_generation;
+    prepared.snapshot->map_generation = current_map_generation;
+    for (auto& item : prepared.working_cells) {
+      item.second.map_generation = current_map_generation;
+    }
+    for (auto& item : prepared.snapshot->cells) {
+      item.second.map_generation = current_map_generation;
+    }
+  }
   std::lock_guard<std::mutex> lock(mutex_);
-  working_cells_ = std::move(restored);
+  working_cells_.swap(prepared.working_cells);
   invalidated_versions_.clear();
   observed_free_tombstones_.clear();
-  working_generation_ = current_map_generation;
-  authority_ = candidate.authority;
-  latest_observation_sequence_ = candidate.latest_observation_sequence;
-  revision_ = candidate.revision;
+  working_generation_ = prepared.map_generation;
+  authority_ = prepared.authority;
+  latest_observation_sequence_ = prepared.latest_observation_sequence;
+  revision_ = prepared.revision;
   last_observation_stamp_sec_ = 0.0;
-  publishSnapshotLocked(candidate.source_stamp_sec, false);
-  if (reason) *reason = "restored_exact_revision";
-  return true;
+  std::shared_ptr<const StaticEvidenceSnapshot> immutable =
+      std::move(prepared.snapshot);
+  std::atomic_store(&snapshot_, std::move(immutable));
 }
 
 bool StaticObstacleEvidenceIndex::loadSnapshot(

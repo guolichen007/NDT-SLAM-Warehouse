@@ -1,4 +1,5 @@
 #include "ndt_slam/cargo_avoidance_fusion.hpp"
+#include "ndt_slam/static_evidence_authorization.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -48,8 +49,8 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
       input.formal_cargo_bottom_valid;
   const bool static_contract = input.static_session_manifest_valid &&
       input.static_session_hash_valid && input.static_session_uuid_valid &&
-      input.static_authority !=
-          StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+      authorizeStaticEvidence(input.static_authority)
+          .official_static_risk_authorized;
   const bool live_reliable = input.live.available && input.live.reliable;
   const bool static_reliable = static_contract &&
       input.static_map.available && input.static_map.reliable;

@@ -333,6 +333,13 @@ if(CATKIN_ENABLE_TESTING)
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
+  catkin_add_gtest(static_evidence_authorization_test
+    test/static_evidence_authorization_test.cpp)
+  if(TARGET static_evidence_authorization_test)
+    target_link_libraries(static_evidence_authorization_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
   catkin_add_gtest(pending_cargo_envelope_test
     test/pending_cargo_envelope_test.cpp)
   if(TARGET pending_cargo_envelope_test)

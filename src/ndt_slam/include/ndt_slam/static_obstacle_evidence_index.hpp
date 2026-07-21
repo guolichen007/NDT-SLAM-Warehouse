@@ -142,6 +142,19 @@ struct StaticEvidenceMutationResult {
   std::uint64_t revision = 0U;
 };
 
+// Fully allocated, generation-adjusted state for a no-I/O lifecycle install.
+// Preparation may fail and must happen before the runtime map is mutated.
+struct PreparedStaticEvidenceInstall {
+  bool valid = false;
+  std::uint64_t map_generation = 0U;
+  std::uint64_t latest_observation_sequence = 0U;
+  std::uint64_t revision = 0U;
+  StaticEvidenceAuthority authority =
+      StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+  std::map<std::int64_t, StaticEvidenceCell> working_cells;
+  std::shared_ptr<StaticEvidenceSnapshot> snapshot;
+};
+
 std::int64_t packStaticEvidenceCell(std::int32_t x, std::int32_t y) noexcept;
 std::pair<std::int32_t, std::int32_t> unpackStaticEvidenceCell(
     std::int64_t key) noexcept;
@@ -222,6 +235,14 @@ class StaticObstacleEvidenceIndex {
       const StaticEvidenceSnapshot& candidate,
       std::uint64_t current_map_generation,
       std::string* reason);
+  bool prepareSnapshotInstall(
+      const StaticEvidenceSnapshot& candidate,
+      std::uint64_t current_map_generation,
+      PreparedStaticEvidenceInstall* prepared,
+      std::string* reason) const;
+  void installPreparedSnapshot(
+      PreparedStaticEvidenceInstall&& prepared,
+      std::uint64_t current_map_generation = 0U) noexcept;
 
  private:
   void publishSnapshotLocked(double stamp_sec,

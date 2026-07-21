@@ -1,4 +1,5 @@
 #include "ndt_slam/cargo_lift_origin_binder.hpp"
+#include "ndt_slam/static_evidence_authorization.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -38,9 +39,8 @@ bool usable(const CargoOriginCandidate& candidate,
   const bool authority_valid =
       candidate.source == CargoOriginCandidateSource::RETIRED_FORMAL_SHAPE ||
       candidate.source == CargoOriginCandidateSource::CONFIGURED_ENVELOPE ||
-      candidate.authority == StaticEvidenceAuthority::RUNTIME_MATURE ||
-      candidate.authority ==
-          StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE;
+      authorizeStaticEvidence(candidate.authority)
+          .formal_origin_authorized;
   return candidate.center_map.allFinite() &&
       std::isfinite(candidate.length_m) && candidate.length_m > 0.0F &&
       std::isfinite(candidate.width_m) && candidate.width_m > 0.0F &&

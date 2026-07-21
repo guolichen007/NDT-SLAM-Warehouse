@@ -2442,6 +2442,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 pending["configured_width_m"].as<float>(3.0F);
             pending_cargo_envelope_config_.configured_height_m =
                 pending["configured_height_m"].as<float>(3.0F);
+            pending_cargo_envelope_config_.configured_center_offset_z_m =
+                pending["configured_center_offset_z_m"].as<float>(-1.50F);
             pending_cargo_envelope_config_.horizontal_margin_m =
                 pending["horizontal_margin_m"].as<float>(0.20F);
             pending_cargo_envelope_config_.vertical_margin_m =
@@ -8238,100 +8240,210 @@ bool NdtSlamNode::saveMapService(lidar_slam2_msgs::SaveMap::Request& request,
     return true;
 }
 
-bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
-                              lidar_slam2_msgs::LoadMap::Response& response) {
-    std::string file_path = request.file_path;
-    if (file_path.empty()) {
-        response.success = false;
-        response.message = "File path is empty";
-        response.num_points = 0;
-        return true;
-    }
-
+NdtSlamNode::LoadedRuntimeMapCandidate NdtSlamNode::stageRuntimeMap(
+    const std::string& source_path, bool require_session) {
+    LoadedRuntimeMapCandidate candidate;
+    candidate.source_path = source_path;
     try {
-        const bool session_mode = std::filesystem::is_directory(file_path);
-        MapSessionLoadResult session;
-        std::shared_ptr<const StaticHeightField> staged_height_field;
-        StaticEvidenceSnapshot staged_static_snapshot;
-        std::deque<KeyFrame> staged_keyframes;
-        pcl::PointCloud<pcl::PointXYZ>::Ptr loaded_cloud(
-            new pcl::PointCloud<pcl::PointXYZ>);
-        if (session_mode) {
-            session = MapSessionSnapshot::loadVerified(file_path);
-            if (!session.valid) {
-                response.success = false;
-                response.message = "Map session verification failed: " +
-                    session.reason;
-                response.num_points = 0;
-                return true;
+        if (source_path.empty()) {
+            candidate.reason = "source_path_empty";
+            return candidate;
+        }
+        candidate.session_mode = std::filesystem::is_directory(source_path);
+        if (require_session && !candidate.session_mode) {
+            candidate.reason = "map_session_directory_required";
+            return candidate;
+        }
+        candidate.registration.reset(new pcl::PointCloud<pcl::PointXYZ>);
+        candidate.display.reset(new pcl::PointCloud<pcl::PointXYZ>);
+        candidate.ground.reset(new pcl::PointCloud<pcl::PointXYZ>);
+        candidate.objects_raw.reset(new pcl::PointCloud<pcl::PointXYZ>);
+        candidate.objects_clean.reset(new pcl::PointCloud<pcl::PointXYZ>);
+
+        candidate.ndt.reset(new NdtRegistration());
+        candidate.ndt->setResolution(ndt_resolution_);
+        candidate.ndt->setStepSize(ndt_step_size_);
+        candidate.ndt->setTransformationEpsilon(
+            ndt_transformation_epsilon_);
+        candidate.ndt->setMaximumIterations(ndt_max_iterations_);
+        candidate.ndt->setNumThreads(ndt_num_threads_);
+        if (ndt_neighbor_search_method_ == "DIRECT7") {
+            candidate.ndt->setNeighborhoodSearchMethod(pclomp::DIRECT7);
+        } else if (ndt_neighbor_search_method_ == "DIRECT1") {
+            candidate.ndt->setNeighborhoodSearchMethod(pclomp::DIRECT1);
+        } else {
+            candidate.ndt->setNeighborhoodSearchMethod(pclomp::KDTREE);
+        }
+
+        if (candidate.session_mode) {
+            candidate.session = MapSessionSnapshot::loadVerified(source_path);
+            if (!candidate.session.valid) {
+                candidate.reason = "map_session_verification_failed:" +
+                    candidate.session.reason;
+                return candidate;
             }
-            *loaded_cloud = *session.layers.registration;
+            *candidate.registration =
+                *candidate.session.layers.registration;
+            *candidate.display = *candidate.session.layers.display;
+            *candidate.ground = *candidate.session.layers.ground;
+            *candidate.objects_raw =
+                *candidate.session.layers.objects_raw;
+            *candidate.objects_clean =
+                *candidate.session.layers.objects_clean;
+
+            StaticEvidenceSnapshot staged_static_snapshot;
             std::string staged_reason;
             if (!static_obstacle_evidence_index_.loadSnapshotCandidate(
-                    session.static_evidence_path,
-                    session.static_evidence_source_generation,
-                    session.static_evidence_revision,
+                    candidate.session.static_evidence_path,
+                    candidate.session.static_evidence_source_generation,
+                    candidate.session.static_evidence_revision,
                     &staged_static_snapshot, &staged_reason) ||
                 staged_static_snapshot.authority !=
-                    session.static_authority) {
-                response.success = false;
-                response.message = "Static evidence verification failed: " +
+                    candidate.session.static_authority) {
+                candidate.reason = "static_evidence_verification_failed:" +
                     staged_reason;
-                response.num_points = 0;
-                return true;
+                return candidate;
+            }
+            std::uint64_t prepared_generation =
+                static_evidence_epoch_.load(std::memory_order_acquire) + 1U;
+            if (prepared_generation == 0U) prepared_generation = 1U;
+            if (!static_obstacle_evidence_index_.prepareSnapshotInstall(
+                    staged_static_snapshot, prepared_generation,
+                    &candidate.static_evidence, &staged_reason)) {
+                candidate.reason = "static_restore_preparation_failed:" +
+                    staged_reason;
+                return candidate;
             }
             std::vector<Eigen::Vector3f> static_objects;
             std::vector<Eigen::Vector3f> static_ground;
             static_objects = selectStaticHeightPointsForAuthority(
-                *session.layers.objects_clean, staged_static_snapshot);
-            static_ground.reserve(session.layers.ground->size());
-            for (const auto& point : session.layers.ground->points) {
+                *candidate.objects_clean, staged_static_snapshot);
+            static_ground.reserve(candidate.ground->size());
+            for (const auto& point : candidate.ground->points) {
                 static_ground.emplace_back(point.x, point.y, point.z);
             }
             auto height_field = std::make_shared<StaticHeightField>(
                 static_height_field_config_);
             const StaticHeightFieldBuildResult height_build =
                 height_field->build(
-                    static_objects, static_ground, session.static_authority);
+                    static_objects, static_ground,
+                    candidate.session.static_authority);
             if (!static_objects.empty() && !height_build.valid) {
-                response.success = false;
-                response.message = "Static height field staging failed: " +
+                candidate.reason = "static_height_field_staging_failed:" +
                     height_build.reason;
-                response.num_points = 0;
-                return true;
+                return candidate;
             }
-            staged_height_field = height_field;
+            candidate.height_field = height_field;
 
             KeyFrameManager staged_keyframe_manager;
-            if (!staged_keyframe_manager.loadKeyFrameDatabase(file_path)) {
-                response.success = false;
-                response.message =
-                    "Verified session keyframe database could not be staged";
-                response.num_points = 0;
-                return true;
+            if (!staged_keyframe_manager.loadKeyFrameDatabase(source_path)) {
+                candidate.reason = "keyframe_database_staging_failed";
+                return candidate;
             }
-            staged_keyframes = staged_keyframe_manager.getKeyFrames();
-            if (staged_keyframes.size() != session.metadata.keyframe_count) {
-                response.success = false;
-                response.message =
-                    "Verified session keyframe count mismatch";
-                response.num_points = 0;
-                return true;
+            std::deque<KeyFrame> staged_keyframes =
+                staged_keyframe_manager.getKeyFrames();
+            if (staged_keyframes.size() !=
+                candidate.session.metadata.keyframe_count) {
+                candidate.reason = "keyframe_count_mismatch";
+                return candidate;
+            }
+            if (!loop_closure_detector_.prepareKeyFrameDatabase(
+                    std::move(staged_keyframes), &candidate.keyframes,
+                    &staged_reason)) {
+                candidate.reason = "keyframe_install_preparation_failed:" +
+                    staged_reason;
+                return candidate;
             }
         } else if (pcl::io::loadPCDFile<pcl::PointXYZ>(
-                       file_path, *loaded_cloud) == -1) {
+                       source_path, *candidate.registration) == -1) {
+            candidate.reason = "pcd_load_failed";
+            return candidate;
+        } else {
+            *candidate.display = *candidate.registration;
+            StaticEvidenceSnapshot empty_snapshot;
+            empty_snapshot.map_generation = 1U;
+            empty_snapshot.revision = 1U;
+            empty_snapshot.cell_size_m =
+                static_obstacle_evidence_index_.config().cell_size_m;
+            empty_snapshot.authority =
+                StaticEvidenceAuthority::RUNTIME_MATURE;
+            std::string staged_reason;
+            if (!static_obstacle_evidence_index_.prepareSnapshotInstall(
+                    empty_snapshot, 1U, &candidate.static_evidence,
+                    &staged_reason)) {
+                candidate.reason = "empty_static_install_preparation_failed:" +
+                    staged_reason;
+                return candidate;
+            }
+            if (!loop_closure_detector_.prepareKeyFrameDatabase(
+                    std::deque<KeyFrame>{}, &candidate.keyframes,
+                    &staged_reason)) {
+                candidate.reason = "empty_keyframe_install_preparation_failed:" +
+                    staged_reason;
+                return candidate;
+            }
+        }
+        candidate.bundle_registration.reset(
+            new pcl::PointCloud<pcl::PointXYZ>(*candidate.registration));
+        candidate.bundle_display.reset(
+            new pcl::PointCloud<pcl::PointXYZ>(*candidate.display));
+        candidate.bundle_ground.reset(
+            new pcl::PointCloud<pcl::PointXYZ>(*candidate.ground));
+        candidate.bundle_objects_raw.reset(
+            new pcl::PointCloud<pcl::PointXYZ>(*candidate.objects_raw));
+        candidate.bundle_objects_clean.reset(
+            new pcl::PointCloud<pcl::PointXYZ>(*candidate.objects_clean));
+        for (auto& cloud : candidate.empty_clouds) {
+            cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
+        }
+        candidate.valid = true;
+        candidate.reason = "runtime_map_candidate_prepared";
+    } catch (const std::exception& error) {
+        candidate.valid = false;
+        candidate.reason = std::string("staging_exception:") + error.what();
+    }
+    return candidate;
+}
+
+bool NdtSlamNode::loadMapService(
+    lidar_slam2_msgs::LoadMap::Request& request,
+    lidar_slam2_msgs::LoadMap::Response& response) {
+    LoadedRuntimeMapCandidate candidate =
+        stageRuntimeMap(request.file_path, false);
+    if (!candidate.valid) {
+        response.success = false;
+        response.message = "Map staging failed: " + candidate.reason;
+        response.num_points = 0;
+        return true;
+    }
+    return installLoadedRuntimeMap(std::move(candidate), response);
+}
+
+bool NdtSlamNode::installLoadedRuntimeMap(
+    LoadedRuntimeMapCandidate&& candidate,
+    lidar_slam2_msgs::LoadMap::Response& response) {
+    const std::string file_path = candidate.source_path;
+    const bool session_mode = candidate.session_mode;
+    const MapSessionLoadResult& session = candidate.session;
+    const auto loaded_cloud = candidate.registration;
+    try {
+
+        std::lock_guard<std::mutex> runtime_state_lock(runtime_state_mutex_);
+        std::lock_guard<std::mutex> map_commit_lifecycle_lock(
+            map_commit_lifecycle_mutex_);
+
+        // This is the final fallible preflight. A failure leaves all runtime
+        // map pointers, UUID/revision, keyframes and height field untouched.
+        if (!suspendPersistentStaticEvidence("load_map")) {
             response.success = false;
-            response.message = "Failed to load PCD file";
+            response.message =
+                "Persistent static evidence suspension preflight failed";
             response.num_points = 0;
             return true;
         }
-
-        std::lock_guard<std::mutex> runtime_state_lock(runtime_state_mutex_);
         verified_map_session_loaded_ = false;
         loaded_map_session_uuid_.clear();
         loaded_map_session_generation_ = 0U;
-        std::lock_guard<std::mutex> map_commit_lifecycle_lock(
-            map_commit_lifecycle_mutex_);
 
         const ros::Time load_stamp = ros::Time::now();
         keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
@@ -8348,72 +8460,66 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
             std::lock_guard<std::mutex> lock(map_mutex_);
             map_rebuild_generation_.fetch_add(
                 1U, std::memory_order_acq_rel);
-            global_map_ = loaded_cloud;
-            display_map_.reset(new pcl::PointCloud<pcl::PointXYZ>(
-                session_mode ? *session.layers.display : *loaded_cloud));
-            ground_map_.reset(session_mode
-                ? new pcl::PointCloud<pcl::PointXYZ>(
-                      *session.layers.ground)
-                : new pcl::PointCloud<pcl::PointXYZ>);
-            objects_map_.reset(session_mode
-                ? new pcl::PointCloud<pcl::PointXYZ>(
-                      *session.layers.objects_raw)
-                : new pcl::PointCloud<pcl::PointXYZ>);
-            objects_clean_map_.reset(session_mode
-                ? new pcl::PointCloud<pcl::PointXYZ>(
-                      *session.layers.objects_clean)
-                : new pcl::PointCloud<pcl::PointXYZ>);
+            global_map_ = std::move(candidate.registration);
+            display_map_ = std::move(candidate.display);
+            ground_map_ = std::move(candidate.ground);
+            objects_map_ = std::move(candidate.objects_raw);
+            objects_clean_map_ = std::move(candidate.objects_clean);
             advanceMapLayerGenerationLocked();
             advanceObjectsMapContentVersionLocked();
-            sealCurrentMapLayerBundleLocked(load_stamp);
-            current_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
-            local_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
-            rebuild_objects_filtered_.reset(
-                new pcl::PointCloud<pcl::PointXYZ>);
-            rebuild_payload_candidate_.reset(
-                new pcl::PointCloud<pcl::PointXYZ>);
-            rebuild_payload_dynamic_.reset(
-                new pcl::PointCloud<pcl::PointXYZ>);
-            rebuild_human_candidate_.reset(
-                new pcl::PointCloud<pcl::PointXYZ>);
-            rebuild_human_dynamic_.reset(
-                new pcl::PointCloud<pcl::PointXYZ>);
-            rebuild_human_pending_.reset(
-                new pcl::PointCloud<pcl::PointXYZ>);
-            rebuild_ground_raw_.reset(
-                new pcl::PointCloud<pcl::PointXYZ>);
+            latest_completed_map_bundle_.valid = true;
+            latest_completed_map_bundle_.generation = map_layer_generation_;
+            latest_completed_map_bundle_.objects_version =
+                objects_map_content_version_;
+            latest_completed_map_bundle_.lifecycle_epoch =
+                map_rebuild_generation_.load(std::memory_order_acquire);
+            latest_completed_map_bundle_.source_stamp = load_stamp;
+            latest_completed_map_bundle_.registration =
+                std::move(candidate.bundle_registration);
+            latest_completed_map_bundle_.display =
+                std::move(candidate.bundle_display);
+            latest_completed_map_bundle_.ground =
+                std::move(candidate.bundle_ground);
+            latest_completed_map_bundle_.objects =
+                std::move(candidate.bundle_objects_raw);
+            latest_completed_map_bundle_.objects_clean =
+                std::move(candidate.bundle_objects_clean);
+            current_cloud_ = std::move(candidate.empty_clouds[0]);
+            local_map_ = std::move(candidate.empty_clouds[1]);
+            rebuild_objects_filtered_ =
+                std::move(candidate.empty_clouds[2]);
+            rebuild_payload_candidate_ =
+                std::move(candidate.empty_clouds[3]);
+            rebuild_payload_dynamic_ =
+                std::move(candidate.empty_clouds[4]);
+            rebuild_human_candidate_ =
+                std::move(candidate.empty_clouds[5]);
+            rebuild_human_dynamic_ =
+                std::move(candidate.empty_clouds[6]);
+            rebuild_human_pending_ =
+                std::move(candidate.empty_clouds[7]);
+            rebuild_ground_raw_ = std::move(candidate.empty_clouds[8]);
             local_map_version_ = 0;
             // A loaded map starts in relocalization/target mode. It must not
             // seed a new local map through the startup bootstrap bypass.
             bootstrap_local_map_complete_ = true;
             bootstrap_local_map_frames_ = 0;
         }
-        if (!suspendPersistentStaticEvidence("load_map")) {
-            ROS_ERROR("[StaticMapEvidence] load-map suspend incomplete; "
-                      "persistent provenance remains fail-safe blocked");
-        }
         const std::uint64_t loaded_evidence_epoch =
             advanceStaticEvidenceEpoch();
-        static_obstacle_evidence_index_.reset(loaded_evidence_epoch);
-        std::atomic_store(&static_height_field_,
-                          std::shared_ptr<const StaticHeightField>{});
+        static_obstacle_evidence_index_.installPreparedSnapshot(
+            std::move(candidate.static_evidence), loaded_evidence_epoch);
         if (session_mode) {
-            std::string static_reason;
-            if (!static_obstacle_evidence_index_
-                    .restoreSnapshotWithoutRevisionIncrement(
-                        staged_static_snapshot, loaded_evidence_epoch,
-                        &static_reason)) {
-                // All validation was completed before the lifecycle lock;
-                // reaching this branch is an internal invariant violation.
-                throw std::logic_error(
-                    "staged static evidence restore invariant failed: " +
-                    static_reason);
-            }
-            std::atomic_store(&static_height_field_, staged_height_field);
+            std::atomic_store(
+                &static_height_field_, std::move(candidate.height_field));
             verified_map_session_loaded_ = true;
-            loaded_map_session_uuid_ = session.metadata.map_uuid;
+            loaded_map_session_uuid_.swap(
+                candidate.session.metadata.map_uuid);
             loaded_map_session_generation_ =
                 session.metadata.map_generation;
+        } else {
+            std::atomic_store(&static_height_field_,
+                              std::shared_ptr<const StaticHeightField>{});
         }
         {
             std::lock_guard<std::mutex> observation_lock(
@@ -8437,12 +8543,12 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
         }
         {
             std::lock_guard<std::mutex> lock(localization_target_mutex_);
-            localization_target_front_.reset(
-                new pcl::PointCloud<pcl::PointXYZ>);
-            localization_target_back_.reset(
-                new pcl::PointCloud<pcl::PointXYZ>);
-            localization_target_snapshot_.reset(
-                new pcl::PointCloud<pcl::PointXYZ>);
+            localization_target_front_ =
+                std::move(candidate.empty_clouds[9]);
+            localization_target_back_ =
+                std::move(candidate.empty_clouds[10]);
+            localization_target_snapshot_ =
+                std::move(candidate.empty_clouds[11]);
             ++localization_target_version_;
             localization_target_snapshot_version_ = 0;
             localization_target_ready_ = false;
@@ -8464,20 +8570,7 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
 
         // The matcher may retain a target shared_ptr internally. Recreate it
         // so no old-map target can survive the generation transition.
-        ndt_.reset(new pclomp::NormalDistributionsTransform<
-                   pcl::PointXYZ, pcl::PointXYZ>());
-        ndt_->setResolution(ndt_resolution_);
-        ndt_->setStepSize(ndt_step_size_);
-        ndt_->setTransformationEpsilon(ndt_transformation_epsilon_);
-        ndt_->setMaximumIterations(ndt_max_iterations_);
-        ndt_->setNumThreads(ndt_num_threads_);
-        if (ndt_neighbor_search_method_ == "DIRECT7") {
-            ndt_->setNeighborhoodSearchMethod(pclomp::DIRECT7);
-        } else if (ndt_neighbor_search_method_ == "DIRECT1") {
-            ndt_->setNeighborhoodSearchMethod(pclomp::DIRECT1);
-        } else {
-            ndt_->setNeighborhoodSearchMethod(pclomp::KDTREE);
-        }
+        ndt_.swap(candidate.ndt);
 
         crane_motion_ekf_.reset();
         frame_count_ = 0;
@@ -8500,13 +8593,11 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
         last_tf_stamp_ = ros::Time();
 
         keyframe_count_ = 0;
+        loop_closure_detector_.installPreparedKeyFrameDatabase(
+            std::move(candidate.keyframes));
         if (session_mode) {
-            loop_closure_detector_.installKeyFrameDatabase(
-                std::move(staged_keyframes));
             keyframe_count_ = static_cast<int>(
                 loop_closure_detector_.getKeyFrameCount());
-        } else {
-            loop_closure_detector_.clear();
         }
         {
             std::lock_guard<std::mutex> lock(processed_loops_mutex_);
@@ -8592,27 +8683,38 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
 bool NdtSlamNode::loadMapSessionService(
     lidar_slam2_msgs::LoadMapSession::Request& request,
     lidar_slam2_msgs::LoadMapSession::Response& response) {
-    const MapSessionLoadResult staged =
-        MapSessionSnapshot::loadVerified(request.session_directory);
-    if (!staged.valid) {
+    LoadedRuntimeMapCandidate candidate =
+        stageRuntimeMap(request.session_directory, true);
+    if (!candidate.valid) {
         response.success = false;
-        response.message = "Map session verification failed: " +
-            staged.reason;
+        response.message = "Map session staging failed: " +
+            candidate.reason;
         return true;
     }
-    lidar_slam2_msgs::LoadMap::Request legacy_request;
+    const std::string map_uuid = candidate.session.metadata.map_uuid;
+    const std::uint64_t map_generation =
+        candidate.session.metadata.map_generation;
+    const std::uint64_t static_revision =
+        candidate.session.static_evidence_revision;
+    const StaticEvidenceAuthority static_authority =
+        candidate.session.static_authority;
     lidar_slam2_msgs::LoadMap::Response legacy_response;
-    legacy_request.file_path = request.session_directory;
-    legacy_request.load_as_current = true;
-    loadMapService(legacy_request, legacy_response);
+    installLoadedRuntimeMap(std::move(candidate), legacy_response);
     response.success = legacy_response.success;
     response.message = legacy_response.message;
-    response.map_uuid = staged.metadata.map_uuid;
     response.registration_points = legacy_response.num_points;
-    response.map_generation = staged.metadata.map_generation;
-    response.static_evidence_revision = staged.static_evidence_revision;
-    response.static_evidence_authority =
-        staticEvidenceAuthorityName(staged.static_authority);
+    if (response.success) {
+        response.map_uuid = map_uuid;
+        response.map_generation = map_generation;
+        response.static_evidence_revision = static_revision;
+        response.static_evidence_authority =
+            staticEvidenceAuthorityName(static_authority);
+    } else {
+        response.map_uuid.clear();
+        response.map_generation = 0U;
+        response.static_evidence_revision = 0U;
+        response.static_evidence_authority = "NOT_INSTALLED";
+    }
     return true;
 }
 
@@ -10582,6 +10684,11 @@ void NdtSlamNode::writeRuntimeStatus() {
       << last_active_map_rebuild_time_sec_.load(std::memory_order_relaxed)
       << ",\n";
     const auto static_snapshot = static_obstacle_evidence_index_.snapshot();
+    const StaticEvidenceAuthority runtime_static_authority = static_snapshot
+        ? static_snapshot->authority
+        : StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+    const StaticEvidenceAuthorization runtime_static_authorization =
+        authorizeStaticEvidence(runtime_static_authority);
     f << "  \"static_evidence_epoch\": "
       << static_evidence_epoch_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"static_evidence_revision\": "
@@ -10593,6 +10700,19 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"static_evidence_latest_sequence\": "
       << static_obstacle_evidence_index_.latestObservationSequence()
       << ",\n";
+    f << "  \"static_authority\": \""
+      << staticEvidenceAuthorityName(runtime_static_authority) << "\",\n";
+    f << "  \"origin_authority\": \""
+      << staticEvidenceAuthorityName(
+             cargo_lift_origin_result_.origin.authority) << "\",\n";
+    f << "  \"formal_thickness_authorized\": "
+      << (authorizeStaticEvidence(
+                  cargo_lift_origin_result_.origin.authority)
+                  .formal_thickness_authorized
+              ? "true" : "false") << ",\n";
+    f << "  \"official_static_risk_authorized\": "
+      << (runtime_static_authorization.official_static_risk_authorized
+              ? "true" : "false") << ",\n";
     f << "  \"static_query_reason\": \""
       << cargo_static_evidence_decision_.reason << "\",\n";
     f << "  \"static_query_authorized\": "
@@ -14166,8 +14286,7 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
     pending_input.hook_anchor_valid = anchor_base.allFinite();
     pending_input.hook_anchor_base = Eigen::Vector3f(
         anchor_base.x(), anchor_base.y(),
-        0.5F * (hook_fixed_config_.roi_z_min +
-                hook_fixed_config_.roi_z_max));
+        hook_fixed_config_.roi_z_max);
     if (detection_current && hook_fixed_cargo_.center_base.allFinite()) {
         auto& candidate = pending_input.current_candidate;
         candidate.valid = true;
@@ -14258,15 +14377,15 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
     geometry_frame.observed_top_m = hook_fixed_cargo_.z95;
     geometry_frame.top_uncertainty_m =
         std::max(0.02F, hook_fixed_bottom_.uncertainty);
+    const StaticEvidenceAuthorization origin_authorization =
+        authorizeStaticEvidence(
+            cargo_lift_origin_result_.origin.authority);
     const bool authorized_origin = cargo_lift_origin_result_.valid &&
         (cargo_lift_origin_result_.origin.source ==
              CargoOriginCandidateSource::OPERATOR_APPROVED_BASELINE ||
          cargo_lift_origin_result_.origin.source ==
              CargoOriginCandidateSource::RUNTIME_MATURE_STATIC) &&
-        (cargo_lift_origin_result_.origin.authority ==
-             StaticEvidenceAuthority::RUNTIME_MATURE ||
-         cargo_lift_origin_result_.origin.authority ==
-             StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE);
+        origin_authorization.formal_thickness_authorized;
     if (authorized_origin &&
         std::isfinite(cargo_lift_origin_result_.static_thickness_m)) {
         geometry_frame.thickness.push_back({
@@ -14333,6 +14452,17 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         << static_cast<int>(cargo_lift_origin_result_.origin.source)
         << ",\"lift_origin_component_id\":"
         << cargo_lift_origin_result_.origin.component_id
+        << ",\"static_authority\":\""
+        << staticEvidenceAuthorityName(snapshot_authority)
+        << "\",\"origin_authority\":\""
+        << staticEvidenceAuthorityName(
+               cargo_lift_origin_result_.origin.authority)
+        << "\",\"formal_thickness_authorized\":"
+        << (authorized_origin ? "true" : "false")
+        << ",\"official_static_risk_authorized\":"
+        << (authorizeStaticEvidence(snapshot_authority)
+                    .official_static_risk_authorized
+                ? "true" : "false")
         << ",\"lift_origin_reason\":\""
         << cargo_lift_origin_result_.reason
         << "\",\"lift_confirm_count\":"
@@ -14388,8 +14518,9 @@ void NdtSlamNode::runPendingCargoAvoidance(
         std::isfinite(envelope.bottom_z_base);
     live_input.height.stamp_sec = stamp.toSec();
     live_input.height.bottom_z = envelope.bottom_z_base;
-    live_input.height.bottom_uncertainty_m =
-        envelope.vertical_uncertainty_m;
+    // Pending envelope min/max already include candidate uncertainty and the
+    // configured vertical margin exactly once.
+    live_input.height.bottom_uncertainty_m = 0.0F;
     live_input.footprint_base = toCargoObbFootprint(envelope);
     pcl::PointCloud<pcl::PointXYZ>::Ptr live_shell(
         new pcl::PointCloud<pcl::PointXYZ>);
@@ -14499,10 +14630,16 @@ void NdtSlamNode::runPendingCargoAvoidance(
     fusion_input.static_authority = evidence_snapshot
         ? evidence_snapshot->authority
         : StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
-    const bool runtime_contract = fusion_input.static_authority ==
+    const StaticEvidenceAuthorization static_authorization =
+        authorizeStaticEvidence(fusion_input.static_authority);
+    const bool runtime_contract =
+        static_authorization.official_static_risk_authorized &&
+        fusion_input.static_authority ==
             StaticEvidenceAuthority::RUNTIME_MATURE &&
         static_obstacle_evidence_index_.matureCellCount() > 0U;
-    const bool verified_contract = verified_map_session_loaded_ &&
+    const bool verified_contract =
+        static_authorization.official_static_risk_authorized &&
+        verified_map_session_loaded_ &&
         fusion_input.static_authority ==
             StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE;
     fusion_input.static_session_manifest_valid =
@@ -14553,6 +14690,19 @@ void NdtSlamNode::runPendingCargoAvoidance(
            << static_result.reason
            << "\",\"static_height_authority\":"
            << static_cast<int>(fusion_input.static_authority)
+           << ",\"static_authority\":\""
+           << staticEvidenceAuthorityName(fusion_input.static_authority)
+           << "\",\"origin_authority\":\""
+           << staticEvidenceAuthorityName(
+                  cargo_lift_origin_result_.origin.authority)
+           << "\",\"formal_thickness_authorized\":"
+           << (authorizeStaticEvidence(
+                       cargo_lift_origin_result_.origin.authority)
+                       .formal_thickness_authorized
+                   ? "true" : "false")
+           << ",\"official_static_risk_authorized\":"
+           << (static_authorization.official_static_risk_authorized
+                   ? "true" : "false")
            << ",\"static_height_matched_cells\":"
            << static_result.matched_cells
            << ",\"static_height_coverage\":"
@@ -14922,10 +15072,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                  CargoOriginCandidateSource::OPERATOR_APPROVED_BASELINE ||
              cargo_lift_origin_result_.origin.source ==
                  CargoOriginCandidateSource::RUNTIME_MATURE_STATIC) &&
-            (cargo_lift_origin_result_.origin.authority ==
-                 StaticEvidenceAuthority::RUNTIME_MATURE ||
-             cargo_lift_origin_result_.origin.authority ==
-                 StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE);
+            authorizeStaticEvidence(
+                cargo_lift_origin_result_.origin.authority)
+                .formal_thickness_authorized;
         observation.map_static_height_valid = authorized_origin &&
             std::isfinite(cargo_lift_origin_result_.static_thickness_m);
         observation.map_static_height_m =

@@ -85,7 +85,7 @@ TEST(CargoLiftOriginBinderTest, LoadedStartupReacquiresWithoutEmptyEdge) {
   EXPECT_NE(result.reason, "waiting_for_preload_baseline");
 }
 
-TEST(CargoLiftOriginBinderTest, UnverifiedStaticCandidateIsRejected) {
+TEST(CargoLiftOriginBinderTest, UnverifiedStaticCannotBindFormalOrigin) {
   CargoLiftOriginBinder binder;
   auto input = loadedInput(1.0);
   input.hook_was_empty = true;

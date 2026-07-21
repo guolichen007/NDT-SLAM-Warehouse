@@ -619,17 +619,55 @@ bool LoopClosureDetector::loadKeyFrameDatabase(
 
 void LoopClosureDetector::installKeyFrameDatabase(
     std::deque<KeyFrame> keyframes) {
-    std::lock_guard<std::mutex> lock(keyframes_mutex_);
-    keyframe_manager_.replaceKeyFrames(std::move(keyframes));
-    auto& installed = keyframe_manager_.getKeyFramesNonConst();
-    scan_context_list_.clear();
-    scan_context_list_.reserve(installed.size());
-    for (auto& keyframe : installed) {
-        if (!keyframe.cloud_ || keyframe.cloud_->empty()) continue;
-        keyframe.scan_context_ = scan_context_.generate(
-            keyframe.cloud_, Eigen::Vector3d::Zero());
-        scan_context_list_.push_back(keyframe.scan_context_);
+    PreparedKeyFrameDatabase prepared;
+    std::string reason;
+    if (!prepareKeyFrameDatabase(
+            std::move(keyframes), &prepared, &reason)) {
+        ROS_ERROR("Prepared keyframe install rejected: %s", reason.c_str());
+        return;
     }
+    installPreparedKeyFrameDatabase(std::move(prepared));
+}
+
+bool LoopClosureDetector::prepareKeyFrameDatabase(
+    std::deque<KeyFrame> keyframes,
+    PreparedKeyFrameDatabase* prepared,
+    std::string* reason) const {
+    if (!prepared) {
+        if (reason) *reason = "prepared_output_missing";
+        return false;
+    }
+    *prepared = PreparedKeyFrameDatabase{};
+    ScanContext generator;
+    generator.configure(
+        scan_context_.getNumRings(), scan_context_.getNumSectors(),
+        scan_context_.getMaxRange());
+    prepared->scan_contexts.reserve(keyframes.size());
+    for (auto& keyframe : keyframes) {
+        if (!keyframe.cloud_ || keyframe.cloud_->empty()) {
+            if (reason) *reason = "keyframe_cloud_missing";
+            return false;
+        }
+        keyframe.scan_context_ = generator.generate(
+            keyframe.cloud_, Eigen::Vector3d::Zero());
+        if (keyframe.scan_context_.size() == 0) {
+            if (reason) *reason = "keyframe_scan_context_invalid";
+            return false;
+        }
+        prepared->scan_contexts.push_back(keyframe.scan_context_);
+    }
+    prepared->keyframes = std::move(keyframes);
+    prepared->valid = true;
+    if (reason) *reason = "keyframe_database_prepared";
+    return true;
+}
+
+void LoopClosureDetector::installPreparedKeyFrameDatabase(
+    PreparedKeyFrameDatabase&& prepared) noexcept {
+    if (!prepared.valid) return;
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    keyframe_manager_.replaceKeyFrames(std::move(prepared.keyframes));
+    scan_context_list_.swap(prepared.scan_contexts);
 }
 
 void LoopClosureDetector::applyKeyFrameMetrics(

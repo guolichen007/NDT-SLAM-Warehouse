@@ -360,5 +360,62 @@ TEST(StaticObstacleEvidenceIndexTest,
   EXPECT_EQ(index.matureCellCount(), 0U);
 }
 
+TEST(StaticObstacleEvidenceIndexTest,
+     PreparedInstallFailureLeavesOldIdentity) {
+  StaticObstacleEvidenceIndex index(testConfig());
+  index.reset(30U);
+  const auto before = index.snapshot();
+  ASSERT_TRUE(before);
+  StaticEvidenceSnapshot invalid = *before;
+  invalid.revision = 0U;
+  PreparedStaticEvidenceInstall prepared;
+  std::string reason;
+  EXPECT_FALSE(index.prepareSnapshotInstall(
+      invalid, 31U, &prepared, &reason));
+  const auto after = index.snapshot();
+  ASSERT_TRUE(after);
+  EXPECT_EQ(after->map_generation, before->map_generation);
+  EXPECT_EQ(after->revision, before->revision);
+  EXPECT_EQ(after->cells.size(), before->cells.size());
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
+     StaticRestoreFailureLeavesOldMap) {
+  StaticObstacleEvidenceIndex index(testConfig());
+  index.reset(40U);
+  const auto before = index.snapshot();
+  ASSERT_TRUE(before);
+  StaticEvidenceSnapshot wrong_schema = *before;
+  wrong_schema.schema_version = 0U;
+  PreparedStaticEvidenceInstall prepared;
+  EXPECT_FALSE(index.prepareSnapshotInstall(
+      wrong_schema, 41U, &prepared, nullptr));
+  EXPECT_EQ(index.snapshot(), before);
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
+     SuccessfulInstallChangesAllIdentityFieldsTogether) {
+  StaticObstacleEvidenceIndex index(testConfig());
+  index.reset(50U);
+  StaticEvidenceSnapshot candidate = *index.snapshot();
+  candidate.revision = 77U;
+  candidate.latest_observation_sequence = 12U;
+  candidate.authority =
+      StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE;
+  PreparedStaticEvidenceInstall prepared;
+  std::string reason;
+  ASSERT_TRUE(index.prepareSnapshotInstall(
+      candidate, 51U, &prepared, &reason)) << reason;
+  EXPECT_NE(index.snapshot()->revision, 77U);
+  index.installPreparedSnapshot(std::move(prepared));
+  const auto installed = index.snapshot();
+  ASSERT_TRUE(installed);
+  EXPECT_EQ(installed->map_generation, 51U);
+  EXPECT_EQ(installed->revision, 77U);
+  EXPECT_EQ(installed->latest_observation_sequence, 12U);
+  EXPECT_EQ(installed->authority,
+            StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE);
+}
+
 }  // namespace
 }  // namespace ndt_slam
