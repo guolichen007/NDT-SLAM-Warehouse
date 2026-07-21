@@ -732,6 +732,14 @@ cargo_safety:
   static_map_pre_cargo_sequence_gap: 2
   static_map_max_observation_gap_sec: 0.8
   static_map_max_sequence_gap: 1
+  # Sparse 2.5D+ height field. Only mature/approved cells enter formal use.
+  static_height_z_bin_m: 0.10
+  static_height_max_layers_per_cell: 3
+  static_height_min_points_per_layer: 6
+  static_height_maximum_merge_gap_m: 0.18
+  # Clear 14 requires live ROI coverage plus a reliable static contract.
+  fusion_minimum_live_coverage_for_clear: 0.05
+  fusion_provisional_warning_to_official_code: false
   motion_corridor_enabled: true
   motion_corridor_immediate_near_field_m: 0.30
   motion_corridor_minimum_speed_mps: 0.05
@@ -913,6 +921,9 @@ hook_cargo_lock:
   locked_obb_min_short_axis_coverage: 0.12
   lost_velocity_decay_tau_sec: 0.30
   rearm_empty_confirm_sec: 1.0
+  # A process that remains LOADED can reuse only the retired formal signature;
+  # it must pass this separate multi-frame identity/geometry gate.
+  loaded_reacquire_confirm_frames: 5
   self_cargo_base_margin_xy_m: 0.15
   self_cargo_base_margin_z_m: 0.12
   self_cargo_max_margin_xy_m: 0.40

@@ -143,6 +143,11 @@ set(LIBRARY_SOURCES
   src/cargo_safety_temporal_filter.cpp
   src/cargo_obstacle_tracker.cpp
   src/static_obstacle_evidence_index.cpp
+  src/static_height_field.cpp
+  src/cargo_lift_origin_binder.cpp
+  src/cargo_geometry_fusion.cpp
+  src/cargo_avoidance_fusion.cpp
+  src/map_session_snapshot.cpp
   src/cargo_motion_corridor.cpp
   src/cargo_residual_classifier.cpp
   src/hook_load_state_filter.cpp
@@ -297,6 +302,41 @@ if(CATKIN_ENABLE_TESTING)
   if(TARGET static_obstacle_evidence_index_test)
     target_link_libraries(static_obstacle_evidence_index_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(static_height_field_test
+    test/static_height_field_test.cpp)
+  if(TARGET static_height_field_test)
+    target_link_libraries(static_height_field_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_lift_origin_binder_test
+    test/cargo_lift_origin_binder_test.cpp)
+  if(TARGET cargo_lift_origin_binder_test)
+    target_link_libraries(cargo_lift_origin_binder_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_geometry_fusion_test
+    test/cargo_geometry_fusion_test.cpp)
+  if(TARGET cargo_geometry_fusion_test)
+    target_link_libraries(cargo_geometry_fusion_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_avoidance_fusion_test
+    test/cargo_avoidance_fusion_test.cpp)
+  if(TARGET cargo_avoidance_fusion_test)
+    target_link_libraries(cargo_avoidance_fusion_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(map_session_snapshot_test
+    test/map_session_snapshot_test.cpp)
+  if(TARGET map_session_snapshot_test)
+    target_link_libraries(map_session_snapshot_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(cargo_motion_corridor_test

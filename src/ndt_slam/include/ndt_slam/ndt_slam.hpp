@@ -51,6 +51,9 @@
 #include <ndt_slam/cargo_safety_evaluator.hpp>
 #include <ndt_slam/cargo_obstacle_tracker.hpp>
 #include <ndt_slam/static_obstacle_evidence_index.hpp>
+#include <ndt_slam/map_session_snapshot.hpp>
+#include <ndt_slam/static_height_field.hpp>
+#include <ndt_slam/cargo_avoidance_fusion.hpp>
 #include <ndt_slam/cargo_motion_corridor.hpp>
 #include <ndt_slam/cargo_residual_classifier.hpp>
 #include <ndt_slam/cargo_safety_temporal_filter.hpp>
@@ -80,6 +83,7 @@
 #include "ndt_slam/runtime_diagnostics.hpp"
 #include "lidar_slam2_msgs/SaveMap.h"
 #include "lidar_slam2_msgs/LoadMap.h"
+#include "lidar_slam2_msgs/LoadMapSession.h"
 #include "lidar_slam2_msgs/CargoBottomEstimate.h"
 #include "lidar_slam2_msgs/CargoSafetyStatus.h"
 #include "lidar_slam2_msgs/HookLoadState.h"
@@ -207,6 +211,9 @@ private:
                         lidar_slam2_msgs::SaveMap::Response& response);
     bool loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
                         lidar_slam2_msgs::LoadMap::Response& response);
+    bool loadMapSessionService(
+        lidar_slam2_msgs::LoadMapSession::Request& request,
+        lidar_slam2_msgs::LoadMapSession::Response& response);
     bool rebuildMapService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response);
 
     void initializeParameters();
@@ -270,6 +277,7 @@ private:
     ros::ServiceServer relocalize_srv_;
     ros::ServiceServer save_map_srv_;
     ros::ServiceServer load_map_srv_;
+    ros::ServiceServer load_map_session_srv_;
     ros::ServiceServer rebuild_map_srv_;
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -760,10 +768,18 @@ private:
         double duration_ms = 0.0;
         CleanMapBuildResult build;
         StaticEvidenceCellGeometryMap static_clean_cells;
+        StaticEvidenceCellGeometryMap static_observed_cells;
+        StaticEvidenceCellKeySet static_observable_cells;
+        StaticEvidenceCellKeySet static_free_cells;
         StaticEvidenceCellKeySet static_invalidated_cells;
+        std::shared_ptr<StaticHeightField> static_height_field;
         MapLayerBundle bundle;
     };
     CleanMapWorkerResult clean_map_worker_result_;
+    std::mutex static_observation_mutex_;
+    StaticEvidenceCellGeometryMap pending_static_observed_cells_;
+    StaticEvidenceCellKeySet pending_static_observable_cells_;
+    StaticEvidenceCellKeySet pending_static_free_cells_;
     std::uint64_t objects_map_content_version_ = 1U;
     std::atomic<std::uint64_t> static_clean_build_version_{1U};
     std::atomic<std::uint64_t> static_clean_build_started_{0U};
@@ -1271,6 +1287,8 @@ private:
 
     // 保存多层地图到目录
     void saveMultiLayerMaps(const std::string& session_dir);
+    bool saveMapSessionAtomic(const std::string& session_dir,
+                              std::string* reason);
 
     // 从关键帧重建地图（不叠加旧 PCD）
 
@@ -1591,7 +1609,8 @@ private:
         GEOMETRY_CONFIRMING = 2,
         LOCKED = 3,
         LOST_HOLD = 4,
-        CLEAR_WAIT_REARM = 5
+        CLEAR_WAIT_REARM = 5,
+        LOADED_REACQUIRE = 6
     };
 
     struct HookCargoLockConfig {
@@ -1665,6 +1684,7 @@ private:
         float locked_obb_min_short_axis_coverage = 0.12F;
         float lost_velocity_decay_tau_sec = 0.30F;
         float rearm_empty_confirm_sec = 1.0F;
+        int loaded_reacquire_confirm_frames = 5;
         float self_cargo_base_margin_xy_m = 0.15F;
         float self_cargo_base_margin_z_m = 0.12F;
         float self_cargo_max_margin_xy_m = 0.40F;
@@ -1888,12 +1908,19 @@ private:
     ros::Publisher cargo_raw_status_code_pub_;
     ros::Publisher cargo_fused_box_marker_pub_;
     ros::Publisher cargo_static_evidence_debug_pub_;
+    ros::Publisher static_evidence_status_pub_;
+    ros::Publisher static_evidence_cell_state_counts_pub_;
+    ros::Publisher static_evidence_streak_histogram_pub_;
 
     CargoBottomFusion cargo_bottom_fusion_;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
+    StaticHeightFieldConfig static_height_field_config_;
+    CargoAvoidanceFusionConfig cargo_avoidance_fusion_config_;
     CargoObstacleTracker cargo_obstacle_tracker_;
     StaticObstacleEvidenceIndex static_obstacle_evidence_index_;
+    std::shared_ptr<const StaticHeightField> static_height_field_;
+    bool verified_map_session_loaded_ = false;
     StaticProvenanceDecision cargo_static_evidence_decision_;
     bool cargo_diagnostic_source_evidence_valid_ = false;
     CargoSafetyClusterEvidence cargo_diagnostic_source_evidence_;
