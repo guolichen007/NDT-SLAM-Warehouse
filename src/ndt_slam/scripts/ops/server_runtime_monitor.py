@@ -68,6 +68,8 @@ RUNTIME_SAMPLE_FIELDS = (
     "runtime_static_clean_build_discarded", "runtime_static_cells_confirmed",
     "runtime_static_cells_invalidated", "runtime_obstacle_track_created_count",
     "runtime_obstacle_track_reset_count",
+    "cpu_some_avg10", "memory_some_avg10", "memory_full_avg10",
+    "io_some_avg10", "io_full_avg10",
 )
 
 
@@ -609,11 +611,14 @@ def read_pcd_header(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def read_pcd_xyz_bounds(path: Path, max_sample: int = 5000) -> Optional[Dict[str, float]]:
-    """Quick sample of PCD XYZ data to get spatial bounds.
+def read_pcd_xyz_bounds(path: Path, max_sample: int = 5000,
+                        z_below: Optional[float] = None,
+                        z_above: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Quick sample of PCD XYZ data to get spatial bounds and Z outlier counts.
 
     Only reads first max_sample points for performance.
-    Returns {x_min, x_max, y_min, y_max, z_min, z_max} or None.
+    Returns {x_min, x_max, y_min, y_max, z_min, z_max, z_outlier_below_count,
+             z_outlier_above_count, points_sampled} or None.
     """
     header = read_pcd_header(path)
     if header is None:
@@ -633,6 +638,9 @@ def read_pcd_xyz_bounds(path: Path, max_sample: int = 5000) -> Optional[Dict[str
     fmt = {4: "f", 8: "d"}
 
     bounds: Dict[str, float] = {}
+    z_outlier_below_count = 0
+    z_outlier_above_count = 0
+    points_sampled = 0
     try:
         with path.open("rb") as fh:
             fh.seek(header["header_bytes"])
@@ -647,32 +655,113 @@ def read_pcd_xyz_bounds(path: Path, max_sample: int = 5000) -> Optional[Dict[str
                 z = struct.unpack(fmt.get(field_sizes[zi], "f"), row[z_off:z_off + field_sizes[zi]])[0]
                 if not all(math.isfinite(v) for v in (x, y, z)):
                     continue
+                points_sampled += 1
                 bounds["x_min"] = min(bounds.get("x_min", float("inf")), x)
                 bounds["x_max"] = max(bounds.get("x_max", float("-inf")), x)
                 bounds["y_min"] = min(bounds.get("y_min", float("inf")), y)
                 bounds["y_max"] = max(bounds.get("y_max", float("-inf")), y)
                 bounds["z_min"] = min(bounds.get("z_min", float("inf")), z)
                 bounds["z_max"] = max(bounds.get("z_max", float("-inf")), z)
-            # Count Z outliers in this sample
-            z_outliers_below = 0
-            z_outliers_above = 0
-            # Re-read for outlier counting (simplified: just check against bounds)
+                # Count Z outliers during the same pass
+                if z_below is not None and z < z_below:
+                    z_outlier_below_count += 1
+                if z_above is not None and z > z_above:
+                    z_outlier_above_count += 1
     except (OSError, struct.error):
         return None
-    return bounds if bounds else None
-
-
-def quick_scan_tile_bounds(path: Path) -> Optional[Dict[str, Any]]:
-    """Fast tile scan: header + optional xyz sample for outlier detection."""
-    header = read_pcd_header(path)
-    if header is None:
+    if not bounds:
         return None
+    bounds["z_outlier_below_count"] = z_outlier_below_count
+    bounds["z_outlier_above_count"] = z_outlier_above_count
+    bounds["points_sampled"] = points_sampled
+    return bounds
+
+
+def read_psi() -> Dict[str, Any]:
+    """Read Linux Pressure Stall Information from /proc/pressure/*.
+
+    Returns dict with cpu, memory, io pressure averages (avg10, avg60, avg300).
+    Each metric has 'some' (share of time some tasks stalled) and
+    'full' (share of time all tasks stalled, for memory/io only).
+    Values are None if /proc/pressure is not available.
+    """
     result: Dict[str, Any] = {
-        "points": header.get("point_count", 0),
-        "bytes": header.get("file_size", 0),
-        "header_valid": True,
+        "cpu_some_avg10": None, "cpu_some_avg60": None, "cpu_some_avg300": None,
+        "memory_some_avg10": None, "memory_some_avg60": None, "memory_some_avg300": None,
+        "memory_full_avg10": None, "memory_full_avg60": None, "memory_full_avg300": None,
+        "io_some_avg10": None, "io_some_avg60": None, "io_some_avg300": None,
+        "io_full_avg10": None, "io_full_avg60": None, "io_full_avg300": None,
     }
+    for resource in ("cpu", "memory", "io"):
+        pressure_path = Path("/proc/pressure") / resource
+        if not pressure_path.is_file():
+            continue
+        try:
+            text = pressure_path.read_text()
+        except OSError:
+            continue
+        for line in text.strip().split("\n"):
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            stall_type = parts[0]  # "some" or "full"
+            for token in parts[1:]:
+                if "=" not in token:
+                    continue
+                key, val = token.split("=", 1)
+                field = f"{resource}_{stall_type}_{key}"
+                if field in result:
+                    try:
+                        result[field] = float(val)
+                    except ValueError:
+                        pass
     return result
+
+
+def build_tile_catalog(persistent_root: Path) -> List[Dict[str, Any]]:
+    """Build a catalog of all PCD tiles with header metadata.
+
+    Reads header of every PCD file, collecting points/bytes/mtime per tile.
+    Returns list of tile catalog entries.
+    """
+    catalog: List[Dict[str, Any]] = []
+    for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
+        layer_dir = persistent_root / layer
+        if not layer_dir.is_dir():
+            continue
+        for pcd_path in sorted(layer_dir.glob("*.pcd")):
+            entry: Dict[str, Any] = {
+                "layer": layer,
+                "path": str(pcd_path.relative_to(persistent_root)),
+                "file_size": None,
+                "mtime_ns": None,
+                "points": None,
+                "header_valid": False,
+                "data_format": None,
+            }
+            try:
+                stat = pcd_path.stat()
+                entry["file_size"] = stat.st_size
+                entry["mtime_ns"] = int(stat.st_mtime * 1e9)
+            except OSError:
+                pass
+            header = read_pcd_header(pcd_path)
+            if header:
+                entry["points"] = header.get("point_count", 0)
+                entry["header_valid"] = True
+                entry["data_format"] = header.get("data_format")
+                # Extract tile_x/tile_y from filename if available
+                # Expected pattern: <prefix>_<x>_<y>.pcd
+                stem = pcd_path.stem
+                parts = stem.split("_")
+                if len(parts) >= 2:
+                    try:
+                        entry["tile_x"] = int(parts[-2])
+                        entry["tile_y"] = int(parts[-1])
+                    except (ValueError, IndexError):
+                        pass
+            catalog.append(entry)
+    return catalog
 
 
 def process_metrics(pid: Optional[int]) -> Dict[str, Any]:
@@ -801,6 +890,9 @@ class RosRuntimeMonitor:
         self._maturity_starvation_started: Optional[float] = None
         self._metric_stuck_zero_started: Dict[str, Optional[float]] = {}
         self._last_ndt_time_zero: bool = True
+        # Tile-level caching for incremental bounds scanning
+        self._tile_mtime_cache: Dict[str, float] = {}
+        self._cached_tile_bounds: Dict[str, Dict[str, float]] = {}
 
     @staticmethod
     def _read_boot_id() -> str:
@@ -1287,6 +1379,12 @@ class RosRuntimeMonitor:
         row.update({"runtime_" + key: value for key, value in self.latest_runtime.items()
                     if isinstance(value, (str, int, float, bool))})
         row.update(self.filesystem_cache)
+        # ── PSI (Pressure Stall Information) ──
+        psi = read_psi()
+        for psi_key in ("cpu_some_avg10", "memory_some_avg10", "memory_full_avg10",
+                         "io_some_avg10", "io_full_avg10"):
+            if psi_key in psi:
+                row[psi_key] = psi[psi_key]
         self.writer.submit("csv", ("samples/runtime_samples.csv",
                                    RUNTIME_SAMPLE_FIELDS, row))
         self.writer.submit("csv", ("samples/localization_samples.csv", [
@@ -1308,7 +1406,7 @@ class RosRuntimeMonitor:
 
         # ── manifest state detection (extended) ──
         has_tiles = False
-        tile_layers_present = []
+        tile_layers_present: List[str] = []
         for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
             layer_dir = self.persistent_root / layer
             if layer_dir.is_dir() and any(layer_dir.glob("*.pcd")):
@@ -1339,6 +1437,14 @@ class RosRuntimeMonitor:
         tmp_files = 0
         tiles_out_of_bounds: List[str] = []
         z_outlier_tiles: List[Dict[str, Any]] = []
+        total_z_below = 0
+        total_z_above = 0
+
+        z_below = map_health_cfg.get("z_outlier_below_m", -4.0)
+        z_above = map_health_cfg.get("z_outlier_above_m", 10.0)
+
+        # Build tile catalog with bounds sampling
+        tile_catalog: List[Dict[str, Any]] = []
 
         for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
             layer_dir = self.persistent_root / layer
@@ -1348,36 +1454,71 @@ class RosRuntimeMonitor:
             if layer_dir.is_dir():
                 for pcd_path in sorted(layer_dir.glob("*.pcd")):
                     layer_count += 1
+                    stat_mtime = None
                     try:
                         stat = pcd_path.stat()
                         layer_bytes += stat.st_size
+                        stat_mtime = stat.st_mtime
                         newest_tile_mtime = max(newest_tile_mtime or stat.st_mtime, stat.st_mtime)
                     except OSError:
                         pass
                     # Quick header scan for point count
                     header = read_pcd_header(pcd_path)
+                    catalog_entry: Dict[str, Any] = {
+                        "layer": layer,
+                        "tile": pcd_path.name,
+                        "points": header.get("point_count", 0) if header else 0,
+                        "bytes": stat.st_size if stat_mtime else 0,
+                        "mtime_ns": int(stat_mtime * 1e9) if stat_mtime else None,
+                        "header_valid": header is not None,
+                        "data_format": header.get("data_format") if header else None,
+                    }
                     if header:
                         layer_points += header.get("point_count", 0)
-                    # Check bounds (sample once per scan cycle, throttle for performance)
-                    if approved and layer_count <= 3:  # only sample first 3 per layer
-                        bounds = read_pcd_xyz_bounds(pcd_path, max_sample=2000)
+                    # Check bounds for ALL tiles, but only sample XYZ on first call or when
+                    # file mtime has changed since last scan
+                    tile_key = f"{layer}/{pcd_path.name}"
+                    last_tile_mtime = self._tile_mtime_cache.get(tile_key, 0)
+                    should_sample = (approved and
+                                     (stat_mtime is None or stat_mtime != last_tile_mtime))
+                    if should_sample:
+                        bounds = read_pcd_xyz_bounds(pcd_path, max_sample=2000,
+                                                     z_below=z_below, z_above=z_above)
                         if bounds:
-                            tile_name = f"{layer}/{pcd_path.name}"
+                            catalog_entry["bounds"] = {k: bounds[k] for k in
+                                ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
+                                if k in bounds}
+                            catalog_entry["z_outlier_below_count"] = bounds.get("z_outlier_below_count", 0)
+                            catalog_entry["z_outlier_above_count"] = bounds.get("z_outlier_above_count", 0)
+                            total_z_below += bounds.get("z_outlier_below_count", 0)
+                            total_z_above += bounds.get("z_outlier_above_count", 0)
                             # Approved bounds check
-                            if (bounds.get("x_min", 0) < approved.get("x_min", -100) or
-                                    bounds.get("x_max", 0) > approved.get("x_max", 100) or
-                                    bounds.get("y_min", 0) < approved.get("y_min", -100) or
-                                    bounds.get("y_max", 0) > approved.get("y_max", 100)):
-                                tiles_out_of_bounds.append(tile_name)
+                            if (bounds.get("x_min", approved.get("x_min", -100)) < approved.get("x_min", -100) or
+                                    bounds.get("x_max", approved.get("x_max", 100)) > approved.get("x_max", 100) or
+                                    bounds.get("y_min", approved.get("y_min", -100)) < approved.get("y_min", -100) or
+                                    bounds.get("y_max", approved.get("y_max", 100)) > approved.get("y_max", 100)):
+                                tiles_out_of_bounds.append(tile_key)
                             # Z outlier check
-                            z_below = map_health_cfg.get("z_outlier_below_m", -4.0)
-                            z_above = map_health_cfg.get("z_outlier_above_m", 10.0)
                             if bounds.get("z_min", 0) < z_below or bounds.get("z_max", 0) > z_above:
                                 z_outlier_tiles.append({
-                                    "tile": tile_name,
+                                    "tile": tile_key,
                                     "z_min": bounds.get("z_min"),
                                     "z_max": bounds.get("z_max"),
                                 })
+                        if stat_mtime is not None:
+                            self._tile_mtime_cache[tile_key] = stat_mtime
+                            # Cache bounds for reuse when tile hasn't changed
+                            self._cached_tile_bounds[tile_key] = {
+                                k: bounds[k] for k in
+                                ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
+                                if k in bounds
+                            }
+                    elif approved and tile_key in self._tile_mtime_cache:
+                        # Reuse cached bounds if tile hasn't changed
+                        cached = self._cached_tile_bounds.get(tile_key)
+                        if cached:
+                            catalog_entry["bounds"] = cached
+                    tile_catalog.append(catalog_entry)
             total_tile_files += layer_count
             total_tile_bytes += layer_bytes
             total_tile_points += layer_points
@@ -1407,6 +1548,69 @@ class RosRuntimeMonitor:
             if dt_hours > 0:
                 growth_points_per_hour = (total_tile_points - prev_points) / dt_hours
 
+        # ── write tile catalog (JSONL) ──
+        for entry in tile_catalog:
+            self.writer.submit("jsonl", ("samples/map_tile_catalog.jsonl", entry))
+
+        # ── write map health CSV sample ──
+        psi = read_psi()
+        health_csv_fields = [
+            "wall_time", "manifest_state", "tile_files", "tile_points",
+            "tile_bytes", "tile_size_mb", "tiles_out_of_bounds_count",
+            "z_outlier_tiles_count", "z_outlier_below_total", "z_outlier_above_total",
+            "ratio_alerts_count", "growth_points_per_hour",
+            "cpu_some_avg10", "memory_some_avg10", "io_some_avg10",
+            "io_full_avg10",
+        ]
+        health_csv_row = {
+            "wall_time": time.time(),
+            "manifest_state": manifest_state,
+            "tile_files": total_tile_files,
+            "tile_points": total_tile_points,
+            "tile_bytes": total_tile_bytes,
+            "tile_size_mb": total_tile_bytes / (1024.0 * 1024.0),
+            "tiles_out_of_bounds_count": len(tiles_out_of_bounds),
+            "z_outlier_tiles_count": len(z_outlier_tiles),
+            "z_outlier_below_total": total_z_below,
+            "z_outlier_above_total": total_z_above,
+            "ratio_alerts_count": len(ratio_alerts),
+            "growth_points_per_hour": growth_points_per_hour,
+            "cpu_some_avg10": psi.get("cpu_some_avg10"),
+            "memory_some_avg10": psi.get("memory_some_avg10"),
+            "io_some_avg10": psi.get("io_some_avg10"),
+            "io_full_avg10": psi.get("io_full_avg10"),
+        }
+        self.writer.submit("csv", ("samples/map_health_samples.csv",
+                                   health_csv_fields, health_csv_row))
+
+        # ── write map health latest JSON report ──
+        report: Dict[str, Any] = {
+            "wall_time": time.time(),
+            "manifest_state": manifest_state,
+            "active_manifest_present": active.is_file(),
+            "last_good_manifest_present": last_good.is_file(),
+            "suspension_marker_present": suspended.is_file(),
+            "persistent_tmp_files": tmp_files,
+            "persistent_tile_files": total_tile_files,
+            "persistent_total_tile_points": total_tile_points,
+            "persistent_total_tile_bytes": total_tile_bytes,
+            "persistent_newest_tile_mtime": newest_tile_mtime,
+            "persistent_size_mb": total_tile_bytes / (1024.0 * 1024.0),
+            "layer_stats": layer_stats,
+            "tiles_out_of_bounds": tiles_out_of_bounds,
+            "z_outlier_tiles": z_outlier_tiles,
+            "ratio_alerts": ratio_alerts,
+            "tile_growth_points_per_hour": growth_points_per_hour,
+            "z_outlier_below_total": total_z_below,
+            "z_outlier_above_total": total_z_above,
+            "psi": psi,
+            "manifest_generation": manifest_payload.get("generation") if manifest_payload else None,
+            "manifest_revision": manifest_payload.get("revision") if manifest_payload else None,
+            "manifest_total_cells": manifest_payload.get("total_cells") if manifest_payload else None,
+            "manifest_mature_cells": manifest_payload.get("mature_cells") if manifest_payload else None,
+        }
+        self.writer.submit("atomic_json", ("reports/map_health_latest.json", report))
+
         result = {
             "manifest_state": manifest_state,
             "active_manifest_present": active.is_file(),
@@ -1423,6 +1627,9 @@ class RosRuntimeMonitor:
             "z_outlier_tiles": z_outlier_tiles,
             "ratio_alerts": ratio_alerts,
             "tile_growth_points_per_hour": growth_points_per_hour,
+            "z_outlier_below_total": total_z_below,
+            "z_outlier_above_total": total_z_above,
+            "psi": psi,
             "manifest_generation": manifest_payload.get("generation") if manifest_payload else None,
             "manifest_revision": manifest_payload.get("revision") if manifest_payload else None,
             "manifest_total_cells": manifest_payload.get("total_cells") if manifest_payload else None,
