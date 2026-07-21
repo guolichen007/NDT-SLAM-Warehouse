@@ -25,6 +25,7 @@ add_service_files(
   FILES
   SaveMap.srv
   LoadMap.srv
+  LoadMapSession.srv
 )
 
 generate_messages(

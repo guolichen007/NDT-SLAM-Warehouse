@@ -1,0 +1,10 @@
+# Directory containing manifest.yaml and the formal map-session layers.
+string session_directory
+---
+bool success
+string message
+string map_uuid
+int64 registration_points
+uint64 map_generation
+uint64 static_evidence_revision
+string static_evidence_authority
