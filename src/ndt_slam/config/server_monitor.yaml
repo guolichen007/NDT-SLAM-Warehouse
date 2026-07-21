@@ -21,3 +21,108 @@ monitor:
   log_rotation_size_mb: 50
   log_rotation_count: 5
   optional_lightweight_rosbag: false
+
+# ── Fallback cargo envelope (disabled by default) ──
+# Requires manual approval of dimensions before enabling.
+fallback_cargo_envelope:
+  enabled: false
+
+  length_m: null
+  width_m: null
+  height_m: null
+
+  margin_x_m: 0.0
+  margin_y_m: 0.0
+  margin_z_m: 0.0
+
+  center_offset_x_m: 0.0
+  center_offset_y_m: 0.0
+  center_offset_z_m: 0.0
+
+  activation_delay_sec: 1.0
+  measured_recovery_confirm_sec: 1.0
+  maximum_fallback_duration_sec: 30.0
+
+  require_hook_loaded: true
+  require_fresh_load_signal: true
+  require_valid_localization: true
+  require_fresh_odom: true
+  require_valid_hook_anchor: true
+  require_valid_vertical_anchor: true
+
+  odom_stale_sec: 0.5
+  load_signal_stale_sec: 1.0
+  hook_anchor_stale_sec: 0.5
+
+  use_last_reliable_yaw: true
+  yaw_uncertainty_deg: 10.0
+  allow_clear_with_fallback: false
+
+# ── Operational code debounce (disabled by default) ──
+operational_output:
+  enabled: false
+  clear_confirm_sec: 0.5
+  transient_hold_sec: 0.5
+  fault_confirm_sec: 0.5
+  immediate_fault_codes: [30, 31, 32, 35]
+  immediate_hazard_codes: [17, 18]
+
+# ── Map health audit ──
+map_health:
+  # Approved warehouse bounds (tiles outside generate OUT_OF_APPROVED_MAP_BOUNDS)
+  approved_bounds:
+    x_min: -32.0
+    x_max: 30.0
+    y_min: -30.0
+    y_max: 14.0
+    z_min: -1.5
+    z_max: 7.0
+
+  # Z outlier detection
+  z_outlier_below_m: -4.0
+  z_outlier_above_m: 10.0
+
+  # Layer ratio anomaly thresholds
+  max_objects_to_display_ratio: 0.85
+  max_ground_to_display_ratio: 0.85
+  max_registration_to_display_ratio: 0.85
+
+  # Tile growth rate (points/hour)
+  max_tile_growth_points_per_hour: 500000
+
+  # Track churn
+  max_track_reset_ratio: 0.5
+
+  # Static evidence
+  maturity_starvation_sec: 60.0
+  min_mature_required_cells: 100
+
+  # Metric stuck-zero detection
+  metric_stuck_zero_duration_sec: 300.0
+
+  # PCD header scan: only full-scan when these conditions trigger
+  full_scan_trigger:
+    points_delta_pct: 30.0
+    bounds_delta_m: 5.0
+    size_delta_pct: 50.0
+
+# ── Motion episode capture ──
+motion_capture:
+  enter_speed_mps: 0.08
+  enter_confirm_sec: 0.5
+  exit_speed_mps: 0.03
+  exit_confirm_sec: 2.0
+  require_runtime_stationary_for_exit: true
+
+# Event-generation thresholds only. Cargo recognition and motion decisions
+# remain authoritative in ndt_slam_node and are not duplicated here.
+cargo_recognition_monitor:
+  stale_sec: 1.0
+  loaded_without_lock_event_sec: 5.0
+  repeat_period_sec: 30.0
+
+cargo_swing_monitor:
+  stale_sec: 0.75
+  sustained_warning_event_sec: 1.0
+  sustained_suspected_event_sec: 1.0
+  repeat_period_sec: 10.0

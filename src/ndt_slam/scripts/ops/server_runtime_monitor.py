@@ -68,6 +68,8 @@ RUNTIME_SAMPLE_FIELDS = (
     "runtime_static_clean_build_discarded", "runtime_static_cells_confirmed",
     "runtime_static_cells_invalidated", "runtime_obstacle_track_created_count",
     "runtime_obstacle_track_reset_count",
+    "cpu_some_avg10", "memory_some_avg10", "memory_full_avg10",
+    "io_some_avg10", "io_full_avg10",
 )
 
 
@@ -533,14 +535,29 @@ def load_config(path: Optional[Path]) -> Dict[str, Any]:
         "runtime_status_stale_sec": 5.0,
         "repeat_period_sec": 30.0,
         "writer_queue_size": 4096,
+        # Root-level keys from server_monitor.yaml
+        "motion_capture": {},
+        "fallback_cargo_envelope": {},
+        "operational_output": {},
+        "map_health": {},
+        "cargo_recognition_monitor": {},
+        "cargo_swing_monitor": {},
     }
     if not path or not path.exists():
         return defaults
     try:
         import yaml  # type: ignore
         loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        monitor = loaded.get("monitor", loaded)
-        defaults.update(monitor)
+        # Merge monitor section (backward compat)
+        monitor = loaded.get("monitor", {})
+        if isinstance(monitor, dict):
+            defaults.update(monitor)
+        # Merge root-level observability keys
+        for key in ("motion_capture", "fallback_cargo_envelope",
+                    "operational_output", "map_health",
+                    "cargo_recognition_monitor", "cargo_swing_monitor"):
+            if key in loaded and isinstance(loaded[key], dict):
+                defaults[key] = loaded[key]
     except (ImportError, OSError, ValueError):
         pass
     return defaults
@@ -552,6 +569,203 @@ def read_json(path: Path) -> Optional[Dict[str, Any]]:
         return value if isinstance(value, dict) else None
     except (OSError, ValueError):
         return None
+
+
+def read_pcd_header(path: Path) -> Optional[Dict[str, Any]]:
+    """Read PCD header fields without loading point data.
+
+    Returns dict with keys: points, width, height, fields, size, type, count,
+    viewpoint, data_format, header_bytes, file_size.
+    Returns None if not a valid PCD file.
+    """
+    try:
+        file_size = path.stat().st_size
+        with path.open("rb") as fh:
+            header_bytes = 0
+            info: Dict[str, Any] = {"file_size": file_size, "fields": []}
+            for _ in range(120):
+                line = fh.readline()
+                header_bytes += len(line)
+                text = line.decode("utf-8", "replace").strip()
+                if text.startswith("FIELDS"):
+                    info["fields"] = text.split()[1:]
+                elif text.startswith("SIZE"):
+                    info["size"] = [int(v) for v in text.split()[1:]]
+                elif text.startswith("TYPE"):
+                    info["type"] = text.split()[1:]
+                elif text.startswith("COUNT"):
+                    info["count"] = [int(v) for v in text.split()[1:]]
+                elif text.startswith("WIDTH"):
+                    info["width"] = int(text.split()[1])
+                elif text.startswith("HEIGHT"):
+                    info["height"] = int(text.split()[1])
+                elif text.startswith("POINTS"):
+                    info["points"] = int(text.split()[1])
+                elif text.startswith("VIEWPOINT"):
+                    parts = text.split()[1:]
+                    if len(parts) >= 7:
+                        info["viewpoint"] = [float(v) for v in parts[:7]]
+                elif text.startswith("DATA"):
+                    info["data_format"] = text.split()[1]
+                    break
+            info["header_bytes"] = header_bytes
+            info["point_count"] = info.get("points", info.get("width", 0))
+            # Must have at minimum a DATA field to be valid
+            if "data_format" not in info:
+                return None
+            return info
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def read_pcd_xyz_bounds(path: Path, max_sample: int = 5000,
+                        z_below: Optional[float] = None,
+                        z_above: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Quick sample of PCD XYZ data to get spatial bounds and Z outlier counts.
+
+    Only reads first max_sample points for performance.
+    Returns {x_min, x_max, y_min, y_max, z_min, z_max, z_outlier_below_count,
+             z_outlier_above_count, points_sampled} or None.
+    """
+    header = read_pcd_header(path)
+    if header is None:
+        return None
+    field_names = header.get("fields", [])
+    try:
+        xi = field_names.index("x")
+        yi = field_names.index("y")
+        zi = field_names.index("z")
+    except ValueError:
+        return None
+    field_sizes = header.get("size", [4] * len(field_names))
+    stride = sum(field_sizes)
+    x_off = sum(field_sizes[:xi])
+    y_off = sum(field_sizes[:yi])
+    z_off = sum(field_sizes[:zi])
+    fmt = {4: "f", 8: "d"}
+
+    bounds: Dict[str, float] = {}
+    z_outlier_below_count = 0
+    z_outlier_above_count = 0
+    points_sampled = 0
+    try:
+        with path.open("rb") as fh:
+            fh.seek(header["header_bytes"])
+            sample_count = min(max_sample, header.get("point_count", 0))
+            for _ in range(sample_count):
+                row = fh.read(stride)
+                if len(row) < stride:
+                    break
+                import struct
+                x = struct.unpack(fmt.get(field_sizes[xi], "f"), row[x_off:x_off + field_sizes[xi]])[0]
+                y = struct.unpack(fmt.get(field_sizes[yi], "f"), row[y_off:y_off + field_sizes[yi]])[0]
+                z = struct.unpack(fmt.get(field_sizes[zi], "f"), row[z_off:z_off + field_sizes[zi]])[0]
+                if not all(math.isfinite(v) for v in (x, y, z)):
+                    continue
+                points_sampled += 1
+                bounds["x_min"] = min(bounds.get("x_min", float("inf")), x)
+                bounds["x_max"] = max(bounds.get("x_max", float("-inf")), x)
+                bounds["y_min"] = min(bounds.get("y_min", float("inf")), y)
+                bounds["y_max"] = max(bounds.get("y_max", float("-inf")), y)
+                bounds["z_min"] = min(bounds.get("z_min", float("inf")), z)
+                bounds["z_max"] = max(bounds.get("z_max", float("-inf")), z)
+                # Count Z outliers during the same pass
+                if z_below is not None and z < z_below:
+                    z_outlier_below_count += 1
+                if z_above is not None and z > z_above:
+                    z_outlier_above_count += 1
+    except (OSError, struct.error):
+        return None
+    if not bounds:
+        return None
+    bounds["z_outlier_below_count"] = z_outlier_below_count
+    bounds["z_outlier_above_count"] = z_outlier_above_count
+    bounds["points_sampled"] = points_sampled
+    return bounds
+
+
+def read_psi() -> Dict[str, Any]:
+    """Read Linux Pressure Stall Information from /proc/pressure/*.
+
+    Returns dict with cpu, memory, io pressure averages (avg10, avg60, avg300).
+    Each metric has 'some' (share of time some tasks stalled) and
+    'full' (share of time all tasks stalled, for memory/io only).
+    Values are None if /proc/pressure is not available.
+    """
+    result: Dict[str, Any] = {
+        "cpu_some_avg10": None, "cpu_some_avg60": None, "cpu_some_avg300": None,
+        "memory_some_avg10": None, "memory_some_avg60": None, "memory_some_avg300": None,
+        "memory_full_avg10": None, "memory_full_avg60": None, "memory_full_avg300": None,
+        "io_some_avg10": None, "io_some_avg60": None, "io_some_avg300": None,
+        "io_full_avg10": None, "io_full_avg60": None, "io_full_avg300": None,
+    }
+    for resource in ("cpu", "memory", "io"):
+        pressure_path = Path("/proc/pressure") / resource
+        if not pressure_path.is_file():
+            continue
+        try:
+            text = pressure_path.read_text()
+        except OSError:
+            continue
+        for line in text.strip().split("\n"):
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            stall_type = parts[0]  # "some" or "full"
+            for token in parts[1:]:
+                if "=" not in token:
+                    continue
+                key, val = token.split("=", 1)
+                field = f"{resource}_{stall_type}_{key}"
+                if field in result:
+                    try:
+                        result[field] = float(val)
+                    except ValueError:
+                        pass
+    return result
+
+
+def build_tile_catalog(persistent_root: Path) -> List[Dict[str, Any]]:
+    """Build a catalog of all PCD tiles with header metadata.
+
+    Reads header of every PCD file, collecting points/bytes/mtime per tile.
+    Returns list of tile catalog entries.
+    """
+    import re
+    _tile_coord_re = re.compile(r'^x(-?\d+)_y(-?\d+)')
+    catalog: List[Dict[str, Any]] = []
+    for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
+        layer_dir = persistent_root / layer
+        if not layer_dir.is_dir():
+            continue
+        for pcd_path in sorted(layer_dir.glob("*.pcd")):
+            entry: Dict[str, Any] = {
+                "layer": layer,
+                "path": str(pcd_path.relative_to(persistent_root)),
+                "file_size": None,
+                "mtime_ns": None,
+                "points": None,
+                "header_valid": False,
+                "data_format": None,
+            }
+            try:
+                stat = pcd_path.stat()
+                entry["file_size"] = stat.st_size
+                entry["mtime_ns"] = int(stat.st_mtime * 1e9)
+            except OSError:
+                pass
+            header = read_pcd_header(pcd_path)
+            if header:
+                entry["points"] = header.get("point_count", 0)
+                entry["header_valid"] = True
+                entry["data_format"] = header.get("data_format")
+            # Extract tile coordinates from filename (x-1_y-1.pcd or x0_y1.pcd)
+            m = _tile_coord_re.match(pcd_path.stem)
+            if m:
+                entry["tile_x"] = int(m.group(1))
+                entry["tile_y"] = int(m.group(2))
+            catalog.append(entry)
+    return catalog
 
 
 def process_metrics(pid: Optional[int]) -> Dict[str, Any]:
@@ -597,7 +811,11 @@ class RosRuntimeMonitor:
 
     def __init__(self, args: argparse.Namespace, config: Mapping[str, Any]) -> None:
         import rospy
-        from lidar_slam2_msgs.msg import CargoSafetyStatus
+        from lidar_slam2_msgs.msg import (
+            CargoRecognitionStatus,
+            CargoSafetyStatus,
+            CargoSwingStatus,
+        )
         from nav_msgs.msg import Odometry
         from rosgraph_msgs.msg import Log
         from std_msgs.msg import Int32, String
@@ -617,6 +835,15 @@ class RosRuntimeMonitor:
         self.runtime_path = Path(args.persistent_root).expanduser().resolve() / "runtime_status.json"
         self.persistent_root = self.runtime_path.parent
         self.last_odom_wall: Optional[float] = None
+        self.odom_message_count: int = 0
+        self.last_safety_wall: Optional[float] = None
+        self.safety_status_message_count: int = 0
+        self.last_status_code_wall: Optional[float] = None
+        self.status_code_message_count: int = 0
+        self.last_recognition_wall: Optional[float] = None
+        self.recognition_status_message_count: int = 0
+        self.last_swing_wall: Optional[float] = None
+        self.swing_status_message_count: int = 0
         self.odom_times: Deque[float] = deque(maxlen=6000)
         self.pose_steps: Deque[float] = deque(maxlen=6000)
         self.last_pose: Optional[Tuple[float, float, float]] = None
@@ -630,6 +857,7 @@ class RosRuntimeMonitor:
         self.restart_count = 0
         self.pid: Optional[int] = None
         self.shutdown_requested = False
+        self.shutdown_event = threading.Event()
         self.snapshot_requested = False
         self.last_guard_state: Dict[str, bool] = {}
         self.last_static_epoch: Optional[int] = None
@@ -638,6 +866,58 @@ class RosRuntimeMonitor:
         self.filesystem_cache: Dict[str, Any] = {}
         self.last_cpu_sample: Optional[Tuple[float, int]] = None
 
+        # Typed recognition and suspended-motion observability. These values
+        # are read-only mirrors; they never feed ROS parameters or control.
+        self._recognition_state_counts: Counter[int] = Counter()
+        self._sway_state_counts: Counter[int] = Counter()
+        self._skew_state_counts: Counter[int] = Counter()
+        self._torsion_state_counts: Counter[int] = Counter()
+        self._last_recognition_state: Optional[int] = None
+        self._last_sway_state: Optional[int] = None
+        self._last_skew_state: Optional[int] = None
+        self._last_torsion_state: Optional[int] = None
+        self._last_swing_alarm_inhibited = False
+        self._recognition_failure_count = 0
+        self._recognition_failed_since: Optional[float] = None
+        self._recognition_recovery_sec: Deque[float] = deque(maxlen=10_000)
+        self._longest_loaded_without_lock_sec = 0.0
+        self._swing_offsets: Deque[float] = deque(maxlen=200_000)
+        self._swing_angles: Deque[float] = deque(maxlen=200_000)
+        self._swing_speeds: Deque[float] = deque(maxlen=200_000)
+        self._swing_yaw_errors: Deque[float] = deque(maxlen=200_000)
+        self._longest_sway_warning_sec = 0.0
+        self._longest_skew_suspected_sec = 0.0
+        self._sway_alarm_count = 0
+        self._skew_pull_alarm_count = 0
+        self._skew_alarm_inhibited_count = 0
+        self._torsion_alarm_count = 0
+        self._swing_stale_count = 0
+        self._recognition_stale_active = False
+        self._swing_stale_active = False
+        self._recognition_track_stats: Dict[str, Dict[str, Any]] = {}
+        self._swing_track_stats: Dict[str, Dict[str, Any]] = {}
+        self._last_loaded_without_lock_event_wall = 0.0
+        self._last_sway_warning_event_wall = 0.0
+        self._last_skew_suspected_event_wall = 0.0
+
+        # Motion episode tracking
+        motion_cfg = config.get("motion_capture", {})
+        self._motion_enter_speed = float(motion_cfg.get("enter_speed_mps", 0.08))
+        self._motion_enter_confirm = float(motion_cfg.get("enter_confirm_sec", 0.5))
+        self._motion_exit_speed = float(motion_cfg.get("exit_speed_mps", 0.03))
+        self._motion_exit_confirm = float(motion_cfg.get("exit_confirm_sec", 2.0))
+        self._motion_state: str = "UNKNOWN"
+        self._motion_enter_candidate: Optional[float] = None
+        self._motion_exit_candidate: Optional[float] = None
+        self._motion_episode_start: Optional[float] = None
+        self._motion_episode_start_pose: Optional[Dict[str, float]] = None
+        self._motion_speeds: Deque[float] = deque(maxlen=600)
+        self._motion_episode_count = 0
+
+        # Terminal event classifier state
+        self._last_health_line = 0.0
+        self._terminal_event_counts: Counter[str] = Counter()
+
         rospy.Subscriber("/odom", Odometry, self._odom_callback, queue_size=100)
         rospy.Subscriber("/cargo_avoidance/safety_status", CargoSafetyStatus,
                          self._safety_callback, queue_size=100)
@@ -645,7 +925,425 @@ class RosRuntimeMonitor:
                          self._code_callback, queue_size=100)
         rospy.Subscriber("/cargo_avoidance/static_evidence_debug", String,
                          self._static_callback, queue_size=20)
+        rospy.Subscriber("/cargo_avoidance/cargo_geometry_debug", String,
+                         self._cargo_geometry_callback, queue_size=50)
+        rospy.Subscriber("/cargo_avoidance/recognition_status",
+                         CargoRecognitionStatus,
+                         self._recognition_callback, queue_size=50)
+        rospy.Subscriber("/cargo_avoidance/swing_status", CargoSwingStatus,
+                         self._swing_callback, queue_size=100)
         rospy.Subscriber("/rosout_agg", Log, self._rosout_callback, queue_size=200)
+
+        # Track-level geometry sample filtering state
+        self._geo_track_samples: Dict[int, int] = {}
+        self._geo_track_episodes: Dict[int, str] = {}
+        self._geo_last_authoritative: Dict[int, float] = {}
+
+        # Map health tracking
+        self._last_tile_files: Optional[int] = None
+        self._last_tile_points: Optional[int] = None
+        self._last_map_scan_result: Dict[str, Any] = {}
+        self._map_health_events_suppressed: Dict[str, float] = {}
+        self._maturity_starvation_started: Optional[float] = None
+        self._metric_stuck_zero_started: Dict[str, Optional[float]] = {}
+        self._last_ndt_time_zero: Optional[bool] = None  # None = not yet observed
+        # Tile-level caching: key=tile_key, value=complete health analysis
+        self._tile_health_cache: Dict[str, Dict[str, Any]] = {}
+        # Readiness tracking
+        self._start_requested_at: float = time.time()
+
+    @staticmethod
+    def _read_boot_id() -> str:
+        try:
+            return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        except OSError:
+            return "unknown"
+
+    def _emit_typed_event(self, relative: str,
+                          event: Mapping[str, Any]) -> None:
+        payload = dict(event)
+        payload.setdefault("wall_time", time.time())
+        self.writer.submit("jsonl", (relative, payload))
+        line = "[{event}] reason={reason}".format(
+            event=payload.get("event", "CARGO_EVENT"),
+            reason=payload.get("reason", "-"))
+        self.writer.submit("text", ("logs/monitor.log", line))
+
+    def _recognition_callback(self, message: Any) -> None:
+        wall = time.time()
+        self.last_recognition_wall = wall
+        self.recognition_status_message_count += 1
+        state = int(message.state)
+        source_stamp = float(message.header.stamp.to_sec())
+        row = {
+            "wall_time": wall,
+            "source_stamp": source_stamp,
+            "state": state,
+            "valid": bool(message.valid),
+            "hook_loaded": bool(message.hook_loaded),
+            "lock_state": int(message.lock_state),
+            "cargo_lifecycle_id": int(message.cargo_lifecycle_id),
+            "track_segment_id": int(message.track_segment_id),
+            "provisional_track_id": int(message.provisional_track_id),
+            "formal_track_id": int(message.formal_track_id),
+            "candidate_visible": bool(message.candidate_visible),
+            "candidate_count": int(message.candidate_count),
+            "candidate_progress": int(message.candidate_progress),
+            "candidate_required": int(message.candidate_required),
+            "recognition_age_sec": float(message.recognition_age_sec),
+            "identity_confidence": float(message.identity_confidence),
+            "shape_confidence": float(message.shape_confidence),
+            "overall_confidence": float(message.overall_confidence),
+            "detector_reason": str(message.detector_reason),
+            "association_reason": str(message.association_reason),
+            "vertical_reason": str(message.vertical_reason),
+            "reason": str(message.reason),
+        }
+        fields = list(row.keys())
+        self.writer.submit("csv", (
+            "samples/cargo_recognition_samples.csv", fields, row))
+        self._recognition_state_counts[state] += 1
+        track_key = "{}:{}".format(
+            int(message.cargo_lifecycle_id), int(message.track_segment_id))
+        track_stats = self._recognition_track_stats.setdefault(track_key, {
+            "cargo_lifecycle_id": int(message.cargo_lifecycle_id),
+            "track_segment_id": int(message.track_segment_id),
+            "samples": 0,
+            "state_counts": {},
+            "failure_count": 0,
+            "maximum_recognition_age_sec": 0.0,
+        })
+        track_stats["samples"] += 1
+        state_key = str(state)
+        track_stats["state_counts"][state_key] = (
+            int(track_stats["state_counts"].get(state_key, 0)) + 1)
+        track_stats["maximum_recognition_age_sec"] = max(
+            float(track_stats["maximum_recognition_age_sec"]),
+            max(0.0, float(message.recognition_age_sec)))
+        if bool(message.hook_loaded) and state != int(message.STATE_CARGO_LOCKED):
+            self._longest_loaded_without_lock_sec = max(
+                self._longest_loaded_without_lock_sec,
+                max(0.0, float(message.recognition_age_sec)))
+            monitor_cfg = self.config.get("cargo_recognition_monitor", {})
+            event_after = float(monitor_cfg.get(
+                "loaded_without_lock_event_sec", 5.0))
+            repeat_after = float(monitor_cfg.get("repeat_period_sec", 30.0))
+            if (float(message.recognition_age_sec) >= event_after and
+                    wall - self._last_loaded_without_lock_event_wall >=
+                    repeat_after):
+                self._emit_typed_event(
+                    "samples/cargo_recognition_events.jsonl", {
+                        "event": "CARGO_LOADED_WITHOUT_LOCK",
+                        "wall_time": wall,
+                        "source_stamp": source_stamp,
+                        "cargo_lifecycle_id": int(
+                            message.cargo_lifecycle_id),
+                        "track_segment_id": int(message.track_segment_id),
+                        "recognition_age_sec": float(
+                            message.recognition_age_sec),
+                        "reason": str(message.reason),
+                    })
+                self._last_loaded_without_lock_event_wall = wall
+        if self._last_recognition_state != state:
+            self._emit_typed_event(
+                "samples/cargo_recognition_events.jsonl", {
+                    "event": "CARGO_RECOGNITION_STATE_CHANGE",
+                    "wall_time": wall,
+                    "source_stamp": source_stamp,
+                    "previous_state": self._last_recognition_state,
+                    "state": state,
+                    "cargo_lifecycle_id": int(message.cargo_lifecycle_id),
+                    "track_segment_id": int(message.track_segment_id),
+                    "reason": str(message.reason),
+                })
+        if state == int(message.STATE_RECOGNITION_FAILED) and \
+                self._last_recognition_state != state:
+            self._recognition_failure_count += 1
+            track_stats["failure_count"] += 1
+            self._recognition_failed_since = wall
+            self._emit_typed_event(
+                "samples/cargo_recognition_events.jsonl", {
+                    "event": "CARGO_RECOGNITION_FAILED_ENTER",
+                    "wall_time": wall, "source_stamp": source_stamp,
+                    "reason": str(message.reason)})
+        elif self._last_recognition_state == int(
+                message.STATE_RECOGNITION_FAILED) and state != int(
+                    message.STATE_RECOGNITION_FAILED):
+            if self._recognition_failed_since is not None:
+                recovery = max(0.0, wall - self._recognition_failed_since)
+                self._recognition_recovery_sec.append(recovery)
+            self._recognition_failed_since = None
+            self._emit_typed_event(
+                "samples/cargo_recognition_events.jsonl", {
+                    "event": "CARGO_RECOGNITION_RECOVERED",
+                    "wall_time": wall, "source_stamp": source_stamp,
+                    "reason": str(message.reason)})
+        special_events = {
+            int(message.STATE_GRAVITY_LIDAR_CONFLICT):
+                "CARGO_GRAVITY_LIDAR_CONFLICT",
+            int(message.STATE_CARGO_LOCKED): "CARGO_TRACK_LOCKED",
+            int(message.STATE_CARGO_LOST_HOLD): "CARGO_TRACK_LOST_HOLD",
+        }
+        if state in special_events and self._last_recognition_state != state:
+            self._emit_typed_event(
+                "samples/cargo_recognition_events.jsonl", {
+                    "event": special_events[state], "wall_time": wall,
+                    "source_stamp": source_stamp,
+                    "reason": str(message.reason)})
+        self._last_recognition_state = state
+        self._recognition_stale_active = False
+
+    def _swing_callback(self, message: Any) -> None:
+        wall = time.time()
+        self.last_swing_wall = wall
+        self.swing_status_message_count += 1
+        source_stamp = float(message.header.stamp.to_sec())
+        sway = int(message.sway_state)
+        skew = int(message.skew_pull_state)
+        torsion = int(message.torsion_state)
+        row = {
+            "wall_time": wall,
+            "source_stamp": source_stamp,
+            "valid": bool(message.valid),
+            "observation_state": int(message.observation_state),
+            "sway_state": sway,
+            "skew_pull_state": skew,
+            "torsion_state": torsion,
+            "cargo_lifecycle_id": int(message.cargo_lifecycle_id),
+            "track_segment_id": int(message.track_segment_id),
+            "track_id": int(message.track_id),
+            "hook_anchor_source": str(message.hook_anchor_source),
+            "hoist_state": int(message.hoist_state),
+            "hoist_state_fresh": bool(message.hoist_state_fresh),
+            "hoist_up_confirmed": bool(message.hoist_up_confirmed),
+            "alarm_inhibited": bool(message.alarm_inhibited),
+            "offset_x_m": float(message.offset_x_m),
+            "offset_y_m": float(message.offset_y_m),
+            "offset_m": float(message.offset_m),
+            "rope_length_m": float(message.rope_length_m),
+            "angle_deg": float(message.angle_deg),
+            "horizontal_speed_mps": float(message.horizontal_speed_mps),
+            "radial_speed_mps": float(message.radial_speed_mps),
+            "oscillation_amplitude_m": float(
+                message.oscillation_amplitude_m),
+            "direction_consistency": float(message.direction_consistency),
+            "zero_crossings": int(message.zero_crossings),
+            "yaw_error_deg": float(message.yaw_error_deg),
+            "observation_age_sec": float(message.observation_age_sec),
+            "state_duration_sec": float(message.state_duration_sec),
+            "recommended_action": int(message.recommended_action),
+            "reason": str(message.reason),
+        }
+        fields = list(row.keys())
+        self.writer.submit("csv", (
+            "samples/cargo_swing_samples.csv", fields, row))
+        self._sway_state_counts[sway] += 1
+        self._skew_state_counts[skew] += 1
+        self._torsion_state_counts[torsion] += 1
+        track_key = "{}:{}".format(
+            int(message.cargo_lifecycle_id), int(message.track_segment_id))
+        track_stats = self._swing_track_stats.setdefault(track_key, {
+            "cargo_lifecycle_id": int(message.cargo_lifecycle_id),
+            "track_segment_id": int(message.track_segment_id),
+            "track_id": int(message.track_id),
+            "samples": 0,
+            "sway_state_counts": {},
+            "skew_pull_state_counts": {},
+            "torsion_state_counts": {},
+            "maximum_offset_m": 0.0,
+            "maximum_angle_deg": 0.0,
+            "maximum_horizontal_speed_mps": 0.0,
+            "maximum_yaw_error_deg": 0.0,
+            "longest_sway_warning_sec": 0.0,
+            "longest_skew_suspected_sec": 0.0,
+        })
+        track_stats["samples"] += 1
+        track_stats["track_id"] = int(message.track_id)
+        for field, value in (("sway_state_counts", sway),
+                             ("skew_pull_state_counts", skew),
+                             ("torsion_state_counts", torsion)):
+            value_key = str(value)
+            track_stats[field][value_key] = (
+                int(track_stats[field].get(value_key, 0)) + 1)
+        if bool(message.valid):
+            offset = abs(float(message.offset_m))
+            angle = abs(float(message.angle_deg))
+            speed = abs(float(message.horizontal_speed_mps))
+            yaw_error = abs(float(message.yaw_error_deg))
+            self._swing_offsets.append(offset)
+            self._swing_angles.append(angle)
+            self._swing_speeds.append(speed)
+            self._swing_yaw_errors.append(yaw_error)
+            track_stats["maximum_offset_m"] = max(
+                float(track_stats["maximum_offset_m"]), offset)
+            track_stats["maximum_angle_deg"] = max(
+                float(track_stats["maximum_angle_deg"]), angle)
+            track_stats["maximum_horizontal_speed_mps"] = max(
+                float(track_stats["maximum_horizontal_speed_mps"]), speed)
+            track_stats["maximum_yaw_error_deg"] = max(
+                float(track_stats["maximum_yaw_error_deg"]), yaw_error)
+        if sway in (int(message.SWAY_WARNING), int(message.SWAY_ALARM),
+                    int(message.SWAY_SETTLING)):
+            self._longest_sway_warning_sec = max(
+                self._longest_sway_warning_sec,
+                max(0.0, float(message.state_duration_sec)))
+            track_stats["longest_sway_warning_sec"] = max(
+                float(track_stats["longest_sway_warning_sec"]),
+                max(0.0, float(message.state_duration_sec)))
+        if skew in (int(message.SKEW_PULL_SUSPECTED),
+                    int(message.SKEW_PULL_ALARM)):
+            self._longest_skew_suspected_sec = max(
+                self._longest_skew_suspected_sec,
+                max(0.0, float(message.state_duration_sec)))
+            track_stats["longest_skew_suspected_sec"] = max(
+                float(track_stats["longest_skew_suspected_sec"]),
+                max(0.0, float(message.state_duration_sec)))
+        sway_events = {
+            int(message.SWAY_DETECTED): "CARGO_SWAY_DETECTED_ENTER",
+            int(message.SWAY_WARNING): "CARGO_SWAY_WARNING_ENTER",
+            int(message.SWAY_ALARM): "CARGO_SWAY_ALARM_ENTER",
+            int(message.SWAY_SETTLING): "CARGO_SWAY_SETTLING",
+            int(message.SWAY_NORMAL): "CARGO_SWAY_CLEAR",
+        }
+        if sway != self._last_sway_state and sway in sway_events:
+            self._emit_typed_event("samples/cargo_swing_events.jsonl", {
+                "event": sway_events[sway], "wall_time": wall,
+                "source_stamp": source_stamp, "reason": str(message.reason)})
+            if sway == int(message.SWAY_ALARM):
+                self._sway_alarm_count += 1
+        skew_events = {
+            int(message.SKEW_PULL_SUSPECTED): "CARGO_SKEW_PULL_SUSPECTED",
+            int(message.SKEW_PULL_ALARM): "CARGO_SKEW_PULL_ALARM",
+        }
+        if skew != self._last_skew_state and skew in skew_events:
+            self._emit_typed_event("samples/cargo_swing_events.jsonl", {
+                "event": skew_events[skew], "wall_time": wall,
+                "source_stamp": source_stamp, "reason": str(message.reason)})
+            if skew == int(message.SKEW_PULL_ALARM):
+                self._skew_pull_alarm_count += 1
+        if bool(message.alarm_inhibited) and not self._last_swing_alarm_inhibited:
+            self._skew_alarm_inhibited_count += 1
+            self._emit_typed_event("samples/cargo_swing_events.jsonl", {
+                "event": "CARGO_SKEW_PULL_ALARM_INHIBITED",
+                "wall_time": wall, "source_stamp": source_stamp,
+                "reason": str(message.reason)})
+        torsion_events = {
+            int(message.TORSION_WARNING): "CARGO_TORSION_WARNING",
+            int(message.TORSION_ALARM): "CARGO_TORSION_ALARM",
+        }
+        if torsion != self._last_torsion_state and torsion in torsion_events:
+            self._emit_typed_event("samples/cargo_swing_events.jsonl", {
+                "event": torsion_events[torsion], "wall_time": wall,
+                "source_stamp": source_stamp, "reason": str(message.reason)})
+            if torsion == int(message.TORSION_ALARM):
+                self._torsion_alarm_count += 1
+        if int(message.observation_state) == int(message.OBSERVATION_TRACK_CHANGED):
+            self._emit_typed_event("samples/cargo_swing_events.jsonl", {
+                "event": "CARGO_SWING_TRACK_RESET", "wall_time": wall,
+                "source_stamp": source_stamp, "reason": str(message.reason)})
+        monitor_cfg = self.config.get("cargo_swing_monitor", {})
+        repeat_after = float(monitor_cfg.get("repeat_period_sec", 10.0))
+        if (sway in (int(message.SWAY_WARNING), int(message.SWAY_ALARM)) and
+                float(message.state_duration_sec) >= float(monitor_cfg.get(
+                    "sustained_warning_event_sec", 1.0)) and
+                wall - self._last_sway_warning_event_wall >= repeat_after):
+            self._emit_typed_event("samples/cargo_swing_events.jsonl", {
+                "event": "CARGO_SWAY_WARNING_SUSTAINED",
+                "wall_time": wall, "source_stamp": source_stamp,
+                "state_duration_sec": float(message.state_duration_sec),
+                "reason": str(message.reason)})
+            self._last_sway_warning_event_wall = wall
+        if (skew in (int(message.SKEW_PULL_SUSPECTED),
+                     int(message.SKEW_PULL_ALARM)) and
+                float(message.state_duration_sec) >= float(monitor_cfg.get(
+                    "sustained_suspected_event_sec", 1.0)) and
+                wall - self._last_skew_suspected_event_wall >= repeat_after):
+            self._emit_typed_event("samples/cargo_swing_events.jsonl", {
+                "event": "CARGO_SKEW_PULL_SUSPECTED_SUSTAINED",
+                "wall_time": wall, "source_stamp": source_stamp,
+                "state_duration_sec": float(message.state_duration_sec),
+                "reason": str(message.reason)})
+            self._last_skew_suspected_event_wall = wall
+        self._last_sway_state = sway
+        self._last_skew_state = skew
+        self._last_torsion_state = torsion
+        self._last_swing_alarm_inhibited = bool(message.alarm_inhibited)
+        self._swing_stale_active = False
+
+    def _cargo_geometry_callback(self, message: Any) -> None:
+        """Filter and save authoritative measured geometry samples only."""
+        wall = time.time()
+        text = str(message.data)
+        self.writer.submit("jsonl", ("samples/cargo_geometry_samples.jsonl",
+                                     {"wall_time": wall, "raw": text}))
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(parsed, dict):
+            return
+
+        # CSV record all samples (for debugging)
+        csv_fields = [
+            "wall_time", "stamp", "track_id", "track_state", "lock_state",
+            "geometry_source", "authoritative", "observation_valid", "height_valid",
+            "points", "support", "confidence",
+            "center_x", "center_y", "center_z",
+            "length_m", "width_m", "height_m", "yaw_deg",
+            "bottom_z", "top_z", "vertical_source", "failure_reason",
+            "hook_load_state", "gravity_voltage", "gravity_age_sec",
+            "fallback_active"
+        ]
+        row = {"wall_time": wall}
+        for field in csv_fields[1:]:  # skip wall_time which we already set
+            row[field] = parsed.get(field, "")
+        self.writer.submit("csv", ("samples/cargo_geometry_samples.csv", csv_fields, row))
+
+        # Filter: only authoritative measured geometry
+        geo_source = str(parsed.get("geometry_source", ""))
+        authoritative = parsed.get("authoritative", False)
+        track_state = str(parsed.get("track_state", ""))
+        height_valid = parsed.get("height_valid", False)
+        observation_valid = parsed.get("observation_valid", False)
+        support = int(parsed.get("support", 0))
+        points = int(parsed.get("points", 0))
+        confidence = float(parsed.get("confidence", 0.0))
+
+        # Rejection rules from plan
+        if geo_source != "MEASURED":
+            return  # DISPLAY_FROZEN, DEFAULT_FALLBACK, NONE rejected
+        if not authoritative:
+            return
+        if track_state != "LOCKED":
+            return  # EMPTY, LOCKING, LOST_HOLD rejected
+        if not observation_valid:
+            return
+        if not height_valid:
+            return
+        if support <= 0:
+            return
+        if points <= 0:
+            return
+        if confidence <= 0.0:
+            return
+        dims = [float(parsed.get(k, 0.0)) for k in ("length_m", "width_m", "height_m")]
+        if any(v <= 0.0 or not math.isfinite(v) for v in dims):
+            return
+
+        # Save filtered authoritative sample
+        filtered = dict(parsed)
+        filtered["wall_time"] = wall
+        self.writer.submit("jsonl", ("samples/cargo_geometry_authoritative.jsonl", filtered))
+        filtered_csv = {"wall_time": wall}
+        for field in csv_fields[1:]:
+            filtered_csv[field] = parsed.get(field, "")
+        self.writer.submit("csv", ("samples/cargo_geometry_authoritative.csv",
+                                   csv_fields, filtered_csv))
+
+        # Track per-track_id sample count
+        track_id = int(parsed.get("track_id", 0))
+        if track_id > 0:
+            self._geo_track_samples[track_id] = self._geo_track_samples.get(track_id, 0) + 1
 
     def _odom_callback(self, message: Any) -> None:
         wall = time.time()
@@ -659,6 +1357,7 @@ class RosRuntimeMonitor:
             self.pose_steps.append(math.sqrt(sum((a - b) ** 2 for a, b in zip(position, self.last_pose))))
         self.last_pose = position
         self.last_odom_wall = wall
+        self.odom_message_count += 1
         self.odom_times.append(wall)
         q = pose.orientation
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
@@ -670,6 +1369,8 @@ class RosRuntimeMonitor:
 
     def _safety_callback(self, message: Any) -> None:
         wall = time.time()
+        self.last_safety_wall = wall
+        self.safety_status_message_count += 1
         stamp = float(message.header.stamp.to_sec())
         values = {field: getattr(message, field) for field in (
             "requested_alarm_code", "reason", "warning_valid", "evidence_state",
@@ -703,9 +1404,12 @@ class RosRuntimeMonitor:
         self.writer.submit("csv", ("samples/safety_samples.csv", fields, row))
 
     def _code_callback(self, message: Any) -> None:
+        wall = time.time()
+        self.last_status_code_wall = wall
+        self.status_code_message_count += 1
         with self.aggregator_lock:
             event = self.aggregator.check_status_code(
-                int(message.data), wall_time=time.time())
+                int(message.data), wall_time=wall)
         if event:
             self._emit_event(event)
 
@@ -736,12 +1440,217 @@ class RosRuntimeMonitor:
             return
         text = str(message.msg)
         tags = ("SO3", "MemoryGuard", "DiskGuard", "SAFETY", "Relocalization",
-                "non-finite", "StaticMapEvidence")
-        if int(message.level) < int(message.ERROR) and not any(tag in text for tag in tags):
+                "non-finite", "StaticMapEvidence", "CARGO_MONITOR",
+                "CargoAlarmHeartbeat", "HookLoadState", "SAFETY_PENDING",
+                "MotionGate", "NDT", "time rollback", "source stale")
+        level = int(message.level)
+        # ERROR/FATAL always saved
+        if level >= int(message.ERROR):
+            pass
+        # WARN: only if tag matches
+        elif not any(tag in text for tag in tags):
+            # Count suppressed WARNs
+            self._terminal_event_counts["WARN_suppressed"] += 1
             return
-        self.writer.submit("jsonl", ("logs/ros_events.jsonl", {
-            "wall_time": time.time(), "level": int(message.level),
-            "name": message.name, "message": text}))
+        event = {
+            "wall_time": time.time(), "level": level,
+            "name": message.name, "message": text,
+            "tags": [t for t in tags if t in text],
+        }
+        self.writer.submit("jsonl", ("logs/ros_events.jsonl", event))
+        self._terminal_event_counts["ERROR" if level >= int(message.ERROR) else "WARN_matched"] += 1
+
+    def _check_runtime_invariants(self, runtime: Dict[str, Any], now: float) -> None:
+        """Emit events for runtime invariant violations."""
+        map_health_cfg = self.config.get("map_health", {})
+
+        # 1. stationary=true but stationary_frame_count==0
+        is_stationary = runtime.get("is_stationary", False)
+        stationary_frames = int(runtime.get("stationary_frame_count", 0) or 0)
+        if is_stationary and stationary_frames == 0:
+            self._throttled_emit("RUNTIME_INVARIANT_VIOLATION", now, 60.0, {
+                "detail": "stationary_true_but_frame_count_zero",
+                "is_stationary": True, "stationary_frame_count": 0,
+            })
+
+        # 2. static maturity starvation
+        mature = int(runtime.get("static_evidence_mature_cells", 0) or 0)
+        cells = int(runtime.get("static_evidence_cells", 0) or 0)
+        confirmed = int(runtime.get("static_cells_confirmed", 0) or 0)
+        revision = int(runtime.get("static_evidence_revision", 0) or 0)
+        min_cells = map_health_cfg.get("min_mature_required_cells", 100)
+        starvation_sec = map_health_cfg.get("maturity_starvation_sec", 60.0)
+        if mature == 0 and cells >= min_cells and confirmed > 0:
+            if self._maturity_starvation_started is None:
+                self._maturity_starvation_started = now
+            elif now - self._maturity_starvation_started >= starvation_sec:
+                self._throttled_emit("STATIC_MATURITY_STARVATION", now, 120.0, {
+                    "detail": "mature=0 despite confirmed cells",
+                    "cells": cells, "mature_cells": mature,
+                    "confirmed": confirmed, "revision": revision,
+                    "duration_sec": now - self._maturity_starvation_started,
+                })
+        else:
+            self._maturity_starvation_started = None
+
+        # 3. metric stuck-zero: ndt_time
+        ndt_time = float(runtime.get("average_ndt_time_ms", 0) or 0)
+        stuck_dur = map_health_cfg.get("metric_stuck_zero_duration_sec", 300.0)
+        if ndt_time == 0.0:
+            if not self._last_ndt_time_zero:
+                self._metric_stuck_zero_started["ndt_time"] = now
+            elif now - self._metric_stuck_zero_started.get("ndt_time", now) >= stuck_dur:
+                self._throttled_emit("METRIC_STUCK_ZERO", now, 300.0, {
+                    "detail": "average_ndt_time_ms=0 for extended period",
+                    "duration_sec": now - self._metric_stuck_zero_started.get("ndt_time", now),
+                })
+            self._last_ndt_time_zero = True
+        else:
+            self._last_ndt_time_zero = False
+            self._metric_stuck_zero_started["ndt_time"] = None
+
+        # 4. track churn
+        created = int(runtime.get("obstacle_track_created_count", 0) or 0)
+        reset = int(runtime.get("obstacle_track_reset_count", 0) or 0)
+        max_ratio = map_health_cfg.get("max_track_reset_ratio", 0.5)
+        if created >= 10 and reset / max(1, created) > max_ratio:
+            self._throttled_emit("TRACK_CHURN_HIGH", now, 120.0, {
+                "detail": f"reset/created={reset}/{created}={reset / max(1, created):.3f}",
+                "track_created": created, "track_reset": reset,
+                "churn_ratio": reset / max(1, created),
+            })
+
+    def _emit_map_health_events(self, now: float) -> None:
+        """Emit throttled events based on map scan results."""
+        result = self._last_map_scan_result
+        if not result:
+            return
+
+        # TILES_ACTIVE_NO_MANIFEST
+        if result.get("manifest_state") == "TILES_ACTIVE_NO_MANIFEST":
+            self._throttled_emit("TILES_ACTIVE_NO_MANIFEST", now, 300.0, {
+                "detail": f"{result.get('persistent_tile_files', 0)} tiles, no manifest",
+                "tile_count": result.get("persistent_tile_files", 0),
+            })
+
+        # Map layer ratios
+        for alert in result.get("ratio_alerts", []):
+            self._throttled_emit(f"MAP_LAYER_RATIO_ANOMALY", now, 300.0, {
+                "detail": alert,
+            })
+
+        # Out of approved bounds
+        for tile_name in result.get("tiles_out_of_bounds", []):
+            self._throttled_emit("OUT_OF_APPROVED_MAP_BOUNDS", now, 300.0, {
+                "detail": tile_name,
+            })
+
+        # Z outliers
+        for zt in result.get("z_outlier_tiles", []):
+            self._throttled_emit("MAP_Z_OUTLIER", now, 300.0, {
+                "detail": f"{zt['tile']} z=[{zt.get('z_min')}, {zt.get('z_max')}]",
+            })
+
+        # Tile growth rate
+        max_growth = self.config.get("map_health", {}).get("max_tile_growth_points_per_hour", 500000)
+        growth = result.get("tile_growth_points_per_hour", 0.0)
+        if growth > max_growth:
+            self._throttled_emit("MAP_TILE_GROWTH_HIGH", now, 600.0, {
+                "detail": f"{growth:.0f} pts/hour > {max_growth}",
+            })
+
+    def _throttled_emit(self, event_type: str, now: float, interval: float,
+                         payload: Dict[str, Any]) -> None:
+        """Emit event if not suppressed (throttled per event type + detail key)."""
+        key = f"{event_type}:{payload.get('detail', '')}"
+        last = self._map_health_events_suppressed.get(key, 0.0)
+        if now - last < interval:
+            return
+        self._map_health_events_suppressed[key] = now
+        self._emit_event({
+            "event": event_type,
+            "wall_time": now,
+            "code": "-",
+            "reason": payload.get("detail", ""),
+            "obstacle_track_id": 0,
+        })
+        self.writer.submit("jsonl", ("logs/map_health_events.jsonl", {
+            "event": event_type, "wall_time": now, **payload,
+        }))
+
+    def _update_motion_state(self, now: float) -> None:
+        """Track motion episodes based on odom speed."""
+        speed = self.current_pose.get("speed_mps", 0.0) if self.current_pose else 0.0
+        if not math.isfinite(speed):
+            return
+        self._motion_speeds.append(speed)
+
+        if self._motion_state in ("UNKNOWN", "STATIONARY"):
+            if speed >= self._motion_enter_speed:
+                if self._motion_enter_candidate is None:
+                    self._motion_enter_candidate = now
+                elif now - self._motion_enter_candidate >= self._motion_enter_confirm:
+                    self._motion_state = "MOVING"
+                    self._motion_episode_start = now
+                    self._motion_episode_start_pose = dict(self.current_pose) if self.current_pose else None
+                    self._motion_episode_count += 1
+                    event = {
+                        "event": "MOTION_ENTER",
+                        "wall_time": now,
+                        "episode_id": self._motion_episode_count,
+                        "pose": self._motion_episode_start_pose,
+                    }
+                    self.writer.submit("jsonl", ("samples/motion_events.jsonl", event))
+                    self._emit_event({"event": "MOTION_ENTER", "wall_time": now,
+                                      "code": "-", "reason": f"speed={speed:.3f}",
+                                      "obstacle_track_id": 0})
+            else:
+                self._motion_enter_candidate = None
+                self._motion_state = "STATIONARY"
+        elif self._motion_state == "MOVING":
+            if speed < self._motion_exit_speed:
+                if self._motion_exit_candidate is None:
+                    self._motion_exit_candidate = now
+                elif now - self._motion_exit_candidate >= self._motion_exit_confirm:
+                    self._motion_state = "STATIONARY"
+                    self._motion_exit_candidate = None
+                    start_pose = self._motion_episode_start_pose
+                    current_pose = dict(self.current_pose) if self.current_pose else None
+                    displacement = None
+                    if start_pose and current_pose:
+                        displacement = math.sqrt(
+                            (current_pose.get("x", 0) - start_pose.get("x", 0))**2 +
+                            (current_pose.get("y", 0) - start_pose.get("y", 0))**2)
+                    speeds = list(self._motion_speeds)
+                    event = {
+                        "event": "MOTION_EXIT",
+                        "wall_time": now,
+                        "episode_id": self._motion_episode_count,
+                        "duration_sec": now - (self._motion_episode_start or now),
+                        "displacement_m": displacement,
+                        "max_speed_mps": max(speeds) if speeds else 0.0,
+                        "p95_speed_mps": _percentile(speeds, 0.95) if speeds else 0.0,
+                    }
+                    self.writer.submit("jsonl", ("samples/motion_events.jsonl", event))
+                    self._emit_event({"event": "MOTION_EXIT", "wall_time": now,
+                                      "code": "-", "reason": f"displacement={displacement or 0:.2f}m",
+                                      "obstacle_track_id": 0})
+            else:
+                self._motion_exit_candidate = None
+        # Write motion sample CSV
+        self.writer.submit("csv", ("samples/motion_samples.csv", [
+            "wall_time", "speed_mps", "motion_state", "episode_id",
+            "x", "y", "z", "yaw_deg"
+        ], {
+            "wall_time": now,
+            "speed_mps": speed,
+            "motion_state": self._motion_state,
+            "episode_id": self._motion_episode_count,
+            "x": self.current_pose.get("x") if self.current_pose else None,
+            "y": self.current_pose.get("y") if self.current_pose else None,
+            "z": self.current_pose.get("z") if self.current_pose else None,
+            "yaw_deg": self.current_pose.get("yaw_deg") if self.current_pose else None,
+        }))
 
     def _emit_event(self, event: Mapping[str, Any]) -> None:
         line = "[{event}] code={code} reason={reason} track={obstacle_track_id}".format(
@@ -779,6 +1688,9 @@ class RosRuntimeMonitor:
                 pass
             self.writer.submit("jsonl", ("snapshots/runtime_status.jsonl",
                                          {"wall_time": now, "status": runtime}))
+
+            # ── runtime invariant checks ──
+            self._check_runtime_invariants(runtime, now)
         runtime_age = None if self.last_runtime_mtime is None else max(0.0, now - self.last_runtime_mtime)
         runtime_stale = is_runtime_status_stale(
             self.last_runtime_mtime, now,
@@ -794,6 +1706,9 @@ class RosRuntimeMonitor:
                                       self.last_manifest_state, manifest_state),
                                   "obstacle_track_id": 0})
             self.last_manifest_state = manifest_state
+
+            # Emit map health events (throttled per event type)
+            self._emit_map_health_events(now)
         if self.pid is None or not (Path("/proc") / str(self.pid)).exists():
             self.pid = find_process()
         process = process_metrics(self.pid)
@@ -839,6 +1754,12 @@ class RosRuntimeMonitor:
         row.update({"runtime_" + key: value for key, value in self.latest_runtime.items()
                     if isinstance(value, (str, int, float, bool))})
         row.update(self.filesystem_cache)
+        # ── PSI (Pressure Stall Information) ──
+        psi = read_psi()
+        for psi_key in ("cpu_some_avg10", "memory_some_avg10", "memory_full_avg10",
+                         "io_some_avg10", "io_full_avg10"):
+            if psi_key in psi:
+                row[psi_key] = psi[psi_key]
         self.writer.submit("csv", ("samples/runtime_samples.csv",
                                    RUNTIME_SAMPLE_FIELDS, row))
         self.writer.submit("csv", ("samples/localization_samples.csv", [
@@ -857,54 +1778,403 @@ class RosRuntimeMonitor:
         active = self.persistent_root / "static_evidence_manifest.json"
         last_good = self.persistent_root / "static_evidence_manifest.last_good.json"
         suspended = self.persistent_root / "static_evidence_manifest.suspended"
+
+        # ── manifest state detection ──
+        has_tiles = False
+        tile_layers_present: List[str] = []
+        for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
+            layer_dir = self.persistent_root / layer
+            if layer_dir.is_dir() and any(layer_dir.glob("*.pcd")):
+                has_tiles = True
+                tile_layers_present.append(layer)
+
+        manifest_payload = None
         if suspended.is_file():
             manifest_state = "SUSPENDED"
         elif active.is_file():
-            manifest_state = "ACTIVE"
+            manifest_payload = read_json(active)
+            if manifest_payload is None:
+                manifest_state = "MANIFEST_CORRUPT"
+            else:
+                manifest_state = "ACTIVE"
         elif last_good.is_file():
-            manifest_state = "LAST_GOOD_ONLY"
-        else:
-            manifest_state = "FIRST_RUN"
-        manifest_payload = read_json(active if active.is_file() else last_good)
-        total_bytes = tile_files = tmp_files = 0
-        newest_tile_mtime: Optional[float] = None
-        try:
-            for root, _directories, files in os.walk(str(self.persistent_root)):
-                for name in files:
-                    path = Path(root) / name
+            manifest_payload = read_json(last_good)
+            if manifest_payload is None:
+                manifest_state = "MANIFEST_CORRUPT"
+            else:
+                manifest_state = "LAST_GOOD_ONLY"
+        elif has_tiles:
+            # Check if tiles are still being written (recent mtime within last 30s)
+            now_ts = time.time()
+            building = False
+            for layer in tile_layers_present:
+                layer_dir = self.persistent_root / layer
+                for pcd_path in layer_dir.glob("*.pcd"):
                     try:
-                        stat = path.stat()
+                        if now_ts - pcd_path.stat().st_mtime < 30.0:
+                            building = True
+                            break
                     except OSError:
-                        continue
-                    total_bytes += stat.st_size
-                    if name.endswith(".tmp"):
-                        tmp_files += 1
-                    if "tiles_" in root and name.endswith((".pcd", ".bin", ".csv")):
-                        tile_files += 1
-                        newest_tile_mtime = max(newest_tile_mtime or stat.st_mtime,
-                                               stat.st_mtime)
-        except OSError:
-            pass
-        return {"manifest_state": manifest_state,
-                "active_manifest_present": active.is_file(),
-                "last_good_manifest_present": last_good.is_file(),
-                "suspension_marker_present": suspended.is_file(),
-                "persistent_tmp_files": tmp_files,
-                "persistent_tile_files": tile_files,
-                "persistent_newest_tile_mtime": newest_tile_mtime,
-                "persistent_size_mb": total_bytes / (1024.0 * 1024.0),
-                "manifest_generation": manifest_payload.get("generation"),
-                "manifest_revision": manifest_payload.get("revision"),
-                "manifest_total_cells": manifest_payload.get("total_cells"),
-                "manifest_mature_cells": manifest_payload.get("mature_cells")}
+                        pass
+                if building:
+                    break
+            if building:
+                manifest_state = "TILES_BUILDING"
+            else:
+                manifest_state = "TILES_ACTIVE_NO_MANIFEST"
+        else:
+            manifest_state = "EMPTY_FIRST_RUN"
+
+        # ── per-layer tile audit ──
+        map_health_cfg = self.config.get("map_health", {})
+        approved = map_health_cfg.get("approved_bounds", {})
+        layer_stats: Dict[str, Dict[str, Any]] = {}
+        total_tile_files = 0
+        total_tile_bytes = 0
+        total_tile_points = 0
+        newest_tile_mtime: Optional[float] = None
+        tmp_files = 0
+        tiles_out_of_bounds: List[str] = []
+        z_outlier_tiles: List[Dict[str, Any]] = []
+        total_z_below = 0
+        total_z_above = 0
+
+        z_below = map_health_cfg.get("z_outlier_below_m", -4.0)
+        z_above = map_health_cfg.get("z_outlier_above_m", 10.0)
+
+        # Build tile catalog with bounds sampling
+        tile_catalog: List[Dict[str, Any]] = []
+        changed_tiles: List[Dict[str, Any]] = []
+        # Regex for tile filenames: x-1_y-1.pcd or x0_y1.pcd
+        import re
+        _tile_coord_re = re.compile(r'^x(-?\d+)_y(-?\d+)')
+
+        for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
+            layer_dir = self.persistent_root / layer
+            layer_points = 0
+            layer_bytes = 0
+            layer_count = 0
+            if layer_dir.is_dir():
+                for pcd_path in sorted(layer_dir.glob("*.pcd")):
+                    layer_count += 1
+                    stat_mtime = None
+                    stat_size = 0
+                    try:
+                        stat = pcd_path.stat()
+                        layer_bytes += stat.st_size
+                        stat_mtime = stat.st_mtime
+                        stat_size = stat.st_size
+                        newest_tile_mtime = max(newest_tile_mtime or stat.st_mtime, stat.st_mtime)
+                    except OSError:
+                        pass
+                    # Quick header scan for point count
+                    header = read_pcd_header(pcd_path)
+                    tile_key = f"{layer}/{pcd_path.name}"
+
+                    # ── tile signature for cache invalidation ──
+                    signature = (int(stat_mtime * 1e9) if stat_mtime else 0, stat_size)
+                    cached = self._tile_health_cache.get(tile_key)
+
+                    catalog_entry: Dict[str, Any] = {
+                        "layer": layer,
+                        "tile": pcd_path.name,
+                        "points": header.get("point_count", 0) if header else 0,
+                        "bytes": stat_size if stat_mtime else 0,
+                        "mtime_ns": int(stat_mtime * 1e9) if stat_mtime else None,
+                        "header_valid": header is not None,
+                        "data_format": header.get("data_format") if header else None,
+                    }
+                    # Parse tile coordinates from filename
+                    m = _tile_coord_re.match(pcd_path.stem)
+                    if m:
+                        catalog_entry["tile_x"] = int(m.group(1))
+                        catalog_entry["tile_y"] = int(m.group(2))
+
+                    if header:
+                        layer_points += header.get("point_count", 0)
+
+                    # ── bounds / outlier analysis ──
+                    if approved:
+                        if cached is not None and cached.get("signature") == signature:
+                            # Reuse complete cached analysis → P0-3 fix
+                            if cached.get("out_of_approved_bounds"):
+                                tiles_out_of_bounds.append(tile_key)
+                            if cached.get("z_outlier"):
+                                z_outlier_tiles.append({
+                                    "tile": tile_key,
+                                    "z_min": cached.get("z_min"),
+                                    "z_max": cached.get("z_max"),
+                                })
+                            total_z_below += cached.get("z_outlier_below_count", 0)
+                            total_z_above += cached.get("z_outlier_above_count", 0)
+                            catalog_entry["bounds"] = cached.get("bounds")
+                            catalog_entry["z_outlier_below_count"] = cached.get("z_outlier_below_count", 0)
+                            catalog_entry["z_outlier_above_count"] = cached.get("z_outlier_above_count", 0)
+                        else:
+                            # Sample XYZ bounds — only when tile is new or changed
+                            bounds = read_pcd_xyz_bounds(pcd_path, max_sample=2000,
+                                                         z_below=z_below, z_above=z_above)
+                            # Build complete cache entry
+                            cache_entry: Dict[str, Any] = {
+                                "signature": signature,
+                                "header_valid": header is not None,
+                                "scan_error": None,
+                            }
+                            if bounds is not None:
+                                bnd = {k: bounds[k] for k in
+                                       ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
+                                       if k in bounds}
+                                catalog_entry["bounds"] = bnd
+                                catalog_entry["z_outlier_below_count"] = bounds.get("z_outlier_below_count", 0)
+                                catalog_entry["z_outlier_above_count"] = bounds.get("z_outlier_above_count", 0)
+                                cache_entry["bounds"] = bnd
+                                cache_entry["z_min"] = bounds.get("z_min")
+                                cache_entry["z_max"] = bounds.get("z_max")
+                                cache_entry["z_outlier_below_count"] = bounds.get("z_outlier_below_count", 0)
+                                cache_entry["z_outlier_above_count"] = bounds.get("z_outlier_above_count", 0)
+                                total_z_below += bounds.get("z_outlier_below_count", 0)
+                                total_z_above += bounds.get("z_outlier_above_count", 0)
+
+                                # Approved bounds check
+                                ax_min = approved.get("x_min", -100)
+                                ax_max = approved.get("x_max", 100)
+                                ay_min = approved.get("y_min", -100)
+                                ay_max = approved.get("y_max", 100)
+                                is_oob = (bounds.get("x_min", ax_min) < ax_min or
+                                          bounds.get("x_max", ax_max) > ax_max or
+                                          bounds.get("y_min", ay_min) < ay_min or
+                                          bounds.get("y_max", ay_max) > ay_max)
+                                cache_entry["out_of_approved_bounds"] = is_oob
+                                if is_oob:
+                                    tiles_out_of_bounds.append(tile_key)
+
+                                # Z outlier check
+                                is_z_outlier = (bounds.get("z_min", 0) < z_below or
+                                                bounds.get("z_max", 0) > z_above)
+                                cache_entry["z_outlier"] = is_z_outlier
+                                if is_z_outlier:
+                                    z_outlier_tiles.append({
+                                        "tile": tile_key,
+                                        "z_min": bounds.get("z_min"),
+                                        "z_max": bounds.get("z_max"),
+                                    })
+                            else:
+                                # P0-4 fix: bounds=None → record scan error, don't crash
+                                cache_entry["scan_error"] = "read_pcd_xyz_bounds returned None"
+                                cache_entry["out_of_approved_bounds"] = False
+                                cache_entry["z_outlier"] = False
+                                cache_entry["z_outlier_below_count"] = 0
+                                cache_entry["z_outlier_above_count"] = 0
+                            self._tile_health_cache[tile_key] = cache_entry
+                            changed_tiles.append(catalog_entry)
+                    tile_catalog.append(catalog_entry)
+            total_tile_files += layer_count
+            total_tile_bytes += layer_bytes
+            total_tile_points += layer_points
+            layer_stats[layer] = {"files": layer_count, "points": layer_points, "bytes": layer_bytes}
+
+        # ── layer ratio anomalies ──
+        display_points = layer_stats.get("tiles_display", {}).get("points", 0)
+        ratio_alerts: List[str] = []
+        if display_points > 0:
+            for layer, key in [("tiles_objects", "max_objects_to_display_ratio"),
+                               ("tiles_ground", "max_ground_to_display_ratio"),
+                               ("tiles_registration", "max_registration_to_display_ratio")]:
+                threshold = map_health_cfg.get(key, 0.85)
+                lp = layer_stats.get(layer, {}).get("points", 0)
+                if lp / display_points > threshold:
+                    ratio_alerts.append(f"{layer}/display={lp / display_points:.2f}")
+
+        # ── tile growth tracking ──
+        prev_points = self._last_tile_points
+        prev_scan_time = self.last_filesystem_scan_wall
+        self._last_tile_files = total_tile_files
+        self._last_tile_points = total_tile_points
+        growth_points_per_hour = 0.0
+        if prev_scan_time and prev_scan_time > 0 and prev_points is not None:
+            dt_hours = (time.time() - prev_scan_time) / 3600.0
+            if dt_hours > 0:
+                growth_points_per_hour = (total_tile_points - prev_points) / dt_hours
+
+        # ── write tile catalog: atomic latest snapshot + changes-only JSONL ──
+        self.writer.submit("atomic_json", ("reports/map_tile_catalog_latest.json",
+                                           tile_catalog))
+        for entry in changed_tiles:
+            self.writer.submit("jsonl", ("samples/map_tile_changes.jsonl", entry))
+
+        # ── write map health CSV sample ──
+        psi = read_psi()
+        health_csv_fields = [
+            "wall_time", "manifest_state", "tile_files", "tile_points",
+            "tile_bytes", "tile_size_mb", "tiles_out_of_bounds_count",
+            "z_outlier_tiles_count", "z_outlier_below_total", "z_outlier_above_total",
+            "ratio_alerts_count", "growth_points_per_hour",
+            "cpu_some_avg10", "memory_some_avg10", "io_some_avg10",
+            "io_full_avg10",
+        ]
+        health_csv_row = {
+            "wall_time": time.time(),
+            "manifest_state": manifest_state,
+            "tile_files": total_tile_files,
+            "tile_points": total_tile_points,
+            "tile_bytes": total_tile_bytes,
+            "tile_size_mb": total_tile_bytes / (1024.0 * 1024.0),
+            "tiles_out_of_bounds_count": len(tiles_out_of_bounds),
+            "z_outlier_tiles_count": len(z_outlier_tiles),
+            "z_outlier_below_total": total_z_below,
+            "z_outlier_above_total": total_z_above,
+            "ratio_alerts_count": len(ratio_alerts),
+            "growth_points_per_hour": growth_points_per_hour,
+            "cpu_some_avg10": psi.get("cpu_some_avg10"),
+            "memory_some_avg10": psi.get("memory_some_avg10"),
+            "io_some_avg10": psi.get("io_some_avg10"),
+            "io_full_avg10": psi.get("io_full_avg10"),
+        }
+        self.writer.submit("csv", ("samples/map_health_samples.csv",
+                                   health_csv_fields, health_csv_row))
+
+        # ── write map health latest JSON report ──
+        report: Dict[str, Any] = {
+            "wall_time": time.time(),
+            "manifest_state": manifest_state,
+            "active_manifest_present": active.is_file(),
+            "last_good_manifest_present": last_good.is_file(),
+            "suspension_marker_present": suspended.is_file(),
+            "persistent_tmp_files": tmp_files,
+            "persistent_tile_files": total_tile_files,
+            "persistent_total_tile_points": total_tile_points,
+            "persistent_total_tile_bytes": total_tile_bytes,
+            "persistent_newest_tile_mtime": newest_tile_mtime,
+            "persistent_size_mb": total_tile_bytes / (1024.0 * 1024.0),
+            "layer_stats": layer_stats,
+            "tiles_out_of_bounds": tiles_out_of_bounds,
+            "z_outlier_tiles": z_outlier_tiles,
+            "ratio_alerts": ratio_alerts,
+            "tile_growth_points_per_hour": growth_points_per_hour,
+            "z_outlier_below_total": total_z_below,
+            "z_outlier_above_total": total_z_above,
+            "psi": psi,
+            "manifest_generation": manifest_payload.get("generation") if manifest_payload else None,
+            "manifest_revision": manifest_payload.get("revision") if manifest_payload else None,
+            "manifest_total_cells": manifest_payload.get("total_cells") if manifest_payload else None,
+            "manifest_mature_cells": manifest_payload.get("mature_cells") if manifest_payload else None,
+        }
+        self.writer.submit("atomic_json", ("reports/map_health_latest.json", report))
+
+        result = {
+            "manifest_state": manifest_state,
+            "active_manifest_present": active.is_file(),
+            "last_good_manifest_present": last_good.is_file(),
+            "suspension_marker_present": suspended.is_file(),
+            "persistent_tmp_files": tmp_files,
+            "persistent_tile_files": total_tile_files,
+            "persistent_total_tile_points": total_tile_points,
+            "persistent_total_tile_bytes": total_tile_bytes,
+            "persistent_newest_tile_mtime": newest_tile_mtime,
+            "persistent_size_mb": total_tile_bytes / (1024.0 * 1024.0),
+            "layer_stats": layer_stats,
+            "tiles_out_of_bounds": tiles_out_of_bounds,
+            "z_outlier_tiles": z_outlier_tiles,
+            "ratio_alerts": ratio_alerts,
+            "tile_growth_points_per_hour": growth_points_per_hour,
+            "z_outlier_below_total": total_z_below,
+            "z_outlier_above_total": total_z_above,
+            "psi": psi,
+            "manifest_generation": manifest_payload.get("generation") if manifest_payload else None,
+            "manifest_revision": manifest_payload.get("revision") if manifest_payload else None,
+            "manifest_total_cells": manifest_payload.get("total_cells") if manifest_payload else None,
+            "manifest_mature_cells": manifest_payload.get("mature_cells") if manifest_payload else None,
+        }
+        self._last_map_scan_result = result
+        return result
 
     def snapshot(self, now: Optional[float] = None) -> Dict[str, Any]:
         wall = time.time() if now is None else now
+        self._update_motion_state(wall)
+        recognition_cfg = self.config.get("cargo_recognition_monitor", {})
+        recognition_stale_sec = float(recognition_cfg.get("stale_sec", 1.0))
+        if (self.last_recognition_wall is not None and
+                wall - self.last_recognition_wall > recognition_stale_sec and
+                not self._recognition_stale_active):
+            self._emit_typed_event(
+                "samples/cargo_recognition_events.jsonl", {
+                    "event": "CARGO_RECOGNITION_STALE",
+                    "wall_time": wall,
+                    "age_sec": wall - self.last_recognition_wall,
+                    "reason": "recognition_status_stale",
+                })
+            self._recognition_stale_active = True
+        swing_cfg = self.config.get("cargo_swing_monitor", {})
+        swing_stale_sec = float(swing_cfg.get("stale_sec", 0.75))
+        if (self.last_swing_wall is not None and
+                wall - self.last_swing_wall > swing_stale_sec and
+                not self._swing_stale_active):
+            self._emit_typed_event(
+                "samples/cargo_swing_events.jsonl", {
+                    "event": "CARGO_SWING_EVIDENCE_STALE",
+                    "wall_time": wall,
+                    "age_sec": wall - self.last_swing_wall,
+                    "reason": "swing_status_stale",
+                })
+            self._swing_stale_count += 1
+            self._swing_stale_active = True
         runtime = self._sample_runtime(wall)
+        # Real safety_status age from callback wall time
+        runtime["safety_status_age_sec"] = (
+            wall - self.last_safety_wall if self.last_safety_wall else None)
         with self.aggregator_lock:
             summary = self.aggregator.full_summary(now=wall)
-        summary.update({"runtime": runtime, "writer_dropped": self.writer.dropped,
-                        "restart_count": self.restart_count})
+        recovery_values = list(self._recognition_recovery_sec)
+        offset_values = list(self._swing_offsets)
+        angle_values = list(self._swing_angles)
+        speed_values = list(self._swing_speeds)
+        yaw_error_values = list(self._swing_yaw_errors)
+        summary.update({
+            "runtime": runtime,
+            "writer_dropped": self.writer.dropped,
+            "restart_count": self.restart_count,
+            "recognition_state_counts": {
+                str(key): value
+                for key, value in self._recognition_state_counts.items()
+            },
+            "recognition_failure_count": self._recognition_failure_count,
+            "longest_loaded_without_lock_sec":
+                self._longest_loaded_without_lock_sec,
+            "recognition_recovery_sec": {
+                "count": len(recovery_values),
+                "last": recovery_values[-1] if recovery_values else None,
+                "maximum": max(recovery_values) if recovery_values else None,
+                "p95": _percentile(recovery_values, 0.95),
+            },
+            "sway_state_counts": {
+                str(key): value for key, value in self._sway_state_counts.items()
+            },
+            "skew_pull_state_counts": {
+                str(key): value for key, value in self._skew_state_counts.items()
+            },
+            "torsion_state_counts": {
+                str(key): value
+                for key, value in self._torsion_state_counts.items()
+            },
+            "maximum_offset_m": max(offset_values) if offset_values else None,
+            "p95_offset_m": _percentile(offset_values, 0.95),
+            "maximum_angle_deg": max(angle_values) if angle_values else None,
+            "p95_angle_deg": _percentile(angle_values, 0.95),
+            "maximum_horizontal_speed_mps": (
+                max(speed_values) if speed_values else None),
+            "maximum_yaw_error_deg": (
+                max(yaw_error_values) if yaw_error_values else None),
+            "longest_sway_warning_sec": self._longest_sway_warning_sec,
+            "longest_skew_suspected_sec":
+                self._longest_skew_suspected_sec,
+            "sway_alarm_count": self._sway_alarm_count,
+            "skew_pull_alarm_count": self._skew_pull_alarm_count,
+            "skew_alarm_inhibited_count": self._skew_alarm_inhibited_count,
+            "torsion_alarm_count": self._torsion_alarm_count,
+            "swing_stale_count": self._swing_stale_count,
+            "cargo_recognition_track_stats": self._recognition_track_stats,
+            "cargo_swing_track_stats": self._swing_track_stats,
+        })
         self.writer.submit("atomic_json", ("reports/live_summary.json", summary))
         current = summary.get("current") or {}
         repeat_period = float(self.config.get("repeat_period_sec", 30.0))
@@ -920,10 +2190,140 @@ class RosRuntimeMonitor:
     def run(self) -> None:
         sample_period = float(self.config.get("sample_period_sec", 1.0))
         summary_period = float(self.config.get("summary_period_sec", 10.0))
-        rate = self.rospy.Rate(max(0.2, 1.0 / max(0.1, sample_period)))
+
+        # ── readiness handshake ──
+        # Read process start ticks for identity verification
+        try:
+            _proc_start_ticks = int(open('/proc/self/stat').read().split()[21])
+        except Exception:
+            _proc_start_ticks = 0
+
+        # Track received topics for data_ready
+        _first_message_wall: Dict[str, float] = {}
+        _last_message_wall: Dict[str, float] = {}
+        _required_topics = ["/odom", "/cargo_avoidance/safety_status",
+                            "/cargo_avoidance/status_code"]
+
+        ready_payload: Dict[str, Any] = {
+            "ready": True,
+            "process_ready": True,
+            "data_ready": False,
+            "pid": os.getpid(),
+            "run_id": self.args.run_id,
+            "boot_id": self._read_boot_id(),
+            "process_start_ticks": _proc_start_ticks,
+            "ros_node": "/ndt_slam_server_monitor",
+            "workspace_sha": self.args.expected_sha or "unknown",
+            "created_at": time.time(),
+            "ready_updated_at": time.time(),
+            "odom_message_count": 0,
+            "safety_status_message_count": 0,
+            "status_code_message_count": 0,
+            "recognition_status_message_count": 0,
+            "swing_status_message_count": 0,
+            "last_recognition_wall": None,
+            "last_swing_wall": None,
+            "recognition_data_ready": False,
+            "swing_data_ready": False,
+            "extended_data_ready": False,
+            "received_topics": {},
+            "first_message_wall": {},
+            "last_message_wall": {},
+            "topics": {},
+        }
+        try:
+            import rosgraph
+            master = rosgraph.Master(self.rospy.get_name())
+            topic_types = master.getTopicTypes()
+            for topic_name, topic_type in topic_types:
+                if topic_name in ("/odom", "/cargo_avoidance/safety_status",
+                                  "/cargo_avoidance/status_code",
+                                  "/cargo_avoidance/static_evidence_debug",
+                                  "/cargo_avoidance/cargo_geometry_debug",
+                                  "/cargo_avoidance/operational_status",
+                                  "/cargo_avoidance/recognition_status",
+                                  "/cargo_avoidance/swing_status"):
+                    ready_payload["topics"][topic_name] = topic_type
+        except Exception:
+            pass
+        atomic_write_json(self.run_dir / "reports" / "monitor_ready.json", ready_payload)
+
+        # ── wall-clock scheduling (not rospy.Rate) ──
+        # Uses time.monotonic() so the loop runs even when /use_sim_time is set
+        # and /clock is paused.  ROS time is only used for message source stamps.
+        next_sample = time.monotonic()
+        next_ready_update = time.monotonic() + 5.0  # update ready after 5s
+
         while not self.rospy.is_shutdown() and not self.shutdown_requested:
             now = time.time()
+            mono_now = time.monotonic()
+
+            # ── update data_ready tracking ──
+            if mono_now >= next_ready_update:
+                _rdy = ready_payload
+                _rdy["received_topics"] = {
+                    t: t in _first_message_wall for t in _required_topics
+                }
+                _rdy["first_message_wall"] = dict(_first_message_wall)
+                _rdy["last_message_wall"] = dict(_last_message_wall)
+                _rdy["odom_message_count"] = self.odom_message_count
+                _rdy["safety_status_message_count"] = self.safety_status_message_count
+                _rdy["status_code_message_count"] = self.status_code_message_count
+                _rdy["recognition_status_message_count"] = (
+                    self.recognition_status_message_count)
+                _rdy["swing_status_message_count"] = (
+                    self.swing_status_message_count)
+                _rdy["last_recognition_wall"] = self.last_recognition_wall
+                _rdy["last_swing_wall"] = self.last_swing_wall
+                _rdy["data_ready"] = (
+                    self.odom_message_count > 0
+                    and self.safety_status_message_count > 0
+                    and self.status_code_message_count > 0
+                )
+                _rdy["recognition_data_ready"] = (
+                    self.recognition_status_message_count > 0)
+                _rdy["swing_data_ready"] = (
+                    self.swing_status_message_count > 0)
+                _rdy["extended_data_ready"] = (
+                    _rdy["data_ready"]
+                    and _rdy["recognition_data_ready"]
+                    and _rdy["swing_data_ready"])
+                _rdy["ready_updated_at"] = time.time()
+                # created_at is set once at startup; never rewritten
+                atomic_write_json(
+                    self.run_dir / "reports" / "monitor_ready.json", _rdy)
+                next_ready_update = mono_now + 5.0
+
+            # ── snapshot ──
             summary = self.snapshot(now)
+
+            # ── record message receipt timestamps ──
+            if self.last_odom_wall:
+                _first_message_wall.setdefault("/odom", self.last_odom_wall)
+                _last_message_wall["/odom"] = self.last_odom_wall
+            if self.last_safety_wall:
+                _first_message_wall.setdefault(
+                    "/cargo_avoidance/safety_status", self.last_safety_wall)
+                _last_message_wall["/cargo_avoidance/safety_status"] = self.last_safety_wall
+            if self.last_status_code_wall:
+                _first_message_wall.setdefault(
+                    "/cargo_avoidance/status_code",
+                    self.last_status_code_wall)
+                _last_message_wall["/cargo_avoidance/status_code"] = (
+                    self.last_status_code_wall)
+            if self.last_recognition_wall:
+                _first_message_wall.setdefault(
+                    "/cargo_avoidance/recognition_status",
+                    self.last_recognition_wall)
+                _last_message_wall[
+                    "/cargo_avoidance/recognition_status"] = (
+                        self.last_recognition_wall)
+            if self.last_swing_wall:
+                _first_message_wall.setdefault(
+                    "/cargo_avoidance/swing_status", self.last_swing_wall)
+                _last_message_wall["/cargo_avoidance/swing_status"] = (
+                    self.last_swing_wall)
+
             if now - self.last_summary_wall >= summary_period or self.snapshot_requested:
                 current = summary.get("current") or {}
                 window = summary.get("windows", {}).get("60", {})
@@ -937,7 +2337,16 @@ class RosRuntimeMonitor:
                 self.writer.submit("text", ("logs/monitor.log", health_line))
                 self.last_summary_wall = now
                 self.snapshot_requested = False
-            rate.sleep()
+
+            # Wall-clock sleep (not rospy.Rate — survives /clock pause)
+            next_sample += sample_period
+            sleep_sec = next_sample - time.monotonic()
+            if sleep_sec > 0:
+                self.shutdown_event.wait(min(sleep_sec, 1.0))
+            else:
+                # We fell behind; reset to avoid tight loop
+                next_sample = time.monotonic() + sample_period
+
         final = self.snapshot(time.time())
         self.writer.submit("atomic_json", ("reports/final_summary.json", final))
         self.writer.close()
@@ -1036,9 +2445,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     def stop_handler(_signum: int, _frame: Any) -> None:
         monitor.shutdown_requested = True
+        monitor.shutdown_event.set()
 
     def snapshot_handler(_signum: int, _frame: Any) -> None:
         monitor.snapshot_requested = True
+        monitor.shutdown_event.set()
 
     signal.signal(signal.SIGINT, stop_handler)
     signal.signal(signal.SIGTERM, stop_handler)

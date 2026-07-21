@@ -486,6 +486,7 @@ catkin_install_python(PROGRAMS
 
 install(PROGRAMS
   scripts/ops/server_monitorctl.sh
+  scripts/ops/server_monitor_bag_validate.sh
   scripts/ops/server_preflight.sh
   scripts/ops/run_server_validation.sh
   scripts/ops/collect_server_artifacts.sh
