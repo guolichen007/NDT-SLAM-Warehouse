@@ -222,6 +222,8 @@ TEST(StaticObstacleEvidenceIndexTest,
   ASSERT_TRUE(loaded.loadSnapshot(
       path, 15U, snapshot->map_generation, snapshot->revision, &reason))
       << reason;
+  ASSERT_TRUE(loaded.snapshot());
+  EXPECT_EQ(loaded.snapshot()->revision, snapshot->revision);
   EXPECT_TRUE(loaded.query(queryFor(15U)).authorized);
   std::remove(path.c_str());
 }

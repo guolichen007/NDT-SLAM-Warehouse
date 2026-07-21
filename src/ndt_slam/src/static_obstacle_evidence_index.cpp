@@ -406,11 +406,14 @@ bool StaticObstacleEvidenceIndex::isTemporallyMatureLocked(
           config_.minimum_stable_duration_sec;
 }
 
-void StaticObstacleEvidenceIndex::publishSnapshotLocked(double stamp_sec) {
+void StaticObstacleEvidenceIndex::publishSnapshotLocked(
+    double stamp_sec, bool increment_revision) {
   auto next = std::make_shared<StaticEvidenceSnapshot>();
   next->map_generation = working_generation_;
-  ++revision_;
-  if (revision_ == 0U) ++revision_;
+  if (increment_revision) {
+    ++revision_;
+    if (revision_ == 0U) ++revision_;
+  }
   next->revision = revision_;
   next->latest_observation_sequence = latest_observation_sequence_;
   next->source_stamp_sec = stamp_sec;
@@ -697,12 +700,16 @@ bool StaticObstacleEvidenceIndex::saveSnapshot(
   return true;
 }
 
-bool StaticObstacleEvidenceIndex::loadSnapshot(
+bool StaticObstacleEvidenceIndex::loadSnapshotCandidate(
     const std::string& path,
-    std::uint64_t current_map_generation,
     std::uint64_t expected_source_generation,
     std::uint64_t expected_revision,
-    std::string* reason) {
+    StaticEvidenceSnapshot* candidate,
+    std::string* reason) const {
+  if (!candidate) {
+    if (reason) *reason = "candidate_output_missing";
+    return false;
+  }
   std::ifstream input(path);
   if (!input.is_open()) {
     if (reason) *reason = "index_missing";
@@ -738,6 +745,7 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
     }
     if (schema != StaticEvidenceSnapshot::kSchemaVersion ||
         std::abs(cell_size - config_.cell_size_m) > 1.0e-5F ||
+        source_generation == 0U || source_revision == 0U ||
         source_generation != expected_source_generation ||
         source_revision != expected_revision) {
       if (reason) *reason = "index_schema_or_resolution_mismatch";
@@ -785,7 +793,7 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
       }
       cell.temporally_mature = mature_value == 1UL;
       cell.clean_map_confirmed = true;
-      cell.map_generation = current_map_generation;
+      cell.map_generation = source_generation;
       if (!std::isfinite(cell.first_seen_sec) ||
           !std::isfinite(cell.last_seen_sec) ||
           !std::isfinite(cell.consecutive_stable_duration_sec) ||
@@ -812,22 +820,64 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
       latest_sequence = std::max(
           latest_sequence, cell.last_observation_sequence);
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    working_cells_ = std::move(loaded);
-    invalidated_versions_.clear();
-    observed_free_tombstones_.clear();
-    working_generation_ = current_map_generation;
-    authority_ = loaded_authority;
-    latest_observation_sequence_ = latest_sequence;
-    revision_ = source_revision;
-    last_observation_stamp_sec_ = 0.0;
-    publishSnapshotLocked(source_stamp_sec);
+    candidate->schema_version = schema;
+    candidate->map_generation = source_generation;
+    candidate->revision = source_revision;
+    candidate->latest_observation_sequence = latest_sequence;
+    candidate->source_stamp_sec = source_stamp_sec;
+    candidate->cell_size_m = cell_size;
+    candidate->authority = loaded_authority;
+    candidate->cells = std::move(loaded);
   } catch (const std::exception&) {
     if (reason) *reason = "index_parse_failed";
     return false;
   }
-  if (reason) *reason = "loaded";
+  if (reason) *reason = "candidate_loaded";
   return true;
+}
+
+bool StaticObstacleEvidenceIndex::restoreSnapshotWithoutRevisionIncrement(
+    const StaticEvidenceSnapshot& candidate,
+    std::uint64_t current_map_generation,
+    std::string* reason) {
+  if (candidate.schema_version != StaticEvidenceSnapshot::kSchemaVersion ||
+      std::abs(candidate.cell_size_m - config_.cell_size_m) > 1.0e-5F ||
+      candidate.revision == 0U || current_map_generation == 0U) {
+    if (reason) *reason = "candidate_schema_or_generation_invalid";
+    return false;
+  }
+  std::map<std::int64_t, StaticEvidenceCell> restored = candidate.cells;
+  for (auto& item : restored) {
+    item.second.map_generation = current_map_generation;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  working_cells_ = std::move(restored);
+  invalidated_versions_.clear();
+  observed_free_tombstones_.clear();
+  working_generation_ = current_map_generation;
+  authority_ = candidate.authority;
+  latest_observation_sequence_ = candidate.latest_observation_sequence;
+  revision_ = candidate.revision;
+  last_observation_stamp_sec_ = 0.0;
+  publishSnapshotLocked(candidate.source_stamp_sec, false);
+  if (reason) *reason = "restored_exact_revision";
+  return true;
+}
+
+bool StaticObstacleEvidenceIndex::loadSnapshot(
+    const std::string& path,
+    std::uint64_t current_map_generation,
+    std::uint64_t expected_source_generation,
+    std::uint64_t expected_revision,
+    std::string* reason) {
+  StaticEvidenceSnapshot candidate;
+  if (!loadSnapshotCandidate(
+          path, expected_source_generation, expected_revision,
+          &candidate, reason)) {
+    return false;
+  }
+  return restoreSnapshotWithoutRevisionIncrement(
+      candidate, current_map_generation, reason);
 }
 
 }  // namespace ndt_slam

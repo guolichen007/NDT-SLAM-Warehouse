@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <g2o/core/optimization_algorithm_levenberg.h>
+#include <utility>
 
 namespace ndt_slam {
 
@@ -614,6 +615,21 @@ bool LoopClosureDetector::loadKeyFrameDatabase(
         scan_context_list_.push_back(keyframe.scan_context_);
     }
     return true;
+}
+
+void LoopClosureDetector::installKeyFrameDatabase(
+    std::deque<KeyFrame> keyframes) {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    keyframe_manager_.replaceKeyFrames(std::move(keyframes));
+    auto& installed = keyframe_manager_.getKeyFramesNonConst();
+    scan_context_list_.clear();
+    scan_context_list_.reserve(installed.size());
+    for (auto& keyframe : installed) {
+        if (!keyframe.cloud_ || keyframe.cloud_->empty()) continue;
+        keyframe.scan_context_ = scan_context_.generate(
+            keyframe.cloud_, Eigen::Vector3d::Zero());
+        scan_context_list_.push_back(keyframe.scan_context_);
+    }
 }
 
 void LoopClosureDetector::applyKeyFrameMetrics(

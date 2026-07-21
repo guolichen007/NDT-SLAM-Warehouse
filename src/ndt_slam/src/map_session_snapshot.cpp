@@ -498,4 +498,39 @@ MapSessionLoadResult MapSessionSnapshot::loadVerified(
   }
 }
 
+std::vector<Eigen::Vector3f> selectStaticHeightPointsForAuthority(
+    const pcl::PointCloud<pcl::PointXYZ>& objects_clean,
+    const StaticEvidenceSnapshot& evidence) {
+  std::vector<Eigen::Vector3f> selected;
+  selected.reserve(objects_clean.size());
+  if (!std::isfinite(evidence.cell_size_m) || evidence.cell_size_m <= 0.0F) {
+    return selected;
+  }
+  for (const pcl::PointXYZ& point : objects_clean.points) {
+    if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+        !std::isfinite(point.z)) {
+      continue;
+    }
+    bool authorized = evidence.authority ==
+        StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+    if (!authorized) {
+      const std::int32_t x = static_cast<std::int32_t>(
+          std::floor(point.x / evidence.cell_size_m));
+      const std::int32_t y = static_cast<std::int32_t>(
+          std::floor(point.y / evidence.cell_size_m));
+      const auto found = evidence.cells.find(packStaticEvidenceCell(x, y));
+      const bool explicit_cell = found != evidence.cells.end() &&
+          found->second.clean_map_confirmed &&
+          found->second.map_generation == evidence.map_generation;
+      authorized = explicit_cell &&
+          (evidence.authority ==
+               StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE ||
+           (evidence.authority == StaticEvidenceAuthority::RUNTIME_MATURE &&
+            found->second.temporally_mature));
+    }
+    if (authorized) selected.emplace_back(point.x, point.y, point.z);
+  }
+  return selected;
+}
+
 }  // namespace ndt_slam

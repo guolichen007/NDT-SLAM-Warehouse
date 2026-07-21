@@ -5,10 +5,12 @@
 #include <pcl/io/pcd_io.h>
 #include <Eigen/Geometry>
 #include <yaml-cpp/yaml.h>
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <utility>
 
 namespace ndt_slam {
 
@@ -220,6 +222,21 @@ bool KeyFrameManager::loadKeyFrameDatabase(const std::string& session_dir) {
     } catch (const std::exception& e) {
         ROS_ERROR("Exception loading keyframe database: %s", e.what());
         return false;
+    }
+}
+
+void KeyFrameManager::replaceKeyFrames(std::deque<KeyFrame> keyframes) {
+    keyframes_ = std::move(keyframes);
+    spatial_index_.clear();
+    last_keyframe_id_ = 0U;
+    last_keyframe_time_ = ros::Time(0);
+    last_keyframe_pose_ = Sophus::SE3d();
+    for (const auto& keyframe : keyframes_) {
+        last_keyframe_id_ = std::max(last_keyframe_id_, keyframe.id_);
+    }
+    if (!keyframes_.empty()) {
+        last_keyframe_time_ = keyframes_.back().stamp_;
+        last_keyframe_pose_ = keyframes_.back().pose_;
     }
 }
 

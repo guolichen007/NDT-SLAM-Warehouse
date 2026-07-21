@@ -118,5 +118,47 @@ TEST_F(MapSessionSnapshotTest, ExtrasFailureLeavesNoPublishedSession) {
   EXPECT_FALSE(fs::exists(target));
 }
 
+TEST_F(MapSessionSnapshotTest, RuntimeHeightSelectionKeepsOnlyMatureCells) {
+  pcl::PointCloud<pcl::PointXYZ> cloud;
+  cloud.push_back(pcl::PointXYZ(0.1F, 0.1F, 1.0F));
+  cloud.push_back(pcl::PointXYZ(1.1F, 0.1F, 1.0F));
+  StaticEvidenceSnapshot evidence;
+  evidence.cell_size_m = 1.0F;
+  evidence.map_generation = 9U;
+  evidence.authority = StaticEvidenceAuthority::RUNTIME_MATURE;
+  StaticEvidenceCell mature;
+  mature.key = packStaticEvidenceCell(0, 0);
+  mature.clean_map_confirmed = true;
+  mature.temporally_mature = true;
+  mature.map_generation = 9U;
+  evidence.cells.emplace(mature.key, mature);
+  StaticEvidenceCell immature = mature;
+  immature.key = packStaticEvidenceCell(1, 0);
+  immature.temporally_mature = false;
+  evidence.cells.emplace(immature.key, immature);
+  const auto selected = selectStaticHeightPointsForAuthority(cloud, evidence);
+  ASSERT_EQ(selected.size(), 1U);
+  EXPECT_FLOAT_EQ(selected.front().x(), 0.1F);
+}
+
+TEST_F(MapSessionSnapshotTest, OperatorHeightSelectionRequiresExplicitCell) {
+  pcl::PointCloud<pcl::PointXYZ> cloud;
+  cloud.push_back(pcl::PointXYZ(0.1F, 0.1F, 1.0F));
+  cloud.push_back(pcl::PointXYZ(1.1F, 0.1F, 1.0F));
+  StaticEvidenceSnapshot evidence;
+  evidence.cell_size_m = 1.0F;
+  evidence.map_generation = 9U;
+  evidence.authority =
+      StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE;
+  StaticEvidenceCell approved;
+  approved.key = packStaticEvidenceCell(0, 0);
+  approved.clean_map_confirmed = true;
+  approved.map_generation = 9U;
+  evidence.cells.emplace(approved.key, approved);
+  const auto selected = selectStaticHeightPointsForAuthority(cloud, evidence);
+  ASSERT_EQ(selected.size(), 1U);
+  EXPECT_FLOAT_EQ(selected.front().x(), 0.1F);
+}
+
 }  // namespace
 }  // namespace ndt_slam

@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace ndt_slam {
 
@@ -57,10 +58,17 @@ struct MapSessionLoadResult {
   std::uint64_t static_evidence_source_generation = 0U;
 };
 
+std::vector<Eigen::Vector3f> selectStaticHeightPointsForAuthority(
+    const pcl::PointCloud<pcl::PointXYZ>& objects_clean,
+    const StaticEvidenceSnapshot& evidence);
+
 class MapSessionSnapshot {
  public:
   static constexpr std::uint32_t kSchemaVersion = 1U;
 
+  // Atomic for reader visibility through a same-filesystem directory rename.
+  // This API does not fsync every file/directory and therefore does not claim
+  // crash durability across sudden power loss.
   static bool saveAtomic(const MapSessionSaveRequest& request,
                          std::string* reason);
   static MapSessionLoadResult loadVerified(const std::string& directory);

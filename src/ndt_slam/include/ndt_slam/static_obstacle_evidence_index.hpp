@@ -212,9 +212,20 @@ class StaticObstacleEvidenceIndex {
                     std::uint64_t expected_source_generation,
                     std::uint64_t expected_revision,
                     std::string* reason);
+  bool loadSnapshotCandidate(
+      const std::string& path,
+      std::uint64_t expected_source_generation,
+      std::uint64_t expected_revision,
+      StaticEvidenceSnapshot* candidate,
+      std::string* reason) const;
+  bool restoreSnapshotWithoutRevisionIncrement(
+      const StaticEvidenceSnapshot& candidate,
+      std::uint64_t current_map_generation,
+      std::string* reason);
 
  private:
-  void publishSnapshotLocked(double stamp_sec);
+  void publishSnapshotLocked(double stamp_sec,
+                             bool increment_revision = true);
   bool isTemporallyMatureLocked(const StaticEvidenceCell& cell) const;
 
   StaticObstacleEvidenceConfig config_;

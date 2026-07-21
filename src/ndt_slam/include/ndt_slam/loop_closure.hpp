@@ -114,6 +114,7 @@ public:
     void clear();
     bool saveKeyFrameDatabase(const std::string& session_dir) const;
     bool loadKeyFrameDatabase(const std::string& session_dir);
+    void installKeyFrameDatabase(std::deque<KeyFrame> keyframes);
     void applyKeyFrameMetrics(
         const std::vector<std::pair<std::uint64_t, KeyFrameMetrics>>& metrics);
     bool setLastKeyFrameLayers(
