@@ -57,4 +57,8 @@ bool meanCargoAxialYaw(const std::vector<float>& yaw_samples,
 
 float normalizeCargoAxialYaw(float yaw_rad);
 
+float normalizeAxialYaw(float yaw_rad);
+float baseYawToMap(float yaw_base, float base_pose_yaw_map);
+float mapYawToBase(float yaw_map, float base_pose_yaw_map);
+
 }  // namespace ndt_slam

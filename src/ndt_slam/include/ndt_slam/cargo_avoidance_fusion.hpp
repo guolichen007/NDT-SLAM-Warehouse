@@ -32,6 +32,8 @@ struct CargoAvoidanceFusionInput {
   bool static_session_manifest_valid = false;
   bool static_session_hash_valid = false;
   bool static_session_uuid_valid = false;
+  bool static_risk_contract_valid = false;
+  bool static_clear_contract_valid = false;
   StaticEvidenceAuthority static_authority =
       StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
   CargoAvoidanceSourceRisk live;

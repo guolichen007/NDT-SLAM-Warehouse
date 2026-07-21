@@ -14,6 +14,8 @@ bool validConfig(const CargoLiftOriginConfig& config) {
       config.significance_sigma > 0.0F &&
       config.minimum_source_coverage >= 0.0F &&
       config.minimum_source_coverage <= 1.0F &&
+      config.minimum_top_coverage >= 0.0F &&
+      config.minimum_top_coverage <= 1.0F &&
       config.minimum_revealed_support_coverage >= 0.0F &&
       config.minimum_revealed_support_coverage <= 1.0F &&
       config.lift_confirm_frames > 0 &&
@@ -174,8 +176,14 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
       const float distance =
           (candidate.center_map - input.hook_anchor_map).norm();
       if (distance > config_.maximum_anchor_distance_m) continue;
-      const float score = 10.0F * sourcePriority(candidate.source) -
-          distance + 0.001F * static_cast<float>(candidate.point_count);
+      const float top_error = input.current_top_valid
+          ? std::abs(candidate.top_z95_map - input.current_top_z_map)
+          : 0.0F;
+      const float score = 100.0F * candidate.candidate_overlap +
+          20.0F * candidate.anchor_overlap - 5.0F * distance - top_error +
+          2.0F * static_cast<float>(sourcePriority(candidate.source)) +
+          0.001F * static_cast<float>(candidate.point_count) +
+          (candidate.component_id == bound_component_id_ ? 10.0F : 0.0F);
       if (!selected || score > selected_score) {
         selected = &candidate;
         selected_score = score;
@@ -222,7 +230,8 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
           config_.maximum_source_age_sec;
   const bool top_valid = input.current_top_valid && top_fresh &&
       std::isfinite(input.current_top_z_map) &&
-      input.source_coverage >= config_.minimum_source_coverage;
+      input.source_coverage >= config_.minimum_source_coverage &&
+      input.top_coverage >= config_.minimum_top_coverage;
   if (top_valid) {
     result_.lift_delta_m =
         input.current_top_z_map - result_.origin.top_z95_map;

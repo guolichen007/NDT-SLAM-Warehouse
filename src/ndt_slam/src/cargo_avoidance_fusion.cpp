@@ -47,12 +47,18 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
 
   const bool formal_cargo = input.formal_cargo_geometry_valid &&
       input.formal_cargo_bottom_valid;
-  const bool static_contract = input.static_session_manifest_valid &&
-      input.static_session_hash_valid && input.static_session_uuid_valid &&
-      authorizeStaticEvidence(input.static_authority)
-          .official_static_risk_authorized;
+  const StaticEvidenceAuthorization static_authorization =
+      authorizeStaticEvidence(input.static_authority);
+  const bool static_identity_valid = input.static_session_manifest_valid &&
+      input.static_session_hash_valid && input.static_session_uuid_valid;
+  const bool static_risk_contract = static_identity_valid &&
+      input.static_risk_contract_valid &&
+      static_authorization.official_static_risk_authorized;
+  const bool static_clear_contract = static_identity_valid &&
+      input.static_clear_contract_valid &&
+      static_authorization.official_clear_authorized;
   const bool live_reliable = input.live.available && input.live.reliable;
-  const bool static_reliable = static_contract &&
+  const bool static_reliable = static_risk_contract &&
       input.static_map.available && input.static_map.reliable;
 
   result.risk_live = live_reliable && input.live.hazard &&
@@ -110,7 +116,10 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     return result;
   }
 
-  if (!live_clear_observed || !static_reliable) {
+  const bool static_clear_reliable = static_clear_contract &&
+      input.static_map.available && input.static_map.reliable &&
+      !result.risk_static;
+  if (!live_clear_observed || !static_clear_reliable) {
     result.official_code = kObstacleInvalid;
     result.reason = !live_clear_observed
         ? "live_roi_not_reliable_for_clear"

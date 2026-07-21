@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ndt_slam/static_obstacle_evidence_index.hpp"
+#include "ndt_slam/static_height_field.hpp"
 
 #include <Eigen/Core>
 
@@ -40,6 +40,7 @@ struct CargoLiftOriginConfig {
   float minimum_significant_change_m = 0.15F;
   float significance_sigma = 3.0F;
   float minimum_source_coverage = 0.35F;
+  float minimum_top_coverage = 0.20F;
   float minimum_revealed_support_coverage = 0.25F;
   int lift_confirm_frames = 4;
   int thickness_confirm_frames = 5;
@@ -64,6 +65,11 @@ struct CargoOriginCandidate {
   float uncertainty_m = 0.20F;
   std::size_t occupied_cells = 0U;
   std::size_t point_count = 0U;
+  std::uint64_t map_generation = 0U;
+  std::vector<StaticHeightLayerNodeId> members;
+  float hook_anchor_distance_m = 0.0F;
+  float candidate_overlap = 0.0F;
+  float anchor_overlap = 0.0F;
 };
 
 struct CargoLiftOriginInput {
@@ -80,6 +86,7 @@ struct CargoLiftOriginInput {
   float current_top_z_map = std::numeric_limits<float>::quiet_NaN();
   float current_top_uncertainty_m = 0.20F;
   float source_coverage = 0.0F;
+  float top_coverage = 0.0F;
   bool revealed_support_valid = false;
   double revealed_support_stamp_sec = 0.0;
   float revealed_support_z_map = std::numeric_limits<float>::quiet_NaN();

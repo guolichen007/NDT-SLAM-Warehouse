@@ -75,14 +75,17 @@ void StaticHeightField::clear() {
   cells_.clear();
   support_plane_.setZero();
   support_plane_valid_ = false;
+  map_generation_ = 0U;
 }
 
 StaticHeightFieldBuildResult StaticHeightField::build(
     const std::vector<Eigen::Vector3f>& object_points,
     const std::vector<Eigen::Vector3f>& ground_points,
     StaticEvidenceAuthority authority,
-    std::uint32_t observation_count) {
+    std::uint32_t observation_count,
+    std::uint64_t map_generation) {
   clear();
+  map_generation_ = map_generation;
   StaticHeightFieldBuildResult result;
   if (!validConfig(config_)) {
     result.reason = "invalid_config";
@@ -370,7 +373,19 @@ StaticHeightQueryResult StaticHeightField::query(
       const float distance = std::hypot(outside_x, outside_y);
       if (distance > input.shell_m + 0.5F * config_.cell_size_m) continue;
       bool matched_cell = false;
-      for (const StaticHeightLayer& layer : height_cell->layers) {
+      for (std::size_t layer_index = 0U;
+           layer_index < height_cell->layers.size(); ++layer_index) {
+        const StaticHeightLayer& layer = height_cell->layers[layer_index];
+        const bool exclusion_identity_valid =
+            input.exclusion_authorized &&
+            input.excluded_component_id != 0U &&
+            input.excluded_component_generation != 0U &&
+            input.excluded_component_generation == map_generation_;
+        if (exclusion_identity_valid &&
+            input.excluded_members.count(StaticHeightLayerNodeId{
+                key, static_cast<std::uint16_t>(layer_index)}) > 0U) {
+          continue;
+        }
         if (layer.z95 < input.minimum_z || layer.z05 > input.maximum_z) {
           continue;
         }

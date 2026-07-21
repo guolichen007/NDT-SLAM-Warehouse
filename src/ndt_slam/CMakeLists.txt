@@ -144,10 +144,14 @@ set(LIBRARY_SOURCES
   src/cargo_obstacle_tracker.cpp
   src/static_obstacle_evidence_index.cpp
   src/static_height_field.cpp
+  src/static_height_component_extractor.cpp
   src/cargo_lift_origin_binder.cpp
+  src/revealed_support_observer.cpp
   src/cargo_geometry_fusion.cpp
   src/cargo_avoidance_fusion.cpp
   src/pending_cargo_envelope.cpp
+  src/pending_cargo_self_evidence.cpp
+  src/cargo_swing_monitor.cpp
   src/map_session_snapshot.cpp
   src/cargo_motion_corridor.cpp
   src/cargo_residual_classifier.cpp

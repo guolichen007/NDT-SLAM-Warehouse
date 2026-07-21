@@ -54,6 +54,18 @@ float normalizeCargoAxialYaw(float yaw_rad) {
     return yaw_rad;
 }
 
+float normalizeAxialYaw(float yaw_rad) {
+    return normalizeCargoAxialYaw(yaw_rad);
+}
+
+float baseYawToMap(float yaw_base, float base_pose_yaw_map) {
+    return normalizeCargoAxialYaw(yaw_base + base_pose_yaw_map);
+}
+
+float mapYawToBase(float yaw_map, float base_pose_yaw_map) {
+    return normalizeCargoAxialYaw(yaw_map - base_pose_yaw_map);
+}
+
 bool meanCargoAxialYaw(const std::vector<float>& yaw_samples,
                        float* mean_yaw_rad) {
     if (!mean_yaw_rad) return false;

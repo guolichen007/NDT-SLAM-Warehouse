@@ -6,6 +6,7 @@
 #include <nav_msgs/Path.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <geometry_msgs/Point.h>
+#include <geometry_msgs/PointStamped.h>
 #include <geometry_msgs/Vector3.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/buffer.h>
@@ -54,11 +55,15 @@
 #include <ndt_slam/static_obstacle_evidence_index.hpp>
 #include <ndt_slam/map_session_snapshot.hpp>
 #include <ndt_slam/static_height_field.hpp>
+#include <ndt_slam/static_height_component_extractor.hpp>
 #include <ndt_slam/static_evidence_authorization.hpp>
 #include <ndt_slam/cargo_avoidance_fusion.hpp>
 #include <ndt_slam/cargo_lift_origin_binder.hpp>
 #include <ndt_slam/cargo_geometry_fusion.hpp>
 #include <ndt_slam/pending_cargo_envelope.hpp>
+#include <ndt_slam/pending_cargo_self_evidence.hpp>
+#include <ndt_slam/revealed_support_observer.hpp>
+#include <ndt_slam/cargo_swing_monitor.hpp>
 #include <ndt_slam/cargo_motion_corridor.hpp>
 #include <ndt_slam/cargo_residual_classifier.hpp>
 #include <ndt_slam/cargo_safety_temporal_filter.hpp>
@@ -90,7 +95,10 @@
 #include "lidar_slam2_msgs/LoadMap.h"
 #include "lidar_slam2_msgs/LoadMapSession.h"
 #include "lidar_slam2_msgs/CargoBottomEstimate.h"
+#include "lidar_slam2_msgs/CargoRecognitionStatus.h"
 #include "lidar_slam2_msgs/CargoSafetyStatus.h"
+#include "lidar_slam2_msgs/CargoSwingStatus.h"
+#include "lidar_slam2_msgs/HoistMotionState.h"
 #include "lidar_slam2_msgs/HookLoadState.h"
 
 // KISS-ICP config struct (保留用于兼容)
@@ -1897,6 +1905,7 @@ private:
     Eigen::Vector3f retired_cargo_velocity_base_ = Eigen::Vector3f::Zero();
     ros::Time retired_cargo_stamp_;
     bool retired_cargo_signature_valid_ = false;
+    std::uint64_t retired_cargo_lifecycle_id_ = 0U;
 
     // ========== Cargo Warning 数据结构 ==========
     struct CargoWarningData {
@@ -1945,8 +1954,18 @@ private:
     ros::Publisher cargo_raw_status_code_pub_;
     ros::Publisher cargo_fused_box_marker_pub_;
     ros::Publisher cargo_static_evidence_debug_pub_;
+    ros::Publisher cargo_geometry_debug_pub_;
+    ros::Publisher cargo_operational_status_pub_;
     ros::Publisher cargo_pending_avoidance_pub_;
     ros::Publisher cargo_pending_envelope_marker_pub_;
+    ros::Publisher cargo_pending_self_removed_pub_;
+    ros::Publisher cargo_pending_unresolved_inside_pub_;
+    ros::Publisher cargo_pending_external_shell_pub_;
+    ros::Publisher cargo_recognition_status_pub_;
+    ros::Publisher cargo_recognition_text_marker_pub_;
+    ros::Publisher cargo_swing_status_pub_;
+    ros::Publisher cargo_swing_marker_pub_;
+    ros::Publisher cargo_swing_text_marker_pub_;
     ros::Publisher static_evidence_status_pub_;
     ros::Publisher static_evidence_cell_state_counts_pub_;
     ros::Publisher static_evidence_streak_histogram_pub_;
@@ -1955,9 +1974,16 @@ private:
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
     StaticHeightFieldConfig static_height_field_config_;
+    StaticHeightComponentExtractorConfig static_origin_component_config_;
+    StaticHeightComponentExtractor static_origin_component_extractor_;
+    StaticHeightComponent cargo_origin_component_;
+    RevealedSupportObserver revealed_support_observer_;
+    RevealedSupportObservation revealed_support_observation_;
     CargoAvoidanceFusionConfig cargo_avoidance_fusion_config_;
     PendingCargoEnvelopeConfig pending_cargo_envelope_config_;
     PendingCargoEnvelope pending_cargo_envelope_;
+    PendingCargoSelfEvidenceConfig pending_cargo_self_evidence_config_;
+    PendingCargoSelfEvidence pending_cargo_self_evidence_;
     CargoLiftOriginConfig cargo_lift_origin_config_;
     bool cargo_lift_origin_enabled_ = true;
     CargoLiftOriginBinder cargo_lift_origin_binder_;
@@ -1965,10 +1991,34 @@ private:
     CargoGeometryFusionConfig cargo_geometry_fusion_config_;
     CargoGeometryFusion cargo_geometry_fusion_;
     CargoFrozenGeometry cargo_frozen_geometry_;
+    std::uint64_t cargo_lifecycle_sequence_ = 0U;
     std::uint64_t cargo_lifecycle_id_ = 0U;
     std::uint64_t cargo_track_segment_id_ = 0U;
     bool cargo_hook_state_initialized_ = false;
     bool cargo_previous_hook_loaded_ = false;
+    bool cargo_recognition_enabled_ = true;
+    double cargo_recognition_loaded_grace_sec_ = 1.0;
+    double cargo_recognition_timeout_sec_ = 8.0;
+    bool cargo_recognition_publish_text_marker_ = true;
+    ros::Time cargo_loaded_since_;
+    std::uint8_t last_cargo_recognition_state_ = 0U;
+    CargoSwingConfig cargo_swing_config_;
+    CargoSwingMonitor cargo_swing_monitor_;
+    CargoSwingResult cargo_swing_result_;
+    std::string cargo_swing_hook_anchor_source_ = "config";
+    std::string cargo_swing_hook_anchor_topic_ =
+        "/crane/hook_anchor_base";
+    double cargo_swing_hook_anchor_timeout_sec_ = 0.50;
+    float cargo_swing_hook_anchor_z_m_ = 3.50F;
+    std::string cargo_hoist_state_topic_ = "/crane/hoist_motion_state";
+    double cargo_hoist_state_timeout_sec_ = 0.50;
+    ros::Subscriber cargo_swing_hook_anchor_sub_;
+    ros::Subscriber cargo_hoist_state_sub_;
+    mutable std::mutex cargo_motion_input_mutex_;
+    geometry_msgs::PointStamped cargo_swing_hook_anchor_message_;
+    ros::Time cargo_swing_hook_anchor_received_stamp_;
+    lidar_slam2_msgs::HoistMotionState cargo_hoist_state_message_;
+    ros::Time cargo_hoist_state_received_stamp_;
     CargoObstacleTracker cargo_obstacle_tracker_;
     StaticObstacleEvidenceIndex static_obstacle_evidence_index_;
     std::shared_ptr<const StaticHeightField> static_height_field_;
@@ -1997,6 +2047,10 @@ private:
     CargoSafetyResult last_cargo_safety_result_;
     CargoSafetyResult confirmed_cargo_safety_result_;
     std::size_t cargo_self_removed_points_ = 0U;
+    std::size_t cargo_pending_self_removed_points_ = 0U;
+    std::size_t cargo_pending_unresolved_inside_points_ = 0U;
+    std::size_t cargo_pending_external_shell_points_ = 0U;
+    bool cargo_origin_exclusion_active_ = false;
     std::size_t cargo_identity_self_removed_points_ = 0U;
     std::size_t cargo_rigging_self_removed_points_ = 0U;
     std::size_t cargo_external_obstacle_points_ = 0U;
@@ -2178,6 +2232,7 @@ private:
         double processing_age_sec);
     void updateCargoLiftAndGeometryFusion(
         const HookLoadSnapshot& hook,
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
         const Sophus::SE3d& pose_map_base,
         const ros::Time& stamp,
         bool active_track);
@@ -2189,10 +2244,23 @@ private:
         const ros::Time& stamp,
         const ros::Time& obstacle_cloud_stamp,
         double processing_age_sec);
+    void publishCargoRecognitionStatus(
+        const HookLoadSnapshot& hook, const ros::Time& stamp);
+    void updateAndPublishCargoSwing(
+        const HookLoadSnapshot& hook, const ros::Time& stamp);
+    void cargoSwingHookAnchorCallback(
+        const geometry_msgs::PointStamped::ConstPtr& message);
+    void cargoHoistStateCallback(
+        const lidar_slam2_msgs::HoistMotionState::ConstPtr& message);
     void publishCargoFusionMarker(const CargoBottomResult& bottom,
                                   const ros::Time& stamp,
                                   bool explicit_empty = false,
                                   bool localization_valid = true);
+    void publishCargoGeometryDebug(const CargoBottomResult& bottom,
+                                   const ros::Time& stamp);
+    void publishOperationalStatus(
+        const lidar_slam2_msgs::CargoSafetyStatus& raw,
+        const ros::Time& stamp);
     HookLoadSnapshot currentHookLoadSnapshot() const;
     lidar_slam2_msgs::CargoSafetyStatus composeCargoSafetyStatus(
         lidar_slam2_msgs::CargoSafetyStatus status,

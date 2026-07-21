@@ -8,10 +8,25 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
 namespace ndt_slam {
+
+struct StaticHeightLayerNodeId {
+  std::int64_t cell_key = 0;
+  std::uint16_t layer_index = 0U;
+
+  bool operator<(const StaticHeightLayerNodeId& rhs) const noexcept {
+    return cell_key < rhs.cell_key ||
+        (cell_key == rhs.cell_key && layer_index < rhs.layer_index);
+  }
+
+  bool operator==(const StaticHeightLayerNodeId& rhs) const noexcept {
+    return cell_key == rhs.cell_key && layer_index == rhs.layer_index;
+  }
+};
 
 struct StaticHeightFieldConfig {
   float cell_size_m = 0.25F;
@@ -81,6 +96,10 @@ struct StaticHeightQuery {
   float minimum_z = -std::numeric_limits<float>::infinity();
   float maximum_z = std::numeric_limits<float>::infinity();
   std::size_t maximum_cells = 0U;
+  std::set<StaticHeightLayerNodeId> excluded_members;
+  std::uint64_t excluded_component_id = 0U;
+  std::uint64_t excluded_component_generation = 0U;
+  bool exclusion_authorized = false;
 };
 
 struct StaticHeightQueryResult {
@@ -117,13 +136,15 @@ class StaticHeightField {
       const std::vector<Eigen::Vector3f>& object_points,
       const std::vector<Eigen::Vector3f>& ground_points,
       StaticEvidenceAuthority authority,
-      std::uint32_t observation_count = 1U);
+      std::uint32_t observation_count = 1U,
+      std::uint64_t map_generation = 0U);
 
   const StaticHeightCell* cell(std::int64_t key) const;
   StaticSupportSurfaceCell supportAt(const Eigen::Vector2f& xy) const;
   StaticHeightQueryResult query(const StaticHeightQuery& query) const;
   std::size_t cellCount() const noexcept { return cells_.size(); }
   std::size_t layerCount() const noexcept;
+  std::uint64_t mapGeneration() const noexcept { return map_generation_; }
   const std::map<std::int64_t, StaticHeightCell>& cells() const noexcept {
     return cells_;
   }
@@ -133,6 +154,7 @@ class StaticHeightField {
   std::map<std::int64_t, StaticHeightCell> cells_;
   Eigen::Vector3f support_plane_ = Eigen::Vector3f::Zero();
   bool support_plane_valid_ = false;
+  std::uint64_t map_generation_ = 0U;
 };
 
 }  // namespace ndt_slam

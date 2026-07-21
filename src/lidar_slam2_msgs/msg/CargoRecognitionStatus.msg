@@ -1,0 +1,48 @@
+uint32 SCHEMA_VERSION=1
+
+uint8 STATE_NOT_READY=0
+uint8 STATE_HOOK_EMPTY=1
+uint8 STATE_WAITING_FOR_CANDIDATE=2
+uint8 STATE_CANDIDATE_TRACKING=3
+uint8 STATE_GEOMETRY_CONFIRMING=4
+uint8 STATE_CARGO_LOCKED=5
+uint8 STATE_CARGO_LOST_HOLD=6
+uint8 STATE_CLEAR_WAIT_REARM=7
+uint8 STATE_RECOGNITION_FAILED=8
+uint8 STATE_GRAVITY_LIDAR_CONFLICT=9
+uint8 STATE_LOCALIZATION_INVALID=10
+
+std_msgs/Header header
+uint32 schema_version
+bool valid
+uint8 state
+
+bool hook_signal_valid
+uint8 hook_load_state
+bool hook_loaded
+
+uint8 lock_state
+uint64 cargo_lifecycle_id
+uint64 track_segment_id
+uint32 provisional_track_id
+uint32 formal_track_id
+
+bool candidate_visible
+uint32 candidate_count
+int32 selected_candidate_id
+uint32 candidate_progress
+uint32 candidate_required
+
+float32 recognition_age_sec
+float32 candidate_age_sec
+float32 top1_score
+float32 top2_score
+float32 score_margin
+float32 identity_confidence
+float32 shape_confidence
+float32 overall_confidence
+
+string detector_reason
+string association_reason
+string vertical_reason
+string reason

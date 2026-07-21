@@ -787,12 +787,29 @@ pending_cargo_envelope:
   maximum_candidate_age_sec: 0.50
   maximum_retired_age_sec: 8.0
 
+pending_cargo_self_evidence:
+  minimum_identity_confidence: 0.55
+  minimum_shape_confidence: 0.55
+  point_match_radius_m: 0.10
+  maximum_candidate_age_sec: 0.50
+  maximum_retired_age_sec: 8.0
+
+static_origin_component:
+  neighbor_height_center_tolerance_m: 0.18
+  neighbor_interval_gap_tolerance_m: 0.12
+  maximum_support_height_difference_m: 0.18
+  maximum_component_cells: 4096
+  minimum_component_cells: 4
+  maximum_anchor_distance_m: 2.0
+  minimum_candidate_overlap: 0.15
+
 cargo_lift_origin:
   enabled: true
   maximum_anchor_distance_m: 2.0
   minimum_significant_change_m: 0.15
   significance_sigma: 3.0
   minimum_source_coverage: 0.35
+  minimum_top_coverage: 0.20
   minimum_revealed_support_coverage: 0.25
   lift_confirm_frames: 4
   thickness_confirm_frames: 5
@@ -811,6 +828,49 @@ cargo_geometry_fusion:
   maximum_height_m: 5.00
   huber_delta_m: 0.20
   configured_bottom_margin_m: 0.10
+
+cargo_recognition:
+  enabled: true
+  loaded_grace_sec: 1.0
+  recognition_timeout_sec: 8.0
+  publish_text_marker: true
+
+# Initial commissioning values; they are not asserted as industry standards.
+cargo_swing:
+  enabled: true
+  hook_anchor_source: "config"
+  hook_anchor_topic: "/crane/hook_anchor_base"
+  hook_anchor_timeout_sec: 0.50
+  hook_anchor_z_m: 3.50
+  hoist_state_topic: "/crane/hoist_motion_state"
+  hoist_state_timeout_sec: 0.50
+  configured_sling_length_m: 1.00
+  minimum_rope_length_m: 0.30
+  minimum_valid_observation_sec: 0.50
+  maximum_observation_gap_sec: 0.30
+  history_window_sec: 4.00
+  stationary_settle_delay_sec: 0.30
+  measurement_filter_alpha: 0.35
+  normal_angle_deg: 2.0
+  warning_angle_deg: 3.0
+  alarm_angle_deg: 5.0
+  warning_offset_m: 0.20
+  alarm_offset_m: 0.50
+  normal_speed_mps: 0.15
+  warning_speed_mps: 0.30
+  sway_end_angle_deg: 1.0
+  sway_end_speed_mps: 0.10
+  sway_end_confirm_sec: 2.0
+  skew_suspect_angle_deg: 3.0
+  skew_alarm_angle_deg: 5.0
+  skew_direction_consistency: 0.80
+  skew_min_duration_sec: 1.00
+  skew_alarm_confirm_sec: 0.50
+  skew_max_zero_crossings: 1
+  torsion_detect_deg: 3.0
+  torsion_warning_deg: 5.0
+  torsion_alarm_deg: 10.0
+  allow_skew_alarm_without_hoist_up: false
 
 # Clean-map maintenance receives a bounded owner-thread timeslice even when the
 # latest-only localization queue remains continuously occupied. RViz map
