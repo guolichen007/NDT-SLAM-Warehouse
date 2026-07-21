@@ -17,6 +17,8 @@ bool validConfig(const CargoLiftOriginConfig& config) {
       config.minimum_revealed_support_coverage <= 1.0F &&
       config.lift_confirm_frames > 0 &&
       config.thickness_confirm_frames > 0 &&
+      config.maximum_observation_gap_sec > 0.0 &&
+      config.maximum_source_age_sec >= 0.0 &&
       config.maximum_height_m > config.minimum_height_m;
 }
 
@@ -87,10 +89,14 @@ void CargoLiftOriginBinder::reset() {
   result_ = CargoLiftOriginResult{};
   previous_loaded_ = false;
   last_stamp_sec_ = 0.0;
+  last_valid_lift_stamp_sec_ = 0.0;
+  last_valid_thickness_stamp_sec_ = 0.0;
+  bound_component_id_ = 0U;
 }
 
 CargoLiftOriginResult CargoLiftOriginBinder::update(
     const CargoLiftOriginInput& input) {
+  const double previous_stamp_sec = last_stamp_sec_;
   if (!std::isfinite(input.stamp_sec) || input.stamp_sec <= 0.0 ||
       (last_stamp_sec_ > 0.0 && input.stamp_sec <= last_stamp_sec_)) {
     result_.state = CargoLiftEventState::INVALID;
@@ -101,6 +107,16 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
     return result_;
   }
   last_stamp_sec_ = input.stamp_sec;
+  if (previous_stamp_sec > 0.0 &&
+      input.stamp_sec - previous_stamp_sec >
+          config_.maximum_observation_gap_sec) {
+    result_.lift_confirm_count = 0;
+    result_.thickness_confirm_count = 0;
+    result_.lift_confirmed = false;
+    result_.thickness_ready = false;
+    last_valid_lift_stamp_sec_ = 0.0;
+    last_valid_thickness_stamp_sec_ = 0.0;
+  }
 
   if (!input.hook_signal_valid) {
     result_.state = CargoLiftEventState::INVALID;
@@ -121,6 +137,23 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
   }
 
   const bool load_edge = !previous_loaded_ || input.hook_was_empty;
+  if (result_.valid) {
+    const bool bound_identity_present = std::any_of(
+        input.candidates.begin(), input.candidates.end(),
+        [&](const CargoOriginCandidate& candidate) {
+          return candidate.component_id == result_.origin.component_id &&
+              candidate.source == result_.origin.source &&
+              usable(candidate, config_);
+        });
+    if (!bound_identity_present) {
+      result_ = CargoLiftOriginResult{};
+      result_.state = CargoLiftEventState::INVALID;
+      result_.reason = "origin_identity_changed";
+      bound_component_id_ = 0U;
+      last_valid_lift_stamp_sec_ = 0.0;
+      last_valid_thickness_stamp_sec_ = 0.0;
+    }
+  }
   if (!result_.valid &&
       (load_edge || input.node_started_loaded ||
        result_.state == CargoLiftEventState::INVALID)) {
@@ -155,6 +188,12 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
       return result_;
     }
     result_.origin = *selected;
+    if (bound_component_id_ != 0U &&
+        bound_component_id_ != selected->component_id) {
+      result_.lift_confirm_count = 0;
+      result_.thickness_confirm_count = 0;
+    }
+    bound_component_id_ = selected->component_id;
     result_.valid = true;
     result_.static_thickness_m =
         selected->top_z95_map - selected->support_z_map;
@@ -172,14 +211,23 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
       config_.significance_sigma * std::sqrt(
           result_.origin.uncertainty_m * result_.origin.uncertainty_m +
           input.current_top_uncertainty_m * input.current_top_uncertainty_m));
-  const bool top_valid = input.current_top_valid &&
+  const bool top_fresh = std::isfinite(input.current_top_stamp_sec) &&
+      input.current_top_stamp_sec > 0.0 &&
+      std::abs(input.stamp_sec - input.current_top_stamp_sec) <=
+          config_.maximum_source_age_sec;
+  const bool support_fresh =
+      std::isfinite(input.revealed_support_stamp_sec) &&
+      input.revealed_support_stamp_sec > 0.0 &&
+      std::abs(input.stamp_sec - input.revealed_support_stamp_sec) <=
+          config_.maximum_source_age_sec;
+  const bool top_valid = input.current_top_valid && top_fresh &&
       std::isfinite(input.current_top_z_map) &&
       input.source_coverage >= config_.minimum_source_coverage;
   if (top_valid) {
     result_.lift_delta_m =
         input.current_top_z_map - result_.origin.top_z95_map;
   }
-  const bool revealed = input.revealed_support_valid &&
+  const bool revealed = input.revealed_support_valid && support_fresh &&
       std::isfinite(input.revealed_support_z_map) &&
       input.revealed_support_coverage >=
           config_.minimum_revealed_support_coverage &&
@@ -188,11 +236,21 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
   const bool lifted = top_valid &&
       result_.lift_delta_m >= result_.change_threshold_m && revealed;
   if (lifted) {
+    if (last_valid_lift_stamp_sec_ > 0.0 &&
+        input.stamp_sec - last_valid_lift_stamp_sec_ >
+            config_.maximum_observation_gap_sec) {
+      result_.lift_confirm_count = 0;
+    }
     ++result_.lift_confirm_count;
-  } else if (top_valid && input.source_coverage >=
-                         config_.minimum_source_coverage) {
+    last_valid_lift_stamp_sec_ = input.stamp_sec;
+  } else {
     result_.lift_confirm_count = 0;
+    result_.thickness_confirm_count = 0;
+    last_valid_lift_stamp_sec_ = 0.0;
+    last_valid_thickness_stamp_sec_ = 0.0;
   }
+  result_.lift_confirmed = false;
+  result_.thickness_ready = false;
   result_.state = CargoLiftEventState::LIFT_CONFIRMING;
   if (result_.lift_confirm_count >= config_.lift_confirm_frames) {
     result_.lift_confirmed = true;
@@ -201,7 +259,18 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
     const bool thickness_valid =
         result_.revealed_thickness_m >= config_.minimum_height_m &&
         result_.revealed_thickness_m <= config_.maximum_height_m;
-    if (thickness_valid) ++result_.thickness_confirm_count;
+    if (thickness_valid) {
+      if (last_valid_thickness_stamp_sec_ > 0.0 &&
+          input.stamp_sec - last_valid_thickness_stamp_sec_ >
+              config_.maximum_observation_gap_sec) {
+        result_.thickness_confirm_count = 0;
+      }
+      ++result_.thickness_confirm_count;
+      last_valid_thickness_stamp_sec_ = input.stamp_sec;
+    } else {
+      result_.thickness_confirm_count = 0;
+      last_valid_thickness_stamp_sec_ = 0.0;
+    }
     result_.state = CargoLiftEventState::THICKNESS_CONFIRMING;
     result_.reason = thickness_valid
         ? "lift_confirmed_thickness_pending"

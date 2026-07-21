@@ -43,6 +43,8 @@ struct CargoLiftOriginConfig {
   float minimum_revealed_support_coverage = 0.25F;
   int lift_confirm_frames = 4;
   int thickness_confirm_frames = 5;
+  double maximum_observation_gap_sec = 0.50;
+  double maximum_source_age_sec = 0.50;
   float minimum_height_m = 0.30F;
   float maximum_height_m = 5.00F;
 };
@@ -74,10 +76,12 @@ struct CargoLiftOriginInput {
   Eigen::Vector2f hook_anchor_map = Eigen::Vector2f::Zero();
   std::vector<CargoOriginCandidate> candidates;
   bool current_top_valid = false;
+  double current_top_stamp_sec = 0.0;
   float current_top_z_map = std::numeric_limits<float>::quiet_NaN();
   float current_top_uncertainty_m = 0.20F;
   float source_coverage = 0.0F;
   bool revealed_support_valid = false;
+  double revealed_support_stamp_sec = 0.0;
   float revealed_support_z_map = std::numeric_limits<float>::quiet_NaN();
   float revealed_support_coverage = 0.0F;
 };
@@ -111,6 +115,9 @@ class CargoLiftOriginBinder {
   CargoLiftOriginResult result_;
   bool previous_loaded_ = false;
   double last_stamp_sec_ = 0.0;
+  double last_valid_lift_stamp_sec_ = 0.0;
+  double last_valid_thickness_stamp_sec_ = 0.0;
+  std::uint64_t bound_component_id_ = 0U;
 };
 
 }  // namespace ndt_slam

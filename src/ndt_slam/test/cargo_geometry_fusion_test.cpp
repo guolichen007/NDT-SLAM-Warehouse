@@ -34,9 +34,9 @@ TEST(CargoGeometryFusionTest, FreezesAfterIndependentConsistentSources) {
   config.minimum_confirm_frames = 2;
   CargoGeometryFusion fusion(config);
   auto result = fusion.update(frame(1.0));
-  EXPECT_TRUE(result.valid);
+  EXPECT_FALSE(result.valid);
   EXPECT_FALSE(result.frozen);
-  result = fusion.update(frame(2.0));
+  result = fusion.update(frame(1.1));
   ASSERT_TRUE(result.frozen);
   EXPECT_NEAR(result.height_m, 1.52F, 0.08F);
   EXPECT_LT(result.conservative_bottom_m, result.bottom_m);
@@ -68,7 +68,7 @@ TEST(CargoGeometryFusionTest, FrozenShapeOnlyUpdatesCenterAndBottom) {
   auto result = fusion.update(frame(1.0));
   ASSERT_TRUE(result.frozen);
   const float frozen_length = result.length_m;
-  auto next = frame(2.0);
+  auto next = frame(1.1);
   next.track_segment_id = 2U;
   next.center = Eigen::Vector3f(1.0F, 2.0F, 3.0F);
   next.length_m = 9.0F;
@@ -78,6 +78,29 @@ TEST(CargoGeometryFusionTest, FrozenShapeOnlyUpdatesCenterAndBottom) {
   EXPECT_FLOAT_EQ(result.center.x(), 1.0F);
   EXPECT_EQ(result.track_segment_id, 2U);
   EXPECT_NEAR(result.bottom_m, 3.75F - result.height_m, 1.0e-5F);
+}
+
+TEST(CargoGeometryFusionTest, ObservationGapRestartsConfirmation) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 2;
+  config.maximum_observation_gap_sec = 0.5;
+  CargoGeometryFusion fusion(config);
+  EXPECT_EQ(fusion.update(frame(1.0)).confirm_frames, 1);
+  const auto result = fusion.update(frame(2.0));
+  EXPECT_FALSE(result.valid);
+  EXPECT_FALSE(result.frozen);
+  EXPECT_EQ(result.confirm_frames, 1);
+}
+
+TEST(CargoGeometryFusionTest, DuplicateStampCannotFreezeGeometry) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 2;
+  CargoGeometryFusion fusion(config);
+  EXPECT_EQ(fusion.update(frame(1.0)).confirm_frames, 1);
+  const auto result = fusion.update(frame(1.0));
+  EXPECT_FALSE(result.valid);
+  EXPECT_FALSE(result.frozen);
+  EXPECT_EQ(result.reason, "source_time_invalid_or_rollback");
 }
 
 }  // namespace

@@ -23,6 +23,7 @@ const char* cargoThicknessSourceName(CargoThicknessSource source) noexcept;
 struct CargoGeometryFusionConfig {
   std::size_t minimum_independent_sources = 2U;
   int minimum_confirm_frames = 5;
+  double maximum_observation_gap_sec = 0.50;
   float maximum_source_disagreement_m = 0.25F;
   float maximum_fused_uncertainty_m = 0.20F;
   float minimum_height_m = 0.30F;

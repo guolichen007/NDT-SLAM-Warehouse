@@ -12,6 +12,7 @@ namespace {
 bool validConfig(const CargoGeometryFusionConfig& config) {
   return config.minimum_independent_sources > 0U &&
       config.minimum_confirm_frames > 0 &&
+      config.maximum_observation_gap_sec > 0.0 &&
       config.maximum_source_disagreement_m > 0.0F &&
       config.maximum_fused_uncertainty_m > 0.0F &&
       config.maximum_height_m > config.minimum_height_m &&
@@ -80,6 +81,7 @@ void CargoGeometryFusion::reset() {
 
 CargoFrozenGeometry CargoGeometryFusion::update(
     const CargoGeometryFrame& frame) {
+  const double previous_stamp_sec = last_stamp_sec_;
   if (!std::isfinite(frame.stamp_sec) || frame.stamp_sec <= 0.0 ||
       (last_stamp_sec_ > 0.0 && frame.stamp_sec <= last_stamp_sec_)) {
     result_.valid = false;
@@ -87,6 +89,12 @@ CargoFrozenGeometry CargoGeometryFusion::update(
     return result_;
   }
   last_stamp_sec_ = frame.stamp_sec;
+  if (!result_.frozen && previous_stamp_sec > 0.0 &&
+      frame.stamp_sec - previous_stamp_sec >
+          config_.maximum_observation_gap_sec) {
+    result_.confirm_frames = 0;
+    pending_valid_ = false;
+  }
   if (frame.cargo_lifecycle_id == 0U) {
     result_.valid = false;
     result_.reason = "cargo_lifecycle_invalid";
@@ -228,10 +236,13 @@ CargoFrozenGeometry CargoGeometryFusion::update(
   for (const auto& value : values) {
     result_.accepted_sources.push_back(value.source);
   }
-  result_.valid = true;
+  // A numerically usable candidate is not formal geometry. Runtime callers
+  // must not gain safety/removal authority until the shape is frozen.
+  result_.valid = false;
   result_.reason = "thickness_confirmation_pending";
   if (result_.confirm_frames >= config_.minimum_confirm_frames) {
     result_.frozen = true;
+    result_.valid = true;
     result_.center = frame.center;
     result_.length_m = frame.length_m;
     result_.width_m = frame.width_m;
