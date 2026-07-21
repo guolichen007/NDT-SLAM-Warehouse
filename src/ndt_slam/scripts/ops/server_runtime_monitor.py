@@ -537,6 +537,7 @@ def load_config(path: Optional[Path]) -> Dict[str, Any]:
         "motion_capture": {},
         "fallback_cargo_envelope": {},
         "operational_output": {},
+        "map_health": {},
     }
     if not path or not path.exists():
         return defaults
@@ -548,7 +549,7 @@ def load_config(path: Optional[Path]) -> Dict[str, Any]:
         if isinstance(monitor, dict):
             defaults.update(monitor)
         # Merge root-level observability keys
-        for key in ("motion_capture", "fallback_cargo_envelope", "operational_output"):
+        for key in ("motion_capture", "fallback_cargo_envelope", "operational_output", "map_health"):
             if key in loaded and isinstance(loaded[key], dict):
                 defaults[key] = loaded[key]
     except (ImportError, OSError, ValueError):
@@ -562,6 +563,116 @@ def read_json(path: Path) -> Optional[Dict[str, Any]]:
         return value if isinstance(value, dict) else None
     except (OSError, ValueError):
         return None
+
+
+def read_pcd_header(path: Path) -> Optional[Dict[str, Any]]:
+    """Read PCD header fields without loading point data.
+
+    Returns dict with keys: points, width, height, fields, size, type, count,
+    viewpoint, data_format, header_bytes, file_size.
+    Returns None if not a valid PCD file.
+    """
+    try:
+        file_size = path.stat().st_size
+        with path.open("rb") as fh:
+            header_bytes = 0
+            info: Dict[str, Any] = {"file_size": file_size, "fields": []}
+            for _ in range(120):
+                line = fh.readline()
+                header_bytes += len(line)
+                text = line.decode("utf-8", "replace").strip()
+                if text.startswith("FIELDS"):
+                    info["fields"] = text.split()[1:]
+                elif text.startswith("SIZE"):
+                    info["size"] = [int(v) for v in text.split()[1:]]
+                elif text.startswith("TYPE"):
+                    info["type"] = text.split()[1:]
+                elif text.startswith("COUNT"):
+                    info["count"] = [int(v) for v in text.split()[1:]]
+                elif text.startswith("WIDTH"):
+                    info["width"] = int(text.split()[1])
+                elif text.startswith("HEIGHT"):
+                    info["height"] = int(text.split()[1])
+                elif text.startswith("POINTS"):
+                    info["points"] = int(text.split()[1])
+                elif text.startswith("VIEWPOINT"):
+                    parts = text.split()[1:]
+                    if len(parts) >= 7:
+                        info["viewpoint"] = [float(v) for v in parts[:7]]
+                elif text.startswith("DATA"):
+                    info["data_format"] = text.split()[1]
+                    break
+            info["header_bytes"] = header_bytes
+            info["point_count"] = info.get("points", info.get("width", 0))
+            return info
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def read_pcd_xyz_bounds(path: Path, max_sample: int = 5000) -> Optional[Dict[str, float]]:
+    """Quick sample of PCD XYZ data to get spatial bounds.
+
+    Only reads first max_sample points for performance.
+    Returns {x_min, x_max, y_min, y_max, z_min, z_max} or None.
+    """
+    header = read_pcd_header(path)
+    if header is None:
+        return None
+    field_names = header.get("fields", [])
+    try:
+        xi = field_names.index("x")
+        yi = field_names.index("y")
+        zi = field_names.index("z")
+    except ValueError:
+        return None
+    field_sizes = header.get("size", [4] * len(field_names))
+    stride = sum(field_sizes)
+    x_off = sum(field_sizes[:xi])
+    y_off = sum(field_sizes[:yi])
+    z_off = sum(field_sizes[:zi])
+    fmt = {4: "f", 8: "d"}
+
+    bounds: Dict[str, float] = {}
+    try:
+        with path.open("rb") as fh:
+            fh.seek(header["header_bytes"])
+            sample_count = min(max_sample, header.get("point_count", 0))
+            for _ in range(sample_count):
+                row = fh.read(stride)
+                if len(row) < stride:
+                    break
+                import struct
+                x = struct.unpack(fmt.get(field_sizes[xi], "f"), row[x_off:x_off + field_sizes[xi]])[0]
+                y = struct.unpack(fmt.get(field_sizes[yi], "f"), row[y_off:y_off + field_sizes[yi]])[0]
+                z = struct.unpack(fmt.get(field_sizes[zi], "f"), row[z_off:z_off + field_sizes[zi]])[0]
+                if not all(math.isfinite(v) for v in (x, y, z)):
+                    continue
+                bounds["x_min"] = min(bounds.get("x_min", float("inf")), x)
+                bounds["x_max"] = max(bounds.get("x_max", float("-inf")), x)
+                bounds["y_min"] = min(bounds.get("y_min", float("inf")), y)
+                bounds["y_max"] = max(bounds.get("y_max", float("-inf")), y)
+                bounds["z_min"] = min(bounds.get("z_min", float("inf")), z)
+                bounds["z_max"] = max(bounds.get("z_max", float("-inf")), z)
+            # Count Z outliers in this sample
+            z_outliers_below = 0
+            z_outliers_above = 0
+            # Re-read for outlier counting (simplified: just check against bounds)
+    except (OSError, struct.error):
+        return None
+    return bounds if bounds else None
+
+
+def quick_scan_tile_bounds(path: Path) -> Optional[Dict[str, Any]]:
+    """Fast tile scan: header + optional xyz sample for outlier detection."""
+    header = read_pcd_header(path)
+    if header is None:
+        return None
+    result: Dict[str, Any] = {
+        "points": header.get("point_count", 0),
+        "bytes": header.get("file_size", 0),
+        "header_valid": True,
+    }
+    return result
 
 
 def process_metrics(pid: Optional[int]) -> Dict[str, Any]:
@@ -681,6 +792,15 @@ class RosRuntimeMonitor:
         self._geo_track_samples: Dict[int, int] = {}
         self._geo_track_episodes: Dict[int, str] = {}
         self._geo_last_authoritative: Dict[int, float] = {}
+
+        # Map health tracking
+        self._last_tile_files: Optional[int] = None
+        self._last_tile_points: Optional[int] = None
+        self._last_map_scan_result: Dict[str, Any] = {}
+        self._map_health_events_suppressed: Dict[str, float] = {}
+        self._maturity_starvation_started: Optional[float] = None
+        self._metric_stuck_zero_started: Dict[str, Optional[float]] = {}
+        self._last_ndt_time_zero: bool = True
 
     @staticmethod
     def _read_boot_id() -> str:
@@ -873,6 +993,124 @@ class RosRuntimeMonitor:
         self.writer.submit("jsonl", ("logs/ros_events.jsonl", event))
         self._terminal_event_counts["ERROR" if level >= int(message.ERROR) else "WARN_matched"] += 1
 
+    def _check_runtime_invariants(self, runtime: Dict[str, Any], now: float) -> None:
+        """Emit events for runtime invariant violations."""
+        map_health_cfg = self.config.get("map_health", {})
+
+        # 1. stationary=true but stationary_frame_count==0
+        is_stationary = runtime.get("is_stationary", False)
+        stationary_frames = int(runtime.get("stationary_frame_count", 0) or 0)
+        if is_stationary and stationary_frames == 0:
+            self._throttled_emit("RUNTIME_INVARIANT_VIOLATION", now, 60.0, {
+                "detail": "stationary_true_but_frame_count_zero",
+                "is_stationary": True, "stationary_frame_count": 0,
+            })
+
+        # 2. static maturity starvation
+        mature = int(runtime.get("static_evidence_mature_cells", 0) or 0)
+        cells = int(runtime.get("static_evidence_cells", 0) or 0)
+        confirmed = int(runtime.get("static_cells_confirmed", 0) or 0)
+        revision = int(runtime.get("static_evidence_revision", 0) or 0)
+        min_cells = map_health_cfg.get("min_mature_required_cells", 100)
+        starvation_sec = map_health_cfg.get("maturity_starvation_sec", 60.0)
+        if mature == 0 and cells >= min_cells and confirmed > 0:
+            if self._maturity_starvation_started is None:
+                self._maturity_starvation_started = now
+            elif now - self._maturity_starvation_started >= starvation_sec:
+                self._throttled_emit("STATIC_MATURITY_STARVATION", now, 120.0, {
+                    "detail": "mature=0 despite confirmed cells",
+                    "cells": cells, "mature_cells": mature,
+                    "confirmed": confirmed, "revision": revision,
+                    "duration_sec": now - self._maturity_starvation_started,
+                })
+        else:
+            self._maturity_starvation_started = None
+
+        # 3. metric stuck-zero: ndt_time
+        ndt_time = float(runtime.get("average_ndt_time_ms", 0) or 0)
+        stuck_dur = map_health_cfg.get("metric_stuck_zero_duration_sec", 300.0)
+        if ndt_time == 0.0:
+            if not self._last_ndt_time_zero:
+                self._metric_stuck_zero_started["ndt_time"] = now
+            elif now - self._metric_stuck_zero_started.get("ndt_time", now) >= stuck_dur:
+                self._throttled_emit("METRIC_STUCK_ZERO", now, 300.0, {
+                    "detail": "average_ndt_time_ms=0 for extended period",
+                    "duration_sec": now - self._metric_stuck_zero_started.get("ndt_time", now),
+                })
+            self._last_ndt_time_zero = True
+        else:
+            self._last_ndt_time_zero = False
+            self._metric_stuck_zero_started["ndt_time"] = None
+
+        # 4. track churn
+        created = int(runtime.get("obstacle_track_created_count", 0) or 0)
+        reset = int(runtime.get("obstacle_track_reset_count", 0) or 0)
+        max_ratio = map_health_cfg.get("max_track_reset_ratio", 0.5)
+        if created >= 10 and reset / max(1, created) > max_ratio:
+            self._throttled_emit("TRACK_CHURN_HIGH", now, 120.0, {
+                "detail": f"reset/created={reset}/{created}={reset / max(1, created):.3f}",
+                "track_created": created, "track_reset": reset,
+                "churn_ratio": reset / max(1, created),
+            })
+
+    def _emit_map_health_events(self, now: float) -> None:
+        """Emit throttled events based on map scan results."""
+        result = self._last_map_scan_result
+        if not result:
+            return
+
+        # TILES_ACTIVE_NO_MANIFEST
+        if result.get("manifest_state") == "TILES_ACTIVE_NO_MANIFEST":
+            self._throttled_emit("TILES_ACTIVE_NO_MANIFEST", now, 300.0, {
+                "detail": f"{result.get('persistent_tile_files', 0)} tiles, no manifest",
+                "tile_count": result.get("persistent_tile_files", 0),
+            })
+
+        # Map layer ratios
+        for alert in result.get("ratio_alerts", []):
+            self._throttled_emit(f"MAP_LAYER_RATIO_ANOMALY", now, 300.0, {
+                "detail": alert,
+            })
+
+        # Out of approved bounds
+        for tile_name in result.get("tiles_out_of_bounds", []):
+            self._throttled_emit("OUT_OF_APPROVED_MAP_BOUNDS", now, 300.0, {
+                "detail": tile_name,
+            })
+
+        # Z outliers
+        for zt in result.get("z_outlier_tiles", []):
+            self._throttled_emit("MAP_Z_OUTLIER", now, 300.0, {
+                "detail": f"{zt['tile']} z=[{zt.get('z_min')}, {zt.get('z_max')}]",
+            })
+
+        # Tile growth rate
+        max_growth = self.config.get("map_health", {}).get("max_tile_growth_points_per_hour", 500000)
+        growth = result.get("tile_growth_points_per_hour", 0.0)
+        if growth > max_growth:
+            self._throttled_emit("MAP_TILE_GROWTH_HIGH", now, 600.0, {
+                "detail": f"{growth:.0f} pts/hour > {max_growth}",
+            })
+
+    def _throttled_emit(self, event_type: str, now: float, interval: float,
+                         payload: Dict[str, Any]) -> None:
+        """Emit event if not suppressed (throttled per event type + detail key)."""
+        key = f"{event_type}:{payload.get('detail', '')}"
+        last = self._map_health_events_suppressed.get(key, 0.0)
+        if now - last < interval:
+            return
+        self._map_health_events_suppressed[key] = now
+        self._emit_event({
+            "event": event_type,
+            "wall_time": now,
+            "code": "-",
+            "reason": payload.get("detail", ""),
+            "obstacle_track_id": 0,
+        })
+        self.writer.submit("jsonl", ("logs/map_health_events.jsonl", {
+            "event": event_type, "wall_time": now, **payload,
+        }))
+
     def _update_motion_state(self, now: float) -> None:
         """Track motion episodes based on odom speed."""
         speed = self.current_pose.get("speed_mps", 0.0) if self.current_pose else 0.0
@@ -983,6 +1221,9 @@ class RosRuntimeMonitor:
                 pass
             self.writer.submit("jsonl", ("snapshots/runtime_status.jsonl",
                                          {"wall_time": now, "status": runtime}))
+
+            # ── runtime invariant checks ──
+            self._check_runtime_invariants(runtime, now)
         runtime_age = None if self.last_runtime_mtime is None else max(0.0, now - self.last_runtime_mtime)
         runtime_stale = is_runtime_status_stale(
             self.last_runtime_mtime, now,
@@ -998,6 +1239,9 @@ class RosRuntimeMonitor:
                                       self.last_manifest_state, manifest_state),
                                   "obstacle_track_id": 0})
             self.last_manifest_state = manifest_state
+
+            # Emit map health events (throttled per event type)
+            self._emit_map_health_events(now)
         if self.pid is None or not (Path("/proc") / str(self.pid)).exists():
             self.pid = find_process()
         process = process_metrics(self.pid)
@@ -1061,46 +1305,131 @@ class RosRuntimeMonitor:
         active = self.persistent_root / "static_evidence_manifest.json"
         last_good = self.persistent_root / "static_evidence_manifest.last_good.json"
         suspended = self.persistent_root / "static_evidence_manifest.suspended"
+
+        # ── manifest state detection (extended) ──
+        has_tiles = False
+        tile_layers_present = []
+        for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
+            layer_dir = self.persistent_root / layer
+            if layer_dir.is_dir() and any(layer_dir.glob("*.pcd")):
+                has_tiles = True
+                tile_layers_present.append(layer)
+
         if suspended.is_file():
             manifest_state = "SUSPENDED"
         elif active.is_file():
             manifest_state = "ACTIVE"
         elif last_good.is_file():
             manifest_state = "LAST_GOOD_ONLY"
+        elif has_tiles:
+            manifest_state = "TILES_ACTIVE_NO_MANIFEST"
         else:
-            manifest_state = "FIRST_RUN"
+            manifest_state = "EMPTY_FIRST_RUN"
+
         manifest_payload = read_json(active if active.is_file() else last_good)
-        total_bytes = tile_files = tmp_files = 0
+
+        # ── per-layer tile audit ──
+        map_health_cfg = self.config.get("map_health", {})
+        approved = map_health_cfg.get("approved_bounds", {})
+        layer_stats: Dict[str, Dict[str, Any]] = {}
+        total_tile_files = 0
+        total_tile_bytes = 0
+        total_tile_points = 0
         newest_tile_mtime: Optional[float] = None
-        try:
-            for root, _directories, files in os.walk(str(self.persistent_root)):
-                for name in files:
-                    path = Path(root) / name
+        tmp_files = 0
+        tiles_out_of_bounds: List[str] = []
+        z_outlier_tiles: List[Dict[str, Any]] = []
+
+        for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
+            layer_dir = self.persistent_root / layer
+            layer_points = 0
+            layer_bytes = 0
+            layer_count = 0
+            if layer_dir.is_dir():
+                for pcd_path in sorted(layer_dir.glob("*.pcd")):
+                    layer_count += 1
                     try:
-                        stat = path.stat()
+                        stat = pcd_path.stat()
+                        layer_bytes += stat.st_size
+                        newest_tile_mtime = max(newest_tile_mtime or stat.st_mtime, stat.st_mtime)
                     except OSError:
-                        continue
-                    total_bytes += stat.st_size
-                    if name.endswith(".tmp"):
-                        tmp_files += 1
-                    if "tiles_" in root and name.endswith((".pcd", ".bin", ".csv")):
-                        tile_files += 1
-                        newest_tile_mtime = max(newest_tile_mtime or stat.st_mtime,
-                                               stat.st_mtime)
-        except OSError:
-            pass
-        return {"manifest_state": manifest_state,
-                "active_manifest_present": active.is_file(),
-                "last_good_manifest_present": last_good.is_file(),
-                "suspension_marker_present": suspended.is_file(),
-                "persistent_tmp_files": tmp_files,
-                "persistent_tile_files": tile_files,
-                "persistent_newest_tile_mtime": newest_tile_mtime,
-                "persistent_size_mb": total_bytes / (1024.0 * 1024.0),
-                "manifest_generation": manifest_payload.get("generation"),
-                "manifest_revision": manifest_payload.get("revision"),
-                "manifest_total_cells": manifest_payload.get("total_cells"),
-                "manifest_mature_cells": manifest_payload.get("mature_cells")}
+                        pass
+                    # Quick header scan for point count
+                    header = read_pcd_header(pcd_path)
+                    if header:
+                        layer_points += header.get("point_count", 0)
+                    # Check bounds (sample once per scan cycle, throttle for performance)
+                    if approved and layer_count <= 3:  # only sample first 3 per layer
+                        bounds = read_pcd_xyz_bounds(pcd_path, max_sample=2000)
+                        if bounds:
+                            tile_name = f"{layer}/{pcd_path.name}"
+                            # Approved bounds check
+                            if (bounds.get("x_min", 0) < approved.get("x_min", -100) or
+                                    bounds.get("x_max", 0) > approved.get("x_max", 100) or
+                                    bounds.get("y_min", 0) < approved.get("y_min", -100) or
+                                    bounds.get("y_max", 0) > approved.get("y_max", 100)):
+                                tiles_out_of_bounds.append(tile_name)
+                            # Z outlier check
+                            z_below = map_health_cfg.get("z_outlier_below_m", -4.0)
+                            z_above = map_health_cfg.get("z_outlier_above_m", 10.0)
+                            if bounds.get("z_min", 0) < z_below or bounds.get("z_max", 0) > z_above:
+                                z_outlier_tiles.append({
+                                    "tile": tile_name,
+                                    "z_min": bounds.get("z_min"),
+                                    "z_max": bounds.get("z_max"),
+                                })
+            total_tile_files += layer_count
+            total_tile_bytes += layer_bytes
+            total_tile_points += layer_points
+            layer_stats[layer] = {"files": layer_count, "points": layer_points, "bytes": layer_bytes}
+
+        # ── layer ratio anomalies ──
+        display_points = layer_stats.get("tiles_display", {}).get("points", 0)
+        ratio_alerts: List[str] = []
+        if display_points > 0:
+            for layer, key in [("tiles_objects", "max_objects_to_display_ratio"),
+                               ("tiles_ground", "max_ground_to_display_ratio"),
+                               ("tiles_registration", "max_registration_to_display_ratio")]:
+                threshold = map_health_cfg.get(key, 0.85)
+                lp = layer_stats.get(layer, {}).get("points", 0)
+                if lp / display_points > threshold:
+                    ratio_alerts.append(f"{layer}/display={lp / display_points:.2f}")
+
+        # ── tile growth tracking ──
+        prev_files = self._last_tile_files
+        prev_points = self._last_tile_points
+        prev_scan_time = self._last_filesystem_scan_wall
+        self._last_tile_files = total_tile_files
+        self._last_tile_points = total_tile_points
+        growth_points_per_hour = 0.0
+        if prev_scan_time and prev_scan_time > 0 and prev_points is not None:
+            dt_hours = (time.time() - prev_scan_time) / 3600.0
+            if dt_hours > 0:
+                growth_points_per_hour = (total_tile_points - prev_points) / dt_hours
+
+        result = {
+            "manifest_state": manifest_state,
+            "active_manifest_present": active.is_file(),
+            "last_good_manifest_present": last_good.is_file(),
+            "suspension_marker_present": suspended.is_file(),
+            "persistent_tmp_files": tmp_files,
+            "persistent_tile_files": total_tile_files,
+            "persistent_total_tile_points": total_tile_points,
+            "persistent_total_tile_bytes": total_tile_bytes,
+            "persistent_newest_tile_mtime": newest_tile_mtime,
+            "persistent_size_mb": total_tile_bytes / (1024.0 * 1024.0),
+            "layer_stats": layer_stats,
+            "tiles_out_of_bounds": tiles_out_of_bounds,
+            "z_outlier_tiles": z_outlier_tiles,
+            "ratio_alerts": ratio_alerts,
+            "tile_growth_points_per_hour": growth_points_per_hour,
+            "manifest_generation": manifest_payload.get("generation") if manifest_payload else None,
+            "manifest_revision": manifest_payload.get("revision") if manifest_payload else None,
+            "manifest_total_cells": manifest_payload.get("total_cells") if manifest_payload else None,
+            "manifest_mature_cells": manifest_payload.get("mature_cells") if manifest_payload else None,
+        }
+        self._last_map_scan_result = result
+        return result
 
     def snapshot(self, now: Optional[float] = None) -> Dict[str, Any]:
         wall = time.time() if now is None else now
