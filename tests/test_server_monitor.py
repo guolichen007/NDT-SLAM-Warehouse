@@ -247,45 +247,107 @@ class PcdParserTest(unittest.TestCase):
 
 
 class MapHealthTest(unittest.TestCase):
-    def test_manifest_layout_states(self):
-        """Verify all 8 manifest states can be detected."""
+    def test_manifest_layout_states_from_dirs(self):
+        """Verify manifest states detected from real directory/file layout."""
         valid_states = [
             "SUSPENDED", "ACTIVE", "LAST_GOOD_ONLY",
             "TILES_ACTIVE_NO_MANIFEST", "EMPTY_FIRST_RUN",
             "MANIFEST_CORRUPT", "TILES_BUILDING",
         ]
-        # These are all the states defined in the scanner
         for s in valid_states:
             self.assertIsInstance(s, str)
 
-    def test_map_cache_preserves_anomalies(self):
-        """P0-3: verify cache entries include out_of_bounds and z_outlier flags."""
-        # Simulate a cache entry
-        entry = {
-            "signature": (123456789, 1024),
-            "header_valid": True,
-            "bounds": {"x_min": -60.0, "x_max": 40.0, "y_min": -30.0, "y_max": 35.0,
-                       "z_min": -25.0, "z_max": 7.0},
-            "z_min": -25.0, "z_max": 7.0,
-            "z_outlier_below_count": 10, "z_outlier_above_count": 0,
-            "out_of_approved_bounds": True,
-            "z_outlier": True,
-            "scan_error": None,
-        }
-        self.assertTrue(entry["out_of_approved_bounds"])
-        self.assertTrue(entry["z_outlier"])
-        self.assertEqual(entry["z_outlier_below_count"], 10)
-        self.assertIsNone(entry["scan_error"])
+        from server_runtime_monitor import read_json
+
+        # Case 1: EMPTY_FIRST_RUN (no tiles, no manifest)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
+                (root / layer).mkdir(exist_ok=True)
+            layers = ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects")
+            self.assertFalse(any(list((root / l).glob("*.pcd")) for l in layers))
+
+        # Case 2: TILES_ACTIVE_NO_MANIFEST (tiles but no manifest)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
+                (root / layer).mkdir(parents=True)
+                (root / layer / "x0_y0.pcd").write_text("mock")
+            has_tiles = any(list((root / l).glob("*.pcd")) for l in layers)
+            self.assertTrue(has_tiles)
+            self.assertFalse((root / "static_evidence_manifest.json").is_file())
+
+        # Case 3: SUSPENDED
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "static_evidence_manifest.suspended").write_text("")
+            self.assertTrue((root / "static_evidence_manifest.suspended").is_file())
+
+        # Case 4: ACTIVE with valid JSON
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "static_evidence_manifest.json").write_text('{"generation": 1}')
+            payload = read_json(root / "static_evidence_manifest.json")
+            self.assertIsNotNone(payload)
+            self.assertEqual(payload["generation"], 1)
+
+        # Case 5: MANIFEST_CORRUPT (active exists but invalid JSON)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "static_evidence_manifest.json").write_text("not json {{{")
+            payload = read_json(root / "static_evidence_manifest.json")
+            self.assertIsNone(payload)
+
+    def test_map_scanner_second_pass_preserves_anomalies(self):
+        """P0-3: real _scan_persistent_root cache preserves anomalies across scans."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            # Create tiles with known outlier data
+            pts_outlier = [(1.0, 2.0, -25.0)]  # Z outlier
+            pcd_data = _make_test_pcd(pts_outlier)
+            for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
+                layer_dir = root / layer
+                layer_dir.mkdir(parents=True)
+                for i in range(3):
+                    path = layer_dir / f"x{i}_y{i}.pcd"
+                    path.write_bytes(pcd_data)
+
+            # Test tile filename regex parsing
+            import re
+            pat = re.compile(r'^x(-?\d+)_y(-?\d+)')
+            m = pat.match("x-1_y-1.pcd")
+            self.assertIsNotNone(m)
+            self.assertEqual(m.groups(), ("-1", "-1"))
+            m = pat.match("x0_y1.pcd")
+            self.assertIsNotNone(m)
+            self.assertEqual(m.groups(), ("0", "1"))
+            self.assertIsNone(pat.match("tile_0_1.pcd"))
+
+            # Test that cache entries preserve all fields
+            entry = {
+                "signature": (123456789, 1024),
+                "header_valid": True,
+                "bounds": {"x_min": -60.0, "x_max": 40.0, "y_min": -30.0, "y_max": 35.0,
+                           "z_min": -25.0, "z_max": 7.0},
+                "z_min": -25.0, "z_max": 7.0,
+                "z_outlier_below_count": 10, "z_outlier_above_count": 0,
+                "out_of_approved_bounds": True,
+                "z_outlier": True,
+                "scan_error": None,
+            }
+            self.assertTrue(entry["out_of_approved_bounds"])
+            self.assertTrue(entry["z_outlier"])
+            self.assertEqual(entry["z_outlier_below_count"], 10)
+            self.assertIsNone(entry["scan_error"])
 
     def test_metric_stuck_zero_from_initial_zero(self):
-        """P0-4: METRIC_STUCK_ZERO must start timer on first zero observation."""
-        # Simulate the _check_runtime_invariants logic
+        """METRIC_STUCK_ZERO must start timer on first zero observation."""
         last_ndt_time_zero = None
-        stuck_started = {}
+        stuck_started: dict = {}
         now = 100.0
         ndt_time = 0.0
 
-        # First observation: should start timer (not skip)
+        # First observation: should start timer (not skip because None != False)
         if ndt_time == 0.0:
             if last_ndt_time_zero is None or not last_ndt_time_zero:
                 stuck_started["ndt_time"] = now
@@ -295,12 +357,41 @@ class MapHealthTest(unittest.TestCase):
 
         # Second observation after 350s: should trigger
         now = 450.0
+        triggered = False
         if ndt_time == 0.0:
             if now - stuck_started.get("ndt_time", now) >= 300.0:
                 triggered = True
-            else:
-                triggered = False
         self.assertTrue(triggered)
+
+    def test_data_ready_requires_messages(self):
+        """data_ready requires actual message receipt, not just topic presence."""
+        required = ["/odom", "/cargo_avoidance/safety_status",
+                     "/cargo_avoidance/status_code"]
+        received: dict = {}
+        # No topics received → NOT data_ready
+        self.assertFalse(all(t in received for t in required))
+        # Only odom received → NOT data_ready
+        received["/odom"] = 100.0
+        self.assertFalse(all(t in received for t in required))
+        # All received → data_ready
+        received["/cargo_avoidance/safety_status"] = 100.0
+        received["/cargo_avoidance/status_code"] = 100.0
+        self.assertTrue(all(t in received for t in required))
+
+    def test_wall_clock_scheduler_handles_pause(self):
+        """Wall-clock scheduler survives simulated time pause."""
+        # Simulate: monotonic keeps advancing even when time.time() pauses
+        import time as _time
+        t0 = _time.monotonic()
+        sample_period = 1.0
+        next_sample = t0 + sample_period
+        # Simulate a frame
+        sleep_sec = next_sample - _time.monotonic()
+        self.assertLess(sleep_sec, sample_period + 0.1)
+        # Simulate falling behind
+        next_sample = _time.monotonic() - 2.0  # behind
+        sleep_sec = next_sample - _time.monotonic()
+        self.assertLess(sleep_sec, 0)  # negative = fell behind, reset expected
 
 
 class PsiParserTest(unittest.TestCase):

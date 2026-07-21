@@ -840,6 +840,7 @@ class RosRuntimeMonitor:
         self.restart_count = 0
         self.pid: Optional[int] = None
         self.shutdown_requested = False
+        self.shutdown_event = threading.Event()
         self.snapshot_requested = False
         self.last_guard_state: Dict[str, bool] = {}
         self.last_static_epoch: Optional[int] = None
@@ -1743,7 +1744,6 @@ class RosRuntimeMonitor:
     def run(self) -> None:
         sample_period = float(self.config.get("sample_period_sec", 1.0))
         summary_period = float(self.config.get("summary_period_sec", 10.0))
-        rate = self.rospy.Rate(max(0.2, 1.0 / max(0.1, sample_period)))
 
         # ── readiness handshake ──
         # Read process start ticks for identity verification
@@ -1751,8 +1751,17 @@ class RosRuntimeMonitor:
             _proc_start_ticks = int(open('/proc/self/stat').read().split()[21])
         except Exception:
             _proc_start_ticks = 0
+
+        # Track received topics for data_ready
+        _first_message_wall: Dict[str, float] = {}
+        _last_message_wall: Dict[str, float] = {}
+        _required_topics = ["/odom", "/cargo_avoidance/safety_status",
+                            "/cargo_avoidance/status_code"]
+
         ready_payload: Dict[str, Any] = {
             "ready": True,
+            "process_ready": True,
+            "data_ready": False,
             "pid": os.getpid(),
             "run_id": self.args.run_id,
             "boot_id": self._read_boot_id(),
@@ -1760,6 +1769,9 @@ class RosRuntimeMonitor:
             "ros_node": "/ndt_slam_server_monitor",
             "workspace_sha": self.args.expected_sha or "unknown",
             "created_at": time.time(),
+            "received_topics": {},
+            "first_message_wall": {},
+            "last_message_wall": {},
             "topics": {},
         }
         try:
@@ -1775,9 +1787,51 @@ class RosRuntimeMonitor:
             pass
         atomic_write_json(self.run_dir / "reports" / "monitor_ready.json", ready_payload)
 
+        # ── wall-clock scheduling (not rospy.Rate) ──
+        # Uses time.monotonic() so the loop runs even when /use_sim_time is set
+        # and /clock is paused.  ROS time is only used for message source stamps.
+        next_sample = time.monotonic()
+        next_ready_update = time.monotonic() + 5.0  # update ready after 5s
+
         while not self.rospy.is_shutdown() and not self.shutdown_requested:
             now = time.time()
+            mono_now = time.monotonic()
+
+            # ── update data_ready tracking ──
+            if mono_now >= next_ready_update:
+                _rdy = ready_payload
+                _rdy["received_topics"] = {
+                    t: t in _first_message_wall for t in _required_topics
+                }
+                _rdy["first_message_wall"] = dict(_first_message_wall)
+                _rdy["last_message_wall"] = dict(_last_message_wall)
+                _rdy["data_ready"] = all(
+                    t in _first_message_wall for t in _required_topics
+                )
+                _rdy["created_at"] = time.time()
+                atomic_write_json(
+                    self.run_dir / "reports" / "monitor_ready.json", _rdy)
+                next_ready_update = mono_now + 5.0
+
+            # ── snapshot ──
             summary = self.snapshot(now)
+
+            # ── record message receipt timestamps ──
+            if self.last_odom_wall:
+                _first_message_wall.setdefault("/odom", self.last_odom_wall)
+                _last_message_wall["/odom"] = self.last_odom_wall
+            if self.last_safety_wall:
+                _first_message_wall.setdefault(
+                    "/cargo_avoidance/safety_status", self.last_safety_wall)
+                _last_message_wall["/cargo_avoidance/safety_status"] = self.last_safety_wall
+            # status_code is tracked via aggregator ingestion wall time
+            if hasattr(self, 'aggregator') and self.aggregator.records:
+                _first_message_wall.setdefault(
+                    "/cargo_avoidance/status_code",
+                    self.aggregator.records[-1].wall_time)
+                _last_message_wall["/cargo_avoidance/status_code"] = (
+                    self.aggregator.records[-1].wall_time)
+
             if now - self.last_summary_wall >= summary_period or self.snapshot_requested:
                 current = summary.get("current") or {}
                 window = summary.get("windows", {}).get("60", {})
@@ -1791,7 +1845,16 @@ class RosRuntimeMonitor:
                 self.writer.submit("text", ("logs/monitor.log", health_line))
                 self.last_summary_wall = now
                 self.snapshot_requested = False
-            rate.sleep()
+
+            # Wall-clock sleep (not rospy.Rate — survives /clock pause)
+            next_sample += sample_period
+            sleep_sec = next_sample - time.monotonic()
+            if sleep_sec > 0:
+                self.shutdown_event.wait(min(sleep_sec, 1.0))
+            else:
+                # We fell behind; reset to avoid tight loop
+                next_sample = time.monotonic() + sample_period
+
         final = self.snapshot(time.time())
         self.writer.submit("atomic_json", ("reports/final_summary.json", final))
         self.writer.close()
@@ -1890,9 +1953,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     def stop_handler(_signum: int, _frame: Any) -> None:
         monitor.shutdown_requested = True
+        monitor.shutdown_event.set()
 
     def snapshot_handler(_signum: int, _frame: Any) -> None:
         monitor.snapshot_requested = True
+        monitor.shutdown_event.set()
 
     signal.signal(signal.SIGINT, stop_handler)
     signal.signal(signal.SIGTERM, stop_handler)
