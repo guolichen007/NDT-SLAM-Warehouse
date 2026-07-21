@@ -15,6 +15,18 @@
 
 namespace ndt_slam {
 
+// Temporal maturity and operator approval are separate authorities. Loading a
+// clean PCD never fabricates runtime history: it is either explicitly approved
+// by an offline audit or remains unavailable to formal avoidance.
+enum class StaticEvidenceAuthority : std::uint8_t {
+  RUNTIME_MATURE = 0,
+  OPERATOR_APPROVED_BASELINE = 1,
+  UNVERIFIED_LOADED_CLEAN = 2,
+};
+
+const char* staticEvidenceAuthorityName(
+    StaticEvidenceAuthority authority) noexcept;
+
 struct StaticObstacleEvidenceConfig {
   float cell_size_m = 0.25F;
   std::uint32_t minimum_observations = 4U;
@@ -71,7 +83,26 @@ struct StaticEvidenceSnapshot {
   std::uint64_t latest_observation_sequence = 0U;
   double source_stamp_sec = 0.0;
   float cell_size_m = 0.25F;
+  StaticEvidenceAuthority authority =
+      StaticEvidenceAuthority::RUNTIME_MATURE;
   std::map<std::int64_t, StaticEvidenceCell> cells;
+};
+
+struct StaticEvidenceDiagnostics {
+  std::size_t working_cells = 0U;
+  std::size_t clean_confirmed_cells = 0U;
+  std::size_t temporally_mature_cells = 0U;
+  std::size_t pending_observation_count = 0U;
+  std::size_t pending_stable_duration = 0U;
+  std::uint64_t reset_by_time_gap = 0U;
+  std::uint64_t reset_by_sequence_gap = 0U;
+  std::uint64_t invalidated_by_tombstone = 0U;
+  std::uint64_t generation_mismatch = 0U;
+  std::uint64_t height_invalid = 0U;
+  std::uint64_t not_in_view = 0U;
+  std::uint64_t observed_free = 0U;
+  std::uint64_t observed_occupied = 0U;
+  std::map<std::uint32_t, std::size_t> streak_histogram;
 };
 
 struct StaticProvenanceQuery {
@@ -84,6 +115,8 @@ struct StaticProvenanceQuery {
 
 struct StaticProvenanceDecision {
   ExternalProvenance provenance = ExternalProvenance::NONE;
+  StaticEvidenceAuthority authority =
+      StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
   bool authorized = false;
   float matched_cell_ratio = 0.0F;
   float matched_iou = 0.0F;
@@ -138,6 +171,18 @@ class StaticObstacleEvidenceIndex {
       double stamp_sec,
       std::uint64_t map_generation,
       std::uint64_t objects_version = 0U);
+  // Advances exactly one completed clean-build observation. A cell outside
+  // observable_cells is NOT_IN_VIEW: its streak is paused, not cleared. A
+  // visible cell in observed_free_cells is explicit negative evidence and is
+  // invalidated. This prevents a global build sequence from breaking cells
+  // merely because they were outside the LiDAR ROI.
+  bool observeCleanBuildCells(
+      const StaticEvidenceCellGeometryMap& occupied_cells,
+      const StaticEvidenceCellKeySet& observable_cells,
+      const StaticEvidenceCellKeySet& observed_free_cells,
+      double stamp_sec,
+      std::uint64_t map_generation,
+      std::uint64_t objects_version = 0U);
   StaticEvidenceMutationResult invalidateCells(
       const StaticEvidenceCellKeySet& invalidated_cells,
       std::uint64_t clean_build_version,
@@ -155,6 +200,8 @@ class StaticObstacleEvidenceIndex {
   std::shared_ptr<const StaticEvidenceSnapshot> snapshot() const;
   std::uint64_t latestObservationSequence() const;
   std::size_t matureCellCount() const;
+  StaticEvidenceDiagnostics diagnostics() const;
+  void setSnapshotAuthority(StaticEvidenceAuthority authority);
 
   bool saveSnapshot(
       const std::shared_ptr<const StaticEvidenceSnapshot>& snapshot,
@@ -176,10 +223,14 @@ class StaticObstacleEvidenceIndex {
   // Tombstones survive erasing a contaminated working cell. They prevent an
   // older asynchronous clean result from recreating/confirming that cell.
   std::map<std::int64_t, std::uint64_t> invalidated_versions_;
+  StaticEvidenceCellKeySet observed_free_tombstones_;
   std::uint64_t working_generation_ = 0U;
   std::uint64_t latest_observation_sequence_ = 0U;
   std::uint64_t revision_ = 0U;
   double last_observation_stamp_sec_ = 0.0;
+  StaticEvidenceAuthority authority_ =
+      StaticEvidenceAuthority::RUNTIME_MATURE;
+  StaticEvidenceDiagnostics diagnostics_totals_;
   std::shared_ptr<const StaticEvidenceSnapshot> snapshot_;
 };
 

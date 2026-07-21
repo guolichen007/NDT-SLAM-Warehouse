@@ -70,6 +70,19 @@ std::vector<std::string> splitCsv(const std::string& line) {
 
 }  // namespace
 
+const char* staticEvidenceAuthorityName(
+    StaticEvidenceAuthority authority) noexcept {
+  switch (authority) {
+    case StaticEvidenceAuthority::RUNTIME_MATURE:
+      return "RUNTIME_MATURE";
+    case StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE:
+      return "OPERATOR_APPROVED_BASELINE";
+    case StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN:
+      return "UNVERIFIED_LOADED_CLEAN";
+  }
+  return "UNVERIFIED_LOADED_CLEAN";
+}
+
 std::int64_t packStaticEvidenceCell(
     std::int32_t x, std::int32_t y) noexcept {
   const std::uint64_t packed =
@@ -126,10 +139,13 @@ void StaticObstacleEvidenceIndex::setConfig(
   config_ = validConfig(config) ? config : StaticObstacleEvidenceConfig{};
   working_cells_.clear();
   invalidated_versions_.clear();
+  observed_free_tombstones_.clear();
   working_generation_ = 0U;
   latest_observation_sequence_ = 0U;
   revision_ = 0U;
   last_observation_stamp_sec_ = 0.0;
+  authority_ = StaticEvidenceAuthority::RUNTIME_MATURE;
+  diagnostics_totals_ = StaticEvidenceDiagnostics{};
   auto empty = std::make_shared<StaticEvidenceSnapshot>();
   empty->cell_size_m = config_.cell_size_m;
   std::atomic_store_explicit(
@@ -141,9 +157,12 @@ void StaticObstacleEvidenceIndex::reset(std::uint64_t map_generation) {
   std::lock_guard<std::mutex> lock(mutex_);
   working_cells_.clear();
   invalidated_versions_.clear();
+  observed_free_tombstones_.clear();
   working_generation_ = map_generation;
   latest_observation_sequence_ = 0U;
   last_observation_stamp_sec_ = 0.0;
+  authority_ = StaticEvidenceAuthority::RUNTIME_MATURE;
+  diagnostics_totals_ = StaticEvidenceDiagnostics{};
   publishSnapshotLocked(0.0);
 }
 
@@ -152,11 +171,25 @@ bool StaticObstacleEvidenceIndex::observeFilteredCells(
     double stamp_sec,
     std::uint64_t map_generation,
     std::uint64_t objects_version) {
+  StaticEvidenceCellKeySet observable;
+  for (const auto& item : cells) observable.insert(item.first);
+  return observeCleanBuildCells(
+      cells, observable, {}, stamp_sec, map_generation, objects_version);
+}
+
+bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
+    const StaticEvidenceCellGeometryMap& occupied_cells,
+    const StaticEvidenceCellKeySet& observable_cells,
+    const StaticEvidenceCellKeySet& observed_free_cells,
+    double stamp_sec,
+    std::uint64_t map_generation,
+    std::uint64_t objects_version) {
   if (!std::isfinite(stamp_sec) || stamp_sec <= 0.0) return false;
   std::lock_guard<std::mutex> lock(mutex_);
   if (working_generation_ != map_generation) {
     // Only an explicit lifecycle reset may change the active epoch. A delayed
     // MapCommit from an older pose graph must never roll the index backwards.
+    ++diagnostics_totals_.generation_mismatch;
     return false;
   }
   if (last_observation_stamp_sec_ > 0.0 &&
@@ -174,12 +207,40 @@ bool StaticObstacleEvidenceIndex::observeFilteredCells(
   if (latest_observation_sequence_ == 0U) ++latest_observation_sequence_;
   bool snapshot_changed = false;
 
-  for (const auto& item : cells) {
+  // NOT_IN_VIEW deliberately preserves pending streaks. Only an explicitly
+  // visible free cell is negative evidence.
+  for (const auto& item : working_cells_) {
+    if (observable_cells.find(item.first) == observable_cells.end()) {
+      ++diagnostics_totals_.not_in_view;
+    }
+  }
+  for (const auto key : observed_free_cells) {
+    if (observable_cells.find(key) == observable_cells.end()) continue;
+    const auto working = working_cells_.find(key);
+    if (working == working_cells_.end()) continue;
+    ++diagnostics_totals_.observed_free;
+    observed_free_tombstones_.insert(key);
+    working_cells_.erase(working);
+    snapshot_changed = true;
+    ++diagnostics_totals_.invalidated_by_tombstone;
+  }
+
+  for (const auto& item : occupied_cells) {
+    if (!observable_cells.empty() &&
+        observable_cells.find(item.first) == observable_cells.end()) {
+      continue;
+    }
+    if (observed_free_cells.find(item.first) != observed_free_cells.end()) {
+      continue;
+    }
     const auto& geometry = item.second;
     if (!std::isfinite(geometry.min_z) || !std::isfinite(geometry.max_z) ||
         geometry.max_z < geometry.min_z) {
+      ++diagnostics_totals_.height_invalid;
       continue;
     }
+    ++diagnostics_totals_.observed_occupied;
+    observed_free_tombstones_.erase(item.first);
     auto inserted = working_cells_.emplace(item.first, StaticEvidenceCell{});
     StaticEvidenceCell& cell = inserted.first->second;
     if (inserted.second) {
@@ -198,21 +259,25 @@ bool StaticObstacleEvidenceIndex::observeFilteredCells(
       const bool continuous = std::isfinite(delta) &&
           delta > kStampEpsilonSec &&
           delta <= config_.maximum_observation_gap_sec &&
-          sequence_gap > 0U &&
-          sequence_gap <= config_.maximum_observation_sequence_gap;
+          sequence_gap == 1U;
       if (continuous) {
         cell.consecutive_stable_duration_sec += delta;
-      } else if (!cell.temporally_mature) {
-        // Sparse sightings must not accumulate into a mature static object.
-        // Clean-map confirmation alone is not maturity. Only a cell which has
-        // already completed the temporal contract remains durable across a
-        // gap; a pending clean-confirmed streak starts over here.
+      } else if (sequence_gap == 1U && !cell.temporally_mature) {
+        // An adjacent build that arrives after the configured time gap starts
+        // a new continuous-time streak. A larger sequence gap represents one
+        // or more NOT_IN_VIEW builds and pauses the streak without increasing
+        // its duration or clearing its observation count.
         cell.consecutive_observation_count = 0U;
         cell.consecutive_stable_duration_sec = 0.0;
         cell.first_seen_sec = stamp_sec;
         cell.first_observation_sequence = latest_observation_sequence_;
         cell.min_z = geometry.min_z;
         cell.max_z = geometry.max_z;
+        ++diagnostics_totals_.reset_by_time_gap;
+      } else if (sequence_gap == 0U && !cell.temporally_mature) {
+        cell.consecutive_observation_count = 0U;
+        cell.consecutive_stable_duration_sec = 0.0;
+        ++diagnostics_totals_.reset_by_sequence_gap;
       }
       cell.min_z = std::min(cell.min_z, geometry.min_z);
       cell.max_z = std::max(cell.max_z, geometry.max_z);
@@ -234,7 +299,10 @@ bool StaticObstacleEvidenceIndex::observeFilteredCells(
       snapshot_changed = true;
     }
   }
-  if (snapshot_changed) publishSnapshotLocked(stamp_sec);
+  if (snapshot_changed || !occupied_cells.empty() ||
+      !observed_free_cells.empty()) {
+    publishSnapshotLocked(stamp_sec);
+  }
   return snapshot_changed;
 }
 
@@ -246,11 +314,15 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::invalidateCells(
   StaticEvidenceMutationResult result;
   if (clean_build_version == 0U) return result;
   std::lock_guard<std::mutex> lock(mutex_);
-  if (working_generation_ != map_generation) return result;
+  if (working_generation_ != map_generation) {
+    ++diagnostics_totals_.generation_mismatch;
+    return result;
+  }
   for (const auto key : invalidated_cells) {
     std::uint64_t& tombstone = invalidated_versions_[key];
     tombstone = std::max(tombstone, clean_build_version);
     result.invalidated_cells += working_cells_.erase(key);
+    ++diagnostics_totals_.invalidated_by_tombstone;
   }
   if (!invalidated_cells.empty()) publishSnapshotLocked(stamp_sec);
   const auto current = std::atomic_load_explicit(
@@ -270,6 +342,7 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
   if (clean_build_version == 0U) return result;
   std::lock_guard<std::mutex> lock(mutex_);
   if (working_generation_ != map_generation) {
+    ++diagnostics_totals_.generation_mismatch;
     return result;
   }
   // Invalidation is monotonic and always wins over clean evidence from the
@@ -278,10 +351,13 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
     std::uint64_t& tombstone = invalidated_versions_[key];
     tombstone = std::max(tombstone, clean_build_version);
     result.invalidated_cells += working_cells_.erase(key);
+    ++diagnostics_totals_.invalidated_by_tombstone;
   }
   for (const auto& item : clean_cells) {
     const auto tombstone = invalidated_versions_.find(item.first);
-    if (invalidated_cells.find(item.first) != invalidated_cells.end() ||
+    if (observed_free_tombstones_.find(item.first) !=
+            observed_free_tombstones_.end() ||
+        invalidated_cells.find(item.first) != invalidated_cells.end() ||
         (tombstone != invalidated_versions_.end() &&
          tombstone->second >= clean_build_version)) {
       continue;
@@ -339,6 +415,7 @@ void StaticObstacleEvidenceIndex::publishSnapshotLocked(double stamp_sec) {
   next->latest_observation_sequence = latest_observation_sequence_;
   next->source_stamp_sec = stamp_sec;
   next->cell_size_m = config_.cell_size_m;
+  next->authority = authority_;
   for (const auto& item : working_cells_) {
     if (item.second.clean_map_confirmed) {
       next->cells.emplace(item.first, item.second);
@@ -372,6 +449,36 @@ std::size_t StaticObstacleEvidenceIndex::matureCellCount() const {
       }));
 }
 
+StaticEvidenceDiagnostics StaticObstacleEvidenceIndex::diagnostics() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  StaticEvidenceDiagnostics status = diagnostics_totals_;
+  status.working_cells = working_cells_.size();
+  for (const auto& item : working_cells_) {
+    const StaticEvidenceCell& cell = item.second;
+    if (cell.clean_map_confirmed) ++status.clean_confirmed_cells;
+    if (cell.clean_map_confirmed && cell.temporally_mature) {
+      ++status.temporally_mature_cells;
+    } else if (cell.clean_map_confirmed) {
+      if (cell.consecutive_observation_count < config_.minimum_observations) {
+        ++status.pending_observation_count;
+      }
+      if (cell.consecutive_stable_duration_sec + kStampEpsilonSec <
+          config_.minimum_stable_duration_sec) {
+        ++status.pending_stable_duration;
+      }
+    }
+    ++status.streak_histogram[cell.consecutive_observation_count];
+  }
+  return status;
+}
+
+void StaticObstacleEvidenceIndex::setSnapshotAuthority(
+    StaticEvidenceAuthority authority) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  authority_ = authority;
+  publishSnapshotLocked(last_observation_stamp_sec_);
+}
+
 StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
     const StaticProvenanceQuery& input) const {
   StaticProvenanceDecision decision;
@@ -380,6 +487,7 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
       input.cargo_track_start_sequence;
   const auto current = snapshot();
   if (!current) return decision;
+  decision.authority = current->authority;
   decision.map_generation = current->map_generation;
   decision.index_revision = current->revision;
   decision.index_latest_observation_sequence =
@@ -388,6 +496,11 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
   if (current->cells.empty()) return decision;
   if (current->map_generation != input.expected_map_generation) {
     decision.reason = "static_index_generation_mismatch";
+    return decision;
+  }
+  if (current->authority ==
+      StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN) {
+    decision.reason = "static_index_unverified_loaded_clean";
     return decision;
   }
   if (!std::isfinite(input.min_z_map) || !std::isfinite(input.max_z_map) ||
@@ -444,13 +557,18 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
       const float height_ratio = intervalOverlapRatio(
           input.min_z_map, input.max_z_map, cell.min_z, cell.max_z,
           config_.height_tolerance_m);
+      const bool operator_approved = current->authority ==
+          StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE;
+      const bool authority_allowed = current->authority !=
+          StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
       const bool stable_history = cell.clean_map_confirmed &&
-          cell.temporally_mature &&
+          authority_allowed && (cell.temporally_mature || operator_approved) &&
           cell.map_generation == input.expected_map_generation &&
-          cell.consecutive_observation_count >=
-              config_.minimum_observations &&
-          cell.consecutive_stable_duration_sec + kStampEpsilonSec >=
-              config_.minimum_stable_duration_sec;
+          (operator_approved ||
+           (cell.consecutive_observation_count >=
+                config_.minimum_observations &&
+            cell.consecutive_stable_duration_sec + kStampEpsilonSec >=
+                config_.minimum_stable_duration_sec));
       if (stable_history && query_cells.find(key) != query_cells.end()) {
         ++spatially_matched;
       }
@@ -517,7 +635,10 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
   if (enough_static_map) {
     decision.provenance = ExternalProvenance::STATIC_MAP_MATCH;
     decision.authorized = true;
-    decision.reason = "static_map_match_confirmed";
+    decision.reason = current->authority ==
+            StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE
+        ? "operator_approved_static_map_match"
+        : "static_map_match_confirmed";
     return decision;
   }
   if (spatially_matched > 0U && matched == 0U) {
@@ -547,7 +668,8 @@ bool StaticObstacleEvidenceIndex::saveSnapshot(
          << std::setprecision(9) << current->cell_size_m << ','
          << current->map_generation << ',' << current->revision << ','
          << current->latest_observation_sequence << ','
-         << std::setprecision(17) << current->source_stamp_sec << '\n';
+         << std::setprecision(17) << current->source_stamp_sec << ','
+         << static_cast<unsigned int>(current->authority) << '\n';
   for (const auto& item : current->cells) {
     const StaticEvidenceCell& cell = item.second;
     output << cell.key << ',' << cell.consecutive_observation_count << ','
@@ -592,7 +714,8 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
     return false;
   }
   const auto header = splitCsv(line);
-  if (header.size() != 7U || header[0] != "NDT_STATIC_EVIDENCE_INDEX") {
+  if ((header.size() != 7U && header.size() != 8U) ||
+      header[0] != "NDT_STATIC_EVIDENCE_INDEX") {
     if (reason) *reason = "index_header_invalid";
     return false;
   }
@@ -601,6 +724,18 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
     const float cell_size = std::stof(header[2]);
     const std::uint64_t source_generation = std::stoull(header[3]);
     const std::uint64_t source_revision = std::stoull(header[4]);
+    StaticEvidenceAuthority loaded_authority =
+        StaticEvidenceAuthority::RUNTIME_MATURE;
+    if (header.size() == 8U) {
+      const unsigned long parsed_authority = std::stoul(header[7]);
+      if (parsed_authority > static_cast<unsigned long>(
+              StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN)) {
+        if (reason) *reason = "index_authority_invalid";
+        return false;
+      }
+      loaded_authority = static_cast<StaticEvidenceAuthority>(
+          parsed_authority);
+    }
     if (schema != StaticEvidenceSnapshot::kSchemaVersion ||
         std::abs(cell_size - config_.cell_size_m) > 1.0e-5F ||
         source_generation != expected_source_generation ||
@@ -680,7 +815,9 @@ bool StaticObstacleEvidenceIndex::loadSnapshot(
     std::lock_guard<std::mutex> lock(mutex_);
     working_cells_ = std::move(loaded);
     invalidated_versions_.clear();
+    observed_free_tombstones_.clear();
     working_generation_ = current_map_generation;
+    authority_ = loaded_authority;
     latest_observation_sequence_ = latest_sequence;
     revision_ = source_revision;
     last_observation_stamp_sec_ = 0.0;
