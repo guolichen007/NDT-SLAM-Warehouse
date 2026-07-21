@@ -606,6 +606,9 @@ def read_pcd_header(path: Path) -> Optional[Dict[str, Any]]:
                     break
             info["header_bytes"] = header_bytes
             info["point_count"] = info.get("points", info.get("width", 0))
+            # Must have at minimum a DATA field to be valid
+            if "data_format" not in info:
+                return None
             return info
     except (OSError, ValueError, IndexError):
         return None
@@ -724,6 +727,8 @@ def build_tile_catalog(persistent_root: Path) -> List[Dict[str, Any]]:
     Reads header of every PCD file, collecting points/bytes/mtime per tile.
     Returns list of tile catalog entries.
     """
+    import re
+    _tile_coord_re = re.compile(r'^x(-?\d+)_y(-?\d+)')
     catalog: List[Dict[str, Any]] = []
     for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
         layer_dir = persistent_root / layer
@@ -750,16 +755,11 @@ def build_tile_catalog(persistent_root: Path) -> List[Dict[str, Any]]:
                 entry["points"] = header.get("point_count", 0)
                 entry["header_valid"] = True
                 entry["data_format"] = header.get("data_format")
-                # Extract tile_x/tile_y from filename if available
-                # Expected pattern: <prefix>_<x>_<y>.pcd
-                stem = pcd_path.stem
-                parts = stem.split("_")
-                if len(parts) >= 2:
-                    try:
-                        entry["tile_x"] = int(parts[-2])
-                        entry["tile_y"] = int(parts[-1])
-                    except (ValueError, IndexError):
-                        pass
+            # Extract tile coordinates from filename (x-1_y-1.pcd or x0_y1.pcd)
+            m = _tile_coord_re.match(pcd_path.stem)
+            if m:
+                entry["tile_x"] = int(m.group(1))
+                entry["tile_y"] = int(m.group(2))
             catalog.append(entry)
     return catalog
 
@@ -889,10 +889,13 @@ class RosRuntimeMonitor:
         self._map_health_events_suppressed: Dict[str, float] = {}
         self._maturity_starvation_started: Optional[float] = None
         self._metric_stuck_zero_started: Dict[str, Optional[float]] = {}
-        self._last_ndt_time_zero: bool = True
-        # Tile-level caching for incremental bounds scanning
-        self._tile_mtime_cache: Dict[str, float] = {}
-        self._cached_tile_bounds: Dict[str, Dict[str, float]] = {}
+        self._last_ndt_time_zero: Optional[bool] = None  # None = not yet observed
+        # Tile-level caching: key=tile_key, value=complete health analysis
+        self._tile_health_cache: Dict[str, Dict[str, Any]] = {}
+        # Readiness tracking
+        self._start_requested_at: float = time.time()
+        # Safety callback wall time for real safety_status_age_sec
+        self.last_safety_wall: Optional[float] = None
 
     @staticmethod
     def _read_boot_id() -> str:
@@ -999,6 +1002,7 @@ class RosRuntimeMonitor:
 
     def _safety_callback(self, message: Any) -> None:
         wall = time.time()
+        self.last_safety_wall = wall
         stamp = float(message.header.stamp.to_sec())
         values = {field: getattr(message, field) for field in (
             "requested_alarm_code", "reason", "warning_valid", "evidence_state",
@@ -1404,7 +1408,7 @@ class RosRuntimeMonitor:
         last_good = self.persistent_root / "static_evidence_manifest.last_good.json"
         suspended = self.persistent_root / "static_evidence_manifest.suspended"
 
-        # ── manifest state detection (extended) ──
+        # ── manifest state detection ──
         has_tiles = False
         tile_layers_present: List[str] = []
         for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
@@ -1413,18 +1417,42 @@ class RosRuntimeMonitor:
                 has_tiles = True
                 tile_layers_present.append(layer)
 
+        manifest_payload = None
         if suspended.is_file():
             manifest_state = "SUSPENDED"
         elif active.is_file():
-            manifest_state = "ACTIVE"
+            manifest_payload = read_json(active)
+            if manifest_payload is None:
+                manifest_state = "MANIFEST_CORRUPT"
+            else:
+                manifest_state = "ACTIVE"
         elif last_good.is_file():
-            manifest_state = "LAST_GOOD_ONLY"
+            manifest_payload = read_json(last_good)
+            if manifest_payload is None:
+                manifest_state = "MANIFEST_CORRUPT"
+            else:
+                manifest_state = "LAST_GOOD_ONLY"
         elif has_tiles:
-            manifest_state = "TILES_ACTIVE_NO_MANIFEST"
+            # Check if tiles are still being written (recent mtime within last 30s)
+            now_ts = time.time()
+            building = False
+            for layer in tile_layers_present:
+                layer_dir = self.persistent_root / layer
+                for pcd_path in layer_dir.glob("*.pcd"):
+                    try:
+                        if now_ts - pcd_path.stat().st_mtime < 30.0:
+                            building = True
+                            break
+                    except OSError:
+                        pass
+                if building:
+                    break
+            if building:
+                manifest_state = "TILES_BUILDING"
+            else:
+                manifest_state = "TILES_ACTIVE_NO_MANIFEST"
         else:
             manifest_state = "EMPTY_FIRST_RUN"
-
-        manifest_payload = read_json(active if active.is_file() else last_good)
 
         # ── per-layer tile audit ──
         map_health_cfg = self.config.get("map_health", {})
@@ -1445,6 +1473,10 @@ class RosRuntimeMonitor:
 
         # Build tile catalog with bounds sampling
         tile_catalog: List[Dict[str, Any]] = []
+        changed_tiles: List[Dict[str, Any]] = []
+        # Regex for tile filenames: x-1_y-1.pcd or x0_y1.pcd
+        import re
+        _tile_coord_re = re.compile(r'^x(-?\d+)_y(-?\d+)')
 
         for layer in ("tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"):
             layer_dir = self.persistent_root / layer
@@ -1455,69 +1487,115 @@ class RosRuntimeMonitor:
                 for pcd_path in sorted(layer_dir.glob("*.pcd")):
                     layer_count += 1
                     stat_mtime = None
+                    stat_size = 0
                     try:
                         stat = pcd_path.stat()
                         layer_bytes += stat.st_size
                         stat_mtime = stat.st_mtime
+                        stat_size = stat.st_size
                         newest_tile_mtime = max(newest_tile_mtime or stat.st_mtime, stat.st_mtime)
                     except OSError:
                         pass
                     # Quick header scan for point count
                     header = read_pcd_header(pcd_path)
+                    tile_key = f"{layer}/{pcd_path.name}"
+
+                    # ── tile signature for cache invalidation ──
+                    signature = (int(stat_mtime * 1e9) if stat_mtime else 0, stat_size)
+                    cached = self._tile_health_cache.get(tile_key)
+
                     catalog_entry: Dict[str, Any] = {
                         "layer": layer,
                         "tile": pcd_path.name,
                         "points": header.get("point_count", 0) if header else 0,
-                        "bytes": stat.st_size if stat_mtime else 0,
+                        "bytes": stat_size if stat_mtime else 0,
                         "mtime_ns": int(stat_mtime * 1e9) if stat_mtime else None,
                         "header_valid": header is not None,
                         "data_format": header.get("data_format") if header else None,
                     }
+                    # Parse tile coordinates from filename
+                    m = _tile_coord_re.match(pcd_path.stem)
+                    if m:
+                        catalog_entry["tile_x"] = int(m.group(1))
+                        catalog_entry["tile_y"] = int(m.group(2))
+
                     if header:
                         layer_points += header.get("point_count", 0)
-                    # Check bounds for ALL tiles, but only sample XYZ on first call or when
-                    # file mtime has changed since last scan
-                    tile_key = f"{layer}/{pcd_path.name}"
-                    last_tile_mtime = self._tile_mtime_cache.get(tile_key, 0)
-                    should_sample = (approved and
-                                     (stat_mtime is None or stat_mtime != last_tile_mtime))
-                    if should_sample:
-                        bounds = read_pcd_xyz_bounds(pcd_path, max_sample=2000,
-                                                     z_below=z_below, z_above=z_above)
-                        if bounds:
-                            catalog_entry["bounds"] = {k: bounds[k] for k in
-                                ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
-                                if k in bounds}
-                            catalog_entry["z_outlier_below_count"] = bounds.get("z_outlier_below_count", 0)
-                            catalog_entry["z_outlier_above_count"] = bounds.get("z_outlier_above_count", 0)
-                            total_z_below += bounds.get("z_outlier_below_count", 0)
-                            total_z_above += bounds.get("z_outlier_above_count", 0)
-                            # Approved bounds check
-                            if (bounds.get("x_min", approved.get("x_min", -100)) < approved.get("x_min", -100) or
-                                    bounds.get("x_max", approved.get("x_max", 100)) > approved.get("x_max", 100) or
-                                    bounds.get("y_min", approved.get("y_min", -100)) < approved.get("y_min", -100) or
-                                    bounds.get("y_max", approved.get("y_max", 100)) > approved.get("y_max", 100)):
+
+                    # ── bounds / outlier analysis ──
+                    if approved:
+                        if cached is not None and cached.get("signature") == signature:
+                            # Reuse complete cached analysis → P0-3 fix
+                            if cached.get("out_of_approved_bounds"):
                                 tiles_out_of_bounds.append(tile_key)
-                            # Z outlier check
-                            if bounds.get("z_min", 0) < z_below or bounds.get("z_max", 0) > z_above:
+                            if cached.get("z_outlier"):
                                 z_outlier_tiles.append({
                                     "tile": tile_key,
-                                    "z_min": bounds.get("z_min"),
-                                    "z_max": bounds.get("z_max"),
+                                    "z_min": cached.get("z_min"),
+                                    "z_max": cached.get("z_max"),
                                 })
-                        if stat_mtime is not None:
-                            self._tile_mtime_cache[tile_key] = stat_mtime
-                            # Cache bounds for reuse when tile hasn't changed
-                            self._cached_tile_bounds[tile_key] = {
-                                k: bounds[k] for k in
-                                ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
-                                if k in bounds
+                            total_z_below += cached.get("z_outlier_below_count", 0)
+                            total_z_above += cached.get("z_outlier_above_count", 0)
+                            catalog_entry["bounds"] = cached.get("bounds")
+                            catalog_entry["z_outlier_below_count"] = cached.get("z_outlier_below_count", 0)
+                            catalog_entry["z_outlier_above_count"] = cached.get("z_outlier_above_count", 0)
+                        else:
+                            # Sample XYZ bounds — only when tile is new or changed
+                            bounds = read_pcd_xyz_bounds(pcd_path, max_sample=2000,
+                                                         z_below=z_below, z_above=z_above)
+                            # Build complete cache entry
+                            cache_entry: Dict[str, Any] = {
+                                "signature": signature,
+                                "header_valid": header is not None,
+                                "scan_error": None,
                             }
-                    elif approved and tile_key in self._tile_mtime_cache:
-                        # Reuse cached bounds if tile hasn't changed
-                        cached = self._cached_tile_bounds.get(tile_key)
-                        if cached:
-                            catalog_entry["bounds"] = cached
+                            if bounds is not None:
+                                bnd = {k: bounds[k] for k in
+                                       ("x_min", "x_max", "y_min", "y_max", "z_min", "z_max")
+                                       if k in bounds}
+                                catalog_entry["bounds"] = bnd
+                                catalog_entry["z_outlier_below_count"] = bounds.get("z_outlier_below_count", 0)
+                                catalog_entry["z_outlier_above_count"] = bounds.get("z_outlier_above_count", 0)
+                                cache_entry["bounds"] = bnd
+                                cache_entry["z_min"] = bounds.get("z_min")
+                                cache_entry["z_max"] = bounds.get("z_max")
+                                cache_entry["z_outlier_below_count"] = bounds.get("z_outlier_below_count", 0)
+                                cache_entry["z_outlier_above_count"] = bounds.get("z_outlier_above_count", 0)
+                                total_z_below += bounds.get("z_outlier_below_count", 0)
+                                total_z_above += bounds.get("z_outlier_above_count", 0)
+
+                                # Approved bounds check
+                                ax_min = approved.get("x_min", -100)
+                                ax_max = approved.get("x_max", 100)
+                                ay_min = approved.get("y_min", -100)
+                                ay_max = approved.get("y_max", 100)
+                                is_oob = (bounds.get("x_min", ax_min) < ax_min or
+                                          bounds.get("x_max", ax_max) > ax_max or
+                                          bounds.get("y_min", ay_min) < ay_min or
+                                          bounds.get("y_max", ay_max) > ay_max)
+                                cache_entry["out_of_approved_bounds"] = is_oob
+                                if is_oob:
+                                    tiles_out_of_bounds.append(tile_key)
+
+                                # Z outlier check
+                                is_z_outlier = (bounds.get("z_min", 0) < z_below or
+                                                bounds.get("z_max", 0) > z_above)
+                                cache_entry["z_outlier"] = is_z_outlier
+                                if is_z_outlier:
+                                    z_outlier_tiles.append({
+                                        "tile": tile_key,
+                                        "z_min": bounds.get("z_min"),
+                                        "z_max": bounds.get("z_max"),
+                                    })
+                            else:
+                                # P0-4 fix: bounds=None → record scan error, don't crash
+                                cache_entry["scan_error"] = "read_pcd_xyz_bounds returned None"
+                                cache_entry["out_of_approved_bounds"] = False
+                                cache_entry["z_outlier"] = False
+                                cache_entry["z_outlier_below_count"] = 0
+                                cache_entry["z_outlier_above_count"] = 0
+                            self._tile_health_cache[tile_key] = cache_entry
+                            changed_tiles.append(catalog_entry)
                     tile_catalog.append(catalog_entry)
             total_tile_files += layer_count
             total_tile_bytes += layer_bytes
@@ -1537,7 +1615,6 @@ class RosRuntimeMonitor:
                     ratio_alerts.append(f"{layer}/display={lp / display_points:.2f}")
 
         # ── tile growth tracking ──
-        prev_files = self._last_tile_files
         prev_points = self._last_tile_points
         prev_scan_time = self._last_filesystem_scan_wall
         self._last_tile_files = total_tile_files
@@ -1548,9 +1625,11 @@ class RosRuntimeMonitor:
             if dt_hours > 0:
                 growth_points_per_hour = (total_tile_points - prev_points) / dt_hours
 
-        # ── write tile catalog (JSONL) ──
-        for entry in tile_catalog:
-            self.writer.submit("jsonl", ("samples/map_tile_catalog.jsonl", entry))
+        # ── write tile catalog: atomic latest snapshot + changes-only JSONL ──
+        self.writer.submit("atomic_json", ("reports/map_tile_catalog_latest.json",
+                                           tile_catalog))
+        for entry in changed_tiles:
+            self.writer.submit("jsonl", ("samples/map_tile_changes.jsonl", entry))
 
         # ── write map health CSV sample ──
         psi = read_psi()
@@ -1642,6 +1721,9 @@ class RosRuntimeMonitor:
         wall = time.time() if now is None else now
         self._update_motion_state(wall)
         runtime = self._sample_runtime(wall)
+        # Real safety_status age from callback wall time
+        runtime["safety_status_age_sec"] = (
+            wall - self.last_safety_wall if self.last_safety_wall else None)
         with self.aggregator_lock:
             summary = self.aggregator.full_summary(now=wall)
         summary.update({"runtime": runtime, "writer_dropped": self.writer.dropped,
@@ -1664,11 +1746,17 @@ class RosRuntimeMonitor:
         rate = self.rospy.Rate(max(0.2, 1.0 / max(0.1, sample_period)))
 
         # ── readiness handshake ──
+        # Read process start ticks for identity verification
+        try:
+            _proc_start_ticks = int(open('/proc/self/stat').read().split()[21])
+        except Exception:
+            _proc_start_ticks = 0
         ready_payload: Dict[str, Any] = {
             "ready": True,
             "pid": os.getpid(),
             "run_id": self.args.run_id,
             "boot_id": self._read_boot_id(),
+            "process_start_ticks": _proc_start_ticks,
             "ros_node": "/ndt_slam_server_monitor",
             "workspace_sha": self.args.expected_sha or "unknown",
             "created_at": time.time(),

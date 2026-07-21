@@ -47,11 +47,12 @@ fi
 
 # doctor and status work without a prior run
 if [[ "$action" == "doctor" ]]; then
-  if [[ -z "$run_id" ]]; then
-    run_id=".doctor_$(date +%Y%m%d_%H%M%S)"
-  fi
-  run_dir="$runs_root/$run_id"
-  rm -rf "$run_dir"
+  # Doctor ALWAYS uses an independent temp directory — never touches
+  # .current_run or any real run directory.  This is a read-only diagnostic.
+  doctor_dir="$(mktemp -d "$runs_root/.doctor_XXXXXX")"
+  trap 'rm -rf "$doctor_dir"' EXIT
+  run_id="doctor"
+  run_dir="$doctor_dir"
   mkdir -p "$run_dir/logs" "$run_dir/samples" "$run_dir/reports"
 elif [[ "$action" == "status" && -z "$run_id" ]]; then
   # status without a run: still produce valid output
@@ -364,6 +365,8 @@ run_doctor() {
 
   if $json_output; then
     # Use Python to build valid JSON from the TSV file
+    # Returns exit code: 0=PASS, 10=DEGRADED, 1=FAIL
+    local doctor_rc=0
     python3 - "$DOCTOR_TSV" "$(date +%s.%3N 2>/dev/null || date +%s)" <<'PY'
 import json, sys, time
 
@@ -398,10 +401,13 @@ blocking_failures = sum(1 for c in checks if c["status"] == "FAIL" and c["severi
 
 if blocking_failures > 0:
     overall = "FAIL"
+    exit_code = 1
 elif failures > 0:
     overall = "DEGRADED"
+    exit_code = 10
 else:
     overall = "PASS"
+    exit_code = 0
 
 payload = {
     "schema_version": 2,
@@ -413,31 +419,41 @@ payload = {
     "checks": checks,
 }
 print(json.dumps(payload, ensure_ascii=False, indent=2))
+sys.exit(exit_code)
 PY
+    doctor_rc=$?
+    # Clean up temp dir
+    rm -rf "$DOCTOR_TEMP_DIR"
+    return $doctor_rc
   else
     # Text mode
-    local pass_count=0 fail_count=0 skip_count=0
+    local pass_count=0 fail_count=0 skip_count=0 blocking_fail_count=0
     while IFS=$'\t' read -r name status severity detail duration_ms; do
-      local display_status="$status"
       printf '%-45s %-6s [%-8s] %s\n' "$name" "$status" "$severity" "$detail"
       case "$status" in
         PASS) pass_count=$((pass_count + 1)) ;;
-        FAIL) fail_count=$((fail_count + 1)) ;;
+        FAIL)
+          fail_count=$((fail_count + 1))
+          if [[ "$severity" == "BLOCKING" ]]; then
+            blocking_fail_count=$((blocking_fail_count + 1))
+          fi
+          ;;
         SKIP) skip_count=$((skip_count + 1)) ;;
       esac
     done < "$DOCTOR_TSV"
     echo ""
-    echo "Doctor: $pass_count PASS, $fail_count FAIL, $skip_count SKIP"
-    if [[ "$fail_count" -gt 0 ]]; then
-      echo "Doctor found $fail_count failure(s). Fix before starting." >&2
+    echo "Doctor: $pass_count PASS, $fail_count FAIL ($blocking_fail_count BLOCKING), $skip_count SKIP"
+    rm -rf "$DOCTOR_TEMP_DIR"
+    if [[ "$blocking_fail_count" -gt 0 ]]; then
+      echo "Doctor found $blocking_fail_count BLOCKING failure(s). Fix before starting." >&2
       return 1
+    elif [[ "$fail_count" -gt 0 ]]; then
+      echo "Doctor found $fail_count non-blocking failure(s). Monitor can start in DEGRADED mode." >&2
+      return 0
     fi
     echo "All doctor checks passed."
+    return 0
   fi
-
-  # Clean up temp dir
-  rm -rf "$DOCTOR_TEMP_DIR"
-  return 0
 }
 
 # ─── start ──────────────────────────────────────────────────────────────────────
@@ -490,6 +506,8 @@ start_monitor() {
   [[ -z "$expected_sha" ]] || args+=(--expected-sha "$expected_sha")
   [[ -z "$windows" ]] || args+=(--windows "$windows")
   [[ -z "$summary_sec" ]] || args+=(--summary-sec "$summary_sec")
+  local start_requested_at
+  start_requested_at="$(date +%s.%3N 2>/dev/null || date +%s)"
   nohup rosrun ndt_slam server_runtime_monitor.py "${args[@]}" \
     >>"$run_dir/logs/monitor.stdout.log" 2>&1 &
   local pid=$!
@@ -523,15 +541,15 @@ start_monitor() {
       return 4
     fi
     if [[ -f "$ready_file" ]]; then
-      # Verify ready file belongs to THIS process
+      # Verify ready file belongs to THIS process and was created after start
       local ready_ok
-      ready_ok="$(python3 - "$ready_file" "$pid" "$run_id" "$boot_id" "$waited" <<'PY'
+      ready_ok="$(python3 - "$ready_file" "$pid" "$run_id" "$boot_id" "$start_requested_at" <<'PY'
 import json, sys, os, time
 ready_path = sys.argv[1]
 expected_pid = int(sys.argv[2])
 expected_run_id = sys.argv[3]
 expected_boot_id = sys.argv[4]
-min_age = int(sys.argv[5])
+start_requested_at = float(sys.argv[5])
 
 try:
     d = json.load(open(ready_path, 'r', encoding='utf-8'))
@@ -562,11 +580,22 @@ if ready_boot and ready_boot != expected_boot_id:
     print("false")
     sys.exit(0)
 
-# ready file must have been created after process start (>1s ago)
+# ready file created_at must be >= start_requested_at
 created = d.get("created_at", 0)
-if created > 0 and time.time() - created < 1.0:
+if created > 0 and created < start_requested_at:
     print("false")
     sys.exit(0)
+
+# Verify process_start_ticks if present in ready file
+ready_ticks = d.get("process_start_ticks")
+if ready_ticks is not None:
+    try:
+        actual_ticks = int(open('/proc/%d/stat' % expected_pid).read().split()[21])
+        if ready_ticks != actual_ticks:
+            print("false")
+            sys.exit(0)
+    except Exception:
+        pass
 
 print("true")
 PY
@@ -732,7 +761,7 @@ if os.path.exists(summary_file):
 current = summary_data.get('current', {}) if summary_data else {}
 runtime_info = summary_data.get('runtime', {}) if summary_data else {}
 uptime_sec = get_uptime_sec(pid) if pid and pid_valid else None
-safety_age = runtime_info.get('runtime_status_age_sec')
+safety_age = runtime_info.get('safety_status_age_sec')
 odom_hz = runtime_info.get('odom_hz')
 
 payload = {
