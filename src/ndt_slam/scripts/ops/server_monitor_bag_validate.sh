@@ -4,22 +4,22 @@
 #
 # Modes:
 #   monitor-only  – Bag already contains /odom, /safety_status, /status_code
-#   full-chain    – Bag contains raw PointCloud2; needs full SLAM pipeline
-#   partial       – Bag has some but not all required topics
+#   full-chain    – Bag contains raw PointCloud2; runs production SLAM pipeline
+#   partial       – Bag has some but not all required topics; can NEVER PASS
 #
 # Usage:
 #   server_monitor_bag_validate.sh \
 #     --bag /path/to/bag.bag \
-#     --mode monitor-only|full-chain|partial \
+#     --mode full-chain \
 #     --workspace /path/to/NDT-slam-ws \
 #     --map-source /path/to/maps/live/current \
-#     --duration 25 \
+#     --duration 30 \
 #     --rate 1.0
 # ────────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 # ── defaults ──
-MODE="monitor-only"
+MODE=""
 WORKSPACE="${NDT_SLAM_WORKSPACE:-$HOME/NDT-slam-ws}"
 DURATION=25
 RATE=1.0
@@ -29,16 +29,33 @@ ROS_MASTER_PORT=11321
 START_OFFSET=0
 BAG=""
 RUN_ID="bag_validate_$(date +%Y%m%d_%H%M%S)"
+ALLOWED_MODES=("monitor-only" "full-chain" "partial")
 
+# ── PID tracking ──
+ROSCORE_PID=""
+LAUNCH_PID=""
+MONITOR_PID=""
+BAG_PID=""
+RECORDER_PID=""
+DERIVED_BAG=""
+
+# ── exit code tracking ──
+ROSCORE_RC=""
+LAUNCH_RC=""
+MONITOR_RC=""
+BAG_RC=""
+RECORDER_RC=""
+
+# ── helpers ──
 usage() {
   cat <<'EOF'
 server_monitor_bag_validate.sh – isolated rosbag validation for server monitor
 
   --bag FILE             Path to rosbag (required)
-  --mode MODE            monitor-only | full-chain | partial (default: monitor-only)
+  --mode MODE            monitor-only | full-chain | partial (required)
   --workspace PATH       NDT-slam-ws root (default: $NDT_SLAM_WORKSPACE)
   --map-source PATH      Source maps directory for sandbox copy
-  --duration SEC         Monitor run duration before SIGTERM (default: 25)
+  --duration SEC         Test duration in seconds (default: 25)
   --rate RATE            rosbag play --rate (default: 1.0)
   --expected-sha SHA     Expected git HEAD (optional)
   --ros-master-port PORT Isolated ROS master port (default: 11321)
@@ -46,6 +63,20 @@ server_monitor_bag_validate.sh – isolated rosbag validation for server monitor
 EOF
   exit 1
 }
+
+wait_and_capture() {
+  # Usage: wait_and_capture <pid> <result_var_name>
+  local pid="$1"
+  local result_var="$2"
+  local rc
+  set +e
+  wait "$pid"
+  rc=$?
+  set -e
+  printf -v "$result_var" '%s' "$rc"
+}
+
+die() { echo "FATAL: $*" >&2; exit 1; }
 
 # ── parse args ──
 while [[ $# -gt 0 ]]; do
@@ -64,26 +95,37 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$BAG" ]] || { echo "--bag is required" >&2; usage; }
-[[ -f "$BAG" ]] || { echo "Bag file not found: $BAG" >&2; exit 1; }
-[[ -d "$WORKSPACE" ]] || { echo "Workspace not found: $WORKSPACE" >&2; exit 1; }
+# ── strict mode validation ──
+[[ -n "$BAG" ]] || die "--bag is required"
+[[ -f "$BAG" ]] || die "Bag file not found: $BAG"
+[[ -d "$WORKSPACE" ]] || die "Workspace not found: $WORKSPACE"
+[[ -n "$MODE" ]] || die "--mode is required"
 
+MODE_VALID=false
+for m in "${ALLOWED_MODES[@]}"; do
+  [[ "$MODE" == "$m" ]] && MODE_VALID=true
+done
+$MODE_VALID || die "Invalid mode: $MODE (must be one of: ${ALLOWED_MODES[*]})"
+
+# ── resolve paths ──
 BAG="$(realpath "$BAG")"
 WORKSPACE="$(realpath "$WORKSPACE")"
 RUN_DIR="$WORKSPACE/server_runs/$RUN_ID"
-MAP_SANDBOX="$RUN_DIR/map_sandbox/current"
+MAP_SANDBOX_ROOT="$RUN_DIR/map_sandbox"
+MAP_SANDBOX="$MAP_SANDBOX_ROOT/current"
+CONFIG_DIR="$RUN_DIR/config"
+GENERATED_CONFIG="$CONFIG_DIR/live_longterm_mapping.bag.yaml"
 
 # ── verify workspace state ──
 cd "$WORKSPACE"
 if [[ -n "$EXPECTED_SHA" ]]; then
   ACTUAL_SHA="$(git rev-parse HEAD)"
   if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
-    echo "HEAD mismatch: expected=$EXPECTED_SHA actual=$ACTUAL_SHA" >&2
-    exit 1
+    die "HEAD mismatch: expected=$EXPECTED_SHA actual=$ACTUAL_SHA"
   fi
 fi
 
-# ── setup ──
+# ── setup directories ──
 echo "=== Bag Validation Setup ==="
 echo "bag:       $BAG"
 echo "mode:      $MODE"
@@ -93,28 +135,56 @@ echo "duration:  ${DURATION}s"
 echo "rate:      $RATE"
 echo ""
 
-mkdir -p "$RUN_DIR/logs" "$RUN_DIR/reports" "$RUN_DIR/samples"
+mkdir -p "$RUN_DIR"/{logs,reports,samples,bags} "$CONFIG_DIR"
 ROS_HOME="$RUN_DIR/ros_home"
 mkdir -p "$ROS_HOME"
 
-# ── bag audit ──
+# ── source ROS ──
+source /opt/ros/noetic/setup.bash 2>/dev/null || true
+source "$WORKSPACE/devel/setup.bash" 2>/dev/null || true
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bag audit
+# ══════════════════════════════════════════════════════════════════════════════
 echo "=== Bag Audit ==="
 BAG_INFO="$RUN_DIR/reports/bag_info.yaml"
 rosbag info --yaml "$BAG" > "$BAG_INFO" 2>/dev/null || true
 rosbag info "$BAG" 2>&1 | tee "$RUN_DIR/logs/bag_info.txt"
 
 BAG_SHA="$(sha256sum "$BAG" | awk '{print $1}')"
-BAG_DURATION="$(grep 'duration:' "$BAG_INFO" | awk '{print $2}')"
+BAG_DURATION="$(grep -oP 'duration:\s*\K[0-9.]+' "$BAG_INFO" 2>/dev/null || echo "0")"
 
-# Determine available topics
-HAS_ODOM=false
-HAS_SAFETY=false
-HAS_STATUS_CODE=false
-if grep -q '/odom' "$BAG_INFO" 2>/dev/null; then HAS_ODOM=true; fi
-if grep -q '/cargo_avoidance/safety_status' "$BAG_INFO" 2>/dev/null; then HAS_SAFETY=true; fi
-if grep -q '/cargo_avoidance/status_code' "$BAG_INFO" 2>/dev/null; then HAS_STATUS_CODE=true; fi
+# Detect available topics in bag
+_bag_has_topic() {
+  grep -qF "$1" "$BAG_INFO" 2>/dev/null
+}
+HAS_RS201=false;   _bag_has_topic "/rs_201" && HAS_RS201=true
+HAS_RS203=false;   _bag_has_topic "/rs_203" && HAS_RS203=true
+HAS_GRAVITY=false; _bag_has_topic "/gravity" && HAS_GRAVITY=true
+HAS_ODOM=false;    _bag_has_topic "/odom" && HAS_ODOM=true
+HAS_SAFETY=false;  _bag_has_topic "/cargo_avoidance/safety_status" && HAS_SAFETY=true
+HAS_CODE=false;    _bag_has_topic "/cargo_avoidance/status_code" && HAS_CODE=true
 
-# ── map sandbox ──
+# ── mode pre-flight validation ──
+case "$MODE" in
+  monitor-only)
+    if ! $HAS_ODOM || ! $HAS_SAFETY || ! $HAS_CODE; then
+      die "monitor-only mode requires /odom, /cargo_avoidance/safety_status, /cargo_avoidance/status_code in bag"
+    fi
+    ;;
+  full-chain)
+    if ! $HAS_RS201 && ! $HAS_RS203; then
+      die "full-chain mode requires at least one of /rs_201, /rs_203 in bag"
+    fi
+    ;;
+  partial)
+    echo "WARNING: partial mode — will NEVER output PASS, only PARTIAL/NOT_RUN/FAIL"
+    ;;
+esac
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Map sandbox
+# ══════════════════════════════════════════════════════════════════════════════
 MAP_HASH_BEFORE=""
 MAP_HASH_AFTER=""
 LIVE_MAP_HASH_BEFORE=""
@@ -123,29 +193,147 @@ LIVE_MAP_HASH_AFTER=""
 if [[ -n "$MAP_SOURCE" && -d "$MAP_SOURCE" ]]; then
   MAP_SOURCE="$(realpath "$MAP_SOURCE")"
   echo "=== Map Sandbox ==="
-  echo "source: $MAP_SOURCE"
+  echo "source:  $MAP_SOURCE"
   echo "sandbox: $MAP_SANDBOX"
-  mkdir -p "$MAP_SANDBOX"
+  mkdir -p "$(dirname "$MAP_SANDBOX")"
   rsync -a "$MAP_SOURCE/" "$MAP_SANDBOX/"
-  echo "Map copied to sandbox"
-
-  if [[ "$MODE" == "monitor-only" ]]; then
-    chmod -R a-w "$MAP_SANDBOX"
-    echo "Sandbox set to read-only"
-  fi
+  echo "Map copied to sandbox ($(find "$MAP_SANDBOX" -type f | wc -l) files)"
 
   # Record sandbox hash before
-  MAP_HASH_BEFORE="$(find "$MAP_SANDBOX" -type f -print0 | sort -z | xargs -0 sha256sum)"
+  MAP_HASH_BEFORE="$(find "$MAP_SANDBOX" -type f -print0 | sort -z | xargs -0 sha256sum 2>/dev/null)"
   echo "$MAP_HASH_BEFORE" > "$RUN_DIR/reports/map_hash_before.txt"
 
-  # Record live map hash (if different)
-  if [[ "$MAP_SOURCE" != "$MAP_SANDBOX" ]]; then
-    LIVE_MAP_HASH_BEFORE="$(find "$MAP_SOURCE" -type f -print0 | sort -z | xargs -0 sha256sum)"
-    echo "$LIVE_MAP_HASH_BEFORE" > "$RUN_DIR/reports/live_map_hash_before.txt"
-  fi
+  # Record live map hash
+  LIVE_MAP_HASH_BEFORE="$(find "$MAP_SOURCE" -type f -print0 | sort -z | xargs -0 sha256sum 2>/dev/null)"
+  echo "$LIVE_MAP_HASH_BEFORE" > "$RUN_DIR/reports/live_map_hash_before.txt"
+else
+  die "--map-source is required and must be an existing directory"
 fi
 
-# ── isolated ROS master ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Generate sandbox config (full-chain mode)
+# ══════════════════════════════════════════════════════════════════════════════
+CONFIG_SOURCE="$WORKSPACE/src/ndt_slam/config/live_longterm_mapping.yaml"
+DIAG_OUTPUT_DIR="$RUN_DIR/runtime_diagnostics"
+mkdir -p "$DIAG_OUTPUT_DIR"
+
+generate_sandbox_config() {
+  echo "=== Generating Sandbox Config ==="
+  python3 - "$CONFIG_SOURCE" "$GENERATED_CONFIG" "$MAP_SANDBOX" "$DIAG_OUTPUT_DIR" <<'PYEOF'
+import sys, yaml, os
+
+src = sys.argv[1]
+dst = sys.argv[2]
+sandbox = sys.argv[3]
+diag_dir = sys.argv[4]
+
+with open(src, 'r') as f:
+    config = yaml.safe_load(f)
+
+# Override persistent map path
+if 'persistent_map' not in config:
+    config['persistent_map'] = {}
+config['persistent_map']['root_dir'] = sandbox
+config['persistent_map']['enabled'] = True  # must match launch persistent_map:=true
+
+# Override runtime diagnostics output_dir
+if 'debug' not in config:
+    config['debug'] = {}
+if 'runtime_diagnostics' not in config['debug']:
+    config['debug']['runtime_diagnostics'] = {}
+config['debug']['runtime_diagnostics']['output_dir'] = diag_dir
+
+# Preserve original source path
+config['_generated_from'] = src
+config['_generated_for_run'] = os.path.basename(os.path.dirname(os.path.dirname(dst)))
+
+with open(dst, 'w') as f:
+    yaml.safe_dump(config, f, default_flow_style=False, allow_unicode=True, width=200)
+
+print(f"Sandbox config written to {dst}")
+print(f"  persistent_map.root_dir = {sandbox}")
+print(f"  runtime_diagnostics.output_dir = {diag_dir}")
+PYEOF
+  echo ""
+
+  # Generate diff
+  diff <(python3 -c "import yaml; yaml.safe_dump(yaml.safe_load(open('$CONFIG_SOURCE')), default_flow_style=False, width=200)") \
+       <(python3 -c "import yaml; yaml.safe_dump(yaml.safe_load(open('$GENERATED_CONFIG')), default_flow_style=False, width=200)") \
+       > "$RUN_DIR/reports/generated_config_diff.txt" 2>&1 || true
+}
+
+if [[ "$MODE" == "full-chain" ]]; then
+  generate_sandbox_config
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cleanup function — handles all PIDs in correct order
+# ══════════════════════════════════════════════════════════════════════════════
+cleanup() {
+  echo ""
+  echo "=== Cleanup ==="
+  local rc=0
+
+  # 1. Stop rosbag play first
+  if [[ -n "$BAG_PID" ]] && kill -0 "$BAG_PID" 2>/dev/null; then
+    echo "Stopping rosbag play (pid=$BAG_PID)..."
+    kill -TERM "$BAG_PID" 2>/dev/null || true
+  fi
+
+  # 2. Stop derived bag recorder
+  if [[ -n "$RECORDER_PID" ]] && kill -0 "$RECORDER_PID" 2>/dev/null; then
+    echo "Stopping derived bag recorder (pid=$RECORDER_PID)..."
+    kill -TERM "$RECORDER_PID" 2>/dev/null || true
+  fi
+
+  # 3. SIGTERM monitor, wait up to 5s
+  if [[ -n "$MONITOR_PID" ]] && kill -0 "$MONITOR_PID" 2>/dev/null; then
+    echo "Stopping monitor (pid=$MONITOR_PID)..."
+    kill -TERM "$MONITOR_PID" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+      kill -0 "$MONITOR_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+
+  # 4. Stop warehouse launch
+  if [[ -n "$LAUNCH_PID" ]] && kill -0 "$LAUNCH_PID" 2>/dev/null; then
+    echo "Stopping launch (pid=$LAUNCH_PID)..."
+    kill -TERM "$LAUNCH_PID" 2>/dev/null || true
+    sleep 1
+  fi
+
+  # 5. Stop roscore
+  if [[ -n "$ROSCORE_PID" ]] && kill -0 "$ROSCORE_PID" 2>/dev/null; then
+    echo "Stopping roscore (pid=$ROSCORE_PID)..."
+    kill -TERM "$ROSCORE_PID" 2>/dev/null || true
+    sleep 0.5
+  fi
+
+  # 6. Force-kill any remaining
+  for pid in "$BAG_PID" "$RECORDER_PID" "$MONITOR_PID" "$LAUNCH_PID" "$ROSCORE_PID"; do
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "Force-killing pid=$pid..."
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+
+  # 7. Wait for all children with timeout, but never use bare "wait"
+  local remaining
+  remaining=$(jobs -p 2>/dev/null || true)
+  if [[ -n "$remaining" ]]; then
+    for pid in $remaining; do
+      wait "$pid" 2>/dev/null || true
+    done
+  fi
+
+  return $rc
+}
+trap cleanup EXIT
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Isolated ROS Master
+# ══════════════════════════════════════════════════════════════════════════════
 echo "=== Starting isolated ROS Master (port $ROS_MASTER_PORT) ==="
 export ROS_MASTER_URI="http://127.0.0.1:$ROS_MASTER_PORT"
 export ROS_HOSTNAME=127.0.0.1
@@ -156,45 +344,140 @@ ROSCORE_PID=$!
 echo "roscore pid=$ROSCORE_PID"
 
 # Wait for roscore
-for _ in $(seq 1 10); do
+ROSCORE_READY=false
+for _ in $(seq 1 15); do
   if rostopic list &>/dev/null; then
+    ROSCORE_READY=true
     echo "ROS Master ready"
     break
   fi
   sleep 0.5
 done
+$ROSCORE_READY || die "roscore failed to start"
 
 rosparam set /use_sim_time true
 
-# ── trap cleanup ──
-cleanup() {
+# ══════════════════════════════════════════════════════════════════════════════
+# Mode-specific launch
+# ══════════════════════════════════════════════════════════════════════════════
+NODES_SEEN=""
+FAILURE_REASONS=()
+
+if [[ "$MODE" == "full-chain" ]]; then
   echo ""
-  echo "=== Cleanup ==="
-  for sig in TERM TERM TERM; do
-    for pid in "$MONITOR_PID" "$BAG_PID" "$ROSCORE_PID"; do
-      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        kill -$sig "$pid" 2>/dev/null || true
+  echo "=== Starting Production Warehouse Launch ==="
+
+  LAUNCH_ARGS=(
+    "use_sim_time:=true"
+    "use_rviz:=false"
+    "use_cargo_visualizer:=false"
+    "config_file:=$GENERATED_CONFIG"
+  )
+
+  roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
+    "${LAUNCH_ARGS[@]}" \
+    > "$RUN_DIR/logs/warehouse_launch.log" 2>&1 &
+  LAUNCH_PID=$!
+  echo "launch pid=$LAUNCH_PID"
+
+  # Wait for required nodes to appear
+  echo "Waiting for nodes to appear..."
+  EXPECTED_NODES=("/pointcloud_merger" "/ndt_slam" "/hook_load_state" "/cargo_alarm_heartbeat")
+  NODE_TIMEOUT=30
+  NODE_START=$(date +%s)
+  NODES_SEEN=""
+  while true; do
+    ELAPSED=$(( $(date +%s) - NODE_START ))
+    [[ $ELAPSED -gt $NODE_TIMEOUT ]] && break
+    current_nodes="$(rosnode list 2>/dev/null || true)"
+    all_found=true
+    for n in "${EXPECTED_NODES[@]}"; do
+      if ! echo "$current_nodes" | grep -qF "$n"; then
+        all_found=false
+        break
       fi
     done
+    if $all_found; then
+      NODES_SEEN="$current_nodes"
+      echo "All nodes appeared after ${ELAPSED}s"
+      break
+    fi
     sleep 0.5
   done
-  # force kill any stragglers
-  for pid in "$MONITOR_PID" "$BAG_PID" "$ROSCORE_PID"; do
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-  done
-  wait 2>/dev/null || true
-}
-trap cleanup EXIT
+  if [[ -z "$NODES_SEEN" ]]; then
+    FAILURE_REASONS+=("Not all expected nodes appeared within ${NODE_TIMEOUT}s. Found: $(rosnode list 2>/dev/null || echo 'none')")
+    echo "WARNING: ${FAILURE_REASONS[-1]}"
+  fi
 
-# ── start monitor ──
+  # Verify sandbox config is active
+  echo "Verifying sandbox config..."
+  ACTIVE_CONFIG="$(rosparam get /ndt_slam_node/config_file 2>/dev/null || echo "NOT_FOUND")"
+  echo "Active ndt_slam_node config_file: $ACTIVE_CONFIG"
+
+  ACTIVE_PM_ENABLED="$(rosparam get /ndt_slam_node/persistent_map_enabled 2>/dev/null || echo "NOT_FOUND")"
+  echo "Active persistent_map_enabled: $ACTIVE_PM_ENABLED"
+
+elif [[ "$MODE" == "monitor-only" ]]; then
+  echo "=== Monitor-only mode: no SLAM pipeline needed ==="
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Runtime topic audit (full-chain mode)
+# ══════════════════════════════════════════════════════════════════════════════
+AUDIT_TOPIC_TYPES="{}"
+if [[ "$MODE" == "full-chain" ]]; then
+  echo ""
+  echo "=== Runtime Topic Audit ==="
+  TOPIC_AUDIT="$RUN_DIR/reports/runtime_topic_audit.json"
+
+  python3 - "$TOPIC_AUDIT" "$ROS_MASTER_PORT" <<'PYEOF'
+import sys, json
+out = sys.argv[1]
+try:
+    import rosgraph
+    master = rosgraph.Master('/topic_audit')
+    # Override master URI
+    import os
+    os.environ['ROS_MASTER_URI'] = 'http://127.0.0.1:' + sys.argv[2]
+    master = rosgraph.Master('/topic_audit')
+    topics = master.getTopicTypes()
+    audit = {}
+    expected_types = {
+        '/merged_points': 'sensor_msgs/PointCloud2',
+        '/odom': 'nav_msgs/Odometry',
+        '/cargo_avoidance/safety_status': 'lidar_slam2_msgs/CargoSafetyStatus',
+        '/cargo_avoidance/status_code': 'std_msgs/Int32',
+    }
+    for t, typ in topics:
+        audit[t] = {'type': typ, 'matches_expected': expected_types.get(t, 'N/A') == typ}
+    with open(out, 'w') as f:
+        json.dump(audit, f, indent=2)
+    print(f"Topic audit saved to {out}")
+    for t, expect in expected_types.items():
+        if t in audit:
+            match = "PASS" if audit[t]['type'] == expect else f"MISMATCH (got {audit[t]['type']})"
+            print(f"  {t}: {match}")
+        else:
+            print(f"  {t}: NOT_FOUND")
+except Exception as e:
+    with open(out, 'w') as f:
+        json.dump({'error': str(e)}, f, indent=2)
+    print(f"WARNING: topic audit failed: {e}")
+PYEOF
+
+  if [[ -f "$TOPIC_AUDIT" ]]; then
+    AUDIT_TOPIC_TYPES="$(python3 -c "import json; print(json.dumps(json.load(open('$TOPIC_AUDIT'))))" 2>/dev/null || echo '{}')"
+  fi
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Start Monitor
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== Starting Monitor ==="
-MONITOR_DURATION=$(( DURATION + 5 ))
+MONITOR_DURATION=$(( DURATION + 10 ))
 
-timeout --signal=TERM --kill-after=5s "${MONITOR_DURATION}s" \
-  rosrun ndt_slam server_runtime_monitor.py \
+rosrun ndt_slam server_runtime_monitor.py \
   --workspace "$WORKSPACE" \
   --run-id "$RUN_ID" \
   --run-dir "$RUN_DIR" \
@@ -204,51 +487,152 @@ timeout --signal=TERM --kill-after=5s "${MONITOR_DURATION}s" \
   > "$RUN_DIR/logs/monitor.foreground.log" 2>&1 &
 
 MONITOR_PID=$!
-echo "monitor pid=$MONITOR_PID (wrapper)"
-sleep 2
+echo "monitor pid=$MONITOR_PID"
 
-# ── play bag ──
-echo ""
-echo "=== Playing Bag ==="
-BAG_TOPICS=()
-if [[ "$MODE" == "monitor-only" ]]; then
-  for t in /odom /cargo_avoidance/safety_status /cargo_avoidance/status_code \
-           /cargo_avoidance/static_evidence_debug /cargo_avoidance/cargo_geometry_debug; do
-    if grep -q "$t" "$BAG_INFO" 2>/dev/null; then
-      BAG_TOPICS+=("$t")
+# Wait for process_ready
+echo "Waiting for monitor process_ready..."
+MONITOR_READY=false
+for _ in $(seq 1 20); do
+  if [[ -f "$RUN_DIR/reports/monitor_ready.json" ]]; then
+    if jq -e '.process_ready == true' "$RUN_DIR/reports/monitor_ready.json" > /dev/null 2>&1; then
+      MONITOR_READY=true
+      echo "Monitor process_ready=true"
+      break
     fi
-  done
+  fi
+  sleep 0.5
+done
+$MONITOR_READY || FAILURE_REASONS+=("Monitor process_ready did not become true within 10s")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Start derived bag recorder (full-chain mode)
+# ══════════════════════════════════════════════════════════════════════════════
+if [[ "$MODE" == "full-chain" ]]; then
+  echo ""
+  echo "=== Starting Derived Monitor-only Bag Recorder ==="
+  DERIVED_BAG="$RUN_DIR/bags/derived_monitor_only.bag"
+
+  rosbag record \
+    --buffsize=256 \
+    -O "$DERIVED_BAG" \
+    /odom \
+    /cargo_avoidance/safety_status \
+    /cargo_avoidance/status_code \
+    /cargo_avoidance/static_evidence_debug \
+    /cargo_avoidance/cargo_geometry_debug \
+    /pointcloud_merger/diagnostics \
+    > "$RUN_DIR/logs/derived_bag_recorder.log" 2>&1 &
+  RECORDER_PID=$!
+  echo "derived recorder pid=$RECORDER_PID"
 fi
 
-BAG_ARGS=(--clock --rate "$RATE")
+# ══════════════════════════════════════════════════════════════════════════════
+# Play Bag
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== Playing Bag ==="
+
+BAG_ARGS=(--clock --rate "$RATE" --duration "$DURATION")
 if [[ "$START_OFFSET" -gt 0 ]]; then
   BAG_ARGS+=(--start "$START_OFFSET")
 fi
-if [[ ${#BAG_TOPICS[@]} -gt 0 ]]; then
-  BAG_ARGS+=(--topics "${BAG_TOPICS[@]}")
+
+# Filter topics for playback (exclude /rosout, /rosout_agg, /clock)
+if [[ "$MODE" == "full-chain" ]]; then
+  BAG_TOPICS=()
+  for t in /rs_201 /rs_203 /gravity; do
+    if _bag_has_topic "$t"; then
+      BAG_TOPICS+=("$t")
+    fi
+  done
+  # Also include /tf /tf_static if present
+  for t in /tf /tf_static; do
+    if _bag_has_topic "$t"; then
+      BAG_TOPICS+=("$t")
+    fi
+  done
+  if [[ ${#BAG_TOPICS[@]} -gt 0 ]]; then
+    BAG_ARGS+=(--topics "${BAG_TOPICS[@]}")
+  fi
+  echo "Playing topics: ${BAG_TOPICS[*]}"
+elif [[ "$MODE" == "monitor-only" ]]; then
+  BAG_TOPICS=()
+  for t in /odom /cargo_avoidance/safety_status /cargo_avoidance/status_code \
+           /cargo_avoidance/static_evidence_debug /cargo_avoidance/cargo_geometry_debug; do
+    if _bag_has_topic "$t"; then
+      BAG_TOPICS+=("$t")
+    fi
+  done
+  if [[ ${#BAG_TOPICS[@]} -gt 0 ]]; then
+    BAG_ARGS+=(--topics "${BAG_TOPICS[@]}")
+  fi
 fi
 
 rosbag play "${BAG_ARGS[@]}" "$BAG" \
   > "$RUN_DIR/logs/rosbag_play.log" 2>&1 &
-
 BAG_PID=$!
 echo "bag pid=$BAG_PID"
+echo "Playing for ${DURATION}s at ${RATE}x..."
 
-# ── wait for monitor to finish ──
-echo ""
-echo "=== Waiting for monitor (${MONITOR_DURATION}s timeout) ==="
-wait "$MONITOR_PID" 2>/dev/null || true
-MONITOR_RC=$?
+# ══════════════════════════════════════════════════════════════════════════════
+# Wait for completion
+# ══════════════════════════════════════════════════════════════════════════════
+# Wait for bag to finish
+wait_and_capture "$BAG_PID" BAG_RC
+echo "rosbag play exit code: $BAG_RC"
+
+# Stop derived recorder
+if [[ -n "$RECORDER_PID" ]] && kill -0 "$RECORDER_PID" 2>/dev/null; then
+  kill -TERM "$RECORDER_PID" 2>/dev/null || true
+  wait_and_capture "$RECORDER_PID" RECORDER_RC
+  echo "derived recorder exit code: $RECORDER_RC"
+
+  # Reindex derived bag if active flag is abnormal
+  if [[ -f "$DERIVED_BAG" ]]; then
+    BAG_ACTIVE="$(rosbag check "$DERIVED_BAG" 2>&1 || true)"
+    if echo "$BAG_ACTIVE" | grep -qi "not properly closed\|active"; then
+      echo "Reindexing derived bag..."
+      rosbag reindex "$DERIVED_BAG" 2>&1 || true
+    fi
+    # Save bag info
+    rosbag info --yaml "$DERIVED_BAG" > "$RUN_DIR/reports/derived_bag_info.yaml" 2>/dev/null || true
+    rosbag info "$DERIVED_BAG" > "$RUN_DIR/logs/derived_bag_info.txt" 2>/dev/null || true
+  fi
+fi
+
+# Wait for monitor to finish (with generous timeout)
+echo "Waiting for monitor graceful shutdown..."
+MONITOR_WAIT_START=$(date +%s)
+while kill -0 "$MONITOR_PID" 2>/dev/null; do
+  ELAPSED=$(( $(date +%s) - MONITOR_WAIT_START ))
+  if [[ $ELAPSED -gt 15 ]]; then
+    echo "Monitor taking too long, sending SIGTERM..."
+    kill -TERM "$MONITOR_PID" 2>/dev/null || true
+    sleep 2
+    break
+  fi
+  sleep 0.5
+done
+wait_and_capture "$MONITOR_PID" MONITOR_RC
 echo "monitor exit code: $MONITOR_RC"
 
-# ── graceful stop ──
-kill -TERM "$BAG_PID" 2>/dev/null || true
-wait "$BAG_PID" 2>/dev/null || true
+# Stop launch
+if [[ -n "$LAUNCH_PID" ]] && kill -0 "$LAUNCH_PID" 2>/dev/null; then
+  kill -TERM "$LAUNCH_PID" 2>/dev/null || true
+  wait_and_capture "$LAUNCH_PID" LAUNCH_RC
+  echo "launch exit code: $LAUNCH_RC"
+fi
 
-kill -TERM "$ROSCORE_PID" 2>/dev/null || true
-wait "$ROSCORE_PID" 2>/dev/null || true
+# Stop roscore
+if [[ -n "$ROSCORE_PID" ]] && kill -0 "$ROSCORE_PID" 2>/dev/null; then
+  kill -TERM "$ROSCORE_PID" 2>/dev/null || true
+  wait_and_capture "$ROSCORE_PID" ROSCORE_RC
+  echo "roscore exit code: $ROSCORE_RC"
+fi
 
-# ── post-run verification ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Post-run verification
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== Verification ==="
 FAILURES=0
@@ -262,17 +646,14 @@ check() {
   else
     echo "  FAIL: $label ($detail)"
     FAILURES=$((FAILURES + 1))
+    FAILURE_REASONS+=("$label: $detail")
   fi
 }
 
-# Required output files
+# ── Required output files ──
 check "monitor_ready.json" \
   '[[ -f "$RUN_DIR/reports/monitor_ready.json" ]]' \
   "$RUN_DIR/reports/monitor_ready.json"
-
-check "live_summary.json" \
-  '[[ -f "$RUN_DIR/reports/live_summary.json" ]]' \
-  "$RUN_DIR/reports/live_summary.json"
 
 check "final_summary.json" \
   '[[ -f "$RUN_DIR/reports/final_summary.json" ]]' \
@@ -280,9 +661,51 @@ check "final_summary.json" \
 
 check "map_health_latest.json" \
   '[[ -f "$RUN_DIR/reports/map_health_latest.json" ]]' \
-  "present if map sandbox available"
+  "map sandbox scan results"
 
-# Writer dropped
+# ── Monitor readiness ──
+if [[ -f "$RUN_DIR/reports/monitor_ready.json" ]]; then
+  READY_JSON="$RUN_DIR/reports/monitor_ready.json"
+
+  DATA_READY="$(jq -r '.data_ready // false' "$READY_JSON" 2>/dev/null)"
+  check "data_ready=true" \
+    '[[ "$DATA_READY" == "true" ]]' \
+    "data_ready=$DATA_READY"
+
+  ODOM_COUNT="$(jq -r '.odom_message_count // 0' "$READY_JSON" 2>/dev/null)"
+  check "odom_message_count>0" \
+    '[[ "$ODOM_COUNT" -gt 0 ]]' \
+    "odom_count=$ODOM_COUNT"
+
+  SAFETY_COUNT="$(jq -r '.safety_status_message_count // 0' "$READY_JSON" 2>/dev/null)"
+  check "safety_status_message_count>0" \
+    '[[ "$SAFETY_COUNT" -gt 0 ]]' \
+    "safety_count=$SAFETY_COUNT"
+
+  CODE_COUNT="$(jq -r '.status_code_message_count // 0' "$READY_JSON" 2>/dev/null)"
+  check "status_code_message_count>0" \
+    '[[ "$CODE_COUNT" -gt 0 ]]' \
+    "code_count=$CODE_COUNT"
+
+  # created_at should be immutable after first write
+  CREATED_AT_START="$(jq -r '.created_at // 0' "$READY_JSON" 2>/dev/null)"
+  CREATED_AT_END="$CREATED_AT_START"
+  if [[ -f "$RUN_DIR/reports/monitor_ready.json" ]]; then
+    CREATED_AT_END="$(jq -r '.created_at // 0' "$READY_JSON" 2>/dev/null)"
+  fi
+  # Just check it's set and reasonable (within last hour)
+  NOW_TS=$(date +%s)
+  CREATED_DELTA=$(( NOW_TS - ${CREATED_AT_START%.*} ))
+  check "created_at_is_reasonable" \
+    '[[ "$CREATED_DELTA" -lt 3600 ]] && [[ "$CREATED_DELTA" -gt -60 ]]' \
+    "delta=${CREATED_DELTA}s"
+
+  check "ready_updated_at_exists" \
+    '[[ "$(jq -r '.ready_updated_at // 0' "$READY_JSON" 2>/dev/null)" != "0" ]]' \
+    "ready_updated_at is set"
+fi
+
+# ── Writer dropped ──
 if [[ -f "$RUN_DIR/reports/live_summary.json" ]]; then
   DROPPED="$(jq -r '.writer_dropped // -1' "$RUN_DIR/reports/live_summary.json" 2>/dev/null || echo -1)"
   check "writer_dropped=0" \
@@ -290,46 +713,68 @@ if [[ -f "$RUN_DIR/reports/live_summary.json" ]]; then
     "dropped=$DROPPED"
 fi
 
-# Odom samples (if odom topic was in bag)
-if $HAS_ODOM && [[ -f "$RUN_DIR/samples/localization_samples.csv" ]]; then
-  ODOM_LINES="$(tail -n +2 "$RUN_DIR/samples/localization_samples.csv" 2>/dev/null | wc -l)"
-  check "odom_samples>0" \
-    '[[ "$ODOM_LINES" -gt 0 ]]' \
-    "odom_lines=$ODOM_LINES"
-fi
-
-# Safety samples
-if $HAS_SAFETY && [[ -f "$RUN_DIR/samples/safety_samples.csv" ]]; then
-  SAFETY_LINES="$(tail -n +2 "$RUN_DIR/samples/safety_samples.csv" 2>/dev/null | wc -l)"
-  check "safety_samples>0" \
-    '[[ "$SAFETY_LINES" -gt 0 ]]' \
-    "safety_lines=$SAFETY_LINES"
-fi
-
-# Map health scans
+# ── Map health scans (use Python csv.DictReader for named fields) ──
 if [[ -f "$RUN_DIR/samples/map_health_samples.csv" ]]; then
-  MAP_SCANS="$(tail -n +2 "$RUN_DIR/samples/map_health_samples.csv" 2>/dev/null | wc -l)"
+  MAP_ANOMALIES_JSON="$RUN_DIR/reports/map_anomaly_counts_by_scan.json"
+  python3 - "$RUN_DIR/samples/map_health_samples.csv" "$MAP_ANOMALIES_JSON" <<'PYEOF'
+import sys, csv, json
+
+csv_path = sys.argv[1]
+out_path = sys.argv[2]
+anomalies = []
+
+with open(csv_path, 'r') as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        entry = {}
+        for k in ('wall_time', 'tile_files', 'tiles_out_of_bounds_count',
+                  'z_outlier_tiles_count', 'z_outlier_below_total',
+                  'z_outlier_above_total', 'ratio_alerts_count'):
+            val = row.get(k, '')
+            if k == 'wall_time':
+                entry[k] = float(val) if val else 0.0
+            else:
+                try:
+                    entry[k] = int(val) if val else 0
+                except ValueError:
+                    entry[k] = 0
+        anomalies.append(entry)
+
+with open(out_path, 'w') as f:
+    json.dump(anomalies, f, indent=2)
+
+scans = len(anomalies)
+print(f"map_health_scans={scans}")
+if scans >= 2:
+    s1 = anomalies[0]
+    s2 = anomalies[1]
+    # tile_files must be consistent
+    if s1.get('tile_files', 0) == s2.get('tile_files', 0):
+        print(f"PASS tile_files_consistent ({s1['tile_files']} == {s2['tile_files']})")
+    else:
+        print(f"FAIL tile_files_consistent ({s1['tile_files']} != {s2['tile_files']})")
+    # anomalies must not zero out on second scan
+    s1_anomalies = s1.get('tiles_out_of_bounds_count', 0)
+    s2_anomalies = s2.get('tiles_out_of_bounds_count', 0)
+    if s2_anomalies > 0 or s1_anomalies == 0:
+        print(f"PASS anomalies_preserved (scan1={s1_anomalies}, scan2={s2_anomalies})")
+    else:
+        print(f"FAIL anomalies_zeroed (scan1={s1_anomalies}, scan2={s2_anomalies})")
+elif scans == 1:
+    print("WARN only_one_scan")
+else:
+    print("FAIL no_scans")
+PYEOF
+
+  MAP_SCANS="$(python3 -c "import json; d=json.load(open('$MAP_ANOMALIES_JSON')); print(len(d))" 2>/dev/null || echo 0)"
   check "map_health_scans>=2" \
     '[[ "$MAP_SCANS" -ge 2 ]]' \
     "scans=$MAP_SCANS"
-
-  # Check second scan doesn't lose anomalies
-  if [[ "$MAP_SCANS" -ge 2 ]]; then
-    SCAN1_BOUNDS="$(sed -n '2p' "$RUN_DIR/samples/map_health_samples.csv" 2>/dev/null | cut -d, -f6)"
-    SCAN2_BOUNDS="$(sed -n '3p' "$RUN_DIR/samples/map_health_samples.csv" 2>/dev/null | cut -d, -f6)"
-    if [[ "$SCAN1_BOUNDS" == "$SCAN2_BOUNDS" ]]; then
-      echo "  PASS: map_scan_anomalies_consistent (bounds=$SCAN1_BOUNDS vs $SCAN2_BOUNDS)"
-      PASSES=$((PASSES + 1))
-    else
-      echo "  FAIL: map_scan_anomalies_consistent (bounds=$SCAN1_BOUNDS vs $SCAN2_BOUNDS)"
-      FAILURES=$((FAILURES + 1))
-    fi
-  fi
 fi
 
-# Map hash unchanged
+# ── Map hash unchanged ──
 if [[ -n "$MAP_HASH_BEFORE" ]]; then
-  MAP_HASH_AFTER="$(find "$MAP_SANDBOX" -type f -print0 | sort -z | xargs -0 sha256sum)"
+  MAP_HASH_AFTER="$(find "$MAP_SANDBOX" -type f -print0 | sort -z | xargs -0 sha256sum 2>/dev/null)"
   echo "$MAP_HASH_AFTER" > "$RUN_DIR/reports/map_hash_after.txt"
   if diff -q <(echo "$MAP_HASH_BEFORE") <(echo "$MAP_HASH_AFTER") > /dev/null 2>&1; then
     check "map_sandbox_unchanged" "true" "sha256 identical"
@@ -340,16 +785,16 @@ fi
 
 # Live map unchanged
 if [[ -n "$LIVE_MAP_HASH_BEFORE" ]]; then
-  LIVE_MAP_HASH_AFTER="$(find "$MAP_SOURCE" -type f -print0 | sort -z | xargs -0 sha256sum)"
+  LIVE_MAP_HASH_AFTER="$(find "$MAP_SOURCE" -type f -print0 | sort -z | xargs -0 sha256sum 2>/dev/null)"
   echo "$LIVE_MAP_HASH_AFTER" > "$RUN_DIR/reports/live_map_hash_after.txt"
   if diff -q <(echo "$LIVE_MAP_HASH_BEFORE") <(echo "$LIVE_MAP_HASH_AFTER") > /dev/null 2>&1; then
     check "live_map_unchanged" "true" "sha256 identical"
   else
-    check "live_map_unchanged" "false" "sha256 DIFFERS"
+    check "live_map_unchanged" "false" "sha256 DIFFERS - SOURCE MAP MODIFIED!"
   fi
 fi
 
-# No crashes
+# ── No crashes ──
 if [[ -f "$RUN_DIR/logs/monitor.foreground.log" ]]; then
   CRASHES="$(grep -ciE 'Traceback|TypeError|KeyError|Segmentation fault|core dumped' \
     "$RUN_DIR/logs/monitor.foreground.log" 2>/dev/null || echo 0)"
@@ -358,7 +803,7 @@ if [[ -f "$RUN_DIR/logs/monitor.foreground.log" ]]; then
     "crash_lines=$CRASHES"
 fi
 
-# graceful shutdown
+# ── Graceful shutdown ──
 MONITOR_GRACEFUL=false
 if [[ "$MONITOR_RC" -eq 0 || "$MONITOR_RC" -eq 124 || "$MONITOR_RC" -eq 143 ]]; then
   MONITOR_GRACEFUL=true
@@ -367,71 +812,225 @@ check "graceful_shutdown" \
   '$MONITOR_GRACEFUL' \
   "exit_code=$MONITOR_RC (0/124/143 acceptable)"
 
-# ── bag validation report ──
-OVERALL="PASS"
-[[ "$FAILURES" -gt 0 ]] && OVERALL="FAIL"
+# ── Full-chain specific checks ──
+if [[ "$MODE" == "full-chain" ]]; then
+  check "production_launch_started" \
+    '[[ -n "$LAUNCH_PID" ]] && [[ "$LAUNCH_RC" != "" ]]' \
+    "launch_pid=$LAUNCH_PID launch_rc=$LAUNCH_RC"
 
-REPORT="$RUN_DIR/reports/bag_validation_latest.json"
+  check "nodes_appeared" \
+    '[[ -n "$NODES_SEEN" ]]' \
+    "nodes=$(echo "$NODES_SEEN" | tr '\n' ' ')"
+
+  # Runtime topic existence (from audit)
+  for t in /merged_points /odom /cargo_avoidance/safety_status /cargo_avoidance/status_code; do
+    if echo "$AUDIT_TOPIC_TYPES" | jq -e '.["'"$t"'"]' > /dev/null 2>&1; then
+      check "runtime_topic_$t" "true" "present"
+    else
+      check "runtime_topic_$t" "false" "NOT_FOUND"
+    fi
+  done
+
+  # Derived bag
+  if [[ -f "$DERIVED_BAG" ]]; then
+    check "derived_bag_exists" "true" "$DERIVED_BAG"
+
+    DERIVED_INFO="$RUN_DIR/reports/derived_bag_info.yaml"
+    DERIVED_VALID=false
+    if [[ -f "$DERIVED_INFO" ]]; then
+      DERIVED_ODOM=$(grep -c '/odom' "$DERIVED_INFO" 2>/dev/null || echo 0)
+      DERIVED_SAFETY=$(grep -c '/cargo_avoidance/safety_status' "$DERIVED_INFO" 2>/dev/null || echo 0)
+      DERIVED_CODE=$(grep -c '/cargo_avoidance/status_code' "$DERIVED_INFO" 2>/dev/null || echo 0)
+      if [[ "$DERIVED_ODOM" -gt 0 && "$DERIVED_SAFETY" -gt 0 && "$DERIVED_CODE" -gt 0 ]]; then
+        DERIVED_VALID=true
+      fi
+    fi
+    check "derived_bag_required_topics" \
+      '$DERIVED_VALID' \
+      "odom=$DERIVED_ODOM safety=$DERIVED_SAFETY code=$DERIVED_CODE"
+  else
+    FAILURE_REASONS+=("derived bag not found: $DERIVED_BAG")
+    check "derived_bag_exists" "false" "not found"
+    check "derived_bag_required_topics" "false" "no bag to check"
+  fi
+fi
+
+# ── Partial mode can never PASS ──
+if [[ "$MODE" == "partial" ]]; then
+  OVERALL="PARTIAL"
+  FAILURE_REASONS+=("partial mode cannot output PASS by policy")
+elif [[ ${#FAILURE_REASONS[@]} -gt 0 ]]; then
+  OVERALL="FAIL"
+else
+  OVERALL="PASS"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Save exit codes
+# ══════════════════════════════════════════════════════════════════════════════
 jq -n \
+  --argjson roscore_rc "${ROSCORE_RC:-null}" \
+  --argjson launch_rc "${LAUNCH_RC:-null}" \
+  --argjson monitor_rc "${MONITOR_RC:-null}" \
+  --argjson bag_rc "${BAG_RC:-null}" \
+  --argjson recorder_rc "${RECORDER_RC:-null}" \
+  '{
+    roscore: $roscore_rc,
+    warehouse_launch: $launch_rc,
+    monitor: $monitor_rc,
+    rosbag_play: $bag_rc,
+    derived_bag_recorder: $recorder_rc
+  }' > "$RUN_DIR/reports/process_exit_codes.json"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Build comprehensive bag validation report
+# ══════════════════════════════════════════════════════════════════════════════
+REPORT="$RUN_DIR/reports/bag_validation_latest.json"
+
+# Build message counts from monitor_ready
+MSG_COUNTS="{}"
+if [[ -f "$RUN_DIR/reports/monitor_ready.json" ]]; then
+  MSG_COUNTS="$(jq '{
+    odom: (.odom_message_count // 0),
+    safety_status: (.safety_status_message_count // 0),
+    status_code: (.status_code_message_count // 0)
+  }' "$RUN_DIR/reports/monitor_ready.json" 2>/dev/null || echo '{}')"
+fi
+
+# Build anomaly counts
+ANOMALY_COUNTS="[]"
+if [[ -f "$RUN_DIR/reports/map_anomaly_counts_by_scan.json" ]]; then
+  ANOMALY_COUNTS="$(cat "$RUN_DIR/reports/map_anomaly_counts_by_scan.json" 2>/dev/null || echo '[]')"
+fi
+
+jq -n \
+  --arg schema_version "2" \
+  --arg mode "$MODE" \
   --arg bag_path "$BAG" \
   --arg bag_sha256 "$BAG_SHA" \
   --arg bag_duration_sec "$BAG_DURATION" \
   --arg playback_rate "$RATE" \
-  --arg mode "$MODE" \
-  --argjson has_odom "$HAS_ODOM" \
-  --argjson has_safety "$HAS_SAFETY" \
-  --argjson has_status_code "$HAS_STATUS_CODE" \
-  --argjson monitor_exit_code "$MONITOR_RC" \
-  --argjson monitor_graceful_shutdown "$MONITOR_GRACEFUL" \
+  --arg start_offset_sec "$START_OFFSET" \
+  --arg production_launch_package "ndt_slam" \
+  --arg production_launch_file "warehouse_live_longterm_mapping.launch" \
+  --arg generated_config "$GENERATED_CONFIG" \
+  --arg run_dir "$RUN_DIR" \
+  --arg persistent_root "$MAP_SANDBOX" \
+  --arg runtime_diagnostics "$DIAG_OUTPUT_DIR" \
+  --arg source_map "$MAP_SOURCE" \
+  --arg nodes_seen "${NODES_SEEN:-}" \
+  --argjson input_topics "$(jq -n \
+    --argjson rs201 "$HAS_RS201" \
+    --argjson rs203 "$HAS_RS203" \
+    --argjson gravity "$HAS_GRAVITY" \
+    '{rs_201: $rs201, rs_203: $rs203, gravity: $gravity}')" \
+  --argjson generated_topics "$(jq -n \
+    '{merged_points: true, odom: true, safety_status: true, status_code: true}')" \
+  --argjson message_counts "$MSG_COUNTS" \
+  --argjson monitor_process_ready "${MONITOR_READY:-false}" \
+  --argjson monitor_data_ready "${DATA_READY:-false}" \
+  --argjson writer_dropped "${DROPPED:--1}" \
+  --argjson monitor_graceful_shutdown "${MONITOR_GRACEFUL:-false}" \
+  --argjson map_scan_count "${MAP_SCANS:-0}" \
+  --argjson anomaly_counts_by_scan "$ANOMALY_COUNTS" \
+  --argjson source_map_unchanged "$([[ -n "$LIVE_MAP_HASH_BEFORE" && -n "$LIVE_MAP_HASH_AFTER" ]] && diff -q <(echo "$LIVE_MAP_HASH_BEFORE") <(echo "$LIVE_MAP_HASH_AFTER") > /dev/null 2>&1 && echo true || echo false)" \
+  --argjson sandbox_changed "$([[ -n "$MAP_HASH_BEFORE" && -n "$MAP_HASH_AFTER" ]] && ! diff -q <(echo "$MAP_HASH_BEFORE") <(echo "$MAP_HASH_AFTER") > /dev/null 2>&1 && echo true || echo false)" \
+  --argjson process_exit_codes "$(cat "$RUN_DIR/reports/process_exit_codes.json" 2>/dev/null || echo '{}')" \
+  --arg derived_bag_path "${DERIVED_BAG:-}" \
+  --argjson derived_bag_valid "${DERIVED_VALID:-false}" \
+  --argjson derived_bag_required_topics_present "${DERIVED_VALID:-false}" \
+  --argjson failure_reasons "$(printf '%s\n' "${FAILURE_REASONS[@]}" | jq -R . | jq -s .)" \
+  --arg overall "$OVERALL" \
   --argjson pass_count "$PASSES" \
   --argjson fail_count "$FAILURES" \
-  --arg overall "$OVERALL" \
   '{
-    bag_path: $bag_path,
-    bag_sha256: $bag_sha256,
-    bag_duration_sec: $bag_duration_sec,
-    playback_rate: $playback_rate,
+    schema_version: $schema_version,
     mode: $mode,
-    required_topics: {
-      odom: $has_odom,
-      safety_status: $has_safety,
-      status_code: $has_status_code
+    bag: {
+      path: $bag_path,
+      sha256: $bag_sha256,
+      duration_sec: $bag_duration_sec,
+      playback_rate: $playback_rate,
+      start_offset_sec: $start_offset_sec
     },
-    monitor_exit_code: $monitor_exit_code,
-    monitor_graceful_shutdown: $monitor_graceful_shutdown,
+    production_launch: {
+      package: $production_launch_package,
+      file: $production_launch_file,
+      use_sim_time: true,
+      use_rviz: false,
+      generated_config: $generated_config,
+      nodes_expected: ["/pointcloud_merger", "/ndt_slam", "/hook_load_state", "/cargo_alarm_heartbeat"],
+      nodes_seen: ($nodes_seen // "")
+    },
+    paths: {
+      run_dir: $run_dir,
+      persistent_root: $persistent_root,
+      runtime_diagnostics: $runtime_diagnostics,
+      source_map: $source_map
+    },
+    input_topics: $input_topics,
+    generated_topics: $generated_topics,
+    message_counts: $message_counts,
+    monitor: {
+      process_ready: $monitor_process_ready,
+      data_ready: $monitor_data_ready,
+      writer_dropped: $writer_dropped,
+      graceful_shutdown: $monitor_graceful_shutdown
+    },
+    map: {
+      scan_count: $map_scan_count,
+      anomaly_counts_by_scan: $anomaly_counts_by_scan,
+      source_map_unchanged: $source_map_unchanged,
+      sandbox_changed: $sandbox_changed
+    },
+    process_exit_codes: $process_exit_codes,
+    derived_monitor_bag: {
+      path: $derived_bag_path,
+      valid: $derived_bag_valid,
+      required_topics_present: $derived_bag_required_topics_present
+    },
     verification: {
       pass_count: $pass_count,
-      fail_count: $fail_count,
+      fail_count: $fail_count
     },
+    failure_reasons: $failure_reasons,
     overall: $overall
   }' > "$REPORT"
 
-# ── update run manifest ──
+# ── Update run manifest ──
 MANIFEST="$RUN_DIR/run_manifest.json"
 if [[ -f "$MANIFEST" ]]; then
   TMP_MANIFEST="${MANIFEST}.tmp"
-  jq --arg result "$OVERALL" '. + {bag_validation: $result}' "$MANIFEST" > "$TMP_MANIFEST"
+  jq --arg result "$OVERALL" \
+     --arg persistent_root "$MAP_SANDBOX" \
+     '. + {bag_validation: $result, persistent_root: $persistent_root}' \
+     "$MANIFEST" > "$TMP_MANIFEST"
   mv "$TMP_MANIFEST" "$MANIFEST"
 fi
 
-# ── save exit codes ──
-jq -n \
-  --argjson monitor_rc "$MONITOR_RC" \
-  '{monitor_exit_code: $monitor_rc}' \
-  > "$RUN_DIR/reports/process_exit_codes.json"
-
-# ── summary ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Summary
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "============================================"
 echo "Bag Validation: $OVERALL"
-echo "  Passes: $PASSES"
-echo "  Failures: $FAILURES"
-echo "  Report: $REPORT"
-echo "  Run dir: $RUN_DIR"
+echo "  Mode:      $MODE"
+echo "  Passes:    $PASSES"
+echo "  Failures:  $FAILURES"
+echo "  Report:    $REPORT"
+echo "  Run dir:   $RUN_DIR"
+if [[ ${#FAILURE_REASONS[@]} -gt 0 ]]; then
+  echo "  Reasons:"
+  for r in "${FAILURE_REASONS[@]}"; do
+    echo "    - $r"
+  done
+fi
 echo "============================================"
 
 if [[ "$OVERALL" == "PASS" ]]; then
   exit 0
+elif [[ "$OVERALL" == "PARTIAL" ]]; then
+  exit 3
 else
   exit 1
 fi

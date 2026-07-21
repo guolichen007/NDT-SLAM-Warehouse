@@ -16,13 +16,16 @@
     <arg name="hook_cargo_removal_enabled" default="true"/>
     <arg name="cargo_warning_enabled" default="true"/>
     <arg name="use_cargo_alarm_heartbeat" default="true"/>
+    <!-- Optional override for all nodes that read live_longterm_mapping.yaml.
+         Default keeps the original path; bag harness passes a sandbox copy. -->
+    <arg name="config_file" default="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
 
     <!-- Debounce and classify the hook load-cell voltage before SLAM uses it. -->
     <node name="hook_load_state"
           pkg="ndt_slam"
           type="hook_load_state_node"
           output="screen">
-        <param name="config_file" value="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
+        <param name="config_file" value="$(arg config_file)"/>
     </node>
 
     <!-- 设置使用真实时间（现场必须） -->
@@ -30,7 +33,7 @@
 
     <!-- SLAM 节点（主节点：建图、定位、动态过滤） -->
     <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen">
-        <param name="config_file" value="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
+        <param name="config_file" value="$(arg config_file)"/>
         <param name="ndt_publish_cargo_markers" value="$(arg ndt_publish_cargo_markers)"/>
         <!-- YAML supplies conservative defaults; these launch arguments are
              explicit production overrides and must be visible in ~params. -->
@@ -94,6 +97,6 @@
     </group>
 
     <param name="mode" value="longterm_mapping"/>
-    <param name="config_file" value="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
+    <param name="config_file" value="$(arg config_file)"/>
 </launch>
 
