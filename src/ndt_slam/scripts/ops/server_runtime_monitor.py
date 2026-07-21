@@ -1625,7 +1625,7 @@ class RosRuntimeMonitor:
 
         # ── tile growth tracking ──
         prev_points = self._last_tile_points
-        prev_scan_time = self._last_filesystem_scan_wall
+        prev_scan_time = self.last_filesystem_scan_wall
         self._last_tile_files = total_tile_files
         self._last_tile_points = total_tile_points
         growth_points_per_hour = 0.0

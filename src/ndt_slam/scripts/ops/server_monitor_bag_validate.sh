@@ -537,39 +537,37 @@ if [[ "$START_OFFSET" -gt 0 ]]; then
   BAG_ARGS+=(--start "$START_OFFSET")
 fi
 
-# Filter topics for playback (exclude /rosout, /rosout_agg, /clock)
+# rosbag play requires BAGFILE before --topics (argparse positional conflict)
+BAG_TOPIC_ARGS=()
 if [[ "$MODE" == "full-chain" ]]; then
-  BAG_TOPICS=()
   for t in /rs_201 /rs_203 /gravity; do
     if _bag_has_topic "$t"; then
-      BAG_TOPICS+=("$t")
+      BAG_TOPIC_ARGS+=("$t")
     fi
   done
-  # Also include /tf /tf_static if present
   for t in /tf /tf_static; do
     if _bag_has_topic "$t"; then
-      BAG_TOPICS+=("$t")
+      BAG_TOPIC_ARGS+=("$t")
     fi
   done
-  if [[ ${#BAG_TOPICS[@]} -gt 0 ]]; then
-    BAG_ARGS+=(--topics "${BAG_TOPICS[@]}")
-  fi
-  echo "Playing topics: ${BAG_TOPICS[*]}"
+  echo "Playing topics: ${BAG_TOPIC_ARGS[*]:-all}"
 elif [[ "$MODE" == "monitor-only" ]]; then
-  BAG_TOPICS=()
   for t in /odom /cargo_avoidance/safety_status /cargo_avoidance/status_code \
            /cargo_avoidance/static_evidence_debug /cargo_avoidance/cargo_geometry_debug; do
     if _bag_has_topic "$t"; then
-      BAG_TOPICS+=("$t")
+      BAG_TOPIC_ARGS+=("$t")
     fi
   done
-  if [[ ${#BAG_TOPICS[@]} -gt 0 ]]; then
-    BAG_ARGS+=(--topics "${BAG_TOPICS[@]}")
-  fi
 fi
 
-rosbag play "${BAG_ARGS[@]}" "$BAG" \
-  > "$RUN_DIR/logs/rosbag_play.log" 2>&1 &
+# BAGFILE must come before --topics
+if [[ ${#BAG_TOPIC_ARGS[@]} -gt 0 ]]; then
+  rosbag play "${BAG_ARGS[@]}" "$BAG" --topics "${BAG_TOPIC_ARGS[@]}" \
+    > "$RUN_DIR/logs/rosbag_play.log" 2>&1 &
+else
+  rosbag play "${BAG_ARGS[@]}" "$BAG" \
+    > "$RUN_DIR/logs/rosbag_play.log" 2>&1 &
+fi
 BAG_PID=$!
 echo "bag pid=$BAG_PID"
 echo "Playing for ${DURATION}s at ${RATE}x..."
@@ -667,32 +665,29 @@ check "map_health_latest.json" \
 if [[ -f "$RUN_DIR/reports/monitor_ready.json" ]]; then
   READY_JSON="$RUN_DIR/reports/monitor_ready.json"
 
-  DATA_READY="$(jq -r '.data_ready // false' "$READY_JSON" 2>/dev/null)"
+  DATA_READY="$(jq -r '.data_ready // false' "$READY_JSON" 2>/dev/null || echo false)"
   check "data_ready=true" \
     '[[ "$DATA_READY" == "true" ]]' \
     "data_ready=$DATA_READY"
 
-  ODOM_COUNT="$(jq -r '.odom_message_count // 0' "$READY_JSON" 2>/dev/null)"
+  ODOM_COUNT="$(jq -r '.odom_message_count // 0' "$READY_JSON" 2>/dev/null || echo 0)"
   check "odom_message_count>0" \
     '[[ "$ODOM_COUNT" -gt 0 ]]' \
     "odom_count=$ODOM_COUNT"
 
-  SAFETY_COUNT="$(jq -r '.safety_status_message_count // 0' "$READY_JSON" 2>/dev/null)"
+  SAFETY_COUNT="$(jq -r '.safety_status_message_count // 0' "$READY_JSON" 2>/dev/null || echo 0)"
   check "safety_status_message_count>0" \
     '[[ "$SAFETY_COUNT" -gt 0 ]]' \
     "safety_count=$SAFETY_COUNT"
 
-  CODE_COUNT="$(jq -r '.status_code_message_count // 0' "$READY_JSON" 2>/dev/null)"
+  CODE_COUNT="$(jq -r '.status_code_message_count // 0' "$READY_JSON" 2>/dev/null || echo 0)"
   check "status_code_message_count>0" \
     '[[ "$CODE_COUNT" -gt 0 ]]' \
     "code_count=$CODE_COUNT"
 
   # created_at should be immutable after first write
-  CREATED_AT_START="$(jq -r '.created_at // 0' "$READY_JSON" 2>/dev/null)"
+  CREATED_AT_START="$(jq -r '.created_at // 0' "$READY_JSON" 2>/dev/null || echo 0)"
   CREATED_AT_END="$CREATED_AT_START"
-  if [[ -f "$RUN_DIR/reports/monitor_ready.json" ]]; then
-    CREATED_AT_END="$(jq -r '.created_at // 0' "$READY_JSON" 2>/dev/null)"
-  fi
   # Just check it's set and reasonable (within last hour)
   NOW_TS=$(date +%s)
   CREATED_DELTA=$(( NOW_TS - ${CREATED_AT_START%.*} ))
@@ -700,9 +695,10 @@ if [[ -f "$RUN_DIR/reports/monitor_ready.json" ]]; then
     '[[ "$CREATED_DELTA" -lt 3600 ]] && [[ "$CREATED_DELTA" -gt -60 ]]' \
     "delta=${CREATED_DELTA}s"
 
+  READY_UPDATED="$(jq -r '.ready_updated_at // 0' "$READY_JSON" 2>/dev/null || echo 0)"
   check "ready_updated_at_exists" \
-    '[[ "$(jq -r '.ready_updated_at // 0' "$READY_JSON" 2>/dev/null)" != "0" ]]' \
-    "ready_updated_at is set"
+    '[[ "$READY_UPDATED" != "0" ]]' \
+    "ready_updated_at=$READY_UPDATED"
 fi
 
 # ── Writer dropped ──
@@ -772,14 +768,23 @@ PYEOF
     "scans=$MAP_SCANS"
 fi
 
-# ── Map hash unchanged ──
+# ── Map sandbox change (expected for full-chain — SLAM writes tiles) ──
 if [[ -n "$MAP_HASH_BEFORE" ]]; then
   MAP_HASH_AFTER="$(find "$MAP_SANDBOX" -type f -print0 | sort -z | xargs -0 sha256sum 2>/dev/null)"
   echo "$MAP_HASH_AFTER" > "$RUN_DIR/reports/map_hash_after.txt"
-  if diff -q <(echo "$MAP_HASH_BEFORE") <(echo "$MAP_HASH_AFTER") > /dev/null 2>&1; then
-    check "map_sandbox_unchanged" "true" "sha256 identical"
+  SBOX_BEFORE_COUNT=$(echo "$MAP_HASH_BEFORE" | wc -l)
+  SBOX_AFTER_COUNT=$(echo "$MAP_HASH_AFTER" | wc -l)
+  if [[ "$MODE" == "full-chain" ]]; then
+    # In full-chain mode, sandbox growth is expected (SLAM writes new tiles)
+    check "map_sandbox_valid" \
+      '[[ "$SBOX_AFTER_COUNT" -ge "$SBOX_BEFORE_COUNT" ]]' \
+      "sandbox files: $SBOX_BEFORE_COUNT -> $SBOX_AFTER_COUNT (growth expected)"
   else
-    check "map_sandbox_unchanged" "false" "sha256 DIFFERS"
+    if diff -q <(echo "$MAP_HASH_BEFORE") <(echo "$MAP_HASH_AFTER") > /dev/null 2>&1; then
+      check "map_sandbox_unchanged" "true" "sha256 identical"
+    else
+      check "map_sandbox_unchanged" "false" "sha256 DIFFERS"
+    fi
   fi
 fi
 
@@ -796,11 +801,17 @@ fi
 
 # ── No crashes ──
 if [[ -f "$RUN_DIR/logs/monitor.foreground.log" ]]; then
-  CRASHES="$(grep -ciE 'Traceback|TypeError|KeyError|Segmentation fault|core dumped' \
-    "$RUN_DIR/logs/monitor.foreground.log" 2>/dev/null || echo 0)"
+  CRASH_COUNT="0"
+  if [[ -f "$RUN_DIR/logs/monitor.foreground.log" ]]; then
+    CRASH_COUNT="$(grep -ciE 'Traceback|TypeError|KeyError|Segmentation fault|core dumped' \
+      "$RUN_DIR/logs/monitor.foreground.log" 2>/dev/null || echo 0)"
+    # Normalize: strip all whitespace/newlines
+    CRASH_COUNT=$(echo "$CRASH_COUNT" | tr -d '[:space:]')
+    CRASH_COUNT="${CRASH_COUNT:-0}"
+  fi
   check "no_crash" \
-    '[[ "$CRASHES" -eq 0 ]]' \
-    "crash_lines=$CRASHES"
+    '[[ '"$CRASH_COUNT"' -eq 0 ]]' \
+    "crash_lines=$CRASH_COUNT"
 fi
 
 # ── Graceful shutdown ──
@@ -883,9 +894,10 @@ jq -n \
   }' > "$RUN_DIR/reports/process_exit_codes.json"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Build comprehensive bag validation report
+# Build comprehensive bag validation report (jq may fail on edge cases)
 # ══════════════════════════════════════════════════════════════════════════════
 REPORT="$RUN_DIR/reports/bag_validation_latest.json"
+set +e  # allow jq sub-commands to fail without killing script
 
 # Build message counts from monitor_ready
 MSG_COUNTS="{}"
@@ -996,6 +1008,8 @@ jq -n \
     failure_reasons: $failure_reasons,
     overall: $overall
   }' > "$REPORT"
+REPORT_RC=$?
+set -e  # restore strict error handling
 
 # ── Update run manifest ──
 MANIFEST="$RUN_DIR/run_manifest.json"
