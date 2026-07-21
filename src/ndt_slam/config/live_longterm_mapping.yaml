@@ -773,6 +773,42 @@ status_codes:
   obstacle_invalid: 34
   internal_error: 35
 
+# Conservative identity-free envelope. It can discover positive hazards but
+# never authorizes clear, cargo point removal, or a map commit.
+pending_cargo_envelope:
+  configured_length_m: 4.0
+  configured_width_m: 3.0
+  configured_height_m: 3.0
+  horizontal_margin_m: 0.20
+  vertical_margin_m: 0.15
+  maximum_candidate_age_sec: 0.50
+  maximum_retired_age_sec: 8.0
+
+cargo_lift_origin:
+  enabled: true
+  maximum_anchor_distance_m: 2.0
+  minimum_significant_change_m: 0.15
+  significance_sigma: 3.0
+  minimum_source_coverage: 0.35
+  minimum_revealed_support_coverage: 0.25
+  lift_confirm_frames: 4
+  thickness_confirm_frames: 5
+  maximum_observation_gap_sec: 0.5
+  maximum_source_age_sec: 0.5
+  minimum_height_m: 0.30
+  maximum_height_m: 5.00
+
+cargo_geometry_fusion:
+  minimum_independent_sources: 2
+  minimum_confirm_frames: 5
+  maximum_observation_gap_sec: 0.5
+  maximum_source_disagreement_m: 0.25
+  maximum_fused_uncertainty_m: 0.20
+  minimum_height_m: 0.30
+  maximum_height_m: 5.00
+  huber_delta_m: 0.20
+  configured_bottom_margin_m: 0.10
+
 # Clean-map maintenance receives a bounded owner-thread timeslice even when the
 # latest-only localization queue remains continuously occupied. RViz map
 # serialization runs on its own version-driven worker.
@@ -882,6 +918,7 @@ hook_cargo_lock:
   candidate_switch_margin: 0.08
   bottom_alpha_points: 0.30
   bottom_alpha_memory: 0.15
+  loaded_reacquire_min_bottom_uncertainty_m: 0.12
   bottom_hold_uncertainty_growth: 0.02
   bottom_max_uncertainty: 0.35
 

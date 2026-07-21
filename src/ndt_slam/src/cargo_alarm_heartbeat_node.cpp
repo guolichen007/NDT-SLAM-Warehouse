@@ -21,6 +21,7 @@ struct StatusContractInput {
     int hook_load_state = 0;
     bool no_cargo_confirmed = false;
     bool cargo_valid = false;
+    int evidence_state = 0;
     bool obstacle_valid = false;
     std::uint32_t obstacle_count = 0U;
     double nearest_obstacle_distance_m =
@@ -70,6 +71,7 @@ public:
     static constexpr int kHookRoleDisabled = 0;
     static constexpr int kHookRoleRequired = 1;
     static constexpr int kHookRoleAuxiliary = 2;
+    static constexpr int kEvidenceHazardCandidate = 3;
 
     struct Result {
         int code = kSystemNotReady;
@@ -270,6 +272,10 @@ StatusContractResult validateStatusContract(
     const bool valid_loaded = input.localization_valid &&
         hook_supports_loaded &&
         !input.no_cargo_confirmed && input.cargo_valid && input.obstacle_valid;
+    const bool provisional_positive_loaded = input.localization_valid &&
+        hook_supports_loaded && !input.no_cargo_confirmed &&
+        !input.cargo_valid && input.obstacle_valid &&
+        input.evidence_state == State::kEvidenceHazardCandidate;
     const bool cluster_geometry_valid = input.obstacle_count > 0U &&
         std::isfinite(input.nearest_obstacle_distance_m) &&
         input.nearest_obstacle_distance_m >= 0.0 &&
@@ -312,7 +318,8 @@ StatusContractResult validateStatusContract(
         input.nearest_obstacle_distance_m <= config.level2_distance_m &&
         input.conservative_vertical_clearance_m <
             config.minimum_vertical_clearance_m;
-    if (!valid_loaded || !cluster_geometry_valid ||
+    if ((!valid_loaded && !provisional_positive_loaded) ||
+        !cluster_geometry_valid ||
         (input.warning_code == State::kLevel1Warning && !level1_geometry) ||
         (input.warning_code == State::kLevel2Warning && !level2_geometry)) {
         return {State::kInternalError, false, false,
@@ -438,6 +445,7 @@ private:
         input.hook_load_state = msg->hook_load_state;
         input.no_cargo_confirmed = msg->no_cargo_confirmed;
         input.cargo_valid = msg->cargo_valid;
+        input.evidence_state = msg->evidence_state;
         input.obstacle_valid = msg->obstacle_valid;
         input.obstacle_count = msg->obstacle_count;
         input.nearest_obstacle_distance_m =

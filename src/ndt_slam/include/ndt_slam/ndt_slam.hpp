@@ -54,6 +54,9 @@
 #include <ndt_slam/map_session_snapshot.hpp>
 #include <ndt_slam/static_height_field.hpp>
 #include <ndt_slam/cargo_avoidance_fusion.hpp>
+#include <ndt_slam/cargo_lift_origin_binder.hpp>
+#include <ndt_slam/cargo_geometry_fusion.hpp>
+#include <ndt_slam/pending_cargo_envelope.hpp>
 #include <ndt_slam/cargo_motion_corridor.hpp>
 #include <ndt_slam/cargo_residual_classifier.hpp>
 #include <ndt_slam/cargo_safety_temporal_filter.hpp>
@@ -1649,6 +1652,7 @@ private:
         float top_bottom_center_agreement_m = 0.25F;
         float bottom_alpha_points = 0.30f;
         float bottom_alpha_memory = 0.15f;
+        float loaded_reacquire_min_bottom_uncertainty_m = 0.12F;
         float bottom_hold_uncertainty_growth = 0.02f;
         float bottom_max_uncertainty = 0.35f;
 
@@ -1908,6 +1912,8 @@ private:
     ros::Publisher cargo_raw_status_code_pub_;
     ros::Publisher cargo_fused_box_marker_pub_;
     ros::Publisher cargo_static_evidence_debug_pub_;
+    ros::Publisher cargo_pending_avoidance_pub_;
+    ros::Publisher cargo_pending_envelope_marker_pub_;
     ros::Publisher static_evidence_status_pub_;
     ros::Publisher static_evidence_cell_state_counts_pub_;
     ros::Publisher static_evidence_streak_histogram_pub_;
@@ -1917,10 +1923,25 @@ private:
     CargoSafetyEvaluator cargo_safety_evaluator_;
     StaticHeightFieldConfig static_height_field_config_;
     CargoAvoidanceFusionConfig cargo_avoidance_fusion_config_;
+    PendingCargoEnvelopeConfig pending_cargo_envelope_config_;
+    PendingCargoEnvelope pending_cargo_envelope_;
+    CargoLiftOriginConfig cargo_lift_origin_config_;
+    bool cargo_lift_origin_enabled_ = true;
+    CargoLiftOriginBinder cargo_lift_origin_binder_;
+    CargoLiftOriginResult cargo_lift_origin_result_;
+    CargoGeometryFusionConfig cargo_geometry_fusion_config_;
+    CargoGeometryFusion cargo_geometry_fusion_;
+    CargoFrozenGeometry cargo_frozen_geometry_;
+    std::uint64_t cargo_lifecycle_id_ = 0U;
+    std::uint64_t cargo_track_segment_id_ = 0U;
+    bool cargo_hook_state_initialized_ = false;
+    bool cargo_previous_hook_loaded_ = false;
     CargoObstacleTracker cargo_obstacle_tracker_;
     StaticObstacleEvidenceIndex static_obstacle_evidence_index_;
     std::shared_ptr<const StaticHeightField> static_height_field_;
     bool verified_map_session_loaded_ = false;
+    std::string loaded_map_session_uuid_;
+    std::uint64_t loaded_map_session_generation_ = 0U;
     StaticProvenanceDecision cargo_static_evidence_decision_;
     bool cargo_diagnostic_source_evidence_valid_ = false;
     CargoSafetyClusterEvidence cargo_diagnostic_source_evidence_;
@@ -2122,6 +2143,19 @@ private:
         const ros::Time& stamp,
         const ros::Time& obstacle_cloud_stamp,
         double processing_age_sec);
+    void updateCargoLiftAndGeometryFusion(
+        const HookLoadSnapshot& hook,
+        const Sophus::SE3d& pose_map_base,
+        const ros::Time& stamp,
+        bool active_track);
+    void runPendingCargoAvoidance(
+        const PendingCargoEnvelope& envelope,
+        const HookLoadSnapshot& hook,
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
+        const Sophus::SE3d& pose_map_base,
+        const ros::Time& stamp,
+        const ros::Time& obstacle_cloud_stamp,
+        double processing_age_sec);
     void publishCargoFusionMarker(const CargoBottomResult& bottom,
                                   const ros::Time& stamp,
                                   bool explicit_empty = false,
@@ -2134,15 +2168,27 @@ private:
         std::uint16_t warning_code,
         bool warning_valid,
         const std::string& evidence_reason,
-        bool evidence_initialized = true) const;
+        bool evidence_initialized = true,
+        bool provisional_positive_warning = false) const;
     void publishHookOnlySafetyStatus(const HookLoadSnapshot& hook,
                                      const ros::Time& stamp,
                                      bool visual_conflict,
                                      const std::string& reason,
-                                     bool evidence_initialized = true);
+                                     bool evidence_initialized = true,
+                                     std::int32_t provisional_warning_code = 0,
+                                     std::uint32_t provisional_obstacle_count = 0U,
+                                     float provisional_distance_m =
+                                         std::numeric_limits<float>::quiet_NaN(),
+                                     float provisional_top_z_map =
+                                         std::numeric_limits<float>::quiet_NaN(),
+                                     float provisional_uncertainty_m =
+                                         std::numeric_limits<float>::quiet_NaN(),
+                                     float provisional_clearance_m =
+                                         std::numeric_limits<float>::quiet_NaN());
     void logCargoSafetyStatus(
         const lidar_slam2_msgs::CargoSafetyStatus& status);
-    void resetCargoForHookState(bool preserve_origin_height);
+    void resetCargoForHookState(bool preserve_origin_height,
+                                bool preserve_retired_signature = false);
     bool hookAllowsMapCommit() const;
     void recordEmptyHookOriginHeight(float height_m,
                                      const Eigen::Vector2f& center_base,

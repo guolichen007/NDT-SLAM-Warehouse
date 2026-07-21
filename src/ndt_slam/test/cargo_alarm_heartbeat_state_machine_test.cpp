@@ -43,6 +43,14 @@ StatusContractInput loadedClusterClear(double distance, double clearance) {
     return input;
 }
 
+StatusContractInput pendingWarning(int code) {
+    StatusContractInput input = loadedWarning(code);
+    input.cargo_valid = false;
+    input.evidence_state =
+        AlarmStateMachine::kEvidenceHazardCandidate;
+    return input;
+}
+
 StatusContractInput faultStatus(int code, std::uint32_t mask) {
     StatusContractInput input;
     input.schema_valid = true;
@@ -61,6 +69,19 @@ TEST(CargoAlarmHeartbeat, StartupAndStaleUseSystemNotReady) {
               state.ingest(AlarmStateMachine::kClear, 2.0, 20.0).code);
     EXPECT_EQ(AlarmStateMachine::kClear, state.tick(2.1).code);
     EXPECT_EQ(AlarmStateMachine::kSystemNotReady, state.tick(2.6).code);
+}
+
+TEST(CargoAlarmHeartbeat, PendingEnvelopeCanOnlyPublishPositiveWarning) {
+    const auto warning = validateStatusContract(
+        pendingWarning(AlarmStateMachine::kLevel1Warning));
+    EXPECT_TRUE(warning.valid);
+    EXPECT_EQ(warning.code, AlarmStateMachine::kLevel1Warning);
+
+    auto clear = pendingWarning(AlarmStateMachine::kClear);
+    clear.obstacle_count = 0U;
+    const auto rejected = validateStatusContract(clear);
+    EXPECT_FALSE(rejected.valid);
+    EXPECT_EQ(rejected.code, AlarmStateMachine::kInternalError);
 }
 
 TEST(CargoAlarmHeartbeat, SourceRollbackStartsRecoverableNewEpoch) {

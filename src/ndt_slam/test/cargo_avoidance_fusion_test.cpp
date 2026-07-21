@@ -56,6 +56,34 @@ TEST(CargoAvoidanceFusion, PendingEnvelopeCannotGrantClear) {
   EXPECT_EQ(result.provisional_status, "CLEAR_NOT_AUTHORIZED");
 }
 
+TEST(CargoAvoidanceFusion, PendingHazardIsProvisionalByDefault) {
+  auto input = validInput();
+  input.formal_cargo_geometry_valid = false;
+  input.formal_cargo_bottom_valid = false;
+  input.pending_envelope_valid = true;
+  input.live.hazard = true;
+  input.live.warning_code = 17;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 33);
+  EXPECT_EQ(result.provisional_status, "NEAR_3M");
+}
+
+TEST(CargoAvoidanceFusion, PendingOptInCanOnlyEscalatePositiveHazard) {
+  auto input = validInput();
+  input.formal_cargo_geometry_valid = false;
+  input.formal_cargo_bottom_valid = false;
+  input.pending_envelope_valid = true;
+  input.static_map.hazard = true;
+  input.static_map.warning_code = 18;
+  CargoAvoidanceFusionConfig config;
+  config.provisional_positive_warning_to_official_code = true;
+  const auto result = fuseCargoAvoidanceRisk(input, config);
+  ASSERT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 18);
+  EXPECT_NE(result.official_code, 14);
+}
+
 TEST(CargoAvoidanceFusion, UnverifiedStaticCannotAuthorizeClearOrHazard) {
   auto input = validInput();
   input.static_authority =

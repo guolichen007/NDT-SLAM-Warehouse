@@ -311,6 +311,11 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
         "/cargo_avoidance/fused_box_marker", 2);
     cargo_static_evidence_debug_pub_ = nh_.advertise<std_msgs::String>(
         "/cargo_avoidance/static_evidence_debug", 1);
+    cargo_pending_avoidance_pub_ = nh_.advertise<std_msgs::String>(
+        "/cargo_avoidance/pending_status", 1);
+    cargo_pending_envelope_marker_pub_ =
+        nh_.advertise<visualization_msgs::Marker>(
+            "/cargo_avoidance/pending_envelope_marker", 1);
     static_evidence_status_pub_ = nh_.advertise<std_msgs::String>(
         "/static_evidence/status", 1, true);
     static_evidence_cell_state_counts_pub_ = nh_.advertise<std_msgs::String>(
@@ -473,6 +478,11 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         "/cargo_avoidance/fused_box_marker", 2);
     cargo_static_evidence_debug_pub_ = nh_.advertise<std_msgs::String>(
         "/cargo_avoidance/static_evidence_debug", 1);
+    cargo_pending_avoidance_pub_ = nh_.advertise<std_msgs::String>(
+        "/cargo_avoidance/pending_status", 1);
+    cargo_pending_envelope_marker_pub_ =
+        nh_.advertise<visualization_msgs::Marker>(
+            "/cargo_avoidance/pending_envelope_marker", 1);
     static_evidence_status_pub_ = nh_.advertise<std_msgs::String>(
         "/static_evidence/status", 1, true);
     static_evidence_cell_state_counts_pub_ = nh_.advertise<std_msgs::String>(
@@ -1847,6 +1857,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                            .as<float>(0.25F));
             hook_lock_config_.bottom_alpha_points = hcl["bottom_alpha_points"].as<float>(0.30f);
             hook_lock_config_.bottom_alpha_memory = hcl["bottom_alpha_memory"].as<float>(0.15f);
+            hook_lock_config_.loaded_reacquire_min_bottom_uncertainty_m =
+                std::max(0.0F,
+                    hcl["loaded_reacquire_min_bottom_uncertainty_m"]
+                        .as<float>(0.12F));
             hook_lock_config_.bottom_hold_uncertainty_growth = hcl["bottom_hold_uncertainty_growth"].as<float>(0.02f);
             hook_lock_config_.bottom_max_uncertainty = hcl["bottom_max_uncertainty"].as<float>(0.35f);
             hook_lock_config_.candidate_hold_sec = hcl["candidate_hold_sec"].as<float>(1.0f);
@@ -2367,6 +2381,76 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         bottom_fusion_config.xy_cell_size =
             std::max(0.05F, hook_fixed_config_.bottom_xy_cell_size);
         cargo_bottom_fusion_.setConfig(bottom_fusion_config);
+
+        if (config["cargo_lift_origin"]) {
+            const YAML::Node lift = config["cargo_lift_origin"];
+            cargo_lift_origin_enabled_ = lift["enabled"].as<bool>(true);
+            cargo_lift_origin_config_.maximum_anchor_distance_m =
+                lift["maximum_anchor_distance_m"].as<float>(2.0F);
+            cargo_lift_origin_config_.minimum_significant_change_m =
+                lift["minimum_significant_change_m"].as<float>(0.15F);
+            cargo_lift_origin_config_.significance_sigma =
+                lift["significance_sigma"].as<float>(3.0F);
+            cargo_lift_origin_config_.minimum_source_coverage =
+                lift["minimum_source_coverage"].as<float>(0.35F);
+            cargo_lift_origin_config_.minimum_revealed_support_coverage =
+                lift["minimum_revealed_support_coverage"].as<float>(0.25F);
+            cargo_lift_origin_config_.lift_confirm_frames =
+                lift["lift_confirm_frames"].as<int>(4);
+            cargo_lift_origin_config_.thickness_confirm_frames =
+                lift["thickness_confirm_frames"].as<int>(5);
+            cargo_lift_origin_config_.maximum_observation_gap_sec =
+                lift["maximum_observation_gap_sec"].as<double>(0.5);
+            cargo_lift_origin_config_.maximum_source_age_sec =
+                lift["maximum_source_age_sec"].as<double>(0.5);
+            cargo_lift_origin_config_.minimum_height_m =
+                lift["minimum_height_m"].as<float>(0.30F);
+            cargo_lift_origin_config_.maximum_height_m =
+                lift["maximum_height_m"].as<float>(5.00F);
+        }
+        cargo_lift_origin_binder_.setConfig(cargo_lift_origin_config_);
+
+        if (config["cargo_geometry_fusion"]) {
+            const YAML::Node geometry = config["cargo_geometry_fusion"];
+            cargo_geometry_fusion_config_.minimum_independent_sources =
+                static_cast<std::size_t>(std::max(
+                    2, geometry["minimum_independent_sources"].as<int>(2)));
+            cargo_geometry_fusion_config_.minimum_confirm_frames =
+                geometry["minimum_confirm_frames"].as<int>(5);
+            cargo_geometry_fusion_config_.maximum_observation_gap_sec =
+                geometry["maximum_observation_gap_sec"].as<double>(0.5);
+            cargo_geometry_fusion_config_.maximum_source_disagreement_m =
+                geometry["maximum_source_disagreement_m"].as<float>(0.25F);
+            cargo_geometry_fusion_config_.maximum_fused_uncertainty_m =
+                geometry["maximum_fused_uncertainty_m"].as<float>(0.20F);
+            cargo_geometry_fusion_config_.minimum_height_m =
+                geometry["minimum_height_m"].as<float>(0.30F);
+            cargo_geometry_fusion_config_.maximum_height_m =
+                geometry["maximum_height_m"].as<float>(5.00F);
+            cargo_geometry_fusion_config_.huber_delta_m =
+                geometry["huber_delta_m"].as<float>(0.20F);
+            cargo_geometry_fusion_config_.configured_bottom_margin_m =
+                geometry["configured_bottom_margin_m"].as<float>(0.10F);
+        }
+        cargo_geometry_fusion_.setConfig(cargo_geometry_fusion_config_);
+
+        if (config["pending_cargo_envelope"]) {
+            const YAML::Node pending = config["pending_cargo_envelope"];
+            pending_cargo_envelope_config_.configured_length_m =
+                pending["configured_length_m"].as<float>(4.0F);
+            pending_cargo_envelope_config_.configured_width_m =
+                pending["configured_width_m"].as<float>(3.0F);
+            pending_cargo_envelope_config_.configured_height_m =
+                pending["configured_height_m"].as<float>(3.0F);
+            pending_cargo_envelope_config_.horizontal_margin_m =
+                pending["horizontal_margin_m"].as<float>(0.20F);
+            pending_cargo_envelope_config_.vertical_margin_m =
+                pending["vertical_margin_m"].as<float>(0.15F);
+            pending_cargo_envelope_config_.maximum_candidate_age_sec =
+                pending["maximum_candidate_age_sec"].as<double>(0.50);
+            pending_cargo_envelope_config_.maximum_retired_age_sec =
+                pending["maximum_retired_age_sec"].as<double>(8.0);
+        }
 
         CargoSafetyConfig safety_config;
         const YAML::Node cargo_safety = config["cargo_safety"];
@@ -2987,13 +3071,25 @@ void NdtSlamNode::recordEmptyHookOriginHeight(
     }
 }
 
-void NdtSlamNode::resetCargoForHookState(bool preserve_origin_height) {
+void NdtSlamNode::resetCargoForHookState(
+    bool preserve_origin_height, bool preserve_retired_signature) {
     clearHookLock();
-    retired_cargo_shape_ = LockedCargoShape{};
-    retired_cargo_center_base_.setZero();
-    retired_cargo_velocity_base_.setZero();
-    retired_cargo_stamp_ = ros::Time();
-    retired_cargo_signature_valid_ = false;
+    cargo_lift_origin_binder_.reset();
+    cargo_lift_origin_result_ = CargoLiftOriginResult{};
+    cargo_geometry_fusion_.reset();
+    cargo_frozen_geometry_ = CargoFrozenGeometry{};
+    pending_cargo_envelope_ = PendingCargoEnvelope{};
+    cargo_hook_state_initialized_ = false;
+    cargo_previous_hook_loaded_ = false;
+    cargo_lifecycle_id_ = 0U;
+    cargo_track_segment_id_ = 0U;
+    if (!preserve_retired_signature) {
+        retired_cargo_shape_ = LockedCargoShape{};
+        retired_cargo_center_base_.setZero();
+        retired_cargo_velocity_base_.setZero();
+        retired_cargo_stamp_ = ros::Time();
+        retired_cargo_signature_valid_ = false;
+    }
     lidar_no_cargo_evidence_.reset("cargo_lifecycle_reset");
     cargo_state_ = CargoState{};
     hook_fixed_cargo_ = HookCargoDetection{};
@@ -4104,7 +4200,7 @@ void NdtSlamNode::processCloudThread() {
             const bool entering_loaded = hook_load.valid &&
                 hook_load.state ==
                     lidar_slam2_msgs::HookLoadState::STATE_LOADED;
-            resetCargoForHookState(entering_loaded);
+            resetCargoForHookState(entering_loaded, true);
             last_processed_hook_load_state_ = hook_load.state;
             ROS_INFO("[HookCargoLifecycle] state=%u valid=%d reason=%s",
                      static_cast<unsigned int>(hook_load.state),
@@ -7837,6 +7933,8 @@ void NdtSlamNode::updatePoseFromLoopClosure(
     std::atomic_store(&static_height_field_,
                       std::shared_ptr<const StaticHeightField>{});
     verified_map_session_loaded_ = false;
+    loaded_map_session_uuid_.clear();
+    loaded_map_session_generation_ = 0U;
     {
         std::lock_guard<std::mutex> observation_lock(
             static_observation_mutex_);
@@ -7909,6 +8007,8 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     std::atomic_store(&static_height_field_,
                       std::shared_ptr<const StaticHeightField>{});
     verified_map_session_loaded_ = false;
+    loaded_map_session_uuid_.clear();
+    loaded_map_session_generation_ = 0U;
     {
         std::lock_guard<std::mutex> observation_lock(
             static_observation_mutex_);
@@ -8152,6 +8252,8 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
         const bool session_mode = std::filesystem::is_directory(file_path);
         MapSessionLoadResult session;
         std::shared_ptr<const StaticHeightField> staged_height_field;
+        StaticEvidenceSnapshot staged_static_snapshot;
+        std::deque<KeyFrame> staged_keyframes;
         pcl::PointCloud<pcl::PointXYZ>::Ptr loaded_cloud(
             new pcl::PointCloud<pcl::PointXYZ>);
         if (session_mode) {
@@ -8164,15 +8266,13 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
                 return true;
             }
             *loaded_cloud = *session.layers.registration;
-            StaticObstacleEvidenceIndex staged_static(
-                static_obstacle_evidence_index_.config());
-            staged_static.reset(1U);
             std::string staged_reason;
-            if (!staged_static.loadSnapshot(
-                    session.static_evidence_path, 1U,
+            if (!static_obstacle_evidence_index_.loadSnapshotCandidate(
+                    session.static_evidence_path,
                     session.static_evidence_source_generation,
-                    session.static_evidence_revision, &staged_reason) ||
-                staged_static.snapshot()->authority !=
+                    session.static_evidence_revision,
+                    &staged_static_snapshot, &staged_reason) ||
+                staged_static_snapshot.authority !=
                     session.static_authority) {
                 response.success = false;
                 response.message = "Static evidence verification failed: " +
@@ -8182,19 +8282,42 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
             }
             std::vector<Eigen::Vector3f> static_objects;
             std::vector<Eigen::Vector3f> static_ground;
-            static_objects.reserve(session.layers.objects_clean->size());
-            for (const auto& point : session.layers.objects_clean->points) {
-                static_objects.emplace_back(point.x, point.y, point.z);
-            }
+            static_objects = selectStaticHeightPointsForAuthority(
+                *session.layers.objects_clean, staged_static_snapshot);
             static_ground.reserve(session.layers.ground->size());
             for (const auto& point : session.layers.ground->points) {
                 static_ground.emplace_back(point.x, point.y, point.z);
             }
             auto height_field = std::make_shared<StaticHeightField>(
                 static_height_field_config_);
-            height_field->build(static_objects, static_ground,
-                                session.static_authority);
+            const StaticHeightFieldBuildResult height_build =
+                height_field->build(
+                    static_objects, static_ground, session.static_authority);
+            if (!static_objects.empty() && !height_build.valid) {
+                response.success = false;
+                response.message = "Static height field staging failed: " +
+                    height_build.reason;
+                response.num_points = 0;
+                return true;
+            }
             staged_height_field = height_field;
+
+            KeyFrameManager staged_keyframe_manager;
+            if (!staged_keyframe_manager.loadKeyFrameDatabase(file_path)) {
+                response.success = false;
+                response.message =
+                    "Verified session keyframe database could not be staged";
+                response.num_points = 0;
+                return true;
+            }
+            staged_keyframes = staged_keyframe_manager.getKeyFrames();
+            if (staged_keyframes.size() != session.metadata.keyframe_count) {
+                response.success = false;
+                response.message =
+                    "Verified session keyframe count mismatch";
+                response.num_points = 0;
+                return true;
+            }
         } else if (pcl::io::loadPCDFile<pcl::PointXYZ>(
                        file_path, *loaded_cloud) == -1) {
             response.success = false;
@@ -8205,6 +8328,8 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
 
         std::lock_guard<std::mutex> runtime_state_lock(runtime_state_mutex_);
         verified_map_session_loaded_ = false;
+        loaded_map_session_uuid_.clear();
+        loaded_map_session_generation_ = 0U;
         std::lock_guard<std::mutex> map_commit_lifecycle_lock(
             map_commit_lifecycle_mutex_);
 
@@ -8274,18 +8399,21 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
                           std::shared_ptr<const StaticHeightField>{});
         if (session_mode) {
             std::string static_reason;
-            if (!static_obstacle_evidence_index_.loadSnapshot(
-                    session.static_evidence_path, loaded_evidence_epoch,
-                    session.static_evidence_source_generation,
-                    session.static_evidence_revision, &static_reason)) {
-                response.success = false;
-                response.message = "Verified static evidence apply failed: " +
-                    static_reason;
-                response.num_points = 0;
-                return true;
+            if (!static_obstacle_evidence_index_
+                    .restoreSnapshotWithoutRevisionIncrement(
+                        staged_static_snapshot, loaded_evidence_epoch,
+                        &static_reason)) {
+                // All validation was completed before the lifecycle lock;
+                // reaching this branch is an internal invariant violation.
+                throw std::logic_error(
+                    "staged static evidence restore invariant failed: " +
+                    static_reason);
             }
             std::atomic_store(&static_height_field_, staged_height_field);
             verified_map_session_loaded_ = true;
+            loaded_map_session_uuid_ = session.metadata.map_uuid;
+            loaded_map_session_generation_ =
+                session.metadata.map_generation;
         }
         {
             std::lock_guard<std::mutex> observation_lock(
@@ -8371,18 +8499,14 @@ bool NdtSlamNode::loadMapService(lidar_slam2_msgs::LoadMap::Request& request,
         last_stamp_ = ros::Time();
         last_tf_stamp_ = ros::Time();
 
-        loop_closure_detector_.clear();
         keyframe_count_ = 0;
         if (session_mode) {
-            if (!loop_closure_detector_.loadKeyFrameDatabase(file_path)) {
-                response.success = false;
-                response.message =
-                    "Verified session keyframe database could not be loaded";
-                response.num_points = 0;
-                return true;
-            }
+            loop_closure_detector_.installKeyFrameDatabase(
+                std::move(staged_keyframes));
             keyframe_count_ = static_cast<int>(
                 loop_closure_detector_.getKeyFrameCount());
+        } else {
+            loop_closure_detector_.clear();
         }
         {
             std::lock_guard<std::mutex> lock(processed_loops_mutex_);
@@ -8508,6 +8632,8 @@ bool NdtSlamNode::rebuildMapService(std_srvs::Empty::Request& request, std_srvs:
     std::atomic_store(&static_height_field_,
                       std::shared_ptr<const StaticHeightField>{});
     verified_map_session_loaded_ = false;
+    loaded_map_session_uuid_.clear();
+    loaded_map_session_generation_ = 0U;
     {
         std::lock_guard<std::mutex> observation_lock(
             static_observation_mutex_);
@@ -13207,7 +13333,7 @@ void NdtSlamNode::updateHookCargoLock(
             bottom.top_z_base - retired_cargo_shape_.height_m;
         hook_lock_.bottom_uncertainty = std::max(
             bottom.uncertainty,
-            hook_lock_config_.bottom_alpha_memory);
+            hook_lock_config_.loaded_reacquire_min_bottom_uncertainty_m);
         hook_lock_.has_good_height = true;
         hook_lock_.shape_height_valid = true;
         hook_lock_.last_accepted_core_points = det.core_points_base;
@@ -13557,7 +13683,8 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
     std::uint16_t warning_code,
     bool warning_valid,
     const std::string& evidence_reason,
-    bool evidence_initialized) const {
+    bool evidence_initialized,
+    bool provisional_positive_warning) const {
     using Status = lidar_slam2_msgs::CargoSafetyStatus;
 
     const bool system_ready = running_.load() &&
@@ -13701,16 +13828,29 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
     const CargoSafetyDecision decision =
         composeCargoSafetyDecision(decision_input);
 
+    const bool use_provisional_warning = provisional_positive_warning &&
+        localization_valid && gravity_valid &&
+        status.hook_load_state == Status::HOOK_LOADED && !internal_fault &&
+        (warning_code == CargoSafetyEvaluator::kLevel1Code ||
+         warning_code == CargoSafetyEvaluator::kLevel2Code);
+
     status.localization_valid = localization_valid;
-    status.valid = decision.valid;
-    status.warning_valid = decision.warning_valid;
-    status.requested_alarm_code = decision.requested_code;
-    status.warning_code = decision.warning_code;
-    status.fault_code = decision.fault_code;
-    status.fault_mask = decision.fault_mask;
-    status.reason = decision.reason;
-    if (decision.requested_code >= CargoSafetyProtocol::kSystemNotReady &&
-        decision.requested_code != CargoSafetyProtocol::kObstacleInvalid) {
+    status.valid = use_provisional_warning ? true : decision.valid;
+    status.warning_valid = use_provisional_warning
+        ? true : decision.warning_valid;
+    status.requested_alarm_code = use_provisional_warning
+        ? static_cast<std::int32_t>(warning_code) : decision.requested_code;
+    status.warning_code = use_provisional_warning
+        ? static_cast<std::int32_t>(warning_code) : decision.warning_code;
+    status.fault_code = use_provisional_warning ? 0 : decision.fault_code;
+    status.fault_mask = use_provisional_warning ? 0U : decision.fault_mask;
+    status.reason = use_provisional_warning
+        ? evidence_reason : decision.reason;
+    if (use_provisional_warning) {
+        status.evidence_state = Status::EVIDENCE_HAZARD_CANDIDATE;
+    }
+    if (status.requested_alarm_code >= CargoSafetyProtocol::kSystemNotReady &&
+        status.requested_alarm_code != CargoSafetyProtocol::kObstacleInvalid) {
         status.evidence_state = Status::EVIDENCE_HARD_FAULT;
     } else if (status.evidence_state == Status::EVIDENCE_UNKNOWN) {
         if (decision.requested_code == CargoSafetyProtocol::kClear) {
@@ -13748,7 +13888,12 @@ void NdtSlamNode::logCargoSafetyStatus(
 void NdtSlamNode::publishHookOnlySafetyStatus(
     const HookLoadSnapshot& hook, const ros::Time& stamp,
     bool visual_conflict, const std::string& reason,
-    bool evidence_initialized) {
+    bool evidence_initialized, std::int32_t provisional_warning_code,
+    std::uint32_t provisional_obstacle_count,
+    float provisional_distance_m,
+    float provisional_top_z_map,
+    float provisional_uncertainty_m,
+    float provisional_clearance_m) {
     const bool lidar_no_cargo =
         lidar_no_cargo_evidence_.result().confirmed && !visual_conflict;
     const bool safe_empty =
@@ -13774,11 +13919,29 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
     status.evidence_state = safe_empty
         ? lidar_slam2_msgs::CargoSafetyStatus::EVIDENCE_CLEAR
         : lidar_slam2_msgs::CargoSafetyStatus::EVIDENCE_HARD_FAULT;
+    const bool has_provisional_warning_geometry =
+        (provisional_warning_code == CargoSafetyEvaluator::kLevel1Code ||
+         provisional_warning_code == CargoSafetyEvaluator::kLevel2Code) &&
+        provisional_obstacle_count > 0U &&
+        std::isfinite(provisional_distance_m) &&
+        std::isfinite(provisional_top_z_map) &&
+        std::isfinite(provisional_uncertainty_m) &&
+        std::isfinite(provisional_clearance_m);
+    if (has_provisional_warning_geometry) {
+        status.obstacle_valid = true;
+        status.obstacle_count = provisional_obstacle_count;
+        status.nearest_obstacle_distance_m = provisional_distance_m;
+        status.obstacle_top_z_map = provisional_top_z_map;
+        status.obstacle_uncertainty_m = provisional_uncertainty_m;
+        status.conservative_vertical_clearance_m =
+            provisional_clearance_m;
+    }
     status = composeCargoSafetyStatus(
         status, visual_conflict, CargoSafetyFault::NONE,
         safe_empty ? CargoSafetyEvaluator::kSafeCode : 0U,
         safe_empty, reason.empty() ? hook.reason : reason,
-        evidence_initialized);
+        evidence_initialized,
+        has_provisional_warning_geometry);
     cargo_raw_warning_code_ = status.warning_valid
         ? status.warning_code : 0;
     cargo_confirmed_warning_code_ = cargo_raw_warning_code_;
@@ -13830,6 +13993,657 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
     publishPayloadTrackInfoInvalid(status.reason);
 }
 
+void NdtSlamNode::updateCargoLiftAndGeometryFusion(
+    const HookLoadSnapshot& hook,
+    const Sophus::SE3d& pose_map_base,
+    const ros::Time& stamp,
+    bool active_track) {
+    const bool hook_loaded = hook.valid &&
+        hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED;
+    const bool node_started_loaded = hook_loaded &&
+        !cargo_hook_state_initialized_;
+    const bool hook_was_empty = hook_loaded &&
+        cargo_hook_state_initialized_ && !cargo_previous_hook_loaded_;
+    if (hook_loaded && (node_started_loaded || hook_was_empty)) {
+        ++cargo_lifecycle_id_;
+        if (cargo_lifecycle_id_ == 0U) ++cargo_lifecycle_id_;
+        cargo_lift_origin_binder_.reset();
+        cargo_geometry_fusion_.reset();
+        cargo_frozen_geometry_ = CargoFrozenGeometry{};
+    }
+    if (active_track && !cargo_fusion_track_active_) {
+        ++cargo_track_segment_id_;
+        if (cargo_track_segment_id_ == 0U) ++cargo_track_segment_id_;
+    }
+    cargo_hook_state_initialized_ = hook.valid;
+    cargo_previous_hook_loaded_ = hook_loaded;
+
+    const Eigen::Vector2f anchor_base = getCargoAnchorXY();
+    const Eigen::Vector3d anchor_map_3d = pose_map_base *
+        Eigen::Vector3d(anchor_base.x(), anchor_base.y(), 0.0);
+    const Eigen::Vector2f anchor_map = anchor_map_3d.head<2>().cast<float>();
+    const auto height_field = std::atomic_load(&static_height_field_);
+    const auto evidence_snapshot = static_obstacle_evidence_index_.snapshot();
+    const StaticEvidenceAuthority snapshot_authority = evidence_snapshot
+        ? evidence_snapshot->authority
+        : StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+
+    CargoLiftOriginInput lift_input;
+    lift_input.stamp_sec = stamp.toSec();
+    lift_input.hook_signal_valid = hook.valid;
+    lift_input.hook_loaded = hook_loaded;
+    lift_input.hook_was_empty = hook_was_empty;
+    lift_input.node_started_loaded = node_started_loaded;
+    lift_input.anchor_valid = anchor_map.allFinite();
+    lift_input.hook_anchor_map = anchor_map;
+
+    const bool detection_current = hook_fixed_cargo_.valid &&
+        !last_anchor_detect_stamp_.isZero() &&
+        std::abs((last_anchor_detect_stamp_ - stamp).toSec()) <= 1.0e-4;
+    if (detection_current && std::isfinite(hook_fixed_cargo_.z95)) {
+        const Eigen::Vector3d top_map = pose_map_base * Eigen::Vector3d(
+            hook_fixed_cargo_.center_base.x(),
+            hook_fixed_cargo_.center_base.y(),
+            hook_fixed_cargo_.z95);
+        lift_input.current_top_valid = std::isfinite(top_map.z());
+        lift_input.current_top_stamp_sec = stamp.toSec();
+        lift_input.current_top_z_map = static_cast<float>(top_map.z());
+        lift_input.current_top_uncertainty_m =
+            std::max(0.02F, hook_fixed_bottom_.uncertainty);
+        lift_input.source_coverage = std::clamp(std::max({
+            hook_fixed_cargo_.long_axis_coverage_ratio,
+            hook_fixed_cargo_.short_axis_coverage_ratio,
+            hook_fixed_cargo_.top_surface_coverage_ratio}), 0.0F, 1.0F);
+    }
+    if (detection_current && hook_fixed_cargo_.ground_reference_valid &&
+        std::isfinite(hook_fixed_cargo_.ground_z)) {
+        const Eigen::Vector3d support_map = pose_map_base * Eigen::Vector3d(
+            anchor_base.x(), anchor_base.y(), hook_fixed_cargo_.ground_z);
+        lift_input.revealed_support_valid = std::isfinite(support_map.z());
+        lift_input.revealed_support_stamp_sec = stamp.toSec();
+        lift_input.revealed_support_z_map =
+            static_cast<float>(support_map.z());
+        lift_input.revealed_support_coverage =
+            lift_input.source_coverage;
+    }
+
+    if (height_field && anchor_map.allFinite()) {
+        StaticHeightQuery origin_query;
+        origin_query.center_map = anchor_map;
+        origin_query.length_m =
+            pending_cargo_envelope_config_.configured_length_m;
+        origin_query.width_m =
+            pending_cargo_envelope_config_.configured_width_m;
+        origin_query.shell_m = 0.0F;
+        const StaticHeightQueryResult origin_height =
+            height_field->query(origin_query);
+        const StaticSupportSurfaceCell support =
+            height_field->supportAt(anchor_map);
+        if (origin_height.valid && origin_height.matched_cells > 0U &&
+            std::isfinite(origin_height.highest_z95_m) && support.valid &&
+            std::isfinite(support.z)) {
+            CargoOriginCandidate candidate;
+            candidate.component_id = origin_height.matched_cell_keys.empty()
+                ? 1U
+                : static_cast<std::uint64_t>(
+                      origin_height.matched_cell_keys.front());
+            candidate.source = snapshot_authority ==
+                    StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE
+                ? CargoOriginCandidateSource::OPERATOR_APPROVED_BASELINE
+                : CargoOriginCandidateSource::RUNTIME_MATURE_STATIC;
+            candidate.authority = snapshot_authority;
+            candidate.center_map = anchor_map;
+            candidate.length_m = origin_query.length_m;
+            candidate.width_m = origin_query.width_m;
+            candidate.top_z95_map = origin_height.highest_z95_m;
+            candidate.support_z_map = support.z;
+            candidate.uncertainty_m = std::max(
+                origin_height.highest_uncertainty_m,
+                support.uncertainty_m);
+            candidate.occupied_cells = origin_height.matched_cells;
+            lift_input.candidates.push_back(candidate);
+        }
+    }
+
+    if (retired_cargo_signature_valid_ && retired_cargo_shape_.valid &&
+        !retired_cargo_stamp_.isZero()) {
+        const double age_sec = (stamp - retired_cargo_stamp_).toSec();
+        if (age_sec >= 0.0 && age_sec <=
+                pending_cargo_envelope_config_.maximum_retired_age_sec) {
+            const Eigen::Vector3f retired_center = retired_cargo_center_base_ +
+                retired_cargo_velocity_base_ * static_cast<float>(age_sec);
+            const Eigen::Vector3d retired_center_map = pose_map_base *
+                retired_center.cast<double>();
+            CargoOriginCandidate candidate;
+            candidate.component_id = cargo_lifecycle_id_;
+            candidate.source =
+                CargoOriginCandidateSource::RETIRED_FORMAL_SHAPE;
+            candidate.authority = snapshot_authority;
+            candidate.center_map =
+                retired_center_map.head<2>().cast<float>();
+            candidate.length_m = retired_cargo_shape_.length_m;
+            candidate.width_m = retired_cargo_shape_.width_m;
+            candidate.yaw_map_rad = retired_cargo_shape_.yaw_base_rad;
+            candidate.top_z95_map = static_cast<float>(retired_center_map.z()) +
+                0.5F * retired_cargo_shape_.height_m;
+            candidate.support_z_map = candidate.top_z95_map -
+                retired_cargo_shape_.height_m;
+            candidate.uncertainty_m = 0.15F;
+            lift_input.candidates.push_back(candidate);
+        }
+    }
+
+    // Configured origin is only a binding/pending fallback. It is never
+    // counted as an independent static thickness source below.
+    CargoOriginCandidate configured_origin;
+    configured_origin.component_id = 1U;
+    configured_origin.source =
+        CargoOriginCandidateSource::CONFIGURED_ENVELOPE;
+    configured_origin.center_map = anchor_map;
+    configured_origin.length_m =
+        pending_cargo_envelope_config_.configured_length_m;
+    configured_origin.width_m =
+        pending_cargo_envelope_config_.configured_width_m;
+    configured_origin.top_z95_map = static_cast<float>(anchor_map_3d.z()) +
+        hook_fixed_config_.roi_z_max;
+    configured_origin.support_z_map = configured_origin.top_z95_map -
+        pending_cargo_envelope_config_.configured_height_m;
+    configured_origin.uncertainty_m =
+        pending_cargo_envelope_config_.vertical_margin_m;
+    lift_input.candidates.push_back(configured_origin);
+    if (cargo_lift_origin_enabled_) {
+        cargo_lift_origin_result_ =
+            cargo_lift_origin_binder_.update(lift_input);
+    } else {
+        cargo_lift_origin_result_ = CargoLiftOriginResult{};
+        cargo_lift_origin_result_.state = CargoLiftEventState::INVALID;
+        cargo_lift_origin_result_.reason = "lift_origin_binding_disabled";
+    }
+
+    PendingCargoEnvelopeInput pending_input;
+    pending_input.stamp_sec = stamp.toSec();
+    pending_input.hook_loaded = hook_loaded;
+    pending_input.hook_anchor_valid = anchor_base.allFinite();
+    pending_input.hook_anchor_base = Eigen::Vector3f(
+        anchor_base.x(), anchor_base.y(),
+        0.5F * (hook_fixed_config_.roi_z_min +
+                hook_fixed_config_.roi_z_max));
+    if (detection_current && hook_fixed_cargo_.center_base.allFinite()) {
+        auto& candidate = pending_input.current_candidate;
+        candidate.valid = true;
+        candidate.center_base = hook_fixed_cargo_.center_base;
+        candidate.length_m = hook_fixed_cargo_.oriented_footprint_valid
+            ? hook_fixed_cargo_.footprint_length_width.x()
+            : hook_fixed_cargo_.size_visible.x();
+        candidate.width_m = hook_fixed_cargo_.oriented_footprint_valid
+            ? hook_fixed_cargo_.footprint_length_width.y()
+            : hook_fixed_cargo_.size_visible.y();
+        candidate.height_m = hook_fixed_bottom_.valid
+            ? hook_fixed_bottom_.height
+            : std::max(hook_fixed_cargo_.visible_height,
+                       hook_fixed_config_.min_visible_height);
+        candidate.yaw_base_rad = hook_fixed_cargo_.oriented_footprint_valid
+            ? hook_fixed_cargo_.footprint_yaw_base_rad : 0.0F;
+        candidate.horizontal_uncertainty_m =
+            hook_lock_.horizontal_tracking_residual_m;
+        candidate.vertical_uncertainty_m =
+            std::max(hook_fixed_bottom_.uncertainty, 0.05F);
+        candidate.evidence_stamp_sec = stamp.toSec();
+    }
+    if (retired_cargo_signature_valid_ && retired_cargo_shape_.valid &&
+        !retired_cargo_stamp_.isZero()) {
+        auto& candidate = pending_input.retired_formal_shape;
+        const double age_sec = std::max(
+            0.0, (stamp - retired_cargo_stamp_).toSec());
+        candidate.valid = true;
+        candidate.center_base = retired_cargo_center_base_ +
+            retired_cargo_velocity_base_ * static_cast<float>(age_sec);
+        candidate.length_m = retired_cargo_shape_.length_m;
+        candidate.width_m = retired_cargo_shape_.width_m;
+        candidate.height_m = retired_cargo_shape_.height_m;
+        candidate.yaw_base_rad = retired_cargo_shape_.yaw_base_rad;
+        candidate.horizontal_uncertainty_m = 0.15F;
+        candidate.vertical_uncertainty_m = 0.15F;
+        candidate.evidence_stamp_sec = retired_cargo_stamp_.toSec();
+    }
+    if (cargo_lift_origin_result_.valid) {
+        auto& candidate = pending_input.lift_origin_candidate;
+        const CargoOriginCandidate& origin = cargo_lift_origin_result_.origin;
+        const Eigen::Vector3d center_map(
+            origin.center_map.x(), origin.center_map.y(),
+            0.5 * (origin.top_z95_map + origin.support_z_map));
+        candidate.valid = true;
+        candidate.center_base =
+            (pose_map_base.inverse() * center_map).cast<float>();
+        candidate.length_m = origin.length_m;
+        candidate.width_m = origin.width_m;
+        candidate.height_m = origin.top_z95_map - origin.support_z_map;
+        candidate.yaw_base_rad = origin.yaw_map_rad;
+        candidate.horizontal_uncertainty_m = origin.uncertainty_m;
+        candidate.vertical_uncertainty_m = origin.uncertainty_m;
+        candidate.evidence_stamp_sec = stamp.toSec();
+    }
+    pending_cargo_envelope_ = buildPendingCargoEnvelope(
+        pending_input, pending_cargo_envelope_config_);
+
+    if (!hook_loaded || cargo_lifecycle_id_ == 0U) return;
+    CargoGeometryFrame geometry_frame;
+    geometry_frame.cargo_lifecycle_id = cargo_lifecycle_id_;
+    geometry_frame.track_segment_id = cargo_track_segment_id_;
+    geometry_frame.stamp_sec = stamp.toSec();
+    if (active_track && hook_lock_.locked_shape.valid &&
+        hook_lock_.live_pose.valid) {
+        geometry_frame.center_valid =
+            hook_lock_.live_pose.center_base.allFinite();
+        geometry_frame.center = hook_lock_.live_pose.center_base;
+        geometry_frame.footprint_valid = true;
+        geometry_frame.length_m = hook_lock_.locked_shape.length_m;
+        geometry_frame.width_m = hook_lock_.locked_shape.width_m;
+        geometry_frame.yaw_rad = hook_lock_.locked_shape.yaw_base_rad;
+        geometry_frame.tracking_uncertainty_m =
+            hook_lock_.horizontal_tracking_residual_m;
+    } else if (pending_input.current_candidate.valid) {
+        const auto& candidate = pending_input.current_candidate;
+        geometry_frame.center_valid = true;
+        geometry_frame.center = candidate.center_base;
+        geometry_frame.footprint_valid = true;
+        geometry_frame.length_m = candidate.length_m;
+        geometry_frame.width_m = candidate.width_m;
+        geometry_frame.yaw_rad = candidate.yaw_base_rad;
+        geometry_frame.tracking_uncertainty_m =
+            candidate.horizontal_uncertainty_m;
+    }
+    geometry_frame.observed_top_valid = detection_current &&
+        std::isfinite(hook_fixed_cargo_.z95);
+    geometry_frame.observed_top_m = hook_fixed_cargo_.z95;
+    geometry_frame.top_uncertainty_m =
+        std::max(0.02F, hook_fixed_bottom_.uncertainty);
+    const bool authorized_origin = cargo_lift_origin_result_.valid &&
+        (cargo_lift_origin_result_.origin.source ==
+             CargoOriginCandidateSource::OPERATOR_APPROVED_BASELINE ||
+         cargo_lift_origin_result_.origin.source ==
+             CargoOriginCandidateSource::RUNTIME_MATURE_STATIC) &&
+        (cargo_lift_origin_result_.origin.authority ==
+             StaticEvidenceAuthority::RUNTIME_MATURE ||
+         cargo_lift_origin_result_.origin.authority ==
+             StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE);
+    if (authorized_origin &&
+        std::isfinite(cargo_lift_origin_result_.static_thickness_m)) {
+        geometry_frame.thickness.push_back({
+            CargoThicknessSource::STATIC_ORIGIN_TOP_SUPPORT,
+            cargo_lift_origin_result_.static_thickness_m,
+            std::max(0.05F,
+                     cargo_lift_origin_result_.origin.uncertainty_m),
+            0.80F, true});
+    }
+    if (authorized_origin && cargo_lift_origin_result_.lift_confirmed &&
+        std::isfinite(cargo_lift_origin_result_.revealed_thickness_m)) {
+        geometry_frame.thickness.push_back({
+            CargoThicknessSource::MAP_DIFF_REVEALED_SUPPORT,
+            cargo_lift_origin_result_.revealed_thickness_m,
+            std::max(0.08F,
+                     cargo_lift_origin_result_.origin.uncertainty_m),
+            0.75F, true});
+    }
+    if (detection_current && hook_fixed_bottom_.valid &&
+        std::isfinite(hook_fixed_bottom_.height)) {
+        geometry_frame.thickness.push_back({
+            CargoThicknessSource::LIVE_VISIBLE_EXTENT,
+            hook_fixed_bottom_.height,
+            std::max(0.05F, hook_fixed_bottom_.uncertainty),
+            std::clamp(hook_fixed_bottom_.confidence, 0.0F, 1.0F), true});
+    }
+    if (retired_cargo_signature_valid_ && retired_cargo_shape_.valid) {
+        geometry_frame.thickness.push_back({
+            CargoThicknessSource::RETIRED_LOCKED_SHAPE,
+            retired_cargo_shape_.height_m, 0.15F, 0.70F, true});
+    }
+    geometry_frame.thickness.push_back({
+        CargoThicknessSource::CONFIGURED_FALLBACK,
+        pending_cargo_envelope_config_.configured_height_m,
+        0.50F, 0.25F, true});
+    cargo_frozen_geometry_ = cargo_geometry_fusion_.update(geometry_frame);
+    if (active_track && cargo_frozen_geometry_.valid &&
+        cargo_frozen_geometry_.frozen &&
+        cargo_frozen_geometry_.cargo_lifecycle_id == cargo_lifecycle_id_) {
+        hook_lock_.locked_shape.valid = true;
+        hook_lock_.locked_shape.length_m = cargo_frozen_geometry_.length_m;
+        hook_lock_.locked_shape.width_m = cargo_frozen_geometry_.width_m;
+        hook_lock_.locked_shape.height_m = cargo_frozen_geometry_.height_m;
+        hook_lock_.locked_shape.yaw_base_rad = cargo_frozen_geometry_.yaw_rad;
+        hook_lock_.locked_size = Eigen::Vector3f(
+            cargo_frozen_geometry_.length_m,
+            cargo_frozen_geometry_.width_m,
+            cargo_frozen_geometry_.height_m);
+        hook_lock_.stable_height = cargo_frozen_geometry_.height_m;
+        hook_lock_.shape_height_valid = true;
+    }
+    std_msgs::String fusion_debug;
+    std::ostringstream fusion_stream;
+    const auto diagnostic_float = [](float value) {
+        return std::isfinite(value) ? std::to_string(value)
+                                    : std::string("null");
+    };
+    fusion_stream
+        << "{\"cargo_lifecycle_id\":" << cargo_lifecycle_id_
+        << ",\"cargo_track_segment_id\":" << cargo_track_segment_id_
+        << ",\"lift_origin_state\":\""
+        << cargoLiftEventStateName(cargo_lift_origin_result_.state)
+        << "\",\"lift_origin_source\":"
+        << static_cast<int>(cargo_lift_origin_result_.origin.source)
+        << ",\"lift_origin_component_id\":"
+        << cargo_lift_origin_result_.origin.component_id
+        << ",\"lift_origin_reason\":\""
+        << cargo_lift_origin_result_.reason
+        << "\",\"lift_confirm_count\":"
+        << cargo_lift_origin_result_.lift_confirm_count
+        << ",\"thickness_confirm_count\":"
+        << cargo_lift_origin_result_.thickness_confirm_count
+        << ",\"static_thickness_m\":"
+        << diagnostic_float(cargo_lift_origin_result_.static_thickness_m)
+        << ",\"revealed_thickness_m\":"
+        << diagnostic_float(cargo_lift_origin_result_.revealed_thickness_m)
+        << ",\"geometry_fusion_valid\":"
+        << (cargo_frozen_geometry_.valid ? "true" : "false")
+        << ",\"geometry_frozen\":"
+        << (cargo_frozen_geometry_.frozen ? "true" : "false")
+        << ",\"geometry_confirm_frames\":"
+        << cargo_frozen_geometry_.confirm_frames
+        << ",\"geometry_independent_sources\":"
+        << cargo_frozen_geometry_.independent_sources
+        << ",\"geometry_reason\":\""
+        << cargo_frozen_geometry_.reason
+        << "\",\"pending_envelope_valid\":"
+        << (pending_cargo_envelope_.valid ? "true" : "false")
+        << ",\"pending_envelope_source\":\""
+        << pendingCargoEnvelopeSourceName(pending_cargo_envelope_.source)
+        << "\",\"pending_envelope_reason\":\""
+        << pending_cargo_envelope_.reason
+        << "\",\"map_session_uuid\":\""
+        << loaded_map_session_uuid_
+        << "\",\"map_session_generation\":"
+        << loaded_map_session_generation_
+        << ",\"map_session_verified\":"
+        << (verified_map_session_loaded_ ? "true" : "false") << "}";
+    fusion_debug.data = fusion_stream.str();
+    cargo_pending_avoidance_pub_.publish(fusion_debug);
+}
+
+void NdtSlamNode::runPendingCargoAvoidance(
+    const PendingCargoEnvelope& envelope,
+    const HookLoadSnapshot& hook,
+    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
+    const Sophus::SE3d& pose_map_base,
+    const ros::Time& stamp,
+    const ros::Time& obstacle_cloud_stamp,
+    double processing_age_sec) {
+    CargoAvoidanceFusionInput fusion_input;
+    fusion_input.localization_valid =
+        relocalization_pose_reliable_ && !tracking_lost_;
+    fusion_input.pending_envelope_valid = envelope.valid;
+
+    CargoSafetyInput live_input;
+    live_input.evaluation_time_sec = stamp.toSec();
+    live_input.height.valid = envelope.valid &&
+        std::isfinite(envelope.bottom_z_base);
+    live_input.height.stamp_sec = stamp.toSec();
+    live_input.height.bottom_z = envelope.bottom_z_base;
+    live_input.height.bottom_uncertainty_m =
+        envelope.vertical_uncertainty_m;
+    live_input.footprint_base = toCargoObbFootprint(envelope);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr live_shell(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    const float shell_m = cargo_safety_evaluator_.config().level2_distance_m;
+    if (obstacle_cloud_base) {
+        live_shell->reserve(obstacle_cloud_base->size());
+        for (const pcl::PointXYZ& point : obstacle_cloud_base->points) {
+            if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+                !std::isfinite(point.z)) continue;
+            const Eigen::Vector3f xyz = point.getVector3fMap();
+            // This is an evaluator-local exterior view. It never mutates the
+            // registration/map clouds and never grants formal cargo removal.
+            if (containsPointInCargoObbBase(
+                    xyz, live_input.footprint_base, 0.0F, 0.0F)) continue;
+            if (pointToCargoObbDistance2D(
+                    xyz.head<2>(), live_input.footprint_base) <= shell_m) {
+                live_shell->push_back(point);
+            }
+        }
+    }
+    live_input.obstacle_cloud_base = live_shell;
+    const double cloud_age_sec = obstacle_cloud_stamp.isZero()
+        ? std::numeric_limits<double>::infinity()
+        : std::max(processing_age_sec,
+                   (stamp - obstacle_cloud_stamp).toSec());
+    live_input.obstacle_cloud_age_sec = cloud_age_sec;
+    live_input.obstacle_observation_valid = obstacle_cloud_base &&
+        std::isfinite(cloud_age_sec) && cloud_age_sec >= 0.0 &&
+        cloud_age_sec <=
+            cargo_safety_evaluator_.config().maximum_obstacle_cloud_age_sec;
+    live_input.obstacle_roi_finite_points = live_shell->size();
+    live_input.obstacle_roi_coverage_ratio = std::clamp(
+        static_cast<float>(live_shell->size()) /
+            static_cast<float>(std::max<std::size_t>(
+                1U, cargo_safety_evaluator_.config()
+                        .minimum_roi_finite_points)),
+        0.0F, 1.0F);
+    const CargoSafetyResult live_result =
+        cargo_safety_evaluator_.evaluate(live_input);
+    fusion_input.live.available = live_input.obstacle_observation_valid;
+    fusion_input.live.reliable = live_result.input_valid &&
+        live_result.warning_valid &&
+        live_result.fault == CargoSafetyFault::NONE;
+    fusion_input.live.hazard = fusion_input.live.reliable &&
+        (live_result.warning_code == CargoSafetyEvaluator::kLevel1Code ||
+         live_result.warning_code == CargoSafetyEvaluator::kLevel2Code);
+    fusion_input.live.warning_code = live_result.warning_code;
+    fusion_input.live.coverage = live_input.obstacle_roi_coverage_ratio;
+    fusion_input.live.reason = live_result.reason;
+    if (live_result.has_cluster_evidence) {
+        fusion_input.live.distance_m = live_result.most_dangerous_cluster
+            .footprint_distance_m;
+        fusion_input.live.clearance_m = live_result.most_dangerous_cluster
+            .conservative_clearance_m;
+    }
+
+    StaticHeightQueryResult static_result;
+    const auto height_field = std::atomic_load(&static_height_field_);
+    const auto evidence_snapshot = static_obstacle_evidence_index_.snapshot();
+    if (height_field && envelope.valid) {
+        const Eigen::Vector3d center_map_3d = pose_map_base *
+            envelope.center_base.cast<double>();
+        StaticHeightQuery query;
+        query.center_map = center_map_3d.head<2>().cast<float>();
+        query.length_m = envelope.length_m;
+        query.width_m = envelope.width_m;
+        const Eigen::Matrix3d rotation = pose_map_base.so3().matrix();
+        query.yaw_map_rad = static_cast<float>(
+            std::atan2(rotation(1, 0), rotation(0, 0))) +
+            envelope.yaw_base_rad;
+        query.shell_m = shell_m;
+        static_result = height_field->query(query);
+        fusion_input.static_map.available = static_result.valid;
+        fusion_input.static_map.coverage = static_result.coverage_ratio;
+        if (static_result.valid && static_result.matched_cells > 0U &&
+            std::isfinite(static_result.highest_z95_m) &&
+            std::isfinite(static_result.nearest_horizontal_distance_m)) {
+            const Eigen::Vector3d bottom_map = pose_map_base * Eigen::Vector3d(
+                envelope.center_base.x(), envelope.center_base.y(),
+                envelope.bottom_z_base);
+            const float clearance = static_cast<float>(bottom_map.z()) -
+                static_result.highest_z95_m -
+                static_result.highest_uncertainty_m;
+            fusion_input.static_map.distance_m =
+                static_result.nearest_horizontal_distance_m;
+            fusion_input.static_map.clearance_m = clearance;
+            fusion_input.static_map.hazard = clearance <
+                    cargo_safety_evaluator_.config()
+                        .minimum_vertical_clearance_m &&
+                static_result.nearest_horizontal_distance_m <= shell_m;
+            if (fusion_input.static_map.hazard) {
+                fusion_input.static_map.warning_code =
+                    static_result.nearest_horizontal_distance_m <=
+                            cargo_safety_evaluator_.config().level1_distance_m
+                        ? CargoSafetyEvaluator::kLevel1Code
+                        : CargoSafetyEvaluator::kLevel2Code;
+            }
+        }
+        fusion_input.static_map.reliable = static_result.valid &&
+            static_result.bounded &&
+            (fusion_input.static_map.hazard ||
+             static_result.coverage_ratio >=
+                 cargo_avoidance_fusion_config_
+                     .minimum_live_coverage_for_clear);
+        fusion_input.static_map.reason = static_result.reason;
+    }
+    fusion_input.static_authority = evidence_snapshot
+        ? evidence_snapshot->authority
+        : StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+    const bool runtime_contract = fusion_input.static_authority ==
+            StaticEvidenceAuthority::RUNTIME_MATURE &&
+        static_obstacle_evidence_index_.matureCellCount() > 0U;
+    const bool verified_contract = verified_map_session_loaded_ &&
+        fusion_input.static_authority ==
+            StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE;
+    fusion_input.static_session_manifest_valid =
+        runtime_contract || verified_contract;
+    fusion_input.static_session_hash_valid =
+        fusion_input.static_session_manifest_valid;
+    fusion_input.static_session_uuid_valid =
+        fusion_input.static_session_manifest_valid;
+    const CargoAvoidanceFusionResult fused = fuseCargoAvoidanceRisk(
+        fusion_input, cargo_avoidance_fusion_config_);
+
+    std_msgs::String debug;
+    std::ostringstream stream;
+    stream << "{\"cargo_lifecycle_id\":" << cargo_lifecycle_id_
+           << ",\"cargo_track_segment_id\":" << cargo_track_segment_id_
+           << ",\"lift_origin_state\":\""
+           << cargoLiftEventStateName(cargo_lift_origin_result_.state)
+           << "\",\"lift_origin_source\":"
+           << static_cast<int>(cargo_lift_origin_result_.origin.source)
+           << ",\"lift_origin_component_id\":"
+           << cargo_lift_origin_result_.origin.component_id
+           << ",\"lift_origin_reason\":\""
+           << cargo_lift_origin_result_.reason
+           << "\",\"lift_confirm_count\":"
+           << cargo_lift_origin_result_.lift_confirm_count
+           << ",\"thickness_confirm_count\":"
+           << cargo_lift_origin_result_.thickness_confirm_count
+           << ",\"geometry_fusion_valid\":"
+           << (cargo_frozen_geometry_.valid ? "true" : "false")
+           << ",\"geometry_frozen\":"
+           << (cargo_frozen_geometry_.frozen ? "true" : "false")
+           << ",\"geometry_reason\":\""
+           << cargo_frozen_geometry_.reason
+           << "\",\"pending_envelope_valid\":"
+           << (envelope.valid ? "true" : "false")
+           << ",\"pending_envelope_source\":\""
+           << pendingCargoEnvelopeSourceName(envelope.source)
+           << "\",\"pending_envelope_reason\":\"" << envelope.reason
+           << "\",\"pending_provisional_status\":\""
+           << fused.provisional_status
+           << "\",\"risk_live\":"
+           << (fused.risk_live ? "true" : "false")
+           << ",\"risk_static\":"
+           << (fused.risk_static ? "true" : "false")
+           << ",\"map_live_conflict\":"
+           << (fused.map_live_conflict ? "true" : "false")
+           << ",\"static_height_query_reason\":\""
+           << static_result.reason
+           << "\",\"static_height_authority\":"
+           << static_cast<int>(fusion_input.static_authority)
+           << ",\"static_height_matched_cells\":"
+           << static_result.matched_cells
+           << ",\"static_height_coverage\":"
+           << static_result.coverage_ratio
+           << ",\"map_session_uuid\":\""
+           << loaded_map_session_uuid_
+           << "\",\"map_session_generation\":"
+           << loaded_map_session_generation_
+           << ",\"map_session_verified\":"
+           << (verified_map_session_loaded_ ? "true" : "false") << "}";
+    debug.data = stream.str();
+    cargo_pending_avoidance_pub_.publish(debug);
+
+    const std::int32_t provisional_code = fused.official_valid &&
+        (fused.official_code == CargoSafetyEvaluator::kLevel1Code ||
+         fused.official_code == CargoSafetyEvaluator::kLevel2Code)
+        ? fused.official_code : 0;
+    std::uint32_t provisional_count = 0U;
+    float provisional_distance =
+        std::numeric_limits<float>::quiet_NaN();
+    float provisional_top_map =
+        std::numeric_limits<float>::quiet_NaN();
+    float provisional_uncertainty =
+        std::numeric_limits<float>::quiet_NaN();
+    float provisional_clearance =
+        std::numeric_limits<float>::quiet_NaN();
+    const bool use_live_geometry = fused.risk_live &&
+        live_result.has_cluster_evidence &&
+        live_result.warning_code == provisional_code;
+    if (use_live_geometry) {
+        const CargoSafetyClusterEvidence& evidence =
+            live_result.most_dangerous_cluster;
+        provisional_count = static_cast<std::uint32_t>(
+            std::min<std::size_t>(
+                evidence.point_count,
+                std::numeric_limits<std::uint32_t>::max()));
+        provisional_distance = evidence.footprint_distance_m;
+        provisional_uncertainty = evidence.obstacle_uncertainty_m;
+        provisional_clearance = evidence.conservative_clearance_m;
+        const Eigen::Vector3d obstacle_map = pose_map_base * Eigen::Vector3d(
+            evidence.nearest_point_base.x,
+            evidence.nearest_point_base.y,
+            evidence.obstacle_top_z95_m);
+        provisional_top_map = static_cast<float>(obstacle_map.z());
+    } else if (fused.risk_static &&
+               fusion_input.static_map.warning_code == provisional_code) {
+        provisional_count = static_cast<std::uint32_t>(std::min<std::size_t>(
+            static_result.matched_cells,
+            std::numeric_limits<std::uint32_t>::max()));
+        provisional_distance = fusion_input.static_map.distance_m;
+        provisional_top_map = static_result.highest_z95_m;
+        provisional_uncertainty = static_result.highest_uncertainty_m;
+        provisional_clearance = fusion_input.static_map.clearance_m;
+    }
+    publishHookOnlySafetyStatus(
+        hook, stamp, hook_fixed_cargo_.valid,
+        std::string("pending_cargo:") +
+            pendingCargoEnvelopeSourceName(envelope.source) +
+            ":" + fused.provisional_status + ":" + fused.reason,
+        false, provisional_code, provisional_count, provisional_distance,
+        provisional_top_map, provisional_uncertainty,
+        provisional_clearance);
+
+    visualization_msgs::Marker marker;
+    marker.header.stamp = stamp;
+    marker.header.frame_id = "base_link";
+    marker.ns = "pending_cargo_envelope";
+    marker.id = 0;
+    marker.type = visualization_msgs::Marker::CUBE;
+    marker.action = envelope.valid
+        ? visualization_msgs::Marker::ADD
+        : visualization_msgs::Marker::DELETE;
+    marker.pose.orientation.w = 1.0;
+    if (envelope.valid) {
+        marker.pose.position.x = envelope.center_base.x();
+        marker.pose.position.y = envelope.center_base.y();
+        marker.pose.position.z = envelope.center_base.z();
+        const float half_yaw = 0.5F * envelope.yaw_base_rad;
+        marker.pose.orientation.z = std::sin(half_yaw);
+        marker.pose.orientation.w = std::cos(half_yaw);
+        marker.scale.x = envelope.length_m;
+        marker.scale.y = envelope.width_m;
+        marker.scale.z = envelope.height_m;
+        marker.color.r = 1.0F;
+        marker.color.g = 0.55F;
+        marker.color.b = 0.0F;
+        marker.color.a = 0.28F;
+    }
+    cargo_pending_envelope_marker_pub_.publish(marker);
+}
+
 void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
@@ -13842,6 +14656,20 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const bool visual_conflict = hook_fixed_cargo_.valid;
     const bool required_role =
         hook_load_signal_role_ == HookLoadSignalRole::REQUIRED;
+    if (hook.valid &&
+        hook.state == lidar_slam2_msgs::HookLoadState::STATE_EMPTY) {
+        if (!cargo_hook_state_initialized_ || cargo_previous_hook_loaded_) {
+            cargo_lift_origin_binder_.reset();
+            cargo_lift_origin_result_ = CargoLiftOriginResult{};
+            cargo_geometry_fusion_.reset();
+            cargo_frozen_geometry_ = CargoFrozenGeometry{};
+            pending_cargo_envelope_ = PendingCargoEnvelope{};
+            cargo_lifecycle_id_ = 0U;
+            cargo_track_segment_id_ = 0U;
+        }
+        cargo_hook_state_initialized_ = true;
+        cargo_previous_hook_loaded_ = false;
+    }
     if (required_role &&
         (!hook.valid ||
          hook.state == lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN ||
@@ -13889,12 +14717,20 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         formal_cargo_removal_authorized_ = false;
         cargo_static_evidence_track_start_sequence_ = 0U;
     }
+    updateCargoLiftAndGeometryFusion(
+        hook, pose_map_base, stamp, active_track);
     cargo_fusion_track_active_ = active_track;
     if (!active_track) {
-        // Before either a retained cargo track or an independently confirmed
-        // EMPTY observation exists, the safety evidence epoch has not
-        // started.  Report 30 (not-ready), not 33 (an established cargo whose
-        // live pose/height has become invalid).
+        const bool hook_loaded = hook.valid &&
+            hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED;
+        if (hook_loaded && pending_cargo_envelope_.valid) {
+            formal_cargo_removal_authorized_ = false;
+            runPendingCargoAvoidance(
+                pending_cargo_envelope_, hook, obstacle_cloud_base,
+                pose_map_base, stamp, obstacle_cloud_stamp,
+                processing_age_sec);
+            return;
+        }
         publishHookOnlySafetyStatus(
             hook, stamp, visual_conflict,
             visual_conflict ? "cargo_candidate_not_yet_authoritative"
@@ -14060,7 +14896,12 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         observation.prior_height_m = cargo_origin_height_m_;
         observation.origin_height_valid = origin_height_matches_track;
         observation.origin_height_m = cargo_origin_height_m_;
-        const float frozen_thickness = hook_lock_.locked_shape.height_m;
+        const bool fused_geometry_formal = cargo_frozen_geometry_.valid &&
+            cargo_frozen_geometry_.frozen &&
+            cargo_frozen_geometry_.cargo_lifecycle_id == cargo_lifecycle_id_;
+        const float frozen_thickness = fused_geometry_formal
+            ? cargo_frozen_geometry_.height_m
+            : hook_lock_.locked_shape.height_m;
         observation.frozen_thickness_valid =
             hook_lock_.locked_shape.valid &&
             std::isfinite(frozen_thickness) &&
@@ -14076,10 +14917,24 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         observation.frozen_thickness_confidence = std::clamp(
             hook_lock_.locked_shape.orientation_confidence,
             0.0F, 1.0F);
-        // MAP_STATIC and MAP_DIFF stay invalid until an independent map-backed
-        // observation is available. Never label the origin prior as map evidence.
-        observation.map_static_height_valid = false;
-        observation.map_diff_height_valid = false;
+        const bool authorized_origin = cargo_lift_origin_result_.valid &&
+            (cargo_lift_origin_result_.origin.source ==
+                 CargoOriginCandidateSource::OPERATOR_APPROVED_BASELINE ||
+             cargo_lift_origin_result_.origin.source ==
+                 CargoOriginCandidateSource::RUNTIME_MATURE_STATIC) &&
+            (cargo_lift_origin_result_.origin.authority ==
+                 StaticEvidenceAuthority::RUNTIME_MATURE ||
+             cargo_lift_origin_result_.origin.authority ==
+                 StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE);
+        observation.map_static_height_valid = authorized_origin &&
+            std::isfinite(cargo_lift_origin_result_.static_thickness_m);
+        observation.map_static_height_m =
+            cargo_lift_origin_result_.static_thickness_m;
+        observation.map_diff_height_valid = authorized_origin &&
+            cargo_lift_origin_result_.lift_confirmed &&
+            std::isfinite(cargo_lift_origin_result_.revealed_thickness_m);
+        observation.map_diff_height_m =
+            cargo_lift_origin_result_.revealed_thickness_m;
     }
 
     last_cargo_bottom_result_ = cargo_bottom_fusion_.update(observation);
@@ -15444,7 +16299,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         last_cargo_bottom_result_.geometry_valid &&
         std::isfinite(
             last_cargo_bottom_result_.geometry.bottom_z_map);
-    avoidance_input.pending_envelope_valid = rigid_geometry.valid;
+    avoidance_input.pending_envelope_valid = false;
     avoidance_input.live.available =
         last_cargo_safety_result_.input_valid;
     avoidance_input.live.reliable =
