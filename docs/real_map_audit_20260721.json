@@ -1,0 +1,303 @@
+{
+  "contract": {
+    "keyframe_directory_present": true,
+    "keyframe_pcd_count": 80,
+    "manifest_present": false,
+    "poses_raw_present": true,
+    "static_evidence_present": false
+  },
+  "findings": [
+    {
+      "code": "SESSION_MANIFEST_MISSING",
+      "detail": "layer generation, UUID and hashes cannot be proven",
+      "severity": "error"
+    },
+    {
+      "code": "STATIC_EVIDENCE_MISSING",
+      "detail": "clean PCD alone has no temporal/operator authority",
+      "severity": "error"
+    },
+    {
+      "code": "DISPLAY_FULL_IS_FILTERED_OBJECTS_ONLY",
+      "detail": "legacy display_full is not a coherent full display layer",
+      "severity": "warning"
+    }
+  ],
+  "layers": {
+    "display": {
+      "bytes": 25128296,
+      "finite_points": 2094010,
+      "maximum_xyz": [
+        26.992633819580078,
+        10.792632102966309,
+        5.816736698150635
+      ],
+      "minimum_xyz": [
+        -28.73136329650879,
+        -26.790382385253906,
+        -0.7435305118560791
+      ],
+      "nonfinite_points": 0,
+      "occupied_xy_cells": 21384,
+      "occupied_xyz_voxels": 70614,
+      "path": "map_display.pcd",
+      "pcd": {
+        "encoding": "binary",
+        "fields": [
+          "x",
+          "y",
+          "z"
+        ],
+        "header_points": 2094010,
+        "point_step_bytes": 12
+      },
+      "points": 2094010,
+      "present": true,
+      "sha256": "825FE35248DA3F29080D77DE5714DD636CA4DC6BF091E061B6A6713561295FF7"
+    },
+    "display_full": {
+      "bytes": 1812774,
+      "finite_points": 151050,
+      "maximum_xyz": [
+        16.632396697998047,
+        9.348095893859863,
+        5.526185989379883
+      ],
+      "minimum_xyz": [
+        -27.43367576599121,
+        -20.408084869384766,
+        0.018658293411135674
+      ],
+      "nonfinite_points": 0,
+      "occupied_xy_cells": 6989,
+      "occupied_xyz_voxels": 21651,
+      "path": "map_display_full.pcd",
+      "pcd": {
+        "encoding": "binary",
+        "fields": [
+          "x",
+          "y",
+          "z"
+        ],
+        "header_points": 151050,
+        "point_step_bytes": 12
+      },
+      "points": 151050,
+      "present": true,
+      "sha256": "FD0EDB192B39D033DCA96638B6C904304B2D51F984041E577F45B1B4DC7E50A5"
+    },
+    "ground": {
+      "bytes": 10833714,
+      "finite_points": 902795,
+      "maximum_xyz": [
+        26.992633819580078,
+        10.792632102966309,
+        4.171593189239502
+      ],
+      "minimum_xyz": [
+        -28.73136329650879,
+        -26.790382385253906,
+        -0.7435305118560791
+      ],
+      "nonfinite_points": 0,
+      "occupied_xy_cells": 20992,
+      "occupied_xyz_voxels": 52001,
+      "path": "map_ground.pcd",
+      "pcd": {
+        "encoding": "binary",
+        "fields": [
+          "x",
+          "y",
+          "z"
+        ],
+        "header_points": 902795,
+        "point_step_bytes": 12
+      },
+      "points": 902795,
+      "present": true,
+      "sha256": "D527C1EB61B2C684B33A84A2C074255849E3E7030659F1AE0CD786645175BB4E"
+    },
+    "objects_clean": {
+      "bytes": 3455298,
+      "finite_points": 287927,
+      "maximum_xyz": [
+        23.39394187927246,
+        8.099271774291992,
+        5.80114221572876
+      ],
+      "minimum_xyz": [
+        -27.291582107543945,
+        -20.911386489868164,
+        -0.10522765666246414
+      ],
+      "nonfinite_points": 0,
+      "occupied_xy_cells": 6735,
+      "occupied_xyz_voxels": 26729,
+      "path": "map_objects_clean.pcd",
+      "pcd": {
+        "encoding": "binary",
+        "fields": [
+          "x",
+          "y",
+          "z"
+        ],
+        "header_points": 287927,
+        "point_step_bytes": 12
+      },
+      "points": 287927,
+      "present": true,
+      "sha256": "1055A66DFFF0F04BCD2A08B1550BB7A030F4CD3D5ADC5BDA804C7A2CDBA50E01"
+    },
+    "objects_filtered": {
+      "bytes": 1812774,
+      "finite_points": 151050,
+      "maximum_xyz": [
+        16.632396697998047,
+        9.348095893859863,
+        5.526185989379883
+      ],
+      "minimum_xyz": [
+        -27.43367576599121,
+        -20.408084869384766,
+        0.018658293411135674
+      ],
+      "nonfinite_points": 0,
+      "occupied_xy_cells": 6989,
+      "occupied_xyz_voxels": 21651,
+      "path": "map_objects_filtered.pcd",
+      "pcd": {
+        "encoding": "binary",
+        "fields": [
+          "x",
+          "y",
+          "z"
+        ],
+        "header_points": 151050,
+        "point_step_bytes": 12
+      },
+      "points": 151050,
+      "present": true,
+      "sha256": "FD0EDB192B39D033DCA96638B6C904304B2D51F984041E577F45B1B4DC7E50A5"
+    },
+    "objects_raw": {
+      "bytes": 4000458,
+      "finite_points": 333357,
+      "maximum_xyz": [
+        23.600257873535156,
+        9.348095893859863,
+        5.816736698150635
+      ],
+      "minimum_xyz": [
+        -27.43367576599121,
+        -21.70970344543457,
+        -0.20798322558403015
+      ],
+      "nonfinite_points": 0,
+      "occupied_xy_cells": 9135,
+      "occupied_xyz_voxels": 31800,
+      "path": "map_objects_raw.pcd",
+      "pcd": {
+        "encoding": "binary",
+        "fields": [
+          "x",
+          "y",
+          "z"
+        ],
+        "header_points": 333357,
+        "point_step_bytes": 12
+      },
+      "points": 333357,
+      "present": true,
+      "sha256": "873BAEF4BA127E71FD09F6D9DA6A715F56B98849D00E6F02E8FC1052F55E259F"
+    },
+    "registration": {
+      "bytes": 12180920,
+      "finite_points": 1015062,
+      "maximum_xyz": [
+        26.992633819580078,
+        10.792632102966309,
+        5.816736698150635
+      ],
+      "minimum_xyz": [
+        -28.73136329650879,
+        -26.790382385253906,
+        -0.7111907005310059
+      ],
+      "nonfinite_points": 0,
+      "occupied_xy_cells": 21084,
+      "occupied_xyz_voxels": 66209,
+      "path": "map_registration.pcd",
+      "pcd": {
+        "encoding": "binary",
+        "fields": [
+          "x",
+          "y",
+          "z"
+        ],
+        "header_points": 1015062,
+        "point_step_bytes": 12
+      },
+      "points": 1015062,
+      "present": true,
+      "sha256": "1F066E2BF35EDF7175C3BF38655CDFDF303252BAEA7D3CE6FF279767238EE5E7"
+    }
+  },
+  "parameters": {
+    "cell_size_m": 0.25,
+    "voxel_size_m": 0.25
+  },
+  "relationships": {
+    "byte_identical_layers": [
+      [
+        "display_full",
+        "objects_filtered"
+      ]
+    ],
+    "point_set_overlap": {
+      "display_full_vs_objects_filtered": {
+        "intersection_unique": 151050,
+        "lhs_contained_ratio": 1.0,
+        "lhs_unique": 151050,
+        "rhs_contained_ratio": 1.0,
+        "rhs_unique": 151050
+      },
+      "objects_clean_vs_objects_raw": {
+        "intersection_unique": 287927,
+        "lhs_contained_ratio": 1.0,
+        "lhs_unique": 287927,
+        "rhs_contained_ratio": 0.8637196759030109,
+        "rhs_unique": 333357
+      },
+      "objects_filtered_vs_objects_clean": {
+        "intersection_unique": 127771,
+        "lhs_contained_ratio": 0.845885468387951,
+        "lhs_unique": 151050,
+        "rhs_contained_ratio": 0.4437617868418037,
+        "rhs_unique": 287927
+      }
+    }
+  },
+  "schema": "ndt_slam_real_map_audit",
+  "schema_version": 1,
+  "session_directory": "maps/warehouse_baseline_20260721_095645/session_1784599040.792685",
+  "source": {
+    "archive_bytes": 128203277,
+    "archive_sha256": "F4D9A7115B601E17B50259223D49239DA4EDEE576FFA0DC4356EA292940C819C",
+    "input": "maps.zip"
+  },
+  "static_height_field_projection": {
+    "cell_size_m": 0.25,
+    "discarded_small_clusters": 4266,
+    "layer_histogram": {
+      "1": 4733,
+      "2": 475,
+      "3": 232
+    },
+    "layers": 6379,
+    "maximum_layers_per_cell": 3,
+    "maximum_merge_gap_m": 0.18,
+    "minimum_points_per_layer": 6,
+    "multi_layer_cells": 707,
+    "occupied_cells": 5440
+  }
+}
