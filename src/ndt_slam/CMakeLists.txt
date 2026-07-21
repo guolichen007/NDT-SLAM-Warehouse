@@ -147,6 +147,7 @@ set(LIBRARY_SOURCES
   src/cargo_lift_origin_binder.cpp
   src/cargo_geometry_fusion.cpp
   src/cargo_avoidance_fusion.cpp
+  src/pending_cargo_envelope.cpp
   src/map_session_snapshot.cpp
   src/cargo_motion_corridor.cpp
   src/cargo_residual_classifier.cpp
@@ -329,6 +330,13 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_avoidance_fusion_test.cpp)
   if(TARGET cargo_avoidance_fusion_test)
     target_link_libraries(cargo_avoidance_fusion_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(pending_cargo_envelope_test
+    test/pending_cargo_envelope_test.cpp)
+  if(TARGET pending_cargo_envelope_test)
+    target_link_libraries(pending_cargo_envelope_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
