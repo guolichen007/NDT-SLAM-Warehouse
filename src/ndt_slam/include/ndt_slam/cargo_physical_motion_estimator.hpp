@@ -79,6 +79,8 @@ class CargoPhysicalMotionEstimator {
   double last_valid_sample_stamp_sec_ = 0.0;
   double state_since_sec_ = 0.0;
   double transition_candidate_since_sec_ = 0.0;
+  double raw_rejection_since_sec_ = 0.0;
+  int raw_rejection_count_ = 0;
   bool previous_position_valid_ = false;
   Eigen::Vector2d previous_position_ = Eigen::Vector2d::Zero();
   bool filtered_speed_valid_ = false;

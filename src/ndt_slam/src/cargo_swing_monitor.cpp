@@ -197,6 +197,30 @@ void CargoSwingMonitor::reset() {
   previous_crane_motion_state_ = CargoPhysicalMotionState::UNKNOWN;
 }
 
+void CargoSwingMonitor::resetMeasurementHistoryPreserveSafetyLatches(
+    double stamp_sec) {
+  // P1-3: clear directional/kinematic history that belongs to the old
+  // track segment, but preserve latched safety alarms so that a
+  // re-acquisition of the same cargo does not silently clear alarms.
+  history_.clear();
+  last_measurement_stamp_sec_ = stamp_sec;
+  filtered_offset_valid_ = false;
+  filtered_offset_.setZero();
+  stationary_enter_stamp_sec_ = 0.0;
+  sway_below_end_stamp_sec_ = 0.0;
+  skew_alarm_candidate_stamp_sec_ = 0.0;
+  skew_clear_candidate_stamp_sec_ = 0.0;
+  // Preserve: immediate_alarm_latched_, settling_active_,
+  //           skew_alarm_latched_, skew_alarm_enter_stamp_sec_,
+  //           torsion_latched_state_, sway_alarm_enter_stamp_sec_,
+  //           last_severe_measurement_stamp_sec_, settling_enter_stamp_sec_,
+  //           torsion_clear_candidate_stamp_sec_,
+  //           last_torsion_evidence_stamp_sec_.
+
+  result_.observation_state = CargoSwingObservationState::TRACK_CHANGED;
+  result_.reason = "track_segment_changed_history_reset_alarm_preserved";
+}
+
 CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
   if (!config_.enabled) {
     reset();
@@ -244,6 +268,21 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     last_input_stamp_sec_ = input.stamp_sec;
     result_.observation_state = CargoSwingObservationState::TRACK_CHANGED;
     result_.reason = "track_lifecycle_or_anchor_changed_reset";
+    return result_;
+  }
+  // P1-3: track segment change must clear directional/kinematic history
+  // (DC/AC, principal axis, zero crossings, candidate timers) but must
+  // preserve any already-latched safety alarms (sway, skew, torsion).
+  const bool segment_changed = track_segment_id_ != 0U &&
+      track_segment_id_ != input.track_segment_id;
+  if (segment_changed) {
+    resetMeasurementHistoryPreserveSafetyLatches(input.stamp_sec);
+    cargo_lifecycle_id_ = input.cargo_lifecycle_id;
+    track_segment_id_ = input.track_segment_id;
+    hook_anchor_source_ = input.hook_anchor_source;
+    last_input_stamp_sec_ = input.stamp_sec;
+    // Do not accumulate this frame's measurement into the fresh history;
+    // the next frame will establish a new baseline from scratch.
     return result_;
   }
   cargo_lifecycle_id_ = input.cargo_lifecycle_id;
@@ -583,7 +622,17 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     } else {
       sway = CargoSwayState::NORMAL;
     }
+  } else if (severeSway(result_.sway_state)) {
+    // An immature replacement window is not evidence that a previously
+    // established safety state disappeared.
+    sway = result_.sway_state;
+  }
 
+  // Skew pull and torsion evaluation runs whenever sufficient history is
+  // available, independent of the sway state machine latch. This prevents
+  // an immediate sway alarm from permanently blocking directional skew
+  // detection that requires accumulated DC/AC evidence.
+  if (history_duration >= config_.minimum_valid_observation_sec) {
     mean_angle_deg = std::atan2(
         mean_offset.norm(), rope_length) * kRadToDeg;
     const bool skew_angle_suspect = angle_authoritative &&
@@ -598,6 +647,12 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
         history_duration >= config_.skew_min_duration_sec;
     skew = skew_suspected ? CargoSkewPullState::SKEW_PULL_SUSPECTED
                           : CargoSkewPullState::NO_SKEW_PULL;
+    // When the immediate-offset path flagged SUSPECTED but skew history is
+    // not yet mature for full DC/AC evaluation, keep the immediate SUSPECTED
+    // rather than downgrading to NO_SKEW_PULL on incomplete evidence.
+    if (skew == CargoSkewPullState::NO_SKEW_PULL && immediate_skew_offset) {
+      skew = CargoSkewPullState::SKEW_PULL_SUSPECTED;
+    }
     // Configured rope length remains diagnostic-only for every formal angle
     // threshold, including skew pull. Absolute LiDAR offset is the independent
     // safety channel when measured rope length is unavailable.
@@ -608,8 +663,13 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     const bool skew_immediate_alarm = immediate_skew_offset;
     const bool skew_alarm_evidence = skew_suspected &&
         (skew_angle_alarm || skew_offset_alarm || skew_immediate_alarm);
-    skew_alarm_authority_missing =
-        skew_alarm_evidence && !hoist_alarm_authorized;
+    // skew_alarm_authority_missing must not regress from the value set by
+    // the immediate-offset path when the extracted block re-evaluates with
+    // immature history (skew_suspected == false → skew_alarm_evidence == false).
+    if (skew_alarm_evidence || !immediate_skew_offset) {
+      skew_alarm_authority_missing =
+          skew_alarm_evidence && !hoist_alarm_authorized;
+    }
     if (skew_alarm_evidence && hoist_alarm_authorized) {
       if (skew_alarm_candidate_stamp_sec_ <= 0.0) {
         skew_alarm_candidate_stamp_sec_ = input.stamp_sec;
@@ -633,10 +693,6 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
         torsion = CargoTorsionState::NORMAL;
       }
     }
-  } else if (severeSway(result_.sway_state)) {
-    // An immature replacement window is not evidence that a previously
-    // established safety state disappeared.
-    sway = result_.sway_state;
   }
 
   if (skew == CargoSkewPullState::SKEW_PULL_ALARM) {
@@ -649,10 +705,19 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     const bool minimum_hold_complete = skew_alarm_enter_stamp_sec_ > 0.0 &&
         input.stamp_sec - skew_alarm_enter_stamp_sec_ >=
             config_.skew_alarm_hold_sec;
-    const bool clear_evidence = !hoist_up ||
-        (dc_offset_m <= config_.skew_clear_offset_m &&
-         direction_consistency <=
-             config_.skew_clear_direction_consistency);
+    // P1-1: stale/UNKNOWN hoist state must never serve as clear evidence.
+    // Only a fresh explicit non-UP (STOPPED or DOWN) combined with
+    // authoritative geometry recovery can clear a latched skew alarm.
+    const bool fresh_explicit_non_up =
+        input.hoist_state_fresh &&
+        (input.hoist_motion_state == HoistMotionState::STOPPED ||
+         input.hoist_motion_state == HoistMotionState::DOWN);
+    const bool authoritative_geometry_recovered =
+        offset_authoritative &&
+        dc_offset_m <= config_.skew_clear_offset_m &&
+        direction_consistency <= config_.skew_clear_direction_consistency;
+    const bool clear_evidence =
+        fresh_explicit_non_up && authoritative_geometry_recovered;
     if (minimum_hold_complete && clear_evidence) {
       if (skew_clear_candidate_stamp_sec_ <= 0.0) {
         skew_clear_candidate_stamp_sec_ = input.stamp_sec;
@@ -730,7 +795,10 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
       torsion_state_change_stamp_sec_ <= 0.0) {
     torsion_state_change_stamp_sec_ = input.stamp_sec;
   }
-  result_.valid = !torsion_evidence_stale;
+  // P1-2: torsion evidence stale must not invalidate the entire status.
+  // Sway and skew pull channels remain valid when only torsion orientation
+  // evidence has expired. The torsion channel itself reports NOT_EVALUATED.
+  result_.valid = true;
   result_.observation_state =
       CargoSwingObservationState::CURRENT_MEASUREMENT;
   result_.sway_state = sway;
@@ -788,7 +856,7 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     result_.recommended_action = CargoSwingRecommendedAction::WATCH;
   }
   result_.reason = torsion_evidence_stale
-      ? "torsion_orientation_evidence_stale"
+      ? "torsion_orientation_evidence_stale_sway_skew_valid"
       : (result_.alarm_inhibited
       ? "skew_alarm_authority_unavailable"
       : (measurement_gap_reset

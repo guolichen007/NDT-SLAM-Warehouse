@@ -387,7 +387,9 @@ TEST(CargoSwingMonitorTest, SkewAlarmClearsAfterConfirmedRecovery) {
   config.skew_alarm_confirm_sec = 0.0;
   config.measurement_filter_alpha = 1.0F;
   config.skew_alarm_hold_sec = 0.1;
-  config.skew_clear_confirm_sec = 0.2;
+  config.skew_clear_confirm_sec = 0.1;
+  config.maximum_observation_gap_sec = 0.3;
+  config.history_window_sec = 0.3;  // flush old alarm samples quickly
   CargoSwingMonitor monitor(config);
   auto input = validInput(1.0);
   input.hoist_state_fresh = true;
@@ -397,9 +399,12 @@ TEST(CargoSwingMonitorTest, SkewAlarmClearsAfterConfirmedRecovery) {
             CargoSkewPullState::SKEW_PULL_ALARM);
   input.measured_center_base.x() = 0.0F;
   input.hoist_motion_state = HoistMotionState::STOPPED;
-  input.stamp_sec = 1.1;
-  monitor.update(input);
-  input.stamp_sec = 1.31;
+  // Feed calm frames: first flushes old alarm from history window,
+  // second starts clear candidate, third confirms the clear.
+  for (double t = 1.1; t <= 1.5; t += 0.1) {
+    input.stamp_sec = t;
+    monitor.update(input);
+  }
   EXPECT_NE(monitor.update(input).skew_pull_state,
             CargoSkewPullState::SKEW_PULL_ALARM);
 }
@@ -444,9 +449,13 @@ TEST(CargoSwingMonitorTest,
             CargoTorsionState::TORSION_ALARM);
   input.stamp_sec = 1.5;
   const auto stale = monitor.update(input);
-  EXPECT_FALSE(stale.valid);
+  // P1-2: torsion evidence stale must not invalidate the entire status.
+  // Sway and skew channels remain valid; only torsion reports NOT_EVALUATED.
+  EXPECT_TRUE(stale.valid);
   EXPECT_EQ(stale.torsion_state,
             CargoTorsionState::NOT_EVALUATED);
+  EXPECT_NE(stale.reason.find("torsion_orientation_evidence_stale"),
+            std::string::npos);
 }
 
 TEST(CargoSwingMonitorTest, SkewAlarmRecommendsStopAndSettle) {
@@ -465,6 +474,364 @@ TEST(CargoSwingMonitorTest, SkewAlarmRecommendsStopAndSettle) {
   EXPECT_EQ(result.recommended_action,
             CargoSwingRecommendedAction::STOP_AND_SETTLE);
   EXPECT_EQ(result.reason, "stop_hoist_and_travel");
+}
+
+// ─── P1-1: stale/unknown hoist cannot clear latched skew alarm ───
+
+CargoSwingConfig fastSkewAlarmConfig() {
+  CargoSwingConfig config;
+  config.minimum_valid_observation_sec = 0.0;
+  config.skew_min_duration_sec = 0.0;
+  config.skew_alarm_confirm_sec = 0.0;
+  config.measurement_filter_alpha = 1.0F;
+  config.skew_alarm_hold_sec = 0.1;
+  config.skew_clear_confirm_sec = 0.2;
+  config.maximum_observation_gap_sec = 0.3;
+  config.history_window_sec = 0.3;  // flush old alarm samples quickly
+  return config;
+}
+
+void feedSkewAlarm(CargoSwingMonitor* monitor, double start_stamp) {
+  auto input = validInput(start_stamp);
+  input.hoist_state_fresh = true;
+  input.hoist_motion_state = HoistMotionState::UP;
+  input.measured_center_base.x() = 0.8F;
+  ASSERT_EQ(monitor->update(input).skew_pull_state,
+            CargoSkewPullState::SKEW_PULL_ALARM);
+}
+
+TEST(CargoSwingMonitorTest, StaleHoistCannotClearLatchedSkewAlarm) {
+  CargoSwingConfig config = fastSkewAlarmConfig();
+  CargoSwingMonitor monitor(config);
+  feedSkewAlarm(&monitor, 1.0);
+
+  // hoist_state_fresh = false → stale hoist → must not clear alarm
+  auto input = validInput(1.2);
+  input.hoist_state_fresh = false;  // stale
+  input.measured_center_base.x() = 0.0F;
+  // Feed several frames past hold + clear confirm
+  for (double t = 1.3; t <= 1.7; t += 0.1) {
+    input.stamp_sec = t;
+    const auto result = monitor.update(input);
+    EXPECT_EQ(result.skew_pull_state,
+              CargoSkewPullState::SKEW_PULL_ALARM)
+        << "stale hoist cleared alarm at t=" << t;
+  }
+}
+
+TEST(CargoSwingMonitorTest, UnknownHoistCannotClearLatchedSkewAlarm) {
+  CargoSwingConfig config = fastSkewAlarmConfig();
+  CargoSwingMonitor monitor(config);
+  feedSkewAlarm(&monitor, 1.0);
+
+  auto input = validInput(1.2);
+  input.hoist_state_fresh = true;
+  input.hoist_motion_state = HoistMotionState::UNKNOWN;
+  input.measured_center_base.x() = 0.0F;
+  for (double t = 1.3; t <= 1.7; t += 0.1) {
+    input.stamp_sec = t;
+    const auto result = monitor.update(input);
+    EXPECT_EQ(result.skew_pull_state,
+              CargoSkewPullState::SKEW_PULL_ALARM)
+        << "UNKNOWN hoist cleared alarm at t=" << t;
+  }
+}
+
+TEST(CargoSwingMonitorTest,
+     FreshStoppedAndRecoveredGeometryCanClearSkewAlarm) {
+  CargoSwingConfig config = fastSkewAlarmConfig();
+  config.skew_clear_confirm_sec = 0.1;
+  CargoSwingMonitor monitor(config);
+  feedSkewAlarm(&monitor, 1.0);
+
+  // Fresh STOPPED + recovered geometry → clear after confirm
+  auto input = validInput(1.2);
+  input.hoist_state_fresh = true;
+  input.hoist_motion_state = HoistMotionState::STOPPED;
+  input.measured_center_base.x() = 0.0F;
+  for (double t = 1.2; t <= 1.6; t += 0.1) {
+    input.stamp_sec = t;
+    monitor.update(input);
+  }
+  const auto result = monitor.update(input);
+  EXPECT_NE(result.skew_pull_state,
+            CargoSkewPullState::SKEW_PULL_ALARM);
+}
+
+TEST(CargoSwingMonitorTest,
+     FreshDownAndRecoveredGeometryCanClearSkewAlarm) {
+  CargoSwingConfig config = fastSkewAlarmConfig();
+  config.skew_clear_confirm_sec = 0.1;
+  CargoSwingMonitor monitor(config);
+  feedSkewAlarm(&monitor, 1.0);
+
+  // Fresh DOWN + recovered geometry → clear after confirm
+  auto input = validInput(1.2);
+  input.hoist_state_fresh = true;
+  input.hoist_motion_state = HoistMotionState::DOWN;
+  input.measured_center_base.x() = 0.0F;
+  for (double t = 1.2; t <= 1.6; t += 0.1) {
+    input.stamp_sec = t;
+    monitor.update(input);
+  }
+  const auto result = monitor.update(input);
+  EXPECT_NE(result.skew_pull_state,
+            CargoSkewPullState::SKEW_PULL_ALARM);
+}
+
+TEST(CargoSwingMonitorTest, NonAuthoritativeOffsetCannotClearSkewAlarm) {
+  CargoSwingConfig config = fastSkewAlarmConfig();
+  CargoSwingMonitor monitor(config);
+  feedSkewAlarm(&monitor, 1.0);
+
+  // Fresh STOPPED + low offset but non-authoritative → must NOT clear
+  auto input = validInput(1.2);
+  input.hoist_state_fresh = true;
+  input.hoist_motion_state = HoistMotionState::STOPPED;
+  input.hook_anchor_xy_authoritative = false;  // offset not authoritative
+  input.measured_center_base.x() = 0.0F;
+  for (double t = 1.3; t <= 1.7; t += 0.1) {
+    input.stamp_sec = t;
+    const auto result = monitor.update(input);
+    EXPECT_EQ(result.skew_pull_state,
+              CargoSkewPullState::SKEW_PULL_ALARM)
+        << "non-authoritative offset cleared alarm at t=" << t;
+  }
+}
+
+// ─── P1-2: torsion stale channel isolation ───
+
+TEST(CargoSwingMonitorTest,
+     TorsionStaleDoesNotSuppressCurrentSwayAlarm) {
+  CargoSwingConfig config;
+  config.minimum_valid_observation_sec = 0.0;
+  config.maximum_alarm_evidence_hold_sec = 0.3;
+  CargoSwingMonitor monitor(config);
+
+  // First establish a torsion alarm
+  auto input = validInput(1.0);
+  input.locked_yaw_valid = true;
+  input.measured_yaw_valid = true;
+  input.locked_yaw_base_rad = 0.0F;
+  input.measured_yaw_base_rad = 0.25F;
+  ASSERT_EQ(monitor.update(input).torsion_state,
+            CargoTorsionState::TORSION_ALARM);
+
+  // Then establish a sway alarm via extreme offset
+  input.stamp_sec = 1.1;
+  input.measured_center_base.x() = 0.8F;
+  const auto sway_alarm = monitor.update(input);
+  ASSERT_EQ(sway_alarm.sway_state, CargoSwayState::SWAY_ALARM);
+
+  // Now let torsion evidence go stale while sway remains valid
+  input.stamp_sec = 1.2;
+  input.measured_yaw_valid = false;  // torsion evidence lost
+  input.measured_center_base.x() = 0.8F;  // sway still extreme
+  monitor.update(input);
+  input.stamp_sec = 1.5;  // past maximum_alarm_evidence_hold_sec
+  const auto result = monitor.update(input);
+
+  // P1-2: valid must remain true, sway alarm preserved
+  EXPECT_TRUE(result.valid);
+  EXPECT_EQ(result.sway_state, CargoSwayState::SWAY_ALARM);
+  EXPECT_EQ(result.torsion_state, CargoTorsionState::NOT_EVALUATED);
+}
+
+TEST(CargoSwingMonitorTest,
+     TorsionStaleDoesNotSuppressCurrentSkewAlarm) {
+  CargoSwingConfig config;
+  config.minimum_valid_observation_sec = 0.0;
+  config.maximum_alarm_evidence_hold_sec = 0.3;
+  config.skew_min_duration_sec = 0.0;
+  config.skew_alarm_confirm_sec = 0.0;
+  CargoSwingMonitor monitor(config);
+
+  // Establish both torsion and skew alarms
+  auto input = validInput(1.0);
+  input.hoist_state_fresh = true;
+  input.hoist_motion_state = HoistMotionState::UP;
+  input.measured_center_base.x() = 0.8F;
+  input.locked_yaw_valid = true;
+  input.measured_yaw_valid = true;
+  input.locked_yaw_base_rad = 0.0F;
+  input.measured_yaw_base_rad = 0.25F;
+  const auto initial = monitor.update(input);
+  ASSERT_EQ(initial.torsion_state, CargoTorsionState::TORSION_ALARM);
+  ASSERT_EQ(initial.skew_pull_state,
+            CargoSkewPullState::SKEW_PULL_ALARM);
+
+  // Let torsion go stale while skew alarm persists
+  input.stamp_sec = 1.1;
+  input.measured_yaw_valid = false;
+  monitor.update(input);
+  input.stamp_sec = 1.5;
+  const auto result = monitor.update(input);
+
+  // P1-2: valid=true, skew alarm preserved, torsion=NOT_EVALUATED
+  EXPECT_TRUE(result.valid);
+  EXPECT_EQ(result.skew_pull_state,
+            CargoSkewPullState::SKEW_PULL_ALARM);
+  EXPECT_EQ(result.torsion_state, CargoTorsionState::NOT_EVALUATED);
+}
+
+// ─── P1-3: track segment change clears history, preserves safety latches ───
+
+TEST(CargoSwingMonitorTest,
+     TrackSegmentChangeClearsDirectionalHistory) {
+  CargoSwingConfig config;
+  config.minimum_valid_observation_sec = 0.5;
+  config.skew_min_duration_sec = 0.5;
+  CargoSwingMonitor monitor(config);
+
+  // Feed consistent directional offset on segment 3
+  for (int i = 0; i < 8; ++i) {
+    auto input = validInput(1.0 + i * 0.1);
+    input.hoist_state_fresh = true;
+    input.hoist_motion_state = HoistMotionState::UP;
+    input.measured_center_base.x() = 0.6F;
+    monitor.update(input);
+  }
+
+  // Switch to segment 5 — history must reset
+  auto seg5 = validInput(2.0);
+  seg5.track_segment_id = 5U;
+  seg5.hoist_state_fresh = true;
+  seg5.hoist_motion_state = HoistMotionState::UP;
+  seg5.measured_center_base.x() = -0.6F;  // opposite direction
+  const auto result = monitor.update(seg5);
+
+  // P1-3: segment change must be signaled
+  EXPECT_EQ(result.observation_state,
+            CargoSwingObservationState::TRACK_CHANGED);
+  EXPECT_EQ(result.reason,
+            "track_segment_changed_history_reset_alarm_preserved");
+
+  // Feed more frames on segment 5 — old DC history must not combine
+  for (int i = 1; i < 8; ++i) {
+    seg5.stamp_sec = 2.0 + i * 0.1;
+    monitor.update(seg5);
+  }
+  // After fresh history, the -X direction should establish its own skew
+  // without the old +X direction creating false zero-crossings
+  auto final_input = validInput(2.8);
+  final_input.track_segment_id = 5U;
+  final_input.hoist_state_fresh = true;
+  final_input.hoist_motion_state = HoistMotionState::UP;
+  final_input.measured_center_base.x() = -0.6F;
+  const auto final_result = monitor.update(final_input);
+  // New segment's consistent -X should produce low zero_crossings
+  EXPECT_LE(final_result.zero_crossings, 1)
+      << "old segment DC combined with new segment produced spurious crossings";
+}
+
+TEST(CargoSwingMonitorTest,
+     TrackSegmentChangeCannotCombineOldAndNewDcEvidence) {
+  CargoSwingConfig config;
+  config.minimum_valid_observation_sec = 0.5;
+  config.skew_min_duration_sec = 0.5;
+  CargoSwingMonitor monitor(config);
+
+  // Segment 3: build consistent +X DC
+  for (int i = 0; i < 8; ++i) {
+    auto input = validInput(1.0 + i * 0.1);
+    input.hoist_state_fresh = true;
+    input.hoist_motion_state = HoistMotionState::UP;
+    input.measured_center_base.x() = 0.55F;
+    monitor.update(input);
+  }
+
+  // Segment 7: +Y DC (orthogonal), fresh history
+  for (int i = 0; i < 8; ++i) {
+    auto input = validInput(2.0 + i * 0.1);
+    input.track_segment_id = 7U;
+    input.hoist_state_fresh = true;
+    input.hoist_motion_state = HoistMotionState::UP;
+    input.measured_center_base.x() = 0.0F;
+    input.measured_center_base.y() = 0.55F;
+    monitor.update(input);
+  }
+
+  // After segment change and fresh history, the direction consistency
+  // must reflect the new segment alone — not a blend of old+X and new+Y
+  auto final_input = validInput(2.8);
+  final_input.track_segment_id = 7U;
+  final_input.hoist_state_fresh = true;
+  final_input.hoist_motion_state = HoistMotionState::UP;
+  final_input.measured_center_base.y() = 0.55F;
+  const auto result = monitor.update(final_input);
+  // New segment's pure Y offset should have high direction consistency
+  EXPECT_GT(result.direction_consistency, 0.7F)
+      << "blended old+X and new+Y DC ruined direction consistency";
+}
+
+TEST(CargoSwingMonitorTest,
+     TrackSegmentChangePreservesLatchedSwayAlarm) {
+  CargoSwingConfig config;
+  config.minimum_valid_observation_sec = 0.3;
+  CargoSwingMonitor monitor(config);
+
+  // Trigger immediate sway alarm
+  auto extreme = validInput(1.0);
+  extreme.measured_center_base.x() = 0.8F;
+  ASSERT_EQ(monitor.update(extreme).sway_state,
+            CargoSwayState::SWAY_ALARM);
+
+  // Segment change
+  auto seg5 = validInput(1.1);
+  seg5.track_segment_id = 5U;
+  seg5.measured_center_base.x() = 0.0F;
+  const auto result = monitor.update(seg5);
+
+  // P1-3: sway alarm latch must survive segment change
+  EXPECT_EQ(result.sway_state, CargoSwayState::SWAY_ALARM);
+  EXPECT_EQ(result.observation_state,
+            CargoSwingObservationState::TRACK_CHANGED);
+}
+
+TEST(CargoSwingMonitorTest,
+     TrackSegmentChangePreservesLatchedSkewAlarm) {
+  CargoSwingConfig config = fastSkewAlarmConfig();
+  CargoSwingMonitor monitor(config);
+  feedSkewAlarm(&monitor, 1.0);
+
+  // Segment change
+  auto seg5 = validInput(1.1);
+  seg5.track_segment_id = 5U;
+  seg5.measured_center_base.x() = 0.0F;
+  const auto result = monitor.update(seg5);
+
+  // P1-3: skew alarm latch must survive segment change
+  EXPECT_EQ(result.skew_pull_state,
+            CargoSkewPullState::SKEW_PULL_ALARM);
+  EXPECT_EQ(result.observation_state,
+            CargoSwingObservationState::TRACK_CHANGED);
+}
+
+TEST(CargoSwingMonitorTest,
+     TrackSegmentChangePreservesLatchedTorsionAlarm) {
+  CargoSwingConfig config;
+  config.minimum_valid_observation_sec = 0.0;
+  CargoSwingMonitor monitor(config);
+
+  // Establish torsion alarm
+  auto input = validInput(1.0);
+  input.locked_yaw_valid = true;
+  input.measured_yaw_valid = true;
+  input.locked_yaw_base_rad = 0.0F;
+  input.measured_yaw_base_rad = 0.25F;
+  ASSERT_EQ(monitor.update(input).torsion_state,
+            CargoTorsionState::TORSION_ALARM);
+
+  // Segment change — torsion evidence lost but latch preserved
+  auto seg5 = validInput(1.1);
+  seg5.track_segment_id = 5U;
+  seg5.measured_yaw_valid = false;
+  const auto result = monitor.update(seg5);
+
+  // P1-3: torsion latch survives segment change with evidence hold
+  EXPECT_EQ(result.torsion_state, CargoTorsionState::TORSION_ALARM);
+  EXPECT_EQ(result.observation_state,
+            CargoSwingObservationState::TRACK_CHANGED);
 }
 
 }  // namespace

@@ -246,5 +246,121 @@ TEST(PendingCargoEnvelopeTest, EmptyHookCannotCreateEnvelope) {
   EXPECT_FALSE(buildPendingCargoEnvelope(input).valid);
 }
 
+// ─── P1-5: yaw authority ───
+
+CargoEnvelopePoseCandidate poseWithYaw(
+    double stamp, const Eigen::Vector3f& center, float yaw,
+    CargoEnvelopePoseSource source, bool yaw_auth = false,
+    std::uint64_t lifecycle_id = 1U) {
+  auto value = pose(stamp, center, source, lifecycle_id);
+  value.yaw_base_rad = yaw;
+  value.yaw_authoritative = yaw_auth;
+  return value;
+}
+
+CargoEnvelopeShapeCandidate shapeWithYaw(
+    double stamp, float length, float width, float height,
+    float yaw_rad, CargoEnvelopeShapeSource source,
+    std::uint64_t lifecycle_id = 1U) {
+  auto value = shape(stamp, length, width, height, source, lifecycle_id);
+  value.yaw_rad = yaw_rad;
+  return value;
+}
+
+TEST(PendingCargoEnvelopeTest,
+     LowQualityCurrentPoseCannotOverrideStaticShapeYaw) {
+  auto input = loadedInput();
+  // Current LiDAR pose with yaw=0 but NOT authoritative (low quality)
+  input.current_associated_pose = poseWithYaw(
+      10.0, Eigen::Vector3f(0.5F, -1.0F, 2.0F), 0.0F,
+      CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR,
+      /*yaw_authoritative=*/false);
+  // Static origin shape with reliable yaw=0.8 rad
+  input.static_origin_shape = shapeWithYaw(
+      10.0, 1.5F, 0.8F, 1.2F, 0.8F,
+      CargoEnvelopeShapeSource::STATIC_ORIGIN_COMPONENT);
+
+  const auto result = buildPendingCargoEnvelope(input, exactConfig());
+  ASSERT_TRUE(result.valid);
+  // P1-5: static shape yaw must win over non-authoritative pose yaw
+  EXPECT_NEAR(result.yaw_base_rad, 0.8F, 1.0e-5F);
+}
+
+TEST(PendingCargoEnvelopeTest, CurrentCenterCanCombineWithStaticYaw) {
+  auto input = loadedInput();
+  // Current LiDAR pose with center but non-authoritative yaw=0
+  input.current_associated_pose = poseWithYaw(
+      10.0, Eigen::Vector3f(1.2F, -0.5F, 1.9F), 0.0F,
+      CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR,
+      /*yaw_authoritative=*/false);
+  input.current_high_quality_shape = shapeWithYaw(
+      10.0, 1.5F, 0.8F, 1.0F, 0.0F,
+      CargoEnvelopeShapeSource::CURRENT_HIGH_QUALITY_LIDAR);
+  // Static origin shape with yaw=1.2 rad
+  input.static_origin_shape = shapeWithYaw(
+      10.0, 2.0F, 1.0F, 1.2F, 1.2F,
+      CargoEnvelopeShapeSource::STATIC_ORIGIN_COMPONENT);
+
+  const auto result = buildPendingCargoEnvelope(input, exactConfig());
+  ASSERT_TRUE(result.valid);
+  // Center comes from current pose, but yaw from the winning shape
+  EXPECT_FLOAT_EQ(result.center_base.x(), 1.2F);
+  EXPECT_FLOAT_EQ(result.center_base.y(), -0.5F);
+  // When both current_high_quality_shape and static_origin_shape compete,
+  // current_high_quality_shape wins (higher priority). Its yaw is 0.
+  EXPECT_NEAR(result.yaw_base_rad, 0.0F, 1.0e-5F);
+}
+
+TEST(PendingCargoEnvelopeTest, HighQualityCurrentPoseCanProvideYaw) {
+  auto input = loadedInput();
+  // Current LiDAR pose with authoritative yaw=0.5 rad
+  input.current_associated_pose = poseWithYaw(
+      10.0, Eigen::Vector3f(0.5F, -1.0F, 2.0F), 0.5F,
+      CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR,
+      /*yaw_authoritative=*/true);
+  input.current_high_quality_shape = shapeWithYaw(
+      10.0, 1.5F, 0.8F, 1.0F, 0.3F,
+      CargoEnvelopeShapeSource::CURRENT_HIGH_QUALITY_LIDAR);
+
+  const auto result = buildPendingCargoEnvelope(input, exactConfig());
+  ASSERT_TRUE(result.valid);
+  // Authoritative pose yaw must override shape yaw
+  EXPECT_NEAR(result.yaw_base_rad, 0.5F, 1.0e-5F);
+}
+
+TEST(PendingCargoEnvelopeTest, HookFallbackUsesShapeYaw) {
+  auto input = loadedInput();
+  // HOOK_DEFAULT_OFFSET never has yaw authority
+  input.hook_default_pose = poseWithYaw(
+      10.0, Eigen::Vector3f(0.0F, -2.0F, 1.5F), 0.0F,
+      CargoEnvelopePoseSource::HOOK_DEFAULT_OFFSET,
+      /*yaw_authoritative=*/false);
+  // Static origin shape with yaw=1.5 rad
+  input.static_origin_shape = shapeWithYaw(
+      10.0, 1.5F, 0.8F, 1.2F, 1.5F,
+      CargoEnvelopeShapeSource::STATIC_ORIGIN_COMPONENT);
+
+  const auto result = buildPendingCargoEnvelope(input, exactConfig());
+  ASSERT_TRUE(result.valid);
+  // Hook fallback must use shape yaw
+  EXPECT_NEAR(result.yaw_base_rad, 1.5F, 1.0e-5F);
+}
+
+TEST(PendingCargoEnvelopeTest, RetiredLockedPoseKeepsLockedYaw) {
+  auto input = loadedInput();
+  // Retired track pose with authoritative yaw from locked shape
+  input.retired_track_pose = poseWithYaw(
+      10.0, Eigen::Vector3f(0.8F, 0.2F, 1.8F), 0.9F,
+      CargoEnvelopePoseSource::RETIRED_TRACK_PREDICTION,
+      /*yaw_authoritative=*/true);
+  input.retired_locked_shape = shapeWithYaw(
+      10.0, 1.5F, 0.8F, 1.2F, 0.9F,
+      CargoEnvelopeShapeSource::RETIRED_LOCKED_SHAPE);
+
+  const auto result = buildPendingCargoEnvelope(input, exactConfig());
+  ASSERT_TRUE(result.valid);
+  EXPECT_NEAR(result.yaw_base_rad, 0.9F, 1.0e-5F);
+}
+
 }  // namespace
 }  // namespace ndt_slam

@@ -77,6 +77,8 @@ void CargoPhysicalMotionEstimator::resetKinematics(bool preserve_epoch) {
   last_valid_sample_stamp_sec_ = 0.0;
   state_since_sec_ = 0.0;
   transition_candidate_since_sec_ = 0.0;
+  raw_rejection_since_sec_ = 0.0;
+  raw_rejection_count_ = 0;
   previous_position_valid_ = false;
   previous_position_.setZero();
   filtered_speed_valid_ = false;
@@ -160,6 +162,10 @@ CargoPhysicalMotionResult CargoPhysicalMotionEstimator::update(
         input.raw_pose_innovation_m >
             config_.maximum_raw_pose_innovation_m));
   if (drift_rejected) {
+    if (raw_rejection_since_sec_ <= 0.0) {
+      raw_rejection_since_sec_ = input.stamp_sec;
+    }
+    ++raw_rejection_count_;
     const bool short_hold = last_valid_sample_stamp_sec_ > 0.0 &&
         input.stamp_sec - last_valid_sample_stamp_sec_ <=
             config_.maximum_sample_gap_sec;
@@ -168,6 +174,27 @@ CargoPhysicalMotionResult CargoPhysicalMotionEstimator::update(
     result_.reason = input.localization_degenerate
         ? "degenerate_raw_pose_rejected_short_hold"
         : "raw_pose_quality_rejected_short_hold";
+    return result_;
+  }
+  // P1-4: drift rejection state cleared on first valid sample.
+  raw_rejection_since_sec_ = 0.0;
+  raw_rejection_count_ = 0;
+
+  // P1-4: rebaseline after persistent drift rejection.
+  // When rejection exceeds maximum_sample_gap_sec, the previous baseline
+  // is stale. Accept this frame as a fresh baseline without claiming motion.
+  const bool rebaseline_needed = previous_position_valid_ &&
+      last_valid_sample_stamp_sec_ > 0.0 &&
+      input.stamp_sec - last_valid_sample_stamp_sec_ >
+          config_.maximum_sample_gap_sec;
+  if (rebaseline_needed) {
+    previous_position_ = input.raw_position;
+    previous_position_valid_ = true;
+    last_valid_sample_stamp_sec_ = input.stamp_sec;
+    filtered_speed_valid_ = false;
+    result_.valid = false;
+    result_.source = CargoPhysicalMotionSource::RAW_POSE_DELTA;
+    result_.reason = "raw_pose_rebaseline_after_rejection";
     return result_;
   }
 

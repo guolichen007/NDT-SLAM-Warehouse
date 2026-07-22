@@ -217,6 +217,9 @@ class CargoSwingMonitor {
   const CargoSwingResult& result() const noexcept { return result_; }
 
  private:
+  void resetMeasurementHistoryPreserveSafetyLatches(double stamp_sec);
+
+ private:
   struct Sample {
     double stamp_sec = 0.0;
     Eigen::Vector2f offset = Eigen::Vector2f::Zero();

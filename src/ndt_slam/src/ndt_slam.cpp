@@ -14861,7 +14861,7 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
     }
     cargo_last_hook_anchor_source_ = hook_anchor.source;
     const Eigen::Vector2f anchor_base = hook_anchor.valid
-        ? hook_anchor.point_base.head<2>()
+        ? Eigen::Vector2f(hook_anchor.point_base.head<2>())
         : Eigen::Vector2f::Constant(
               std::numeric_limits<float>::quiet_NaN());
     const Eigen::Vector3d anchor_map_3d = pose_map_base *
@@ -15102,6 +15102,8 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         pose.center_base = hook_fixed_cargo_.center_base;
         pose.yaw_base_rad = hook_fixed_cargo_.oriented_footprint_valid
             ? hook_fixed_cargo_.footprint_yaw_base_rad : 0.0F;
+        pose.yaw_authoritative =
+            hook_fixed_cargo_.oriented_footprint_valid;
         pose.horizontal_uncertainty_m =
             hook_lock_.horizontal_tracking_residual_m;
         pose.vertical_uncertainty_m =
@@ -15150,6 +15152,7 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         pose.valid = true;
         pose.center_base = hook_lock_.live_pose.center_base;
         pose.yaw_base_rad = hook_lock_.locked_shape.yaw_base_rad;
+        pose.yaw_authoritative = hook_lock_.locked_shape.valid;
         pose.horizontal_uncertainty_m =
             hook_lock_.horizontal_tracking_residual_m;
         pose.vertical_uncertainty_m = hook_lock_.bottom_uncertainty;
@@ -15174,6 +15177,7 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
             retired_cargo_velocity_base_ *
                 static_cast<float>(pending_retired_age_sec);
         pose.yaw_base_rad = retired_cargo_shape_.yaw_base_rad;
+        pose.yaw_authoritative = retired_cargo_shape_.valid;
         pose.horizontal_uncertainty_m = 0.15F;
         pose.vertical_uncertainty_m = 0.15F;
         pose.evidence_stamp_sec = retired_cargo_stamp_.toSec();

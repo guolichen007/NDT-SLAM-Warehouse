@@ -35,6 +35,7 @@ struct CargoEnvelopePoseCandidate {
   bool valid = false;
   Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
   float yaw_base_rad = 0.0F;
+  bool yaw_authoritative = false;
   float horizontal_uncertainty_m = 0.0F;
   float vertical_uncertainty_m = 0.0F;
   double evidence_stamp_sec = 0.0;

@@ -162,11 +162,10 @@ PendingCargoEnvelope combinePoseAndShape(
   result.length_m = base_length + 2.0F * horizontal_uncertainty;
   result.width_m = base_width + 2.0F * horizontal_uncertainty;
   result.height_m = base_height + 2.0F * vertical_uncertainty;
-  const bool pose_has_orientation =
-      pose.source == CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR ||
-      pose.source == CargoEnvelopePoseSource::SHORT_TERM_TRACK_PREDICTION ||
-      pose.source == CargoEnvelopePoseSource::RETIRED_TRACK_PREDICTION;
-  result.yaw_base_rad = pose_has_orientation
+  // P1-5: only pose candidates with explicit yaw authority may override
+  // the shape yaw. A low-quality or default (0-rad) current-pose yaw must
+  // not silently overwrite a reliable static-origin or locked-shape yaw.
+  result.yaw_base_rad = pose.yaw_authoritative
       ? pose.yaw_base_rad : shape.yaw_rad;
   result.horizontal_uncertainty_m = horizontal_uncertainty;
   result.vertical_uncertainty_m = vertical_uncertainty;
