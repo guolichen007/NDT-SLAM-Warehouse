@@ -11,7 +11,6 @@ void configureDiagnostics(RuntimeDiagnostics* diagnostics) {
   RuntimeDiagnosticsConfig config;
   config.enabled = true;
   config.csv_enabled = false;
-  config.console_period_sec = 5.0;
   config.risk_repeat_period_sec = 5.0;
   diagnostics->configure(config, ".");
 }
