@@ -542,6 +542,12 @@ class AvoidancePipelineObserver:
         self.pending = dict(value)
         self.pending["_wall_time"] = float(wall_time)
 
+    def reset(self) -> None:
+        self.values.clear()
+        self.operational.clear()
+        self.pending.clear()
+        self._divergence_since.clear()
+
     def _mismatch(self, name: str, left: str, right: str,
                   now: float) -> Tuple[bool, bool]:
         if left not in self.values or right not in self.values:
@@ -629,7 +635,7 @@ def classify_cargo_geometry(value: Mapping[str, Any]) -> Tuple[bool, bool]:
         int(value.get("points", 0) or 0) > 0 and
         positive("confidence") and dimensions_valid)
     formal_source = (geometry_source in
-                     ("MEASURED", "FORMAL_FROZEN", "FROZEN", "LOST_HOLD") or
+                     ("FORMAL_FROZEN", "FROZEN", "LOST_HOLD") or
                      _as_bool(value.get("frozen")) or
                      _as_bool(value.get("effective_envelope_clear_authority")))
     vertical_source = str(value.get("vertical_source", ""))
@@ -643,8 +649,58 @@ def classify_cargo_geometry(value: Mapping[str, Any]) -> Tuple[bool, bool]:
               _as_bool(value.get("height_valid")) and
               math.isfinite(bottom_z) and math.isfinite(top_z) and
               top_z > bottom_z and
-              (direct or formal_source or formal_vertical))
+              (direct or (geometry_source != "MEASURED" and
+                          (formal_source or formal_vertical))))
     return direct, formal
+
+
+def select_static_status(now: float, operational: Mapping[str, Any],
+                         static_debug: Mapping[str, Any],
+                         pending: Mapping[str, Any],
+                         freshness_sec: float = 2.0) -> Dict[str, Any]:
+    """Resolve fresh static/session fields in operational-first order."""
+    result: Dict[str, Any] = {
+        "map_session_verified": False,
+        "static_authority": "UNKNOWN",
+        "source": "NONE",
+    }
+    sources = (("OPERATIONAL", operational), ("STATIC_DEBUG", static_debug),
+               ("PENDING", pending))
+    def fresh(source: Mapping[str, Any]) -> bool:
+        wall_time = _finite(source.get("_wall_time"))
+        return (math.isfinite(wall_time) and 0.0 <= now - wall_time <=
+                max(0.0, freshness_sec))
+
+    for source_name, source in sources:
+        if fresh(source) and "map_session_verified" in source:
+            result["map_session_verified"] = source[
+                "map_session_verified"]
+            result["source"] = source_name
+            break
+    for source_name, source in sources:
+        if not fresh(source):
+            continue
+        if "static_authority" in source:
+            result["static_authority"] = source["static_authority"]
+        elif source_name == "STATIC_DEBUG" and "authorized" in source:
+            result["static_authority"] = (
+                "AUTHORIZED" if _as_bool(source["authorized"])
+                else "UNAUTHORIZED")
+        else:
+            continue
+        if result["source"] == "NONE":
+            result["source"] = source_name
+        break
+    result["map_session_verified"] = _as_bool(
+        result["map_session_verified"])
+    return result
+
+
+def cargo_monitor_ready(active: bool, recognition_ready: bool,
+                        swing_ready: bool, geometry_ready: bool,
+                        pipeline_ready: bool) -> bool:
+    return (active and recognition_ready and swing_ready and geometry_ready and
+            pipeline_ready)
 
 
 class AsyncRunWriter:
@@ -734,6 +790,8 @@ def load_config(path: Optional[Path]) -> Dict[str, Any]:
         "repeat_period_sec": 30.0,
         "gravity_monitor_stale_sec": 1.0,
         "avoidance_pipeline_grace_sec": 0.4,
+        "static_status_freshness_sec": 2.0,
+        "cargo_episode_geometry_max_samples": 10000,
         "writer_queue_size": 4096,
         # Root-level keys from server_monitor.yaml
         "motion_capture": {},
@@ -1034,6 +1092,7 @@ class RosRuntimeMonitor:
             int(config.get("log_rotation_count", 5)))
         self.aggregator = SafetyAggregator(config.get("windows_sec", DEFAULT_WINDOWS))
         self.aggregator_lock = threading.Lock()
+        self._state_lock = threading.RLock()
         self.runtime_path = Path(args.persistent_root).expanduser().resolve() / "runtime_status.json"
         self.persistent_root = self.runtime_path.parent
         self.last_odom_wall: Optional[float] = None
@@ -1079,7 +1138,13 @@ class RosRuntimeMonitor:
         self.latest_geometry: Dict[str, Any] = {}
         self.latest_bottom: Dict[str, Any] = {}
         self.latest_safety: Dict[str, Any] = {}
-        self._episode_geometry: List[Dict[str, Any]] = []
+        self._episode_geometry_max_samples = max(
+            1, int(config.get("cargo_episode_geometry_max_samples", 10000)))
+        self._episode_geometry: Deque[Dict[str, Any]] = deque(
+            maxlen=self._episode_geometry_max_samples)
+        self._episode_geometry_total_count = 0
+        self._episode_geometry_dropped_count = 0
+        self._episode_geometry_message_count = 0
         self._episode_first_lock_wall: Optional[float] = None
         self._episode_recognition_failures_start = 0
         self._episode_recognition_messages_start = 0
@@ -1222,22 +1287,28 @@ class RosRuntimeMonitor:
             "message_age_sec": max(0.0, self.rospy.Time.now().to_sec() -
                                    source_stamp),
         }
-        self.last_gravity_wall = wall
-        self.gravity_message_count += 1
-        events = self.cargo_gate.update(
-            valid=row["valid"], fresh=row["fresh"], state=row["state"],
-            wall_time=wall, source_stamp=source_stamp, reason=row["reason"])
-        row["cargo_monitor_state"] = self.cargo_gate.state
-        row["cargo_monitor_active"] = self.cargo_gate.active
-        row["cargo_episode_id"] = self.cargo_gate.episode_id
-        self.latest_gravity = dict(row)
-        self.writer.submit("csv", ("samples/gravity_samples.csv",
-                                   list(row.keys()), row))
-        for event in events:
-            self._emit_typed_event("samples/gravity_events.jsonl", event)
-            self._emit_typed_event("samples/cargo_episode_events.jsonl", event)
-            if event["event"] == "GRAVITY_LOADED":
-                self._episode_geometry = []
+        with self._state_lock:
+            self.last_gravity_wall = wall
+            self.gravity_message_count += 1
+            events = self.cargo_gate.update(
+                valid=row["valid"], fresh=row["fresh"], state=row["state"],
+                wall_time=wall, source_stamp=source_stamp,
+                reason=row["reason"])
+            closed_reports = {
+                event["event"]: self._cargo_episode_summary(event)
+                for event in events if event["event"] in (
+                    "GRAVITY_LOST_DURING_CARGO", "CARGO_EPISODE_CLOSED")
+            }
+            row["cargo_monitor_state"] = self.cargo_gate.state
+            row["cargo_monitor_active"] = self.cargo_gate.active
+            row["cargo_episode_id"] = self.cargo_gate.episode_id
+            self.latest_gravity = dict(row)
+            if any(event["event"] == "GRAVITY_LOADED"
+                   for event in events):
+                self._episode_geometry.clear()
+                self._episode_geometry_total_count = 0
+                self._episode_geometry_dropped_count = 0
+                self._episode_geometry_message_count = 0
                 self._episode_first_lock_wall = None
                 self._episode_recognition_failures_start = (
                     self._recognition_failure_count)
@@ -1247,6 +1318,11 @@ class RosRuntimeMonitor:
                     self.swing_status_message_count)
                 self.latest_recognition = {}
                 self.latest_swing = {}
+                self.latest_geometry = {}
+                self.latest_bottom = {}
+                self.latest_safety = {}
+                self.pipeline.reset()
+                self._pipeline_last_flags.clear()
                 self.last_recognition_wall = None
                 self.last_swing_wall = None
                 self._last_recognition_source_stamp = None
@@ -1258,35 +1334,53 @@ class RosRuntimeMonitor:
                 self._recognition_failed_since = None
                 self._recognition_stale_active = False
                 self._swing_stale_active = False
-            elif event["event"] in (
-                    "GRAVITY_LOST_DURING_CARGO", "CARGO_EPISODE_CLOSED"):
-                self._write_cargo_episode_report(event)
-
-    def _expire_gravity_if_needed(self, wall: float) -> None:
-        stale_sec = float(self.config.get("gravity_monitor_stale_sec", 1.0))
-        if (self.last_gravity_wall is None or
-                wall - self.last_gravity_wall <= stale_sec or
-                self.cargo_gate.state == CargoMonitorGate.INVALID_OR_STALE):
-            return
-        events = self.cargo_gate.update(
-            valid=False, fresh=False, state=0, wall_time=wall,
-            source_stamp=_finite(self.latest_gravity.get("source_stamp"), 0.0),
-            reason="gravity_message_stale")
-        self.latest_gravity["cargo_monitor_state"] = self.cargo_gate.state
-        self.latest_gravity["cargo_monitor_active"] = False
+        self.writer.submit("csv", ("samples/gravity_samples.csv",
+                                   list(row.keys()), row))
         for event in events:
             self._emit_typed_event("samples/gravity_events.jsonl", event)
             self._emit_typed_event("samples/cargo_episode_events.jsonl", event)
             if event["event"] in (
                     "GRAVITY_LOST_DURING_CARGO", "CARGO_EPISODE_CLOSED"):
-                self._write_cargo_episode_report(event)
+                self._write_cargo_episode_report(
+                    event, closed_reports.get(event["event"]))
+
+    def _expire_gravity_if_needed(self, wall: float) -> None:
+        stale_sec = float(self.config.get("gravity_monitor_stale_sec", 1.0))
+        with self._state_lock:
+            if (self.last_gravity_wall is None or
+                    wall - self.last_gravity_wall <= stale_sec or
+                    self.cargo_gate.state ==
+                    CargoMonitorGate.INVALID_OR_STALE):
+                return
+            events = self.cargo_gate.update(
+                valid=False, fresh=False, state=0, wall_time=wall,
+                source_stamp=_finite(
+                    self.latest_gravity.get("source_stamp"), 0.0),
+                reason="gravity_message_stale")
+            closed_reports = {
+                event["event"]: self._cargo_episode_summary(event)
+                for event in events if event["event"] in (
+                    "GRAVITY_LOST_DURING_CARGO", "CARGO_EPISODE_CLOSED")
+            }
+            self.latest_gravity["cargo_monitor_state"] = (
+                self.cargo_gate.state)
+            self.latest_gravity["cargo_monitor_active"] = False
+        for event in events:
+            self._emit_typed_event("samples/gravity_events.jsonl", event)
+            self._emit_typed_event("samples/cargo_episode_events.jsonl", event)
+            if event["event"] in (
+                    "GRAVITY_LOST_DURING_CARGO", "CARGO_EPISODE_CLOSED"):
+                self._write_cargo_episode_report(
+                    event, closed_reports.get(event["event"]))
 
     def _raw_safety_callback(self, message: Any) -> None:
-        self.pipeline.set_code("raw_typed", int(message.requested_alarm_code),
-                               time.time())
+        with self._state_lock:
+            self.pipeline.set_code(
+                "raw_typed", int(message.requested_alarm_code), time.time())
 
     def _raw_code_callback(self, message: Any) -> None:
-        self.pipeline.set_code("raw_simple", int(message.data), time.time())
+        with self._state_lock:
+            self.pipeline.set_code("raw_simple", int(message.data), time.time())
 
     @staticmethod
     def _parse_json_message(message: Any) -> Dict[str, Any]:
@@ -1299,17 +1393,17 @@ class RosRuntimeMonitor:
     def _operational_callback(self, message: Any) -> None:
         value = self._parse_json_message(message)
         if value:
-            self.pipeline.set_operational(value, time.time())
+            with self._state_lock:
+                self.pipeline.set_operational(value, time.time())
 
     def _pending_callback(self, message: Any) -> None:
         value = self._parse_json_message(message)
         if value:
-            self.pipeline.set_pending(value, time.time())
+            with self._state_lock:
+                self.pipeline.set_pending(value, time.time())
 
     def _bottom_callback(self, message: Any) -> None:
-        if not self.cargo_gate.active:
-            return
-        self.latest_bottom = {
+        row = {
             "wall_time": time.time(),
             "source_stamp": float(message.header.stamp.to_sec()),
             "valid": bool(message.valid), "track_id": int(message.track_id),
@@ -1322,6 +1416,10 @@ class RosRuntimeMonitor:
             "uncertainty_m": float(message.uncertainty_m),
             "confidence": float(message.confidence),
         }
+        with self._state_lock:
+            if not self.cargo_gate.active:
+                return
+            self.latest_bottom = row
 
     def _accept_recognition_source_stamp(self, source_stamp: float,
                                          wall: float) -> bool:
@@ -1380,8 +1478,10 @@ class RosRuntimeMonitor:
         return True
 
     def _recognition_callback(self, message: Any) -> None:
-        if not self.cargo_gate.active:
-            return
+        with self._state_lock:
+            if not self.cargo_gate.active:
+                return
+            episode_id = self.cargo_gate.episode_id
         wall = time.time()
         source_stamp = float(message.header.stamp.to_sec())
         if not self._accept_recognition_source_stamp(source_stamp, wall):
@@ -1415,7 +1515,11 @@ class RosRuntimeMonitor:
             "reason": str(message.reason),
         }
         fields = list(row.keys())
-        self.latest_recognition = dict(row)
+        with self._state_lock:
+            if (not self.cargo_gate.active or
+                    self.cargo_gate.episode_id != episode_id):
+                return
+            self.latest_recognition = dict(row)
         self.writer.submit("csv", (
             "samples/cargo_recognition_samples.csv", fields, row))
         self._recognition_state_counts[state] += 1
@@ -1515,8 +1619,10 @@ class RosRuntimeMonitor:
         self._recognition_stale_active = False
 
     def _swing_callback(self, message: Any) -> None:
-        if not self.cargo_gate.active:
-            return
+        with self._state_lock:
+            if not self.cargo_gate.active:
+                return
+            episode_id = self.cargo_gate.episode_id
         wall = time.time()
         source_stamp = float(message.header.stamp.to_sec())
         if not self._accept_swing_source_stamp(source_stamp, wall):
@@ -1574,7 +1680,11 @@ class RosRuntimeMonitor:
             "reason": str(message.reason),
         }
         fields = list(row.keys())
-        self.latest_swing = dict(row)
+        with self._state_lock:
+            if (not self.cargo_gate.active or
+                    self.cargo_gate.episode_id != episode_id):
+                return
+            self.latest_swing = dict(row)
         self.writer.submit("csv", (
             "samples/cargo_swing_samples.csv", fields, row))
         self._sway_state_counts[sway] += 1
@@ -1714,8 +1824,10 @@ class RosRuntimeMonitor:
 
     def _cargo_geometry_callback(self, message: Any) -> None:
         """Archive direct and formal geometry as separate evidence classes."""
-        if not self.cargo_gate.active:
-            return
+        with self._state_lock:
+            if not self.cargo_gate.active:
+                return
+            episode_id = self.cargo_gate.episode_id
         wall = time.time()
         text = str(message.data)
         try:
@@ -1725,12 +1837,25 @@ class RosRuntimeMonitor:
         if not isinstance(parsed, dict):
             return
         parsed["wall_time"] = wall
-        parsed["cargo_episode_id"] = self.cargo_gate.episode_id
+        parsed["cargo_episode_id"] = episode_id
         direct_measured, formal_operational = classify_cargo_geometry(parsed)
         parsed["direct_measured"] = direct_measured
         parsed["formal_operational"] = formal_operational
         parsed["frozen"] = (not direct_measured and formal_operational)
-        self.latest_geometry = dict(parsed)
+        with self._state_lock:
+            if (not self.cargo_gate.active or
+                    self.cargo_gate.episode_id != episode_id):
+                return
+            self.latest_geometry = dict(parsed)
+            self._episode_geometry_message_count += 1
+            self._episode_geometry_total_count += 1
+            if len(self._episode_geometry) == self._episode_geometry.maxlen:
+                self._episode_geometry_dropped_count += 1
+            self._episode_geometry.append(dict(parsed))
+            track_id = int(parsed.get("track_id", 0))
+            if formal_operational and track_id > 0:
+                self._geo_track_samples[track_id] = (
+                    self._geo_track_samples.get(track_id, 0) + 1)
 
         csv_fields = [
             "wall_time", "cargo_episode_id", "stamp", "track_id",
@@ -1756,13 +1881,16 @@ class RosRuntimeMonitor:
             self.writer.submit("csv", (
                 "samples/cargo_geometry_formal_operational.csv",
                 csv_fields, row))
-        self._episode_geometry.append(dict(parsed))
-        track_id = int(parsed.get("track_id", 0))
-        if formal_operational and track_id > 0:
-            self._geo_track_samples[track_id] = self._geo_track_samples.get(track_id, 0) + 1
-
     def _cargo_episode_summary(self, closed: Mapping[str, Any]) -> Dict[str, Any]:
-        samples = list(self._episode_geometry)
+        with self._state_lock:
+            samples = list(self._episode_geometry)
+            total_count = self._episode_geometry_total_count
+            dropped_count = self._episode_geometry_dropped_count
+            first_lock_wall = self._episode_first_lock_wall
+            recognition_failure_count = max(
+                0, self._recognition_failure_count -
+                self._episode_recognition_failures_start)
+            episode_id = self.cargo_gate.episode_id
         formal = [value for value in samples
                   if _as_bool(value.get("formal_operational"))]
         direct = [value for value in samples
@@ -1794,21 +1922,22 @@ class RosRuntimeMonitor:
         episode_start_wall = (_finite(closed.get("wall_time"), 0.0) -
                               _finite(closed.get("duration_sec"), 0.0))
         return {
-            "episode_id": int(closed.get("episode_id", self.cargo_gate.episode_id)),
+            "episode_id": int(closed.get("episode_id", episode_id)),
             "closed_event": closed.get("event"),
             "closed_wall_time": closed.get("wall_time"),
             "duration_sec": closed.get("duration_sec"),
             "geometry_samples": len(samples),
+            "geometry_total_count": total_count,
+            "geometry_retained_count": len(samples),
+            "geometry_dropped_count": dropped_count,
             "direct_measured_samples": len(direct),
             "formal_geometry_samples": len(formal),
             "formal_geometry_coverage_ratio": len(formal) / max(1, len(samples)),
-            "first_lock_sec": (max(0.0, self._episode_first_lock_wall -
+            "first_lock_sec": (max(0.0, first_lock_wall -
                                    episode_start_wall)
-                               if self._episode_first_lock_wall is not None
+                               if first_lock_wall is not None
                                else None),
-            "recognition_failure_count": max(
-                0, self._recognition_failure_count -
-                self._episode_recognition_failures_start),
+            "recognition_failure_count": recognition_failure_count,
             "length_m": range_summary("length_m"),
             "width_m": range_summary("width_m"),
             "height_m": range_summary("height_m"),
@@ -1823,8 +1952,11 @@ class RosRuntimeMonitor:
                 default=None),
         }
 
-    def _write_cargo_episode_report(self, closed: Mapping[str, Any]) -> None:
-        report = self._cargo_episode_summary(closed)
+    def _write_cargo_episode_report(
+            self, closed: Mapping[str, Any],
+            prepared: Optional[Mapping[str, Any]] = None) -> None:
+        report = (dict(prepared) if prepared is not None else
+                  self._cargo_episode_summary(closed))
         self.writer.submit("atomic_json", (
             "reports/cargo_episode_latest.json", report))
         self.writer.submit("jsonl", (
@@ -1833,43 +1965,62 @@ class RosRuntimeMonitor:
             "reports/cargo_episode_summary.json", report))
 
     def _record_pipeline_snapshot(self, now: float) -> Dict[str, Any]:
-        row = self.pipeline.snapshot(now)
-        row["normal_code35"] = (self.cargo_gate.active and
-                                bool(row.get("normal_code35")))
-        formal_clear = (
-            _as_bool(self.latest_geometry.get(
-                "effective_envelope_clear_authority", False)) and
-            _as_bool(self.latest_static_debug.get("authorized", False)) and
-            _as_bool(self.latest_safety.get("cargo_valid", False)) and
-            _as_bool(self.latest_safety.get("obstacle_valid", False)))
-        row["final_illegal_clear"] = (
-            self.cargo_gate.active and row.get("final_typed_code") == CLEAR_CODE
-            and not formal_clear)
-        row["cargo_monitor_active"] = self.cargo_gate.active
-        row["cargo_episode_id"] = self.cargo_gate.episode_id
+        with self._state_lock:
+            row = self.pipeline.snapshot(now)
+            active = self.cargo_gate.active
+            episode_id = self.cargo_gate.episode_id
+            row["normal_code35"] = (active and
+                                    bool(row.get("normal_code35")))
+            formal_clear = (
+                _as_bool(self.latest_geometry.get(
+                    "effective_envelope_clear_authority", False)) and
+                _as_bool(self.latest_static_debug.get("authorized", False)) and
+                _as_bool(self.latest_safety.get("cargo_valid", False)) and
+                _as_bool(self.latest_safety.get("obstacle_valid", False)))
+            row["final_illegal_clear"] = (
+                active and row.get("final_typed_code") == CLEAR_CODE and
+                not formal_clear)
+            row["cargo_monitor_active"] = active
+            row["cargo_episode_id"] = episode_id
+            static_status = select_static_status(
+                now, self.pipeline.operational, self.latest_static_debug,
+                self.pipeline.pending, float(self.config.get(
+                    "static_status_freshness_sec", 2.0)))
+            row["static_authority"] = static_status["static_authority"]
+            row["map_session_verified"] = static_status[
+                "map_session_verified"]
+            row["static_status_source"] = static_status["source"]
+            event_rows = []
+            for flag in ("raw_typed_simple_mismatch",
+                         "final_typed_heartbeat_mismatch",
+                         "operational_final_mismatch", "pending_illegal_clear",
+                         "final_illegal_clear", "normal_code35"):
+                flag_active = bool(row.get(flag))
+                if (flag_active and
+                        not self._pipeline_last_flags.get(flag, False)):
+                    event = dict(row)
+                    event.update({
+                        "event": "AVOIDANCE_PIPELINE_" + flag.upper(),
+                        "reason": flag})
+                    event_rows.append(event)
+                self._pipeline_last_flags[flag] = flag_active
         fields = list(row.keys())
         self.writer.submit("csv", (
             "samples/avoidance_pipeline_samples.csv", fields, row))
-        for flag in ("raw_typed_simple_mismatch",
-                     "final_typed_heartbeat_mismatch",
-                     "operational_final_mismatch", "pending_illegal_clear",
-                     "final_illegal_clear", "normal_code35"):
-            active = bool(row.get(flag))
-            if active and not self._pipeline_last_flags.get(flag, False):
-                event = dict(row)
-                event.update({"event": "AVOIDANCE_PIPELINE_" + flag.upper(),
-                              "reason": flag})
-                self._emit_typed_event(
-                    "samples/avoidance_pipeline_events.jsonl", event)
-            self._pipeline_last_flags[flag] = active
+        for event in event_rows:
+            self._emit_typed_event(
+                "samples/avoidance_pipeline_events.jsonl", event)
         return row
 
     def _cargo_terminal_line(self, now: float,
                              pipeline: Mapping[str, Any]) -> str:
-        gravity = self.latest_gravity
-        geometry = self.latest_geometry
-        recognition = self.latest_recognition
-        swing = self.latest_swing
+        with self._state_lock:
+            gravity = dict(self.latest_gravity)
+            geometry = dict(self.latest_geometry)
+            recognition = dict(self.latest_recognition)
+            swing = dict(self.latest_swing)
+            episode_id = self.cargo_gate.episode_id
+            gate_state = self.cargo_gate.state
         current = self.aggregator.current_summary()
         gravity_age = (now - float(gravity.get("wall_time", now))
                        if gravity else float("nan"))
@@ -1886,8 +2037,8 @@ class RosRuntimeMonitor:
                 "hoist={hoist} hoist_fresh={hoist_fresh} "
                 "static={static} session_verified={session_verified} "
                 "reason={reason}").format(
-                    episode=self.cargo_gate.episode_id,
-                    gravity=self.cargo_gate.state,
+                    episode=episode_id,
+                    gravity=gate_state,
                     gravity_age=gravity_age,
                     recognition=recognition.get("state", "-"),
                     lifecycle=recognition.get("cargo_lifecycle_id", "-"),
@@ -1915,10 +2066,8 @@ class RosRuntimeMonitor:
                     speed=swing.get("horizontal_speed_mps", "-"),
                     hoist=swing.get("hoist_state", "-"),
                     hoist_fresh=swing.get("hoist_state_fresh", "-"),
-                    static=self.pipeline.pending.get(
-                        "static_authority",
-                        self.latest_static_debug.get("authorized", "-")),
-                    session_verified=self.pipeline.pending.get(
+                    static=pipeline.get("static_authority", "-"),
+                    session_verified=pipeline.get(
                         "map_session_verified", "-"),
                     reason=current.get("reason", "-"))
 
@@ -1946,8 +2095,10 @@ class RosRuntimeMonitor:
 
     def _safety_callback(self, message: Any) -> None:
         wall = time.time()
-        self.pipeline.set_code("final_typed",
-                               int(message.requested_alarm_code), wall)
+        with self._state_lock:
+            self.pipeline.set_code("final_typed",
+                                   int(message.requested_alarm_code), wall)
+            static_debug = dict(self.latest_static_debug)
         self.last_safety_wall = wall
         self.safety_status_message_count += 1
         stamp = float(message.header.stamp.to_sec())
@@ -1958,7 +2109,7 @@ class RosRuntimeMonitor:
             "nearest_obstacle_distance_m", "conservative_vertical_clearance_m",
             "obstacle_association_reset_reason")}
         values["static_authorized"] = _as_bool(
-            self.latest_static_debug.get("authorized", False))
+            static_debug.get("authorized", False))
         with self.aggregator_lock:
             events = self.aggregator.ingest(
                 values, source_stamp=stamp, wall_time=wall)
@@ -1974,20 +2125,23 @@ class RosRuntimeMonitor:
                     "obstacle_valid": bool(message.obstacle_valid),
                     "message_age_sec": max(0.0, self.rospy.Time.now().to_sec() - stamp)})
         row.update({
-            "static_query_reason": self.latest_static_debug.get("query_reason", ""),
-            "static_matched_ratio": self.latest_static_debug.get("matched_ratio", ""),
-            "static_matched_iou": self.latest_static_debug.get("matched_iou", ""),
-            "static_height_overlap": self.latest_static_debug.get("height_overlap", ""),
-            "static_index_epoch": self.latest_static_debug.get("index_epoch", ""),
-            "static_index_revision": self.latest_static_debug.get("index_revision", ""),
+            "static_query_reason": static_debug.get("query_reason", ""),
+            "static_matched_ratio": static_debug.get("matched_ratio", ""),
+            "static_matched_iou": static_debug.get("matched_iou", ""),
+            "static_height_overlap": static_debug.get("height_overlap", ""),
+            "static_index_epoch": static_debug.get("index_epoch", ""),
+            "static_index_revision": static_debug.get("index_revision", ""),
         })
         fields = list(row.keys())
-        self.latest_safety = dict(row)
+        with self._state_lock:
+            if self.cargo_gate.active:
+                self.latest_safety = dict(row)
         self.writer.submit("csv", ("samples/safety_samples.csv", fields, row))
 
     def _code_callback(self, message: Any) -> None:
         wall = time.time()
-        self.pipeline.set_code("heartbeat", int(message.data), wall)
+        with self._state_lock:
+            self.pipeline.set_code("heartbeat", int(message.data), wall)
         self.last_status_code_wall = wall
         self.status_code_message_count += 1
         with self.aggregator_lock:
@@ -2008,8 +2162,11 @@ class RosRuntimeMonitor:
                 if "=" in token:
                     key, value = token.split("=", 1)
                     parsed[key.strip()] = value.strip()
-        self.latest_static_debug = parsed
-        row = {"wall_time": time.time(), "raw": text}
+        wall = time.time()
+        parsed["_wall_time"] = wall
+        with self._state_lock:
+            self.latest_static_debug = dict(parsed)
+        row = {"wall_time": wall, "raw": text}
         row.update(parsed)
         self.writer.submit("jsonl", ("samples/static_evidence_samples.jsonl", row))
         self.writer.submit("csv", ("samples/static_evidence_samples.csv", [
@@ -2676,36 +2833,47 @@ class RosRuntimeMonitor:
         self._update_motion_state(wall)
         recognition_cfg = self.config.get("cargo_recognition_monitor", {})
         recognition_stale_sec = float(recognition_cfg.get("stale_sec", 1.0))
-        recognition_reference = (self.last_recognition_wall or
-                                 self.cargo_gate.episode_started_wall)
-        if (self.cargo_gate.active and
-                recognition_reference is not None and
-                wall - recognition_reference > recognition_stale_sec and
-                not self._recognition_stale_active):
-            self._emit_typed_event(
-                "samples/cargo_recognition_events.jsonl", {
+        swing_cfg = self.config.get("cargo_swing_monitor", {})
+        swing_stale_sec = float(swing_cfg.get("stale_sec", 0.75))
+        recognition_stale_event = None
+        swing_stale_event = None
+        with self._state_lock:
+            recognition_reference = (self.last_recognition_wall or
+                                     self.cargo_gate.episode_started_wall)
+            if (self.cargo_gate.active and
+                    recognition_reference is not None and
+                    wall - recognition_reference > recognition_stale_sec and
+                    not self._recognition_stale_active):
+                recognition_stale_event = {
                     "event": "CARGO_RECOGNITION_STALE",
                     "wall_time": wall,
                     "age_sec": wall - recognition_reference,
                     "reason": "recognition_status_stale",
-                })
-            self._recognition_stale_active = True
-        swing_cfg = self.config.get("cargo_swing_monitor", {})
-        swing_stale_sec = float(swing_cfg.get("stale_sec", 0.75))
-        swing_reference = (self.last_swing_wall or
-                           self.cargo_gate.episode_started_wall)
-        if (self.cargo_gate.active and swing_reference is not None and
-                wall - swing_reference > swing_stale_sec and
-                not self._swing_stale_active):
-            self._emit_typed_event(
-                "samples/cargo_swing_events.jsonl", {
+                }
+                self._recognition_stale_active = True
+            swing_reference = (self.last_swing_wall or
+                               self.cargo_gate.episode_started_wall)
+            if (self.cargo_gate.active and swing_reference is not None and
+                    wall - swing_reference > swing_stale_sec and
+                    not self._swing_stale_active):
+                swing_stale_event = {
                     "event": "CARGO_SWING_EVIDENCE_STALE",
                     "wall_time": wall,
                     "age_sec": wall - swing_reference,
                     "reason": "swing_status_stale",
-                })
-            self._swing_stale_count += 1
-            self._swing_stale_active = True
+                }
+                self._swing_stale_count += 1
+                self._swing_stale_active = True
+            cargo_monitor_state = self.cargo_gate.state
+            cargo_monitor_active = self.cargo_gate.active
+            cargo_episode_id = self.cargo_gate.episode_id
+        if recognition_stale_event is not None:
+            self._emit_typed_event(
+                "samples/cargo_recognition_events.jsonl",
+                recognition_stale_event)
+        if swing_stale_event is not None:
+            self._emit_typed_event(
+                "samples/cargo_swing_events.jsonl", swing_stale_event)
         runtime = self._sample_runtime(wall)
         # Real safety_status age from callback wall time
         runtime["safety_status_age_sec"] = (
@@ -2771,9 +2939,9 @@ class RosRuntimeMonitor:
             "cargo_recognition_track_stats": self._recognition_track_stats,
             "cargo_swing_track_stats": self._swing_track_stats,
             "gravity_data_ready": self.gravity_message_count > 0,
-            "cargo_monitor_state": self.cargo_gate.state,
-            "cargo_monitor_active": self.cargo_gate.active,
-            "cargo_episode_id": self.cargo_gate.episode_id,
+            "cargo_monitor_state": cargo_monitor_state,
+            "cargo_monitor_active": cargo_monitor_active,
+            "cargo_episode_id": cargo_episode_id,
         })
         self.writer.submit("atomic_json", ("reports/live_summary.json", summary))
         current = summary.get("current") or {}
@@ -2914,18 +3082,33 @@ class RosRuntimeMonitor:
                 _rdy["swing_data_ready"] = (
                     self.swing_status_message_count > 0)
                 _rdy["gravity_data_ready"] = self.gravity_message_count > 0
-                _rdy["cargo_monitor_active"] = self.cargo_gate.active
-                _rdy["cargo_monitor_ready"] = (
-                    not self.cargo_gate.active or
-                    (self.recognition_status_message_count >
-                         self._episode_recognition_messages_start and
-                     self.swing_status_message_count >
-                         self._episode_swing_messages_start))
-                _rdy["avoidance_pipeline_ready"] = all(
-                    name in self.pipeline.values for name in
-                    ("raw_typed", "raw_simple", "final_typed", "heartbeat"))
-                _rdy["static_session_ready"] = _as_bool(
-                    self.pipeline.pending.get("map_session_verified", False))
+                with self._state_lock:
+                    cargo_active = self.cargo_gate.active
+                    episode_recognition_ready = (
+                        self.recognition_status_message_count >
+                        self._episode_recognition_messages_start)
+                    episode_swing_ready = (
+                        self.swing_status_message_count >
+                        self._episode_swing_messages_start)
+                    episode_geometry_ready = (
+                        self._episode_geometry_message_count > 0)
+                    pipeline_ready = all(
+                        name in self.pipeline.values for name in
+                        ("raw_typed", "raw_simple", "final_typed",
+                         "heartbeat"))
+                    static_status = select_static_status(
+                        now, self.pipeline.operational,
+                        self.latest_static_debug, self.pipeline.pending,
+                        float(self.config.get(
+                            "static_status_freshness_sec", 2.0)))
+                _rdy["cargo_monitor_active"] = cargo_active
+                _rdy["cargo_monitor_ready"] = cargo_monitor_ready(
+                    cargo_active, episode_recognition_ready,
+                    episode_swing_ready, episode_geometry_ready,
+                    pipeline_ready)
+                _rdy["avoidance_pipeline_ready"] = pipeline_ready
+                _rdy["static_session_ready"] = static_status[
+                    "map_session_verified"]
                 _rdy["extended_data_ready"] = (
                     _rdy["data_ready"]
                     and _rdy["recognition_data_ready"]
@@ -2939,7 +3122,7 @@ class RosRuntimeMonitor:
             # ── snapshot ──
             summary = self.snapshot(now)
             pipeline = self._record_pipeline_snapshot(now)
-            if self.cargo_gate.active:
+            if pipeline.get("cargo_monitor_active"):
                 cargo_line = self._cargo_terminal_line(now, pipeline)
                 print(cargo_line, flush=True)
                 self.writer.submit("text", ("logs/cargo_terminal.log",

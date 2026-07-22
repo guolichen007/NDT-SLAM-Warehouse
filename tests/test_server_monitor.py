@@ -18,6 +18,8 @@ from server_runtime_monitor import (  # noqa: E402
     is_runtime_status_stale,
     normalize_timeout_status,
     classify_cargo_geometry,
+    cargo_monitor_ready,
+    select_static_status,
 )
 from summarize_server_run import summarize  # noqa: E402
 
@@ -222,6 +224,16 @@ class AvoidancePipelineObserverTest(unittest.TestCase):
         self.assertTrue(snapshot["pending_illegal_clear"])
         self.assertTrue(snapshot["normal_code35"])
 
+    def test_reset_drops_previous_episode_mirrors(self):
+        observer = AvoidancePipelineObserver()
+        observer.set_code("final_typed", 14, 1.0)
+        observer.set_operational({"operational_code": 14}, 1.0)
+        observer.set_pending({"pending_provisional_status": "NEAR_3M"}, 1.0)
+        observer.reset()
+        self.assertEqual(observer.values, {})
+        self.assertEqual(observer.operational, {})
+        self.assertEqual(observer.pending, {})
+
 
 class CargoGeometryClassificationTest(unittest.TestCase):
     def test_frozen_formal_geometry_is_not_direct_measured(self):
@@ -250,7 +262,44 @@ class CargoGeometryClassificationTest(unittest.TestCase):
         self.assertTrue(direct)
         self.assertTrue(formal)
         value["support"] = 0
-        self.assertFalse(classify_cargo_geometry(value)[0])
+        direct, formal = classify_cargo_geometry(value)
+        self.assertFalse(direct)
+        self.assertFalse(formal)
+
+
+class CargoMonitorReadinessTest(unittest.TestCase):
+    def test_inactive_monitor_is_not_cargo_ready(self):
+        self.assertFalse(cargo_monitor_ready(False, True, True, True, True))
+
+    def test_active_monitor_requires_all_current_episode_sources(self):
+        self.assertTrue(cargo_monitor_ready(True, True, True, True, True))
+        for missing in range(4):
+            values = [True, True, True, True]
+            values[missing] = False
+            self.assertFalse(cargo_monitor_ready(True, *values))
+
+
+class StaticStatusSelectionTest(unittest.TestCase):
+    def test_operational_precedes_static_and_pending(self):
+        result = select_static_status(
+            10.0,
+            {"_wall_time": 9.5, "map_session_verified": True},
+            {"_wall_time": 9.7, "map_session_verified": False,
+             "authorized": True},
+            {"_wall_time": 9.9, "map_session_verified": False,
+             "static_authority": "PENDING"},
+            2.0)
+        self.assertTrue(result["map_session_verified"])
+        self.assertEqual(result["static_authority"], "AUTHORIZED")
+
+    def test_stale_pending_cannot_keep_session_ready(self):
+        result = select_static_status(
+            10.0, {}, {},
+            {"_wall_time": 7.0, "map_session_verified": True,
+             "static_authority": "RUNTIME_MATURE"},
+            2.0)
+        self.assertFalse(result["map_session_verified"])
+        self.assertEqual(result["static_authority"], "UNKNOWN")
 
 
 class AppendSafeOutputTest(unittest.TestCase):

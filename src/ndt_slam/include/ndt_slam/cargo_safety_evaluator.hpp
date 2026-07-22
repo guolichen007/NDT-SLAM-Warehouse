@@ -131,12 +131,12 @@ enum class CargoSafetyDecisionPhase : std::uint8_t {
 };
 
 struct CargoSafetyDecisionInput {
-    CargoSafetyDecisionPhase phase =
-        CargoSafetyDecisionPhase::STARTUP_NOT_READY;
     bool system_ready = false;
     bool localization_valid = false;
     HookLoadSignalRole hook_signal_role = HookLoadSignalRole::REQUIRED;
     bool gravity_valid = false;
+    bool gravity_empty = false;
+    bool gravity_loaded = false;
     bool gravity_conflict = false;
     bool safe_empty = false;
     bool hook_loaded = false;
@@ -152,6 +152,12 @@ struct CargoSafetyDecisionInput {
     std::string evidence_reason;
 };
 
+struct CargoSafetyPhaseSelection {
+    CargoSafetyDecisionPhase phase =
+        CargoSafetyDecisionPhase::STARTUP_NOT_READY;
+    std::string reason;
+};
+
 struct CargoSafetyDecision {
     bool valid = false;
     bool warning_valid = false;
@@ -164,6 +170,10 @@ struct CargoSafetyDecision {
 
 CargoSafetyDecision composeCargoSafetyDecision(
     const CargoSafetyDecisionInput& input);
+CargoSafetyPhaseSelection deriveCargoSafetyDecisionPhase(
+    const CargoSafetyDecisionInput& input);
+bool cargoSafetyDecisionSelfConsistent(
+    const CargoSafetyDecision& decision);
 
 struct CargoSafetyResult {
     bool input_valid = false;

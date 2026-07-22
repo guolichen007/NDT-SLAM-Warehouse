@@ -53,7 +53,7 @@ TEST(CargoRigidGeometryTest, FormalHeightUsesOneAuthorityDecision) {
 
 TEST(CargoRigidGeometryTest, BuilderPreservesHeldPoseHeightEvidenceStamp) {
     LiveCargoPose held_pose = pose(Eigen::Vector3f(0.0F, 0.0F, 2.0F));
-    held_pose.source = CargoPoseSource::HELD_LAST_RELIABLE_OFFSET;
+    held_pose.source = CargoPoseSource::RECENT_STABLE_HOLD;
     held_pose.evidence_stamp_sec = 8.5;
     held_pose.evaluation_stamp_sec = 10.0;
     const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(

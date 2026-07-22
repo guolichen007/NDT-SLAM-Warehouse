@@ -11,6 +11,8 @@ monitor:
   safety_status_stale_sec: 1.0
   gravity_monitor_stale_sec: 1.0
   avoidance_pipeline_grace_sec: 0.4
+  static_status_freshness_sec: 2.0
+  cargo_episode_geometry_max_samples: 10000
   sustained_33_sec: 5.0
   sustained_34_sec: 5.0
   repeat_period_sec: 30.0

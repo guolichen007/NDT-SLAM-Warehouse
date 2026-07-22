@@ -14501,6 +14501,8 @@ void NdtSlamNode::publishOperationalStatus(
            << ",\"degraded_pending\":false"
            << ",\"held_from_last_valid\":false"
            << ",\"hold_age_sec\":0.0"
+           << ",\"map_session_verified\":"
+           << verified_map_session_loaded_
            << ",\"reason\":\"" << escapeJsonString(raw.reason) << "\""
            << ",\"source_stamp\":" << stamp.toSec() << "}";
     std_msgs::String message;
@@ -14649,9 +14651,15 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
     decision_input.localization_valid = localization_valid;
     decision_input.hook_signal_role = hook_load_signal_role_;
     decision_input.gravity_valid = gravity_valid;
+    decision_input.gravity_empty = gravity_valid &&
+        status.hook_load_state == Status::HOOK_EMPTY;
+    decision_input.gravity_loaded = gravity_valid &&
+        status.hook_load_state == Status::HOOK_LOADED;
     decision_input.gravity_conflict = hook_evidence.gravity_conflict;
     decision_input.safe_empty = safe_empty;
-    decision_input.hook_loaded = lidar_cargo_accepted;
+    decision_input.hook_loaded =
+        hook_load_signal_role_ != HookLoadSignalRole::DISABLED &&
+        decision_input.gravity_loaded;
     decision_input.cargo_fault = cargo_fault;
     decision_input.obstacle_fault = obstacle_fault;
     decision_input.internal_fault = internal_fault;
@@ -14670,34 +14678,6 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
             (hook_evidence.gravity_conflict
                 ? std::string("gravity_lidar_conflict:") + evidence_reason
                 : evidence_reason)));
-    if (internal_fault) {
-        decision_input.phase =
-            CargoSafetyDecisionPhase::INTERNAL_CONTRACT_ERROR;
-    } else if (!system_ready) {
-        decision_input.phase = CargoSafetyDecisionPhase::STARTUP_NOT_READY;
-    } else if (!localization_valid) {
-        decision_input.phase = CargoSafetyDecisionPhase::LOCALIZATION_INVALID;
-    } else if (hook_load_signal_role_ == HookLoadSignalRole::REQUIRED &&
-               !gravity_valid) {
-        decision_input.phase =
-            CargoSafetyDecisionPhase::GRAVITY_REQUIRED_INVALID;
-    } else if (safe_empty) {
-        decision_input.phase = CargoSafetyDecisionPhase::SAFE_EMPTY;
-    } else if (use_provisional_warning) {
-        decision_input.phase =
-            CargoSafetyDecisionPhase::VALID_WARNING_OR_CLEAR;
-    } else if (!lidar_cargo_accepted) {
-        decision_input.phase = CargoSafetyDecisionPhase::
-            CARGO_EXPECTED_NOT_AUTHORITATIVE;
-    } else if (obstacle_fault || !warning_valid ||
-               (warning_code == CargoSafetyEvaluator::kSafeCode &&
-                !formal_clear_authorized)) {
-        decision_input.phase = CargoSafetyDecisionPhase::
-            CARGO_FORMAL_OBSTACLE_NOT_READY;
-    } else {
-        decision_input.phase =
-            CargoSafetyDecisionPhase::VALID_WARNING_OR_CLEAR;
-    }
     const CargoSafetyDecision decision =
         composeCargoSafetyDecision(decision_input);
 
@@ -17957,6 +17937,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         std_msgs::String debug_message;
         std::ostringstream stream;
         stream << "stamp=" << std::setprecision(17) << stamp.toSec()
+               << " map_session_verified="
+               << (verified_map_session_loaded_ ? 1 : 0)
                << " source_validated="
                << (selected_source_evidence &&
                    selected_source_evidence->source_validated ? 1 : 0)
