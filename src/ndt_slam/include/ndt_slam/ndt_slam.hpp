@@ -14,6 +14,7 @@
 #include <std_srvs/Empty.h>
 #include <std_msgs/String.h>
 #include <std_msgs/Int32.h>
+#include <std_msgs/UInt8.h>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
@@ -1117,7 +1118,6 @@ private:
     ros::Publisher payload_track_info_pub_;
     void publishPayloadTrackInfo(const ros::Time& stamp);
     void publishPayloadTrackInfoInvalid(const std::string& reason);
-    void buildLockedOdomFixedCargoBox(const ros::Time& stamp);
 
     // Commit C: payload precise box info
 
@@ -1989,6 +1989,12 @@ private:
     CargoPhysicalMotionConfig cargo_physical_motion_config_;
     CargoPhysicalMotionEstimator cargo_physical_motion_estimator_;
     CargoPhysicalMotionResult cargo_physical_motion_result_;
+    std::string cargo_base_motion_state_topic_ =
+        "/crane/base_motion_state";
+    double cargo_base_motion_state_timeout_sec_ = 0.50;
+    ros::Subscriber cargo_base_motion_state_sub_;
+    std_msgs::UInt8 cargo_base_motion_state_message_;
+    ros::Time cargo_base_motion_state_received_stamp_;
     PendingCargoEnvelopeConfig pending_cargo_envelope_config_;
     PendingCargoEnvelope pending_cargo_envelope_;
     EffectiveCargoEnvelope effective_cargo_envelope_;
@@ -2010,6 +2016,8 @@ private:
     Eigen::Vector2f cargo_last_reliable_offset_base_ =
         Eigen::Vector2f::Zero();
     ros::Time cargo_last_reliable_offset_stamp_;
+    std::uint64_t cargo_last_reliable_offset_lifecycle_id_ = 0U;
+    std::string cargo_last_hook_anchor_source_;
     bool cargo_recognition_enabled_ = true;
     double cargo_recognition_loaded_grace_sec_ = 1.0;
     double cargo_recognition_timeout_sec_ = 8.0;
@@ -2025,6 +2033,10 @@ private:
         "/crane/hook_anchor_base";
     double cargo_swing_hook_anchor_timeout_sec_ = 0.50;
     float cargo_swing_hook_anchor_z_m_ = 3.50F;
+    bool cargo_configured_hook_anchor_xy_authoritative_ = false;
+    bool cargo_configured_hook_anchor_z_authoritative_ = false;
+    bool cargo_topic_hook_anchor_xy_authoritative_ = true;
+    bool cargo_topic_hook_anchor_z_authoritative_ = true;
     std::string cargo_hoist_state_topic_ = "/crane/hoist_motion_state";
     double cargo_hoist_state_timeout_sec_ = 0.50;
     ros::Subscriber cargo_swing_hook_anchor_sub_;
@@ -2189,9 +2201,6 @@ private:
     HookCargoDetection detectCargoAroundOdomAnchor(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
         const ros::Time& stamp);
-    // Legacy implementation retained until the engineering cleanup commit.
-    // It has no runtime call site.
-    void publishPayloadTrackInfoFromOdomAnchorBox(const ros::Time& stamp);
     void publishPayloadTrackInfoFromFusion(
         const CargoBottomResult& bottom,
         const ros::Time& stamp);
@@ -2265,10 +2274,24 @@ private:
         const HookLoadSnapshot& hook, const ros::Time& stamp);
     void updateAndPublishCargoSwing(
         const HookLoadSnapshot& hook, const ros::Time& stamp);
+    struct CargoHookAnchorSnapshot {
+        bool valid = false;
+        Eigen::Vector3f point_base = Eigen::Vector3f::Zero();
+        CargoHookAnchorAuthority authority =
+            CargoHookAnchorAuthority::INVALID;
+        bool xy_authoritative = false;
+        bool z_authoritative = false;
+        std::string source = "invalid";
+        ros::Time evidence_stamp;
+    };
+    CargoHookAnchorSnapshot currentCargoHookAnchor(
+        const ros::Time& stamp) const;
     void cargoSwingHookAnchorCallback(
         const geometry_msgs::PointStamped::ConstPtr& message);
     void cargoHoistStateCallback(
         const lidar_slam2_msgs::HoistMotionState::ConstPtr& message);
+    void cargoBaseMotionStateCallback(
+        const std_msgs::UInt8::ConstPtr& message);
     void publishCargoFusionMarker(const CargoBottomResult& bottom,
                                   const ros::Time& stamp,
                                   bool explicit_empty = false,

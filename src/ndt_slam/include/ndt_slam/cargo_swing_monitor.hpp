@@ -65,6 +65,16 @@ enum class CargoRopeLengthSource : std::uint8_t {
   INVALID,
 };
 
+enum class CargoHookAnchorAuthority : std::uint8_t {
+  INVALID = 0,
+  CONFIG_DIAGNOSTIC,
+  TOPIC_MEASURED,
+  EXTERNAL_CONTROLLER,
+};
+
+const char* cargoHookAnchorAuthorityName(
+    CargoHookAnchorAuthority authority) noexcept;
+
 struct CargoSwingConfig {
   bool enabled = true;
   float configured_sling_length_m = 1.00F;
@@ -98,11 +108,18 @@ struct CargoSwingConfig {
   float skew_min_dc_to_ac_ratio = 2.0F;
   double skew_min_duration_sec = 1.00;
   double skew_alarm_confirm_sec = 0.50;
+  double skew_alarm_hold_sec = 0.50;
+  double skew_clear_confirm_sec = 1.00;
+  float skew_clear_offset_m = 0.12F;
+  float skew_clear_direction_consistency = 0.55F;
   int skew_max_zero_crossings = 1;
   float crossing_deadband_m = 0.03F;
   float torsion_detect_deg = 3.0F;
   float torsion_warning_deg = 5.0F;
   float torsion_alarm_deg = 10.0F;
+  float torsion_warning_clear_deg = 3.0F;
+  float torsion_alarm_clear_deg = 6.0F;
+  double torsion_clear_confirm_sec = 1.00;
   float minimum_identity_confidence = 0.60F;
   float minimum_shape_confidence = 0.55F;
   float maximum_tracking_residual_m = 0.25F;
@@ -119,6 +136,10 @@ struct CargoSwingInput {
   bool hook_anchor_valid = false;
   Eigen::Vector3f hook_anchor_base = Eigen::Vector3f::Zero();
   std::string hook_anchor_source = "config";
+  CargoHookAnchorAuthority hook_anchor_authority =
+      CargoHookAnchorAuthority::INVALID;
+  bool hook_anchor_xy_authoritative = false;
+  bool hook_anchor_z_authoritative = false;
   bool track_retained = false;
   bool track_locked = false;
   bool observation_associated_current = false;
@@ -159,6 +180,9 @@ struct CargoSwingResult {
   float rope_length_m = 0.0F;
   CargoRopeLengthSource rope_length_source = CargoRopeLengthSource::INVALID;
   bool angle_authoritative = false;
+  bool offset_authoritative = false;
+  CargoHookAnchorAuthority hook_anchor_authority =
+      CargoHookAnchorAuthority::INVALID;
   float angle_deg = 0.0F;
   float horizontal_speed_mps = 0.0F;
   float radial_speed_mps = 0.0F;
@@ -217,7 +241,14 @@ class CargoSwingMonitor {
   double last_severe_measurement_stamp_sec_ = 0.0;
   double settling_enter_stamp_sec_ = 0.0;
   double skew_alarm_candidate_stamp_sec_ = 0.0;
+  double skew_alarm_enter_stamp_sec_ = 0.0;
+  double skew_clear_candidate_stamp_sec_ = 0.0;
+  double torsion_clear_candidate_stamp_sec_ = 0.0;
+  double last_torsion_evidence_stamp_sec_ = 0.0;
   bool immediate_alarm_latched_ = false;
+  bool skew_alarm_latched_ = false;
+  CargoTorsionState torsion_latched_state_ =
+      CargoTorsionState::NOT_EVALUATED;
   bool settling_active_ = false;
   bool filtered_offset_valid_ = false;
   Eigen::Vector2f filtered_offset_ = Eigen::Vector2f::Zero();

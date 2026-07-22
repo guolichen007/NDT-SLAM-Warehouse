@@ -18,6 +18,15 @@ bool validConfig(const CargoPhysicalMotionConfig& config) {
       config.exit_stationary_confirm_sec >= 0.0 &&
       std::isfinite(config.maximum_sample_gap_sec) &&
       config.maximum_sample_gap_sec > 0.0 &&
+      std::isfinite(config.confidence_decay_tau_sec) &&
+      config.confidence_decay_tau_sec > 0.0 &&
+      std::isfinite(config.minimum_valid_confidence) &&
+      config.minimum_valid_confidence >= 0.0F &&
+      config.minimum_valid_confidence <= 1.0F &&
+      std::isfinite(config.maximum_physical_speed_mps) &&
+      config.maximum_physical_speed_mps > 0.0F &&
+      std::isfinite(config.maximum_raw_pose_innovation_m) &&
+      config.maximum_raw_pose_innovation_m > 0.0F &&
       std::isfinite(config.velocity_filter_alpha) &&
       config.velocity_filter_alpha > 0.0F &&
       config.velocity_filter_alpha <= 1.0F;
@@ -126,6 +135,10 @@ CargoPhysicalMotionResult CargoPhysicalMotionEstimator::update(
     result_.reason = "external_motion_state";
     last_valid_sample_stamp_sec_ = input.stamp_sec;
     transition_candidate_since_sec_ = 0.0;
+    // Do not compare the first raw-pose sample after controller handoff with
+    // a stale pre-controller baseline.
+    previous_position_valid_ = false;
+    filtered_speed_valid_ = false;
     return result_;
   }
 
@@ -138,6 +151,23 @@ CargoPhysicalMotionResult CargoPhysicalMotionEstimator::update(
     result_.reason = result_.valid
         ? "short_unknown_motion_input_hold"
         : "motion_input_unavailable";
+    return result_;
+  }
+
+  const bool drift_rejected = !input.raw_pose_quality_valid ||
+      (input.localization_degenerate &&
+       (!std::isfinite(input.raw_pose_innovation_m) ||
+        input.raw_pose_innovation_m >
+            config_.maximum_raw_pose_innovation_m));
+  if (drift_rejected) {
+    const bool short_hold = last_valid_sample_stamp_sec_ > 0.0 &&
+        input.stamp_sec - last_valid_sample_stamp_sec_ <=
+            config_.maximum_sample_gap_sec;
+    result_.valid = short_hold &&
+        result_.state != CargoPhysicalMotionState::UNKNOWN;
+    result_.reason = input.localization_degenerate
+        ? "degenerate_raw_pose_rejected_short_hold"
+        : "raw_pose_quality_rejected_short_hold";
     return result_;
   }
 
@@ -157,8 +187,20 @@ CargoPhysicalMotionResult CargoPhysicalMotionEstimator::update(
     result_.reason = "raw_pose_delta_time_invalid";
     return result_;
   }
-  const float measured_speed = static_cast<float>(
-      (input.raw_position - previous_position_).norm() / dt);
+  const float computed_step = static_cast<float>(
+      (input.raw_position - previous_position_).norm());
+  const float reported_step = std::isfinite(input.raw_pose_step_m) &&
+          input.raw_pose_step_m > 0.0F
+      ? input.raw_pose_step_m : computed_step;
+  const float measured_speed = computed_step / static_cast<float>(dt);
+  if (!std::isfinite(reported_step) || !std::isfinite(measured_speed) ||
+      reported_step > config_.maximum_physical_speed_mps *
+          static_cast<float>(dt) ||
+      measured_speed > config_.maximum_physical_speed_mps) {
+    result_.valid = result_.state != CargoPhysicalMotionState::UNKNOWN;
+    result_.reason = "raw_pose_drift_spike_rejected_short_hold";
+    return result_;
+  }
   previous_position_ = input.raw_position;
   last_valid_sample_stamp_sec_ = input.stamp_sec;
   if (!filtered_speed_valid_) {
@@ -172,8 +214,13 @@ CargoPhysicalMotionResult CargoPhysicalMotionEstimator::update(
   }
   result_.source = CargoPhysicalMotionSource::RAW_POSE_DELTA;
   result_.confidence = std::clamp(
-      static_cast<float>(dt / config_.maximum_sample_gap_sec),
-      0.2F, 1.0F);
+      static_cast<float>(std::exp(
+          -dt / config_.confidence_decay_tau_sec)), 0.0F, 1.0F);
+  if (result_.confidence < config_.minimum_valid_confidence) {
+    result_.valid = false;
+    result_.reason = "raw_pose_sample_confidence_too_low";
+    return result_;
+  }
 
   const float speed = result_.filtered_speed_mps;
   if (result_.state == CargoPhysicalMotionState::UNKNOWN) {

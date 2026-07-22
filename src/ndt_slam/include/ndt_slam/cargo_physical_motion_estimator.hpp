@@ -27,6 +27,10 @@ struct CargoPhysicalMotionConfig {
   double enter_stationary_confirm_sec = 0.50;
   double exit_stationary_confirm_sec = 0.20;
   double maximum_sample_gap_sec = 0.50;
+  double confidence_decay_tau_sec = 0.25;
+  float minimum_valid_confidence = 0.35F;
+  float maximum_physical_speed_mps = 3.0F;
+  float maximum_raw_pose_innovation_m = 0.75F;
   float velocity_filter_alpha = 0.30F;
 };
 
@@ -37,6 +41,10 @@ struct CargoPhysicalMotionInput {
       CargoPhysicalMotionState::UNKNOWN;
   bool raw_position_valid = false;
   Eigen::Vector2d raw_position = Eigen::Vector2d::Zero();
+  bool raw_pose_quality_valid = true;
+  float raw_pose_innovation_m = 0.0F;
+  float raw_pose_step_m = 0.0F;
+  bool localization_degenerate = false;
 };
 
 struct CargoPhysicalMotionResult {

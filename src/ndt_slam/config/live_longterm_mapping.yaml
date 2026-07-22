@@ -795,11 +795,17 @@ cargo_presence:
 
 cargo_physical_motion:
   enabled: true
+  external_state_topic: "/crane/base_motion_state"
+  external_state_timeout_sec: 0.50
   enter_stationary_speed_mps: 0.03
   exit_stationary_speed_mps: 0.08
   enter_stationary_confirm_sec: 0.50
   exit_stationary_confirm_sec: 0.20
   maximum_sample_gap_sec: 0.50
+  confidence_decay_tau_sec: 0.25
+  minimum_valid_confidence: 0.35
+  maximum_physical_speed_mps: 3.0
+  maximum_raw_pose_innovation_m: 0.75
   velocity_filter_alpha: 0.30
 
 pending_cargo_self_evidence:
@@ -848,8 +854,11 @@ cargo_geometry_fusion:
   immediate_expand_enabled: true
   minimum_live_dimension_support: 30
   minimum_live_shape_confidence_for_shrink: 0.75
-  minimum_conservative_length_m: 4.0
-  minimum_conservative_width_m: 3.0
+  minimum_physical_length_m: 0.30
+  minimum_physical_width_m: 0.20
+  formal_transition_start_length_m: 4.0
+  formal_transition_start_width_m: 3.0
+  configured_fallback_is_formal_floor: false
 
 cargo_recognition:
   enabled: true
@@ -865,6 +874,10 @@ cargo_swing:
   hook_anchor_topic: "/crane/hook_anchor_base"
   hook_anchor_timeout_sec: 0.50
   hook_anchor_z_m: 3.50
+  configured_hook_anchor_xy_authoritative: false
+  configured_hook_anchor_z_authoritative: false
+  topic_hook_anchor_xy_authoritative: true
+  topic_hook_anchor_z_authoritative: true
   hoist_state_topic: "/crane/hoist_motion_state"
   hoist_state_timeout_sec: 0.50
   configured_sling_length_m: 1.00
@@ -898,11 +911,18 @@ cargo_swing:
   skew_min_dc_to_ac_ratio: 2.0
   skew_min_duration_sec: 1.00
   skew_alarm_confirm_sec: 0.50
+  skew_alarm_hold_sec: 0.50
+  skew_clear_confirm_sec: 1.00
+  skew_clear_offset_m: 0.12
+  skew_clear_direction_consistency: 0.55
   skew_max_zero_crossings: 1
   crossing_deadband_m: 0.03
   torsion_detect_deg: 3.0
   torsion_warning_deg: 5.0
   torsion_alarm_deg: 10.0
+  torsion_warning_clear_deg: 3.0
+  torsion_alarm_clear_deg: 6.0
+  torsion_clear_confirm_sec: 1.00
   minimum_identity_confidence: 0.60
   minimum_shape_confidence: 0.55
   maximum_tracking_residual_m: 0.25

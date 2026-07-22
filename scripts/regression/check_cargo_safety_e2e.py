@@ -48,6 +48,10 @@ def main() -> int:
         "src/ndt_slam/src/cargo_presence_state_machine.cpp")
     physical_motion = read(
         "src/ndt_slam/src/cargo_physical_motion_estimator.cpp")
+    cargo_geometry = read(
+        "src/ndt_slam/src/cargo_geometry_fusion.cpp")
+    cargo_avoidance = read(
+        "src/ndt_slam/src/cargo_avoidance_fusion.cpp")
     swing_monitor = read(
         "src/ndt_slam/src/cargo_swing_monitor.cpp")
     swing_message = read(
@@ -515,7 +519,11 @@ def main() -> int:
             failures)
     require("maximum_fallback_sway_offset_m" in pending_envelope and
             "lost_position_uncertainty_per_sec" in pending_envelope and
-            "configured commissioning floor" in pending_envelope and
+            "commissioning-conservative" in pending_envelope and
+            "CargoEnvelopePoseSource" in pending_envelope and
+            "CargoEnvelopeShapeSource" in pending_envelope and
+            "current_cargo_pose_unavailable" in pending_envelope and
+            "composeEffectiveCargoEnvelope" in pending_envelope and
             "resolveEffectiveCargoEnvelope" in pending_envelope + node and
             "can_authorize_clear = false" not in pending_envelope,
             "persistent conservative envelope source/uncertainty contract is incomplete",
@@ -526,12 +534,35 @@ def main() -> int:
             "RAW_POSE_DELTA" in physical_motion,
             "cargo swing history is still coupled to localization MotionGate",
             failures)
+    require("std::exp" in physical_motion and
+            "raw_pose_drift_spike_rejected_short_hold" in physical_motion and
+            "maximum_physical_speed_mps" in physical_motion and
+            "/crane/base_motion_state" in node,
+            "physical motion confidence/drift/external-source contract is incomplete",
+            failures)
     require("immediate_alarm_latched_" in swing_monitor and
+            "skew_alarm_latched_" in swing_monitor and
+            "torsion_latched_state_" in swing_monitor and
             "CargoSwayState::SETTLING" in swing_monitor and
             "angle_authoritative &&" in swing_monitor and
+            "hook_anchor_z_authoritative" in swing_monitor and
+            "hook_anchor_xy_authoritative" in swing_monitor and
+            "stop_hoist_and_travel" in swing_monitor and
             "Configured rope length remains diagnostic-only" in swing_monitor and
             "SCHEMA_VERSION=2" in swing_message,
             "sway latch, angle authority, or schema-2 contract is incomplete",
+            failures)
+    require("minimum_physical_length_m" in cargo_geometry and
+            "minimum_physical_width_m" in cargo_geometry and
+            "minimum_conservative_length_m" not in cargo_geometry and
+            "formal_shape_confirmation_pending" in cargo_geometry,
+            "formal physical floor is still coupled to the pending fallback",
+            failures)
+    require("formal_clear_authorized" in cargo_avoidance and
+            "formal_cargo_clear_not_authorized" in cargo_avoidance and
+            "effective_cargo_envelope_.can_authorize_clear" in node and
+            "formal_cargo_removal_authorized_ = active_track" in node,
+            "formal clear/removal does not consume gravity and evidence authority",
             failures)
     pending_update = node.find("updateCargoLiftAndGeometryFusion(")
     pending_branch = node.find("if (!active_track)", pending_update)
@@ -565,6 +596,11 @@ def main() -> int:
             "CONFIGURED_CONSERVATIVE" in pending_envelope and
             "hook_not_loaded" in pending_envelope,
             "PendingCargoEnvelope source/fail-safe policy is incomplete",
+            failures)
+    require("publishPayloadTrackInfoFromOdomAnchorBox" not in node and
+            "buildLockedOdomFixedCargoBox" not in node and
+            "effective_cargo_envelope_.footprint" in node,
+            "legacy anchor-centered payload geometry remains reachable",
             failures)
     require("cargo_lift_origin_binder_.update(lift_input)" in node and
             "cargo_geometry_fusion_.update(geometry_frame)" in node and
@@ -630,10 +666,10 @@ def main() -> int:
             "static evidence revision is incremented while restoring",
             failures)
     require("configured_center_offset_z_m" in pending_envelope + live_config and
-            "fallback.center_base.z() +=" in pending_envelope and
-            "result.height_m = 2.0F * expanded_half_height" in
+            "pose.center_base.z() +=" in node and
+            "result.height_m = base_height +" in
                 pending_envelope and
-            "result.top_z_base = candidate.center_base.z() +" in
+            "result.top_z_base = pose.center_base.z() +" in
                 pending_envelope and
             "live_input.height.bottom_uncertainty_m = 0.0F" in node,
             "pending envelope Z offset/expanded-height contract is incomplete",

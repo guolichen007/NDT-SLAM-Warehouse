@@ -35,8 +35,11 @@ struct CargoGeometryFusionConfig {
   bool immediate_expand_enabled = true;
   std::size_t minimum_live_dimension_support = 30U;
   float minimum_live_shape_confidence_for_shrink = 0.75F;
-  float minimum_conservative_length_m = 0.0F;
-  float minimum_conservative_width_m = 0.0F;
+  float minimum_physical_length_m = 0.30F;
+  float minimum_physical_width_m = 0.20F;
+  float formal_transition_start_length_m = 4.0F;
+  float formal_transition_start_width_m = 3.0F;
+  bool configured_fallback_is_formal_floor = false;
 };
 
 struct CargoThicknessObservation {
@@ -107,6 +110,8 @@ class CargoGeometryFusion {
   double last_stamp_sec_ = 0.0;
   int shrink_confirm_count_ = 0;
   std::uint64_t shrink_track_segment_id_ = 0U;
+  int shape_confirm_count_ = 0;
+  std::uint64_t shape_confirm_track_segment_id_ = 0U;
 };
 
 }  // namespace ndt_slam

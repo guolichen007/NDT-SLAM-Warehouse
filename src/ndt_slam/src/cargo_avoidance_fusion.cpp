@@ -116,6 +116,12 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     return result;
   }
 
+  if (!input.formal_clear_authorized) {
+    result.official_code = kCargoInvalid;
+    result.reason = "formal_cargo_clear_not_authorized";
+    return result;
+  }
+
   const bool static_clear_reliable = static_clear_contract &&
       input.static_map.available && input.static_map.reliable &&
       !result.risk_static;

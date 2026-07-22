@@ -28,6 +28,7 @@ struct CargoAvoidanceFusionInput {
   bool localization_valid = false;
   bool formal_cargo_geometry_valid = false;
   bool formal_cargo_bottom_valid = false;
+  bool formal_clear_authorized = false;
   bool pending_envelope_valid = false;
   bool static_session_manifest_valid = false;
   bool static_session_hash_valid = false;
