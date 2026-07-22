@@ -354,16 +354,15 @@ StaticHeightQueryResult StaticHeightField::query(
   const float sine = std::sin(input.yaw_map_rad);
   const float half_length = 0.5F * input.length_m;
   const float half_width = 0.5F * input.width_m;
+  const bool exclusion_identity_valid =
+      input.exclusion_authorized &&
+      input.excluded_component_id != 0U &&
+      input.excluded_component_generation != 0U &&
+      input.excluded_component_generation == map_generation_;
   for (int x = min_x; x <= max_x; ++x) {
     for (int y = min_y; y <= max_y; ++y) {
       ++result.queried_cells;
       const std::int64_t key = packStaticEvidenceCell(x, y);
-      const StaticHeightCell* height_cell = cell(key);
-      if (height_cell &&
-          (height_cell->support.valid || !height_cell->layers.empty())) {
-        ++result.covered_cells;
-      }
-      if (!height_cell || height_cell->layers.empty()) continue;
       const Eigen::Vector2f delta =
           centerFor(key, config_.cell_size_m) - input.center_map;
       const float local_x = cosine * delta.x() + sine * delta.y();
@@ -372,20 +371,26 @@ StaticHeightQueryResult StaticHeightField::query(
       const float outside_y = std::max(std::abs(local_y) - half_width, 0.0F);
       const float distance = std::hypot(outside_x, outside_y);
       if (distance > input.shell_m + 0.5F * config_.cell_size_m) continue;
+      ++result.clear_shell_queried_cells;
+      const StaticHeightCell* height_cell = cell(key);
+      if (!height_cell) continue;
+      const bool raw_covered =
+          height_cell->support.valid || !height_cell->layers.empty();
+      if (raw_covered) ++result.raw_covered_cells;
       bool matched_cell = false;
+      bool cell_has_excluded_layer = false;
+      bool cell_has_external_layer = false;
       for (std::size_t layer_index = 0U;
            layer_index < height_cell->layers.size(); ++layer_index) {
         const StaticHeightLayer& layer = height_cell->layers[layer_index];
-        const bool exclusion_identity_valid =
-            input.exclusion_authorized &&
-            input.excluded_component_id != 0U &&
-            input.excluded_component_generation != 0U &&
-            input.excluded_component_generation == map_generation_;
         if (exclusion_identity_valid &&
             input.excluded_members.count(StaticHeightLayerNodeId{
                 key, static_cast<std::uint16_t>(layer_index)}) > 0U) {
+          cell_has_excluded_layer = true;
+          ++result.excluded_layer_count;
           continue;
         }
+        cell_has_external_layer = true;
         if (layer.z95 < input.minimum_z || layer.z05 > input.maximum_z) {
           continue;
         }
@@ -402,6 +407,18 @@ StaticHeightQueryResult StaticHeightField::query(
           result.strongest_authority = layer.authority;
         }
       }
+      if (cell_has_excluded_layer) {
+        ++result.excluded_origin_cells;
+      }
+      // Support beneath an excluded origin component cannot prove that the
+      // external shell is clear. A mixed cell may still report an external
+      // hazard above, but it contributes no formal CLEAR coverage.
+      const bool effective_external_covered = !cell_has_excluded_layer &&
+          (height_cell->support.valid || cell_has_external_layer);
+      if (effective_external_covered) {
+        ++result.effective_external_covered_cells;
+        ++result.clear_shell_covered_cells;
+      }
       if (matched_cell) {
         ++result.matched_cells;
         result.matched_cell_keys.push_back(key);
@@ -409,10 +426,17 @@ StaticHeightQueryResult StaticHeightField::query(
     }
   }
   result.valid = true;
-  result.coverage_ratio = result.queried_cells > 0U
-      ? static_cast<float>(result.covered_cells) /
-            static_cast<float>(result.queried_cells)
+  result.covered_cells = result.effective_external_covered_cells;
+  result.effective_coverage_ratio = result.clear_shell_queried_cells > 0U
+      ? static_cast<float>(result.effective_external_covered_cells) /
+            static_cast<float>(result.clear_shell_queried_cells)
       : 0.0F;
+  result.clear_shell_coverage_ratio =
+      result.clear_shell_queried_cells > 0U
+      ? static_cast<float>(result.clear_shell_covered_cells) /
+            static_cast<float>(result.clear_shell_queried_cells)
+      : 0.0F;
+  result.coverage_ratio = result.effective_coverage_ratio;
   result.reason = result.matched_cells > 0U ? "matched" : "clear_in_bounds";
   return result;
 }

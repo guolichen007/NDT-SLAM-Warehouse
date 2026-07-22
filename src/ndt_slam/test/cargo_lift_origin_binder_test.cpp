@@ -34,6 +34,7 @@ CargoLiftOriginInput loadedInput(double stamp) {
   input.current_top_stamp_sec = stamp;
   input.current_top_z_map = 2.0F;
   input.current_top_uncertainty_m = 0.02F;
+  input.top_coverage = 0.8F;
   input.source_coverage = 0.8F;
   input.revealed_support_valid = true;
   input.revealed_support_stamp_sec = stamp;
@@ -135,6 +136,29 @@ TEST(CargoLiftOriginBinderTest, DuplicateStampDoesNotAdvanceConfirmation) {
   const auto duplicate = binder.update(loadedInput(1.0));
   EXPECT_FALSE(duplicate.valid);
   EXPECT_EQ(duplicate.reason, "source_time_invalid_or_rollback");
+}
+
+TEST(CargoLiftOriginBinderTest,
+     RepeatedPhysicalEvidenceDoesNotAdvanceConfirmation) {
+  CargoLiftOriginConfig config;
+  config.lift_confirm_frames = 1;
+  config.thickness_confirm_frames = 2;
+  CargoLiftOriginBinder binder(config);
+  auto first = loadedInput(1.0);
+  first.hook_was_empty = true;
+  const auto initial = binder.update(first);
+  ASSERT_EQ(initial.lift_confirm_count, 1);
+  ASSERT_EQ(initial.thickness_confirm_count, 1);
+
+  auto repeated = loadedInput(1.1);
+  repeated.current_top_stamp_sec = 1.0;
+  repeated.revealed_support_stamp_sec = 1.0;
+  const auto held = binder.update(repeated);
+  EXPECT_EQ(held.lift_confirm_count, 1);
+  EXPECT_EQ(held.thickness_confirm_count, 1);
+  EXPECT_TRUE(held.lift_confirmed);
+  EXPECT_FALSE(held.thickness_ready);
+  EXPECT_EQ(held.reason, "waiting_for_new_physical_evidence");
 }
 
 TEST(CargoLiftOriginBinderTest, StaleSourceDoesNotAdvanceConfirmation) {

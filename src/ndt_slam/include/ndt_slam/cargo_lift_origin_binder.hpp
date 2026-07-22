@@ -124,6 +124,8 @@ class CargoLiftOriginBinder {
   double last_stamp_sec_ = 0.0;
   double last_valid_lift_stamp_sec_ = 0.0;
   double last_valid_thickness_stamp_sec_ = 0.0;
+  double last_consumed_support_stamp_sec_ = 0.0;
+  double last_consumed_top_stamp_sec_ = 0.0;
   std::uint64_t bound_component_id_ = 0U;
 };
 

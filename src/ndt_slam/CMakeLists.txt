@@ -316,6 +316,13 @@ if(CATKIN_ENABLE_TESTING)
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
+  catkin_add_gtest(static_height_component_extractor_test
+    test/static_height_component_extractor_test.cpp)
+  if(TARGET static_height_component_extractor_test)
+    target_link_libraries(static_height_component_extractor_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
   catkin_add_gtest(cargo_lift_origin_binder_test
     test/cargo_lift_origin_binder_test.cpp)
   if(TARGET cargo_lift_origin_binder_test)
@@ -348,6 +355,27 @@ if(CATKIN_ENABLE_TESTING)
     test/pending_cargo_envelope_test.cpp)
   if(TARGET pending_cargo_envelope_test)
     target_link_libraries(pending_cargo_envelope_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(pending_cargo_self_evidence_test
+    test/pending_cargo_self_evidence_test.cpp)
+  if(TARGET pending_cargo_self_evidence_test)
+    target_link_libraries(pending_cargo_self_evidence_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(revealed_support_observer_test
+    test/revealed_support_observer_test.cpp)
+  if(TARGET revealed_support_observer_test)
+    target_link_libraries(revealed_support_observer_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_swing_monitor_test
+    test/cargo_swing_monitor_test.cpp)
+  if(TARGET cargo_swing_monitor_test)
+    target_link_libraries(cargo_swing_monitor_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 

@@ -121,7 +121,11 @@ PendingPointClassification classifyPendingCargoPoint(
           point_base, self_evidence.tight_identity_obb, 0.0F, 0.0F)) {
     if (self_evidence.formal_obb_only_authorized) {
       result.identity_distance_m = 0.0F;
-      result.classification = PendingPointClass::IDENTITY_SELF;
+      // A retired formal box is a motion-envelope prior, not point identity.
+      // Anything inside remains unresolved unless retained identity points
+      // independently match it.
+      result.classification =
+          PendingPointClass::UNRESOLVED_INSIDE_PENDING;
       return result;
     }
     float nearest_squared = std::numeric_limits<float>::infinity();

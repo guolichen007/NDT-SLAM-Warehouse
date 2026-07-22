@@ -99,5 +99,41 @@ TEST(StaticHeightFieldTest, QueryIsBoundedAndAuthorityIsPreserved) {
   EXPECT_FALSE(rejected.bounded);
 }
 
+TEST(StaticHeightFieldTest,
+     ExcludedOriginCellCannotContributeFormalClearCoverage) {
+  StaticHeightField field;
+  auto objects = layer(0.05F, 0.05F, 1.0F);
+  const auto external = layer(0.55F, 0.05F, 1.2F);
+  objects.insert(objects.end(), external.begin(), external.end());
+  ASSERT_TRUE(field.build(
+      objects, {}, StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE,
+      1U, 9U).valid);
+
+  StaticHeightQuery query;
+  query.center_map = Eigen::Vector2f(0.25F, 0.125F);
+  query.length_m = 1.0F;
+  query.width_m = 0.25F;
+  query.shell_m = 0.25F;
+  query.minimum_z = 0.0F;
+  query.maximum_z = 3.0F;
+  query.exclusion_authorized = true;
+  query.excluded_component_id = 17U;
+  query.excluded_component_generation = field.mapGeneration();
+  query.excluded_members.insert(
+      StaticHeightLayerNodeId{packStaticEvidenceCell(0, 0), 0U});
+
+  const auto result = field.query(query);
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.excluded_origin_cells, 1U);
+  EXPECT_EQ(result.excluded_layer_count, 1U);
+  EXPECT_GT(result.raw_covered_cells,
+            result.effective_external_covered_cells);
+  EXPECT_EQ(result.covered_cells,
+            result.effective_external_covered_cells);
+  EXPECT_EQ(result.clear_shell_covered_cells,
+            result.effective_external_covered_cells);
+  EXPECT_GT(result.matched_cells, 0U);
+}
+
 }  // namespace
 }  // namespace ndt_slam

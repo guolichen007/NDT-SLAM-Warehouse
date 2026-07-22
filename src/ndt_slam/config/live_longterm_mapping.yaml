@@ -834,6 +834,7 @@ cargo_recognition:
   loaded_grace_sec: 1.0
   recognition_timeout_sec: 8.0
   publish_text_marker: true
+  text_marker_z_m: 3.90
 
 # Initial commissioning values; they are not asserted as industry standards.
 cargo_swing:
@@ -854,8 +855,10 @@ cargo_swing:
   normal_angle_deg: 2.0
   warning_angle_deg: 3.0
   alarm_angle_deg: 5.0
+  immediate_alarm_angle_deg: 7.0
   warning_offset_m: 0.20
   alarm_offset_m: 0.50
+  immediate_alarm_offset_m: 0.70
   normal_speed_mps: 0.15
   warning_speed_mps: 0.30
   sway_end_angle_deg: 1.0
@@ -867,10 +870,15 @@ cargo_swing:
   skew_min_duration_sec: 1.00
   skew_alarm_confirm_sec: 0.50
   skew_max_zero_crossings: 1
+  crossing_deadband_m: 0.03
   torsion_detect_deg: 3.0
   torsion_warning_deg: 5.0
   torsion_alarm_deg: 10.0
+  minimum_identity_confidence: 0.60
+  minimum_shape_confidence: 0.55
+  maximum_tracking_residual_m: 0.25
   allow_skew_alarm_without_hoist_up: false
+  allow_configured_rope_length_alarm: false
 
 # Clean-map maintenance receives a bounded owner-thread timeslice even when the
 # latest-only localization queue remains continuously occupied. RViz map

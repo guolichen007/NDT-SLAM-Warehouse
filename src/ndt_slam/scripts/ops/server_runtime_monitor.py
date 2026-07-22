@@ -876,6 +876,14 @@ class RosRuntimeMonitor:
         self._last_sway_state: Optional[int] = None
         self._last_skew_state: Optional[int] = None
         self._last_torsion_state: Optional[int] = None
+        self._last_recognition_source_stamp: Optional[float] = None
+        self._last_swing_source_stamp: Optional[float] = None
+        self._recognition_epoch = 0
+        self._swing_epoch = 0
+        self._recognition_duplicate_count = 0
+        self._swing_duplicate_count = 0
+        self._recognition_rollback_count = 0
+        self._swing_rollback_count = 0
         self._last_swing_alarm_inhibited = False
         self._recognition_failure_count = 0
         self._recognition_failed_since: Optional[float] = None
@@ -969,15 +977,74 @@ class RosRuntimeMonitor:
             reason=payload.get("reason", "-"))
         self.writer.submit("text", ("logs/monitor.log", line))
 
+    def _accept_recognition_source_stamp(self, source_stamp: float,
+                                         wall: float) -> bool:
+        if not math.isfinite(source_stamp):
+            return False
+        previous = self._last_recognition_source_stamp
+        if previous is not None:
+            if abs(source_stamp - previous) <= 1.0e-9:
+                self._recognition_duplicate_count += 1
+                return False
+            if source_stamp < previous:
+                self._recognition_rollback_count += 1
+                self._recognition_epoch += 1
+                self._last_recognition_state = None
+                self._recognition_failed_since = None
+                self._recognition_stale_active = False
+                self._emit_typed_event(
+                    "samples/cargo_recognition_events.jsonl", {
+                        "event": "CARGO_RECOGNITION_TIME_ROLLBACK",
+                        "wall_time": wall,
+                        "previous_source_stamp": previous,
+                        "source_stamp": source_stamp,
+                        "epoch": self._recognition_epoch,
+                        "reason": "source_stamp_rollback",
+                    })
+        self._last_recognition_source_stamp = source_stamp
+        return True
+
+    def _accept_swing_source_stamp(self, source_stamp: float,
+                                   wall: float) -> bool:
+        if not math.isfinite(source_stamp):
+            return False
+        previous = self._last_swing_source_stamp
+        if previous is not None:
+            if abs(source_stamp - previous) <= 1.0e-9:
+                self._swing_duplicate_count += 1
+                return False
+            if source_stamp < previous:
+                self._swing_rollback_count += 1
+                self._swing_epoch += 1
+                self._last_sway_state = None
+                self._last_skew_state = None
+                self._last_torsion_state = None
+                self._last_swing_alarm_inhibited = False
+                self._swing_stale_active = False
+                self._emit_typed_event(
+                    "samples/cargo_swing_events.jsonl", {
+                        "event": "CARGO_SWING_TIME_ROLLBACK",
+                        "wall_time": wall,
+                        "previous_source_stamp": previous,
+                        "source_stamp": source_stamp,
+                        "epoch": self._swing_epoch,
+                        "reason": "source_stamp_rollback",
+                    })
+        self._last_swing_source_stamp = source_stamp
+        return True
+
     def _recognition_callback(self, message: Any) -> None:
         wall = time.time()
+        source_stamp = float(message.header.stamp.to_sec())
+        if not self._accept_recognition_source_stamp(source_stamp, wall):
+            return
         self.last_recognition_wall = wall
         self.recognition_status_message_count += 1
         state = int(message.state)
-        source_stamp = float(message.header.stamp.to_sec())
         row = {
             "wall_time": wall,
             "source_stamp": source_stamp,
+            "source_epoch": self._recognition_epoch,
             "state": state,
             "valid": bool(message.valid),
             "hook_loaded": bool(message.hook_loaded),
@@ -1003,9 +1070,11 @@ class RosRuntimeMonitor:
         self.writer.submit("csv", (
             "samples/cargo_recognition_samples.csv", fields, row))
         self._recognition_state_counts[state] += 1
-        track_key = "{}:{}".format(
-            int(message.cargo_lifecycle_id), int(message.track_segment_id))
+        track_key = "{}:{}:{}".format(
+            self._recognition_epoch, int(message.cargo_lifecycle_id),
+            int(message.track_segment_id))
         track_stats = self._recognition_track_stats.setdefault(track_key, {
+            "source_epoch": self._recognition_epoch,
             "cargo_lifecycle_id": int(message.cargo_lifecycle_id),
             "track_segment_id": int(message.track_segment_id),
             "samples": 0,
@@ -1095,15 +1164,18 @@ class RosRuntimeMonitor:
 
     def _swing_callback(self, message: Any) -> None:
         wall = time.time()
+        source_stamp = float(message.header.stamp.to_sec())
+        if not self._accept_swing_source_stamp(source_stamp, wall):
+            return
         self.last_swing_wall = wall
         self.swing_status_message_count += 1
-        source_stamp = float(message.header.stamp.to_sec())
         sway = int(message.sway_state)
         skew = int(message.skew_pull_state)
         torsion = int(message.torsion_state)
         row = {
             "wall_time": wall,
             "source_stamp": source_stamp,
+            "source_epoch": self._swing_epoch,
             "valid": bool(message.valid),
             "observation_state": int(message.observation_state),
             "sway_state": sway,
@@ -1121,6 +1193,10 @@ class RosRuntimeMonitor:
             "offset_y_m": float(message.offset_y_m),
             "offset_m": float(message.offset_m),
             "rope_length_m": float(message.rope_length_m),
+            "rope_length_source": int(getattr(
+                message, "rope_length_source", 0)),
+            "angle_authoritative": bool(getattr(
+                message, "angle_authoritative", False)),
             "angle_deg": float(message.angle_deg),
             "horizontal_speed_mps": float(message.horizontal_speed_mps),
             "radial_speed_mps": float(message.radial_speed_mps),
@@ -1131,6 +1207,15 @@ class RosRuntimeMonitor:
             "yaw_error_deg": float(message.yaw_error_deg),
             "observation_age_sec": float(message.observation_age_sec),
             "state_duration_sec": float(message.state_duration_sec),
+            "sway_state_duration_sec": float(getattr(
+                message, "sway_state_duration_sec",
+                message.state_duration_sec)),
+            "skew_state_duration_sec": float(getattr(
+                message, "skew_state_duration_sec",
+                message.state_duration_sec)),
+            "torsion_state_duration_sec": float(getattr(
+                message, "torsion_state_duration_sec",
+                message.state_duration_sec)),
             "recommended_action": int(message.recommended_action),
             "reason": str(message.reason),
         }
@@ -1140,9 +1225,11 @@ class RosRuntimeMonitor:
         self._sway_state_counts[sway] += 1
         self._skew_state_counts[skew] += 1
         self._torsion_state_counts[torsion] += 1
-        track_key = "{}:{}".format(
-            int(message.cargo_lifecycle_id), int(message.track_segment_id))
+        track_key = "{}:{}:{}".format(
+            self._swing_epoch, int(message.cargo_lifecycle_id),
+            int(message.track_segment_id))
         track_stats = self._swing_track_stats.setdefault(track_key, {
+            "source_epoch": self._swing_epoch,
             "cargo_lifecycle_id": int(message.cargo_lifecycle_id),
             "track_segment_id": int(message.track_segment_id),
             "track_id": int(message.track_id),
@@ -1186,18 +1273,18 @@ class RosRuntimeMonitor:
                     int(message.SWAY_SETTLING)):
             self._longest_sway_warning_sec = max(
                 self._longest_sway_warning_sec,
-                max(0.0, float(message.state_duration_sec)))
+                max(0.0, row["sway_state_duration_sec"]))
             track_stats["longest_sway_warning_sec"] = max(
                 float(track_stats["longest_sway_warning_sec"]),
-                max(0.0, float(message.state_duration_sec)))
+                max(0.0, row["sway_state_duration_sec"]))
         if skew in (int(message.SKEW_PULL_SUSPECTED),
                     int(message.SKEW_PULL_ALARM)):
             self._longest_skew_suspected_sec = max(
                 self._longest_skew_suspected_sec,
-                max(0.0, float(message.state_duration_sec)))
+                max(0.0, row["skew_state_duration_sec"]))
             track_stats["longest_skew_suspected_sec"] = max(
                 float(track_stats["longest_skew_suspected_sec"]),
-                max(0.0, float(message.state_duration_sec)))
+                max(0.0, row["skew_state_duration_sec"]))
         sway_events = {
             int(message.SWAY_DETECTED): "CARGO_SWAY_DETECTED_ENTER",
             int(message.SWAY_WARNING): "CARGO_SWAY_WARNING_ENTER",
@@ -1244,24 +1331,24 @@ class RosRuntimeMonitor:
         monitor_cfg = self.config.get("cargo_swing_monitor", {})
         repeat_after = float(monitor_cfg.get("repeat_period_sec", 10.0))
         if (sway in (int(message.SWAY_WARNING), int(message.SWAY_ALARM)) and
-                float(message.state_duration_sec) >= float(monitor_cfg.get(
+                row["sway_state_duration_sec"] >= float(monitor_cfg.get(
                     "sustained_warning_event_sec", 1.0)) and
                 wall - self._last_sway_warning_event_wall >= repeat_after):
             self._emit_typed_event("samples/cargo_swing_events.jsonl", {
                 "event": "CARGO_SWAY_WARNING_SUSTAINED",
                 "wall_time": wall, "source_stamp": source_stamp,
-                "state_duration_sec": float(message.state_duration_sec),
+                "state_duration_sec": row["sway_state_duration_sec"],
                 "reason": str(message.reason)})
             self._last_sway_warning_event_wall = wall
         if (skew in (int(message.SKEW_PULL_SUSPECTED),
                      int(message.SKEW_PULL_ALARM)) and
-                float(message.state_duration_sec) >= float(monitor_cfg.get(
+                row["skew_state_duration_sec"] >= float(monitor_cfg.get(
                     "sustained_suspected_event_sec", 1.0)) and
                 wall - self._last_skew_suspected_event_wall >= repeat_after):
             self._emit_typed_event("samples/cargo_swing_events.jsonl", {
                 "event": "CARGO_SKEW_PULL_SUSPECTED_SUSTAINED",
                 "wall_time": wall, "source_stamp": source_stamp,
-                "state_duration_sec": float(message.state_duration_sec),
+                "state_duration_sec": row["skew_state_duration_sec"],
                 "reason": str(message.reason)})
             self._last_skew_suspected_event_wall = wall
         self._last_sway_state = sway
@@ -2138,6 +2225,11 @@ class RosRuntimeMonitor:
                 for key, value in self._recognition_state_counts.items()
             },
             "recognition_failure_count": self._recognition_failure_count,
+            "recognition_source_epoch": self._recognition_epoch,
+            "recognition_duplicate_source_stamps":
+                self._recognition_duplicate_count,
+            "recognition_source_stamp_rollbacks":
+                self._recognition_rollback_count,
             "longest_loaded_without_lock_sec":
                 self._longest_loaded_without_lock_sec,
             "recognition_recovery_sec": {
@@ -2172,6 +2264,9 @@ class RosRuntimeMonitor:
             "skew_alarm_inhibited_count": self._skew_alarm_inhibited_count,
             "torsion_alarm_count": self._torsion_alarm_count,
             "swing_stale_count": self._swing_stale_count,
+            "swing_source_epoch": self._swing_epoch,
+            "swing_duplicate_source_stamps": self._swing_duplicate_count,
+            "swing_source_stamp_rollbacks": self._swing_rollback_count,
             "cargo_recognition_track_stats": self._recognition_track_stats,
             "cargo_swing_track_stats": self._swing_track_stats,
         })
@@ -2221,6 +2316,12 @@ class RosRuntimeMonitor:
             "status_code_message_count": 0,
             "recognition_status_message_count": 0,
             "swing_status_message_count": 0,
+            "recognition_source_epoch": 0,
+            "swing_source_epoch": 0,
+            "recognition_duplicate_source_stamps": 0,
+            "swing_duplicate_source_stamps": 0,
+            "recognition_source_stamp_rollbacks": 0,
+            "swing_source_stamp_rollbacks": 0,
             "last_recognition_wall": None,
             "last_swing_wall": None,
             "recognition_data_ready": False,
@@ -2273,6 +2374,16 @@ class RosRuntimeMonitor:
                     self.recognition_status_message_count)
                 _rdy["swing_status_message_count"] = (
                     self.swing_status_message_count)
+                _rdy["recognition_source_epoch"] = self._recognition_epoch
+                _rdy["swing_source_epoch"] = self._swing_epoch
+                _rdy["recognition_duplicate_source_stamps"] = (
+                    self._recognition_duplicate_count)
+                _rdy["swing_duplicate_source_stamps"] = (
+                    self._swing_duplicate_count)
+                _rdy["recognition_source_stamp_rollbacks"] = (
+                    self._recognition_rollback_count)
+                _rdy["swing_source_stamp_rollbacks"] = (
+                    self._swing_rollback_count)
                 _rdy["last_recognition_wall"] = self.last_recognition_wall
                 _rdy["last_swing_wall"] = self.last_swing_wall
                 _rdy["data_ready"] = (

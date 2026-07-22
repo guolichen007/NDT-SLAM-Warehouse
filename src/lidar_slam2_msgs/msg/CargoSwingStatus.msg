@@ -1,4 +1,4 @@
-uint32 SCHEMA_VERSION=1
+uint32 SCHEMA_VERSION=2
 
 uint8 OBSERVATION_INVALID=0
 uint8 OBSERVATION_CURRENT_MEASUREMENT=1
@@ -32,6 +32,10 @@ uint8 ACTION_STOP_TRAVEL=3
 uint8 ACTION_INHIBIT_HOIST_UP=4
 uint8 ACTION_STOP_AND_SETTLE=5
 
+uint8 ROPE_LENGTH_INVALID=0
+uint8 ROPE_LENGTH_MEASURED=1
+uint8 ROPE_LENGTH_CONFIG_FALLBACK=2
+
 std_msgs/Header header
 uint32 schema_version
 bool valid
@@ -52,6 +56,8 @@ float32 offset_x_m
 float32 offset_y_m
 float32 offset_m
 float32 rope_length_m
+uint8 rope_length_source
+bool angle_authoritative
 float32 angle_deg
 float32 horizontal_speed_mps
 float32 radial_speed_mps
@@ -61,5 +67,8 @@ int32 zero_crossings
 float32 yaw_error_deg
 float32 observation_age_sec
 float32 state_duration_sec
+float32 sway_state_duration_sec
+float32 skew_state_duration_sec
+float32 torsion_state_duration_sec
 uint8 recommended_action
 string reason

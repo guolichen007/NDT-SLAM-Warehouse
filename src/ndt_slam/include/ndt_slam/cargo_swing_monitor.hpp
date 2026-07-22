@@ -77,8 +77,10 @@ struct CargoSwingConfig {
   float normal_angle_deg = 2.0F;
   float warning_angle_deg = 3.0F;
   float alarm_angle_deg = 5.0F;
+  float immediate_alarm_angle_deg = 7.0F;
   float warning_offset_m = 0.20F;
   float alarm_offset_m = 0.50F;
+  float immediate_alarm_offset_m = 0.70F;
   float normal_speed_mps = 0.15F;
   float warning_speed_mps = 0.30F;
   float sway_end_angle_deg = 1.0F;
@@ -90,10 +92,15 @@ struct CargoSwingConfig {
   double skew_min_duration_sec = 1.00;
   double skew_alarm_confirm_sec = 0.50;
   int skew_max_zero_crossings = 1;
+  float crossing_deadband_m = 0.03F;
   float torsion_detect_deg = 3.0F;
   float torsion_warning_deg = 5.0F;
   float torsion_alarm_deg = 10.0F;
+  float minimum_identity_confidence = 0.60F;
+  float minimum_shape_confidence = 0.55F;
+  float maximum_tracking_residual_m = 0.25F;
   bool allow_skew_alarm_without_hoist_up = false;
+  bool allow_configured_rope_length_alarm = false;
 };
 
 struct CargoSwingInput {
@@ -138,6 +145,7 @@ struct CargoSwingResult {
   float offset_m = 0.0F;
   float rope_length_m = 0.0F;
   CargoRopeLengthSource rope_length_source = CargoRopeLengthSource::INVALID;
+  bool angle_authoritative = false;
   float angle_deg = 0.0F;
   float horizontal_speed_mps = 0.0F;
   float radial_speed_mps = 0.0F;
@@ -147,6 +155,9 @@ struct CargoSwingResult {
   float yaw_error_deg = 0.0F;
   float observation_age_sec = 0.0F;
   float state_duration_sec = 0.0F;
+  float sway_state_duration_sec = 0.0F;
+  float skew_state_duration_sec = 0.0F;
+  float torsion_state_duration_sec = 0.0F;
   bool hoist_up_confirmed = false;
   bool alarm_inhibited = false;
   CargoSwingRecommendedAction recommended_action =
@@ -179,11 +190,16 @@ class CargoSwingMonitor {
   std::string hook_anchor_source_;
   double last_input_stamp_sec_ = 0.0;
   double last_measurement_stamp_sec_ = 0.0;
-  double state_change_stamp_sec_ = 0.0;
+  double sway_state_change_stamp_sec_ = 0.0;
+  double skew_state_change_stamp_sec_ = 0.0;
+  double torsion_state_change_stamp_sec_ = 0.0;
+  double stationary_enter_stamp_sec_ = 0.0;
   double sway_below_end_stamp_sec_ = 0.0;
   double skew_alarm_candidate_stamp_sec_ = 0.0;
   bool filtered_offset_valid_ = false;
   Eigen::Vector2f filtered_offset_ = Eigen::Vector2f::Zero();
+  RuntimeMotionState previous_crane_motion_state_ =
+      RuntimeMotionState::MOVING;
 };
 
 float shortestAxialAngle(float lhs_rad, float rhs_rad);

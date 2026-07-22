@@ -110,7 +110,15 @@ struct StaticHeightQueryResult {
   std::size_t matched_cells = 0U;
   std::size_t matched_layers = 0U;
   std::size_t covered_cells = 0U;
+  std::size_t raw_covered_cells = 0U;
+  std::size_t effective_external_covered_cells = 0U;
+  std::size_t excluded_origin_cells = 0U;
+  std::size_t excluded_layer_count = 0U;
+  std::size_t clear_shell_queried_cells = 0U;
+  std::size_t clear_shell_covered_cells = 0U;
   float coverage_ratio = 0.0F;
+  float effective_coverage_ratio = 0.0F;
+  float clear_shell_coverage_ratio = 0.0F;
   float nearest_horizontal_distance_m =
       std::numeric_limits<float>::infinity();
   float highest_z95_m = -std::numeric_limits<float>::infinity();

@@ -9,6 +9,7 @@ OPS = Path(__file__).resolve().parents[1] / "src" / "ndt_slam" / "scripts" / "op
 sys.path.insert(0, str(OPS))
 
 from server_runtime_monitor import (  # noqa: E402
+    RosRuntimeMonitor,
     SafetyAggregator,
     append_csv,
     atomic_write_json,
@@ -99,6 +100,78 @@ class SafetyAggregatorTest(unittest.TestCase):
         self.assertIsNotNone(aggregate.check_status_code(17, wall_time=1.1))
         self.assertIsNone(aggregate.check_status_code(17, wall_time=1.2))
         self.assertEqual(aggregate.status_code_mismatches, 1)
+
+
+class TypedCargoCallbackTimeTest(unittest.TestCase):
+    @staticmethod
+    def recognition_monitor():
+        monitor = RosRuntimeMonitor.__new__(RosRuntimeMonitor)
+        monitor._last_recognition_source_stamp = 10.0
+        monitor._recognition_duplicate_count = 0
+        monitor._recognition_rollback_count = 0
+        monitor._recognition_epoch = 2
+        monitor._last_recognition_state = 4
+        monitor._recognition_failed_since = 9.0
+        monitor._recognition_stale_active = True
+        monitor.events = []
+        monitor._emit_typed_event = lambda path, event: monitor.events.append(
+            (path, event))
+        return monitor
+
+    @staticmethod
+    def swing_monitor():
+        monitor = RosRuntimeMonitor.__new__(RosRuntimeMonitor)
+        monitor._last_swing_source_stamp = 10.0
+        monitor._swing_duplicate_count = 0
+        monitor._swing_rollback_count = 0
+        monitor._swing_epoch = 3
+        monitor._last_sway_state = 2
+        monitor._last_skew_state = 2
+        monitor._last_torsion_state = 1
+        monitor._last_swing_alarm_inhibited = True
+        monitor._swing_stale_active = True
+        monitor.events = []
+        monitor._emit_typed_event = lambda path, event: monitor.events.append(
+            (path, event))
+        return monitor
+
+    def test_recognition_duplicate_is_not_new_evidence(self):
+        monitor = self.recognition_monitor()
+        self.assertFalse(monitor._accept_recognition_source_stamp(10.0, 20.0))
+        self.assertEqual(monitor._recognition_duplicate_count, 1)
+        self.assertEqual(monitor._recognition_epoch, 2)
+        self.assertEqual(monitor.events, [])
+
+    def test_recognition_rollback_starts_new_epoch(self):
+        monitor = self.recognition_monitor()
+        self.assertTrue(monitor._accept_recognition_source_stamp(1.0, 20.0))
+        self.assertEqual(monitor._recognition_rollback_count, 1)
+        self.assertEqual(monitor._recognition_epoch, 3)
+        self.assertIsNone(monitor._last_recognition_state)
+        self.assertIsNone(monitor._recognition_failed_since)
+        self.assertFalse(monitor._recognition_stale_active)
+        self.assertEqual(monitor.events[0][1]["event"],
+                         "CARGO_RECOGNITION_TIME_ROLLBACK")
+
+    def test_swing_duplicate_is_not_new_evidence(self):
+        monitor = self.swing_monitor()
+        self.assertFalse(monitor._accept_swing_source_stamp(10.0, 20.0))
+        self.assertEqual(monitor._swing_duplicate_count, 1)
+        self.assertEqual(monitor._swing_epoch, 3)
+        self.assertEqual(monitor.events, [])
+
+    def test_swing_rollback_resets_state_baselines(self):
+        monitor = self.swing_monitor()
+        self.assertTrue(monitor._accept_swing_source_stamp(1.0, 20.0))
+        self.assertEqual(monitor._swing_rollback_count, 1)
+        self.assertEqual(monitor._swing_epoch, 4)
+        self.assertIsNone(monitor._last_sway_state)
+        self.assertIsNone(monitor._last_skew_state)
+        self.assertIsNone(monitor._last_torsion_state)
+        self.assertFalse(monitor._last_swing_alarm_inhibited)
+        self.assertFalse(monitor._swing_stale_active)
+        self.assertEqual(monitor.events[0][1]["event"],
+                         "CARGO_SWING_TIME_ROLLBACK")
 
 
 class AppendSafeOutputTest(unittest.TestCase):

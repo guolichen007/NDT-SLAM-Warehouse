@@ -8,6 +8,8 @@
 namespace ndt_slam {
 namespace {
 
+constexpr double kEvidenceStampEpsilonSec = 1.0e-6;
+
 bool validConfig(const CargoLiftOriginConfig& config) {
   return config.maximum_anchor_distance_m > 0.0F &&
       config.minimum_significant_change_m > 0.0F &&
@@ -93,6 +95,8 @@ void CargoLiftOriginBinder::reset() {
   last_stamp_sec_ = 0.0;
   last_valid_lift_stamp_sec_ = 0.0;
   last_valid_thickness_stamp_sec_ = 0.0;
+  last_consumed_support_stamp_sec_ = 0.0;
+  last_consumed_top_stamp_sec_ = 0.0;
   bound_component_id_ = 0U;
 }
 
@@ -106,6 +110,8 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
     result_.reason = "source_time_invalid_or_rollback";
     previous_loaded_ = input.hook_loaded;
     last_stamp_sec_ = input.stamp_sec;
+    last_consumed_support_stamp_sec_ = 0.0;
+    last_consumed_top_stamp_sec_ = 0.0;
     return result_;
   }
   last_stamp_sec_ = input.stamp_sec;
@@ -118,6 +124,8 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
     result_.thickness_ready = false;
     last_valid_lift_stamp_sec_ = 0.0;
     last_valid_thickness_stamp_sec_ = 0.0;
+    last_consumed_support_stamp_sec_ = 0.0;
+    last_consumed_top_stamp_sec_ = 0.0;
   }
 
   if (!input.hook_signal_valid) {
@@ -135,6 +143,8 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
     result_.reason = result_.state == CargoLiftEventState::IDLE
         ? "waiting_for_preload_baseline" : "preload_baseline_ready";
     previous_loaded_ = false;
+    last_consumed_support_stamp_sec_ = 0.0;
+    last_consumed_top_stamp_sec_ = 0.0;
     return result_;
   }
 
@@ -154,6 +164,8 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
       bound_component_id_ = 0U;
       last_valid_lift_stamp_sec_ = 0.0;
       last_valid_thickness_stamp_sec_ = 0.0;
+      last_consumed_support_stamp_sec_ = 0.0;
+      last_consumed_top_stamp_sec_ = 0.0;
     }
   }
   if (!result_.valid &&
@@ -202,6 +214,8 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
       result_.thickness_confirm_count = 0;
     }
     bound_component_id_ = selected->component_id;
+    last_consumed_support_stamp_sec_ = 0.0;
+    last_consumed_top_stamp_sec_ = 0.0;
     result_.valid = true;
     result_.static_thickness_m =
         selected->top_z95_map - selected->support_z_map;
@@ -244,7 +258,12 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
           result_.change_threshold_m;
   const bool lifted = top_valid &&
       result_.lift_delta_m >= result_.change_threshold_m && revealed;
-  if (lifted) {
+  const bool evidence_advanced = lifted &&
+      input.current_top_stamp_sec >
+          last_consumed_top_stamp_sec_ + kEvidenceStampEpsilonSec &&
+      input.revealed_support_stamp_sec >
+          last_consumed_support_stamp_sec_ + kEvidenceStampEpsilonSec;
+  if (evidence_advanced) {
     if (last_valid_lift_stamp_sec_ > 0.0 &&
         input.stamp_sec - last_valid_lift_stamp_sec_ >
             config_.maximum_observation_gap_sec) {
@@ -252,7 +271,7 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
     }
     ++result_.lift_confirm_count;
     last_valid_lift_stamp_sec_ = input.stamp_sec;
-  } else {
+  } else if (!lifted) {
     result_.lift_confirm_count = 0;
     result_.thickness_confirm_count = 0;
     last_valid_lift_stamp_sec_ = 0.0;
@@ -268,7 +287,7 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
     const bool thickness_valid =
         result_.revealed_thickness_m >= config_.minimum_height_m &&
         result_.revealed_thickness_m <= config_.maximum_height_m;
-    if (thickness_valid) {
+    if (thickness_valid && evidence_advanced) {
       if (last_valid_thickness_stamp_sec_ > 0.0 &&
           input.stamp_sec - last_valid_thickness_stamp_sec_ >
               config_.maximum_observation_gap_sec) {
@@ -276,14 +295,16 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
       }
       ++result_.thickness_confirm_count;
       last_valid_thickness_stamp_sec_ = input.stamp_sec;
-    } else {
+    } else if (!thickness_valid) {
       result_.thickness_confirm_count = 0;
       last_valid_thickness_stamp_sec_ = 0.0;
     }
     result_.state = CargoLiftEventState::THICKNESS_CONFIRMING;
-    result_.reason = thickness_valid
-        ? "lift_confirmed_thickness_pending"
-        : "lift_confirmed_revealed_thickness_invalid";
+    result_.reason = !thickness_valid
+        ? "lift_confirmed_revealed_thickness_invalid"
+        : (evidence_advanced
+               ? "lift_confirmed_thickness_pending"
+               : "waiting_for_new_physical_evidence");
     if (result_.thickness_confirm_count >=
         config_.thickness_confirm_frames) {
       result_.thickness_ready = true;
@@ -291,7 +312,14 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
       result_.reason = "origin_and_revealed_thickness_confirmed";
     }
   } else {
-    result_.reason = "lift_confirmation_pending";
+    result_.reason = lifted && !evidence_advanced
+        ? "waiting_for_new_physical_evidence"
+        : "lift_confirmation_pending";
+  }
+  if (evidence_advanced) {
+    last_consumed_top_stamp_sec_ = input.current_top_stamp_sec;
+    last_consumed_support_stamp_sec_ =
+        input.revealed_support_stamp_sec;
   }
   previous_loaded_ = true;
   return result_;

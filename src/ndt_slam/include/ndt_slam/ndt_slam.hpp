@@ -1903,6 +1903,7 @@ private:
     LockedCargoShape retired_cargo_shape_;
     Eigen::Vector3f retired_cargo_center_base_ = Eigen::Vector3f::Zero();
     Eigen::Vector3f retired_cargo_velocity_base_ = Eigen::Vector3f::Zero();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr retired_cargo_identity_points_;
     ros::Time retired_cargo_stamp_;
     bool retired_cargo_signature_valid_ = false;
     std::uint64_t retired_cargo_lifecycle_id_ = 0U;
@@ -2000,6 +2001,7 @@ private:
     double cargo_recognition_loaded_grace_sec_ = 1.0;
     double cargo_recognition_timeout_sec_ = 8.0;
     bool cargo_recognition_publish_text_marker_ = true;
+    float cargo_recognition_text_marker_z_m_ = 3.90F;
     ros::Time cargo_loaded_since_;
     std::uint8_t last_cargo_recognition_state_ = 0U;
     CargoSwingConfig cargo_swing_config_;

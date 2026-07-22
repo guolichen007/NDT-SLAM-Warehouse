@@ -8,8 +8,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <map>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -54,9 +52,6 @@ class RevealedSupportObserver {
   std::uint64_t component_id_ = 0U;
   double last_stamp_sec_ = 0.0;
   double last_revealed_stamp_sec_ = 0.0;
-  std::set<StaticHeightLayerNodeId> observable_members_;
-  std::set<StaticHeightLayerNodeId> revealed_members_;
-  std::map<StaticHeightLayerNodeId, std::vector<float>> support_samples_;
 };
 
 }  // namespace ndt_slam

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
+#include <set>
 
 namespace ndt_slam {
 namespace {
@@ -28,9 +30,6 @@ void RevealedSupportObserver::reset() {
   component_id_ = 0U;
   last_stamp_sec_ = 0.0;
   last_revealed_stamp_sec_ = 0.0;
-  observable_members_.clear();
-  revealed_members_.clear();
-  support_samples_.clear();
 }
 
 RevealedSupportObservation RevealedSupportObserver::update(
@@ -82,6 +81,9 @@ RevealedSupportObservation RevealedSupportObserver::update(
   }
 
   std::set<std::int64_t> counted_cells;
+  std::set<std::int64_t> current_observable_cells;
+  std::set<std::int64_t> current_revealed_cells;
+  std::vector<float> current_support_samples;
   std::size_t current_observable = 0U;
   for (const StaticHeightLayerNodeId& member :
        input.origin_component.members) {
@@ -94,7 +96,7 @@ RevealedSupportObservation RevealedSupportObserver::update(
       continue;
     }
     ++current_observable;
-    observable_members_.insert(member);
+    current_observable_cells.insert(member.cell_key);
     std::vector<float> support_points;
     std::size_t origin_layer_points = 0U;
     for (const float z : found->second) {
@@ -116,53 +118,35 @@ RevealedSupportObservation RevealedSupportObserver::update(
         origin_layer_points >= input.visibility_min_points_per_cell;
     if (!origin_layer_still_present &&
         support_points.size() >= input.visibility_min_points_per_cell) {
-      revealed_members_.insert(member);
+      current_revealed_cells.insert(member.cell_key);
       last_revealed_stamp_sec_ = input.stamp_sec;
-      std::vector<float>& history = support_samples_[member];
-      history.insert(history.end(), support_points.begin(), support_points.end());
-      if (history.size() > 64U) {
-        history.erase(history.begin(), history.end() - 64);
-      }
+      current_support_samples.insert(
+          current_support_samples.end(), support_points.begin(),
+          support_points.end());
     }
   }
 
   std::set<std::int64_t> total_cells;
-  std::set<std::int64_t> observable_cells;
-  std::set<std::int64_t> revealed_cells;
   for (const StaticHeightLayerNodeId& member :
        input.origin_component.members) {
     total_cells.insert(member.cell_key);
   }
-  for (const StaticHeightLayerNodeId& member : observable_members_) {
-    observable_cells.insert(member.cell_key);
-  }
-  for (const StaticHeightLayerNodeId& member : revealed_members_) {
-    revealed_cells.insert(member.cell_key);
-  }
-
-  std::vector<float> all_support;
-  for (const std::map<StaticHeightLayerNodeId,
-                      std::vector<float>>::value_type& item :
-       support_samples_) {
-    all_support.insert(
-        all_support.end(), item.second.begin(), item.second.end());
-  }
-  const float robust_support = median(all_support);
+  const float robust_support = median(current_support_samples);
   std::vector<float> residuals;
-  residuals.reserve(all_support.size());
+  residuals.reserve(current_support_samples.size());
   if (std::isfinite(robust_support)) {
-    for (const float value : all_support) {
+    for (const float value : current_support_samples) {
       residuals.push_back(std::abs(value - robust_support));
     }
   }
   const float residual = median(residuals);
-  // Visibility without a support return must not refresh source freshness.
-  // The accumulated revealed-cell set remains available, while the binder's
-  // maximum_source_age_sec enforces a recent physical support observation.
+  // Visibility without a new support return must not refresh source
+  // freshness. Formal coverage and height use this frame only; old evidence
+  // is retained solely as a diagnostic timestamp.
   result_.evidence_stamp_sec = last_revealed_stamp_sec_;
   result_.origin_total_cells = total_cells.size();
-  result_.origin_observable_cells = observable_cells.size();
-  result_.origin_revealed_cells = revealed_cells.size();
+  result_.origin_observable_cells = current_observable_cells.size();
+  result_.origin_revealed_cells = current_revealed_cells.size();
   result_.coverage = result_.origin_observable_cells > 0U
       ? static_cast<float>(result_.origin_revealed_cells) /
             static_cast<float>(result_.origin_observable_cells)
