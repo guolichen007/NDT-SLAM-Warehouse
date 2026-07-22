@@ -17,7 +17,14 @@ bool validConfig(const CargoGeometryFusionConfig& config) {
       config.maximum_fused_uncertainty_m > 0.0F &&
       config.maximum_height_m > config.minimum_height_m &&
       config.huber_delta_m > 0.0F &&
-      config.configured_bottom_margin_m >= 0.0F;
+      config.configured_bottom_margin_m >= 0.0F &&
+      config.conservative_shrink_confirm_frames > 0 &&
+      config.maximum_shrink_per_frame_m > 0.0F &&
+      config.minimum_live_dimension_support > 0U &&
+      config.minimum_live_shape_confidence_for_shrink >= 0.0F &&
+      config.minimum_live_shape_confidence_for_shrink <= 1.0F &&
+      config.minimum_conservative_length_m >= 0.0F &&
+      config.minimum_conservative_width_m >= 0.0F;
 }
 
 struct WeightedHeight {
@@ -77,6 +84,8 @@ void CargoGeometryFusion::reset() {
   pending_uncertainty_m_ = 1.0F;
   pending_valid_ = false;
   last_stamp_sec_ = 0.0;
+  shrink_confirm_count_ = 0;
+  shrink_track_segment_id_ = 0U;
 }
 
 CargoFrozenGeometry CargoGeometryFusion::update(
@@ -109,6 +118,10 @@ CargoFrozenGeometry CargoGeometryFusion::update(
   }
 
   if (result_.frozen) {
+    if (frame.track_segment_id != shrink_track_segment_id_) {
+      shrink_confirm_count_ = 0;
+      shrink_track_segment_id_ = frame.track_segment_id;
+    }
     result_.track_segment_id = frame.track_segment_id;
     if (frame.center_valid && frame.center.allFinite()) {
       result_.center = frame.center;
@@ -125,10 +138,56 @@ CargoFrozenGeometry CargoGeometryFusion::update(
           std::max(0.0F, frame.tracking_uncertainty_m) -
           config_.configured_bottom_margin_m;
     }
+    const bool dimension_quality_valid = frame.footprint_valid &&
+        std::isfinite(frame.length_m) && frame.length_m > 0.0F &&
+        std::isfinite(frame.width_m) && frame.width_m > 0.0F &&
+        frame.dimension_observation_complete &&
+        frame.dimension_support_points >=
+            config_.minimum_live_dimension_support &&
+        std::isfinite(frame.dimension_shape_confidence) &&
+        frame.dimension_shape_confidence >=
+            config_.minimum_live_shape_confidence_for_shrink;
+    if (dimension_quality_valid) {
+      const float length_floor = std::max(
+          config_.minimum_conservative_length_m,
+          std::max(0.0F, frame.static_length_lower_bound_m));
+      const float width_floor = std::max(
+          config_.minimum_conservative_width_m,
+          std::max(0.0F, frame.static_width_lower_bound_m));
+      const bool expands = frame.length_m > result_.length_m ||
+          frame.width_m > result_.width_m;
+      if (config_.immediate_expand_enabled && expands) {
+        result_.length_m = std::max(result_.length_m, frame.length_m);
+        result_.width_m = std::max(result_.width_m, frame.width_m);
+        shrink_confirm_count_ = 0;
+      } else if (frame.length_m < result_.length_m ||
+                 frame.width_m < result_.width_m) {
+        ++shrink_confirm_count_;
+        if (shrink_confirm_count_ >=
+            config_.conservative_shrink_confirm_frames) {
+          result_.length_m = std::max(
+              length_floor,
+              std::max(frame.length_m,
+                       result_.length_m -
+                           config_.maximum_shrink_per_frame_m));
+          result_.width_m = std::max(
+              width_floor,
+              std::max(frame.width_m,
+                       result_.width_m -
+                           config_.maximum_shrink_per_frame_m));
+        }
+      } else {
+        shrink_confirm_count_ = 0;
+      }
+    } else {
+      // Partial sides, tiny clusters and weak identities may only retain the
+      // conservative frozen dimensions; they never authorize shrinkage.
+      shrink_confirm_count_ = 0;
+    }
     result_.valid = frame.center_valid && frame.center.allFinite() &&
         std::isfinite(result_.bottom_m);
     result_.reason = result_.valid
-        ? "frozen_geometry_center_updated"
+        ? "frozen_geometry_pose_and_asymmetric_dimensions_updated"
         : "frozen_geometry_pose_or_top_invalid";
     return result_;
   }
@@ -244,8 +303,14 @@ CargoFrozenGeometry CargoGeometryFusion::update(
     result_.frozen = true;
     result_.valid = true;
     result_.center = frame.center;
-    result_.length_m = frame.length_m;
-    result_.width_m = frame.width_m;
+    result_.length_m = std::max(
+        frame.length_m,
+        std::max(config_.minimum_conservative_length_m,
+                 frame.static_length_lower_bound_m));
+    result_.width_m = std::max(
+        frame.width_m,
+        std::max(config_.minimum_conservative_width_m,
+                 frame.static_width_lower_bound_m));
     result_.height_m = fused;
     result_.yaw_rad = frame.yaw_rad;
     result_.height_uncertainty_m = uncertainty;
@@ -258,6 +323,7 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         std::max(0.0F, frame.tracking_uncertainty_m) -
         config_.configured_bottom_margin_m;
     result_.reason = "geometry_frozen";
+    shrink_track_segment_id_ = frame.track_segment_id;
   }
   return result_;
 }

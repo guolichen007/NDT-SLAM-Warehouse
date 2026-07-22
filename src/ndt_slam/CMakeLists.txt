@@ -149,6 +149,8 @@ set(LIBRARY_SOURCES
   src/revealed_support_observer.cpp
   src/cargo_geometry_fusion.cpp
   src/cargo_avoidance_fusion.cpp
+  src/cargo_presence_state_machine.cpp
+  src/cargo_physical_motion_estimator.cpp
   src/pending_cargo_envelope.cpp
   src/pending_cargo_self_evidence.cpp
   src/cargo_swing_monitor.cpp
@@ -376,6 +378,20 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_swing_monitor_test.cpp)
   if(TARGET cargo_swing_monitor_test)
     target_link_libraries(cargo_swing_monitor_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_presence_state_machine_test
+    test/cargo_presence_state_machine_test.cpp)
+  if(TARGET cargo_presence_state_machine_test)
+    target_link_libraries(cargo_presence_state_machine_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_physical_motion_estimator_test
+    test/cargo_physical_motion_estimator_test.cpp)
+  if(TARGET cargo_physical_motion_estimator_test)
+    target_link_libraries(cargo_physical_motion_estimator_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 

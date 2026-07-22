@@ -44,6 +44,14 @@ def main() -> int:
     rviz = read("src/ndt_slam/launch/rviz.rviz")
     pending_envelope = read(
         "src/ndt_slam/src/pending_cargo_envelope.cpp")
+    cargo_presence = read(
+        "src/ndt_slam/src/cargo_presence_state_machine.cpp")
+    physical_motion = read(
+        "src/ndt_slam/src/cargo_physical_motion_estimator.cpp")
+    swing_monitor = read(
+        "src/ndt_slam/src/cargo_swing_monitor.cpp")
+    swing_message = read(
+        "src/lidar_slam2_msgs/msg/CargoSwingStatus.msg")
     static_index = read(
         "src/ndt_slam/src/static_obstacle_evidence_index.cpp")
     static_authorization = read(
@@ -483,13 +491,47 @@ def main() -> int:
     for source in (
             "src/pending_cargo_envelope.cpp",
             "src/cargo_lift_origin_binder.cpp",
-            "src/cargo_geometry_fusion.cpp"):
+            "src/cargo_geometry_fusion.cpp",
+            "src/cargo_presence_state_machine.cpp",
+            "src/cargo_physical_motion_estimator.cpp"):
         require(source in cmake,
                 f"Cargo static-height runtime source is missing: {source}",
                 failures)
     require("pending_cargo_envelope_test" in cmake and
             "test/pending_cargo_envelope_test.cpp" in cmake,
             "PendingCargoEnvelope regression target is not registered",
+            failures)
+    require("cargo_presence_state_machine_test" in cmake and
+            "cargo_physical_motion_estimator_test" in cmake and
+            "cargo_swing_monitor_test" in cmake,
+            "presence/physical-motion/swing regressions are not registered",
+            failures)
+    require("gravity_loaded_authoritative" in cargo_presence and
+            "gravity_stale_loaded_hold" in cargo_presence and
+            "gravity_unavailable_hard_fault" in cargo_presence and
+            "cargo_presence_state_machine_.update" in node and
+            "cargo_presence_result_.cargo_present" in node,
+            "gravity-authoritative cargo presence latch is incomplete",
+            failures)
+    require("maximum_fallback_sway_offset_m" in pending_envelope and
+            "lost_position_uncertainty_per_sec" in pending_envelope and
+            "configured commissioning floor" in pending_envelope and
+            "resolveEffectiveCargoEnvelope" in pending_envelope + node and
+            "can_authorize_clear = false" not in pending_envelope,
+            "persistent conservative envelope source/uncertainty contract is incomplete",
+            failures)
+    require("previous_runtime_motion_state_" not in swing_monitor and
+            "cargo_physical_motion_result_.state" in node and
+            "cargo_raw_physical_pose = new_pose" in node and
+            "RAW_POSE_DELTA" in physical_motion,
+            "cargo swing history is still coupled to localization MotionGate",
+            failures)
+    require("immediate_alarm_latched_" in swing_monitor and
+            "CargoSwayState::SETTLING" in swing_monitor and
+            "angle_authoritative &&" in swing_monitor and
+            "Configured rope length remains diagnostic-only" in swing_monitor and
+            "SCHEMA_VERSION=2" in swing_message,
+            "sway latch, angle authority, or schema-2 contract is incomplete",
             failures)
     pending_update = node.find("updateCargoLiftAndGeometryFusion(")
     pending_branch = node.find("if (!active_track)", pending_update)
@@ -498,6 +540,11 @@ def main() -> int:
     require(pending_update >= 0 and pending_branch > pending_update and
             pending_run > pending_branch and formal_observation > pending_run,
             "LOADED pending avoidance does not run before the formal pipeline",
+            failures)
+    require("required_role && !cargo_presence_result_.cargo_present" in node and
+            "if (cargo_presence_result_.cargo_present &&" in
+                node[pending_branch:formal_observation],
+            "loaded cargo can still exit before pending risk evaluation",
             failures)
     pending_function = node.find("void NdtSlamNode::runPendingCargoAvoidance(")
     next_function = node.find(

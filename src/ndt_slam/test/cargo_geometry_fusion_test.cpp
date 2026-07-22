@@ -80,6 +80,65 @@ TEST(CargoGeometryFusionTest, FrozenShapeOnlyUpdatesCenterAndBottom) {
   EXPECT_NEAR(result.bottom_m, 3.75F - result.height_m, 1.0e-5F);
 }
 
+TEST(CargoGeometryFusionTest, LargerMeasurementExpandsImmediately) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  config.minimum_conservative_length_m = 0.0F;
+  config.minimum_conservative_width_m = 0.0F;
+  CargoGeometryFusion fusion(config);
+  auto result = fusion.update(frame(1.0));
+  ASSERT_TRUE(result.frozen);
+  auto larger = frame(1.1);
+  larger.length_m = 4.5F;
+  larger.width_m = 2.0F;
+  larger.dimension_observation_complete = true;
+  larger.dimension_support_points = 100U;
+  larger.dimension_shape_confidence = 0.9F;
+  result = fusion.update(larger);
+  EXPECT_FLOAT_EQ(result.length_m, 4.5F);
+  EXPECT_FLOAT_EQ(result.width_m, 2.0F);
+}
+
+TEST(CargoGeometryFusionTest, TinyClusterCannotShrinkFrozenEnvelope) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  CargoGeometryFusion fusion(config);
+  auto result = fusion.update(frame(1.0));
+  ASSERT_TRUE(result.frozen);
+  const float length = result.length_m;
+  auto tiny = frame(1.1);
+  tiny.length_m = 1.0F;
+  tiny.width_m = 0.5F;
+  tiny.dimension_observation_complete = false;
+  tiny.dimension_support_points = 5U;
+  tiny.dimension_shape_confidence = 0.2F;
+  result = fusion.update(tiny);
+  EXPECT_FLOAT_EQ(result.length_m, length);
+}
+
+TEST(CargoGeometryFusionTest, ShrinkRequiresConsecutiveQualityEvidence) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  config.conservative_shrink_confirm_frames = 3;
+  config.maximum_shrink_per_frame_m = 0.05F;
+  CargoGeometryFusion fusion(config);
+  auto result = fusion.update(frame(1.0));
+  ASSERT_TRUE(result.frozen);
+  auto smaller = frame(1.1);
+  smaller.length_m = 3.0F;
+  smaller.width_m = 1.2F;
+  smaller.dimension_observation_complete = true;
+  smaller.dimension_support_points = 100U;
+  smaller.dimension_shape_confidence = 0.9F;
+  const float original = result.length_m;
+  EXPECT_FLOAT_EQ(fusion.update(smaller).length_m, original);
+  smaller.stamp_sec = 1.2;
+  EXPECT_FLOAT_EQ(fusion.update(smaller).length_m, original);
+  smaller.stamp_sec = 1.3;
+  result = fusion.update(smaller);
+  EXPECT_NEAR(result.length_m, original - 0.05F, 1.0e-6F);
+}
+
 TEST(CargoGeometryFusionTest, ObservationGapRestartsConfirmation) {
   CargoGeometryFusionConfig config;
   config.minimum_confirm_frames = 2;

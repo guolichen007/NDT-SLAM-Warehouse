@@ -66,7 +66,10 @@ TEST(StaticHeightFieldTest, GroundUsesLowStableSupportAndInterpolation) {
       StaticEvidenceAuthority::RUNTIME_MATURE);
   ASSERT_TRUE(build.valid);
   EXPECT_GT(build.elevated_ground_points, 0U);
-  const auto support = field.supportAt(Eigen::Vector2f(1.2F, 0.0F));
+  // x=1.2 is still inside the populated [1.0, 1.25) cell. Query the
+  // adjacent empty cell so this assertion exercises interpolation rather
+  // than a direct lookup.
+  const auto support = field.supportAt(Eigen::Vector2f(1.3F, 0.0F));
   ASSERT_TRUE(support.valid);
   EXPECT_TRUE(support.interpolated);
   EXPECT_NEAR(support.z, 0.01F, 0.15F);

@@ -55,13 +55,27 @@ bool validConfig(const CargoSwingConfig& config) {
       config.sway_end_speed_mps >= 0.0F &&
       std::isfinite(config.sway_end_confirm_sec) &&
       config.sway_end_confirm_sec >= 0.0 &&
+      std::isfinite(config.minimum_alarm_hold_sec) &&
+      config.minimum_alarm_hold_sec >= 0.0 &&
+      std::isfinite(config.maximum_alarm_evidence_hold_sec) &&
+      config.maximum_alarm_evidence_hold_sec >= 0.0 &&
+      std::isfinite(config.sway_end_offset_m) &&
+      config.sway_end_offset_m >= 0.0F &&
       std::isfinite(config.skew_suspect_angle_deg) &&
       std::isfinite(config.skew_alarm_angle_deg) &&
       config.skew_suspect_angle_deg >= 0.0F &&
       config.skew_alarm_angle_deg >= config.skew_suspect_angle_deg &&
+      std::isfinite(config.skew_suspect_offset_m) &&
+      std::isfinite(config.skew_alarm_offset_m) &&
+      std::isfinite(config.skew_immediate_offset_m) &&
+      config.skew_suspect_offset_m >= 0.0F &&
+      config.skew_alarm_offset_m >= config.skew_suspect_offset_m &&
+      config.skew_immediate_offset_m >= config.skew_alarm_offset_m &&
       std::isfinite(config.skew_direction_consistency) &&
       config.skew_direction_consistency >= 0.0F &&
       config.skew_direction_consistency <= 1.0F &&
+      std::isfinite(config.skew_min_dc_to_ac_ratio) &&
+      config.skew_min_dc_to_ac_ratio >= 0.0F &&
       std::isfinite(config.skew_min_duration_sec) &&
       config.skew_min_duration_sec >= 0.0 &&
       std::isfinite(config.skew_alarm_confirm_sec) &&
@@ -82,7 +96,12 @@ bool validConfig(const CargoSwingConfig& config) {
       config.minimum_shape_confidence >= 0.0F &&
       config.minimum_shape_confidence <= 1.0F &&
       std::isfinite(config.maximum_tracking_residual_m) &&
-      config.maximum_tracking_residual_m >= 0.0F;
+      config.maximum_tracking_residual_m >= 0.0F &&
+      std::isfinite(config.minimum_orientation_confidence) &&
+      config.minimum_orientation_confidence >= 0.0F &&
+      config.minimum_orientation_confidence <= 1.0F &&
+      std::isfinite(config.minimum_torsion_aspect_ratio) &&
+      config.minimum_torsion_aspect_ratio > 1.0F;
 }
 
 float percentile(std::vector<float> values, float q) {
@@ -130,10 +149,15 @@ void CargoSwingMonitor::reset() {
   torsion_state_change_stamp_sec_ = 0.0;
   stationary_enter_stamp_sec_ = 0.0;
   sway_below_end_stamp_sec_ = 0.0;
+  sway_alarm_enter_stamp_sec_ = 0.0;
+  last_severe_measurement_stamp_sec_ = 0.0;
+  settling_enter_stamp_sec_ = 0.0;
   skew_alarm_candidate_stamp_sec_ = 0.0;
+  immediate_alarm_latched_ = false;
+  settling_active_ = false;
   filtered_offset_valid_ = false;
   filtered_offset_.setZero();
-  previous_crane_motion_state_ = RuntimeMotionState::MOVING;
+  previous_crane_motion_state_ = CargoPhysicalMotionState::UNKNOWN;
 }
 
 CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
@@ -189,7 +213,7 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
   hook_anchor_source_ = input.hook_anchor_source;
 
   if (input.crane_motion_state != previous_crane_motion_state_) {
-    if (input.crane_motion_state == RuntimeMotionState::STATIONARY_HOLD) {
+    if (input.crane_motion_state == CargoPhysicalMotionState::STATIONARY) {
       stationary_enter_stamp_sec_ = input.stamp_sec;
       // Stationary oscillation evidence must start after the transition,
       // never inherit travel-phase samples or velocity.
@@ -197,7 +221,8 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
       last_measurement_stamp_sec_ = 0.0;
       filtered_offset_valid_ = false;
       filtered_offset_.setZero();
-    } else {
+    } else if (input.crane_motion_state ==
+               CargoPhysicalMotionState::MOVING) {
       stationary_enter_stamp_sec_ = 0.0;
     }
     previous_crane_motion_state_ = input.crane_motion_state;
@@ -210,8 +235,13 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     result_.observation_age_sec = last_measurement_stamp_sec_ > 0.0
         ? static_cast<float>(input.stamp_sec - last_measurement_stamp_sec_)
         : std::numeric_limits<float>::infinity();
+    const double hold_limit =
+        (immediate_alarm_latched_ || settling_active_ ||
+         severeSway(result_.sway_state))
+            ? config_.maximum_alarm_evidence_hold_sec
+            : config_.maximum_observation_gap_sec;
     result_.valid = last_measurement_stamp_sec_ > 0.0 &&
-        result_.observation_age_sec <= config_.maximum_observation_gap_sec;
+        result_.observation_age_sec <= hold_limit;
     result_.observation_state = result_.valid
         ? CargoSwingObservationState::SHORT_GAP_HOLD
         : CargoSwingObservationState::STALE;
@@ -255,7 +285,8 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     skew_alarm_candidate_stamp_sec_ = 0.0;
     filtered_offset_valid_ = false;
     filtered_offset_.setZero();
-    result_ = CargoSwingResult{};
+    // A long observation gap invalidates kinematic history, but it must not
+    // silently clear a previously latched safety alarm.
   }
 
   const Eigen::Vector2f raw_offset =
@@ -302,7 +333,16 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
   const bool yaw_evidence_valid =
       input.locked_yaw_valid && input.measured_yaw_valid &&
       std::isfinite(input.locked_yaw_base_rad) &&
-      std::isfinite(input.measured_yaw_base_rad);
+      std::isfinite(input.measured_yaw_base_rad) &&
+      std::isfinite(input.orientation_confidence) &&
+      input.orientation_confidence >=
+          config_.minimum_orientation_confidence &&
+      input.shape_confidence >= config_.minimum_shape_confidence &&
+      std::isfinite(input.cargo_length_m) && input.cargo_length_m > 0.0F &&
+      std::isfinite(input.cargo_width_m) && input.cargo_width_m > 0.0F &&
+      std::max(input.cargo_length_m, input.cargo_width_m) /
+              std::min(input.cargo_length_m, input.cargo_width_m) >=
+          config_.minimum_torsion_aspect_ratio;
   if (yaw_evidence_valid) {
     yaw_error_deg = std::abs(shortestAxialAngle(
         input.measured_yaw_base_rad,
@@ -358,6 +398,23 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
   const float direction_consistency = mean_norm > 1.0e-5F
       ? std::clamp(mean_offset.norm() / mean_norm, 0.0F, 1.0F)
       : 0.0F;
+  float ac_square_sum = 0.0F;
+  for (const Sample& sample : history_) {
+    ac_square_sum += (sample.offset - mean_offset).squaredNorm();
+  }
+  const float dc_offset_m = mean_offset.norm();
+  const float ac_rms_m = std::sqrt(
+      ac_square_sum / static_cast<float>(history_.size()));
+  const float dc_to_ac_ratio = dc_offset_m /
+      std::max(ac_rms_m, 0.01F);
+  const float oscillation_confidence = std::clamp(
+      0.5F * ac_rms_m / std::max(config_.warning_offset_m, 0.01F) +
+          0.25F * static_cast<float>(oscillation_zero_crossings),
+      0.0F, 1.0F);
+  const float skew_confidence = std::clamp(
+      direction_consistency *
+          (dc_to_ac_ratio / std::max(config_.skew_min_dc_to_ac_ratio, 0.1F)),
+      0.0F, 1.0F);
   const double history_duration = history_.size() > 1U
       ? history_.back().stamp_sec - history_.front().stamp_sec : 0.0;
   const Eigen::Vector2f skew_axis = mean_offset.norm() > 1.0e-5F
@@ -374,7 +431,7 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     }
   }
   const double stationary_duration =
-      input.crane_motion_state == RuntimeMotionState::STATIONARY_HOLD &&
+      input.crane_motion_state == CargoPhysicalMotionState::STATIONARY &&
           stationary_enter_stamp_sec_ > 0.0
       ? std::max(0.0, input.stamp_sec - stationary_enter_stamp_sec_)
       : 0.0;
@@ -384,27 +441,92 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
   CargoTorsionState torsion = CargoTorsionState::NOT_EVALUATED;
   float mean_angle_deg = 0.0F;
   bool skew_alarm_authority_missing = false;
+  const bool hoist_up = input.hoist_state_fresh &&
+      input.hoist_motion_state == HoistMotionState::UP;
+  const bool hoist_alarm_authorized = hoist_up ||
+      config_.allow_skew_alarm_without_hoist_up;
+  const bool immediate_skew_offset =
+      offset_m >= config_.skew_immediate_offset_m;
+  if (immediate_skew_offset) {
+    skew = hoist_alarm_authorized
+        ? CargoSkewPullState::SKEW_PULL_ALARM
+        : CargoSkewPullState::SKEW_PULL_SUSPECTED;
+    skew_alarm_authority_missing = !hoist_alarm_authorized;
+  }
   const bool immediate_sway_alarm =
       offset_m >= config_.immediate_alarm_offset_m ||
       (angle_authoritative &&
        angle_deg >= config_.immediate_alarm_angle_deg);
   if (immediate_sway_alarm) {
-    sway = CargoSwayState::SWAY_ALARM;
+    immediate_alarm_latched_ = true;
+    settling_active_ = false;
+    sway_alarm_enter_stamp_sec_ = input.stamp_sec;
+    last_severe_measurement_stamp_sec_ = input.stamp_sec;
+    sway_below_end_stamp_sec_ = 0.0;
   }
-  if (history_duration >= config_.minimum_valid_observation_sec) {
-    if (immediate_sway_alarm || angle_deg >= config_.alarm_angle_deg ||
-        offset_m >= config_.alarm_offset_m) {
+  const bool formal_alarm_measurement =
+      offset_m >= config_.alarm_offset_m ||
+      (angle_authoritative && angle_deg >= config_.alarm_angle_deg);
+  if (formal_alarm_measurement) {
+    last_severe_measurement_stamp_sec_ = input.stamp_sec;
+  }
+  const bool angle_below_end = !angle_authoritative ||
+      angle_deg <= config_.sway_end_angle_deg;
+  const bool below_end = angle_below_end &&
+      offset_m <= config_.sway_end_offset_m &&
+      horizontal_speed <= config_.sway_end_speed_mps;
+  if (immediate_alarm_latched_) {
+    const bool minimum_hold_complete = sway_alarm_enter_stamp_sec_ > 0.0 &&
+        input.stamp_sec - sway_alarm_enter_stamp_sec_ >=
+            config_.minimum_alarm_hold_sec;
+    if (minimum_hold_complete && below_end) {
+      if (sway_below_end_stamp_sec_ <= 0.0) {
+        sway_below_end_stamp_sec_ = input.stamp_sec;
+      }
+      if (input.stamp_sec - sway_below_end_stamp_sec_ >=
+          config_.sway_end_confirm_sec) {
+        immediate_alarm_latched_ = false;
+        settling_active_ = true;
+        settling_enter_stamp_sec_ = input.stamp_sec;
+        sway = CargoSwayState::SETTLING;
+      } else {
+        sway = CargoSwayState::SWAY_ALARM;
+      }
+    } else {
       sway = CargoSwayState::SWAY_ALARM;
-    } else if (angle_deg >= config_.warning_angle_deg ||
+      sway_below_end_stamp_sec_ = 0.0;
+    }
+  } else if (settling_active_) {
+    if (formal_alarm_measurement) {
+      immediate_alarm_latched_ = true;
+      settling_active_ = false;
+      sway_alarm_enter_stamp_sec_ = input.stamp_sec;
+      sway = CargoSwayState::SWAY_ALARM;
+    } else if (!below_end) {
+      sway = CargoSwayState::SETTLING;
+      settling_enter_stamp_sec_ = input.stamp_sec;
+    } else if (input.stamp_sec - settling_enter_stamp_sec_ >=
+               config_.sway_end_confirm_sec) {
+      settling_active_ = false;
+      sway = CargoSwayState::NORMAL;
+    } else {
+      sway = CargoSwayState::SETTLING;
+    }
+  } else if (history_duration >= config_.minimum_valid_observation_sec) {
+    if (formal_alarm_measurement) {
+      sway = CargoSwayState::SWAY_ALARM;
+    } else if ((angle_authoritative &&
+                angle_deg >= config_.warning_angle_deg) ||
                offset_m >= config_.warning_offset_m ||
                horizontal_speed >= config_.warning_speed_mps ||
                (input.crane_motion_state ==
-                    RuntimeMotionState::STATIONARY_HOLD &&
+                    CargoPhysicalMotionState::STATIONARY &&
                 stationary_duration >= config_.stationary_settle_delay_sec &&
                 oscillation_zero_crossings >= 1 &&
                 oscillation_amplitude >= config_.warning_offset_m)) {
       sway = CargoSwayState::SWAY_WARNING;
-    } else if (angle_deg >= config_.normal_angle_deg ||
+    } else if ((angle_authoritative &&
+                angle_deg >= config_.normal_angle_deg) ||
                horizontal_speed >= config_.normal_speed_mps ||
                oscillation_amplitude >= 0.5F * config_.warning_offset_m) {
       sway = CargoSwayState::SWAY_DETECTED;
@@ -412,41 +534,37 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
       sway = CargoSwayState::NORMAL;
     }
 
-    const bool was_severe = severeSway(result_.sway_state);
-    const bool below_end = angle_deg <= config_.sway_end_angle_deg &&
-        horizontal_speed <= config_.sway_end_speed_mps;
-    if (was_severe && below_end) {
-      if (sway_below_end_stamp_sec_ <= 0.0) {
-        sway_below_end_stamp_sec_ = input.stamp_sec;
-      }
-      if (input.stamp_sec - sway_below_end_stamp_sec_ <
-          config_.sway_end_confirm_sec) {
-        sway = CargoSwayState::SETTLING;
-      }
-    } else {
-      sway_below_end_stamp_sec_ = 0.0;
-    }
-
     mean_angle_deg = std::atan2(
         mean_offset.norm(), rope_length) * kRadToDeg;
+    const bool skew_angle_suspect = angle_authoritative &&
+        mean_angle_deg >= config_.skew_suspect_angle_deg;
+    const bool skew_offset_suspect =
+        dc_offset_m >= config_.skew_suspect_offset_m;
     const bool skew_suspected =
-        mean_angle_deg >= config_.skew_suspect_angle_deg &&
+        (skew_angle_suspect || skew_offset_suspect) &&
         direction_consistency >= config_.skew_direction_consistency &&
+        dc_to_ac_ratio >= config_.skew_min_dc_to_ac_ratio &&
         zero_crossings <= config_.skew_max_zero_crossings &&
         history_duration >= config_.skew_min_duration_sec;
     skew = skew_suspected ? CargoSkewPullState::SKEW_PULL_SUSPECTED
                           : CargoSkewPullState::NO_SKEW_PULL;
-    const bool hoist_up = input.hoist_state_fresh &&
-        input.hoist_motion_state == HoistMotionState::UP;
-    const bool rope_alarm_authorized = angle_authoritative ||
-        config_.allow_configured_rope_length_alarm;
-    const bool hoist_alarm_authorized = hoist_up ||
-        config_.allow_skew_alarm_without_hoist_up;
-    skew_alarm_authority_missing = skew_suspected &&
-        mean_angle_deg >= config_.skew_alarm_angle_deg &&
-        (!hoist_alarm_authorized || !rope_alarm_authorized);
-    if (skew_suspected && mean_angle_deg >= config_.skew_alarm_angle_deg &&
-        rope_alarm_authorized && hoist_alarm_authorized) {
+    // Configured rope length remains diagnostic-only for every formal angle
+    // threshold, including skew pull. Absolute LiDAR offset is the independent
+    // safety channel when measured rope length is unavailable.
+    const bool skew_angle_alarm = angle_authoritative &&
+        mean_angle_deg >= config_.skew_alarm_angle_deg;
+    const bool skew_offset_alarm =
+        dc_offset_m >= config_.skew_alarm_offset_m;
+    const bool skew_immediate_alarm = immediate_skew_offset;
+    const bool skew_alarm_evidence = skew_suspected &&
+        (skew_angle_alarm || skew_offset_alarm);
+    skew_alarm_authority_missing =
+        (skew_alarm_evidence || skew_immediate_alarm) &&
+        !hoist_alarm_authorized;
+    if (skew_immediate_alarm && hoist_alarm_authorized) {
+      skew = CargoSkewPullState::SKEW_PULL_ALARM;
+      skew_alarm_candidate_stamp_sec_ = input.stamp_sec;
+    } else if (skew_alarm_evidence && hoist_alarm_authorized) {
       if (skew_alarm_candidate_stamp_sec_ <= 0.0) {
         skew_alarm_candidate_stamp_sec_ = input.stamp_sec;
       }
@@ -469,6 +587,10 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
         torsion = CargoTorsionState::NORMAL;
       }
     }
+  } else if (severeSway(result_.sway_state)) {
+    // An immature replacement window is not evidence that a previously
+    // established safety state disappeared.
+    sway = result_.sway_state;
   }
 
   if (sway != result_.sway_state || sway_state_change_stamp_sec_ <= 0.0) {
@@ -497,6 +619,11 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
   result_.radial_speed_mps = radial_speed;
   result_.oscillation_amplitude_m = oscillation_amplitude;
   result_.direction_consistency = direction_consistency;
+  result_.dc_offset_m = dc_offset_m;
+  result_.ac_rms_m = ac_rms_m;
+  result_.dc_to_ac_ratio = dc_to_ac_ratio;
+  result_.oscillation_confidence = oscillation_confidence;
+  result_.skew_confidence = skew_confidence;
   result_.zero_crossings = zero_crossings;
   result_.yaw_error_deg = yaw_error_deg;
   result_.observation_age_sec = 0.0F;
@@ -532,10 +659,7 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     result_.recommended_action = CargoSwingRecommendedAction::WATCH;
   }
   result_.reason = result_.alarm_inhibited
-      ? (!angle_authoritative &&
-                 !config_.allow_configured_rope_length_alarm
-             ? "rope_length_not_authoritative"
-             : "hoist_up_evidence_unavailable")
+      ? "hoist_up_evidence_unavailable"
       : (measurement_gap_reset
              ? "current_measurement_after_gap_reset"
              : (rope_source == CargoRopeLengthSource::CONFIG_FALLBACK

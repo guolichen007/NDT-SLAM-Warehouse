@@ -21,7 +21,7 @@ struct CargoAvoidanceSourceRisk {
 
 struct CargoAvoidanceFusionConfig {
   float minimum_live_coverage_for_clear = 0.05F;
-  bool provisional_positive_warning_to_official_code = false;
+  bool provisional_positive_warning_to_official_code = true;
 };
 
 struct CargoAvoidanceFusionInput {

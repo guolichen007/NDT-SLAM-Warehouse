@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ndt_slam/stationary_motion_policy.hpp"
+#include "ndt_slam/cargo_physical_motion_estimator.hpp"
 
 #include <Eigen/Core>
 
@@ -86,9 +86,16 @@ struct CargoSwingConfig {
   float sway_end_angle_deg = 1.0F;
   float sway_end_speed_mps = 0.10F;
   double sway_end_confirm_sec = 2.0;
+  double minimum_alarm_hold_sec = 0.50;
+  double maximum_alarm_evidence_hold_sec = 0.30;
+  float sway_end_offset_m = 0.10F;
   float skew_suspect_angle_deg = 3.0F;
   float skew_alarm_angle_deg = 5.0F;
+  float skew_suspect_offset_m = 0.20F;
+  float skew_alarm_offset_m = 0.50F;
+  float skew_immediate_offset_m = 0.70F;
   float skew_direction_consistency = 0.80F;
+  float skew_min_dc_to_ac_ratio = 2.0F;
   double skew_min_duration_sec = 1.00;
   double skew_alarm_confirm_sec = 0.50;
   int skew_max_zero_crossings = 1;
@@ -99,6 +106,8 @@ struct CargoSwingConfig {
   float minimum_identity_confidence = 0.60F;
   float minimum_shape_confidence = 0.55F;
   float maximum_tracking_residual_m = 0.25F;
+  float minimum_orientation_confidence = 0.60F;
+  float minimum_torsion_aspect_ratio = 1.20F;
   bool allow_skew_alarm_without_hoist_up = false;
   bool allow_configured_rope_length_alarm = false;
 };
@@ -126,7 +135,11 @@ struct CargoSwingInput {
   float locked_yaw_base_rad = 0.0F;
   bool measured_yaw_valid = false;
   float measured_yaw_base_rad = 0.0F;
-  RuntimeMotionState crane_motion_state = RuntimeMotionState::MOVING;
+  float orientation_confidence = 0.0F;
+  float cargo_length_m = 0.0F;
+  float cargo_width_m = 0.0F;
+  CargoPhysicalMotionState crane_motion_state =
+      CargoPhysicalMotionState::UNKNOWN;
   HoistMotionState hoist_motion_state = HoistMotionState::UNKNOWN;
   bool hoist_state_fresh = false;
   float hoist_speed_mps = 0.0F;
@@ -151,6 +164,11 @@ struct CargoSwingResult {
   float radial_speed_mps = 0.0F;
   float oscillation_amplitude_m = 0.0F;
   float direction_consistency = 0.0F;
+  float dc_offset_m = 0.0F;
+  float ac_rms_m = 0.0F;
+  float dc_to_ac_ratio = 0.0F;
+  float oscillation_confidence = 0.0F;
+  float skew_confidence = 0.0F;
   int zero_crossings = 0;
   float yaw_error_deg = 0.0F;
   float observation_age_sec = 0.0F;
@@ -195,11 +213,16 @@ class CargoSwingMonitor {
   double torsion_state_change_stamp_sec_ = 0.0;
   double stationary_enter_stamp_sec_ = 0.0;
   double sway_below_end_stamp_sec_ = 0.0;
+  double sway_alarm_enter_stamp_sec_ = 0.0;
+  double last_severe_measurement_stamp_sec_ = 0.0;
+  double settling_enter_stamp_sec_ = 0.0;
   double skew_alarm_candidate_stamp_sec_ = 0.0;
+  bool immediate_alarm_latched_ = false;
+  bool settling_active_ = false;
   bool filtered_offset_valid_ = false;
   Eigen::Vector2f filtered_offset_ = Eigen::Vector2f::Zero();
-  RuntimeMotionState previous_crane_motion_state_ =
-      RuntimeMotionState::MOVING;
+  CargoPhysicalMotionState previous_crane_motion_state_ =
+      CargoPhysicalMotionState::UNKNOWN;
 };
 
 float shortestAxialAngle(float lhs_rad, float rhs_rad);

@@ -30,6 +30,13 @@ struct CargoGeometryFusionConfig {
   float maximum_height_m = 5.00F;
   float huber_delta_m = 0.20F;
   float configured_bottom_margin_m = 0.10F;
+  int conservative_shrink_confirm_frames = 8;
+  float maximum_shrink_per_frame_m = 0.03F;
+  bool immediate_expand_enabled = true;
+  std::size_t minimum_live_dimension_support = 30U;
+  float minimum_live_shape_confidence_for_shrink = 0.75F;
+  float minimum_conservative_length_m = 0.0F;
+  float minimum_conservative_width_m = 0.0F;
 };
 
 struct CargoThicknessObservation {
@@ -55,6 +62,11 @@ struct CargoGeometryFrame {
   float observed_top_m = std::numeric_limits<float>::quiet_NaN();
   float top_uncertainty_m = 0.0F;
   float tracking_uncertainty_m = 0.0F;
+  std::size_t dimension_support_points = 0U;
+  float dimension_shape_confidence = 0.0F;
+  bool dimension_observation_complete = false;
+  float static_length_lower_bound_m = 0.0F;
+  float static_width_lower_bound_m = 0.0F;
   std::vector<CargoThicknessObservation> thickness;
 };
 
@@ -93,6 +105,8 @@ class CargoGeometryFusion {
   float pending_uncertainty_m_ = 1.0F;
   bool pending_valid_ = false;
   double last_stamp_sec_ = 0.0;
+  int shrink_confirm_count_ = 0;
+  std::uint64_t shrink_track_segment_id_ = 0U;
 };
 
 }  // namespace ndt_slam

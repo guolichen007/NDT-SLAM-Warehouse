@@ -58,6 +58,8 @@
 #include <ndt_slam/static_height_component_extractor.hpp>
 #include <ndt_slam/static_evidence_authorization.hpp>
 #include <ndt_slam/cargo_avoidance_fusion.hpp>
+#include <ndt_slam/cargo_presence_state_machine.hpp>
+#include <ndt_slam/cargo_physical_motion_estimator.hpp>
 #include <ndt_slam/cargo_lift_origin_binder.hpp>
 #include <ndt_slam/cargo_geometry_fusion.hpp>
 #include <ndt_slam/pending_cargo_envelope.hpp>
@@ -1981,8 +1983,15 @@ private:
     RevealedSupportObserver revealed_support_observer_;
     RevealedSupportObservation revealed_support_observation_;
     CargoAvoidanceFusionConfig cargo_avoidance_fusion_config_;
+    CargoPresenceConfig cargo_presence_config_;
+    CargoPresenceStateMachine cargo_presence_state_machine_;
+    CargoPresenceResult cargo_presence_result_;
+    CargoPhysicalMotionConfig cargo_physical_motion_config_;
+    CargoPhysicalMotionEstimator cargo_physical_motion_estimator_;
+    CargoPhysicalMotionResult cargo_physical_motion_result_;
     PendingCargoEnvelopeConfig pending_cargo_envelope_config_;
     PendingCargoEnvelope pending_cargo_envelope_;
+    EffectiveCargoEnvelope effective_cargo_envelope_;
     PendingCargoSelfEvidenceConfig pending_cargo_self_evidence_config_;
     PendingCargoSelfEvidence pending_cargo_self_evidence_;
     CargoLiftOriginConfig cargo_lift_origin_config_;
@@ -1997,6 +2006,10 @@ private:
     std::uint64_t cargo_track_segment_id_ = 0U;
     bool cargo_hook_state_initialized_ = false;
     bool cargo_previous_hook_loaded_ = false;
+    bool cargo_last_reliable_offset_valid_ = false;
+    Eigen::Vector2f cargo_last_reliable_offset_base_ =
+        Eigen::Vector2f::Zero();
+    ros::Time cargo_last_reliable_offset_stamp_;
     bool cargo_recognition_enabled_ = true;
     double cargo_recognition_loaded_grace_sec_ = 1.0;
     double cargo_recognition_timeout_sec_ = 8.0;
@@ -2229,6 +2242,7 @@ private:
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
         const Sophus::SE3d& pose_map_base,
+        const Sophus::SE3d& raw_physical_pose,
         const ros::Time& stamp,
         const ros::Time& obstacle_cloud_stamp,
         double processing_age_sec);
@@ -2237,7 +2251,8 @@ private:
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
         const Sophus::SE3d& pose_map_base,
         const ros::Time& stamp,
-        bool active_track);
+        bool active_track,
+        bool cargo_present);
     void runPendingCargoAvoidance(
         const PendingCargoEnvelope& envelope,
         const HookLoadSnapshot& hook,

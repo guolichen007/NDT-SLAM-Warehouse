@@ -739,7 +739,7 @@ cargo_safety:
   static_height_maximum_merge_gap_m: 0.18
   # Clear 14 requires live ROI coverage plus a reliable static contract.
   fusion_minimum_live_coverage_for_clear: 0.05
-  fusion_provisional_warning_to_official_code: false
+  fusion_provisional_warning_to_official_code: true
   motion_corridor_enabled: true
   motion_corridor_immediate_near_field_m: 0.30
   motion_corridor_minimum_speed_mps: 0.05
@@ -786,6 +786,21 @@ pending_cargo_envelope:
   vertical_margin_m: 0.15
   maximum_candidate_age_sec: 0.50
   maximum_retired_age_sec: 8.0
+  maximum_fallback_sway_offset_m: 0.80
+  lost_position_uncertainty_per_sec: 0.15
+  maximum_lost_position_uncertainty_m: 1.00
+
+cargo_presence:
+  gravity_stale_hold_sec: 3.0
+
+cargo_physical_motion:
+  enabled: true
+  enter_stationary_speed_mps: 0.03
+  exit_stationary_speed_mps: 0.08
+  enter_stationary_confirm_sec: 0.50
+  exit_stationary_confirm_sec: 0.20
+  maximum_sample_gap_sec: 0.50
+  velocity_filter_alpha: 0.30
 
 pending_cargo_self_evidence:
   minimum_identity_confidence: 0.55
@@ -828,6 +843,13 @@ cargo_geometry_fusion:
   maximum_height_m: 5.00
   huber_delta_m: 0.20
   configured_bottom_margin_m: 0.10
+  conservative_shrink_confirm_frames: 8
+  maximum_shrink_per_frame_m: 0.03
+  immediate_expand_enabled: true
+  minimum_live_dimension_support: 30
+  minimum_live_shape_confidence_for_shrink: 0.75
+  minimum_conservative_length_m: 4.0
+  minimum_conservative_width_m: 3.0
 
 cargo_recognition:
   enabled: true
@@ -864,9 +886,16 @@ cargo_swing:
   sway_end_angle_deg: 1.0
   sway_end_speed_mps: 0.10
   sway_end_confirm_sec: 2.0
+  minimum_alarm_hold_sec: 0.50
+  maximum_alarm_evidence_hold_sec: 0.30
+  sway_end_offset_m: 0.10
   skew_suspect_angle_deg: 3.0
   skew_alarm_angle_deg: 5.0
+  skew_suspect_offset_m: 0.20
+  skew_alarm_offset_m: 0.50
+  skew_immediate_offset_m: 0.70
   skew_direction_consistency: 0.80
+  skew_min_dc_to_ac_ratio: 2.0
   skew_min_duration_sec: 1.00
   skew_alarm_confirm_sec: 0.50
   skew_max_zero_crossings: 1
@@ -877,6 +906,8 @@ cargo_swing:
   minimum_identity_confidence: 0.60
   minimum_shape_confidence: 0.55
   maximum_tracking_residual_m: 0.25
+  minimum_orientation_confidence: 0.60
+  minimum_torsion_aspect_ratio: 1.20
   allow_skew_alarm_without_hoist_up: false
   allow_configured_rope_length_alarm: false
 

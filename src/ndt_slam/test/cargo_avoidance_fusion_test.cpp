@@ -13,6 +13,8 @@ CargoAvoidanceFusionInput validInput() {
   input.static_session_manifest_valid = true;
   input.static_session_hash_valid = true;
   input.static_session_uuid_valid = true;
+  input.static_risk_contract_valid = true;
+  input.static_clear_contract_valid = true;
   input.static_authority = StaticEvidenceAuthority::RUNTIME_MATURE;
   input.live.available = true;
   input.live.reliable = true;
@@ -46,6 +48,17 @@ TEST(CargoAvoidanceFusion, StaticHazardSurvivesLiveClearConflict) {
   EXPECT_EQ(result.reason, "MAP_LIVE_CONFLICT_static_hazard_retained");
 }
 
+TEST(CargoAvoidanceFusion, StaticHazardSurvivesLiveBlank) {
+  auto input = validInput();
+  input.live.available = false;
+  input.live.reliable = false;
+  input.static_map.hazard = true;
+  input.static_map.warning_code = 17;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 17);
+}
+
 TEST(CargoAvoidanceFusion, PendingEnvelopeCannotGrantClear) {
   auto input = validInput();
   input.formal_cargo_geometry_valid = false;
@@ -56,7 +69,7 @@ TEST(CargoAvoidanceFusion, PendingEnvelopeCannotGrantClear) {
   EXPECT_EQ(result.provisional_status, "CLEAR_NOT_AUTHORIZED");
 }
 
-TEST(CargoAvoidanceFusion, PendingHazardIsProvisionalByDefault) {
+TEST(CargoAvoidanceFusion, PendingHazardWarnsOfficiallyByDefault) {
   auto input = validInput();
   input.formal_cargo_geometry_valid = false;
   input.formal_cargo_bottom_valid = false;
@@ -64,8 +77,8 @@ TEST(CargoAvoidanceFusion, PendingHazardIsProvisionalByDefault) {
   input.live.hazard = true;
   input.live.warning_code = 17;
   const auto result = fuseCargoAvoidanceRisk(input);
-  EXPECT_FALSE(result.official_valid);
-  EXPECT_EQ(result.official_code, 33);
+  EXPECT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 17);
   EXPECT_EQ(result.provisional_status, "NEAR_3M");
 }
 
