@@ -449,6 +449,204 @@ class SafetyAggregator:
         }
 
 
+class CargoMonitorGate:
+    """Gravity-authoritative cargo episode gate, independent of ROS."""
+
+    NO_MESSAGE = "NO_MESSAGE"
+    INVALID_OR_STALE = "INVALID_OR_STALE"
+    INHIBIT = "INHIBIT"
+    EMPTY = "EMPTY"
+    LOADED_ACTIVE = "LOADED_ACTIVE"
+
+    def __init__(self) -> None:
+        self.state = self.NO_MESSAGE
+        self.episode_id = 0
+        self.episode_started_wall: Optional[float] = None
+        self.last_closed_episode: Optional[Dict[str, Any]] = None
+
+    @property
+    def active(self) -> bool:
+        return self.state == self.LOADED_ACTIVE
+
+    @staticmethod
+    def classify(valid: bool, fresh: bool, state: int) -> str:
+        if not valid or not fresh or state not in (1, 2, 3):
+            return CargoMonitorGate.INVALID_OR_STALE
+        if state == 1:
+            return CargoMonitorGate.INHIBIT
+        if state == 2:
+            return CargoMonitorGate.EMPTY
+        return CargoMonitorGate.LOADED_ACTIVE
+
+    def update(self, *, valid: bool, fresh: bool, state: int,
+               wall_time: float, source_stamp: float = 0.0,
+               reason: str = "") -> List[Dict[str, Any]]:
+        next_state = self.classify(valid, fresh, state)
+        if next_state == self.state:
+            return []
+        previous = self.state
+        events: List[Dict[str, Any]] = []
+        if previous == self.LOADED_ACTIVE:
+            duration = max(0.0, wall_time - (self.episode_started_wall or wall_time))
+            event_name = ("GRAVITY_LOST_DURING_CARGO" if
+                          next_state == self.INVALID_OR_STALE else
+                          "CARGO_EPISODE_CLOSED")
+            closed = {
+                "event": event_name, "wall_time": wall_time,
+                "source_stamp": source_stamp, "episode_id": self.episode_id,
+                "duration_sec": duration, "next_state": next_state,
+                "reason": reason or next_state.lower(),
+            }
+            self.last_closed_episode = dict(closed)
+            events.append(closed)
+            self.episode_started_wall = None
+        self.state = next_state
+        if next_state == self.LOADED_ACTIVE:
+            self.episode_id += 1
+            self.episode_started_wall = wall_time
+            events.append({
+                "event": "GRAVITY_LOADED", "wall_time": wall_time,
+                "source_stamp": source_stamp, "episode_id": self.episode_id,
+                "previous_state": previous, "reason": reason or "loaded",
+            })
+        elif previous != self.LOADED_ACTIVE:
+            events.append({
+                "event": ("CARGO_MONITOR_INACTIVE_NO_GRAVITY" if
+                          next_state == self.INVALID_OR_STALE else
+                          "CARGO_MONITOR_STATE_CHANGED"),
+                "wall_time": wall_time, "source_stamp": source_stamp,
+                "previous_state": previous, "state": next_state,
+                "reason": reason or next_state.lower(),
+            })
+        return events
+
+
+class AvoidancePipelineObserver:
+    """Correlate the read-only raw/final/heartbeat safety pipeline."""
+
+    def __init__(self, grace_sec: float = 0.4) -> None:
+        self.grace_sec = max(0.0, float(grace_sec))
+        self.values: Dict[str, Tuple[int, float]] = {}
+        self.operational: Dict[str, Any] = {}
+        self.pending: Dict[str, Any] = {}
+        self._divergence_since: Dict[str, float] = {}
+
+    def set_code(self, name: str, code: int, wall_time: float) -> None:
+        self.values[name] = (int(code), float(wall_time))
+
+    def set_operational(self, value: Mapping[str, Any], wall_time: float) -> None:
+        self.operational = dict(value)
+        self.operational["_wall_time"] = float(wall_time)
+
+    def set_pending(self, value: Mapping[str, Any], wall_time: float) -> None:
+        self.pending = dict(value)
+        self.pending["_wall_time"] = float(wall_time)
+
+    def _mismatch(self, name: str, left: str, right: str,
+                  now: float) -> Tuple[bool, bool]:
+        if left not in self.values or right not in self.values:
+            self._divergence_since.pop(name, None)
+            return False, False
+        left_code, left_wall = self.values[left]
+        right_code, right_wall = self.values[right]
+        if left_code == right_code:
+            self._divergence_since.pop(name, None)
+            return False, False
+        started = self._divergence_since.setdefault(
+            name, max(left_wall, right_wall))
+        return True, now - started > self.grace_sec
+
+    def snapshot(self, now: float) -> Dict[str, Any]:
+        code = lambda name: self.values.get(name, (None, 0.0))[0]
+        raw_typed = code("raw_typed")
+        raw_simple = code("raw_simple")
+        final_typed = code("final_typed")
+        heartbeat = code("heartbeat")
+        operational_final = self.operational.get("operational_code")
+        pending_code = self.pending.get("pending_provisional_status",
+                                        self.pending.get("provisional_status"))
+        pending_numeric: Optional[int]
+        try:
+            pending_numeric = int(pending_code)
+        except (TypeError, ValueError):
+            pending_numeric = {
+                "NEAR_3M": 17, "NEAR_5M": 18, "CLEAR": 14,
+            }.get(str(pending_code).upper())
+        raw_mismatch, raw_mature = self._mismatch(
+            "raw", "raw_typed", "raw_simple", now)
+        final_mismatch, final_mature = self._mismatch(
+            "final", "final_typed", "heartbeat", now)
+        raw_final_mismatch, raw_final_mature = self._mismatch(
+            "raw_final", "raw_typed", "final_typed", now)
+        operational_mismatch = (
+            operational_final is not None and final_typed is not None and
+            int(operational_final) != final_typed)
+        if operational_mismatch:
+            operational_started = self._divergence_since.setdefault(
+                "operational", max(
+                    float(self.operational.get("_wall_time", now)),
+                    self.values.get("final_typed", (0, now))[1]))
+        else:
+            self._divergence_since.pop("operational", None)
+            operational_started = now
+        result = {
+            "wall_time": now, "raw_typed_code": raw_typed,
+            "raw_simple_code": raw_simple, "final_typed_code": final_typed,
+            "heartbeat_code": heartbeat,
+            "operational_raw_code": self.operational.get("raw_code"),
+            "operational_code": operational_final,
+            "pending_provisional_status": pending_code,
+            "pending_numeric_code": pending_numeric,
+            "raw_typed_simple_mismatch": raw_mismatch and raw_mature,
+            "final_typed_heartbeat_mismatch": final_mismatch and final_mature,
+            "raw_final_transition_pending": (raw_final_mismatch and
+                                              not raw_final_mature),
+            "operational_final_mismatch": (operational_mismatch and
+                now - operational_started > self.grace_sec),
+            "pending_illegal_clear": pending_numeric == CLEAR_CODE,
+            "normal_code35": final_typed == 35,
+        }
+        return result
+
+
+def classify_cargo_geometry(value: Mapping[str, Any]) -> Tuple[bool, bool]:
+    """Return (direct_measured, formal_operational) without conflating them."""
+    def positive(name: str) -> bool:
+        number = _finite(value.get(name), 0.0)
+        return number > 0.0
+
+    dimensions_valid = all(positive(name) for name in
+                           ("length_m", "width_m", "height_m"))
+    geometry_source = str(value.get("geometry_source", ""))
+    track_state = str(value.get("track_state", ""))
+    lock_state = str(value.get("lock_state", ""))
+    direct = (
+        geometry_source == "MEASURED" and
+        _as_bool(value.get("authoritative")) and track_state == "LOCKED" and
+        _as_bool(value.get("observation_valid")) and
+        _as_bool(value.get("height_valid")) and
+        int(value.get("support", 0) or 0) > 0 and
+        int(value.get("points", 0) or 0) > 0 and
+        positive("confidence") and dimensions_valid)
+    formal_source = (geometry_source in
+                     ("MEASURED", "FORMAL_FROZEN", "FROZEN", "LOST_HOLD") or
+                     _as_bool(value.get("frozen")) or
+                     _as_bool(value.get("effective_envelope_clear_authority")))
+    vertical_source = str(value.get("vertical_source", ""))
+    formal_vertical = vertical_source in (
+        "DIRECT_TOP_FROZEN_THICKNESS", "LOCKED_OBB_POINT_SUPPORT",
+        "MAP_DIFF_REVEALED_SUPPORT", "STATIC_ORIGIN_TOP_SUPPORT")
+    bottom_z = _finite(value.get("bottom_z"))
+    top_z = _finite(value.get("top_z"))
+    formal = ((track_state == "LOCKED" or lock_state in
+               ("LOCKED", "LOST_HOLD")) and dimensions_valid and
+              _as_bool(value.get("height_valid")) and
+              math.isfinite(bottom_z) and math.isfinite(top_z) and
+              top_z > bottom_z and
+              (direct or formal_source or formal_vertical))
+    return direct, formal
+
+
 class AsyncRunWriter:
     """Single bounded writer thread; callbacks never perform disk I/O."""
 
@@ -534,6 +732,8 @@ def load_config(path: Optional[Path]) -> Dict[str, Any]:
         "odom_stale_sec": 1.0,
         "runtime_status_stale_sec": 5.0,
         "repeat_period_sec": 30.0,
+        "gravity_monitor_stale_sec": 1.0,
+        "avoidance_pipeline_grace_sec": 0.4,
         "writer_queue_size": 4096,
         # Root-level keys from server_monitor.yaml
         "motion_capture": {},
@@ -812,9 +1012,11 @@ class RosRuntimeMonitor:
     def __init__(self, args: argparse.Namespace, config: Mapping[str, Any]) -> None:
         import rospy
         from lidar_slam2_msgs.msg import (
+            CargoBottomEstimate,
             CargoRecognitionStatus,
             CargoSafetyStatus,
             CargoSwingStatus,
+            HookLoadState,
         )
         from nav_msgs.msg import Odometry
         from rosgraph_msgs.msg import Log
@@ -840,6 +1042,8 @@ class RosRuntimeMonitor:
         self.safety_status_message_count: int = 0
         self.last_status_code_wall: Optional[float] = None
         self.status_code_message_count: int = 0
+        self.last_gravity_wall: Optional[float] = None
+        self.gravity_message_count: int = 0
         self.last_recognition_wall: Optional[float] = None
         self.recognition_status_message_count: int = 0
         self.last_swing_wall: Optional[float] = None
@@ -865,6 +1069,24 @@ class RosRuntimeMonitor:
         self.last_filesystem_scan_wall = 0.0
         self.filesystem_cache: Dict[str, Any] = {}
         self.last_cpu_sample: Optional[Tuple[float, int]] = None
+        self.cargo_gate = CargoMonitorGate()
+        self.pipeline = AvoidancePipelineObserver(float(config.get(
+            "avoidance_pipeline_grace_sec", 0.4)))
+        self._pipeline_last_flags: Dict[str, bool] = {}
+        self.latest_gravity: Dict[str, Any] = {}
+        self.latest_recognition: Dict[str, Any] = {}
+        self.latest_swing: Dict[str, Any] = {}
+        self.latest_geometry: Dict[str, Any] = {}
+        self.latest_bottom: Dict[str, Any] = {}
+        self.latest_safety: Dict[str, Any] = {}
+        self._episode_geometry: List[Dict[str, Any]] = []
+        self._episode_first_lock_wall: Optional[float] = None
+        self._episode_recognition_failures_start = 0
+        self._episode_recognition_messages_start = 0
+        self._episode_swing_messages_start = 0
+        self._geo_track_samples: Dict[int, int] = {}
+        self._geo_track_episodes: Dict[int, str] = {}
+        self._geo_last_authoritative: Dict[int, float] = {}
 
         # Typed recognition and suspended-motion observability. These values
         # are read-only mirrors; they never feed ROS parameters or control.
@@ -931,6 +1153,20 @@ class RosRuntimeMonitor:
                          self._safety_callback, queue_size=100)
         rospy.Subscriber("/cargo_avoidance/status_code", Int32,
                          self._code_callback, queue_size=100)
+        rospy.Subscriber("/hook/load_state", HookLoadState,
+                         self._gravity_callback, queue_size=100)
+        rospy.Subscriber("/cargo_avoidance/raw_safety_status",
+                         CargoSafetyStatus, self._raw_safety_callback,
+                         queue_size=100)
+        rospy.Subscriber("/cargo_avoidance/raw_status_code", Int32,
+                         self._raw_code_callback, queue_size=100)
+        rospy.Subscriber("/cargo_avoidance/operational_status", String,
+                         self._operational_callback, queue_size=50)
+        rospy.Subscriber("/cargo_avoidance/pending_status", String,
+                         self._pending_callback, queue_size=50)
+        rospy.Subscriber("/cargo_avoidance/bottom_estimate",
+                         CargoBottomEstimate, self._bottom_callback,
+                         queue_size=50)
         rospy.Subscriber("/cargo_avoidance/static_evidence_debug", String,
                          self._static_callback, queue_size=20)
         rospy.Subscriber("/cargo_avoidance/cargo_geometry_debug", String,
@@ -941,11 +1177,6 @@ class RosRuntimeMonitor:
         rospy.Subscriber("/cargo_avoidance/swing_status", CargoSwingStatus,
                          self._swing_callback, queue_size=100)
         rospy.Subscriber("/rosout_agg", Log, self._rosout_callback, queue_size=200)
-
-        # Track-level geometry sample filtering state
-        self._geo_track_samples: Dict[int, int] = {}
-        self._geo_track_episodes: Dict[int, str] = {}
-        self._geo_last_authoritative: Dict[int, float] = {}
 
         # Map health tracking
         self._last_tile_files: Optional[int] = None
@@ -972,10 +1203,125 @@ class RosRuntimeMonitor:
         payload = dict(event)
         payload.setdefault("wall_time", time.time())
         self.writer.submit("jsonl", (relative, payload))
-        line = "[{event}] reason={reason}".format(
+        line = "[CARGO_EVENT] {event} reason={reason}".format(
             event=payload.get("event", "CARGO_EVENT"),
             reason=payload.get("reason", "-"))
         self.writer.submit("text", ("logs/monitor.log", line))
+        self.writer.submit("text", ("logs/cargo_terminal.log", line))
+        print(line, flush=True)
+
+    def _gravity_callback(self, message: Any) -> None:
+        wall = time.time()
+        source_stamp = float(message.header.stamp.to_sec())
+        row = {
+            "wall_time": wall, "source_stamp": source_stamp,
+            "valid": bool(message.valid), "fresh": bool(message.fresh),
+            "state": int(message.state), "voltage": float(message.voltage),
+            "stable_samples": int(message.stable_samples),
+            "reason": str(message.reason),
+            "message_age_sec": max(0.0, self.rospy.Time.now().to_sec() -
+                                   source_stamp),
+        }
+        self.last_gravity_wall = wall
+        self.gravity_message_count += 1
+        events = self.cargo_gate.update(
+            valid=row["valid"], fresh=row["fresh"], state=row["state"],
+            wall_time=wall, source_stamp=source_stamp, reason=row["reason"])
+        row["cargo_monitor_state"] = self.cargo_gate.state
+        row["cargo_monitor_active"] = self.cargo_gate.active
+        row["cargo_episode_id"] = self.cargo_gate.episode_id
+        self.latest_gravity = dict(row)
+        self.writer.submit("csv", ("samples/gravity_samples.csv",
+                                   list(row.keys()), row))
+        for event in events:
+            self._emit_typed_event("samples/gravity_events.jsonl", event)
+            self._emit_typed_event("samples/cargo_episode_events.jsonl", event)
+            if event["event"] == "GRAVITY_LOADED":
+                self._episode_geometry = []
+                self._episode_first_lock_wall = None
+                self._episode_recognition_failures_start = (
+                    self._recognition_failure_count)
+                self._episode_recognition_messages_start = (
+                    self.recognition_status_message_count)
+                self._episode_swing_messages_start = (
+                    self.swing_status_message_count)
+                self.latest_recognition = {}
+                self.latest_swing = {}
+                self.last_recognition_wall = None
+                self.last_swing_wall = None
+                self._last_recognition_source_stamp = None
+                self._last_swing_source_stamp = None
+                self._last_recognition_state = None
+                self._last_sway_state = None
+                self._last_skew_state = None
+                self._last_torsion_state = None
+                self._recognition_failed_since = None
+                self._recognition_stale_active = False
+                self._swing_stale_active = False
+            elif event["event"] in (
+                    "GRAVITY_LOST_DURING_CARGO", "CARGO_EPISODE_CLOSED"):
+                self._write_cargo_episode_report(event)
+
+    def _expire_gravity_if_needed(self, wall: float) -> None:
+        stale_sec = float(self.config.get("gravity_monitor_stale_sec", 1.0))
+        if (self.last_gravity_wall is None or
+                wall - self.last_gravity_wall <= stale_sec or
+                self.cargo_gate.state == CargoMonitorGate.INVALID_OR_STALE):
+            return
+        events = self.cargo_gate.update(
+            valid=False, fresh=False, state=0, wall_time=wall,
+            source_stamp=_finite(self.latest_gravity.get("source_stamp"), 0.0),
+            reason="gravity_message_stale")
+        self.latest_gravity["cargo_monitor_state"] = self.cargo_gate.state
+        self.latest_gravity["cargo_monitor_active"] = False
+        for event in events:
+            self._emit_typed_event("samples/gravity_events.jsonl", event)
+            self._emit_typed_event("samples/cargo_episode_events.jsonl", event)
+            if event["event"] in (
+                    "GRAVITY_LOST_DURING_CARGO", "CARGO_EPISODE_CLOSED"):
+                self._write_cargo_episode_report(event)
+
+    def _raw_safety_callback(self, message: Any) -> None:
+        self.pipeline.set_code("raw_typed", int(message.requested_alarm_code),
+                               time.time())
+
+    def _raw_code_callback(self, message: Any) -> None:
+        self.pipeline.set_code("raw_simple", int(message.data), time.time())
+
+    @staticmethod
+    def _parse_json_message(message: Any) -> Dict[str, Any]:
+        try:
+            value = json.loads(str(message.data))
+        except (TypeError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _operational_callback(self, message: Any) -> None:
+        value = self._parse_json_message(message)
+        if value:
+            self.pipeline.set_operational(value, time.time())
+
+    def _pending_callback(self, message: Any) -> None:
+        value = self._parse_json_message(message)
+        if value:
+            self.pipeline.set_pending(value, time.time())
+
+    def _bottom_callback(self, message: Any) -> None:
+        if not self.cargo_gate.active:
+            return
+        self.latest_bottom = {
+            "wall_time": time.time(),
+            "source_stamp": float(message.header.stamp.to_sec()),
+            "valid": bool(message.valid), "track_id": int(message.track_id),
+            "track_state": int(message.track_state),
+            "source": int(message.source),
+            "source_detail": str(message.source_detail),
+            "bottom_z_base": float(message.bottom_z_base),
+            "top_z_base": float(message.top_z_base),
+            "height_m": float(message.height_m),
+            "uncertainty_m": float(message.uncertainty_m),
+            "confidence": float(message.confidence),
+        }
 
     def _accept_recognition_source_stamp(self, source_stamp: float,
                                          wall: float) -> bool:
@@ -1034,6 +1380,8 @@ class RosRuntimeMonitor:
         return True
 
     def _recognition_callback(self, message: Any) -> None:
+        if not self.cargo_gate.active:
+            return
         wall = time.time()
         source_stamp = float(message.header.stamp.to_sec())
         if not self._accept_recognition_source_stamp(source_stamp, wall):
@@ -1067,6 +1415,7 @@ class RosRuntimeMonitor:
             "reason": str(message.reason),
         }
         fields = list(row.keys())
+        self.latest_recognition = dict(row)
         self.writer.submit("csv", (
             "samples/cargo_recognition_samples.csv", fields, row))
         self._recognition_state_counts[state] += 1
@@ -1154,6 +1503,9 @@ class RosRuntimeMonitor:
             int(message.STATE_CARGO_LOST_HOLD): "CARGO_TRACK_LOST_HOLD",
         }
         if state in special_events and self._last_recognition_state != state:
+            if (state == int(message.STATE_CARGO_LOCKED) and
+                    self._episode_first_lock_wall is None):
+                self._episode_first_lock_wall = wall
             self._emit_typed_event(
                 "samples/cargo_recognition_events.jsonl", {
                     "event": special_events[state], "wall_time": wall,
@@ -1163,6 +1515,8 @@ class RosRuntimeMonitor:
         self._recognition_stale_active = False
 
     def _swing_callback(self, message: Any) -> None:
+        if not self.cargo_gate.active:
+            return
         wall = time.time()
         source_stamp = float(message.header.stamp.to_sec())
         if not self._accept_swing_source_stamp(source_stamp, wall):
@@ -1220,6 +1574,7 @@ class RosRuntimeMonitor:
             "reason": str(message.reason),
         }
         fields = list(row.keys())
+        self.latest_swing = dict(row)
         self.writer.submit("csv", (
             "samples/cargo_swing_samples.csv", fields, row))
         self._sway_state_counts[sway] += 1
@@ -1358,79 +1713,214 @@ class RosRuntimeMonitor:
         self._swing_stale_active = False
 
     def _cargo_geometry_callback(self, message: Any) -> None:
-        """Filter and save authoritative measured geometry samples only."""
+        """Archive direct and formal geometry as separate evidence classes."""
+        if not self.cargo_gate.active:
+            return
         wall = time.time()
         text = str(message.data)
-        self.writer.submit("jsonl", ("samples/cargo_geometry_samples.jsonl",
-                                     {"wall_time": wall, "raw": text}))
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
             return
         if not isinstance(parsed, dict):
             return
+        parsed["wall_time"] = wall
+        parsed["cargo_episode_id"] = self.cargo_gate.episode_id
+        direct_measured, formal_operational = classify_cargo_geometry(parsed)
+        parsed["direct_measured"] = direct_measured
+        parsed["formal_operational"] = formal_operational
+        parsed["frozen"] = (not direct_measured and formal_operational)
+        self.latest_geometry = dict(parsed)
 
-        # CSV record all samples (for debugging)
         csv_fields = [
-            "wall_time", "stamp", "track_id", "track_state", "lock_state",
+            "wall_time", "cargo_episode_id", "stamp", "track_id",
+            "track_state", "lock_state",
             "geometry_source", "authoritative", "observation_valid", "height_valid",
             "points", "support", "confidence",
             "center_x", "center_y", "center_z",
             "length_m", "width_m", "height_m", "yaw_deg",
             "bottom_z", "top_z", "vertical_source", "failure_reason",
             "hook_load_state", "gravity_voltage", "gravity_age_sec",
-            "fallback_active"
+            "fallback_active", "direct_measured", "formal_operational",
+            "frozen", "pose_evidence_age_sec", "height_evidence_age_sec",
+            "horizontal_uncertainty", "vertical_uncertainty"
         ]
-        row = {"wall_time": wall}
-        for field in csv_fields[1:]:  # skip wall_time which we already set
-            row[field] = parsed.get(field, "")
-        self.writer.submit("csv", ("samples/cargo_geometry_samples.csv", csv_fields, row))
-
-        # Filter: only authoritative measured geometry
-        geo_source = str(parsed.get("geometry_source", ""))
-        authoritative = parsed.get("authoritative", False)
-        track_state = str(parsed.get("track_state", ""))
-        height_valid = parsed.get("height_valid", False)
-        observation_valid = parsed.get("observation_valid", False)
-        support = int(parsed.get("support", 0))
-        points = int(parsed.get("points", 0))
-        confidence = float(parsed.get("confidence", 0.0))
-
-        # Rejection rules from plan
-        if geo_source != "MEASURED":
-            return  # DISPLAY_FROZEN, DEFAULT_FALLBACK, NONE rejected
-        if not authoritative:
-            return
-        if track_state != "LOCKED":
-            return  # EMPTY, LOCKING, LOST_HOLD rejected
-        if not observation_valid:
-            return
-        if not height_valid:
-            return
-        if support <= 0:
-            return
-        if points <= 0:
-            return
-        if confidence <= 0.0:
-            return
-        dims = [float(parsed.get(k, 0.0)) for k in ("length_m", "width_m", "height_m")]
-        if any(v <= 0.0 or not math.isfinite(v) for v in dims):
-            return
-
-        # Save filtered authoritative sample
-        filtered = dict(parsed)
-        filtered["wall_time"] = wall
-        self.writer.submit("jsonl", ("samples/cargo_geometry_authoritative.jsonl", filtered))
-        filtered_csv = {"wall_time": wall}
-        for field in csv_fields[1:]:
-            filtered_csv[field] = parsed.get(field, "")
-        self.writer.submit("csv", ("samples/cargo_geometry_authoritative.csv",
-                                   csv_fields, filtered_csv))
-
-        # Track per-track_id sample count
+        row = {field: parsed.get(field, "") for field in csv_fields}
+        self.writer.submit("csv", ("samples/cargo_geometry_all.csv",
+                                   csv_fields, row))
+        if direct_measured:
+            self.writer.submit("csv", (
+                "samples/cargo_geometry_direct_measured.csv",
+                csv_fields, row))
+        if formal_operational:
+            self.writer.submit("csv", (
+                "samples/cargo_geometry_formal_operational.csv",
+                csv_fields, row))
+        self._episode_geometry.append(dict(parsed))
         track_id = int(parsed.get("track_id", 0))
-        if track_id > 0:
+        if formal_operational and track_id > 0:
             self._geo_track_samples[track_id] = self._geo_track_samples.get(track_id, 0) + 1
+
+    def _cargo_episode_summary(self, closed: Mapping[str, Any]) -> Dict[str, Any]:
+        samples = list(self._episode_geometry)
+        formal = [value for value in samples
+                  if _as_bool(value.get("formal_operational"))]
+        direct = [value for value in samples
+                  if _as_bool(value.get("direct_measured"))]
+
+        def range_summary(name: str) -> Dict[str, Any]:
+            values = [_finite(item.get(name)) for item in formal]
+            values = [value for value in values if math.isfinite(value)]
+            return {"median": _percentile(values, 0.5),
+                    "min": min(values) if values else None,
+                    "max": max(values) if values else None}
+
+        maximum_jump = 0.0
+        previous: Optional[Tuple[float, float, float]] = None
+        for item in formal:
+            current = tuple(_finite(item.get(name)) for name in
+                            ("length_m", "width_m", "height_m"))
+            if previous is not None and all(math.isfinite(v) for v in current):
+                maximum_jump = max(maximum_jump, max(
+                    abs(a - b) for a, b in zip(current, previous)))
+            if all(math.isfinite(v) for v in current):
+                previous = current
+        sources = Counter(str(item.get("geometry_source", "UNKNOWN"))
+                          for item in formal)
+        ages = [_finite(item.get(name)) for item in formal for name in
+                ("pose_evidence_age_sec", "height_evidence_age_sec")]
+        uncertainty = [_finite(item.get(name)) for item in formal for name in
+                       ("horizontal_uncertainty", "vertical_uncertainty")]
+        episode_start_wall = (_finite(closed.get("wall_time"), 0.0) -
+                              _finite(closed.get("duration_sec"), 0.0))
+        return {
+            "episode_id": int(closed.get("episode_id", self.cargo_gate.episode_id)),
+            "closed_event": closed.get("event"),
+            "closed_wall_time": closed.get("wall_time"),
+            "duration_sec": closed.get("duration_sec"),
+            "geometry_samples": len(samples),
+            "direct_measured_samples": len(direct),
+            "formal_geometry_samples": len(formal),
+            "formal_geometry_coverage_ratio": len(formal) / max(1, len(samples)),
+            "first_lock_sec": (max(0.0, self._episode_first_lock_wall -
+                                   episode_start_wall)
+                               if self._episode_first_lock_wall is not None
+                               else None),
+            "recognition_failure_count": max(
+                0, self._recognition_failure_count -
+                self._episode_recognition_failures_start),
+            "length_m": range_summary("length_m"),
+            "width_m": range_summary("width_m"),
+            "height_m": range_summary("height_m"),
+            "bottom_z": range_summary("bottom_z"),
+            "top_z": range_summary("top_z"),
+            "maximum_dimension_jump_m": maximum_jump,
+            "source_distribution": dict(sources),
+            "maximum_evidence_age_sec": max(
+                [value for value in ages if math.isfinite(value)], default=None),
+            "maximum_uncertainty_m": max(
+                [value for value in uncertainty if math.isfinite(value)],
+                default=None),
+        }
+
+    def _write_cargo_episode_report(self, closed: Mapping[str, Any]) -> None:
+        report = self._cargo_episode_summary(closed)
+        self.writer.submit("atomic_json", (
+            "reports/cargo_episode_latest.json", report))
+        self.writer.submit("jsonl", (
+            "reports/cargo_episode_summary.jsonl", report))
+        self.writer.submit("atomic_json", (
+            "reports/cargo_episode_summary.json", report))
+
+    def _record_pipeline_snapshot(self, now: float) -> Dict[str, Any]:
+        row = self.pipeline.snapshot(now)
+        row["normal_code35"] = (self.cargo_gate.active and
+                                bool(row.get("normal_code35")))
+        formal_clear = (
+            _as_bool(self.latest_geometry.get(
+                "effective_envelope_clear_authority", False)) and
+            _as_bool(self.latest_static_debug.get("authorized", False)) and
+            _as_bool(self.latest_safety.get("cargo_valid", False)) and
+            _as_bool(self.latest_safety.get("obstacle_valid", False)))
+        row["final_illegal_clear"] = (
+            self.cargo_gate.active and row.get("final_typed_code") == CLEAR_CODE
+            and not formal_clear)
+        row["cargo_monitor_active"] = self.cargo_gate.active
+        row["cargo_episode_id"] = self.cargo_gate.episode_id
+        fields = list(row.keys())
+        self.writer.submit("csv", (
+            "samples/avoidance_pipeline_samples.csv", fields, row))
+        for flag in ("raw_typed_simple_mismatch",
+                     "final_typed_heartbeat_mismatch",
+                     "operational_final_mismatch", "pending_illegal_clear",
+                     "final_illegal_clear", "normal_code35"):
+            active = bool(row.get(flag))
+            if active and not self._pipeline_last_flags.get(flag, False):
+                event = dict(row)
+                event.update({"event": "AVOIDANCE_PIPELINE_" + flag.upper(),
+                              "reason": flag})
+                self._emit_typed_event(
+                    "samples/avoidance_pipeline_events.jsonl", event)
+            self._pipeline_last_flags[flag] = active
+        return row
+
+    def _cargo_terminal_line(self, now: float,
+                             pipeline: Mapping[str, Any]) -> str:
+        gravity = self.latest_gravity
+        geometry = self.latest_geometry
+        recognition = self.latest_recognition
+        swing = self.latest_swing
+        current = self.aggregator.current_summary()
+        gravity_age = (now - float(gravity.get("wall_time", now))
+                       if gravity else float("nan"))
+        return ("[CARGO_RT] episode={episode} gravity={gravity} "
+                "gravity_age={gravity_age:.2f} recognition={recognition} "
+                "lifecycle={lifecycle} segment={segment} track={track} "
+                "box={length}x{width}x{height}m bottom={bottom} top={top} "
+                "geometry_source={geometry_source} vertical_source={vertical} "
+                "raw={raw} final={final} heartbeat={heartbeat} "
+                "distance={distance} clearance={clearance} "
+                "obstacle_track={obstacle_track} provenance={provenance} "
+                "sway={sway} skew={skew} torsion={torsion} "
+                "offset={offset} angle={angle} speed={speed} "
+                "hoist={hoist} hoist_fresh={hoist_fresh} "
+                "static={static} session_verified={session_verified} "
+                "reason={reason}").format(
+                    episode=self.cargo_gate.episode_id,
+                    gravity=self.cargo_gate.state,
+                    gravity_age=gravity_age,
+                    recognition=recognition.get("state", "-"),
+                    lifecycle=recognition.get("cargo_lifecycle_id", "-"),
+                    segment=recognition.get("track_segment_id", "-"),
+                    track=geometry.get("track_id", "-"),
+                    length=geometry.get("length_m", "-"),
+                    width=geometry.get("width_m", "-"),
+                    height=geometry.get("height_m", "-"),
+                    bottom=geometry.get("bottom_z", "-"),
+                    top=geometry.get("top_z", "-"),
+                    geometry_source=geometry.get("geometry_source", "-"),
+                    vertical=geometry.get("vertical_source", "-"),
+                    raw=pipeline.get("raw_typed_code"),
+                    final=pipeline.get("final_typed_code"),
+                    heartbeat=pipeline.get("heartbeat_code"),
+                    distance=current.get("distance_m"),
+                    clearance=current.get("clearance_m"),
+                    obstacle_track=current.get("obstacle_track_id"),
+                    provenance=current.get("provenance"),
+                    sway=swing.get("sway_state", "-"),
+                    skew=swing.get("skew_pull_state", "-"),
+                    torsion=swing.get("torsion_state", "-"),
+                    offset=swing.get("offset_m", "-"),
+                    angle=swing.get("angle_deg", "-"),
+                    speed=swing.get("horizontal_speed_mps", "-"),
+                    hoist=swing.get("hoist_state", "-"),
+                    hoist_fresh=swing.get("hoist_state_fresh", "-"),
+                    static=self.pipeline.pending.get(
+                        "static_authority",
+                        self.latest_static_debug.get("authorized", "-")),
+                    session_verified=self.pipeline.pending.get(
+                        "map_session_verified", "-"),
+                    reason=current.get("reason", "-"))
 
     def _odom_callback(self, message: Any) -> None:
         wall = time.time()
@@ -1456,6 +1946,8 @@ class RosRuntimeMonitor:
 
     def _safety_callback(self, message: Any) -> None:
         wall = time.time()
+        self.pipeline.set_code("final_typed",
+                               int(message.requested_alarm_code), wall)
         self.last_safety_wall = wall
         self.safety_status_message_count += 1
         stamp = float(message.header.stamp.to_sec())
@@ -1478,6 +1970,8 @@ class RosRuntimeMonitor:
                     "fault_code": int(message.fault_code),
                     "fault_mask": int(message.fault_mask),
                     "valid": bool(message.valid),
+                    "cargo_valid": bool(message.cargo_valid),
+                    "obstacle_valid": bool(message.obstacle_valid),
                     "message_age_sec": max(0.0, self.rospy.Time.now().to_sec() - stamp)})
         row.update({
             "static_query_reason": self.latest_static_debug.get("query_reason", ""),
@@ -1488,10 +1982,12 @@ class RosRuntimeMonitor:
             "static_index_revision": self.latest_static_debug.get("index_revision", ""),
         })
         fields = list(row.keys())
+        self.latest_safety = dict(row)
         self.writer.submit("csv", ("samples/safety_samples.csv", fields, row))
 
     def _code_callback(self, message: Any) -> None:
         wall = time.time()
+        self.pipeline.set_code("heartbeat", int(message.data), wall)
         self.last_status_code_wall = wall
         self.status_code_message_count += 1
         with self.aggregator_lock:
@@ -2180,27 +2676,32 @@ class RosRuntimeMonitor:
         self._update_motion_state(wall)
         recognition_cfg = self.config.get("cargo_recognition_monitor", {})
         recognition_stale_sec = float(recognition_cfg.get("stale_sec", 1.0))
-        if (self.last_recognition_wall is not None and
-                wall - self.last_recognition_wall > recognition_stale_sec and
+        recognition_reference = (self.last_recognition_wall or
+                                 self.cargo_gate.episode_started_wall)
+        if (self.cargo_gate.active and
+                recognition_reference is not None and
+                wall - recognition_reference > recognition_stale_sec and
                 not self._recognition_stale_active):
             self._emit_typed_event(
                 "samples/cargo_recognition_events.jsonl", {
                     "event": "CARGO_RECOGNITION_STALE",
                     "wall_time": wall,
-                    "age_sec": wall - self.last_recognition_wall,
+                    "age_sec": wall - recognition_reference,
                     "reason": "recognition_status_stale",
                 })
             self._recognition_stale_active = True
         swing_cfg = self.config.get("cargo_swing_monitor", {})
         swing_stale_sec = float(swing_cfg.get("stale_sec", 0.75))
-        if (self.last_swing_wall is not None and
-                wall - self.last_swing_wall > swing_stale_sec and
+        swing_reference = (self.last_swing_wall or
+                           self.cargo_gate.episode_started_wall)
+        if (self.cargo_gate.active and swing_reference is not None and
+                wall - swing_reference > swing_stale_sec and
                 not self._swing_stale_active):
             self._emit_typed_event(
                 "samples/cargo_swing_events.jsonl", {
                     "event": "CARGO_SWING_EVIDENCE_STALE",
                     "wall_time": wall,
-                    "age_sec": wall - self.last_swing_wall,
+                    "age_sec": wall - swing_reference,
                     "reason": "swing_status_stale",
                 })
             self._swing_stale_count += 1
@@ -2269,6 +2770,10 @@ class RosRuntimeMonitor:
             "swing_source_stamp_rollbacks": self._swing_rollback_count,
             "cargo_recognition_track_stats": self._recognition_track_stats,
             "cargo_swing_track_stats": self._swing_track_stats,
+            "gravity_data_ready": self.gravity_message_count > 0,
+            "cargo_monitor_state": self.cargo_gate.state,
+            "cargo_monitor_active": self.cargo_gate.active,
+            "cargo_episode_id": self.cargo_gate.episode_id,
         })
         self.writer.submit("atomic_json", ("reports/live_summary.json", summary))
         current = summary.get("current") or {}
@@ -2316,6 +2821,7 @@ class RosRuntimeMonitor:
             "status_code_message_count": 0,
             "recognition_status_message_count": 0,
             "swing_status_message_count": 0,
+            "gravity_message_count": 0,
             "recognition_source_epoch": 0,
             "swing_source_epoch": 0,
             "recognition_duplicate_source_stamps": 0,
@@ -2326,6 +2832,11 @@ class RosRuntimeMonitor:
             "last_swing_wall": None,
             "recognition_data_ready": False,
             "swing_data_ready": False,
+            "gravity_data_ready": False,
+            "cargo_monitor_active": False,
+            "cargo_monitor_ready": False,
+            "avoidance_pipeline_ready": False,
+            "static_session_ready": False,
             "extended_data_ready": False,
             "received_topics": {},
             "first_message_wall": {},
@@ -2342,6 +2853,11 @@ class RosRuntimeMonitor:
                                   "/cargo_avoidance/static_evidence_debug",
                                   "/cargo_avoidance/cargo_geometry_debug",
                                   "/cargo_avoidance/operational_status",
+                                  "/cargo_avoidance/raw_safety_status",
+                                  "/cargo_avoidance/raw_status_code",
+                                  "/cargo_avoidance/pending_status",
+                                  "/cargo_avoidance/bottom_estimate",
+                                  "/hook/load_state",
                                   "/cargo_avoidance/recognition_status",
                                   "/cargo_avoidance/swing_status"):
                     ready_payload["topics"][topic_name] = topic_type
@@ -2358,6 +2874,7 @@ class RosRuntimeMonitor:
         while not self.rospy.is_shutdown() and not self.shutdown_requested:
             now = time.time()
             mono_now = time.monotonic()
+            self._expire_gravity_if_needed(now)
 
             # ── update data_ready tracking ──
             if mono_now >= next_ready_update:
@@ -2374,6 +2891,7 @@ class RosRuntimeMonitor:
                     self.recognition_status_message_count)
                 _rdy["swing_status_message_count"] = (
                     self.swing_status_message_count)
+                _rdy["gravity_message_count"] = self.gravity_message_count
                 _rdy["recognition_source_epoch"] = self._recognition_epoch
                 _rdy["swing_source_epoch"] = self._swing_epoch
                 _rdy["recognition_duplicate_source_stamps"] = (
@@ -2395,6 +2913,19 @@ class RosRuntimeMonitor:
                     self.recognition_status_message_count > 0)
                 _rdy["swing_data_ready"] = (
                     self.swing_status_message_count > 0)
+                _rdy["gravity_data_ready"] = self.gravity_message_count > 0
+                _rdy["cargo_monitor_active"] = self.cargo_gate.active
+                _rdy["cargo_monitor_ready"] = (
+                    not self.cargo_gate.active or
+                    (self.recognition_status_message_count >
+                         self._episode_recognition_messages_start and
+                     self.swing_status_message_count >
+                         self._episode_swing_messages_start))
+                _rdy["avoidance_pipeline_ready"] = all(
+                    name in self.pipeline.values for name in
+                    ("raw_typed", "raw_simple", "final_typed", "heartbeat"))
+                _rdy["static_session_ready"] = _as_bool(
+                    self.pipeline.pending.get("map_session_verified", False))
                 _rdy["extended_data_ready"] = (
                     _rdy["data_ready"]
                     and _rdy["recognition_data_ready"]
@@ -2407,6 +2938,12 @@ class RosRuntimeMonitor:
 
             # ── snapshot ──
             summary = self.snapshot(now)
+            pipeline = self._record_pipeline_snapshot(now)
+            if self.cargo_gate.active:
+                cargo_line = self._cargo_terminal_line(now, pipeline)
+                print(cargo_line, flush=True)
+                self.writer.submit("text", ("logs/cargo_terminal.log",
+                                             cargo_line))
 
             # ── record message receipt timestamps ──
             if self.last_odom_wall:
@@ -2434,6 +2971,11 @@ class RosRuntimeMonitor:
                     "/cargo_avoidance/swing_status", self.last_swing_wall)
                 _last_message_wall["/cargo_avoidance/swing_status"] = (
                     self.last_swing_wall)
+            if self.last_gravity_wall:
+                _first_message_wall.setdefault(
+                    "/hook/load_state", self.last_gravity_wall)
+                _last_message_wall["/hook/load_state"] = (
+                    self.last_gravity_wall)
 
             if now - self.last_summary_wall >= summary_period or self.snapshot_requested:
                 current = summary.get("current") or {}

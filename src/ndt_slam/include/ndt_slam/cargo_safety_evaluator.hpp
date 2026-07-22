@@ -119,7 +119,20 @@ struct CargoSafetyProtocol {
     static constexpr std::uint32_t kFaultInternal = 32U;
 };
 
+enum class CargoSafetyDecisionPhase : std::uint8_t {
+    STARTUP_NOT_READY = 0,
+    LOCALIZATION_INVALID,
+    GRAVITY_REQUIRED_INVALID,
+    CARGO_EXPECTED_NOT_AUTHORITATIVE,
+    CARGO_FORMAL_OBSTACLE_NOT_READY,
+    SAFE_EMPTY,
+    VALID_WARNING_OR_CLEAR,
+    INTERNAL_CONTRACT_ERROR,
+};
+
 struct CargoSafetyDecisionInput {
+    CargoSafetyDecisionPhase phase =
+        CargoSafetyDecisionPhase::STARTUP_NOT_READY;
     bool system_ready = false;
     bool localization_valid = false;
     HookLoadSignalRole hook_signal_role = HookLoadSignalRole::REQUIRED;
@@ -131,6 +144,10 @@ struct CargoSafetyDecisionInput {
     bool obstacle_fault = false;
     bool internal_fault = false;
     bool warning_valid = false;
+    bool pending_positive_warning = false;
+    bool formal_cargo_valid = false;
+    bool formal_clear_authorized = false;
+    bool obstacle_evidence_ready = false;
     std::uint16_t warning_code = 0;
     std::string evidence_reason;
 };

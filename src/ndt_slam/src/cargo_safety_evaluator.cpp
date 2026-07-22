@@ -144,46 +144,102 @@ CargoSafetyDecision composeCargoSafetyDecision(
         decision.fault_mask |= CargoSafetyProtocol::kFaultInternal;
     }
 
-    if (input.internal_fault) {
+    const bool phase_contract_valid =
+        (input.phase == CargoSafetyDecisionPhase::STARTUP_NOT_READY &&
+         !input.system_ready) ||
+        (input.phase == CargoSafetyDecisionPhase::LOCALIZATION_INVALID &&
+         input.system_ready && !input.localization_valid) ||
+        (input.phase ==
+             CargoSafetyDecisionPhase::GRAVITY_REQUIRED_INVALID &&
+         input.system_ready && input.localization_valid &&
+         gravity_required_fault) ||
+        (input.phase == CargoSafetyDecisionPhase::
+             CARGO_EXPECTED_NOT_AUTHORITATIVE &&
+         input.system_ready && input.localization_valid &&
+         !gravity_required_fault &&
+         (input.cargo_fault || !input.formal_cargo_valid)) ||
+        (input.phase == CargoSafetyDecisionPhase::
+             CARGO_FORMAL_OBSTACLE_NOT_READY &&
+         input.system_ready && input.localization_valid &&
+         !gravity_required_fault &&
+         input.formal_cargo_valid) ||
+        (input.phase == CargoSafetyDecisionPhase::SAFE_EMPTY &&
+         input.system_ready && input.localization_valid &&
+         !gravity_required_fault && input.safe_empty) ||
+        (input.phase == CargoSafetyDecisionPhase::VALID_WARNING_OR_CLEAR &&
+         input.system_ready && input.localization_valid &&
+         !gravity_required_fault && !input.cargo_fault &&
+         !input.obstacle_fault && !input.internal_fault) ||
+        input.phase == CargoSafetyDecisionPhase::INTERNAL_CONTRACT_ERROR;
+
+    if (input.phase == CargoSafetyDecisionPhase::INTERNAL_CONTRACT_ERROR ||
+        input.internal_fault || !phase_contract_valid) {
+        decision.fault_mask |= CargoSafetyProtocol::kFaultInternal;
         decision.fault_code = CargoSafetyProtocol::kInternalError;
         decision.reason = input.evidence_reason.empty()
             ? "internal_contract_error" : input.evidence_reason;
-    } else if (!input.system_ready) {
+    } else if (input.phase ==
+               CargoSafetyDecisionPhase::STARTUP_NOT_READY) {
         decision.fault_code = CargoSafetyProtocol::kSystemNotReady;
         decision.reason = input.evidence_reason.empty()
             ? "system_not_ready" : input.evidence_reason;
-    } else if (!input.localization_valid) {
+    } else if (input.phase ==
+               CargoSafetyDecisionPhase::LOCALIZATION_INVALID) {
         decision.fault_code = CargoSafetyProtocol::kLocalizationInvalid;
         decision.reason = input.evidence_reason.empty()
             ? "localization_unreliable" : input.evidence_reason;
-    } else if (gravity_required_fault) {
+    } else if (input.phase ==
+               CargoSafetyDecisionPhase::GRAVITY_REQUIRED_INVALID) {
         decision.fault_code = CargoSafetyProtocol::kGravityInvalid;
         decision.reason = input.evidence_reason.empty()
             ? "gravity_signal_invalid" : input.evidence_reason;
-    } else if (input.cargo_fault) {
+    } else if (input.phase ==
+               CargoSafetyDecisionPhase::CARGO_EXPECTED_NOT_AUTHORITATIVE) {
+        decision.fault_mask |= CargoSafetyProtocol::kFaultCargo;
         decision.fault_code = CargoSafetyProtocol::kCargoInvalid;
         decision.reason = input.evidence_reason.empty()
-            ? "cargo_estimate_invalid" : input.evidence_reason;
-    } else if (input.obstacle_fault) {
+            ? "cargo_expected_not_authoritative" : input.evidence_reason;
+    } else if (input.phase ==
+               CargoSafetyDecisionPhase::CARGO_FORMAL_OBSTACLE_NOT_READY) {
+        decision.fault_mask |= CargoSafetyProtocol::kFaultObstacle;
         decision.fault_code = CargoSafetyProtocol::kObstacleInvalid;
         decision.reason = input.evidence_reason.empty()
-            ? "obstacle_evidence_invalid" : input.evidence_reason;
-    } else if (input.safe_empty) {
+            ? "formal_cargo_obstacle_evidence_not_ready"
+            : input.evidence_reason;
+    } else if (input.phase == CargoSafetyDecisionPhase::SAFE_EMPTY &&
+               input.safe_empty) {
         decision.fault_code = 0;
         decision.warning_code = CargoSafetyProtocol::kClear;
         decision.reason = input.evidence_reason.empty()
             ? "empty_hook_no_cargo_confirmed" : input.evidence_reason;
-    } else if (input.hook_loaded && input.warning_valid &&
-               (input.warning_code == CargoSafetyProtocol::kClear ||
-                input.warning_code == CargoSafetyProtocol::kLevel1Warning ||
-                input.warning_code == CargoSafetyProtocol::kLevel2Warning)) {
-        decision.fault_code = 0;
-        decision.warning_code = input.warning_code;
-        decision.reason = input.evidence_reason;
+    } else if (input.phase ==
+               CargoSafetyDecisionPhase::VALID_WARNING_OR_CLEAR) {
+        const bool positive_warning =
+            input.warning_code == CargoSafetyProtocol::kLevel1Warning ||
+            input.warning_code == CargoSafetyProtocol::kLevel2Warning;
+        const bool formal_clear =
+            input.warning_code == CargoSafetyProtocol::kClear &&
+            input.formal_cargo_valid && input.formal_clear_authorized &&
+            input.obstacle_evidence_ready;
+        const bool authorized_positive = positive_warning &&
+            input.obstacle_evidence_ready &&
+            (input.formal_cargo_valid || input.pending_positive_warning);
+        if (input.warning_valid && (formal_clear || authorized_positive)) {
+            decision.fault_code = 0;
+            decision.warning_code = input.warning_code;
+            decision.reason = input.evidence_reason.empty()
+                ? (formal_clear ? "formal_live_static_clear"
+                                : "positive_hazard")
+                : input.evidence_reason;
+        } else {
+            decision.fault_code = CargoSafetyProtocol::kInternalError;
+            decision.fault_mask |= CargoSafetyProtocol::kFaultInternal;
+            decision.reason = "safety_phase_contract_violation";
+        }
     } else {
         decision.fault_code = CargoSafetyProtocol::kInternalError;
         decision.fault_mask |= CargoSafetyProtocol::kFaultInternal;
-        decision.reason = "unhandled_safety_state";
+        decision.reason = "safety_phase_contract_violation";
     }
 
     decision.warning_valid = decision.fault_code == 0;

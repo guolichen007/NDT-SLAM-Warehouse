@@ -834,5 +834,71 @@ TEST(CargoSwingMonitorTest,
             CargoSwingObservationState::TRACK_CHANGED);
 }
 
+TEST(CargoSwingMonitorTest,
+     TrackSegmentChangeResetsTorsionClearCandidate) {
+  CargoSwingConfig config;
+  config.minimum_valid_observation_sec = 0.0;
+  config.torsion_clear_confirm_sec = 1.0;
+  CargoSwingMonitor monitor(config);
+
+  auto input = validInput(1.0);
+  input.locked_yaw_valid = true;
+  input.measured_yaw_valid = true;
+  input.locked_yaw_base_rad = 0.0F;
+  input.measured_yaw_base_rad = 0.25F;
+  ASSERT_EQ(monitor.update(input).torsion_state,
+            CargoTorsionState::TORSION_ALARM);
+
+  input.stamp_sec = 1.5;
+  input.measured_yaw_base_rad = 0.0F;
+  ASSERT_EQ(monitor.update(input).torsion_state,
+            CargoTorsionState::TORSION_ALARM);
+
+  input.stamp_sec = 2.0;
+  input.track_segment_id = 5U;
+  ASSERT_EQ(monitor.update(input).observation_state,
+            CargoSwingObservationState::TRACK_CHANGED);
+
+  input.stamp_sec = 2.1;
+  ASSERT_EQ(monitor.update(input).torsion_state,
+            CargoTorsionState::TORSION_ALARM);
+  input.stamp_sec = 2.6;
+  EXPECT_EQ(monitor.update(input).torsion_state,
+            CargoTorsionState::TORSION_ALARM);
+}
+
+TEST(CargoSwingMonitorTest,
+     OldSegmentClearEvidenceCannotClearNewSegmentTorsionLatch) {
+  CargoSwingConfig config;
+  config.minimum_valid_observation_sec = 0.0;
+  config.torsion_clear_confirm_sec = 0.5;
+  CargoSwingMonitor monitor(config);
+
+  auto input = validInput(1.0);
+  input.locked_yaw_valid = true;
+  input.measured_yaw_valid = true;
+  input.locked_yaw_base_rad = 0.0F;
+  input.measured_yaw_base_rad = 0.25F;
+  ASSERT_EQ(monitor.update(input).torsion_state,
+            CargoTorsionState::TORSION_ALARM);
+  input.stamp_sec = 1.2;
+  input.measured_yaw_base_rad = 0.0F;
+  ASSERT_EQ(monitor.update(input).torsion_state,
+            CargoTorsionState::TORSION_ALARM);
+
+  input.stamp_sec = 1.6;
+  input.track_segment_id = 9U;
+  monitor.update(input);
+  input.stamp_sec = 1.7;
+  ASSERT_EQ(monitor.update(input).torsion_state,
+            CargoTorsionState::TORSION_ALARM);
+  input.stamp_sec = 2.0;
+  ASSERT_EQ(monitor.update(input).torsion_state,
+            CargoTorsionState::TORSION_ALARM);
+  input.stamp_sec = 2.21;
+  EXPECT_NE(monitor.update(input).torsion_state,
+            CargoTorsionState::TORSION_ALARM);
+}
+
 }  // namespace
 }  // namespace ndt_slam

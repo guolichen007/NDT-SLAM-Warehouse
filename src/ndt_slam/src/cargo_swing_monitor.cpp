@@ -210,12 +210,13 @@ void CargoSwingMonitor::resetMeasurementHistoryPreserveSafetyLatches(
   sway_below_end_stamp_sec_ = 0.0;
   skew_alarm_candidate_stamp_sec_ = 0.0;
   skew_clear_candidate_stamp_sec_ = 0.0;
+  torsion_clear_candidate_stamp_sec_ = 0.0;
   // Preserve: immediate_alarm_latched_, settling_active_,
   //           skew_alarm_latched_, skew_alarm_enter_stamp_sec_,
   //           torsion_latched_state_, sway_alarm_enter_stamp_sec_,
   //           last_severe_measurement_stamp_sec_, settling_enter_stamp_sec_,
-  //           torsion_clear_candidate_stamp_sec_,
-  //           last_torsion_evidence_stamp_sec_.
+  //           last_torsion_evidence_stamp_sec_.  A clear-confirm timer is
+  //           measurement-segment evidence and must not cross this boundary.
 
   result_.observation_state = CargoSwingObservationState::TRACK_CHANGED;
   result_.reason = "track_segment_changed_history_reset_alarm_preserved";

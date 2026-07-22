@@ -33,6 +33,7 @@ TEST(CargoRigidGeometryTest, FormalHeightUsesOneAuthorityDecision) {
         shape(), pose(Eigen::Vector3f(0.0F, 0.0F, 2.0F)),
         Eigen::Isometry3f::Identity(), 7U, 0.10F, 0.08F);
     ASSERT_TRUE(geometry.valid);
+    EXPECT_DOUBLE_EQ(geometry.height_evidence_stamp_sec, 10.0);
     CargoBottomResult fusion;
     fusion.valid = true;
     fusion.source = CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS;
@@ -48,6 +49,20 @@ TEST(CargoRigidGeometryTest, FormalHeightUsesOneAuthorityDecision) {
               CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS);
     EXPECT_NEAR(decision.bottom_z_base, 1.4F, 1.0e-5F);
     EXPECT_NEAR(decision.top_z_base, 2.6F, 1.0e-5F);
+}
+
+TEST(CargoRigidGeometryTest, BuilderPreservesHeldPoseHeightEvidenceStamp) {
+    LiveCargoPose held_pose = pose(Eigen::Vector3f(0.0F, 0.0F, 2.0F));
+    held_pose.source = CargoPoseSource::HELD_LAST_RELIABLE_OFFSET;
+    held_pose.evidence_stamp_sec = 8.5;
+    held_pose.evaluation_stamp_sec = 10.0;
+    const RigidCargoGeometry geometry = buildCurrentRigidCargoGeometry(
+        shape(), held_pose, Eigen::Isometry3f::Identity(), 9U,
+        0.15F, 0.10F);
+    ASSERT_TRUE(geometry.valid);
+    EXPECT_DOUBLE_EQ(geometry.pose_evidence_stamp_sec, 8.5);
+    EXPECT_DOUBLE_EQ(geometry.height_evidence_stamp_sec, 8.5);
+    EXPECT_DOUBLE_EQ(geometry.evaluation_stamp_sec, 10.0);
 }
 
 TEST(CargoRigidGeometryTest, ExpiredTopEvidenceCannotBeAuthorized) {

@@ -72,11 +72,15 @@ TEST(CargoSafetyConfig, ProductionDefaultsMatchContract) {
 
 CargoSafetyDecisionInput validLoadedDecision(std::uint16_t warning_code) {
     CargoSafetyDecisionInput input;
+    input.phase = CargoSafetyDecisionPhase::VALID_WARNING_OR_CLEAR;
     input.system_ready = true;
     input.localization_valid = true;
     input.gravity_valid = true;
     input.hook_loaded = true;
     input.warning_valid = true;
+    input.formal_cargo_valid = true;
+    input.formal_clear_authorized = true;
+    input.obstacle_evidence_ready = true;
     input.warning_code = warning_code;
     input.evidence_reason = "test_evidence";
     return input;
@@ -88,6 +92,7 @@ TEST(CargoSafetyDecision, EndToEndStatusCodePriorityAndFaultMask) {
     empty.localization_valid = true;
     empty.gravity_valid = true;
     empty.safe_empty = true;
+    empty.phase = CargoSafetyDecisionPhase::SAFE_EMPTY;
     EXPECT_EQ(composeCargoSafetyDecision(empty).requested_code,
               CargoSafetyProtocol::kClear);
 
@@ -106,6 +111,7 @@ TEST(CargoSafetyDecision, EndToEndStatusCodePriorityAndFaultMask) {
         CargoSafetyProtocol::kClear);
     multiple.localization_valid = false;
     multiple.gravity_valid = false;
+    multiple.phase = CargoSafetyDecisionPhase::LOCALIZATION_INVALID;
     const CargoSafetyDecision localization =
         composeCargoSafetyDecision(multiple);
     EXPECT_EQ(localization.requested_code,
@@ -118,18 +124,23 @@ TEST(CargoSafetyDecision, EndToEndStatusCodePriorityAndFaultMask) {
     CargoSafetyDecisionInput cargo = validLoadedDecision(
         CargoSafetyProtocol::kClear);
     cargo.cargo_fault = true;
+    cargo.phase =
+        CargoSafetyDecisionPhase::CARGO_EXPECTED_NOT_AUTHORITATIVE;
     EXPECT_EQ(composeCargoSafetyDecision(cargo).requested_code,
               CargoSafetyProtocol::kCargoInvalid);
 
     CargoSafetyDecisionInput obstacle = validLoadedDecision(
         CargoSafetyProtocol::kClear);
     obstacle.obstacle_fault = true;
+    obstacle.phase =
+        CargoSafetyDecisionPhase::CARGO_FORMAL_OBSTACLE_NOT_READY;
     EXPECT_EQ(composeCargoSafetyDecision(obstacle).requested_code,
               CargoSafetyProtocol::kObstacleInvalid);
 
     CargoSafetyDecisionInput internal = validLoadedDecision(
         CargoSafetyProtocol::kLevel2Warning);
     internal.internal_fault = true;
+    internal.phase = CargoSafetyDecisionPhase::INTERNAL_CONTRACT_ERROR;
     EXPECT_EQ(composeCargoSafetyDecision(internal).requested_code,
               CargoSafetyProtocol::kInternalError);
 }
@@ -138,6 +149,7 @@ TEST(CargoSafetyDecision, SystemAndGravityFaultsNeverBecomeLevel2Warning) {
     CargoSafetyDecisionInput startup = validLoadedDecision(
         CargoSafetyProtocol::kLevel2Warning);
     startup.system_ready = false;
+    startup.phase = CargoSafetyDecisionPhase::STARTUP_NOT_READY;
     startup.evidence_reason = "cargo_track_not_initialized";
     const CargoSafetyDecision startup_result =
         composeCargoSafetyDecision(startup);
@@ -148,6 +160,8 @@ TEST(CargoSafetyDecision, SystemAndGravityFaultsNeverBecomeLevel2Warning) {
     CargoSafetyDecisionInput gravity = validLoadedDecision(
         CargoSafetyProtocol::kLevel2Warning);
     gravity.gravity_valid = false;
+    gravity.phase =
+        CargoSafetyDecisionPhase::GRAVITY_REQUIRED_INVALID;
     EXPECT_EQ(composeCargoSafetyDecision(gravity).requested_code,
               CargoSafetyProtocol::kGravityInvalid);
 }
@@ -177,9 +191,88 @@ TEST(CargoSafetyDecision, AuxiliaryAndDisabledGravityDoNotCreateCode32) {
         empty.hook_signal_role = role;
         empty.gravity_valid = false;
         empty.safe_empty = true;
+        empty.phase = CargoSafetyDecisionPhase::SAFE_EMPTY;
         EXPECT_EQ(composeCargoSafetyDecision(empty).requested_code,
                   CargoSafetyProtocol::kClear);
     }
+}
+
+TEST(CargoSafetyDecision, AuxiliaryAndDisabledNoAuthorityAre33Not35) {
+    for (HookLoadSignalRole role : {HookLoadSignalRole::AUXILIARY,
+                                    HookLoadSignalRole::DISABLED}) {
+        CargoSafetyDecisionInput input;
+        input.phase = CargoSafetyDecisionPhase::
+            CARGO_EXPECTED_NOT_AUTHORITATIVE;
+        input.system_ready = true;
+        input.localization_valid = true;
+        input.hook_signal_role = role;
+        input.evidence_reason = "cargo_authority_pending";
+        const auto result = composeCargoSafetyDecision(input);
+        EXPECT_EQ(result.requested_code,
+                  CargoSafetyProtocol::kCargoInvalid);
+        EXPECT_NE(result.requested_code,
+                  CargoSafetyProtocol::kInternalError);
+    }
+}
+
+TEST(CargoSafetyDecision, PendingPositiveRiskCanOnlyBe17Or18) {
+    for (std::uint16_t code : {
+             static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel1Warning),
+             static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel2Warning)}) {
+        CargoSafetyDecisionInput input;
+        input.phase = CargoSafetyDecisionPhase::VALID_WARNING_OR_CLEAR;
+        input.system_ready = true;
+        input.localization_valid = true;
+        input.gravity_valid = true;
+        input.warning_valid = true;
+        input.pending_positive_warning = true;
+        input.obstacle_evidence_ready = true;
+        input.warning_code = code;
+        EXPECT_EQ(composeCargoSafetyDecision(input).requested_code, code);
+    }
+
+    CargoSafetyDecisionInput pending_clear;
+    pending_clear.phase = CargoSafetyDecisionPhase::
+        CARGO_EXPECTED_NOT_AUTHORITATIVE;
+    pending_clear.system_ready = true;
+    pending_clear.localization_valid = true;
+    pending_clear.gravity_valid = true;
+    pending_clear.pending_positive_warning = false;
+    EXPECT_EQ(composeCargoSafetyDecision(pending_clear).requested_code,
+              CargoSafetyProtocol::kCargoInvalid);
+}
+
+TEST(CargoSafetyDecision, FormalObstacleAndClearStateTable) {
+    CargoSafetyDecisionInput obstacle;
+    obstacle.phase = CargoSafetyDecisionPhase::
+        CARGO_FORMAL_OBSTACLE_NOT_READY;
+    obstacle.system_ready = true;
+    obstacle.localization_valid = true;
+    obstacle.gravity_valid = true;
+    obstacle.formal_cargo_valid = true;
+    EXPECT_EQ(composeCargoSafetyDecision(obstacle).requested_code,
+              CargoSafetyProtocol::kObstacleInvalid);
+
+    auto clear = validLoadedDecision(CargoSafetyProtocol::kClear);
+    EXPECT_EQ(composeCargoSafetyDecision(clear).requested_code,
+              CargoSafetyProtocol::kClear);
+    clear.formal_clear_authorized = false;
+    EXPECT_EQ(composeCargoSafetyDecision(clear).requested_code,
+              CargoSafetyProtocol::kInternalError);
+    EXPECT_EQ(composeCargoSafetyDecision(clear).reason,
+              "safety_phase_contract_violation");
+}
+
+TEST(CargoSafetyDecision, ExplicitInternalContractViolationIs35) {
+    CargoSafetyDecisionInput input;
+    input.phase = CargoSafetyDecisionPhase::VALID_WARNING_OR_CLEAR;
+    input.system_ready = true;
+    input.localization_valid = true;
+    input.warning_valid = true;
+    input.warning_code = CargoSafetyProtocol::kClear;
+    const auto result = composeCargoSafetyDecision(input);
+    EXPECT_EQ(result.requested_code, CargoSafetyProtocol::kInternalError);
+    EXPECT_EQ(result.reason, "safety_phase_contract_violation");
 }
 
 TEST(CargoSafetyEvaluator, ExactDistanceAndClearanceBoundaries) {

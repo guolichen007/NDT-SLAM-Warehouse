@@ -9,12 +9,15 @@ OPS = Path(__file__).resolve().parents[1] / "src" / "ndt_slam" / "scripts" / "op
 sys.path.insert(0, str(OPS))
 
 from server_runtime_monitor import (  # noqa: E402
+    AvoidancePipelineObserver,
+    CargoMonitorGate,
     RosRuntimeMonitor,
     SafetyAggregator,
     append_csv,
     atomic_write_json,
     is_runtime_status_stale,
     normalize_timeout_status,
+    classify_cargo_geometry,
 )
 from summarize_server_run import summarize  # noqa: E402
 
@@ -172,6 +175,82 @@ class TypedCargoCallbackTimeTest(unittest.TestCase):
         self.assertFalse(monitor._swing_stale_active)
         self.assertEqual(monitor.events[0][1]["event"],
                          "CARGO_SWING_TIME_ROLLBACK")
+
+
+class CargoMonitorGateTest(unittest.TestCase):
+    def test_loaded_starts_episode_and_stale_closes_it_once(self):
+        gate = CargoMonitorGate()
+        empty = gate.update(valid=True, fresh=True, state=2,
+                            wall_time=1.0)
+        self.assertFalse(gate.active)
+        self.assertEqual(empty[0]["state"], "EMPTY")
+        loaded = gate.update(valid=True, fresh=True, state=3,
+                             wall_time=2.0)
+        self.assertTrue(gate.active)
+        self.assertEqual(loaded[0]["event"], "GRAVITY_LOADED")
+        self.assertEqual(gate.episode_id, 1)
+        lost = gate.update(valid=False, fresh=False, state=0,
+                           wall_time=4.0)
+        self.assertFalse(gate.active)
+        self.assertEqual(lost[0]["event"], "GRAVITY_LOST_DURING_CARGO")
+        self.assertEqual(lost[0]["duration_sec"], 2.0)
+        self.assertEqual(gate.update(valid=False, fresh=False, state=0,
+                                     wall_time=5.0), [])
+
+    def test_no_gravity_never_creates_episode(self):
+        gate = CargoMonitorGate()
+        gate.update(valid=False, fresh=False, state=0, wall_time=1.0)
+        self.assertFalse(gate.active)
+        self.assertEqual(gate.episode_id, 0)
+
+
+class AvoidancePipelineObserverTest(unittest.TestCase):
+    def test_mismatch_uses_grace_window(self):
+        observer = AvoidancePipelineObserver(0.4)
+        observer.set_code("raw_typed", 34, 1.0)
+        observer.set_code("raw_simple", 17, 1.0)
+        self.assertFalse(observer.snapshot(1.3)[
+            "raw_typed_simple_mismatch"])
+        self.assertTrue(observer.snapshot(1.5)[
+            "raw_typed_simple_mismatch"])
+
+    def test_pending_clear_and_normal_35_are_p0_flags(self):
+        observer = AvoidancePipelineObserver()
+        observer.set_pending({"pending_provisional_status": 14}, 1.0)
+        observer.set_code("final_typed", 35, 1.0)
+        snapshot = observer.snapshot(2.0)
+        self.assertTrue(snapshot["pending_illegal_clear"])
+        self.assertTrue(snapshot["normal_code35"])
+
+
+class CargoGeometryClassificationTest(unittest.TestCase):
+    def test_frozen_formal_geometry_is_not_direct_measured(self):
+        direct, formal = classify_cargo_geometry({
+            "track_state": "LOCKED", "lock_state": "LOST_HOLD",
+            "geometry_source": "DIRECT_TOP_FROZEN_THICKNESS",
+            "vertical_source": "DIRECT_TOP_FROZEN_THICKNESS",
+            "frozen": True, "height_valid": True,
+            "length_m": 2.0, "width_m": 1.0, "height_m": 0.5,
+            "bottom_z": 0.4, "top_z": 0.9,
+            "support": 0, "points": 0, "confidence": 0.8,
+        })
+        self.assertFalse(direct)
+        self.assertTrue(formal)
+
+    def test_direct_geometry_requires_current_point_support(self):
+        value = {
+            "track_state": "LOCKED", "lock_state": "LOCKED",
+            "geometry_source": "MEASURED", "authoritative": True,
+            "observation_valid": True, "height_valid": True,
+            "length_m": 2.0, "width_m": 1.0, "height_m": 0.5,
+            "bottom_z": 0.4, "top_z": 0.9,
+            "support": 4, "points": 20, "confidence": 0.8,
+        }
+        direct, formal = classify_cargo_geometry(value)
+        self.assertTrue(direct)
+        self.assertTrue(formal)
+        value["support"] = 0
+        self.assertFalse(classify_cargo_geometry(value)[0])
 
 
 class AppendSafeOutputTest(unittest.TestCase):

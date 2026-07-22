@@ -16,7 +16,9 @@ TEST(HookLoadStateFilter, RequiresConsecutiveLoadedSamples) {
 }
 
 TEST(HookLoadStateFilter, HysteresisRejectsThresholdChatter) {
-    HookLoadStateFilter filter;
+    HookLoadStateConfig config;
+    config.confirm_samples = 3;
+    HookLoadStateFilter filter(config);
     filter.ingest(2.00, 0.0);
     ASSERT_EQ(filter.ingest(2.00, 0.1).state, HookLoadState::EMPTY);
     EXPECT_EQ(filter.ingest(2.11, 0.3).state, HookLoadState::EMPTY);
@@ -24,6 +26,16 @@ TEST(HookLoadStateFilter, HysteresisRejectsThresholdChatter) {
     EXPECT_EQ(filter.ingest(2.14, 0.5).state, HookLoadState::EMPTY);
     EXPECT_EQ(filter.ingest(2.14, 0.6).state, HookLoadState::EMPTY);
     EXPECT_EQ(filter.ingest(2.14, 0.7).state, HookLoadState::LOADED);
+}
+
+TEST(HookLoadStateFilter, DefaultFreshTwoSamplesConfirmLoaded) {
+    HookLoadStateFilter filter;
+    EXPECT_EQ(filter.ingest(2.20, 10.0, 1.0).state,
+              HookLoadState::UNKNOWN);
+    const auto loaded = filter.ingest(2.20, 11.0, 2.0);
+    EXPECT_TRUE(loaded.valid);
+    EXPECT_TRUE(loaded.fresh);
+    EXPECT_EQ(loaded.state, HookLoadState::LOADED);
 }
 
 TEST(HookLoadStateFilter, InhibitAndInvalidInputsAreFailSafe) {

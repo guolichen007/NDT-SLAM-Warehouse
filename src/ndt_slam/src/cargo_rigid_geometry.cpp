@@ -301,6 +301,7 @@ RigidCargoGeometry buildCurrentRigidCargoGeometry(
     result.horizontal_uncertainty_m = horizontal_uncertainty_m;
     result.vertical_uncertainty_m = vertical_uncertainty_m;
     result.pose_evidence_stamp_sec = live_pose.evidence_stamp_sec;
+    result.height_evidence_stamp_sec = live_pose.evidence_stamp_sec;
     result.evaluation_stamp_sec = live_pose.evaluation_stamp_sec;
     result.valid = true;
     result.reason = "locked_shape_live_pose";

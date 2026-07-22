@@ -9,6 +9,8 @@ monitor:
   odom_stale_sec: 1.0
   runtime_status_stale_sec: 5.0
   safety_status_stale_sec: 1.0
+  gravity_monitor_stale_sec: 1.0
+  avoidance_pipeline_grace_sec: 0.4
   sustained_33_sec: 5.0
   sustained_34_sec: 5.0
   repeat_period_sec: 30.0

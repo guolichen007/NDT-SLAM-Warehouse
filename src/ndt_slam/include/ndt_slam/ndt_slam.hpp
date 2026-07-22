@@ -2310,7 +2310,8 @@ private:
         bool warning_valid,
         const std::string& evidence_reason,
         bool evidence_initialized = true,
-        bool provisional_positive_warning = false) const;
+        bool provisional_positive_warning = false,
+        bool formal_clear_authorized = false) const;
     void publishHookOnlySafetyStatus(const HookLoadSnapshot& hook,
                                      const ros::Time& stamp,
                                      bool visual_conflict,

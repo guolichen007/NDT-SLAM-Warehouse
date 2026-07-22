@@ -11,8 +11,24 @@ void configureDiagnostics(RuntimeDiagnostics* diagnostics) {
   RuntimeDiagnosticsConfig config;
   config.enabled = true;
   config.csv_enabled = false;
+  config.console_risk_enabled = true;
   config.risk_repeat_period_sec = 5.0;
   diagnostics->configure(config, ".");
+}
+
+TEST(RuntimeDiagnosticsTest, ConsoleRiskDisabledProducesNoRiskTerminalOutput) {
+  RuntimeDiagnostics diagnostics;
+  RuntimeDiagnosticsConfig config;
+  config.enabled = true;
+  config.csv_enabled = false;
+  config.console_risk_enabled = false;
+  diagnostics.configure(config, ".");
+
+  testing::internal::CaptureStdout();
+  diagnostics.logNdtRiskNotConverged(
+      1, 1.0, 2.0, 20, "active", 3000, 3000, 40.0, 60.0);
+  const std::string output = testing::internal::GetCapturedStdout();
+  EXPECT_TRUE(output.empty());
 }
 
 TEST(RuntimeDiagnosticsTest, PipelineRiskIsEnterChangeRepeatSuppressedAndClear) {

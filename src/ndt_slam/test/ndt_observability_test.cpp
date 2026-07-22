@@ -118,6 +118,7 @@ TEST(NdtObservabilityTest, ModerateAndSevereInflationPreserveStrongDirection) {
     NdtObservability moderate;
     moderate.valid = true;
     moderate.degenerate = true;
+    moderate.severely_degenerate = false;
     moderate.strong_direction = Eigen::Vector2d::UnitY();
     moderate.weak_direction = Eigen::Vector2d::UnitX();
     Eigen::Matrix2d covariance =
