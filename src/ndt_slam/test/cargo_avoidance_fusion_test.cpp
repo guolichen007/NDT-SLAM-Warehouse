@@ -10,6 +10,7 @@ CargoAvoidanceFusionInput validInput() {
   input.localization_valid = true;
   input.formal_cargo_geometry_valid = true;
   input.formal_cargo_bottom_valid = true;
+  input.formal_clear_authorized = true;
   input.static_session_manifest_valid = true;
   input.static_session_hash_valid = true;
   input.static_session_uuid_valid = true;
@@ -46,6 +47,22 @@ TEST(CargoAvoidanceFusion, StaticHazardSurvivesLiveClearConflict) {
   EXPECT_EQ(result.official_code, 17);
   EXPECT_TRUE(result.map_live_conflict);
   EXPECT_EQ(result.reason, "MAP_LIVE_CONFLICT_static_hazard_retained");
+}
+
+TEST(CargoAvoidanceFusion,
+     FormalClearAuthorityBlocksClearButNotPositiveHazard) {
+  auto input = validInput();
+  input.formal_clear_authorized = false;
+  const auto clear = fuseCargoAvoidanceRisk(input);
+  EXPECT_FALSE(clear.official_valid);
+  EXPECT_EQ(clear.official_code, 33);
+  EXPECT_EQ(clear.reason, "formal_cargo_clear_not_authorized");
+
+  input.live.hazard = true;
+  input.live.warning_code = 17;
+  const auto hazard = fuseCargoAvoidanceRisk(input);
+  EXPECT_TRUE(hazard.official_valid);
+  EXPECT_EQ(hazard.official_code, 17);
 }
 
 TEST(CargoAvoidanceFusion, StaticHazardSurvivesLiveBlank) {

@@ -21,6 +21,9 @@ CargoGeometryFrame frame(double stamp, float static_height = 1.50F,
   value.observed_top_m = 2.75F;
   value.top_uncertainty_m = 0.05F;
   value.tracking_uncertainty_m = 0.04F;
+  value.dimension_observation_complete = true;
+  value.dimension_support_points = 100U;
+  value.dimension_shape_confidence = 0.90F;
   value.thickness = {
       {CargoThicknessSource::STATIC_ORIGIN_TOP_SUPPORT,
        static_height, 0.12F, 0.9F, true},
@@ -72,6 +75,7 @@ TEST(CargoGeometryFusionTest, FrozenShapeOnlyUpdatesCenterAndBottom) {
   next.track_segment_id = 2U;
   next.center = Eigen::Vector3f(1.0F, 2.0F, 3.0F);
   next.length_m = 9.0F;
+  next.dimension_observation_complete = false;
   next.observed_top_m = 3.75F;
   result = fusion.update(next);
   EXPECT_FLOAT_EQ(result.length_m, frozen_length);
@@ -83,8 +87,10 @@ TEST(CargoGeometryFusionTest, FrozenShapeOnlyUpdatesCenterAndBottom) {
 TEST(CargoGeometryFusionTest, LargerMeasurementExpandsImmediately) {
   CargoGeometryFusionConfig config;
   config.minimum_confirm_frames = 1;
-  config.minimum_conservative_length_m = 0.0F;
-  config.minimum_conservative_width_m = 0.0F;
+  config.minimum_physical_length_m = 0.30F;
+  config.minimum_physical_width_m = 0.20F;
+  config.formal_transition_start_length_m = 0.30F;
+  config.formal_transition_start_width_m = 0.20F;
   CargoGeometryFusion fusion(config);
   auto result = fusion.update(frame(1.0));
   ASSERT_TRUE(result.frozen);
@@ -160,6 +166,92 @@ TEST(CargoGeometryFusionTest, DuplicateStampCannotFreezeGeometry) {
   EXPECT_FALSE(result.valid);
   EXPECT_FALSE(result.frozen);
   EXPECT_EQ(result.reason, "source_time_invalid_or_rollback");
+}
+
+TEST(CargoGeometryFusionTest,
+     HighQualitySmallCargoCanLeaveFallbackFloorAfterConfirmation) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 2;
+  config.conservative_shrink_confirm_frames = 1;
+  config.formal_transition_start_length_m = 1.56F;
+  config.formal_transition_start_width_m = 0.86F;
+  CargoGeometryFusion fusion(config);
+  auto small = frame(1.0);
+  small.length_m = 1.5F;
+  small.width_m = 0.8F;
+  EXPECT_FALSE(fusion.update(small).frozen);
+  small.stamp_sec = 1.1;
+  auto result = fusion.update(small);
+  ASSERT_TRUE(result.frozen);
+  small.stamp_sec = 1.2;
+  result = fusion.update(small);
+  small.stamp_sec = 1.3;
+  result = fusion.update(small);
+  EXPECT_NEAR(result.length_m, 1.5F, 1.0e-6F);
+  EXPECT_NEAR(result.width_m, 0.8F, 1.0e-6F);
+  EXPECT_LT(result.length_m, 4.0F);
+  EXPECT_LT(result.width_m, 3.0F);
+}
+
+TEST(CargoGeometryFusionTest, FormalGeometryUsesPhysicalFloorNotFallbackFloor) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  config.minimum_physical_length_m = 0.30F;
+  config.minimum_physical_width_m = 0.20F;
+  config.formal_transition_start_length_m = 0.30F;
+  config.formal_transition_start_width_m = 0.20F;
+  CargoGeometryFusion fusion(config);
+  auto tiny = frame(1.0);
+  tiny.length_m = 0.10F;
+  tiny.width_m = 0.10F;
+  const auto result = fusion.update(tiny);
+  ASSERT_TRUE(result.frozen);
+  EXPECT_FLOAT_EQ(result.length_m, 0.30F);
+  EXPECT_FLOAT_EQ(result.width_m, 0.20F);
+}
+
+TEST(CargoGeometryFusionTest, AuthorizedStaticComponentCanRaiseFormalLowerBound) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  config.formal_transition_start_length_m = 0.30F;
+  config.formal_transition_start_width_m = 0.20F;
+  CargoGeometryFusion fusion(config);
+  auto value = frame(1.0);
+  value.length_m = 1.0F;
+  value.width_m = 0.5F;
+  value.static_length_lower_bound_m = 1.8F;
+  value.static_width_lower_bound_m = 0.9F;
+  const auto result = fusion.update(value);
+  ASSERT_TRUE(result.frozen);
+  EXPECT_FLOAT_EQ(result.length_m, 1.8F);
+  EXPECT_FLOAT_EQ(result.width_m, 0.9F);
+}
+
+TEST(CargoGeometryFusionTest, UnverifiedStaticCannotRaiseFormalLowerBound) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  config.formal_transition_start_length_m = 0.30F;
+  config.formal_transition_start_width_m = 0.20F;
+  CargoGeometryFusion fusion(config);
+  auto value = frame(1.0);
+  value.length_m = 1.0F;
+  value.width_m = 0.5F;
+  // Runtime leaves lower bounds at zero for unverified static evidence.
+  const auto result = fusion.update(value);
+  ASSERT_TRUE(result.frozen);
+  EXPECT_FLOAT_EQ(result.length_m, 1.0F);
+  EXPECT_FLOAT_EQ(result.width_m, 0.5F);
+}
+
+TEST(CargoGeometryFusionTest, PartialSideCannotFreezeFormalEnvelope) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  CargoGeometryFusion fusion(config);
+  auto partial = frame(1.0);
+  partial.dimension_observation_complete = false;
+  const auto result = fusion.update(partial);
+  EXPECT_FALSE(result.frozen);
+  EXPECT_EQ(result.reason, "formal_shape_confirmation_pending");
 }
 
 }  // namespace
