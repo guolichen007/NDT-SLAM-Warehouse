@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ndt_slam/pending_cargo_envelope.hpp"
 #include "ndt_slam/static_obstacle_evidence_index.hpp"
 
 #include <cstdint>
@@ -7,6 +8,15 @@
 #include <string>
 
 namespace ndt_slam {
+
+enum class PendingWarningPromotionPolicy : std::uint8_t {
+  DISABLED = 0,
+  EVIDENCE_BACKED_ONLY,
+  LEGACY_ANY_PENDING,
+};
+
+const char* pendingWarningPromotionPolicyName(
+    PendingWarningPromotionPolicy policy) noexcept;
 
 struct CargoAvoidanceSourceRisk {
   bool available = false;
@@ -21,7 +31,10 @@ struct CargoAvoidanceSourceRisk {
 
 struct CargoAvoidanceFusionConfig {
   float minimum_live_coverage_for_clear = 0.05F;
-  bool provisional_positive_warning_to_official_code = true;
+  PendingWarningPromotionPolicy pending_warning_promotion_policy =
+      PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY;
+  int pending_minimum_obstacle_confirmations = 3;
+  float pending_minimum_authority_confidence = 0.55F;
 };
 
 struct CargoAvoidanceFusionInput {
@@ -30,6 +43,18 @@ struct CargoAvoidanceFusionInput {
   bool formal_cargo_bottom_valid = false;
   bool formal_clear_authorized = false;
   bool pending_envelope_valid = false;
+  PendingCargoEnvelopeSource pending_envelope_source =
+      PendingCargoEnvelopeSource::NONE;
+  CargoEnvelopePoseSource pending_pose_source =
+      CargoEnvelopePoseSource::NONE;
+  bool pending_self_evidence_valid = false;
+  bool pending_external_separation_valid = false;
+  bool pending_external_obstacle_authorized = false;
+  std::uint64_t pending_external_obstacle_track_id = 0U;
+  int pending_external_obstacle_confirmations = 0;
+  bool pending_external_provenance_valid = false;
+  bool pending_external_geometry_valid = false;
+  float pending_authority_confidence = 0.0F;
   bool static_session_manifest_valid = false;
   bool static_session_hash_valid = false;
   bool static_session_uuid_valid = false;
@@ -50,6 +75,8 @@ struct CargoAvoidanceFusionResult {
   bool risk_live = false;
   bool risk_static = false;
   bool map_live_conflict = false;
+  bool pending_warning_authorized = false;
+  std::string pending_authority_reason = "not_evaluated";
   std::string provisional_status = "UNKNOWN";
 };
 

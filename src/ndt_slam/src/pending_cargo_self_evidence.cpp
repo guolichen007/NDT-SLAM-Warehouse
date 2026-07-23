@@ -62,6 +62,8 @@ PendingCargoSelfEvidence buildPendingCargoSelfEvidence(
       result.reason = "candidate_identity_not_authorized";
       return result;
     }
+    result.authority_confidence = std::min(
+        input.identity_confidence, input.shape_confidence);
   } else if (input.source ==
              PendingCargoEnvelopeSource::RETIRED_FORMAL_SHAPE) {
     if (!input.retired_track_was_locked ||
@@ -75,6 +77,7 @@ PendingCargoSelfEvidence buildPendingCargoSelfEvidence(
     result.formal_obb_only_authorized =
         input.identity_points_base.empty() &&
         input.retired_formal_obb_authorized;
+    result.authority_confidence = 1.0F;
   } else {
     result.reason = "envelope_source_cannot_mask_live_points";
     return result;

@@ -33,7 +33,91 @@ void combineMetric(float value, float* output) {
   }
 }
 
+bool pendingSourceCanCarryIdentity(PendingCargoEnvelopeSource source) {
+  return source == PendingCargoEnvelopeSource::CURRENT_CANDIDATE ||
+      source == PendingCargoEnvelopeSource::RETIRED_FORMAL_SHAPE ||
+      source == PendingCargoEnvelopeSource::LIFT_ORIGIN_CANDIDATE;
+}
+
+bool pendingPoseCanCarryIdentity(CargoEnvelopePoseSource source) {
+  return source == CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR ||
+      source == CargoEnvelopePoseSource::SHORT_TERM_TRACK_PREDICTION ||
+      source == CargoEnvelopePoseSource::RETIRED_TRACK_PREDICTION ||
+      source == CargoEnvelopePoseSource::HOOK_PLUS_LAST_RELIABLE_OFFSET;
+}
+
+bool authorizePendingWarning(
+    const CargoAvoidanceFusionInput& input,
+    const CargoAvoidanceFusionConfig& config,
+    std::string* reason) {
+  if (config.pending_warning_promotion_policy ==
+      PendingWarningPromotionPolicy::DISABLED) {
+    *reason = "policy_disabled";
+    return false;
+  }
+  if (config.pending_warning_promotion_policy ==
+      PendingWarningPromotionPolicy::LEGACY_ANY_PENDING) {
+    *reason = "explicit_legacy_any_pending";
+    return true;
+  }
+  if (!pendingSourceCanCarryIdentity(input.pending_envelope_source)) {
+    *reason = "envelope_source_not_identity_backed";
+    return false;
+  }
+  if (!pendingPoseCanCarryIdentity(input.pending_pose_source)) {
+    *reason = "pose_source_not_identity_backed";
+    return false;
+  }
+  if (!input.pending_self_evidence_valid) {
+    *reason = "cargo_self_evidence_missing";
+    return false;
+  }
+  if (!input.pending_external_separation_valid) {
+    *reason = "cargo_external_separation_unresolved";
+    return false;
+  }
+  if (!input.pending_external_obstacle_authorized ||
+      input.pending_external_obstacle_track_id == 0U) {
+    *reason = "external_obstacle_identity_missing";
+    return false;
+  }
+  if (input.pending_external_obstacle_confirmations <
+      config.pending_minimum_obstacle_confirmations) {
+    *reason = "external_obstacle_confirmation_pending";
+    return false;
+  }
+  if (!input.pending_external_provenance_valid) {
+    *reason = "external_obstacle_provenance_invalid";
+    return false;
+  }
+  if (!input.pending_external_geometry_valid) {
+    *reason = "external_obstacle_geometry_invalid";
+    return false;
+  }
+  if (!std::isfinite(input.pending_authority_confidence) ||
+      input.pending_authority_confidence <
+          config.pending_minimum_authority_confidence) {
+    *reason = "pending_authority_confidence_low";
+    return false;
+  }
+  *reason = "identity_and_external_obstacle_confirmed";
+  return true;
+}
+
 }  // namespace
+
+const char* pendingWarningPromotionPolicyName(
+    PendingWarningPromotionPolicy policy) noexcept {
+  switch (policy) {
+    case PendingWarningPromotionPolicy::DISABLED:
+      return "DISABLED";
+    case PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY:
+      return "EVIDENCE_BACKED_ONLY";
+    case PendingWarningPromotionPolicy::LEGACY_ANY_PENDING:
+      return "LEGACY_ANY_PENDING";
+  }
+  return "UNKNOWN";
+}
 
 CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     const CargoAvoidanceFusionInput& input,
@@ -91,14 +175,20 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
           result.risk_static ? input.static_map.warning_code : 0);
       result.provisional_status = provisional == kNear3m
           ? "NEAR_3M" : "NEAR_5M";
-      if (config.provisional_positive_warning_to_official_code) {
+      result.pending_warning_authorized = authorizePendingWarning(
+          input, config, &result.pending_authority_reason);
+      if (result.pending_warning_authorized) {
         result.official_code = provisional;
         result.official_valid = true;
-        result.reason = "provisional_positive_warning_enabled";
+        result.reason = "pending_positive_warning_authorized";
+      } else {
+        result.reason = "pending_hazard_not_authorized:" +
+            result.pending_authority_reason;
       }
     } else {
       // A pending envelope can never grant clear.
       result.provisional_status = "CLEAR_NOT_AUTHORIZED";
+      result.pending_authority_reason = "no_positive_hazard";
     }
     return result;
   }

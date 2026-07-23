@@ -302,6 +302,8 @@ private:
     ros::Publisher pose_pub_;
     ros::Publisher map_pub_;
     ros::Publisher display_map_pub_;      // 显示用细地图（全量）
+    ros::Publisher display_map_active_pub_;
+    ros::Publisher display_map_persistent_pub_;
     ros::Publisher ground_map_pub_;       // 地面点地图
     ros::Publisher objects_map_pub_;      // 非地面/货物地图（raw）
     ros::Publisher objects_clean_map_pub_; // 非地面/货物地图（clean，BEV过滤后）
@@ -877,6 +879,9 @@ private:
     void mapPublicationThread();
     MapPublicationSnapshot captureMapPublicationSnapshot(
         std::uint64_t version, const ros::Time& stamp);
+    void publishDisplayMapCompat(
+        const sensor_msgs::PointCloud2& message,
+        bool persistent_tiles_source);
     void publishMapPublicationSnapshot(
         const MapPublicationSnapshot& snapshot);
     void advanceMapLayerGenerationLocked();
@@ -1214,7 +1219,12 @@ private:
     std::map<std::string, TileLayers> dirty_tiles_;
     std::mutex dirty_tiles_mutex_;
     std::thread tile_flush_thread_;
+    std::mutex tile_flush_control_mutex_;
     std::atomic<bool> tile_flush_running_{false};
+    // Serializes persistent tile readers with the flush worker. Individual
+    // tile replacement is atomic, but a map-session snapshot must observe one
+    // coherent catalog across all four layers.
+    std::mutex persistent_tile_io_mutex_;
     std::mutex failed_tile_flush_mutex_;
     std::map<std::string, TileLayers> failed_tile_flush_batch_;
     ros::Time last_flush_time_;
@@ -1224,6 +1234,11 @@ private:
     double tile_voxel_display_ = 0.10;
     double tile_voxel_ground_ = 0.15;
     double tile_voxel_objects_ = 0.08;
+    double persistent_display_voxel_ = 0.25;
+    std::size_t persistent_display_max_points_ = 1500000U;
+    double persistent_display_refresh_sec_ = 30.0;
+    ros::WallTime persistent_display_last_publish_wall_;
+    std::string display_map_compat_scope_ = "active_window";
 
     // runtime status
     int total_frames_ = 0;
@@ -1231,6 +1246,13 @@ private:
     int active_keyframes_ = 0;
     std::atomic<int> dirty_tile_count_{0};
     std::atomic<int> flushed_tile_count_{0};
+    std::atomic<std::uint64_t> persistent_points_accepted_{0U};
+    std::atomic<std::uint64_t> persistent_points_nonfinite_rejected_{0U};
+    std::atomic<std::uint64_t> persistent_points_bounds_rejected_{0U};
+    std::atomic<std::uint64_t> persistent_tile_manifest_failures_{0U};
+    std::atomic<std::uint64_t> persistent_display_tile_count_{0U};
+    std::atomic<std::uint64_t> persistent_display_source_points_{0U};
+    std::atomic<std::uint64_t> persistent_display_published_points_{0U};
     double delta_translation_ = 0.0;
     double delta_yaw_ = 0.0;
     double average_process_time_ms_ = 0.0;
@@ -1243,6 +1265,17 @@ private:
 
     void writeRuntimeStatus();
     void flushDirtyTiles();
+    bool publishPersistentDisplayMapFromTiles();
+    bool loadPersistentTileLayer(
+        const std::string& layer_directory,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr* output,
+        std::string* reason) const;
+    bool assemblePersistentSessionLayers(
+        const std::shared_ptr<const StaticEvidenceSnapshot>& static_evidence,
+        MapSessionLayers* layers,
+        std::string* tile_catalog_json,
+        std::string* reason);
+    bool writePersistentTileManifest();
     bool appendPersistentTileLayers(
         const pcl::PointCloud<pcl::PointXYZ>& registration,
         const pcl::PointCloud<pcl::PointXYZ>& ground,
@@ -2047,6 +2080,10 @@ private:
     lidar_slam2_msgs::HoistMotionState cargo_hoist_state_message_;
     ros::Time cargo_hoist_state_received_stamp_;
     CargoObstacleTracker cargo_obstacle_tracker_;
+    // Pending cargo uses an independent track namespace. Its only purpose is
+    // to prove that an already-separated live cluster has a stable external
+    // identity before a provisional 17/18 can become official.
+    CargoObstacleTracker pending_cargo_obstacle_tracker_;
     StaticObstacleEvidenceIndex static_obstacle_evidence_index_;
     std::shared_ptr<const StaticHeightField> static_height_field_;
     bool verified_map_session_loaded_ = false;

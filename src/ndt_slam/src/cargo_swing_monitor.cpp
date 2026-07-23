@@ -158,6 +158,29 @@ const char* cargoHookAnchorAuthorityName(
   return "INVALID";
 }
 
+const char* cargoSkewPullReadinessName(
+    CargoSkewPullReadiness readiness) noexcept {
+  switch (readiness) {
+    case CargoSkewPullReadiness::HOIST_MISSING:
+      return "HOIST_MISSING";
+    case CargoSkewPullReadiness::HOIST_STALE:
+      return "HOIST_STALE";
+    case CargoSkewPullReadiness::HOOK_ANCHOR_MISSING:
+      return "HOOK_ANCHOR_MISSING";
+    case CargoSkewPullReadiness::HOOK_ANCHOR_NONAUTHORITATIVE:
+      return "HOOK_ANCHOR_NONAUTHORITATIVE";
+    case CargoSkewPullReadiness::ROPE_LENGTH_MISSING:
+      return "ROPE_LENGTH_MISSING";
+    case CargoSkewPullReadiness::ANGLE_NONAUTHORITATIVE:
+      return "ANGLE_NONAUTHORITATIVE";
+    case CargoSkewPullReadiness::HISTORY_NOT_MATURE:
+      return "HISTORY_NOT_MATURE";
+    case CargoSkewPullReadiness::READY:
+      return "READY";
+  }
+  return "HOIST_MISSING";
+}
+
 CargoSwingMonitor::CargoSwingMonitor(const CargoSwingConfig& config) {
   setConfig(config);
 }
@@ -228,6 +251,22 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     result_.reason = "disabled";
     return result_;
   }
+  const auto preliminary_readiness = [&input]() {
+    if (!input.hoist_state_available) {
+      return CargoSkewPullReadiness::HOIST_MISSING;
+    }
+    if (!input.hoist_state_fresh) {
+      return CargoSkewPullReadiness::HOIST_STALE;
+    }
+    if (!input.hook_anchor_valid) {
+      return CargoSkewPullReadiness::HOOK_ANCHOR_MISSING;
+    }
+    if (!input.hook_anchor_xy_authoritative) {
+      return CargoSkewPullReadiness::HOOK_ANCHOR_NONAUTHORITATIVE;
+    }
+    return CargoSkewPullReadiness::HISTORY_NOT_MATURE;
+  }();
+  result_.skew_pull_readiness = preliminary_readiness;
   if (!std::isfinite(input.stamp_sec) || input.stamp_sec <= 0.0) {
     result_.valid = false;
     result_.observation_state = CargoSwingObservationState::INVALID;
@@ -238,6 +277,7 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
       input.stamp_sec <= last_input_stamp_sec_) {
     reset();
     last_input_stamp_sec_ = input.stamp_sec;
+    result_.skew_pull_readiness = preliminary_readiness;
     result_.observation_state =
         CargoSwingObservationState::TIMESTAMP_ROLLBACK;
     result_.reason = "timestamp_rollback_reset";
@@ -247,6 +287,7 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
   if (!input.hook_loaded || input.cargo_lifecycle_id == 0U) {
     reset();
     last_input_stamp_sec_ = input.stamp_sec;
+    result_.skew_pull_readiness = preliminary_readiness;
     result_.reason = !input.hook_loaded ? "hook_not_loaded"
                                : "cargo_lifecycle_invalid";
     return result_;
@@ -267,6 +308,7 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     track_segment_id_ = input.track_segment_id;
     hook_anchor_source_ = input.hook_anchor_source;
     last_input_stamp_sec_ = input.stamp_sec;
+    result_.skew_pull_readiness = preliminary_readiness;
     result_.observation_state = CargoSwingObservationState::TRACK_CHANGED;
     result_.reason = "track_lifecycle_or_anchor_changed_reset";
     return result_;
@@ -396,13 +438,14 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
           input.hook_anchor_z_authoritative
       ? CargoRopeLengthSource::MEASURED
       : CargoRopeLengthSource::CONFIG_FALLBACK;
-  float rope_length = measured_rope_length;
-  if (!measured_vertical_separation_valid) {
-    rope_length = config_.configured_sling_length_m;
-  }
   const bool angle_authoritative =
       input.hook_anchor_z_authoritative &&
       measured_vertical_separation_valid;
+  // A numerically plausible separation from a non-authoritative anchor Z is
+  // not a measured rope length. Keep it out of even the diagnostic angle and
+  // use the explicitly labelled configuration fallback instead.
+  const float rope_length = angle_authoritative
+      ? measured_rope_length : config_.configured_sling_length_m;
   const bool offset_authoritative =
       input.hook_anchor_xy_authoritative && current_measurement;
   const float offset_m = raw_offset.norm();
@@ -838,6 +881,30 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
   result_.hoist_up_confirmed = input.hoist_state_fresh &&
       input.hoist_motion_state == HoistMotionState::UP;
   result_.alarm_inhibited = skew_alarm_authority_missing;
+  if (!input.hoist_state_available) {
+    result_.skew_pull_readiness =
+        CargoSkewPullReadiness::HOIST_MISSING;
+  } else if (!input.hoist_state_fresh) {
+    result_.skew_pull_readiness =
+        CargoSkewPullReadiness::HOIST_STALE;
+  } else if (!input.hook_anchor_valid) {
+    result_.skew_pull_readiness =
+        CargoSkewPullReadiness::HOOK_ANCHOR_MISSING;
+  } else if (!input.hook_anchor_xy_authoritative) {
+    result_.skew_pull_readiness =
+        CargoSkewPullReadiness::HOOK_ANCHOR_NONAUTHORITATIVE;
+  } else if (!measured_vertical_separation_valid) {
+    result_.skew_pull_readiness =
+        CargoSkewPullReadiness::ROPE_LENGTH_MISSING;
+  } else if (!angle_authoritative) {
+    result_.skew_pull_readiness =
+        CargoSkewPullReadiness::ANGLE_NONAUTHORITATIVE;
+  } else if (history_duration < config_.skew_min_duration_sec) {
+    result_.skew_pull_readiness =
+        CargoSkewPullReadiness::HISTORY_NOT_MATURE;
+  } else {
+    result_.skew_pull_readiness = CargoSkewPullReadiness::READY;
+  }
   result_.recommended_action = CargoSwingRecommendedAction::NONE;
   if (skew == CargoSkewPullState::SKEW_PULL_ALARM) {
     result_.recommended_action = CargoSwingRecommendedAction::STOP_AND_SETTLE;

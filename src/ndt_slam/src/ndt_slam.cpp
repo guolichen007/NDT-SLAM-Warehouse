@@ -309,6 +309,10 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>(pose_topic_, 10);
     map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(map_topic_, 1, true);
     display_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map", 1, true);
+    display_map_active_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+        "/display_map_active", 1, true);
+    display_map_persistent_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+        "/display_map_persistent", 1, true);
     ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 1, true);
     objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 1, true);
     objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 1, true);
@@ -464,6 +468,9 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
              ndt_resolution_, ndt_step_size_, ndt_max_iterations_, ndt_num_threads_,
              ndt_neighbor_search_method_.c_str());
 
+    if (persistent_map_enabled_) {
+        publishPersistentDisplayMapFromTiles();
+    }
     relocalizer_.configure(relocalization_cfg_);
     relocalizer_.start();
     shutdown_ = false;
@@ -518,6 +525,10 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>(pose_topic_, 10);
     map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(map_topic_, 1, true);
     display_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map", 1, true);
+    display_map_active_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+        "/display_map_active", 1, true);
+    display_map_persistent_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+        "/display_map_persistent", 1, true);
     ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 1, true);
     objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 1, true);
     objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 1, true);
@@ -698,6 +709,9 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
 
     // Start callbacks only after all publishers, maps, algorithms and
     // diagnostics are fully configured.
+    if (persistent_map_enabled_) {
+        publishPersistentDisplayMapFromTiles();
+    }
     relocalizer_.configure(relocalization_cfg_);
     relocalizer_.start();
     shutdown_ = false;
@@ -1402,6 +1416,26 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             tile_voxel_display_ = pm["tile_voxel_display"].as<double>(0.10);
             tile_voxel_ground_ = pm["tile_voxel_ground"].as<double>(0.15);
             tile_voxel_objects_ = pm["tile_voxel_objects"].as<double>(0.08);
+            persistent_display_voxel_ = std::max(
+                0.10, pm["persistent_display_voxel"]
+                          .as<double>(0.25));
+            persistent_display_max_points_ =
+                static_cast<std::size_t>(std::max(
+                    10000, pm["persistent_display_max_points"]
+                               .as<int>(1500000)));
+            persistent_display_refresh_sec_ = std::max(
+                5.0, pm["persistent_display_refresh_sec"]
+                         .as<double>(30.0));
+            display_map_compat_scope_ =
+                pm["display_map_compat_scope"]
+                    .as<std::string>("active_window");
+            if (display_map_compat_scope_ != "active_window" &&
+                display_map_compat_scope_ != "persistent_tiles") {
+                ROS_WARN("[Config] invalid display_map_compat_scope=%s; "
+                         "using active_window",
+                         display_map_compat_scope_.c_str());
+                display_map_compat_scope_ = "active_window";
+            }
         }
 
         if (debug_cfg_.debug_config) {
@@ -3066,12 +3100,20 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                            .as<int>(2)));
             static_map_config.maximum_observation_gap_sec = std::max(
                 0.05, cargo_safety["static_map_max_observation_gap_sec"]
-                          .as<double>(0.8));
+                          .as<double>(5.0));
             static_map_config.maximum_observation_sequence_gap =
                 static_cast<std::uint64_t>(std::max(
                     1, cargo_safety["static_map_max_sequence_gap"]
                            .as<int>(1)));
             static_obstacle_evidence_index_.setConfig(static_map_config);
+            ROS_INFO(
+                "[StaticMapEvidence] maturity_config observations=%u "
+                "stable_sec=%.2f max_gap_sec=%.2f max_sequence_gap=%llu",
+                static_map_config.minimum_observations,
+                static_map_config.minimum_stable_duration_sec,
+                static_map_config.maximum_observation_gap_sec,
+                static_cast<unsigned long long>(
+                    static_map_config.maximum_observation_sequence_gap));
             static_height_field_config_.cell_size_m =
                 static_map_config.cell_size_m;
             static_height_field_config_.z_bin_m = std::max(
@@ -3096,13 +3138,53 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     cargo_safety["fusion_minimum_live_coverage_for_clear"]
                         .as<float>(0.05F),
                     0.0F, 1.0F);
+            const std::string pending_promotion_policy =
+                cargo_safety["fusion_pending_warning_promotion_policy"]
+                    .as<std::string>("evidence_backed_only");
+            if (pending_promotion_policy == "disabled") {
+                cargo_avoidance_fusion_config_
+                    .pending_warning_promotion_policy =
+                        PendingWarningPromotionPolicy::DISABLED;
+            } else if (pending_promotion_policy ==
+                       "legacy_any_pending") {
+                cargo_avoidance_fusion_config_
+                    .pending_warning_promotion_policy =
+                        PendingWarningPromotionPolicy::LEGACY_ANY_PENDING;
+                ROS_WARN_STREAM(
+                    "[CargoAvoidance] explicit legacy_any_pending policy "
+                    "allows unverified pending envelopes to promote 17/18");
+            } else {
+                cargo_avoidance_fusion_config_
+                    .pending_warning_promotion_policy =
+                        PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY;
+            }
+            // The legacy bool remains a one-way compatibility kill switch.
+            // A historical 'true' never re-enables unsafe any-pending
+            // promotion; only the explicit legacy policy above can do that.
+            if (!cargo_safety[
+                    "fusion_provisional_warning_to_official_code"]
+                     .as<bool>(true)) {
+                cargo_avoidance_fusion_config_
+                    .pending_warning_promotion_policy =
+                        PendingWarningPromotionPolicy::DISABLED;
+            }
             cargo_avoidance_fusion_config_
-                .provisional_positive_warning_to_official_code =
+                .pending_minimum_obstacle_confirmations =
+                    obstacle_tracker_config.confirm_frames;
+            cargo_avoidance_fusion_config_
+                .pending_minimum_authority_confidence = std::clamp(
                     cargo_safety[
-                        "fusion_provisional_warning_to_official_code"]
-                        .as<bool>(true);
+                        "fusion_pending_minimum_authority_confidence"]
+                        .as<float>(0.55F),
+                    0.0F, 1.0F);
         }
         cargo_obstacle_tracker_.setConfig(obstacle_tracker_config);
+        CargoObstacleTrackerConfig pending_obstacle_tracker_config =
+            obstacle_tracker_config;
+        pending_obstacle_tracker_config.require_static_cargo_for_warning =
+            false;
+        pending_cargo_obstacle_tracker_.setConfig(
+            pending_obstacle_tracker_config);
         if (cargo_safety) {
             cargo_motion_corridor_config_.enabled =
                 cargo_safety["motion_corridor_enabled"].as<bool>(true);
@@ -3213,6 +3295,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             removal_overridden ? "launch" : "yaml",
             odom_anchor_config_.cargo_warning.enabled ? 1 : 0,
             warning_overridden ? "launch" : "yaml");
+        ROS_INFO(
+            "[ConfigFinal] map_topics compatibility=/display_map:%s "
+            "active=/display_map_active persistent=/display_map_persistent",
+            display_map_compat_scope_.c_str());
 
     } catch (const YAML::Exception& e) {
         ROS_ERROR("YAML parse error: %s", e.what());
@@ -3538,6 +3624,7 @@ void NdtSlamNode::resetCargoForHookState(
     confirmed_cargo_safety_result_ = CargoSafetyResult{};
     cargo_safety_temporal_filter_.reset();
     cargo_obstacle_tracker_.reset();
+    pending_cargo_obstacle_tracker_.reset();
     cargo_map_motion_sample_valid_ = false;
     cargo_previous_center_map_.setZero();
     cargo_velocity_map_.setZero();
@@ -3674,6 +3761,16 @@ NdtSlamNode::captureMapPublicationSnapshot(
     return snapshot;
 }
 
+void NdtSlamNode::publishDisplayMapCompat(
+    const sensor_msgs::PointCloud2& message,
+    bool persistent_tiles_source) {
+    const bool selected =
+        persistent_tiles_source
+            ? display_map_compat_scope_ == "persistent_tiles"
+            : display_map_compat_scope_ == "active_window";
+    if (selected) display_map_pub_.publish(message);
+}
+
 void NdtSlamNode::publishMapPublicationSnapshot(
     const MapPublicationSnapshot& snapshot) {
     if (!snapshot.registration || !snapshot.display || !snapshot.ground ||
@@ -3693,7 +3790,10 @@ void NdtSlamNode::publishMapPublicationSnapshot(
         return message;
     };
     map_pub_.publish(make_message(*snapshot.registration));
-    display_map_pub_.publish(make_message(*snapshot.display));
+    const sensor_msgs::PointCloud2 active_display_message =
+        make_message(*snapshot.display);
+    publishDisplayMapCompat(active_display_message, false);
+    display_map_active_pub_.publish(active_display_message);
     ground_map_pub_.publish(make_message(*snapshot.ground));
     objects_map_pub_.publish(make_message(*snapshot.objects));
     objects_clean_map_pub_.publish(make_message(*snapshot.objects_clean));
@@ -4639,7 +4739,7 @@ void NdtSlamNode::processCloudThread() {
             hook_fixed_config_.enabled ? 1 : 0);
 
         const HookLoadSnapshot hook_load = currentHookLoadSnapshot();
-        if (hook_load_signal_role_ == HookLoadSignalRole::REQUIRED &&
+        if (hook_load_signal_role_ != HookLoadSignalRole::DISABLED &&
             hook_load.state != last_processed_hook_load_state_) {
             const bool entering_loaded = hook_load.valid &&
                 hook_load.state ==
@@ -4647,10 +4747,14 @@ void NdtSlamNode::processCloudThread() {
             const bool entering_empty = hook_load.valid &&
                 hook_load.state ==
                     lidar_slam2_msgs::HookLoadState::STATE_EMPTY;
-            if (entering_empty) {
+            if (entering_empty &&
+                hook_load_signal_role_ == HookLoadSignalRole::REQUIRED) {
                 resetCargoForHookState(false, true);
-            } else if (entering_loaded &&
-                       !cargo_presence_result_.cargo_present) {
+            } else if (entering_loaded) {
+                // Every valid loaded edge starts a fresh recognition
+                // lifecycle, including AUXILIARY deployments. Otherwise a
+                // previous CLEAR_WAIT_REARM can permanently suppress
+                // candidate progress even though gravity proves a new load.
                 resetCargoForHookState(true, true);
             }
             last_processed_hook_load_state_ = hook_load.state;
@@ -9462,6 +9566,13 @@ bool NdtSlamNode::saveMapSessionAtomic(const std::string& session_dir,
                                        std::string* reason) {
     MapSessionSaveRequest request;
     request.target_directory = session_dir;
+    request.static_evidence = static_obstacle_evidence_index_.snapshot();
+    if (!request.static_evidence) {
+        if (reason) *reason = "static_evidence_unavailable";
+        return false;
+    }
+    MapSessionLayers active_window_layers;
+    std::string persistent_tile_catalog_json;
     pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_snapshot;
     pcl::PointCloud<pcl::PointXYZ>::Ptr payload_candidate_snapshot;
     pcl::PointCloud<pcl::PointXYZ>::Ptr payload_dynamic_snapshot;
@@ -9475,12 +9586,12 @@ bool NdtSlamNode::saveMapSessionAtomic(const std::string& session_dir,
             if (reason) *reason = "completed_map_bundle_unavailable";
             return false;
         }
-        request.layers.registration =
+        active_window_layers.registration =
             latest_completed_map_bundle_.registration;
-        request.layers.display = latest_completed_map_bundle_.display;
-        request.layers.ground = latest_completed_map_bundle_.ground;
-        request.layers.objects_raw = latest_completed_map_bundle_.objects;
-        request.layers.objects_clean =
+        active_window_layers.display = latest_completed_map_bundle_.display;
+        active_window_layers.ground = latest_completed_map_bundle_.ground;
+        active_window_layers.objects_raw = latest_completed_map_bundle_.objects;
+        active_window_layers.objects_clean =
             latest_completed_map_bundle_.objects_clean;
         request.metadata.map_uuid = MapSessionSnapshot::generateUuid();
         request.metadata.frame_id = map_frame_;
@@ -9494,7 +9605,6 @@ bool NdtSlamNode::saveMapSessionAtomic(const std::string& session_dir,
             static_clean_build_applied_.load(std::memory_order_acquire);
         request.metadata.source_stamp_sec =
             latest_completed_map_bundle_.source_stamp.toSec();
-        request.metadata.active_only = false;
         request.metadata.objects_voxel_size_m =
             static_cast<float>(objects_voxel_size_);
         const auto clone = [](const auto& cloud) {
@@ -9512,19 +9622,102 @@ bool NdtSlamNode::saveMapSessionAtomic(const std::string& session_dir,
         human_pending_snapshot = clone(rebuild_human_pending_);
         ground_raw_snapshot = clone(rebuild_ground_raw_);
     }
+
+    if (persistent_map_enabled_) {
+        // Saving a session is also an explicit durability boundary. Flush the
+        // current batch, wait for the asynchronous worker, and then assemble
+        // the session from the complete on-disk tile catalog. A failed tile
+        // remains in the retry batch and aborts the session transaction.
+        flushDirtyTiles();
+        {
+            std::lock_guard<std::mutex> control_lock(
+                tile_flush_control_mutex_);
+            if (tile_flush_thread_.joinable()) tile_flush_thread_.join();
+        }
+        {
+            std::lock_guard<std::mutex> failed_lock(
+                failed_tile_flush_mutex_);
+            if (!failed_tile_flush_batch_.empty()) {
+                if (reason) {
+                    *reason = "persistent_tile_flush_incomplete:failed=" +
+                        std::to_string(failed_tile_flush_batch_.size());
+                }
+                return false;
+            }
+        }
+        std::string persistent_reason;
+        if (!assemblePersistentSessionLayers(
+                request.static_evidence, &request.layers,
+                &persistent_tile_catalog_json,
+                &persistent_reason)) {
+            if (reason) {
+                *reason = "persistent_session_assembly_failed:" +
+                    persistent_reason;
+            }
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> map_lock(map_mutex_);
+            if (!latest_completed_map_bundle_.valid ||
+                latest_completed_map_bundle_.generation !=
+                    request.metadata.map_generation) {
+                if (reason) {
+                    *reason =
+                        "map_generation_changed_during_persistent_snapshot";
+                }
+                return false;
+            }
+        }
+        const auto current_static =
+            static_obstacle_evidence_index_.snapshot();
+        if (!current_static ||
+            current_static->map_generation !=
+                request.static_evidence->map_generation ||
+            current_static->revision != request.static_evidence->revision) {
+            if (reason) {
+                *reason =
+                    "static_evidence_changed_during_persistent_snapshot";
+            }
+            return false;
+        }
+        request.metadata.active_only = false;
+        if (!last_flush_time_local_.isZero()) {
+            request.metadata.source_stamp_sec =
+                last_flush_time_local_.toSec();
+        }
+    } else {
+        // Non-persistent deployments retain the previous active-window save
+        // behavior, but the manifest says so explicitly.
+        request.layers = active_window_layers;
+        request.metadata.active_only = true;
+    }
     request.metadata.keyframe_count =
         static_cast<std::uint64_t>(
             loop_closure_detector_.getKeyFrameCount());
-    request.static_evidence = static_obstacle_evidence_index_.snapshot();
     request.write_extras =
         [this, filtered_snapshot, payload_candidate_snapshot,
          payload_dynamic_snapshot, human_candidate_snapshot,
          human_dynamic_snapshot, human_pending_snapshot,
-         ground_raw_snapshot](const std::string& temporary,
+         ground_raw_snapshot,
+         persistent_tile_catalog_json](const std::string& temporary,
                               std::string* extras_reason) {
             if (!loop_closure_detector_.saveKeyFrameDatabase(temporary)) {
                 if (extras_reason) *extras_reason = "keyframe_database";
                 return false;
+            }
+            if (!persistent_tile_catalog_json.empty()) {
+                std::ofstream catalog(
+                    std::filesystem::path(temporary) /
+                        "persistent_tile_catalog.json",
+                    std::ios::out | std::ios::trunc | std::ios::binary);
+                catalog << persistent_tile_catalog_json;
+                catalog.flush();
+                if (!catalog.good()) {
+                    if (extras_reason) {
+                        *extras_reason = "persistent_tile_catalog";
+                    }
+                    return false;
+                }
             }
             const std::filesystem::path diagnostics =
                 std::filesystem::path(temporary) / "diagnostics";
@@ -9962,6 +10155,7 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
         confirmed_cargo_safety_result_ = CargoSafetyResult{};
         cargo_safety_temporal_filter_.reset();
         cargo_obstacle_tracker_.reset();
+        pending_cargo_obstacle_tracker_.reset();
         formal_cargo_removal_authorized_ = false;
         formal_cargo_removal_stamp_ = ros::Time();
         last_cargo_pipeline_stamp_ = ros::Time();
@@ -10406,6 +10600,28 @@ bool NdtSlamNode::shouldCommitKeyframe(
 void NdtSlamNode::releaseOldKeyframeClouds() {
     if (max_active_keyframes_ <= 0) return;
 
+    if (persistent_map_enabled_) {
+        bool failed_batch_pending = false;
+        {
+            std::lock_guard<std::mutex> lock(failed_tile_flush_mutex_);
+            failed_batch_pending = !failed_tile_flush_batch_.empty();
+        }
+        const bool durable_flush_pending =
+            dirty_tile_count_.load(std::memory_order_acquire) > 0 ||
+            tile_flush_running_.load(std::memory_order_acquire) ||
+            failed_batch_pending;
+        if (durable_flush_pending) {
+            flush_tiles_pending_.store(true, std::memory_order_release);
+            map_maintenance_pending_.store(true, std::memory_order_release);
+            queue_cv_.notify_one();
+            ROS_WARN_THROTTLE(
+                5.0,
+                "[LongTerm] keyframe cloud release deferred until persistent "
+                "tile flush is durable");
+            return;
+        }
+    }
+
     const std::size_t keyframe_count =
         loop_closure_detector_.getKeyFrameCount();
 
@@ -10439,18 +10655,33 @@ bool NdtSlamNode::appendPersistentTileLayers(
     };
     const auto point_allowed = [this](const pcl::PointXYZ& point) {
         if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
-            !std::isfinite(point.z) ||
-            std::abs(point.x) > max_map_size_ ||
+            !std::isfinite(point.z)) {
+            persistent_points_nonfinite_rejected_.fetch_add(
+                1U, std::memory_order_relaxed);
+            return false;
+        }
+        if (std::abs(point.x) > max_map_size_ ||
             std::abs(point.y) > max_map_size_ ||
             std::abs(point.z) > max_map_size_) {
+            persistent_points_bounds_rejected_.fetch_add(
+                1U, std::memory_order_relaxed);
             return false;
         }
         const double tile_x = std::floor(point.x / tile_size_m_);
         const double tile_y = std::floor(point.y / tile_size_m_);
-        return tile_x >= std::numeric_limits<int>::lowest() &&
+        const bool allowed =
+            tile_x >= std::numeric_limits<int>::lowest() &&
             tile_x <= std::numeric_limits<int>::max() &&
             tile_y >= std::numeric_limits<int>::lowest() &&
             tile_y <= std::numeric_limits<int>::max();
+        if (!allowed) {
+            persistent_points_bounds_rejected_.fetch_add(
+                1U, std::memory_order_relaxed);
+            return false;
+        }
+        persistent_points_accepted_.fetch_add(
+            1U, std::memory_order_relaxed);
+        return true;
     };
     const auto ensure_tile = [this](const std::string& key)
         -> TileLayers& {
@@ -10832,8 +11063,371 @@ bool NdtSlamNode::suspendPersistentStaticEvidence(const char* reason) {
     return suspended;
 }
 
+bool NdtSlamNode::loadPersistentTileLayer(
+    const std::string& layer_directory,
+    pcl::PointCloud<pcl::PointXYZ>::Ptr* output,
+    std::string* reason) const {
+    if (!output) {
+        if (reason) *reason = "output_pointer_missing";
+        return false;
+    }
+    output->reset(new pcl::PointCloud<pcl::PointXYZ>);
+    const boost::filesystem::path directory =
+        boost::filesystem::path(persistent_map_root_dir_) / layer_directory;
+    if (!boost::filesystem::is_directory(directory)) {
+        if (reason) *reason = "layer_directory_missing:" + layer_directory;
+        return false;
+    }
+
+    std::vector<boost::filesystem::path> tile_paths;
+    boost::system::error_code iterator_error;
+    for (boost::filesystem::directory_iterator it(directory, iterator_error),
+         end;
+         !iterator_error && it != end; it.increment(iterator_error)) {
+        boost::system::error_code status_error;
+        if (boost::filesystem::is_regular_file(it->path(), status_error) &&
+            !status_error && it->path().extension() == ".pcd") {
+            tile_paths.push_back(it->path());
+        }
+    }
+    if (iterator_error) {
+        if (reason) {
+            *reason = "layer_scan_failed:" + layer_directory + ":" +
+                iterator_error.message();
+        }
+        return false;
+    }
+    std::sort(tile_paths.begin(), tile_paths.end());
+    for (const auto& tile_path : tile_paths) {
+        pcl::PointCloud<pcl::PointXYZ> tile;
+        if (pcl::io::loadPCDFile(tile_path.string(), tile) < 0) {
+            if (reason) {
+                *reason = "tile_read_failed:" + tile_path.string();
+            }
+            return false;
+        }
+        **output += tile;
+    }
+    if (reason) {
+        *reason = "loaded:" + layer_directory + ":tiles=" +
+            std::to_string(tile_paths.size()) + ":points=" +
+            std::to_string((*output)->size());
+    }
+    return true;
+}
+
+bool NdtSlamNode::assemblePersistentSessionLayers(
+    const std::shared_ptr<const StaticEvidenceSnapshot>& static_evidence,
+    MapSessionLayers* layers,
+    std::string* tile_catalog_json,
+    std::string* reason) {
+    if (!persistent_map_enabled_) {
+        if (reason) *reason = "persistent_map_disabled";
+        return false;
+    }
+    if (!layers || !static_evidence || !tile_catalog_json) {
+        if (reason) *reason = "persistent_session_input_missing";
+        return false;
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr registration;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr display;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ground;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr objects;
+    {
+        // The flush worker holds the same mutex for the complete four-layer
+        // replacement batch. This makes the directory scan a coherent
+        // catalog snapshot instead of a mixture of pre/post-flush layers.
+        std::lock_guard<std::mutex> tile_lock(persistent_tile_io_mutex_);
+        const std::array<const char*, 4> layer_directories{{
+            "tiles_registration", "tiles_display",
+            "tiles_ground", "tiles_objects"}};
+        for (const char* layer_directory : layer_directories) {
+            const boost::filesystem::path directory =
+                boost::filesystem::path(persistent_map_root_dir_) /
+                layer_directory;
+            boost::system::error_code iterator_error;
+            for (boost::filesystem::directory_iterator it(
+                     directory, iterator_error), end;
+                 !iterator_error && it != end;
+                 it.increment(iterator_error)) {
+                const std::string filename =
+                    it->path().filename().string();
+                if (filename.size() >= 4U &&
+                    filename.compare(filename.size() - 4U, 4U, ".tmp") ==
+                        0) {
+                    if (reason) {
+                        *reason = "temporary_tile_present:" +
+                            it->path().string();
+                    }
+                    return false;
+                }
+            }
+            if (iterator_error) {
+                if (reason) {
+                    *reason = "temporary_tile_scan_failed:" +
+                        iterator_error.message();
+                }
+                return false;
+            }
+        }
+        std::string layer_reason;
+        if (!loadPersistentTileLayer(
+                "tiles_registration", &registration, &layer_reason) ||
+            !loadPersistentTileLayer(
+                "tiles_display", &display, &layer_reason) ||
+            !loadPersistentTileLayer(
+                "tiles_ground", &ground, &layer_reason) ||
+            !loadPersistentTileLayer(
+                "tiles_objects", &objects, &layer_reason)) {
+            if (reason) *reason = layer_reason;
+            return false;
+        }
+        if (!writePersistentTileManifest()) {
+            persistent_tile_manifest_failures_.fetch_add(
+                1U, std::memory_order_relaxed);
+            if (reason) *reason = "persistent_tile_manifest_write_failed";
+            return false;
+        }
+        const std::string manifest_path =
+            persistent_map_root_dir_ + "/persistent_map_manifest.json";
+        std::ifstream manifest_input(
+            manifest_path, std::ios::in | std::ios::binary);
+        std::ostringstream manifest_buffer;
+        manifest_buffer << manifest_input.rdbuf();
+        if (!manifest_input.good() && !manifest_input.eof()) {
+            if (reason) *reason = "persistent_tile_manifest_read_failed";
+            return false;
+        }
+        *tile_catalog_json = manifest_buffer.str();
+        if (tile_catalog_json->empty()) {
+            if (reason) *reason = "persistent_tile_manifest_empty";
+            return false;
+        }
+    }
+    if (!registration || registration->empty()) {
+        if (reason) *reason = "persistent_registration_empty";
+        return false;
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr objects_clean(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    const float cell_size = static_evidence->cell_size_m;
+    if (objects && std::isfinite(cell_size) && cell_size > 0.0F) {
+        objects_clean->reserve(objects->size());
+        for (const pcl::PointXYZ& point : objects->points) {
+            if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+                !std::isfinite(point.z)) {
+                continue;
+            }
+            const auto cell_x = static_cast<std::int32_t>(
+                std::floor(point.x / cell_size));
+            const auto cell_y = static_cast<std::int32_t>(
+                std::floor(point.y / cell_size));
+            const auto found = static_evidence->cells.find(
+                packStaticEvidenceCell(cell_x, cell_y));
+            if (found == static_evidence->cells.end()) continue;
+            const StaticEvidenceCell& cell = found->second;
+            const bool current_confirmed =
+                cell.clean_map_confirmed &&
+                cell.map_generation == static_evidence->map_generation;
+            const bool authority_allows_cell =
+                static_evidence->authority ==
+                    StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE
+                ? current_confirmed
+                : current_confirmed && cell.temporally_mature;
+            if (authority_allows_cell) objects_clean->push_back(point);
+        }
+    }
+    objects_clean->width =
+        static_cast<std::uint32_t>(objects_clean->size());
+    objects_clean->height = 1U;
+    objects_clean->is_dense = true;
+
+    layers->registration = registration;
+    layers->display = display;
+    layers->ground = ground;
+    layers->objects_raw = objects;
+    layers->objects_clean = objects_clean;
+    if (reason) {
+        *reason = "persistent_tiles_assembled:registration=" +
+            std::to_string(registration->size()) + ":display=" +
+            std::to_string(display ? display->size() : 0U) + ":ground=" +
+            std::to_string(ground ? ground->size() : 0U) + ":objects=" +
+            std::to_string(objects ? objects->size() : 0U) +
+            ":objects_clean=" + std::to_string(objects_clean->size());
+    }
+    return true;
+}
+
+bool NdtSlamNode::writePersistentTileManifest() {
+    const std::string manifest_path =
+        persistent_map_root_dir_ + "/persistent_map_manifest.json";
+    const std::string temporary = manifest_path + ".tmp";
+    const std::array<std::pair<const char*, const char*>, 4> layers{{
+        {"registration", "tiles_registration"},
+        {"display", "tiles_display"},
+        {"ground", "tiles_ground"},
+        {"objects", "tiles_objects"},
+    }};
+    try {
+        std::ofstream output(temporary, std::ios::out | std::ios::trunc);
+        if (!output.is_open()) return false;
+        output << "{\n"
+               << "  \"schema\": \"ndt_slam_persistent_tile_catalog\",\n"
+               << "  \"schema_version\": 1,\n"
+               << "  \"map_uuid\": \""
+               << persistentMapUuid(persistent_map_root_dir_) << "\",\n"
+               << "  \"created_at_sec\": " << std::setprecision(17)
+               << ros::WallTime::now().toSec() << ",\n"
+               << "  \"tile_size_m\": " << tile_size_m_ << ",\n"
+               << "  \"layers\": {\n";
+        for (std::size_t layer_index = 0U;
+             layer_index < layers.size(); ++layer_index) {
+            const auto& layer = layers[layer_index];
+            const boost::filesystem::path directory =
+                boost::filesystem::path(persistent_map_root_dir_) /
+                layer.second;
+            std::vector<boost::filesystem::path> paths;
+            boost::system::error_code iterator_error;
+            if (boost::filesystem::is_directory(directory)) {
+                for (boost::filesystem::directory_iterator it(
+                         directory, iterator_error), end;
+                     !iterator_error && it != end;
+                     it.increment(iterator_error)) {
+                    if (boost::filesystem::is_regular_file(it->path()) &&
+                        it->path().extension() == ".pcd") {
+                        paths.push_back(it->path());
+                    }
+                }
+            }
+            if (iterator_error) return false;
+            std::sort(paths.begin(), paths.end());
+            output << "    \"" << layer.first << "\": [";
+            for (std::size_t i = 0U; i < paths.size(); ++i) {
+                std::string hash_reason;
+                const std::string hash = MapSessionSnapshot::sha256File(
+                    paths[i].string(), &hash_reason);
+                if (hash.empty()) return false;
+                boost::system::error_code size_error;
+                const std::uintmax_t bytes =
+                    boost::filesystem::file_size(paths[i], size_error);
+                if (size_error) return false;
+                if (i > 0U) output << ',';
+                output << "\n      {\"path\": \""
+                       << layer.second << '/'
+                       << paths[i].filename().string()
+                       << "\", \"bytes\": " << bytes
+                       << ", \"sha256\": \"" << hash << "\"}";
+            }
+            if (!paths.empty()) output << '\n' << "    ";
+            output << ']'
+                   << (layer_index + 1U < layers.size() ? "," : "")
+                   << '\n';
+        }
+        output << "  }\n}\n";
+        output.flush();
+        const bool stream_ok = output.good();
+        output.close();
+        if (!stream_ok ||
+            std::rename(temporary.c_str(), manifest_path.c_str()) != 0) {
+            std::remove(temporary.c_str());
+            return false;
+        }
+        return true;
+    } catch (const std::exception& error) {
+        ROS_ERROR("[TileManifest] write failed: %s", error.what());
+        std::remove(temporary.c_str());
+        return false;
+    }
+}
+
+bool NdtSlamNode::publishPersistentDisplayMapFromTiles() {
+    if (!persistent_map_enabled_) return false;
+    const boost::filesystem::path directory =
+        boost::filesystem::path(persistent_map_root_dir_) / "tiles_display";
+    if (!boost::filesystem::is_directory(directory)) return false;
+
+    std::vector<std::string> tile_paths;
+    boost::system::error_code iterator_error;
+    for (boost::filesystem::directory_iterator it(directory, iterator_error),
+         end;
+         !iterator_error && it != end; it.increment(iterator_error)) {
+        if (boost::filesystem::is_regular_file(it->path()) &&
+            it->path().extension() == ".pcd") {
+            tile_paths.push_back(it->path().string());
+        }
+    }
+    if (iterator_error) {
+        ROS_WARN("[MapPublish] persistent display scan failed: %s",
+                 iterator_error.message().c_str());
+        return false;
+    }
+    std::sort(tile_paths.begin(), tile_paths.end());
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr overview(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    std::uint64_t source_points = 0U;
+    for (const std::string& tile_path : tile_paths) {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr tile(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        if (pcl::io::loadPCDFile(tile_path, *tile) < 0 || tile->empty()) {
+            ROS_WARN_THROTTLE(
+                10.0, "[MapPublish] unreadable persistent tile: %s",
+                tile_path.c_str());
+            continue;
+        }
+        source_points += static_cast<std::uint64_t>(tile->size());
+        pcl::VoxelGrid<pcl::PointXYZ> filter;
+        filter.setInputCloud(tile);
+        const float leaf = static_cast<float>(persistent_display_voxel_);
+        filter.setLeafSize(leaf, leaf, leaf);
+        pcl::PointCloud<pcl::PointXYZ> filtered;
+        filter.filter(filtered);
+        *overview += filtered;
+    }
+    if (overview->empty()) return false;
+
+    // Keep the latched overview bounded. Increase the leaf deterministically
+    // until the configured cap is met; durable tiles remain unchanged.
+    float aggregate_leaf = static_cast<float>(persistent_display_voxel_);
+    while (overview->size() > persistent_display_max_points_ &&
+           aggregate_leaf < 2.0F) {
+        aggregate_leaf *= 1.35F;
+        pcl::VoxelGrid<pcl::PointXYZ> filter;
+        filter.setInputCloud(overview);
+        filter.setLeafSize(
+            aggregate_leaf, aggregate_leaf, aggregate_leaf);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr reduced(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        filter.filter(*reduced);
+        overview.swap(reduced);
+    }
+
+    sensor_msgs::PointCloud2 message;
+    pcl::toROSMsg(*overview, message);
+    message.header.stamp = ros::Time::now();
+    message.header.frame_id = map_frame_;
+    display_map_persistent_pub_.publish(message);
+    publishDisplayMapCompat(message, true);
+    persistent_display_tile_count_.store(
+        static_cast<std::uint64_t>(tile_paths.size()),
+        std::memory_order_release);
+    persistent_display_source_points_.store(
+        source_points, std::memory_order_release);
+    persistent_display_published_points_.store(
+        static_cast<std::uint64_t>(overview->size()),
+        std::memory_order_release);
+    persistent_display_last_publish_wall_ = ros::WallTime::now();
+    ROS_INFO("[MapPublish] scope=persistent_tiles topic=/display_map_persistent "
+             "tiles=%zu points=%zu voxel=%.3f",
+             tile_paths.size(), overview->size(), aggregate_leaf);
+    return true;
+}
+
 void NdtSlamNode::flushDirtyTiles() {
     if (!persistent_map_enabled_) return;
+    std::lock_guard<std::mutex> control_lock(tile_flush_control_mutex_);
     const bool persist_static_evidence =
         static_evidence_persistence_dirty_.exchange(
             false, std::memory_order_acq_rel);
@@ -10894,6 +11488,7 @@ void NdtSlamNode::flushDirtyTiles() {
         [this, flush_batch = std::move(flush_batch),
          persist_static_evidence]() mutable {
     try {
+    std::lock_guard<std::mutex> tile_io_lock(persistent_tile_io_mutex_);
 
     // 创建目录
     std::string reg_dir = persistent_map_root_dir_ + "/tiles_registration";
@@ -11028,8 +11623,18 @@ void NdtSlamNode::flushDirtyTiles() {
         flushed_tile_count_.fetch_add(flushed, std::memory_order_relaxed) +
         flushed;
 
+    const bool tile_manifest_written =
+        failed_layers.empty() && writePersistentTileManifest();
+    if (!tile_manifest_written) {
+        persistent_tile_manifest_failures_.fetch_add(
+            1U, std::memory_order_relaxed);
+        ROS_ERROR("[TileManifest] catalog commit failed; map session save "
+                  "will still verify every tile and fail closed on read");
+    }
+
     if (persist_static_evidence) {
-        if (!failed_layers.empty() || !writePersistentStaticEvidence()) {
+        if (!failed_layers.empty() || !tile_manifest_written ||
+            !writePersistentStaticEvidence()) {
             // The sidecar is authoritative only when its corresponding tile
             // batch is durable. Any partial tile failure keeps the previous
             // manifest/index pair and retries the newer snapshot later.
@@ -11040,6 +11645,13 @@ void NdtSlamNode::flushDirtyTiles() {
 
     ROS_INFO("[TileFlush] %d tiles flushed to disk | total_flushed=%d",
              flushed, total_flushed);
+    const ros::WallTime display_now = ros::WallTime::now();
+    if (flushed > 0 &&
+        (persistent_display_last_publish_wall_.isZero() ||
+         (display_now - persistent_display_last_publish_wall_).toSec() >=
+             persistent_display_refresh_sec_)) {
+        publishPersistentDisplayMapFromTiles();
+    }
     } catch (const std::exception& error) {
         ROS_ERROR("[TileFlush] worker failed: %s", error.what());
         if (persist_static_evidence) {
@@ -11090,6 +11702,7 @@ void NdtSlamNode::writeRuntimeStatus() {
     std::size_t objects_pts = 0U;
     std::size_t objects_clean_pts = 0U;
     std::size_t local_pts = 0U;
+    std::uint64_t display_generation = 0U;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
         global_pts = global_map_ ? global_map_->size() : 0U;
@@ -11098,6 +11711,8 @@ void NdtSlamNode::writeRuntimeStatus() {
         objects_pts = objects_map_ ? objects_map_->size() : 0U;
         objects_clean_pts = objects_clean_map_ ? objects_clean_map_->size() : 0U;
         local_pts = local_map_ ? local_map_->size() : 0U;
+        display_generation = latest_completed_map_bundle_.valid
+            ? latest_completed_map_bundle_.generation : 0U;
     }
 
     f << std::fixed << std::setprecision(2);
@@ -11112,6 +11727,23 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"delta_yaw_deg\": " << delta_yaw_ << ",\n";
     f << "  \"global_map_points\": " << global_pts << ",\n";
     f << "  \"display_map_points\": " << display_pts << ",\n";
+    f << "  \"display_map_scope\": \""
+      << display_map_compat_scope_ << "\",\n";
+    f << "  \"display_map_active_topic\": \"/display_map_active\",\n";
+    f << "  \"display_map_persistent_topic\": "
+      << "\"/display_map_persistent\",\n";
+    f << "  \"display_generation\": " << display_generation << ",\n";
+    f << "  \"display_active_keyframes\": " << active_keyframes_ << ",\n";
+    f << "  \"display_persistent_tile_count\": "
+      << persistent_display_tile_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"display_persistent_source_point_count\": "
+      << persistent_display_source_points_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"display_persistent_published_point_count\": "
+      << persistent_display_published_points_.load(
+             std::memory_order_relaxed)
+      << ",\n";
     f << "  \"ground_map_points\": " << ground_pts << ",\n";
     f << "  \"objects_map_points\": " << objects_pts << ",\n";
     f << "  \"objects_clean_map_points\": " << objects_clean_pts << ",\n";
@@ -11126,6 +11758,21 @@ void NdtSlamNode::writeRuntimeStatus() {
       << dirty_tile_count_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"flushed_tile_count\": "
       << flushed_tile_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"persistent_points_accepted\": "
+      << persistent_points_accepted_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"persistent_points_nonfinite_rejected\": "
+      << persistent_points_nonfinite_rejected_.load(
+             std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"persistent_points_bounds_rejected\": "
+      << persistent_points_bounds_rejected_.load(
+             std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"persistent_tile_manifest_failures\": "
+      << persistent_tile_manifest_failures_.load(
+             std::memory_order_relaxed)
+      << ",\n";
     f << "  \"channel_candidate_points\": "
       << channel_candidate_points_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"candidate_removed_before_auth\": "
@@ -11170,6 +11817,16 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"static_evidence_latest_sequence\": "
       << static_obstacle_evidence_index_.latestObservationSequence()
       << ",\n";
+    const StaticEvidenceDiagnostics static_diagnostics =
+        static_obstacle_evidence_index_.diagnostics();
+    f << "  \"static_evidence_reset_by_time_gap\": "
+      << static_diagnostics.reset_by_time_gap << ",\n";
+    f << "  \"static_evidence_reset_by_sequence_gap\": "
+      << static_diagnostics.reset_by_sequence_gap << ",\n";
+    f << "  \"static_evidence_pending_observation_count\": "
+      << static_diagnostics.pending_observation_count << ",\n";
+    f << "  \"static_evidence_pending_stable_duration\": "
+      << static_diagnostics.pending_stable_duration << ",\n";
     f << "  \"static_authority\": \""
       << staticEvidenceAuthorityName(runtime_static_authority) << "\",\n";
     f << "  \"origin_authority\": \""
@@ -15601,6 +16258,12 @@ void NdtSlamNode::runPendingCargoAvoidance(
     fusion_input.localization_valid =
         relocalization_pose_reliable_ && !tracking_lost_;
     fusion_input.pending_envelope_valid = envelope.valid;
+    fusion_input.pending_envelope_source = envelope.source;
+    fusion_input.pending_pose_source = envelope.pose_source;
+    fusion_input.pending_self_evidence_valid =
+        pending_cargo_self_evidence_.valid;
+    fusion_input.pending_authority_confidence =
+        pending_cargo_self_evidence_.authority_confidence;
 
     CargoSafetyInput live_input;
     live_input.evaluation_time_sec = stamp.toSec();
@@ -15702,6 +16365,158 @@ void NdtSlamNode::runPendingCargoAvoidance(
             .footprint_distance_m;
         fusion_input.live.clearance_m = live_result.most_dangerous_cluster
             .conservative_clearance_m;
+    }
+
+    // Evaluate the positively classified external cloud independently. The
+    // full shell above intentionally retains unresolved points for diagnostic
+    // sensitivity, but unresolved points must never authorize an official
+    // pending warning.
+    CargoSafetyInput external_live_input = live_input;
+    external_live_input.obstacle_cloud_base = pending_external_shell;
+    external_live_input.obstacle_roi_finite_points =
+        pending_external_shell->size();
+    external_live_input.obstacle_roi_coverage_ratio = std::clamp(
+        static_cast<float>(pending_external_shell->size()) /
+            static_cast<float>(std::max<std::size_t>(
+                1U, cargo_safety_evaluator_.config()
+                        .minimum_roi_finite_points)),
+        0.0F, 1.0F);
+    const CargoSafetyResult external_live_result =
+        cargo_safety_evaluator_.evaluate(external_live_input);
+    std::vector<CargoObstacleObservation> pending_observations;
+    if (external_live_result.input_valid &&
+        external_live_result.warning_valid &&
+        external_live_result.fault == CargoSafetyFault::NONE) {
+        pending_observations.reserve(
+            external_live_result.cluster_evidence.size());
+        const float map_cell_m =
+            static_obstacle_evidence_index_.config().cell_size_m;
+        const Eigen::Vector3d cargo_center_map_3d =
+            pose_map_base * envelope.center_base.cast<double>();
+        for (std::size_t evidence_index = 0U;
+             evidence_index < external_live_result.cluster_evidence.size();
+             ++evidence_index) {
+            const CargoSafetyClusterEvidence& evidence =
+                external_live_result.cluster_evidence[evidence_index];
+            if (evidence.warning_code !=
+                    CargoSafetyEvaluator::kLevel1Code &&
+                evidence.warning_code !=
+                    CargoSafetyEvaluator::kLevel2Code) {
+                continue;
+            }
+            CargoObstacleObservation observation;
+            observation.source_index = evidence_index;
+            observation.centroid_map = (
+                pose_map_base *
+                evidence.centroid_base.getVector3fMap().cast<double>())
+                    .cast<float>();
+            const Eigen::Vector3d top_map =
+                pose_map_base * Eigen::Vector3d(
+                    evidence.centroid_base.x, evidence.centroid_base.y,
+                    evidence.obstacle_top_z95_m);
+            observation.top_z95_map = static_cast<float>(top_map.z());
+            observation.footprint_distance_m =
+                evidence.footprint_distance_m;
+            observation.conservative_clearance_m =
+                evidence.conservative_clearance_m;
+            observation.point_count = evidence.point_count;
+            observation.warning_code = evidence.warning_code;
+            observation.source_validated = true;
+            observation.validation_shell_m = shell_m;
+            observation.provenance =
+                ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY;
+            observation.cargo_center_map =
+                cargo_center_map_3d.head<2>().cast<float>();
+            observation.cargo_center_valid =
+                cargo_center_map_3d.allFinite();
+
+            float min_x = std::numeric_limits<float>::infinity();
+            float max_x = -std::numeric_limits<float>::infinity();
+            float min_y = std::numeric_limits<float>::infinity();
+            float max_y = -std::numeric_limits<float>::infinity();
+            float min_z = std::numeric_limits<float>::infinity();
+            float max_z = -std::numeric_limits<float>::infinity();
+            std::set<std::int64_t> occupied_cells;
+            for (int point_index : evidence.point_indices) {
+                if (point_index < 0 ||
+                    static_cast<std::size_t>(point_index) >=
+                        pending_external_shell->size()) {
+                    continue;
+                }
+                const pcl::PointXYZ& point =
+                    pending_external_shell->points[
+                        static_cast<std::size_t>(point_index)];
+                min_x = std::min(min_x, point.x);
+                max_x = std::max(max_x, point.x);
+                min_y = std::min(min_y, point.y);
+                max_y = std::max(max_y, point.y);
+                min_z = std::min(min_z, point.z);
+                max_z = std::max(max_z, point.z);
+                const Eigen::Vector3d point_map =
+                    pose_map_base * point.getVector3fMap().cast<double>();
+                if (!point_map.allFinite()) continue;
+                const auto cell_x = static_cast<std::int32_t>(
+                    std::floor(point_map.x() / map_cell_m));
+                const auto cell_y = static_cast<std::int32_t>(
+                    std::floor(point_map.y() / map_cell_m));
+                occupied_cells.insert(
+                    packStaticEvidenceCell(cell_x, cell_y));
+            }
+            if (std::isfinite(min_x) && std::isfinite(max_x) &&
+                std::isfinite(min_y) && std::isfinite(max_y) &&
+                std::isfinite(min_z) && std::isfinite(max_z)) {
+                const float extent_x = std::max(0.0F, max_x - min_x);
+                const float extent_y = std::max(0.0F, max_y - min_y);
+                observation.xy_area_m2 = extent_x * extent_y;
+                observation.long_side_m = std::max(extent_x, extent_y);
+                observation.height_span_m =
+                    std::max(0.0F, max_z - min_z);
+                observation.occupied_cells = occupied_cells.size();
+            }
+            observation.occupied_map_cells.assign(
+                occupied_cells.begin(), occupied_cells.end());
+            pending_observations.push_back(std::move(observation));
+        }
+    }
+    const CargoObstacleTrackerDecision pending_obstacle_decision =
+        pending_cargo_obstacle_tracker_.update(
+            stamp.toSec(), pending_observations);
+    fusion_input.pending_external_separation_valid =
+        pending_cargo_self_evidence_.valid &&
+        external_live_result.has_cluster_evidence;
+    fusion_input.pending_external_obstacle_authorized =
+        pending_obstacle_decision.confirmed_hazard;
+    fusion_input.pending_external_obstacle_track_id =
+        pending_obstacle_decision.selected_track_id;
+    fusion_input.pending_external_obstacle_confirmations =
+        pending_obstacle_decision.selected_confirm_count;
+    fusion_input.pending_external_provenance_valid =
+        pending_obstacle_decision.confirmed_hazard &&
+        pending_obstacle_decision.selected_provenance !=
+            ExternalProvenance::NONE;
+    fusion_input.pending_external_geometry_valid =
+        pending_obstacle_decision.selected_large_geometry_valid;
+    if (pending_obstacle_decision.confirmed_hazard &&
+        external_live_result.has_cluster_evidence) {
+        fusion_input.live.available =
+            external_live_input.obstacle_observation_valid;
+        fusion_input.live.reliable =
+            external_live_result.input_valid &&
+            external_live_result.warning_valid &&
+            external_live_result.fault == CargoSafetyFault::NONE;
+        fusion_input.live.hazard = true;
+        fusion_input.live.warning_code =
+            pending_obstacle_decision.warning_code;
+        fusion_input.live.coverage =
+            external_live_input.obstacle_roi_coverage_ratio;
+        fusion_input.live.distance_m =
+            external_live_result.most_dangerous_cluster
+                .footprint_distance_m;
+        fusion_input.live.clearance_m =
+            external_live_result.most_dangerous_cluster
+                .conservative_clearance_m;
+        fusion_input.live.reason =
+            "pending_external_track_confirmed";
     }
 
     StaticHeightQueryResult static_result;
@@ -15858,7 +16673,25 @@ void NdtSlamNode::runPendingCargoAvoidance(
            << pending_external_shell->size()
            << ",\"pending_provisional_status\":\""
            << fused.provisional_status
-           << "\",\"risk_live\":"
+           << "\",\"pending_warning_promotion_policy\":\""
+           << pendingWarningPromotionPolicyName(
+                  cargo_avoidance_fusion_config_
+                      .pending_warning_promotion_policy)
+           << "\",\"pending_warning_authorized\":"
+           << (fused.pending_warning_authorized ? "true" : "false")
+           << ",\"pending_authority_reason\":\""
+           << fused.pending_authority_reason
+           << "\",\"pending_external_obstacle_track_id\":"
+           << fusion_input.pending_external_obstacle_track_id
+           << ",\"pending_external_obstacle_confirmations\":"
+           << fusion_input.pending_external_obstacle_confirmations
+           << ",\"pending_external_provenance_valid\":"
+           << (fusion_input.pending_external_provenance_valid
+                   ? "true" : "false")
+           << ",\"pending_external_geometry_valid\":"
+           << (fusion_input.pending_external_geometry_valid
+                   ? "true" : "false")
+           << ",\"risk_live\":"
            << (fused.risk_live ? "true" : "false")
            << ",\"risk_static\":"
            << (fused.risk_static ? "true" : "false")
@@ -15907,12 +16740,15 @@ void NdtSlamNode::runPendingCargoAvoidance(
         std::numeric_limits<float>::quiet_NaN();
     float provisional_clearance =
         std::numeric_limits<float>::quiet_NaN();
+    const CargoSafetyResult& pending_live_geometry_result =
+        fused.pending_warning_authorized
+            ? external_live_result : live_result;
     const bool use_live_geometry = fused.risk_live &&
-        live_result.has_cluster_evidence &&
-        live_result.warning_code == provisional_code;
+        pending_live_geometry_result.has_cluster_evidence &&
+        pending_live_geometry_result.warning_code == provisional_code;
     if (use_live_geometry) {
         const CargoSafetyClusterEvidence& evidence =
-            live_result.most_dangerous_cluster;
+            pending_live_geometry_result.most_dangerous_cluster;
         provisional_count = static_cast<std::uint32_t>(
             std::min<std::size_t>(
                 evidence.point_count,
@@ -16081,7 +16917,23 @@ void NdtSlamNode::publishCargoRecognitionStatus(
     status.identity_confidence = hook_fixed_cargo_.identity_confidence;
     status.shape_confidence = hook_fixed_cargo_.shape_confidence;
     status.overall_confidence = hook_fixed_cargo_.overall_lock_confidence;
-    status.detector_reason = hook_fixed_cargo_.reject_reason;
+    {
+        std::ostringstream detector_reason;
+        detector_reason << hook_fixed_cargo_.reject_reason
+                        << ";roi_finite_points="
+                        << hook_fixed_cargo_.roi_finite_points
+                        << ";hag_candidate_points="
+                        << hook_fixed_cargo_.hag_candidate_points
+                        << ";candidate_components="
+                        << hook_fixed_cargo_.candidate_count
+                        << ";merged_components="
+                        << hook_fixed_cargo_.merged_component_count
+                        << ";selected_points="
+                        << (hook_fixed_cargo_.core_points_base
+                                ? hook_fixed_cargo_.core_points_base->size()
+                                : 0U);
+        status.detector_reason = detector_reason.str();
+    }
     status.association_reason = hook_lock_.association_reject_reason;
     status.vertical_reason = hook_lock_.vertical_reject_reason;
 
@@ -16230,6 +17082,7 @@ void NdtSlamNode::updateAndPublishCargoSwing(
         const double hoist_age_sec = hoist_stamp.isZero()
             ? std::numeric_limits<double>::infinity()
             : (stamp - hoist_stamp).toSec();
+        input.hoist_state_available = !hoist_stamp.isZero();
         input.hoist_state_fresh = cargo_hoist_state_message_.valid &&
             cargo_hoist_state_message_.fresh &&
             std::isfinite(hoist_age_sec) && hoist_age_sec >= 0.0 &&
@@ -16341,7 +17194,10 @@ void NdtSlamNode::updateAndPublishCargoSwing(
         cargo_swing_result_.torsion_state_duration_sec;
     status.recommended_action = static_cast<std::uint8_t>(
         cargo_swing_result_.recommended_action);
-    status.reason = cargo_swing_result_.reason;
+    status.reason = std::string("readiness=") +
+        cargoSkewPullReadinessName(
+            cargo_swing_result_.skew_pull_readiness) +
+        ";" + cargo_swing_result_.reason;
     cargo_swing_status_pub_.publish(status);
 
     visualization_msgs::Marker marker;

@@ -221,6 +221,15 @@ persistent_map:
   tile_voxel_display: 0.10
   tile_voxel_ground: 0.15
   tile_voxel_objects: 0.08
+  # `/display_map_persistent` is rebuilt from durable display tiles after
+  # startup/flush. RViz uses this bounded overview; `/display_map_active`
+  # remains the high-detail active window.
+  persistent_display_voxel: 0.25
+  persistent_display_max_points: 1500000
+  persistent_display_refresh_sec: 30.0
+  # Compatibility `/display_map`; RViz explicitly uses the persistent topic.
+  # Allowed values: active_window, persistent_tiles.
+  display_map_compat_scope: active_window
 
 # 磁盘保护
 disk_guard:
@@ -730,7 +739,10 @@ cargo_safety:
   static_map_minimum_matched_cells: 6
   static_map_maximum_query_area_cells: 4096
   static_map_pre_cargo_sequence_gap: 2
-  static_map_max_observation_gap_sec: 0.8
+  # Clean builds are asynchronous and routinely complete slower than 0.8 s.
+  # This gap still requires adjacent build sequence IDs; it tolerates build
+  # latency without treating NOT_IN_VIEW frames as continuous evidence.
+  static_map_max_observation_gap_sec: 5.0
   static_map_max_sequence_gap: 1
   # Sparse 2.5D+ height field. Only mature/approved cells enter formal use.
   static_height_z_bin_m: 0.10
@@ -739,6 +751,12 @@ cargo_safety:
   static_height_maximum_merge_gap_m: 0.18
   # Clear 14 requires live ROI coverage plus a reliable static contract.
   fusion_minimum_live_coverage_for_clear: 0.05
+  # Pending geometry may promote 17/18 only after cargo-self separation and a
+  # temporally confirmed external obstacle identity. "legacy_any_pending" is
+  # an explicit unsafe compatibility mode and must not be used in production.
+  fusion_pending_warning_promotion_policy: evidence_backed_only
+  fusion_pending_minimum_authority_confidence: 0.55
+  # Compatibility kill switch only. true does not bypass the typed policy.
   fusion_provisional_warning_to_official_code: true
   motion_corridor_enabled: true
   motion_corridor_immediate_near_field_m: 0.30

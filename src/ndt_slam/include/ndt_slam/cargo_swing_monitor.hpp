@@ -72,6 +72,20 @@ enum class CargoHookAnchorAuthority : std::uint8_t {
   EXTERNAL_CONTROLLER,
 };
 
+enum class CargoSkewPullReadiness : std::uint8_t {
+  HOIST_MISSING = 0,
+  HOIST_STALE,
+  HOOK_ANCHOR_MISSING,
+  HOOK_ANCHOR_NONAUTHORITATIVE,
+  ROPE_LENGTH_MISSING,
+  ANGLE_NONAUTHORITATIVE,
+  HISTORY_NOT_MATURE,
+  READY,
+};
+
+const char* cargoSkewPullReadinessName(
+    CargoSkewPullReadiness readiness) noexcept;
+
 const char* cargoHookAnchorAuthorityName(
     CargoHookAnchorAuthority authority) noexcept;
 
@@ -162,6 +176,7 @@ struct CargoSwingInput {
   CargoPhysicalMotionState crane_motion_state =
       CargoPhysicalMotionState::UNKNOWN;
   HoistMotionState hoist_motion_state = HoistMotionState::UNKNOWN;
+  bool hoist_state_available = false;
   bool hoist_state_fresh = false;
   float hoist_speed_mps = 0.0F;
 };
@@ -202,6 +217,8 @@ struct CargoSwingResult {
   float torsion_state_duration_sec = 0.0F;
   bool hoist_up_confirmed = false;
   bool alarm_inhibited = false;
+  CargoSkewPullReadiness skew_pull_readiness =
+      CargoSkewPullReadiness::HOIST_MISSING;
   CargoSwingRecommendedAction recommended_action =
       CargoSwingRecommendedAction::NONE;
   std::string reason = "not_evaluated";

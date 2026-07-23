@@ -51,6 +51,7 @@ struct PendingCargoSelfEvidence {
   std::uint64_t track_segment_id = 0U;
   CargoObbFootprint tight_identity_obb;
   std::vector<Eigen::Vector3f> identity_points_base;
+  float authority_confidence = 0.0F;
   float point_match_radius_m = 0.10F;
   double evidence_stamp_sec = 0.0;
   bool formal_obb_only_authorized = false;

@@ -345,6 +345,23 @@ bool MapSessionSnapshot::saveAtomic(const MapSessionSaveRequest& request,
       throw std::runtime_error("manifest_write_failed");
     }
 
+    // Read the complete temporary transaction back through the same strict
+    // verifier used at restart. A write that cannot be reloaded never becomes
+    // visible under the requested session directory.
+    const MapSessionLoadResult verification =
+        MapSessionSnapshot::loadVerified(temporary.string());
+    if (!verification.valid) {
+      throw std::runtime_error(
+          "temporary_session_verification_failed:" + verification.reason);
+    }
+    if (verification.metadata.active_only != request.metadata.active_only ||
+        verification.metadata.map_generation !=
+            request.metadata.map_generation ||
+        verification.static_evidence_revision !=
+            request.static_evidence->revision) {
+      throw std::runtime_error("temporary_session_identity_mismatch");
+    }
+
     fs::rename(temporary, target);
     if (reason) *reason = target.string();
     return true;
