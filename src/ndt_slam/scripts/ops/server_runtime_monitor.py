@@ -276,6 +276,26 @@ class SafetyAggregator:
         transition = self._transition(previous, record)
         if transition:
             emitted.append(transition)
+        # A fault-to-hazard edge has two independent operational meanings:
+        # the fault cleared and a positive warning became active. Preserve
+        # both events instead of hiding the warning behind the fault branch.
+        if (previous is not None and previous.code in FAULT_CODES and
+                record.code in HAZARD_CODES):
+            warning_transition = dict(transition or {})
+            warning_transition.update({
+                "event": "SAFETY_WARNING_ENTER",
+                "wall_time": record.wall_time,
+                "source_stamp": record.source_stamp,
+                "previous_code": previous.code,
+                "code": record.code,
+                "reason": record.reason,
+                "cargo_track_id": record.cargo_track_id,
+                "obstacle_track_id": record.obstacle_track_id,
+                "distance_m": record.nearest_distance_m,
+                "clearance_m": record.vertical_clearance_m,
+                "provenance": record.provenance,
+            })
+            emitted.append(warning_transition)
         for event in emitted:
             self.events.append(event)
         return emitted
@@ -447,6 +467,10 @@ class SafetyAggregator:
             "source_time_rollbacks": self.time_rollbacks,
             "status_code_mismatches": self.status_code_mismatches,
         }
+
+    def current_summary(self) -> Dict[str, Any]:
+        """Return a detached current record for optional presentation paths."""
+        return dataclasses.asdict(self.records[-1]) if self.records else {}
 
 
 class CargoMonitorGate:
@@ -1149,6 +1173,13 @@ class RosRuntimeMonitor:
         self._episode_recognition_failures_start = 0
         self._episode_recognition_messages_start = 0
         self._episode_swing_messages_start = 0
+        self.loaded_episode_seen = False
+        self.cargo_active_path_exercised = False
+        self.recognition_sample_seen_during_loaded = False
+        self.geometry_sample_seen_during_loaded = False
+        self.terminal_path_exercised = False
+        self.active_path_last_error: Optional[str] = None
+        self.monitor_degraded = False
         self._geo_track_samples: Dict[int, int] = {}
         self._geo_track_episodes: Dict[int, str] = {}
         self._geo_last_authoritative: Dict[int, float] = {}
@@ -1275,6 +1306,13 @@ class RosRuntimeMonitor:
         self.writer.submit("text", ("logs/cargo_terminal.log", line))
         print(line, flush=True)
 
+    def _archive_typed_event(self, relative: str,
+                             event: Mapping[str, Any]) -> None:
+        """Archive an event to an additional stream without announcing twice."""
+        payload = dict(event)
+        payload.setdefault("wall_time", time.time())
+        self.writer.submit("jsonl", (relative, payload))
+
     def _gravity_callback(self, message: Any) -> None:
         wall = time.time()
         source_stamp = float(message.header.stamp.to_sec())
@@ -1305,6 +1343,7 @@ class RosRuntimeMonitor:
             self.latest_gravity = dict(row)
             if any(event["event"] == "GRAVITY_LOADED"
                    for event in events):
+                self.loaded_episode_seen = True
                 self._episode_geometry.clear()
                 self._episode_geometry_total_count = 0
                 self._episode_geometry_dropped_count = 0
@@ -1338,7 +1377,8 @@ class RosRuntimeMonitor:
                                    list(row.keys()), row))
         for event in events:
             self._emit_typed_event("samples/gravity_events.jsonl", event)
-            self._emit_typed_event("samples/cargo_episode_events.jsonl", event)
+            self._archive_typed_event(
+                "samples/cargo_episode_events.jsonl", event)
             if event["event"] in (
                     "GRAVITY_LOST_DURING_CARGO", "CARGO_EPISODE_CLOSED"):
                 self._write_cargo_episode_report(
@@ -1367,7 +1407,8 @@ class RosRuntimeMonitor:
             self.latest_gravity["cargo_monitor_active"] = False
         for event in events:
             self._emit_typed_event("samples/gravity_events.jsonl", event)
-            self._emit_typed_event("samples/cargo_episode_events.jsonl", event)
+            self._archive_typed_event(
+                "samples/cargo_episode_events.jsonl", event)
             if event["event"] in (
                     "GRAVITY_LOST_DURING_CARGO", "CARGO_EPISODE_CLOSED"):
                 self._write_cargo_episode_report(
@@ -1482,6 +1523,7 @@ class RosRuntimeMonitor:
             if not self.cargo_gate.active:
                 return
             episode_id = self.cargo_gate.episode_id
+            self.recognition_sample_seen_during_loaded = True
         wall = time.time()
         source_stamp = float(message.header.stamp.to_sec())
         if not self._accept_recognition_source_stamp(source_stamp, wall):
@@ -1632,6 +1674,11 @@ class RosRuntimeMonitor:
         sway = int(message.sway_state)
         skew = int(message.skew_pull_state)
         torsion = int(message.torsion_state)
+        swing_reason = str(message.reason)
+        skew_readiness = "UNKNOWN"
+        if swing_reason.startswith("readiness="):
+            skew_readiness = swing_reason.split(";", 1)[0].split(
+                "=", 1)[1]
         row = {
             "wall_time": wall,
             "source_stamp": source_stamp,
@@ -1677,7 +1724,8 @@ class RosRuntimeMonitor:
                 message, "torsion_state_duration_sec",
                 message.state_duration_sec)),
             "recommended_action": int(message.recommended_action),
-            "reason": str(message.reason),
+            "skew_pull_readiness": skew_readiness,
+            "reason": swing_reason,
         }
         fields = list(row.keys())
         with self._state_lock:
@@ -1846,6 +1894,7 @@ class RosRuntimeMonitor:
             if (not self.cargo_gate.active or
                     self.cargo_gate.episode_id != episode_id):
                 return
+            self.geometry_sample_seen_during_loaded = True
             self.latest_geometry = dict(parsed)
             self._episode_geometry_message_count += 1
             self._episode_geometry_total_count += 1
@@ -2012,8 +2061,9 @@ class RosRuntimeMonitor:
                 "samples/avoidance_pipeline_events.jsonl", event)
         return row
 
-    def _cargo_terminal_line(self, now: float,
-                             pipeline: Mapping[str, Any]) -> str:
+    def _cargo_terminal_line(
+            self, now: float, pipeline: Mapping[str, Any],
+            current: Optional[Mapping[str, Any]] = None) -> str:
         with self._state_lock:
             gravity = dict(self.latest_gravity)
             geometry = dict(self.latest_geometry)
@@ -2021,7 +2071,7 @@ class RosRuntimeMonitor:
             swing = dict(self.latest_swing)
             episode_id = self.cargo_gate.episode_id
             gate_state = self.cargo_gate.state
-        current = self.aggregator.current_summary()
+        current_record = dict(current or {})
         gravity_age = (now - float(gravity.get("wall_time", now))
                        if gravity else float("nan"))
         return ("[CARGO_RT] episode={episode} gravity={gravity} "
@@ -2033,6 +2083,7 @@ class RosRuntimeMonitor:
                 "distance={distance} clearance={clearance} "
                 "obstacle_track={obstacle_track} provenance={provenance} "
                 "sway={sway} skew={skew} torsion={torsion} "
+                "skew_readiness={skew_readiness} "
                 "offset={offset} angle={angle} speed={speed} "
                 "hoist={hoist} hoist_fresh={hoist_fresh} "
                 "static={static} session_verified={session_verified} "
@@ -2054,13 +2105,15 @@ class RosRuntimeMonitor:
                     raw=pipeline.get("raw_typed_code"),
                     final=pipeline.get("final_typed_code"),
                     heartbeat=pipeline.get("heartbeat_code"),
-                    distance=current.get("distance_m"),
-                    clearance=current.get("clearance_m"),
-                    obstacle_track=current.get("obstacle_track_id"),
-                    provenance=current.get("provenance"),
+                    distance=current_record.get("nearest_distance_m"),
+                    clearance=current_record.get("vertical_clearance_m"),
+                    obstacle_track=current_record.get("obstacle_track_id"),
+                    provenance=current_record.get("provenance"),
                     sway=swing.get("sway_state", "-"),
                     skew=swing.get("skew_pull_state", "-"),
                     torsion=swing.get("torsion_state", "-"),
+                    skew_readiness=swing.get(
+                        "skew_pull_readiness", "-"),
                     offset=swing.get("offset_m", "-"),
                     angle=swing.get("angle_deg", "-"),
                     speed=swing.get("horizontal_speed_mps", "-"),
@@ -2069,7 +2122,7 @@ class RosRuntimeMonitor:
                     static=pipeline.get("static_authority", "-"),
                     session_verified=pipeline.get(
                         "map_session_verified", "-"),
-                    reason=current.get("reason", "-"))
+                    reason=current_record.get("reason", "-"))
 
     def _odom_callback(self, message: Any) -> None:
         wall = time.time()
@@ -3006,6 +3059,13 @@ class RosRuntimeMonitor:
             "avoidance_pipeline_ready": False,
             "static_session_ready": False,
             "extended_data_ready": False,
+            "loaded_episode_seen": False,
+            "cargo_active_path_exercised": False,
+            "recognition_sample_seen_during_loaded": False,
+            "geometry_sample_seen_during_loaded": False,
+            "terminal_path_exercised": False,
+            "active_path_last_error": None,
+            "monitor_degraded": False,
             "received_topics": {},
             "first_message_wall": {},
             "last_message_wall": {},
@@ -3109,6 +3169,18 @@ class RosRuntimeMonitor:
                 _rdy["avoidance_pipeline_ready"] = pipeline_ready
                 _rdy["static_session_ready"] = static_status[
                     "map_session_verified"]
+                _rdy["loaded_episode_seen"] = self.loaded_episode_seen
+                _rdy["cargo_active_path_exercised"] = (
+                    self.cargo_active_path_exercised)
+                _rdy["recognition_sample_seen_during_loaded"] = (
+                    self.recognition_sample_seen_during_loaded)
+                _rdy["geometry_sample_seen_during_loaded"] = (
+                    self.geometry_sample_seen_during_loaded)
+                _rdy["terminal_path_exercised"] = (
+                    self.terminal_path_exercised)
+                _rdy["active_path_last_error"] = (
+                    self.active_path_last_error)
+                _rdy["monitor_degraded"] = self.monitor_degraded
                 _rdy["extended_data_ready"] = (
                     _rdy["data_ready"]
                     and _rdy["recognition_data_ready"]
@@ -3123,10 +3195,28 @@ class RosRuntimeMonitor:
             summary = self.snapshot(now)
             pipeline = self._record_pipeline_snapshot(now)
             if pipeline.get("cargo_monitor_active"):
-                cargo_line = self._cargo_terminal_line(now, pipeline)
-                print(cargo_line, flush=True)
-                self.writer.submit("text", ("logs/cargo_terminal.log",
-                                             cargo_line))
+                self.cargo_active_path_exercised = True
+                try:
+                    cargo_line = self._cargo_terminal_line(
+                        now, pipeline, summary.get("current") or {})
+                    print(cargo_line, flush=True)
+                    self.writer.submit("text", (
+                        "logs/cargo_terminal.log", cargo_line))
+                    self.terminal_path_exercised = True
+                    self.active_path_last_error = None
+                except Exception as error:
+                    # Terminal rendering is optional observability. It must
+                    # never terminate collection of safety evidence.
+                    self.monitor_degraded = True
+                    self.active_path_last_error = (
+                        type(error).__name__ + ": " + str(error))
+                    self._emit_typed_event(
+                        "samples/monitor_internal_events.jsonl", {
+                            "event": "MONITOR_INTERNAL_ERROR",
+                            "wall_time": now,
+                            "component": "cargo_terminal",
+                            "reason": self.active_path_last_error,
+                        })
 
             # ── record message receipt timestamps ──
             if self.last_odom_wall:

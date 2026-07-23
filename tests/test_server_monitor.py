@@ -2,6 +2,7 @@ import csv
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -53,6 +54,28 @@ class SafetyAggregatorTest(unittest.TestCase):
         self.assertEqual(first[0]["event"], "SAFETY_ENTER")
         self.assertEqual(reason[0]["event"], "SAFETY_REASON_CHANGE")
         self.assertEqual(warning[0]["event"], "SAFETY_WARNING_ENTER")
+
+    def test_fault_to_hazard_emits_clear_and_warning_edges(self):
+        aggregate = SafetyAggregator()
+        aggregate.ingest(sample(30, "hook_not_loaded"),
+                         source_stamp=1, wall_time=1)
+        events = aggregate.ingest(sample(17, "hazard"),
+                                  source_stamp=2, wall_time=2)
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["SAFETY_FAULT_CLEAR", "SAFETY_WARNING_ENTER"])
+
+    def test_current_summary_is_detached_and_uses_record_field_names(self):
+        aggregate = SafetyAggregator()
+        aggregate.ingest(
+            sample(17, nearest_obstacle_distance_m=0.4,
+                   conservative_vertical_clearance_m=-0.2),
+            source_stamp=1, wall_time=1)
+        current = aggregate.current_summary()
+        self.assertEqual(current["nearest_distance_m"], 0.4)
+        self.assertEqual(current["vertical_clearance_m"], -0.2)
+        current["code"] = 99
+        self.assertEqual(aggregate.records[-1].code, 17)
 
     def test_longest_continuous_33_and_34(self):
         aggregate = SafetyAggregator()
@@ -277,6 +300,31 @@ class CargoMonitorReadinessTest(unittest.TestCase):
             values = [True, True, True, True]
             values[missing] = False
             self.assertFalse(cargo_monitor_ready(True, *values))
+
+
+class CargoTerminalFormattingTest(unittest.TestCase):
+    def test_terminal_uses_snapshot_without_aggregator_method_lookup(self):
+        monitor = RosRuntimeMonitor.__new__(RosRuntimeMonitor)
+        monitor._state_lock = threading.RLock()
+        monitor.latest_gravity = {"wall_time": 9.0}
+        monitor.latest_geometry = {}
+        monitor.latest_recognition = {}
+        monitor.latest_swing = {}
+        monitor.cargo_gate = CargoMonitorGate()
+        monitor.cargo_gate.update(
+            valid=True, fresh=True, state=3, wall_time=9.0)
+        line = monitor._cargo_terminal_line(
+            10.0,
+            {"raw_typed_code": 33, "final_typed_code": 33,
+             "heartbeat_code": 33},
+            {"nearest_distance_m": 0.4,
+             "vertical_clearance_m": -0.2,
+             "obstacle_track_id": 7,
+             "provenance": 3,
+             "reason": "pending_not_authorized"})
+        self.assertIn("distance=0.4", line)
+        self.assertIn("obstacle_track=7", line)
+        self.assertIn("reason=pending_not_authorized", line)
 
 
 class StaticStatusSelectionTest(unittest.TestCase):
