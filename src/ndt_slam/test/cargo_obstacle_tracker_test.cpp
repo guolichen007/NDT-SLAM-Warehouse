@@ -119,6 +119,30 @@ TEST(CargoObstacleTracker, UnvalidatedFrameResetsValidatedStreak) {
   EXPECT_EQ(tracker.tracks().front().validated_consecutive_observations, 1);
 }
 
+TEST(CargoObstacleTracker,
+     PendingLargeGeometryMustBeConsecutiveBeforeWarning) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.confirm_frames = 3;
+  config.require_large_geometry_for_warning = true;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation large = staticCargo(0U, 0.0F, 0.0F);
+  large.provenance =
+      ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY;
+  EXPECT_FALSE(tracker.update(1.0, {large}).confirmed_hazard);
+  EXPECT_FALSE(tracker.update(1.2, {large}).confirmed_hazard);
+
+  CargoObstacleObservation incomplete = hazard(0U, 0.0F, 0.0F);
+  const auto rejected = tracker.update(1.4, {incomplete});
+  EXPECT_FALSE(rejected.confirmed_hazard);
+  EXPECT_EQ(rejected.selected_geometry_confirm_count, 0);
+
+  EXPECT_FALSE(tracker.update(1.6, {large}).confirmed_hazard);
+  EXPECT_FALSE(tracker.update(1.8, {large}).confirmed_hazard);
+  const auto confirmed = tracker.update(2.0, {large});
+  EXPECT_TRUE(confirmed.confirmed_hazard);
+  EXPECT_EQ(confirmed.selected_geometry_confirm_count, 3);
+}
+
 TEST(CargoObstacleTracker, TwentyPointTrackCannotBecomeStaticCargo) {
   CargoObstacleTracker tracker;
   CargoObstacleObservation observation = hazard(0U, 0.0F, 0.0F);

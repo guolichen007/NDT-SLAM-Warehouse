@@ -874,8 +874,11 @@ cargo_geometry_fusion:
   minimum_live_shape_confidence_for_shrink: 0.75
   minimum_physical_length_m: 0.30
   minimum_physical_width_m: 0.20
-  formal_transition_start_length_m: 4.0
-  formal_transition_start_width_m: 3.0
+  # Formal geometry starts from the multi-frame measured shape. The 4x3x3
+  # configured box remains a pending-only conservative envelope and must not
+  # inflate a physically confirmed cargo into a false obstacle query.
+  formal_transition_start_length_m: 0.30
+  formal_transition_start_width_m: 0.20
   configured_fallback_is_formal_floor: false
 
 cargo_recognition:
@@ -1047,8 +1050,8 @@ hook_cargo_lock:
   top_bottom_center_agreement_m: 0.25
   candidate_hold_sec: 1.0
   candidate_max_weak_frames: 10
-  # Window consensus tolerates two short gaps, but weak detections cannot keep
-  # a non-progressing candidate alive indefinitely.
+  # Short gaps stop progress but retain the already confirmed window.
+  # candidate_progress_timeout_sec remains the sole stalled-window reset.
   candidate_window_frames: 12
   candidate_required_consistent_frames: 7
   candidate_max_gap_frames: 2
@@ -1176,8 +1179,10 @@ odom_anchored_cargo_box:
   default_size_z: 0.25
 
   # 检测到货物后的尺寸范围
-  min_size_x: 0.60
-  min_size_y: 0.40
+  # Match the compact-cargo physical contract (minimum area/points still
+  # apply); do not reject a 30x20 cm footprint before compact confirmation.
+  min_size_x: 0.30
+  min_size_y: 0.20
   min_size_z: 0.20
   max_size_x: 4.00
   max_size_y: 1.60

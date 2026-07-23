@@ -37,8 +37,8 @@ struct CargoGeometryFusionConfig {
   float minimum_live_shape_confidence_for_shrink = 0.75F;
   float minimum_physical_length_m = 0.30F;
   float minimum_physical_width_m = 0.20F;
-  float formal_transition_start_length_m = 4.0F;
-  float formal_transition_start_width_m = 3.0F;
+  float formal_transition_start_length_m = 0.30F;
+  float formal_transition_start_width_m = 0.20F;
   bool configured_fallback_is_formal_floor = false;
 };
 

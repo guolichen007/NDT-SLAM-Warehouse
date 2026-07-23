@@ -46,6 +46,10 @@ struct PendingCargoSelfEvidenceInput {
 
 struct PendingCargoSelfEvidence {
   bool valid = false;
+  // Geometry classification may use a retired formal OBB as a conservative
+  // unresolved region. Positive warning promotion is stricter: it requires
+  // retained identity points (or a current candidate), not only an old box.
+  bool positive_warning_identity_authorized = false;
   PendingCargoEnvelopeSource source = PendingCargoEnvelopeSource::NONE;
   std::uint64_t cargo_lifecycle_id = 0U;
   std::uint64_t track_segment_id = 0U;

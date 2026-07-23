@@ -316,5 +316,22 @@ TEST(CargoTrackPolicy, ClearRequiresRearmBeforeNewCandidate) {
   EXPECT_TRUE(evaluateCargoRearm(input).allowed);
 }
 
+TEST(CargoTrackPolicy,
+     AuthoritativeEmptyRearmsRecognitionWithoutGrantingSafetyClear) {
+  CargoRearmInput input;
+  input.gravity_valid = true;
+  input.gravity_state = HookLoadState::EMPTY;
+  input.gravity_state_at_clear = HookLoadState::LOADED;
+  input.rearm_age_sec = 1.0;
+  input.minimum_empty_confirm_sec = 1.0;
+  input.candidate_valid = true;
+  input.independent_suspension_evidence = false;
+  const CargoRearmDecision decision = evaluateCargoRearm(input);
+  EXPECT_TRUE(decision.allowed);
+  EXPECT_EQ(
+      decision.reason,
+      "gravity_empty_rearm_lidar_conflict_retained");
+}
+
 }  // namespace
 }  // namespace ndt_slam

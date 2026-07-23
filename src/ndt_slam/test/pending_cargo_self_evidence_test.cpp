@@ -45,6 +45,7 @@ TEST(PendingCargoSelfEvidenceTest, RetiredObbOnlyCannotRemoveInteriorPoint) {
   const auto evidence = buildPendingCargoSelfEvidence(retiredInput());
   ASSERT_TRUE(evidence.valid);
   ASSERT_TRUE(evidence.formal_obb_only_authorized);
+  EXPECT_FALSE(evidence.positive_warning_identity_authorized);
   const auto classified = classifyPendingCargoPoint(
       Eigen::Vector3f(0.0F, 0.0F, 0.5F), envelope(), evidence, 2.0F);
   EXPECT_EQ(classified.classification,
@@ -57,6 +58,7 @@ TEST(PendingCargoSelfEvidenceTest, RetiredIdentityPointCanBeRemoved) {
   const auto evidence = buildPendingCargoSelfEvidence(input);
   ASSERT_TRUE(evidence.valid);
   EXPECT_FALSE(evidence.formal_obb_only_authorized);
+  EXPECT_TRUE(evidence.positive_warning_identity_authorized);
   const auto classified = classifyPendingCargoPoint(
       Eigen::Vector3f(0.02F, 0.0F, 0.5F), envelope(), evidence, 2.0F);
   EXPECT_EQ(classified.classification, PendingPointClass::IDENTITY_SELF);

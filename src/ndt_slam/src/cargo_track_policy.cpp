@@ -190,6 +190,19 @@ CargoRearmDecision evaluateCargoRearm(const CargoRearmInput& input) {
     decision.reason = "confirmed_empty";
     return decision;
   }
+  if (input.gravity_valid &&
+      input.gravity_state == HookLoadState::EMPTY &&
+      input.rearm_age_sec >= input.minimum_empty_confirm_sec) {
+    // Rearming recognition is not a safety CLEAR decision. A persistent
+    // LiDAR structure may keep the outward status in gravity/LiDAR conflict,
+    // but authoritative EMPTY must still retire the old lock so the next
+    // LOADED edge can start a new lifecycle instead of deadlocking forever.
+    decision.allowed = true;
+    decision.reason = input.candidate_valid
+        ? "gravity_empty_rearm_lidar_conflict_retained"
+        : "gravity_empty_rearm";
+    return decision;
+  }
   if (input.gravity_valid && input.gravity_state == HookLoadState::LOADED &&
       input.gravity_state_at_clear != HookLoadState::LOADED) {
     decision.allowed = true;

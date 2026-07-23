@@ -210,6 +210,20 @@ TEST(CargoGeometryFusionTest, FormalGeometryUsesPhysicalFloorNotFallbackFloor) {
   EXPECT_FLOAT_EQ(result.width_m, 0.20F);
 }
 
+TEST(CargoGeometryFusionTest,
+     DefaultFormalTransitionDoesNotReusePendingFourByThreeEnvelope) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  CargoGeometryFusion fusion(config);
+  auto measured = frame(1.0);
+  measured.length_m = 1.0F;
+  measured.width_m = 0.5F;
+  const auto result = fusion.update(measured);
+  ASSERT_TRUE(result.frozen);
+  EXPECT_FLOAT_EQ(result.length_m, 1.0F);
+  EXPECT_FLOAT_EQ(result.width_m, 0.5F);
+}
+
 TEST(CargoGeometryFusionTest, AuthorizedStaticComponentCanRaiseFormalLowerBound) {
   CargoGeometryFusionConfig config;
   config.minimum_confirm_frames = 1;

@@ -292,6 +292,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
           track.total_consecutive_observations;
       track.large_cluster_geometry_valid =
           hasLargeStaticCargoGeometry(observation, config_);
+      track.geometry_validated_consecutive_observations =
+          observation.source_validated &&
+                  track.large_cluster_geometry_valid
+              ? 1 : 0;
       track.provenance = observation.provenance;
       track.provenance_valid =
           authorizesStaticObstacle(observation.provenance);
@@ -357,6 +361,13 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.warning_code = observation.warning_code;
     track.large_cluster_geometry_valid =
         hasLargeStaticCargoGeometry(observation, config_);
+    track.geometry_validated_consecutive_observations =
+        observation.source_validated &&
+                track.large_cluster_geometry_valid
+            ? (consecutive
+                   ? track.geometry_validated_consecutive_observations + 1
+                   : 1)
+            : 0;
     track.last_cell_overlap = best_overlap;
     track.last_cell_iou = best_iou;
     track.last_anchor_cell_overlap = cellOverlap(
@@ -442,6 +453,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       candidate = &track;
     }
     const bool warning_authorized = track.confirmed &&
+        (!config_.require_large_geometry_for_warning ||
+         track.geometry_validated_consecutive_observations >=
+             config_.confirm_frames) &&
         track.current_source_validated &&
         (!config_.require_static_cargo_for_warning || track.static_obstacle);
     if (warning_authorized &&
@@ -456,6 +470,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.selected_source_index = diagnostic->current_source_index;
     decision.selected_confirm_count =
         diagnostic->validated_consecutive_observations;
+    decision.selected_geometry_confirm_count =
+        diagnostic->geometry_validated_consecutive_observations;
     decision.selected_track_age_sec =
         stamp_sec - diagnostic->first_stamp_sec;
     decision.selected_track_static = diagnostic->static_obstacle;
@@ -489,7 +505,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       decision.reason = "static_track_association_reset";
     } else if (!diagnostic->current_source_validated) {
       decision.reason = "current_source_unvalidated";
-    } else if (!diagnostic->large_cluster_geometry_valid) {
+    } else if (config_.require_large_geometry_for_warning &&
+               (!diagnostic->large_cluster_geometry_valid ||
+                diagnostic->geometry_validated_consecutive_observations <
+                    config_.confirm_frames)) {
       decision.reason = "static_geometry_below_threshold";
     } else if (!diagnostic->provenance_valid) {
       decision.reason = "static_provenance_unavailable";

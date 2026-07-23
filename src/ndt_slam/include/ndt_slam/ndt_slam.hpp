@@ -1478,8 +1478,8 @@ private:
         float default_size_z = 0.25f;
 
         // 检测到货物后的尺寸范围
-        float min_size_x = 0.60f;
-        float min_size_y = 0.40f;
+        float min_size_x = 0.30f;
+        float min_size_y = 0.20f;
         float min_size_z = 0.20f;
         float max_size_x = 2.50f;
         float max_size_y = 1.60f;
@@ -2084,6 +2084,14 @@ private:
     // to prove that an already-separated live cluster has a stable external
     // identity before a provisional 17/18 can become official.
     CargoObstacleTracker pending_cargo_obstacle_tracker_;
+    std::uint64_t pending_obstacle_context_lifecycle_id_ = 0U;
+    std::uint64_t pending_obstacle_context_track_segment_id_ = 0U;
+    PendingCargoEnvelopeSource pending_obstacle_context_envelope_source_ =
+        PendingCargoEnvelopeSource::NONE;
+    CargoEnvelopePoseSource pending_obstacle_context_pose_source_ =
+        CargoEnvelopePoseSource::NONE;
+    CargoEnvelopeShapeSource pending_obstacle_context_shape_source_ =
+        CargoEnvelopeShapeSource::NONE;
     StaticObstacleEvidenceIndex static_obstacle_evidence_index_;
     std::shared_ptr<const StaticHeightField> static_height_field_;
     bool verified_map_session_loaded_ = false;

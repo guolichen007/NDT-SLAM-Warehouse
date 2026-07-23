@@ -37,6 +37,9 @@ struct CargoObstacleTrackerConfig {
   // a formal 17/18. Small-object warning can be enabled after its dedicated
   // provenance policy is commissioned.
   bool require_static_cargo_for_warning = true;
+  // Pending-cargo warning promotion uses this stricter mode so a single
+  // intermittent large extent cannot reuse an otherwise confirmed track.
+  bool require_large_geometry_for_warning = false;
   std::size_t static_cargo_min_voxel_points = 80U;
   std::size_t static_cargo_min_raw_equivalent_points = 0U;
   float static_cargo_min_xy_area_m2 = 0.50F;
@@ -82,6 +85,7 @@ struct CargoObstacleTrack {
   std::uint16_t warning_code = 0U;
   int total_consecutive_observations = 0;
   int validated_consecutive_observations = 0;
+  int geometry_validated_consecutive_observations = 0;
   int static_provenance_consecutive_observations = 0;
   double static_provenance_first_stamp_sec = 0.0;
   // Compatibility diagnostic: mirrors total_consecutive_observations.
@@ -117,6 +121,7 @@ struct CargoObstacleTrackerDecision {
   std::uint64_t selected_track_id = 0U;
   std::size_t selected_source_index = 0U;
   int selected_confirm_count = 0;
+  int selected_geometry_confirm_count = 0;
   double selected_track_age_sec = 0.0;
   bool selected_track_static = false;
   bool selected_large_geometry_valid = false;
