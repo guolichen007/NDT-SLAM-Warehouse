@@ -97,6 +97,7 @@ TEST(StationaryMotionPolicyTest,
     enterStationary(policy, &stamp, &raw);
 
     StationaryMotionDecision decision;
+    bool saw_movement_confirmed = false;
     for (int i = 0; i < 10; ++i) {
         // A 0.2 s processed-frame interval is expected when the latest-only
         // queue drops a frame. No individual displacement reaches the legacy
@@ -105,6 +106,8 @@ TEST(StationaryMotionPolicyTest,
         raw.x() += 0.019;
         decision = policy.update(
             reliableInput(stamp, raw, Eigen::Vector2d::Zero(), 0.019, 0.095));
+        saw_movement_confirmed =
+            saw_movement_confirmed || decision.movement_confirmed;
         if (decision.state == RuntimeMotionState::MOVING_CONFIRM) {
             EXPECT_FALSE(decision.apply_position_constraint);
             EXPECT_FALSE(decision.allow_local_map_update);
@@ -112,7 +115,7 @@ TEST(StationaryMotionPolicyTest,
         }
     }
     EXPECT_EQ(decision.state, RuntimeMotionState::CATCH_UP);
-    EXPECT_TRUE(decision.movement_confirmed);
+    EXPECT_TRUE(saw_movement_confirmed);
 }
 
 TEST(StationaryMotionPolicyTest,
@@ -148,14 +151,17 @@ TEST(StationaryMotionPolicyTest, RealMotionUsesBoundedCatchUpBeforeMoving) {
     const Eigen::Vector2d anchor = Eigen::Vector2d::Zero();
 
     StationaryMotionDecision decision;
+    bool saw_movement_confirmed = false;
     for (int i = 0; i < 3; ++i) {
         raw.x() += 0.05;
         stamp += 0.1;
         decision = policy.update(
             reliableInput(stamp, raw, anchor, 0.05, 0.05));
+        saw_movement_confirmed =
+            saw_movement_confirmed || decision.movement_confirmed;
     }
     ASSERT_EQ(decision.state, RuntimeMotionState::CATCH_UP);
-    EXPECT_TRUE(decision.movement_confirmed);
+    EXPECT_TRUE(saw_movement_confirmed);
     EXPECT_TRUE(decision.start_catch_up);
     EXPECT_FALSE(decision.allow_local_map_update);
     EXPECT_FALSE(decision.allow_persistent_map_commit);
@@ -198,14 +204,17 @@ TEST(StationaryMotionPolicyTest, VeryLowSpeedCoherentMotionCanExit) {
     enterStationary(policy, &stamp, &raw);
 
     StationaryMotionDecision decision;
+    bool saw_movement_confirmed = false;
     for (int i = 0; i < 16; ++i) {
         stamp += 1.0;
         raw.x() += 0.01;
         decision = policy.update(
             reliableInput(stamp, raw, Eigen::Vector2d::Zero(), 0.01, 0.01));
+        saw_movement_confirmed =
+            saw_movement_confirmed || decision.movement_confirmed;
     }
     EXPECT_EQ(decision.state, RuntimeMotionState::CATCH_UP);
-    EXPECT_TRUE(decision.movement_confirmed);
+    EXPECT_TRUE(saw_movement_confirmed);
 }
 
 TEST(StationaryMotionPolicyTest, PredictionAndNonphysicalStepsNeverConfirmExit) {

@@ -254,6 +254,25 @@ TEST(StaticObstacleEvidenceIndexTest,
 }
 
 TEST(StaticObstacleEvidenceIndexTest,
+     AdjacentAsynchronousCleanBuildsMatureWithinConfiguredGap) {
+  auto config = testConfig();
+  config.minimum_observations = 4U;
+  config.minimum_stable_duration_sec = 1.0;
+  config.maximum_observation_gap_sec = 5.0;
+  StaticObstacleEvidenceIndex index(config);
+  index.reset(29U);
+  index.observeFilteredCells(twoCells(), 1.0, 29U, 1U);
+  index.observeFilteredCells(twoCells(), 2.5, 29U, 2U);
+  index.observeFilteredCells(twoCells(), 4.0, 29U, 3U);
+  index.observeFilteredCells(twoCells(), 5.5, 29U, 4U);
+  index.confirmCleanCells(twoCells(), {}, 5.5, 29U, 1U);
+
+  EXPECT_EQ(index.matureCellCount(), 2U);
+  EXPECT_EQ(index.diagnostics().reset_by_time_gap, 0U);
+  EXPECT_TRUE(index.query(queryFor(29U)).authorized);
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
      EmptyMapCommitBreaksConsecutiveObservation) {
   auto config = testConfig();
   config.minimum_stable_duration_sec = 0.3;

@@ -547,6 +547,14 @@ def main() -> int:
             "angle_authoritative &&" in swing_monitor and
             "hook_anchor_z_authoritative" in swing_monitor and
             "hook_anchor_xy_authoritative" in swing_monitor and
+            "CargoSkewPullReadiness::HOIST_MISSING" in swing_monitor and
+            "CargoSkewPullReadiness::HOOK_ANCHOR_NONAUTHORITATIVE" in
+                swing_monitor and
+            "CargoSkewPullReadiness::ROPE_LENGTH_MISSING" in
+                swing_monitor and
+            "CargoSkewPullReadiness::ANGLE_NONAUTHORITATIVE" in
+                swing_monitor and
+            "CargoSkewPullReadiness::READY" in swing_monitor and
             "stop_hoist_and_travel" in swing_monitor and
             "Configured rope length remains diagnostic-only" in swing_monitor and
             "SCHEMA_VERSION=2" in swing_message,
@@ -586,9 +594,21 @@ def main() -> int:
             "fuseCargoAvoidanceRisk(" in pending_body and
             "static_height_field_" in pending_body and
             "cargo_safety_evaluator_.evaluate(live_input)" in pending_body and
+            "cargo_safety_evaluator_.evaluate(external_live_input)" in pending_body and
+            "pending_cargo_obstacle_tracker_.update(" in pending_body and
             "formal_cargo_removal_authorized_ = true" not in pending_body and
             "kSafeCode" not in pending_body,
             "Pending envelope can clear/remove cargo or skips live/static fusion",
+            failures)
+    require("PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY" in
+                cargo_avoidance and
+            "envelope_source_not_identity_backed" in cargo_avoidance and
+            "cargo_external_separation_unresolved" in cargo_avoidance and
+            "external_obstacle_confirmation_pending" in cargo_avoidance and
+            "pending_hazard_not_authorized:" in cargo_avoidance and
+            "fusion_pending_warning_promotion_policy: "
+            "evidence_backed_only" in live_config,
+            "pending 17/18 promotion is not evidence-backed and fail-closed",
             failures)
     require("CURRENT_CANDIDATE" in pending_envelope and
             "RETIRED_FORMAL_SHAPE" in pending_envelope and
@@ -596,6 +616,21 @@ def main() -> int:
             "CONFIGURED_CONSERVATIVE" in pending_envelope and
             "hook_not_loaded" in pending_envelope,
             "PendingCargoEnvelope source/fail-safe policy is incomplete",
+            failures)
+    require('"/display_map_active"' in node and
+            '"/display_map_persistent"' in node and
+            "publishPersistentDisplayMapFromTiles" in node and
+            "Topic: /display_map_persistent" in rviz and
+            "assemblePersistentSessionLayers(" in node and
+            "request.metadata.active_only = false" in node and
+            "persistent_map_manifest.json" in node and
+            "persistent_tile_catalog.json" in node and
+            "temporary_tile_present:" in node and
+            "map_generation_changed_during_persistent_snapshot" in node and
+            "temporary_session_verification_failed:" in
+                map_session and
+            "tile_read_failed:" in node,
+            "active-window and persistent RViz/session map scopes are ambiguous",
             failures)
     require("publishPayloadTrackInfoFromOdomAnchorBox" not in node and
             "buildLockedOdomFixedCargoBox" not in node and

@@ -20,7 +20,8 @@ TEST(HookLoadStateFilter, HysteresisRejectsThresholdChatter) {
     config.confirm_samples = 3;
     HookLoadStateFilter filter(config);
     filter.ingest(2.00, 0.0);
-    ASSERT_EQ(filter.ingest(2.00, 0.1).state, HookLoadState::EMPTY);
+    EXPECT_EQ(filter.ingest(2.00, 0.1).state, HookLoadState::UNKNOWN);
+    ASSERT_EQ(filter.ingest(2.00, 0.2).state, HookLoadState::EMPTY);
     EXPECT_EQ(filter.ingest(2.11, 0.3).state, HookLoadState::EMPTY);
     EXPECT_EQ(filter.ingest(2.12, 0.4).state, HookLoadState::EMPTY);
     EXPECT_EQ(filter.ingest(2.14, 0.5).state, HookLoadState::EMPTY);

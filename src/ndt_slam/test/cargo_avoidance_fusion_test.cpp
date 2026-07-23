@@ -86,32 +86,95 @@ TEST(CargoAvoidanceFusion, PendingEnvelopeCannotGrantClear) {
   EXPECT_EQ(result.provisional_status, "CLEAR_NOT_AUTHORIZED");
 }
 
-TEST(CargoAvoidanceFusion, PendingHazardWarnsOfficiallyByDefault) {
+TEST(CargoAvoidanceFusion, ConfiguredPendingHazardStaysDiagnosticByDefault) {
   auto input = validInput();
   input.formal_cargo_geometry_valid = false;
   input.formal_cargo_bottom_valid = false;
   input.pending_envelope_valid = true;
+  input.pending_envelope_source =
+      PendingCargoEnvelopeSource::CONFIGURED_CONSERVATIVE;
+  input.pending_pose_source = CargoEnvelopePoseSource::HOOK_DEFAULT_OFFSET;
   input.live.hazard = true;
   input.live.warning_code = 17;
   const auto result = fuseCargoAvoidanceRisk(input);
-  EXPECT_TRUE(result.official_valid);
-  EXPECT_EQ(result.official_code, 17);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 33);
   EXPECT_EQ(result.provisional_status, "NEAR_3M");
+  EXPECT_EQ(
+      result.pending_authority_reason,
+      "envelope_source_not_identity_backed");
 }
 
-TEST(CargoAvoidanceFusion, PendingOptInCanOnlyEscalatePositiveHazard) {
+TEST(CargoAvoidanceFusion, EvidenceBackedPendingHazardCanWarn) {
   auto input = validInput();
   input.formal_cargo_geometry_valid = false;
   input.formal_cargo_bottom_valid = false;
   input.pending_envelope_valid = true;
-  input.static_map.hazard = true;
-  input.static_map.warning_code = 18;
+  input.pending_envelope_source =
+      PendingCargoEnvelopeSource::CURRENT_CANDIDATE;
+  input.pending_pose_source =
+      CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR;
+  input.pending_self_evidence_valid = true;
+  input.pending_external_separation_valid = true;
+  input.pending_external_obstacle_authorized = true;
+  input.pending_external_obstacle_track_id = 9U;
+  input.pending_external_obstacle_confirmations = 3;
+  input.pending_external_provenance_valid = true;
+  input.pending_external_geometry_valid = true;
+  input.pending_authority_confidence = 0.8F;
+  input.live.hazard = true;
+  input.live.warning_code = 18;
   CargoAvoidanceFusionConfig config;
-  config.provisional_positive_warning_to_official_code = true;
   const auto result = fuseCargoAvoidanceRisk(input, config);
   ASSERT_TRUE(result.official_valid);
   EXPECT_EQ(result.official_code, 18);
   EXPECT_NE(result.official_code, 14);
+  EXPECT_TRUE(result.pending_warning_authorized);
+}
+
+TEST(CargoAvoidanceFusion, PendingNeedsStableExternalObstacleIdentity) {
+  auto input = validInput();
+  input.formal_cargo_geometry_valid = false;
+  input.formal_cargo_bottom_valid = false;
+  input.pending_envelope_valid = true;
+  input.pending_envelope_source =
+      PendingCargoEnvelopeSource::CURRENT_CANDIDATE;
+  input.pending_pose_source =
+      CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR;
+  input.pending_self_evidence_valid = true;
+  input.pending_external_separation_valid = true;
+  input.pending_external_obstacle_authorized = true;
+  input.pending_external_obstacle_track_id = 9U;
+  input.pending_external_obstacle_confirmations = 2;
+  input.pending_external_provenance_valid = true;
+  input.pending_external_geometry_valid = true;
+  input.pending_authority_confidence = 0.8F;
+  input.live.hazard = true;
+  input.live.warning_code = 17;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 33);
+  EXPECT_EQ(
+      result.pending_authority_reason,
+      "external_obstacle_confirmation_pending");
+}
+
+TEST(CargoAvoidanceFusion, LegacyAnyPendingRequiresExplicitPolicy) {
+  auto input = validInput();
+  input.formal_cargo_geometry_valid = false;
+  input.formal_cargo_bottom_valid = false;
+  input.pending_envelope_valid = true;
+  input.pending_envelope_source =
+      PendingCargoEnvelopeSource::CONFIGURED_CONSERVATIVE;
+  input.pending_pose_source = CargoEnvelopePoseSource::HOOK_DEFAULT_OFFSET;
+  input.live.hazard = true;
+  input.live.warning_code = 17;
+  CargoAvoidanceFusionConfig config;
+  config.pending_warning_promotion_policy =
+      PendingWarningPromotionPolicy::LEGACY_ANY_PENDING;
+  const auto result = fuseCargoAvoidanceRisk(input, config);
+  EXPECT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 17);
 }
 
 TEST(CargoAvoidanceFusion, UnverifiedStaticCannotAuthorizeClearOrHazard) {
@@ -134,9 +197,7 @@ TEST(CargoAvoidanceFusion, PendingUnverifiedStaticRemainsAdvisoryOnly) {
       StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
   input.static_map.hazard = true;
   input.static_map.warning_code = 17;
-  CargoAvoidanceFusionConfig config;
-  config.provisional_positive_warning_to_official_code = true;
-  const auto result = fuseCargoAvoidanceRisk(input, config);
+  const auto result = fuseCargoAvoidanceRisk(input);
   EXPECT_FALSE(result.official_valid);
   EXPECT_EQ(result.official_code, 33);
   EXPECT_FALSE(result.risk_static);

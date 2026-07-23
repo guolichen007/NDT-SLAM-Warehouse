@@ -30,6 +30,7 @@ CargoSwingInput validInput(double stamp) {
   input.orientation_confidence = 0.9F;
   input.cargo_length_m = 2.0F;
   input.cargo_width_m = 1.0F;
+  input.hoist_state_available = true;
   return input;
 }
 
@@ -65,6 +66,49 @@ TEST(CargoSwingMonitorTest, ConfiguredRopeIsNotAngleAuthoritative) {
   EXPECT_EQ(result.rope_length_source,
             CargoRopeLengthSource::CONFIG_FALLBACK);
   EXPECT_FALSE(result.angle_authoritative);
+  EXPECT_EQ(result.skew_pull_readiness,
+            CargoSkewPullReadiness::ROPE_LENGTH_MISSING);
+}
+
+TEST(CargoSwingMonitorTest, NonAuthoritativeAnchorZUsesConfiguredRope) {
+  CargoSwingConfig config;
+  config.configured_sling_length_m = 4.0F;
+  CargoSwingMonitor monitor(config);
+  auto input = validInput(1.0);
+  input.hoist_state_fresh = true;
+  input.hook_anchor_z_authoritative = false;
+  const auto result = monitor.update(input);
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.rope_length_source,
+            CargoRopeLengthSource::CONFIG_FALLBACK);
+  EXPECT_FLOAT_EQ(result.rope_length_m, 4.0F);
+  EXPECT_FALSE(result.angle_authoritative);
+  EXPECT_EQ(result.skew_pull_readiness,
+            CargoSkewPullReadiness::ANGLE_NONAUTHORITATIVE);
+}
+
+TEST(CargoSwingMonitorTest, ReadinessReportsMissingHoistSource) {
+  CargoSwingMonitor monitor;
+  auto input = validInput(1.0);
+  input.hoist_state_available = false;
+  input.hoist_state_fresh = false;
+  const auto result = monitor.update(input);
+  EXPECT_EQ(result.skew_pull_readiness,
+            CargoSkewPullReadiness::HOIST_MISSING);
+  EXPECT_STREQ(
+      cargoSkewPullReadinessName(result.skew_pull_readiness),
+      "HOIST_MISSING");
+}
+
+TEST(CargoSwingMonitorTest, ReadinessRequiresAuthoritativeHookAnchor) {
+  CargoSwingMonitor monitor;
+  auto input = validInput(1.0);
+  input.hoist_state_fresh = true;
+  input.hook_anchor_xy_authoritative = false;
+  const auto result = monitor.update(input);
+  EXPECT_EQ(
+      result.skew_pull_readiness,
+      CargoSkewPullReadiness::HOOK_ANCHOR_NONAUTHORITATIVE);
 }
 
 TEST(CargoSwingMonitorTest,
