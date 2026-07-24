@@ -36,6 +36,8 @@ struct PendingCargoSelfEvidenceInput {
   bool candidate_current = false;
   float identity_confidence = 0.0F;
   float shape_confidence = 0.0F;
+  bool active_track_locked = false;
+  std::uint64_t active_track_id = 0U;
   bool retired_track_was_locked = false;
   std::uint64_t retired_cargo_lifecycle_id = 0U;
   bool retired_formal_obb_authorized = false;

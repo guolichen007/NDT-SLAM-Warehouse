@@ -80,6 +80,9 @@ TEST(CargoAvoidanceFusion, PendingEnvelopeCannotGrantClear) {
   auto input = validInput();
   input.formal_cargo_geometry_valid = false;
   input.pending_envelope_valid = true;
+  input.pending_recognition_state_allows_warning = true;
+  input.pending_pose_physically_plausible = true;
+  input.pending_warning_query_allowed = true;
   const auto result = fuseCargoAvoidanceRisk(input);
   EXPECT_FALSE(result.official_valid);
   EXPECT_EQ(result.official_code, 33);
@@ -94,15 +97,18 @@ TEST(CargoAvoidanceFusion, ConfiguredPendingHazardStaysDiagnosticByDefault) {
   input.pending_envelope_source =
       PendingCargoEnvelopeSource::CONFIGURED_CONSERVATIVE;
   input.pending_pose_source = CargoEnvelopePoseSource::HOOK_DEFAULT_OFFSET;
+  input.pending_recognition_state_allows_warning = true;
+  input.pending_pose_physically_plausible = true;
+  input.pending_warning_query_allowed = false;
   input.live.hazard = true;
   input.live.warning_code = 17;
   const auto result = fuseCargoAvoidanceRisk(input);
   EXPECT_FALSE(result.official_valid);
   EXPECT_EQ(result.official_code, 33);
-  EXPECT_EQ(result.provisional_status, "NEAR_3M");
+  EXPECT_EQ(result.provisional_status, "QUERY_NOT_AUTHORIZED");
   EXPECT_EQ(
       result.pending_authority_reason,
-      "envelope_source_not_identity_backed");
+      "pending_warning_query_not_authorized");
 }
 
 TEST(CargoAvoidanceFusion, EvidenceBackedPendingHazardCanWarn) {
@@ -114,6 +120,9 @@ TEST(CargoAvoidanceFusion, EvidenceBackedPendingHazardCanWarn) {
       PendingCargoEnvelopeSource::CURRENT_CANDIDATE;
   input.pending_pose_source =
       CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR;
+  input.pending_recognition_state_allows_warning = true;
+  input.pending_pose_physically_plausible = true;
+  input.pending_warning_query_allowed = true;
   input.pending_self_evidence_valid = true;
   input.pending_external_separation_valid = true;
   input.pending_external_obstacle_authorized = true;
@@ -141,6 +150,9 @@ TEST(CargoAvoidanceFusion, PendingNeedsStableExternalObstacleIdentity) {
       PendingCargoEnvelopeSource::CURRENT_CANDIDATE;
   input.pending_pose_source =
       CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR;
+  input.pending_recognition_state_allows_warning = true;
+  input.pending_pose_physically_plausible = true;
+  input.pending_warning_query_allowed = true;
   input.pending_self_evidence_valid = true;
   input.pending_external_separation_valid = true;
   input.pending_external_obstacle_authorized = true;
@@ -159,22 +171,33 @@ TEST(CargoAvoidanceFusion, PendingNeedsStableExternalObstacleIdentity) {
       "external_obstacle_confirmation_pending");
 }
 
-TEST(CargoAvoidanceFusion, LegacyAnyPendingRequiresExplicitPolicy) {
+TEST(CargoAvoidanceFusion, LegacyPolicyCannotBypassExternalTrackIdentity) {
   auto input = validInput();
   input.formal_cargo_geometry_valid = false;
   input.formal_cargo_bottom_valid = false;
   input.pending_envelope_valid = true;
   input.pending_envelope_source =
-      PendingCargoEnvelopeSource::CONFIGURED_CONSERVATIVE;
-  input.pending_pose_source = CargoEnvelopePoseSource::HOOK_DEFAULT_OFFSET;
+      PendingCargoEnvelopeSource::CURRENT_CANDIDATE;
+  input.pending_pose_source =
+      CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR;
+  input.pending_recognition_state_allows_warning = true;
+  input.pending_pose_physically_plausible = true;
+  input.pending_warning_query_allowed = true;
+  input.pending_self_evidence_valid = true;
+  input.pending_external_separation_valid = true;
+  input.pending_external_obstacle_authorized = true;
+  input.pending_external_obstacle_track_id = 0U;
+  input.pending_external_provenance_valid = true;
   input.live.hazard = true;
   input.live.warning_code = 17;
   CargoAvoidanceFusionConfig config;
   config.pending_warning_promotion_policy =
       PendingWarningPromotionPolicy::LEGACY_ANY_PENDING;
   const auto result = fuseCargoAvoidanceRisk(input, config);
-  EXPECT_TRUE(result.official_valid);
-  EXPECT_EQ(result.official_code, 17);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 33);
+  EXPECT_EQ(result.pending_authority_reason,
+            "external_obstacle_identity_missing");
 }
 
 TEST(CargoAvoidanceFusion, UnverifiedStaticCannotAuthorizeClearOrHazard) {
@@ -193,6 +216,9 @@ TEST(CargoAvoidanceFusion, PendingUnverifiedStaticRemainsAdvisoryOnly) {
   input.formal_cargo_geometry_valid = false;
   input.formal_cargo_bottom_valid = false;
   input.pending_envelope_valid = true;
+  input.pending_recognition_state_allows_warning = true;
+  input.pending_pose_physically_plausible = true;
+  input.pending_warning_query_allowed = true;
   input.static_authority =
       StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
   input.static_map.hazard = true;

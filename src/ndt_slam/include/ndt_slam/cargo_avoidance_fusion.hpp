@@ -47,6 +47,11 @@ struct CargoAvoidanceFusionInput {
       PendingCargoEnvelopeSource::NONE;
   CargoEnvelopePoseSource pending_pose_source =
       CargoEnvelopePoseSource::NONE;
+  bool pending_recognition_state_allows_warning = false;
+  bool pending_warning_query_allowed = false;
+  bool pending_pose_physically_plausible = false;
+  std::string pending_warning_state_reason =
+      "recognition_state_not_warning_authorized";
   bool pending_self_evidence_valid = false;
   bool pending_external_separation_valid = false;
   bool pending_external_obstacle_authorized = false;

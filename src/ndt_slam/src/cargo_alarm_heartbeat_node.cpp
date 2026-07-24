@@ -21,8 +21,14 @@ struct StatusContractInput {
     int hook_load_state = 0;
     bool no_cargo_confirmed = false;
     bool cargo_valid = false;
+    std::uint32_t cargo_track_id = 0U;
     int evidence_state = 0;
     bool obstacle_valid = false;
+    std::uint32_t obstacle_track_id = 0U;
+    std::uint32_t obstacle_validated_streak = 0U;
+    bool obstacle_large_geometry_valid = false;
+    bool obstacle_provenance_valid = false;
+    double confidence = 0.0;
     std::uint32_t obstacle_count = 0U;
     double nearest_obstacle_distance_m =
         std::numeric_limits<double>::quiet_NaN();
@@ -276,6 +282,13 @@ StatusContractResult validateStatusContract(
         hook_supports_loaded && !input.no_cargo_confirmed &&
         !input.cargo_valid && input.obstacle_valid &&
         input.evidence_state == State::kEvidenceHazardCandidate;
+    const bool provisional_track_contract =
+        input.cargo_track_id > 0U &&
+        input.obstacle_track_id > 0U &&
+        input.obstacle_validated_streak > 0U &&
+        input.obstacle_large_geometry_valid &&
+        input.obstacle_provenance_valid &&
+        std::isfinite(input.confidence) && input.confidence > 0.0;
     const bool cluster_geometry_valid = input.obstacle_count > 0U &&
         std::isfinite(input.nearest_obstacle_distance_m) &&
         input.nearest_obstacle_distance_m >= 0.0 &&
@@ -319,6 +332,7 @@ StatusContractResult validateStatusContract(
         input.conservative_vertical_clearance_m <
             config.minimum_vertical_clearance_m;
     if ((!valid_loaded && !provisional_positive_loaded) ||
+        (provisional_positive_loaded && !provisional_track_contract) ||
         !cluster_geometry_valid ||
         (input.warning_code == State::kLevel1Warning && !level1_geometry) ||
         (input.warning_code == State::kLevel2Warning && !level2_geometry)) {
@@ -445,8 +459,17 @@ private:
         input.hook_load_state = msg->hook_load_state;
         input.no_cargo_confirmed = msg->no_cargo_confirmed;
         input.cargo_valid = msg->cargo_valid;
+        input.cargo_track_id = msg->cargo_track_id;
         input.evidence_state = msg->evidence_state;
         input.obstacle_valid = msg->obstacle_valid;
+        input.obstacle_track_id = msg->obstacle_track_id;
+        input.obstacle_validated_streak =
+            msg->obstacle_validated_streak;
+        input.obstacle_large_geometry_valid =
+            msg->obstacle_large_geometry_valid;
+        input.obstacle_provenance_valid =
+            msg->obstacle_provenance_valid;
+        input.confidence = msg->confidence;
         input.obstacle_count = msg->obstacle_count;
         input.nearest_obstacle_distance_m =
             msg->nearest_obstacle_distance_m;

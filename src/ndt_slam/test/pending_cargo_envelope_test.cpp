@@ -194,6 +194,33 @@ TEST(PendingCargoEnvelopeTest, CurrentPoseAndShapeBeatFallbackSources) {
   EXPECT_FLOAT_EQ(result.center_base.x(), 0.5F);
 }
 
+TEST(PendingCargoEnvelopeTest,
+     ActiveLockedShapeRemainsPendingUntilFormalThicknessFreezes) {
+  auto input = loadedInput();
+  input.short_term_track_pose = pose(
+      10.0, Eigen::Vector3f(0.1F, -0.4F, 0.9F),
+      CargoEnvelopePoseSource::SHORT_TERM_TRACK_PREDICTION);
+  input.active_locked_shape = shape(
+      10.0, 2.837F, 1.121F, 0.319F,
+      CargoEnvelopeShapeSource::ACTIVE_LOCKED_TRACK_SHAPE);
+  input.hook_default_pose = pose(
+      10.0, Eigen::Vector3f(0.0F, 0.0F, 2.0F),
+      CargoEnvelopePoseSource::HOOK_DEFAULT_OFFSET);
+
+  const auto result = buildPendingCargoEnvelope(input, exactConfig());
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.source,
+            PendingCargoEnvelopeSource::ACTIVE_LOCKED_TRACK);
+  EXPECT_EQ(result.shape_source,
+            CargoEnvelopeShapeSource::ACTIVE_LOCKED_TRACK_SHAPE);
+  EXPECT_FLOAT_EQ(result.length_m, 2.837F);
+  EXPECT_FLOAT_EQ(result.width_m, 1.121F);
+  CargoPresenceResult presence;
+  presence.cargo_present = true;
+  EXPECT_FALSE(resolveEffectiveCargoEnvelope(
+      presence, RigidCargoGeometry{}, result).can_authorize_clear);
+}
+
 TEST(PendingCargoEnvelopeTest, FormalClearRequiresFreshHeightEvidence) {
   CargoPresenceResult presence;
   presence.cargo_present = true;
@@ -235,6 +262,48 @@ TEST(PendingCargoEnvelopeTest, ExpandedHeightMatchesMinMax) {
                   result.top_z_base - result.bottom_z_base);
   EXPECT_FLOAT_EQ(result.center_base.z(),
                   0.5F * (result.top_z_base + result.bottom_z_base));
+}
+
+TEST(PendingCargoEnvelopeTest,
+     MeasuredShapeIsNominalAndUncertaintyExpandsOnlyQueryFootprint) {
+  auto input = loadedInput();
+  input.current_associated_pose = pose(
+      10.0, Eigen::Vector3f(0.0F, 0.0F, 2.0F),
+      CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR);
+  input.current_associated_pose.horizontal_uncertainty_m = 0.30F;
+  input.current_tracked_bounded_shape = shape(
+      10.0, 1.20F, 0.60F, 0.80F,
+      CargoEnvelopeShapeSource::CURRENT_TRACKED_BOUNDED_SHAPE);
+  PendingCargoEnvelopeConfig config = exactConfig();
+  config.horizontal_margin_m = 0.20F;
+
+  const auto result = buildPendingCargoEnvelope(input, config);
+  ASSERT_TRUE(result.valid);
+  EXPECT_FLOAT_EQ(result.length_m, 1.20F);
+  EXPECT_FLOAT_EQ(result.width_m, 0.60F);
+  const CargoObbFootprint nominal = toCargoObbFootprint(result);
+  const CargoObbFootprint query = toCargoObbFootprint(
+      result, result.horizontal_uncertainty_m,
+      result.vertical_uncertainty_m);
+  EXPECT_FLOAT_EQ(nominal.length_m, 1.20F);
+  EXPECT_FLOAT_EQ(query.length_m,
+                  1.20F + 2.0F * result.horizontal_uncertainty_m);
+}
+
+TEST(PendingCargoEnvelopeTest, RetiredEnvelopeBelowGroundIsRejected) {
+  PendingCargoVerticalPlausibilityInput input;
+  input.envelope_valid = true;
+  input.center_z_base = -4.0F;
+  input.height_m = 2.0F;
+  input.vertical_uncertainty_m = 0.15F;
+  input.minimum_height_m = 0.30F;
+  input.maximum_height_m = 5.0F;
+  input.local_ground_valid = true;
+  input.local_ground_z_base = 0.0F;
+
+  const auto result = evaluatePendingCargoVerticalPlausibility(input);
+  EXPECT_FALSE(result.valid);
+  EXPECT_EQ(result.reason, "retired_pose_below_local_ground");
 }
 
 TEST(PendingCargoEnvelopeTest, EmptyHookCannotCreateEnvelope) {

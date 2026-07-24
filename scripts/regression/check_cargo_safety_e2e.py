@@ -519,7 +519,9 @@ def main() -> int:
             failures)
     require("maximum_fallback_sway_offset_m" in pending_envelope and
             "lost_position_uncertainty_per_sec" in pending_envelope and
-            "commissioning-conservative" in pending_envelope and
+            "CURRENT_TRACKED_BOUNDED_SHAPE" in pending_envelope and
+            "candidate_shape_hold_sec" in pending_envelope and
+            "configured_shape" in pending_envelope and
             "CargoEnvelopePoseSource" in pending_envelope and
             "CargoEnvelopeShapeSource" in pending_envelope and
             "current_cargo_pose_unavailable" in pending_envelope and
@@ -702,12 +704,37 @@ def main() -> int:
             failures)
     require("configured_center_offset_z_m" in pending_envelope + live_config and
             "pose.center_base.z() +=" in node and
-            "result.height_m = base_height +" in
+            "result.height_m = base_height;" in
                 pending_envelope and
             "result.top_z_base = pose.center_base.z() +" in
                 pending_envelope and
-            "live_input.height.bottom_uncertainty_m = 0.0F" in node,
-            "pending envelope Z offset/expanded-height contract is incomplete",
+            "live_input.height.bottom_uncertainty_m =" in node and
+            "envelope.vertical_uncertainty_m" in node and
+            "toCargoObbFootprint(" in node,
+            "pending nominal-shape/query-uncertainty contract is incomplete",
+            failures)
+    hook_default_start = node.find("if (hook_anchor.valid) {")
+    hook_default_end = node.find(
+        "pending_cargo_envelope_ = buildPendingCargoEnvelope",
+        hook_default_start)
+    hook_default_block = (
+        node[hook_default_start:hook_default_end]
+        if hook_default_start >= 0 and hook_default_end > hook_default_start
+        else "")
+    require("loaded_duration_sec" not in hook_default_block and
+            "pending_lost_growth_allowed_" in node and
+            "HookCargoLockState::LOST_HOLD" in node and
+            "pending_warning_query_allowed" in node and
+            "clear_wait_rearm_warning_revoked" in node,
+            "pending lost-age and recognition warning gates are incomplete",
+            failures)
+    require("ACTIVE_LOCKED_TRACK_SHAPE" in pending_envelope and
+            "active_locked_pending_warning_authorized" in node and
+            "consecutive_recovery_confirmed" in node and
+            "provisional_track_contract" in heartbeat and
+            "obstacle_track_id > 0U" in heartbeat,
+            "active locked pending geometry or warning evidence contract "
+            "is incomplete",
             failures)
     require("authorizeStaticEvidence(" in static_authorization and
             all(field in static_authorization for field in (

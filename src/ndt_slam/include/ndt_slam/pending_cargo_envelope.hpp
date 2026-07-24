@@ -17,6 +17,7 @@ enum class PendingCargoEnvelopeSource : std::uint8_t {
   RETIRED_FORMAL_SHAPE,
   LIFT_ORIGIN_CANDIDATE,
   CONFIGURED_CONSERVATIVE,
+  ACTIVE_LOCKED_TRACK,
 };
 
 enum class CargoEnvelopePoseSource : std::uint8_t {
@@ -50,6 +51,8 @@ enum class CargoEnvelopeShapeSource : std::uint8_t {
   RETIRED_LOCKED_SHAPE,
   STATIC_ORIGIN_COMPONENT,
   CONFIGURED_CONSERVATIVE_DEFAULT,
+  CURRENT_TRACKED_BOUNDED_SHAPE,
+  ACTIVE_LOCKED_TRACK_SHAPE,
 };
 
 const char* cargoEnvelopeShapeSourceName(
@@ -81,6 +84,9 @@ struct PendingCargoEnvelopeConfig {
   float vertical_margin_m = 0.15F;
   double maximum_candidate_age_sec = 0.50;
   double maximum_retired_age_sec = 8.0;
+  double candidate_shape_hold_sec = 3.0;
+  float candidate_shape_growth_rate_mps = 0.30F;
+  float candidate_shape_shrink_rate_mps = 0.05F;
   float maximum_fallback_sway_offset_m = 0.80F;
   float lost_position_uncertainty_per_sec = 0.15F;
   float maximum_lost_position_uncertainty_m = 1.00F;
@@ -96,7 +102,9 @@ struct PendingCargoEnvelopeInput {
   CargoEnvelopePoseCandidate hook_last_offset_pose;
   CargoEnvelopePoseCandidate hook_default_pose;
   CargoEnvelopeShapeCandidate formal_frozen_shape;
+  CargoEnvelopeShapeCandidate active_locked_shape;
   CargoEnvelopeShapeCandidate current_high_quality_shape;
+  CargoEnvelopeShapeCandidate current_tracked_bounded_shape;
   CargoEnvelopeShapeCandidate retired_locked_shape;
   CargoEnvelopeShapeCandidate static_origin_shape;
 };
@@ -173,7 +181,34 @@ EffectiveCargoEnvelope composeEffectiveCargoEnvelope(
         PendingCargoEnvelopeConfig{});
 
 CargoObbFootprint toCargoObbFootprint(
-    const PendingCargoEnvelope& envelope);
+    const PendingCargoEnvelope& envelope,
+    float horizontal_expansion_m = 0.0F,
+    float vertical_expansion_m = 0.0F);
+
+struct PendingCargoVerticalPlausibilityInput {
+  bool envelope_valid = false;
+  float center_z_base = std::numeric_limits<float>::quiet_NaN();
+  float height_m = std::numeric_limits<float>::quiet_NaN();
+  float vertical_uncertainty_m = 0.0F;
+  float minimum_height_m = 0.0F;
+  float maximum_height_m = std::numeric_limits<float>::infinity();
+  bool local_ground_valid = false;
+  float local_ground_z_base = std::numeric_limits<float>::quiet_NaN();
+  float maximum_ground_penetration_m = 0.50F;
+  bool hook_anchor_z_authoritative = false;
+  float hook_anchor_z_base = std::numeric_limits<float>::quiet_NaN();
+};
+
+struct PendingCargoVerticalPlausibilityResult {
+  bool valid = false;
+  float bottom_z_base = std::numeric_limits<float>::quiet_NaN();
+  float top_z_base = std::numeric_limits<float>::quiet_NaN();
+  std::string reason = "not_evaluated";
+};
+
+PendingCargoVerticalPlausibilityResult
+evaluatePendingCargoVerticalPlausibility(
+    const PendingCargoVerticalPlausibilityInput& input);
 
 EffectiveCargoEnvelope resolveEffectiveCargoEnvelope(
     const CargoPresenceResult& presence,

@@ -66,6 +66,20 @@ PendingCargoSelfEvidence buildPendingCargoSelfEvidence(
         input.identity_confidence, input.shape_confidence);
     result.positive_warning_identity_authorized = true;
   } else if (input.source ==
+             PendingCargoEnvelopeSource::ACTIVE_LOCKED_TRACK) {
+    if (!input.active_track_locked || input.active_track_id == 0U ||
+        input.active_track_id != input.track_segment_id ||
+        input.identity_points_base.empty() ||
+        age_sec > config.maximum_retired_age_sec) {
+      result.reason = "active_locked_identity_not_authorized";
+      return result;
+    }
+    // The formal lock was already established from a multi-frame identity and
+    // shape contract. Until two-source thickness freezes, retain that identity
+    // for positive-only Pending avoidance without granting CLEAR.
+    result.authority_confidence = 1.0F;
+    result.positive_warning_identity_authorized = true;
+  } else if (input.source ==
              PendingCargoEnvelopeSource::RETIRED_FORMAL_SHAPE) {
     if (!input.retired_track_was_locked ||
         input.retired_cargo_lifecycle_id != input.cargo_lifecycle_id ||
@@ -111,8 +125,13 @@ PendingPointClassification classifyPendingCargoPoint(
       !std::isfinite(query_shell_m) || query_shell_m < 0.0F) {
     return result;
   }
-  const CargoObbFootprint envelope_footprint =
-      toCargoObbFootprint(envelope);
+  // The nominal box is the best cargo shape estimate. Position uncertainty is
+  // a safety-query region around that box, not evidence of an external
+  // obstacle. Keep points in that region unresolved so uncertainty cannot
+  // manufacture a positive warning against the cargo itself.
+  const CargoObbFootprint envelope_footprint = toCargoObbFootprint(
+      envelope, envelope.horizontal_uncertainty_m,
+      envelope.vertical_uncertainty_m);
   result.envelope_distance_m = pointToCargoObbDistance2D(
       point_base.head<2>(), envelope_footprint);
   const bool in_vertical_query =

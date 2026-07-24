@@ -48,6 +48,12 @@ StatusContractInput pendingWarning(int code) {
     input.cargo_valid = false;
     input.evidence_state =
         AlarmStateMachine::kEvidenceHazardCandidate;
+    input.cargo_track_id = 7U;
+    input.obstacle_track_id = 9U;
+    input.obstacle_validated_streak = 3U;
+    input.obstacle_large_geometry_valid = true;
+    input.obstacle_provenance_valid = true;
+    input.confidence = 0.80;
     return input;
 }
 
@@ -82,6 +88,15 @@ TEST(CargoAlarmHeartbeat, PendingEnvelopeCanOnlyPublishPositiveWarning) {
     const auto rejected = validateStatusContract(clear);
     EXPECT_FALSE(rejected.valid);
     EXPECT_EQ(rejected.code, AlarmStateMachine::kInternalError);
+}
+
+TEST(CargoAlarmHeartbeat, PendingWarningWithoutObstacleTrackIsRejected) {
+    auto warning = pendingWarning(AlarmStateMachine::kLevel1Warning);
+    warning.obstacle_track_id = 0U;
+    const auto result = validateStatusContract(warning);
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(result.code, AlarmStateMachine::kInternalError);
+    EXPECT_STREQ(result.reason, "warning_geometry_mismatch");
 }
 
 TEST(CargoAlarmHeartbeat, SourceRollbackStartsRecoverableNewEpoch) {

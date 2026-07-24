@@ -35,6 +35,7 @@ void combineMetric(float value, float* output) {
 
 bool pendingSourceCanCarryIdentity(PendingCargoEnvelopeSource source) {
   return source == PendingCargoEnvelopeSource::CURRENT_CANDIDATE ||
+      source == PendingCargoEnvelopeSource::ACTIVE_LOCKED_TRACK ||
       source == PendingCargoEnvelopeSource::RETIRED_FORMAL_SHAPE ||
       source == PendingCargoEnvelopeSource::LIFT_ORIGIN_CANDIDATE;
 }
@@ -50,15 +51,24 @@ bool authorizePendingWarning(
     const CargoAvoidanceFusionInput& input,
     const CargoAvoidanceFusionConfig& config,
     std::string* reason) {
+  if (!input.pending_recognition_state_allows_warning) {
+    *reason = input.pending_warning_state_reason.empty()
+        ? "recognition_state_not_warning_authorized"
+        : input.pending_warning_state_reason;
+    return false;
+  }
+  if (!input.pending_pose_physically_plausible) {
+    *reason = "pending_pose_physically_implausible";
+    return false;
+  }
+  if (!input.pending_warning_query_allowed) {
+    *reason = "pending_warning_query_not_authorized";
+    return false;
+  }
   if (config.pending_warning_promotion_policy ==
       PendingWarningPromotionPolicy::DISABLED) {
     *reason = "policy_disabled";
     return false;
-  }
-  if (config.pending_warning_promotion_policy ==
-      PendingWarningPromotionPolicy::LEGACY_ANY_PENDING) {
-    *reason = "explicit_legacy_any_pending";
-    return true;
   }
   if (!pendingSourceCanCarryIdentity(input.pending_envelope_source)) {
     *reason = "envelope_source_not_identity_backed";
@@ -89,6 +99,14 @@ bool authorizePendingWarning(
   if (!input.pending_external_provenance_valid) {
     *reason = "external_obstacle_provenance_invalid";
     return false;
+  }
+  if (config.pending_warning_promotion_policy ==
+      PendingWarningPromotionPolicy::LEGACY_ANY_PENDING) {
+    // Legacy may relax confirmation/shape thresholds, but it must never
+    // bypass the operational identity invariants. An official 17/18 without
+    // a concrete external track is unverifiable.
+    *reason = "legacy_identity_and_external_track_confirmed";
+    return true;
   }
   if (!input.pending_external_geometry_valid) {
     *reason = "external_obstacle_geometry_invalid";
@@ -169,14 +187,47 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
       result.provisional_status = "UNKNOWN";
       return result;
     }
+    if (!input.pending_recognition_state_allows_warning) {
+      result.provisional_status = "WARNING_AUTHORITY_REVOKED";
+      result.pending_authority_reason =
+          input.pending_warning_state_reason.empty()
+          ? "recognition_state_not_warning_authorized"
+          : input.pending_warning_state_reason;
+      result.reason = "pending_warning_state_revoked:" +
+          result.pending_authority_reason;
+      return result;
+    }
+    if (!input.pending_pose_physically_plausible) {
+      result.provisional_status = "POSE_REJECTED";
+      result.pending_authority_reason =
+          "pending_pose_physically_implausible";
+      result.reason = "pending_hazard_not_authorized:" +
+          result.pending_authority_reason;
+      return result;
+    }
+    if (!input.pending_warning_query_allowed) {
+      result.provisional_status = "QUERY_NOT_AUTHORIZED";
+      result.pending_authority_reason =
+          "pending_warning_query_not_authorized";
+      result.reason = "pending_hazard_not_authorized:" +
+          result.pending_authority_reason;
+      return result;
+    }
     if (result.risk_live || result.risk_static) {
-      const std::int32_t provisional = moreSevere(
-          result.risk_live ? input.live.warning_code : 0,
-          result.risk_static ? input.static_map.warning_code : 0);
+      // A pending 17/18 is an identity-bearing live-cluster decision. Static
+      // height evidence may corroborate or increase diagnostics, but cannot
+      // replace the concrete obstacle track that owns code/distance/clearance.
+      const std::int32_t provisional = result.risk_live
+          ? input.live.warning_code : input.static_map.warning_code;
       result.provisional_status = provisional == kNear3m
           ? "NEAR_3M" : "NEAR_5M";
-      result.pending_warning_authorized = authorizePendingWarning(
-          input, config, &result.pending_authority_reason);
+      result.pending_warning_authorized = result.risk_live &&
+          authorizePendingWarning(
+              input, config, &result.pending_authority_reason);
+      if (!result.risk_live) {
+        result.pending_authority_reason =
+            "static_hazard_requires_confirmed_live_obstacle_track";
+      }
       if (result.pending_warning_authorized) {
         result.official_code = provisional;
         result.official_valid = true;

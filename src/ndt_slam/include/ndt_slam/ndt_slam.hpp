@@ -1942,6 +1942,7 @@ private:
     ros::Time retired_cargo_stamp_;
     bool retired_cargo_signature_valid_ = false;
     std::uint64_t retired_cargo_lifecycle_id_ = 0U;
+    std::uint64_t retired_cargo_track_segment_id_ = 0U;
 
     // ========== Cargo Warning 数据结构 ==========
     struct CargoWarningData {
@@ -2040,6 +2041,24 @@ private:
     CargoGeometryFusionConfig cargo_geometry_fusion_config_;
     CargoGeometryFusion cargo_geometry_fusion_;
     CargoFrozenGeometry cargo_frozen_geometry_;
+    struct PendingCargoShapeContinuity {
+        bool valid = false;
+        std::uint64_t cargo_lifecycle_id = 0U;
+        std::uint64_t provisional_track_id = 0U;
+        Eigen::Vector3f size_m = Eigen::Vector3f::Zero();
+        Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
+        float yaw_base_rad = 0.0F;
+        bool yaw_authoritative = false;
+        double last_update_stamp_sec = 0.0;
+        double last_reliable_shape_stamp_sec = 0.0;
+    };
+    PendingCargoShapeContinuity pending_cargo_shape_continuity_;
+    double pending_last_reliable_pose_age_sec_ =
+        std::numeric_limits<double>::infinity();
+    bool pending_lost_growth_allowed_ = false;
+    float pending_lost_growth_m_ = 0.0F;
+    bool pending_retired_pose_plausible_ = true;
+    std::string pending_retired_pose_reject_reason_ = "not_retired";
     std::uint64_t cargo_lifecycle_sequence_ = 0U;
     std::uint64_t cargo_lifecycle_id_ = 0U;
     std::uint64_t cargo_track_segment_id_ = 0U;
@@ -2092,6 +2111,8 @@ private:
         CargoEnvelopePoseSource::NONE;
     CargoEnvelopeShapeSource pending_obstacle_context_shape_source_ =
         CargoEnvelopeShapeSource::NONE;
+    HookCargoLockState pending_obstacle_context_recognition_state_ =
+        HookCargoLockState::EMPTY;
     StaticObstacleEvidenceIndex static_obstacle_evidence_index_;
     std::shared_ptr<const StaticHeightField> static_height_field_;
     bool verified_map_session_loaded_ = false;
@@ -2371,6 +2392,17 @@ private:
                                      float provisional_uncertainty_m =
                                          std::numeric_limits<float>::quiet_NaN(),
                                      float provisional_clearance_m =
+                                         std::numeric_limits<float>::quiet_NaN(),
+                                     std::uint32_t provisional_cargo_track_id = 0U,
+                                     std::uint32_t provisional_obstacle_track_id = 0U,
+                                     std::uint32_t provisional_confirmations = 0U,
+                                     std::uint8_t provisional_provenance_type = 0U,
+                                     bool provisional_provenance_valid = false,
+                                     bool provisional_large_geometry_valid = false,
+                                     float provisional_confidence = 0.0F,
+                                     float provisional_cargo_bottom_z_map =
+                                         std::numeric_limits<float>::quiet_NaN(),
+                                     float provisional_cargo_bottom_uncertainty_m =
                                          std::numeric_limits<float>::quiet_NaN());
     void logCargoSafetyStatus(
         const lidar_slam2_msgs::CargoSafetyStatus& status);

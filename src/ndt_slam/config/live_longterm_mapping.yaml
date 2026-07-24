@@ -794,6 +794,8 @@ status_codes:
 # Conservative identity-free envelope. It can discover positive hazards but
 # never authorizes clear, cargo point removal, or a map commit.
 pending_cargo_envelope:
+  # Visual-only fallback when no physical shape has been measured. It is not a
+  # minimum floor for LiDAR/retired/static shapes and cannot authorize 17/18.
   configured_length_m: 4.0
   configured_width_m: 3.0
   configured_height_m: 3.0
@@ -804,7 +806,14 @@ pending_cargo_envelope:
   vertical_margin_m: 0.15
   maximum_candidate_age_sec: 0.50
   maximum_retired_age_sec: 8.0
+  # Weak but associated LiDAR geometry is retained per provisional track.
+  # Expansion is immediate but rate bounded; shrink is deliberately slower.
+  candidate_shape_hold_sec: 3.0
+  candidate_shape_growth_rate_mps: 0.30
+  candidate_shape_shrink_rate_mps: 0.05
   maximum_fallback_sway_offset_m: 0.80
+  # Lost-position growth is enabled only in LOST_HOLD and is measured from
+  # the last reliable pose. LOADED duration never drives this value.
   lost_position_uncertainty_per_sec: 0.15
   maximum_lost_position_uncertainty_m: 1.00
 
