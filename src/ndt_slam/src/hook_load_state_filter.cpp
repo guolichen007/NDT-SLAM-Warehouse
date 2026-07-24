@@ -21,6 +21,8 @@ bool HookLoadStateFilter::configValid() const {
            2.0 * config_.hysteresis_v <
                config_.high_threshold_v - config_.low_threshold_v &&
            config_.confirm_samples > 0U &&
+           std::isfinite(config_.minimum_transition_duration_sec) &&
+           config_.minimum_transition_duration_sec >= 0.0 &&
            std::isfinite(config_.stale_timeout_sec) &&
            config_.stale_timeout_sec > 0.0 &&
            std::isfinite(config_.valid_voltage_min_v) &&
@@ -64,6 +66,8 @@ HookLoadStateResult HookLoadStateFilter::fail(
     stable_state_ = HookLoadState::UNKNOWN;
     pending_state_ = HookLoadState::UNKNOWN;
     pending_samples_ = 0;
+    pending_since_valid_ = false;
+    pending_since_source_time_sec_ = 0.0;
     stable_samples_ = 0;
     last_voltage_ = static_cast<float>(voltage);
     invalid_reason_ = reason;
@@ -139,6 +143,8 @@ HookLoadStateResult HookLoadStateFilter::ingest(
     if (candidate == stable_state_ && stable_state_ != HookLoadState::UNKNOWN) {
         pending_state_ = stable_state_;
         pending_samples_ = 0;
+        pending_since_valid_ = false;
+        pending_since_source_time_sec_ = 0.0;
         stable_samples_ = std::min<std::uint32_t>(
             stable_samples_ + 1U, std::numeric_limits<std::uint32_t>::max());
         return result("stable");
@@ -149,11 +155,20 @@ HookLoadStateResult HookLoadStateFilter::ingest(
     } else {
         pending_state_ = candidate;
         pending_samples_ = 1U;
+        pending_since_valid_ = true;
+        pending_since_source_time_sec_ = source_time_sec;
     }
-    if (pending_samples_ >= config_.confirm_samples) {
+    const double pending_duration_sec = pending_since_valid_
+        ? source_time_sec - pending_since_source_time_sec_ : 0.0;
+    if (pending_samples_ >= config_.confirm_samples &&
+        std::isfinite(pending_duration_sec) &&
+        pending_duration_sec + 1.0e-6 >=
+            config_.minimum_transition_duration_sec) {
         stable_state_ = pending_state_;
         stable_samples_ = pending_samples_;
         pending_samples_ = 0;
+        pending_since_valid_ = false;
+        pending_since_source_time_sec_ = 0.0;
         return result("transition_confirmed");
     }
     return result("transition_pending");
@@ -182,6 +197,8 @@ void HookLoadStateFilter::reset(const std::string& reason) {
     stable_state_ = HookLoadState::UNKNOWN;
     pending_state_ = HookLoadState::UNKNOWN;
     pending_samples_ = 0;
+    pending_since_valid_ = false;
+    pending_since_source_time_sec_ = 0.0;
     stable_samples_ = 0;
     has_sample_ = false;
     has_seen_source_time_ = false;

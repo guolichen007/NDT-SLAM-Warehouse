@@ -1737,6 +1737,11 @@ private:
 
         // locked association gate 相关
         float locked_update_max_center_dist = 0.65f;
+        // Supplement the filtered-centre gate with a short, displacement-
+        // bounded velocity prediction. The frozen OBB support gate remains
+        // mandatory, so prediction cannot jump identity to a nearby object.
+        float association_prediction_horizon_sec = 0.50F;
+        float association_prediction_max_displacement_m = 0.50F;
         float locked_update_min_overlap_ratio = 0.30f;
         float locked_update_max_z_jump = 0.45f;
         float locked_update_max_top_jump = 0.60f;
@@ -1915,6 +1920,11 @@ private:
         std::string association_reject_reason = "not_evaluated";
         float association_xy_gate_m = 0.0F;
         float association_z_gate_m = 0.0F;
+        float association_filtered_center_distance_m =
+            std::numeric_limits<float>::infinity();
+        float association_predicted_center_distance_m =
+            std::numeric_limits<float>::infinity();
+        bool association_prediction_used = false;
         float observed_yaw_rad = 0.0F;
         float yaw_residual_rad = 0.0F;
         bool yaw_used_as_hard_gate = false;

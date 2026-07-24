@@ -662,6 +662,9 @@ hook_load_signal:
   high_threshold_v: 2.10
   hysteresis_v: 0.03
   confirm_samples: 2
+  # Reject short LOADED/EMPTY pulses even if upstream sampling becomes faster.
+  # Both this duration and confirm_samples must pass.
+  minimum_transition_duration_sec: 0.50
   stale_timeout_sec: 2.50
   consumer_timeout_sec: 3.00
   valid_voltage_min_v: 0.0
@@ -1085,6 +1088,11 @@ hook_cargo_lock:
 
   # locked association gate
   locked_update_max_center_dist: 0.65
+  # A moving load is compared with both the filtered centre and this short,
+  # displacement-bounded prediction. Frozen-shape point support is still
+  # required, so this closes filter lag without widening identity globally.
+  association_prediction_horizon_sec: 0.50
+  association_prediction_max_displacement_m: 0.50
   locked_update_min_overlap_ratio: 0.30
   locked_update_max_z_jump: 0.45
   locked_update_max_top_jump: 0.60

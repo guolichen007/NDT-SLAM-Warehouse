@@ -39,6 +39,22 @@ TEST(HookLoadStateFilter, DefaultFreshTwoSamplesConfirmLoaded) {
     EXPECT_EQ(loaded.state, HookLoadState::LOADED);
 }
 
+TEST(HookLoadStateFilter, TransitionRequiresContinuousMinimumDuration) {
+    HookLoadStateConfig config;
+    config.confirm_samples = 2;
+    config.minimum_transition_duration_sec = 0.50;
+    HookLoadStateFilter filter(config);
+
+    EXPECT_EQ(filter.ingest(2.20, 10.0).state, HookLoadState::UNKNOWN);
+    EXPECT_EQ(filter.ingest(2.20, 10.2).state, HookLoadState::UNKNOWN);
+    EXPECT_EQ(filter.ingest(2.20, 10.49).state, HookLoadState::UNKNOWN);
+    EXPECT_EQ(filter.ingest(2.20, 10.50).state, HookLoadState::LOADED);
+
+    EXPECT_EQ(filter.ingest(2.00, 10.60).state, HookLoadState::LOADED);
+    EXPECT_EQ(filter.ingest(2.20, 10.70).state, HookLoadState::LOADED);
+    EXPECT_EQ(filter.ingest(2.00, 10.80).state, HookLoadState::LOADED);
+}
+
 TEST(HookLoadStateFilter, InhibitAndInvalidInputsAreFailSafe) {
     HookLoadStateFilter filter;
     filter.ingest(1.80, 0.0);

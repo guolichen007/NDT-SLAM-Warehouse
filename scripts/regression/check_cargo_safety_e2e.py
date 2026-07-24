@@ -337,9 +337,13 @@ def main() -> int:
             "cargo detector does not score single/merged component hypotheses",
             failures)
     require("reference_center = hook_lock_.live_pose.center_base" in node and
-            '"center_too_far"' in node and
-            "velocity extrapolation must not drag the gate" in node,
-            "retained cargo association is not anchored to the last filtered pose",
+            "association_center = reference_center" in node and
+            "association_prediction_horizon_sec" in node and
+            "association_prediction_max_displacement_m" in node and
+            "support_input.predicted_center.head<2>() = association_center" in node and
+            '"center_too_far"' in node,
+            "retained cargo association lacks a filtered primary reference "
+            "with bounded motion prediction and frozen-OBB support",
             failures)
     temporal_filter = read(
         "src/ndt_slam/src/cargo_safety_temporal_filter.cpp")

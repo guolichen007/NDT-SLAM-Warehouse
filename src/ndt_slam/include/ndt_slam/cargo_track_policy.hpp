@@ -181,6 +181,9 @@ struct CargoProvisionalLockConfig {
   std::size_t minimum_frames = 3U;
   float maximum_center_step_m = 0.30F;
   float maximum_shape_cv = 0.18F;
+  float minimum_length_m = 0.30F;
+  float minimum_width_m = 0.20F;
+  float minimum_height_m = 0.20F;
   float minimum_orientation_concentration = 0.70F;
   float minimum_identity_confidence = 0.65F;
   float minimum_overall_lock_confidence = 0.70F;

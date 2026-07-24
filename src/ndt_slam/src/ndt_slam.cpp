@@ -2030,6 +2030,16 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
             // locked association gate 配置
             hook_lock_config_.locked_update_max_center_dist = hcl["locked_update_max_center_dist"].as<float>(0.65f);
+            hook_lock_config_.association_prediction_horizon_sec =
+                std::clamp(
+                    hcl["association_prediction_horizon_sec"].as<float>(
+                        0.50F),
+                    0.0F, 1.0F);
+            hook_lock_config_.association_prediction_max_displacement_m =
+                std::clamp(
+                    hcl["association_prediction_max_displacement_m"].as<float>(
+                        0.50F),
+                    0.0F, 0.75F);
             hook_lock_config_.locked_update_min_overlap_ratio = hcl["locked_update_min_overlap_ratio"].as<float>(0.30f);
             hook_lock_config_.locked_update_max_z_jump = hcl["locked_update_max_z_jump"].as<float>(0.45f);
             hook_lock_config_.locked_update_max_top_jump = hcl["locked_update_max_top_jump"].as<float>(0.60f);
@@ -13215,10 +13225,11 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
         return false;
     }
 
-    // Restore the d9 stable association semantics: the rigid shape is frozen,
-    // while each fresh component is compared with the last filtered live
-    // center. A velocity extrapolation must not drag the gate onto another
-    // nearby component after one noisy observation.
+    // Keep the filtered centre as the primary identity reference, but also
+    // evaluate a short, displacement-bounded prediction. This covers the
+    // normal lag of the low-pass live pose while a load is moving. Prediction
+    // never widens the gate and the frozen-OBB point support below remains a
+    // mandatory independent identity check.
     Eigen::Vector2f reference_center;
     if (hook_lock_.live_pose.valid) {
         reference_center = hook_lock_.live_pose.center_base.head<2>();
@@ -13231,8 +13242,53 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
     } else {
         detected_center = det.center_base.head<2>();
     }
-    const float center_distance =
+    const float filtered_center_distance =
         (detected_center - reference_center).norm();
+    Eigen::Vector2f association_center = reference_center;
+    float predicted_center_distance =
+        std::numeric_limits<float>::infinity();
+    bool prediction_used = false;
+    if (hook_lock_.live_pose.valid &&
+        hook_lock_.live_pose_velocity_base.head<2>().allFinite() &&
+        std::isfinite(hook_lock_.live_pose.evidence_stamp_sec) &&
+        !hook_observation_association_stamp_.isZero()) {
+        const double raw_prediction_dt =
+            hook_observation_association_stamp_.toSec() -
+            hook_lock_.live_pose.evidence_stamp_sec;
+        if (std::isfinite(raw_prediction_dt) &&
+            raw_prediction_dt > 1.0e-4) {
+            const float prediction_dt = static_cast<float>(std::min(
+                raw_prediction_dt,
+                static_cast<double>(
+                    hook_lock_config_.association_prediction_horizon_sec)));
+            Eigen::Vector2f displacement =
+                hook_lock_.live_pose_velocity_base.head<2>() * prediction_dt;
+            const float displacement_norm = displacement.norm();
+            const float maximum_displacement =
+                hook_lock_config_
+                    .association_prediction_max_displacement_m;
+            if (displacement_norm > maximum_displacement &&
+                displacement_norm > 1.0e-6F) {
+                displacement *= maximum_displacement / displacement_norm;
+            }
+            const Eigen::Vector2f predicted_center =
+                reference_center + displacement;
+            predicted_center_distance =
+                (detected_center - predicted_center).norm();
+            if (std::isfinite(predicted_center_distance) &&
+                predicted_center_distance < filtered_center_distance) {
+                association_center = predicted_center;
+                prediction_used = true;
+            }
+        }
+    }
+    const float center_distance = prediction_used
+        ? predicted_center_distance : filtered_center_distance;
+    hook_lock_.association_filtered_center_distance_m =
+        filtered_center_distance;
+    hook_lock_.association_predicted_center_distance_m =
+        predicted_center_distance;
+    hook_lock_.association_prediction_used = prediction_used;
     const bool lost_reacquisition =
         hook_lock_.state == HookCargoLockState::LOST_HOLD;
     const double lost_age_sec = lost_reacquisition &&
@@ -13268,6 +13324,7 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
     support_input.predicted_center = hook_lock_.live_pose.valid
         ? hook_lock_.live_pose.center_base
         : hook_lock_.last_accepted_center;
+    support_input.predicted_center.head<2>() = association_center;
     // This gate proves frozen XY identity/coverage. Do not turn it into a
     // hidden vertical-motion gate: a legitimately lifted load may change Z
     // faster than the previous display pose, while its formal height is still
@@ -13344,7 +13401,9 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
         ? "consistent_soft_yaw_mismatch"
         : (partial_height_mismatch
                ? "consistent_partial_height_observation"
-               : "consistent");
+               : (prediction_used
+                      ? "consistent_bounded_motion_prediction"
+                      : "consistent"));
     return true;
 }
 
@@ -13854,6 +13913,11 @@ void NdtSlamNode::clearHookLock() {
     hook_lock_.association_reject_reason = "not_evaluated";
     hook_lock_.association_xy_gate_m = 0.0F;
     hook_lock_.association_z_gate_m = 0.0F;
+    hook_lock_.association_filtered_center_distance_m =
+        std::numeric_limits<float>::infinity();
+    hook_lock_.association_predicted_center_distance_m =
+        std::numeric_limits<float>::infinity();
+    hook_lock_.association_prediction_used = false;
     hook_lock_.observed_yaw_rad = 0.0F;
     hook_lock_.yaw_residual_rad = 0.0F;
     hook_lock_.yaw_used_as_hard_gate = false;
@@ -14382,6 +14446,12 @@ void NdtSlamNode::updateHookCargoLock(
             hook_lock_config_.lock_max_center_step_m;
         provisional_config.maximum_shape_cv =
             hook_lock_config_.maximum_provisional_shape_cv;
+        provisional_config.minimum_length_m =
+            odom_anchor_config_.min_size_x;
+        provisional_config.minimum_width_m =
+            odom_anchor_config_.min_size_y;
+        provisional_config.minimum_height_m =
+            odom_anchor_config_.min_size_z;
         provisional_config.minimum_orientation_concentration =
             odom_anchor_config_.tight_box.orientation_min_concentration;
         provisional_config.minimum_identity_confidence =
@@ -14439,11 +14509,37 @@ void NdtSlamNode::updateHookCargoLock(
             break;
         }
 
+        const CargoProvisionalLockSummary& summary =
+            hook_lock_.provisional_summary;
+        const bool formal_shape_valid =
+            summary.median_center.allFinite() &&
+            summary.median_size.allFinite() &&
+            summary.median_size.x() >= odom_anchor_config_.min_size_x &&
+            summary.median_size.y() >= odom_anchor_config_.min_size_y &&
+            summary.median_size.z() >= odom_anchor_config_.min_size_z &&
+            summary.median_size.x() >= summary.median_size.y();
+        if (!formal_shape_valid) {
+            // Never enter LOCKED and then discover that its sole formal OBB is
+            // zero, non-finite or below the configured physical dimensions.
+            // Keep collecting a fresh provisional window instead.
+            hook_lock_.provisional_summary.formal_lock_allowed = false;
+            hook_lock_.provisional_summary.reason =
+                "formal_shape_out_of_physical_bounds";
+            hook_lock_.association_reject_reason =
+                hook_lock_.provisional_summary.reason;
+            ROS_ERROR_THROTTLE(
+                1.0,
+                "[CargoLock] formal transition rejected: "
+                "center=(%.3f,%.3f,%.3f) shape=(%.3f,%.3f,%.3f)",
+                summary.median_center.x(), summary.median_center.y(),
+                summary.median_center.z(), summary.median_size.x(),
+                summary.median_size.y(), summary.median_size.z());
+            break;
+        }
+
         hook_lock_.state = HookCargoLockState::LOCKED;
         hook_lock_.lock_authority_source = physical_authority.source;
         observation_associated = true;
-        const CargoProvisionalLockSummary& summary =
-            hook_lock_.provisional_summary;
         hook_lock_.locked_shape.length_m = summary.median_size.x();
         hook_lock_.locked_shape.width_m = summary.median_size.y();
         hook_lock_.locked_shape.height_m = summary.median_size.z();
@@ -14552,10 +14648,16 @@ void NdtSlamNode::updateHookCargoLock(
 
                 auto anchor = getCargoAnchorXY();
                 ROS_DEBUG_THROTTLE(2.0,
-                    "[CargoLockUpdate] accepted=0 reason=%s raw_center=(%.2f,%.2f,%.2f) anchor=(%.2f,%.2f) raw_points=%zu",
+                    "[CargoLockUpdate] accepted=0 reason=%s "
+                    "raw_center=(%.2f,%.2f,%.2f) anchor=(%.2f,%.2f) "
+                    "center_distance=(filtered=%.2f,predicted=%.2f,use=%d) "
+                    "raw_points=%zu",
                     reject_reason.c_str(),
                     det.center_base.x(), det.center_base.y(), det.center_base.z(),
                     anchor.x(), anchor.y(),
+                    hook_lock_.association_filtered_center_distance_m,
+                    hook_lock_.association_predicted_center_distance_m,
+                    hook_lock_.association_prediction_used ? 1 : 0,
                     det.core_points_base ? det.core_points_base->size() : 0);
                 const double lost_age =
                     (stamp - hook_lock_.last_seen_stamp).toSec();
@@ -14617,11 +14719,16 @@ void NdtSlamNode::updateHookCargoLock(
                 ROS_WARN_THROTTLE(
                     2.0,
                     "[CargoAssociation] LOST_HOLD recovery rejected age=%.2f "
-                    "reason=%s center_gate=%.2f points=%zu "
+                    "reason=%s center_gate=%.2f "
+                    "center_distance=(filtered=%.2f,predicted=%.2f,use=%d) "
+                    "points=%zu "
                     "obb_inside=%.2f coverage=(%.2f,%.2f) "
                     "observed_shape=(%.2f,%.2f) clamped=%d",
                     lost_age, reject_reason.c_str(),
                     hook_lock_.association_xy_gate_m,
+                    hook_lock_.association_filtered_center_distance_m,
+                    hook_lock_.association_predicted_center_distance_m,
+                    hook_lock_.association_prediction_used ? 1 : 0,
                     det.core_points_base
                         ? det.core_points_base->size() : 0U,
                     hook_lock_.locked_obb_support.inside_ratio,
@@ -20566,6 +20673,26 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             rigid_geometry.shape.yaw_base_rad, base_pose_yaw_map);
         static_query.shell_m =
             cargo_safety_evaluator_.config().level2_distance_m;
+        // A stopped load may already have been accumulated into objects_clean
+        // by an older session or an earlier unfiltered frame. Exclude only
+        // static layers that lie inside the current, fresh formal rigid body.
+        // These cells are also removed from CLEAR coverage, so this suppresses
+        // cargo-self false 17/18 without turning the exclusion into code 14.
+        static_query.cargo_self_exclusion_authorized =
+            active_track && formal_use.formal_removal_valid &&
+            rigid_geometry.valid;
+        if (static_query.cargo_self_exclusion_authorized) {
+            const float self_shell =
+                hook_lock_config_.self_cargo_point_match_radius_m;
+            static_query.cargo_self_length_m =
+                rigid_geometry.shape.length_m + 2.0F * self_shell;
+            static_query.cargo_self_width_m =
+                rigid_geometry.shape.width_m + 2.0F * self_shell;
+            static_query.cargo_self_minimum_z =
+                rigid_geometry.aabb_min_map.z() - self_shell;
+            static_query.cargo_self_maximum_z =
+                rigid_geometry.aabb_max_map.z() + self_shell;
+        }
         const StaticEvidenceAuthorization origin_authorization =
             authorizeStaticEvidence(
                 cargo_origin_exclusion_component_.authority);
@@ -20591,6 +20718,17 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_origin_exclusion_active_ =
             static_query.exclusion_authorized;
         static_height_result = static_height_field->query(static_query);
+        if (static_height_result.excluded_cargo_self_layer_count > 0U) {
+            ROS_INFO_THROTTLE(
+                2.0,
+                "[CargoStaticSelfExclusion] track=%llu cells=%zu layers=%zu "
+                "remaining_matches=%zu clear_coverage=%.3f",
+                static_cast<unsigned long long>(cargo_fusion_track_id_),
+                static_height_result.excluded_cargo_self_cells,
+                static_height_result.excluded_cargo_self_layer_count,
+                static_height_result.matched_cells,
+                static_height_result.clear_shell_coverage_ratio);
+        }
         avoidance_input.static_map.available = static_height_result.valid;
         avoidance_input.static_map.coverage =
             static_height_result.clear_shell_coverage_ratio;

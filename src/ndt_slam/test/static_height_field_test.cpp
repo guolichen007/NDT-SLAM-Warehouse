@@ -138,5 +138,38 @@ TEST(StaticHeightFieldTest,
   EXPECT_GT(result.matched_cells, 0U);
 }
 
+TEST(StaticHeightFieldTest,
+     CurrentCargoSelfLayerCannotWarnOrContributeClearCoverage) {
+  StaticHeightField field;
+  auto objects = layer(0.05F, 0.05F, 1.0F);
+  const auto external = layer(1.05F, 0.05F, 1.2F);
+  objects.insert(objects.end(), external.begin(), external.end());
+  ASSERT_TRUE(field.build(
+      objects, {}, StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE,
+      1U, 11U).valid);
+
+  StaticHeightQuery query;
+  query.center_map = Eigen::Vector2f(0.05F, 0.05F);
+  query.length_m = 0.50F;
+  query.width_m = 0.50F;
+  query.shell_m = 1.25F;
+  query.minimum_z = 0.0F;
+  query.maximum_z = 3.0F;
+  query.cargo_self_exclusion_authorized = true;
+  query.cargo_self_length_m = 0.50F;
+  query.cargo_self_width_m = 0.50F;
+  query.cargo_self_minimum_z = 0.50F;
+  query.cargo_self_maximum_z = 1.50F;
+
+  const auto result = field.query(query);
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.excluded_cargo_self_cells, 1U);
+  EXPECT_EQ(result.excluded_cargo_self_layer_count, 1U);
+  EXPECT_GT(result.raw_covered_cells,
+            result.effective_external_covered_cells);
+  EXPECT_EQ(result.matched_cells, 1U);
+  EXPECT_NEAR(result.nearest_horizontal_distance_m, 0.75F, 0.26F);
+}
+
 }  // namespace
 }  // namespace ndt_slam

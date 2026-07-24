@@ -99,6 +99,20 @@ TEST(CargoTrackPolicy, ProvisionalYawCanConvergeBeforeFormalLock) {
   EXPECT_NEAR(summary.axial_yaw_rad, 0.08F, 0.12F);
 }
 
+TEST(CargoTrackPolicy, FormalLockRejectsSubphysicalMedianShape) {
+  std::vector<CargoCandidateDescriptor> observations = {
+      candidate(1, 0.00F, -1.0F, 2.4F, 0.20F, 0.10F, 0.10F, 0.0F),
+      candidate(1, 0.01F, -1.0F, 2.4F, 0.20F, 0.10F, 0.10F, 0.0F),
+      candidate(1, 0.02F, -1.0F, 2.4F, 0.20F, 0.10F, 0.10F, 0.0F)};
+  std::vector<CargoCandidateIdentityScore> scores(
+      observations.size(), strongScore(1));
+  CargoProvisionalLockConfig config;
+  const CargoProvisionalLockSummary summary =
+      summarizeCargoProvisionalLock(observations, scores, config);
+  EXPECT_FALSE(summary.formal_lock_allowed);
+  EXPECT_EQ(summary.reason, "formal_shape_out_of_physical_bounds");
+}
+
 TEST(CargoTrackPolicy, WrongStableBackgroundClusterCannotFormalLock) {
   CargoCandidateIdentityContext context;
   context.hook_center = Eigen::Vector2f::Zero();

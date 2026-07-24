@@ -18,6 +18,9 @@ struct HookLoadStateConfig {
     double high_threshold_v = 2.10;
     double hysteresis_v = 0.03;
     std::uint32_t confirm_samples = 2;
+    // Independent of source frequency: a state transition must satisfy both
+    // the sample count and this continuous source-time duration.
+    double minimum_transition_duration_sec = 0.0;
     double stale_timeout_sec = 2.50;
     double valid_voltage_min_v = 0.0;
     double valid_voltage_max_v = 6.0;
@@ -56,6 +59,8 @@ private:
     HookLoadState stable_state_ = HookLoadState::UNKNOWN;
     HookLoadState pending_state_ = HookLoadState::UNKNOWN;
     std::uint32_t pending_samples_ = 0;
+    bool pending_since_valid_ = false;
+    double pending_since_source_time_sec_ = 0.0;
     std::uint32_t stable_samples_ = 0;
     bool has_sample_ = false;
     bool has_seen_source_time_ = false;

@@ -539,6 +539,21 @@ CargoProvisionalLockSummary summarizeCargoProvisionalLock(
       median(xs), median(ys), median(zs));
   summary.median_size = Eigen::Vector3f(
       median(lengths), median(widths), median(heights));
+  if (!summary.median_center.allFinite() ||
+      !summary.median_size.allFinite() ||
+      !std::isfinite(config.minimum_length_m) ||
+      !std::isfinite(config.minimum_width_m) ||
+      !std::isfinite(config.minimum_height_m) ||
+      config.minimum_length_m <= 0.0F ||
+      config.minimum_width_m <= 0.0F ||
+      config.minimum_height_m <= 0.0F ||
+      summary.median_size.x() < config.minimum_length_m ||
+      summary.median_size.y() < config.minimum_width_m ||
+      summary.median_size.z() < config.minimum_height_m ||
+      summary.median_size.x() < summary.median_size.y()) {
+    summary.reason = "formal_shape_out_of_physical_bounds";
+    return summary;
+  }
   const CargoAxialYawSummary yaw = summarizeCargoAxialYaw(yaws);
   summary.axial_yaw_rad = yaw.mean_yaw_rad;
   summary.orientation_confidence = yaw.concentration;

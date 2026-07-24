@@ -100,6 +100,14 @@ struct StaticHeightQuery {
   std::uint64_t excluded_component_id = 0U;
   std::uint64_t excluded_component_generation = 0U;
   bool exclusion_authorized = false;
+  // A current formal cargo can already exist in a previously accumulated
+  // clean map. Exclude only layers spatially inside that current rigid body;
+  // excluded cells cannot contribute CLEAR coverage.
+  bool cargo_self_exclusion_authorized = false;
+  float cargo_self_length_m = 0.0F;
+  float cargo_self_width_m = 0.0F;
+  float cargo_self_minimum_z = 0.0F;
+  float cargo_self_maximum_z = 0.0F;
 };
 
 struct StaticHeightQueryResult {
@@ -113,7 +121,9 @@ struct StaticHeightQueryResult {
   std::size_t raw_covered_cells = 0U;
   std::size_t effective_external_covered_cells = 0U;
   std::size_t excluded_origin_cells = 0U;
+  std::size_t excluded_cargo_self_cells = 0U;
   std::size_t excluded_layer_count = 0U;
+  std::size_t excluded_cargo_self_layer_count = 0U;
   std::size_t clear_shell_queried_cells = 0U;
   std::size_t clear_shell_covered_cells = 0U;
   float coverage_ratio = 0.0F;

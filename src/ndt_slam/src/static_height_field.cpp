@@ -323,7 +323,15 @@ StaticHeightQueryResult StaticHeightField::query(
       !std::isfinite(input.width_m) || !std::isfinite(input.yaw_map_rad) ||
       !std::isfinite(input.shell_m) || input.length_m <= 0.0F ||
       input.width_m <= 0.0F || input.shell_m < 0.0F ||
-      input.maximum_z < input.minimum_z) {
+      input.maximum_z < input.minimum_z ||
+      (input.cargo_self_exclusion_authorized &&
+       (!std::isfinite(input.cargo_self_length_m) ||
+        !std::isfinite(input.cargo_self_width_m) ||
+        !std::isfinite(input.cargo_self_minimum_z) ||
+        !std::isfinite(input.cargo_self_maximum_z) ||
+        input.cargo_self_length_m <= 0.0F ||
+        input.cargo_self_width_m <= 0.0F ||
+        input.cargo_self_maximum_z < input.cargo_self_minimum_z))) {
     result.reason = "invalid_query";
     return result;
   }
@@ -359,6 +367,10 @@ StaticHeightQueryResult StaticHeightField::query(
       input.excluded_component_id != 0U &&
       input.excluded_component_generation != 0U &&
       input.excluded_component_generation == map_generation_;
+  const float cargo_self_half_length =
+      0.5F * input.cargo_self_length_m;
+  const float cargo_self_half_width =
+      0.5F * input.cargo_self_width_m;
   for (int x = min_x; x <= max_x; ++x) {
     for (int y = min_y; y <= max_y; ++y) {
       ++result.queried_cells;
@@ -379,6 +391,14 @@ StaticHeightQueryResult StaticHeightField::query(
       if (raw_covered) ++result.raw_covered_cells;
       bool matched_cell = false;
       bool cell_has_excluded_layer = false;
+      bool cell_has_excluded_origin_layer = false;
+      bool cell_has_excluded_cargo_self_layer = false;
+      const bool inside_cargo_self_xy =
+          input.cargo_self_exclusion_authorized &&
+          std::abs(local_x) <= cargo_self_half_length +
+              0.5F * config_.cell_size_m &&
+          std::abs(local_y) <= cargo_self_half_width +
+              0.5F * config_.cell_size_m;
       bool cell_has_external_layer = false;
       for (std::size_t layer_index = 0U;
            layer_index < height_cell->layers.size(); ++layer_index) {
@@ -387,7 +407,18 @@ StaticHeightQueryResult StaticHeightField::query(
             input.excluded_members.count(StaticHeightLayerNodeId{
                 key, static_cast<std::uint16_t>(layer_index)}) > 0U) {
           cell_has_excluded_layer = true;
+          cell_has_excluded_origin_layer = true;
           ++result.excluded_layer_count;
+          continue;
+        }
+        const bool overlaps_cargo_self_z =
+            layer.z95 >= input.cargo_self_minimum_z &&
+            layer.z05 <= input.cargo_self_maximum_z;
+        if (inside_cargo_self_xy && overlaps_cargo_self_z) {
+          cell_has_excluded_layer = true;
+          cell_has_excluded_cargo_self_layer = true;
+          ++result.excluded_layer_count;
+          ++result.excluded_cargo_self_layer_count;
           continue;
         }
         cell_has_external_layer = true;
@@ -407,8 +438,11 @@ StaticHeightQueryResult StaticHeightField::query(
           result.strongest_authority = layer.authority;
         }
       }
-      if (cell_has_excluded_layer) {
+      if (cell_has_excluded_origin_layer) {
         ++result.excluded_origin_cells;
+      }
+      if (cell_has_excluded_cargo_self_layer) {
+        ++result.excluded_cargo_self_cells;
       }
       // Support beneath an excluded origin component cannot prove that the
       // external shell is clear. A mixed cell may still report an external
@@ -437,7 +471,11 @@ StaticHeightQueryResult StaticHeightField::query(
             static_cast<float>(result.clear_shell_queried_cells)
       : 0.0F;
   result.coverage_ratio = result.effective_coverage_ratio;
-  result.reason = result.matched_cells > 0U ? "matched" : "clear_in_bounds";
+  result.reason = result.matched_cells > 0U
+      ? "matched"
+      : (result.excluded_cargo_self_layer_count > 0U
+             ? "cargo_self_layers_excluded"
+             : "clear_in_bounds");
   return result;
 }
 

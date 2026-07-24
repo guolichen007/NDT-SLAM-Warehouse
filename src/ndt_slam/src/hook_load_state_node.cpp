@@ -54,10 +54,12 @@ public:
         publish(filter_.tick(ros::WallTime::now().toSec()), ros::Time::now());
         const HookLoadStateConfig& active = filter_.config();
         ROS_INFO("[GRAVITY] topic=%s type=std_msgs/Float32 "
-                 "thresholds=(%.2f,%.2f) hysteresis=%.2f confirm=%u",
+                 "thresholds=(%.2f,%.2f) hysteresis=%.2f "
+                 "confirm=%u/%.2fs",
                  input_topic_.c_str(), active.low_threshold_v,
                  active.high_threshold_v, active.hysteresis_v,
-                 active.confirm_samples);
+                 active.confirm_samples,
+                 active.minimum_transition_duration_sec);
         ROS_INFO("[HookLoadState] output=%s publish=%.1fHz",
                  output_topic_.c_str(), publish_hz);
     }
@@ -73,6 +75,8 @@ private:
             hook_config_["hysteresis_v"].as<double>(0.03);
         int confirm_samples =
             hook_config_["confirm_samples"].as<int>(2);
+        config.minimum_transition_duration_sec =
+            hook_config_["minimum_transition_duration_sec"].as<double>(0.0);
         config.stale_timeout_sec =
             hook_config_["stale_timeout_sec"].as<double>(2.50);
         config.valid_voltage_min_v =
@@ -88,6 +92,10 @@ private:
         pnh_.param("confirm_samples", confirm_samples, confirm_samples);
         config.confirm_samples = static_cast<std::uint32_t>(
             std::max(1, confirm_samples));
+        pnh_.param(
+            "minimum_transition_duration_sec",
+            config.minimum_transition_duration_sec,
+            config.minimum_transition_duration_sec);
         pnh_.param("stale_timeout_sec", config.stale_timeout_sec,
                    config.stale_timeout_sec);
         pnh_.param("valid_voltage_min_v", config.valid_voltage_min_v,
