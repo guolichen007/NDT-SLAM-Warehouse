@@ -29,6 +29,11 @@ bool validConfig(const CargoComponentFusionConfig& config) {
       config.maximum_combined_long_side_m > 0.0F &&
       std::isfinite(config.maximum_combined_short_side_m) &&
       config.maximum_combined_short_side_m > 0.0F &&
+      std::isfinite(config.maximum_hypothesis_aspect_ratio) &&
+      config.maximum_hypothesis_aspect_ratio >= 1.0F &&
+      std::isfinite(config.minimum_merged_short_side_retention_ratio) &&
+      config.minimum_merged_short_side_retention_ratio >= 0.0F &&
+      config.minimum_merged_short_side_retention_ratio <= 1.0F &&
       config.maximum_components >= 1U && config.maximum_components <= 3U;
 }
 
@@ -135,6 +140,56 @@ std::vector<CargoComponentHypothesis> buildCargoComponentHypotheses(
     }
   }
   return hypotheses;
+}
+
+CargoComponentFootprintDecision validateCargoComponentFootprint(
+    const CargoComponentHypothesis& hypothesis,
+    const std::vector<CargoComponentFragment>& fragments,
+    float fitted_long_side_m,
+    float fitted_short_side_m,
+    const CargoComponentFusionConfig& config) {
+  CargoComponentFootprintDecision decision;
+  if (!validConfig(config) || hypothesis.component_indices.empty() ||
+      !std::isfinite(fitted_long_side_m) ||
+      !std::isfinite(fitted_short_side_m) ||
+      fitted_long_side_m <= 0.0F || fitted_short_side_m <= 0.0F ||
+      fitted_long_side_m < fitted_short_side_m) {
+    decision.reason = "invalid_fitted_footprint";
+    return decision;
+  }
+  if (fitted_long_side_m > config.maximum_combined_long_side_m ||
+      fitted_short_side_m > config.maximum_combined_short_side_m) {
+    decision.reason = "fitted_footprint_exceeds_physical_bounds";
+    return decision;
+  }
+  const float aspect_ratio =
+      fitted_long_side_m / std::max(1.0e-4F, fitted_short_side_m);
+  if (aspect_ratio > config.maximum_hypothesis_aspect_ratio) {
+    decision.reason = "fitted_footprint_aspect_ratio_exceeded";
+    return decision;
+  }
+
+  float widest_fragment_m = 0.0F;
+  for (const std::size_t index : hypothesis.component_indices) {
+    if (index >= fragments.size() || !validFragment(fragments[index])) {
+      decision.reason = "invalid_hypothesis_fragment";
+      return decision;
+    }
+    widest_fragment_m =
+        std::max(widest_fragment_m, fragments[index].width_m);
+  }
+  if (hypothesis.component_indices.size() > 1U &&
+      fitted_short_side_m <
+          widest_fragment_m *
+              config.minimum_merged_short_side_retention_ratio) {
+    decision.reason = "merged_footprint_width_collapsed";
+    return decision;
+  }
+  decision.valid = true;
+  decision.reason = hypothesis.component_indices.size() > 1U
+      ? "merged_footprint_physically_plausible"
+      : "singleton_footprint_physically_plausible";
+  return decision;
 }
 
 }  // namespace ndt_slam

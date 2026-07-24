@@ -1075,7 +1075,9 @@ hook_cargo_lock:
   # candidate_progress_timeout_sec remains the sole stalled-window reset.
   candidate_window_frames: 12
   candidate_required_consistent_frames: 7
-  candidate_max_gap_frames: 2
+  # At the 5 Hz detector rate this tolerates a sub-second visibility gap.
+  # Gap frames never count as lock evidence.
+  candidate_max_gap_frames: 4
   candidate_progress_timeout_sec: 3.0
   candidate_absolute_timeout_sec: 8.0
   candidate_switch_confirm_frames: 3
@@ -1281,6 +1283,12 @@ odom_anchored_cargo_box:
     component_merge_lateral_gap_m: 0.35
     component_merge_max_yaw_difference_deg: 15.0
     component_merge_min_z_overlap_ratio: 0.30
+    # Reject the observed 3.81x0.25 m "line cargo" before it can win identity
+    # ranking. Current measured warehouse loads remain below 2.6:1.
+    component_max_hypothesis_aspect_ratio: 3.0
+    # Merging may extend length but cannot erase the width already measured on
+    # an individual fragment.
+    component_merge_min_short_side_retention_ratio: 0.70
     component_merge_max_components: 3
     # Preserve the detected cargo's own footprint direction. Square/ambiguous
     # observations fall back to the conservative axis-aligned box.

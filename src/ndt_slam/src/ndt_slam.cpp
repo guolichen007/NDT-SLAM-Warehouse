@@ -2016,7 +2016,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     hcl["candidate_required_consistent_frames"].as<int>(7),
                     3, hook_lock_config_.candidate_window_frames);
             hook_lock_config_.candidate_max_gap_frames = std::max(
-                0, hcl["candidate_max_gap_frames"].as<int>(2));
+                0, hcl["candidate_max_gap_frames"].as<int>(4));
             hook_lock_config_.candidate_progress_timeout_sec = std::max(
                 0.5F, hcl["candidate_progress_timeout_sec"].as<float>(3.0F));
             hook_lock_config_.candidate_absolute_timeout_sec = std::max(
@@ -2310,6 +2310,17 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     std::clamp(
                         tb["component_merge_min_z_overlap_ratio"].as<float>(0.30F),
                         0.0F, 1.0F);
+                odom_anchor_config_.tight_box.component_max_hypothesis_aspect_ratio =
+                    std::clamp(
+                        tb["component_max_hypothesis_aspect_ratio"]
+                            .as<float>(3.0F),
+                        1.0F, 10.0F);
+                odom_anchor_config_.tight_box
+                    .component_merge_min_short_side_retention_ratio =
+                        std::clamp(
+                            tb["component_merge_min_short_side_retention_ratio"]
+                                .as<float>(0.70F),
+                            0.0F, 1.0F);
                 odom_anchor_config_.tight_box.component_merge_max_components =
                     std::clamp(
                         tb["component_merge_max_components"].as<int>(3), 1, 3);
@@ -12607,11 +12618,23 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             hook_lock_.locked_shape.height_m);
         identity_context.predicted_yaw_rad =
             hook_lock_.locked_shape.yaw_base_rad;
+        const bool lost_reacquisition =
+            hook_lock_.state == HookCargoLockState::LOST_HOLD;
+        const float base_association_radius_m = lost_reacquisition
+            ? hook_lock_config_.reacquisition_max_xy_gate_m
+            : hook_lock_config_.locked_update_max_center_dist;
+        const float maximum_association_radius_m = lost_reacquisition
+            ? hook_lock_config_.association_max_xy_gate_m
+            : hook_lock_config_.locked_update_max_center_dist;
+        // Candidate ranking and the later frozen-OBB association gate must
+        // use the same bounded uncertainty contract. The old LOST_HOLD code
+        // capped ranking at the strict 0.55 m re-entry radius forever, while
+        // the association gate correctly grew toward 1.05 m. That caused the
+        // ranker to select a nearby unrelated component before the wider,
+        // still OBB-guarded reacquisition gate could evaluate the cargo.
         identity_context.association_radius_m = std::min(
-            hook_lock_.state == HookCargoLockState::LOST_HOLD
-                ? hook_lock_config_.reacquisition_max_xy_gate_m
-                : hook_lock_config_.association_max_xy_gate_m,
-            identity_context.association_radius_m +
+            maximum_association_radius_m,
+            base_association_radius_m +
                 hook_lock_config_.velocity_model_uncertainty_mps *
                     static_cast<float>(dt) +
                 hook_lock_.live_pose.position_uncertainty_m +
@@ -12782,6 +12805,12 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         odom_anchor_config_.max_size_x;
     fusion_config.maximum_combined_short_side_m =
         odom_anchor_config_.max_size_y;
+    fusion_config.maximum_hypothesis_aspect_ratio =
+        odom_anchor_config_.tight_box
+            .component_max_hypothesis_aspect_ratio;
+    fusion_config.minimum_merged_short_side_retention_ratio =
+        odom_anchor_config_.tight_box
+            .component_merge_min_short_side_retention_ratio;
     fusion_config.maximum_components = static_cast<std::size_t>(
         odom_anchor_config_.tight_box.component_merge_max_components);
     const std::vector<CargoComponentHypothesis> component_hypotheses =
@@ -12813,6 +12842,22 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             estimateCargoOrientedFootprint(
                 footprint_points, candidate_footprint_config);
         if (!footprint.valid || component_z.size() < 3U) continue;
+        const CargoComponentFootprintDecision footprint_decision =
+            validateCargoComponentFootprint(
+                hypothesis, fragments, footprint.size_long_short.x(),
+                footprint.size_long_short.y(), fusion_config);
+        if (!footprint_decision.valid) {
+            ROS_WARN_THROTTLE(
+                1.0,
+                "[CargoComponentFusion] rejected hypothesis=%s "
+                "components=%zu fitted=(%.3f,%.3f) reason=%s",
+                hypothesis.reason.c_str(),
+                hypothesis.component_indices.size(),
+                footprint.size_long_short.x(),
+                footprint.size_long_short.y(),
+                footprint_decision.reason.c_str());
+            continue;
+        }
         const float z_low = component_z[static_cast<std::size_t>(
             (component_z.size() - 1U) *
             odom_anchor_config_.tight_box.percentile_low)];
@@ -14219,8 +14264,14 @@ void NdtSlamNode::updateHookCargoLock(
             hook_lock_.last_candidate_progress_stamp.isZero()
                 ? geometry_age
                 : (stamp - hook_lock_.last_candidate_progress_stamp).toSec();
-        if (geometry_progress_age >=
-                hook_lock_config_.candidate_progress_timeout_sec) {
+        const bool formal_observation = det.oriented_footprint_valid &&
+            bottom.valid &&
+            (large_lock_observation ||
+             (compact_lock_observation && compact_size_continuous));
+        const bool progress_timed_out =
+            geometry_progress_age >=
+                hook_lock_config_.candidate_progress_timeout_sec;
+        if (progress_timed_out && !formal_observation) {
             hook_lock_.state = HookCargoLockState::CANDIDATE;
             hook_lock_.confirm_count = 0;
             hook_lock_.candidate_progress_count = 0;
@@ -14236,10 +14287,6 @@ void NdtSlamNode::updateHookCargoLock(
                 geometry_age, geometry_progress_age);
             break;
         }
-        const bool formal_observation = det.oriented_footprint_valid &&
-            bottom.valid &&
-            (large_lock_observation ||
-             (compact_lock_observation && compact_size_continuous));
         if (!formal_observation) {
             hook_lock_.weak_count++;
             hook_lock_.candidate_gap_frames++;
@@ -14283,6 +14330,65 @@ void NdtSlamNode::updateHookCargoLock(
         score.overall_lock_confidence = det.overall_lock_confidence;
         score.reason = "detector_selected_component";
 
+        if (progress_timed_out) {
+            // The current frame is fresh formal evidence, but a stalled
+            // window must never become "consecutive" by bridging the gap.
+            // Re-seed a new provisional identity in-place instead of
+            // bouncing through CANDIDATE and throwing away another detector
+            // cycle. No old observation or confirmation count is retained.
+            hook_lock_.provisional_observations.clear();
+            hook_lock_.provisional_scores.clear();
+            hook_lock_.provisional_summary =
+                CargoProvisionalLockSummary{};
+            ++next_provisional_track_id_;
+            if (next_provisional_track_id_ == 0U) {
+                ++next_provisional_track_id_;
+            }
+            hook_lock_.provisional_track_id = next_provisional_track_id_;
+            hook_lock_.provisional_observations.push_back(observation);
+            hook_lock_.provisional_scores.push_back(score);
+            hook_lock_.provisional_origin_center_base =
+                observation.center;
+            hook_lock_.provisional_velocity_base.setZero();
+            hook_lock_.provisional_last_evidence_stamp_sec =
+                stamp.toSec();
+            hook_lock_.candidate_started_stamp = stamp;
+            hook_lock_.last_candidate_progress_stamp = stamp;
+            hook_lock_.last_identity_consistent_stamp = stamp;
+            hook_lock_.last_any_candidate_stamp = stamp;
+            hook_lock_.last_seen_stamp = stamp;
+            hook_lock_.last_accepted_center = observation.center;
+            hook_lock_.last_accepted_size = observation.size;
+            hook_lock_.has_last_accepted = true;
+            hook_lock_.confirm_count = 1;
+            hook_lock_.candidate_progress_count = 1;
+            hook_lock_.candidate_gap_frames = 0;
+            hook_lock_.weak_count = 0;
+            hook_lock_.challenger_confirm_count = 0;
+            hook_lock_.challenger_candidate_id = -1;
+            hook_lock_.ground_clearance_m =
+                det.ground_reference_valid && std::isfinite(det.ground_z)
+                    ? bottom.bottom_z_base - det.ground_z
+                    : std::numeric_limits<float>::quiet_NaN();
+            hook_lock_.lift_from_origin_m = 0.0F;
+            hook_lock_.suspension_confirm_count =
+                det.lidar_lift_evidence &&
+                        std::isfinite(hook_lock_.ground_clearance_m) &&
+                        hook_lock_.ground_clearance_m >=
+                            hook_lock_config_
+                                .suspended_min_ground_clearance_m
+                    ? 1 : 0;
+            hook_lock_.lift_confirm_count = 0;
+            ROS_WARN(
+                "[CargoLock] GEOMETRY_CONFIRMING reseeded "
+                "reason=progress_timeout_with_fresh_formal_observation "
+                "track=%llu previous_progress_age=%.2f",
+                static_cast<unsigned long long>(
+                    hook_lock_.provisional_track_id),
+                geometry_progress_age);
+            break;
+        }
+
         // Geometry confirmation uses consecutive physical observations, not a
         // velocity prediction or a hard raw-yaw match.  The latter caused a
         // partial face to clear the window; the now-empty window then produced
@@ -14296,12 +14402,32 @@ void NdtSlamNode::updateHookCargoLock(
                 ? 0.0F
                 : (observation.center.head<2>() -
                    hook_lock_.provisional_observations.back()
-                       .center.head<2>()).norm();
+                        .center.head<2>()).norm();
+        bool provisional_shape_continuous =
+            !hook_lock_.provisional_observations.empty();
+        if (provisional_shape_continuous) {
+            const Eigen::Vector3f& previous_size =
+                hook_lock_.provisional_observations.back().size;
+            for (int axis = 0; axis < 3; ++axis) {
+                const float reference =
+                    std::max(0.10F, previous_size[axis]);
+                const float relative_step =
+                    std::abs(observation.size[axis] - previous_size[axis]) /
+                    reference;
+                if (!std::isfinite(relative_step) ||
+                    relative_step >
+                        hook_lock_config_.size_change_max_ratio) {
+                    provisional_shape_continuous = false;
+                    break;
+                }
+            }
+        }
         const bool same_provisional_identity = fresh_stamp &&
             !hook_lock_.provisional_observations.empty() &&
             std::isfinite(provisional_center_step) &&
             provisional_center_step <=
-                hook_lock_config_.lock_max_center_step_m;
+                hook_lock_config_.lock_max_center_step_m &&
+            provisional_shape_continuous;
         if (!fresh_stamp) {
             break;
         }

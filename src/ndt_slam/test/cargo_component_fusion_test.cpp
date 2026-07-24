@@ -59,5 +59,36 @@ TEST(CargoComponentFusion, DiagonalUnrelatedComponentCannotMerge) {
   EXPECT_FALSE(containsGroup(hypotheses, 2U));
 }
 
+TEST(CargoComponentFusion, RejectsElongatedSingletonBeforeIdentityRanking) {
+  const CargoComponentHypothesis hypothesis{{0U}, false, "single_component"};
+  const auto decision = validateCargoComponentFootprint(
+      hypothesis, {fragment(0.0F, 0.0F)}, 3.81F, 0.251F,
+      CargoComponentFusionConfig{});
+  EXPECT_FALSE(decision.valid);
+  EXPECT_EQ(decision.reason, "fitted_footprint_aspect_ratio_exceeded");
+}
+
+TEST(CargoComponentFusion, AllowsMeasuredWarehouseCargoAspectRatio) {
+  const CargoComponentHypothesis hypothesis{{0U}, false, "single_component"};
+  const auto decision = validateCargoComponentFootprint(
+      hypothesis, {fragment(0.0F, 0.0F)}, 2.84F, 1.12F,
+      CargoComponentFusionConfig{});
+  EXPECT_TRUE(decision.valid);
+}
+
+TEST(CargoComponentFusion, MergeCannotCollapseFragmentWidth) {
+  CargoComponentFragment lhs = fragment(-0.5F, 0.0F);
+  CargoComponentFragment rhs = fragment(0.5F, 0.0F);
+  lhs.width_m = 0.60F;
+  rhs.width_m = 0.55F;
+  const CargoComponentHypothesis hypothesis{
+      {0U, 1U}, true, "collinear_pair"};
+  const auto decision = validateCargoComponentFootprint(
+      hypothesis, {lhs, rhs}, 1.8F, 0.30F,
+      CargoComponentFusionConfig{});
+  EXPECT_FALSE(decision.valid);
+  EXPECT_EQ(decision.reason, "merged_footprint_width_collapsed");
+}
+
 }  // namespace
 }  // namespace ndt_slam

@@ -1554,6 +1554,8 @@ private:
             float component_merge_lateral_gap_m = 0.35F;
             float component_merge_max_yaw_difference_deg = 15.0F;
             float component_merge_min_z_overlap_ratio = 0.30F;
+            float component_max_hypothesis_aspect_ratio = 3.0F;
+            float component_merge_min_short_side_retention_ratio = 0.70F;
             int component_merge_max_components = 3;
             bool orientation_enabled = true;
             int orientation_min_points = 20;
@@ -1708,7 +1710,7 @@ private:
         int candidate_max_weak_frames = 10;
         int candidate_window_frames = 12;
         int candidate_required_consistent_frames = 7;
-        int candidate_max_gap_frames = 2;
+        int candidate_max_gap_frames = 4;
         float candidate_progress_timeout_sec = 3.0F;
         float candidate_absolute_timeout_sec = 8.0F;
         int candidate_switch_confirm_frames = 3;
