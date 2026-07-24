@@ -33,6 +33,15 @@ CargoObstacleObservation staticCargo(
   return observation;
 }
 
+CargoObstacleObservation directionalPretrack(
+    std::size_t source, float x, float y) {
+  CargoObstacleObservation observation = hazard(source, x, y, 18U);
+  observation.footprint_distance_m = 6.0F;
+  observation.warning_code = 14U;
+  observation.warning_eligible = false;
+  return observation;
+}
+
 CargoObstacleTrackerConfig ordinaryHazardConfig() {
   CargoObstacleTrackerConfig config;
   config.require_static_cargo_for_warning = false;
@@ -72,6 +81,73 @@ TEST(CargoObstacleTracker, RepeatedStampDoesNotAdvanceTrack) {
       tracker.update(1.2, {hazard(0U, 0.02F, 0.0F)}).confirmed_hazard);
   EXPECT_TRUE(
       tracker.update(1.4, {hazard(0U, 0.04F, 0.0F)}).confirmed_hazard);
+}
+
+TEST(CargoObstacleTracker,
+     DirectionalPretrackMaturesIdentityWithoutPublishingWarning) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  EXPECT_FALSE(tracker.update(
+      1.0, {directionalPretrack(10U, 0.0F, 0.0F)})
+                   .hazard_observed);
+  EXPECT_FALSE(tracker.update(
+      1.2, {directionalPretrack(10U, 0.02F, 0.0F)})
+                   .confirmed_hazard);
+  const CargoObstacleTrackerDecision acquired = tracker.update(
+      1.4, {directionalPretrack(10U, 0.04F, 0.0F)});
+  EXPECT_FALSE(acquired.hazard_observed);
+  EXPECT_FALSE(acquired.confirmed_hazard);
+  EXPECT_EQ(acquired.reason, "directional_collision_track_acquiring");
+
+  CargoObstacleObservation level2 = hazard(3U, 0.06F, 0.0F, 18U);
+  const CargoObstacleTrackerDecision warned =
+      tracker.update(1.6, {level2});
+  EXPECT_TRUE(warned.confirmed_hazard) << warned.reason;
+  EXPECT_EQ(warned.warning_code, 18U);
+  EXPECT_GE(warned.selected_confirm_count, 3);
+}
+
+TEST(CargoObstacleTracker,
+     MaturePretrackDoesNotDelayAccurateLevel1AtThreeMeters) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  tracker.update(1.0, {directionalPretrack(10U, 0.0F, 0.0F)});
+  tracker.update(1.2, {directionalPretrack(10U, 0.02F, 0.0F)});
+  tracker.update(1.4, {directionalPretrack(10U, 0.04F, 0.0F)});
+
+  CargoObstacleObservation level1 = hazard(3U, 0.06F, 0.0F, 17U);
+  level1.footprint_distance_m = 2.9F;
+  const CargoObstacleTrackerDecision warned =
+      tracker.update(1.6, {level1});
+  EXPECT_TRUE(warned.confirmed_hazard) << warned.reason;
+  EXPECT_EQ(warned.warning_code, 17U);
+}
+
+TEST(CargoObstacleTracker,
+     StaticDirectionalPretrackAuthorizesRealLevel2AtFiveMeters) {
+  CargoObstacleTracker tracker;
+  CargoObstacleObservation pretrack =
+      staticCargo(10U, 0.0F, 0.0F, 18U);
+  pretrack.footprint_distance_m = 6.0F;
+  pretrack.warning_code = 14U;
+  pretrack.warning_eligible = false;
+  CargoObstacleTrackerDecision acquired;
+  for (int frame = 0; frame < 8; ++frame) {
+    pretrack.centroid_map.x() =
+        0.002F * static_cast<float>(frame);
+    acquired = tracker.update(
+        1.0 + 0.2 * frame, {pretrack});
+    EXPECT_FALSE(acquired.hazard_observed);
+    EXPECT_FALSE(acquired.confirmed_hazard);
+  }
+  ASSERT_FALSE(tracker.tracks().empty());
+  EXPECT_TRUE(tracker.tracks().front().static_obstacle);
+
+  CargoObstacleObservation level2 =
+      staticCargo(2U, 0.016F, 0.0F, 18U);
+  level2.footprint_distance_m = 4.9F;
+  const CargoObstacleTrackerDecision warned =
+      tracker.update(2.6, {level2});
+  EXPECT_TRUE(warned.confirmed_hazard) << warned.reason;
+  EXPECT_EQ(warned.warning_code, 18U);
 }
 
 TEST(CargoObstacleTracker, MissingCycleBreaksConsecutiveEvidence) {

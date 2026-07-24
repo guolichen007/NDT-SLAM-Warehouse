@@ -20,6 +20,10 @@ struct CargoMotionCorridorConfig {
   float immediate_near_field_m = 0.30F;
   float minimum_motion_speed_mps = 0.05F;
   float prediction_horizon_sec = 3.0F;
+  // Directional obstacle acquisition may need more distance than the
+  // time-horizon projection at low crane speeds. This is tracking lookahead,
+  // not a warning threshold.
+  float minimum_prediction_distance_m = 7.0F;
   float lateral_margin_m = 0.30F;
   float rear_margin_m = 0.30F;
   float velocity_alpha = 0.35F;

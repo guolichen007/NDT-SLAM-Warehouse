@@ -2123,20 +2123,10 @@ private:
     // to prove that an already-separated live cluster has a stable external
     // identity before a provisional 17/18 can become official.
     CargoObstacleTracker pending_cargo_obstacle_tracker_;
-    struct CargoWarningEscalationState {
-        bool valid = false;
-        std::uint64_t cargo_lifecycle_id = 0U;
-        std::uint64_t cargo_track_id = 0U;
-        std::uint64_t obstacle_track_id = 0U;
-        int level2_frames = 0;
-        double last_warning_stamp_sec = 0.0;
-    };
-    // A newly authorized obstacle that is already inside 3 m must first be
-    // published as level 2. This preserves the operational 5 m -> 3 m
-    // escalation contract without weakening obstacle identity/provenance.
-    int cargo_warning_level2_prelude_frames_ = 2;
-    CargoWarningEscalationState pending_warning_escalation_;
-    CargoWarningEscalationState formal_warning_escalation_;
+    // Directional low-clearance observations are tracked outside the 5 m
+    // warning shell so identity/provenance can mature before code 18 is due.
+    // This does not alter the immutable 5 m/3 m warning thresholds.
+    float cargo_collision_tracking_acquisition_distance_m_ = 7.0F;
     std::uint64_t pending_obstacle_context_lifecycle_id_ = 0U;
     std::uint64_t pending_obstacle_context_track_segment_id_ = 0U;
     PendingCargoEnvelopeSource pending_obstacle_context_envelope_source_ =
@@ -2166,6 +2156,7 @@ private:
     std::uint64_t cargo_static_evidence_track_start_sequence_ = 0U;
     std::uint64_t advanceStaticEvidenceEpoch();
     CargoMotionCorridorConfig cargo_motion_corridor_config_;
+    std::size_t cargo_directional_pretrack_clusters_ = 0U;
     CargoResidualClassifierConfig cargo_residual_classifier_config_;
     float cargo_residual_surface_band_below_m_ = 0.60F;
     float cargo_residual_surface_band_above_m_ = 0.20F;

@@ -10,7 +10,12 @@ namespace {
 
 constexpr std::uint16_t kLevel1 = 17U;
 constexpr std::uint16_t kLevel2 = 18U;
+constexpr std::uint16_t kClear = 14U;
 constexpr double kStampEpsilonSec = 1.0e-4;
+
+bool warningCode(std::uint16_t code) {
+  return code == kLevel1 || code == kLevel2;
+}
 
 std::size_t cellIntersectionCount(
     const std::vector<std::int64_t>& left,
@@ -51,6 +56,13 @@ float cellIou(const std::vector<std::int64_t>& left,
 
 bool validConfig(const CargoObstacleTrackerConfig& config) {
   return config.confirm_frames >= 2 && config.minimum_points > 0U &&
+      std::isfinite(config.level1_warning_distance_m) &&
+      config.level1_warning_distance_m > 0.0F &&
+      std::isfinite(config.level2_warning_distance_m) &&
+      config.level2_warning_distance_m >
+          config.level1_warning_distance_m &&
+      std::isfinite(config.acquisition_distance_m) &&
+      config.acquisition_distance_m > config.level2_warning_distance_m &&
       std::isfinite(config.maximum_observation_gap_sec) &&
       config.maximum_observation_gap_sec > 0.0 &&
       std::isfinite(config.stale_track_sec) &&
@@ -83,15 +95,30 @@ bool validConfig(const CargoObstacleTrackerConfig& config) {
 }
 
 bool validObservation(const CargoObstacleObservation& observation,
-                      std::size_t minimum_points) {
+                      const CargoObstacleTrackerConfig& config) {
+  const bool warning_distance_valid =
+      observation.warning_code == kLevel1
+      ? observation.footprint_distance_m <=
+            config.level1_warning_distance_m
+      : observation.warning_code == kLevel2 &&
+            observation.footprint_distance_m >
+                config.level1_warning_distance_m &&
+            observation.footprint_distance_m <=
+                config.level2_warning_distance_m;
+  const bool decision_code_valid = observation.warning_eligible
+      ? warningCode(observation.warning_code) && warning_distance_valid
+      : observation.warning_code == kClear &&
+            observation.footprint_distance_m >
+                config.level2_warning_distance_m &&
+            observation.footprint_distance_m <=
+                config.acquisition_distance_m;
   return observation.centroid_map.allFinite() &&
       std::isfinite(observation.top_z95_map) &&
       std::isfinite(observation.footprint_distance_m) &&
       observation.footprint_distance_m >= 0.0F &&
       std::isfinite(observation.conservative_clearance_m) &&
-      observation.point_count >= minimum_points &&
-      (observation.warning_code == kLevel1 ||
-       observation.warning_code == kLevel2);
+      observation.point_count >= config.minimum_points &&
+      decision_code_valid;
 }
 
 bool hasLargeStaticCargoGeometry(
@@ -220,14 +247,17 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
 
   std::vector<bool> track_assigned(tracks_.size(), false);
   for (CargoObstacleObservation observation : observations) {
-    if (!validObservation(observation, config_.minimum_points)) continue;
+    if (!validObservation(observation, config_)) continue;
     std::sort(observation.occupied_map_cells.begin(),
               observation.occupied_map_cells.end());
     observation.occupied_map_cells.erase(
         std::unique(observation.occupied_map_cells.begin(),
                     observation.occupied_map_cells.end()),
         observation.occupied_map_cells.end());
-    decision.hazard_observed = true;
+    decision.hazard_observed =
+        decision.hazard_observed ||
+        (observation.warning_eligible &&
+         warningCode(observation.warning_code));
 
     std::size_t best_index = tracks_.size();
     float best_cost = std::numeric_limits<float>::infinity();
@@ -327,6 +357,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.observed_this_cycle = true;
       track.current_source_index = observation.source_index;
       track.current_source_validated = observation.source_validated;
+      track.current_warning_eligible =
+          observation.warning_eligible &&
+          warningCode(observation.warning_code);
       tracks_.push_back(track);
       track_assigned.push_back(true);
       continue;
@@ -441,6 +474,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
             config_.static_cargo_confirm_sec;
     track.current_source_index = observation.source_index;
     track.current_source_validated = observation.source_validated;
+    track.current_warning_eligible =
+        observation.warning_eligible &&
+        warningCode(observation.warning_code);
     track_assigned[best_index] = true;
   }
 
@@ -452,7 +488,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     if (candidate == nullptr || moreDangerous(track, *candidate)) {
       candidate = &track;
     }
-    const bool warning_authorized = track.confirmed &&
+    const bool warning_authorized = track.current_warning_eligible &&
+        warningCode(track.warning_code) && track.confirmed &&
         (!config_.require_large_geometry_for_warning ||
          track.geometry_validated_consecutive_observations >=
              config_.confirm_frames) &&
@@ -529,6 +566,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     } else {
       decision.reason = "static_authorization_pending";
     }
+  } else if (candidate != nullptr) {
+    decision.reason = "directional_collision_track_acquiring";
   } else {
     decision.reason = "clear_no_hazard_cluster";
   }

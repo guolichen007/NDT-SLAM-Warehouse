@@ -25,6 +25,9 @@ bool authorizesStaticObstacle(ExternalProvenance provenance) noexcept;
 struct CargoObstacleTrackerConfig {
   int confirm_frames = 3;
   std::size_t minimum_points = 20U;
+  float level1_warning_distance_m = 3.0F;
+  float level2_warning_distance_m = 5.0F;
+  float acquisition_distance_m = 7.0F;
   double maximum_observation_gap_sec = 0.60;
   double stale_track_sec = 1.00;
   float association_max_centroid_distance_m = 0.75F;
@@ -68,6 +71,9 @@ struct CargoObstacleObservation {
   Eigen::Vector2f cargo_center_map = Eigen::Vector2f::Zero();
   bool cargo_center_valid = false;
   std::uint16_t warning_code = 0U;
+  // False for a 5-7 m directional acquisition observation. Such a frame may
+  // build identity/provenance history but can never publish 17/18.
+  bool warning_eligible = true;
   bool source_validated = true;
   float validation_shell_m = 0.0F;
   ExternalProvenance provenance = ExternalProvenance::NONE;
@@ -110,6 +116,7 @@ struct CargoObstacleTrack {
   float last_association_cost = 0.0F;
   std::string association_reset_reason;
   bool current_source_validated = false;
+  bool current_warning_eligible = false;
   std::size_t current_source_index = 0U;
 };
 
@@ -139,9 +146,11 @@ struct CargoObstacleTrackerDecision {
   std::string reason = "not_evaluated";
 };
 
-// Associates every hazard cluster in map coordinates. Confirmation is owned
-// by each physical track, so a different per-frame "most dangerous" winner
-// cannot advance or reset another obstacle's evidence count.
+// Associates warning clusters and directional 5-7 m acquisition clusters in
+// map coordinates. Confirmation is owned by each physical track, so a
+// different per-frame "most dangerous" winner cannot advance or reset
+// another obstacle's evidence count. Acquisition-only observations can mature
+// identity/provenance but never authorize a warning.
 class CargoObstacleTracker {
  public:
   explicit CargoObstacleTracker(

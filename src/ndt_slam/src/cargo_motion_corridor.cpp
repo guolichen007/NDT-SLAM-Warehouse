@@ -13,6 +13,8 @@ bool validConfig(const CargoMotionCorridorConfig& config) {
       config.minimum_motion_speed_mps >= 0.0F &&
       std::isfinite(config.prediction_horizon_sec) &&
       config.prediction_horizon_sec > 0.0F &&
+      std::isfinite(config.minimum_prediction_distance_m) &&
+      config.minimum_prediction_distance_m > 0.0F &&
       std::isfinite(config.lateral_margin_m) &&
       config.lateral_margin_m >= 0.0F &&
       std::isfinite(config.rear_margin_m) && config.rear_margin_m >= 0.0F &&
@@ -95,13 +97,18 @@ CargoMotionCorridorDecision evaluateCargoMotionCorridor(
       std::sin(input.cargo_yaw_map_rad));
   const Eigen::Vector2f cargo_short_axis(
       -cargo_long_axis.y(), cargo_long_axis.x());
+  const float projected_half_forward_extent =
+      0.5F *
+      (std::abs(direction.dot(cargo_long_axis)) * input.cargo_length_m +
+       std::abs(direction.dot(cargo_short_axis)) * input.cargo_width_m);
   const float projected_half_width =
       0.5F * (std::abs(normal.dot(cargo_long_axis)) * input.cargo_length_m +
               std::abs(normal.dot(cargo_short_axis)) * input.cargo_width_m);
   decision.corridor_half_width_m = projected_half_width +
       input.horizontal_uncertainty_m + config.lateral_margin_m;
-  const float corridor_length =
-      decision.speed_mps * config.prediction_horizon_sec;
+  const float corridor_length = std::max(
+      decision.speed_mps * config.prediction_horizon_sec,
+      config.minimum_prediction_distance_m);
   const auto inside_corridor = [&](const Eigen::Vector2f& point,
                                    float* along_out,
                                    float* lateral_out) {
@@ -112,8 +119,12 @@ CargoMotionCorridorDecision evaluateCargoMotionCorridor(
                  relative.y() * direction.x());
     if (along_out != nullptr) *along_out = along;
     if (lateral_out != nullptr) *lateral_out = lateral;
-    return along >= -config.rear_margin_m &&
-        along <= corridor_length + decision.corridor_half_width_m &&
+    return along >=
+            -projected_half_forward_extent -
+                input.horizontal_uncertainty_m - config.rear_margin_m &&
+        along <=
+            projected_half_forward_extent +
+                input.horizontal_uncertainty_m + corridor_length &&
         lateral <= decision.corridor_half_width_m;
   };
 

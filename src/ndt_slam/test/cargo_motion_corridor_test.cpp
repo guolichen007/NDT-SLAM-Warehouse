@@ -28,6 +28,29 @@ TEST(CargoMotionCorridor, ForwardObstacleIsEligible) {
   EXPECT_EQ(decision.mode, CargoSafetySpatialMode::MOTION_CORRIDOR);
 }
 
+TEST(CargoMotionCorridor,
+     MinimumPredictionDistanceSupportsEarlyLowSpeedAcquisition) {
+  CargoMotionCorridorInput input = movingInput(6.5F, 0.1F);
+  input.cargo_velocity_map = Eigen::Vector2f(0.10F, 0.0F);
+  input.current_footprint_distance_m = 6.0F;
+  const auto decision = evaluateCargoMotionCorridor(
+      CargoMotionCorridorConfig{}, input);
+  EXPECT_TRUE(decision.valid);
+  EXPECT_TRUE(decision.eligible);
+  EXPECT_EQ(decision.mode, CargoSafetySpatialMode::MOTION_CORRIDOR);
+}
+
+TEST(CargoMotionCorridor,
+     AcquisitionDistanceIsMeasuredFromCargoFrontNotCenter) {
+  CargoMotionCorridorInput input = movingInput(8.4F, 0.0F);
+  input.cargo_velocity_map = Eigen::Vector2f(0.10F, 0.0F);
+  input.cargo_length_m = 3.0F;
+  input.cargo_width_m = 2.0F;
+  input.current_footprint_distance_m = 6.9F;
+  EXPECT_TRUE(evaluateCargoMotionCorridor(
+      CargoMotionCorridorConfig{}, input).eligible);
+}
+
 TEST(CargoMotionCorridor, SideRearObstacleIsExcluded) {
   const auto decision = evaluateCargoMotionCorridor(
       CargoMotionCorridorConfig{}, movingInput(-2.0F, 2.0F));
