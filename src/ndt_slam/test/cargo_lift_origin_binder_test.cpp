@@ -158,7 +158,7 @@ TEST(CargoLiftOriginBinderTest,
   EXPECT_EQ(held.thickness_confirm_count, 1);
   EXPECT_TRUE(held.lift_confirmed);
   EXPECT_FALSE(held.thickness_ready);
-  EXPECT_EQ(held.reason, "waiting_for_new_physical_evidence");
+  EXPECT_EQ(held.reason, "waiting_for_new_support_evidence");
 }
 
 TEST(CargoLiftOriginBinderTest, StaleSourceDoesNotAdvanceConfirmation) {

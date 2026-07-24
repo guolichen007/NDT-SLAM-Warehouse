@@ -22,6 +22,11 @@ const char* cargoThicknessSourceName(CargoThicknessSource source) noexcept;
 
 struct CargoGeometryFusionConfig {
   std::size_t minimum_independent_sources = 2U;
+  // Formal height requires the post-lift revealed-support difference and a
+  // contemporaneous LiDAR side extent. Static origin height alone is useful
+  // diagnostics/fallback evidence but is correlated with the map-difference
+  // path and cannot replace either physical source.
+  bool require_revealed_and_live_thickness = true;
   int minimum_confirm_frames = 5;
   double maximum_observation_gap_sec = 0.50;
   float maximum_source_disagreement_m = 0.25F;

@@ -251,11 +251,20 @@ CargoFrozenGeometry CargoGeometryFusion::update(
   }
   std::vector<WeightedHeight> values;
   std::size_t independent_sources = 0U;
+  bool has_revealed_support = false;
+  bool has_live_visible_extent = false;
   for (const auto& item : best_by_source) {
     values.push_back(item.second);
     if (item.first != CargoThicknessSource::CONFIGURED_FALLBACK) {
       ++independent_sources;
     }
+    has_revealed_support =
+        has_revealed_support ||
+        item.first ==
+            CargoThicknessSource::MAP_DIFF_REVEALED_SUPPORT;
+    has_live_visible_extent =
+        has_live_visible_extent ||
+        item.first == CargoThicknessSource::LIVE_VISIBLE_EXTENT;
   }
   result_.cargo_lifecycle_id = frame.cargo_lifecycle_id;
   result_.track_segment_id = frame.track_segment_id;
@@ -263,6 +272,15 @@ CargoFrozenGeometry CargoGeometryFusion::update(
   if (independent_sources < config_.minimum_independent_sources) {
     result_.valid = false;
     result_.reason = "independent_thickness_sources_insufficient";
+    result_.confirm_frames = 0;
+    pending_valid_ = false;
+    return result_;
+  }
+  if (config_.require_revealed_and_live_thickness &&
+      (!has_revealed_support || !has_live_visible_extent)) {
+    result_.valid = false;
+    result_.reason =
+        "revealed_and_live_thickness_sources_required";
     result_.confirm_frames = 0;
     pending_valid_ = false;
     return result_;

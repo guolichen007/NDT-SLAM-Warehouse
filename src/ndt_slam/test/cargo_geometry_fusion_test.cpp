@@ -5,7 +5,7 @@
 namespace ndt_slam {
 namespace {
 
-CargoGeometryFrame frame(double stamp, float static_height = 1.50F,
+CargoGeometryFrame frame(double stamp, float live_height = 1.50F,
                          float diff_height = 1.55F) {
   CargoGeometryFrame value;
   value.cargo_lifecycle_id = 11U;
@@ -25,10 +25,10 @@ CargoGeometryFrame frame(double stamp, float static_height = 1.50F,
   value.dimension_support_points = 100U;
   value.dimension_shape_confidence = 0.90F;
   value.thickness = {
-      {CargoThicknessSource::STATIC_ORIGIN_TOP_SUPPORT,
-       static_height, 0.12F, 0.9F, true},
       {CargoThicknessSource::MAP_DIFF_REVEALED_SUPPORT,
-       diff_height, 0.15F, 0.8F, true}};
+       diff_height, 0.15F, 0.8F, true},
+      {CargoThicknessSource::LIVE_VISIBLE_EXTENT,
+       live_height, 0.12F, 0.9F, true}};
   return value;
 }
 

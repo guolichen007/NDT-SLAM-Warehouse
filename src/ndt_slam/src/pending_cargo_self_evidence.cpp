@@ -166,6 +166,23 @@ PendingPointClassification classifyPendingCargoPoint(
     }
   }
 
+  const bool inside_envelope_xy =
+      result.envelope_distance_m <= 1.0e-4F;
+  const float vertical_identity_guard_m = self_evidence.valid
+      ? self_evidence.point_match_radius_m : 0.0F;
+  if (inside_envelope_xy &&
+      point_base.z() >=
+          envelope_footprint.min_z - vertical_identity_guard_m &&
+      point_base.z() <=
+          envelope_footprint.max_z + vertical_identity_guard_m) {
+    // A fragment just above/below an imperfect pending height estimate still
+    // occupies the cargo's XY identity column. It is unresolved self
+    // evidence, not an independently separated zero-distance obstacle.
+    result.classification =
+        PendingPointClass::UNRESOLVED_INSIDE_PENDING;
+    return result;
+  }
+
   if (containsPointInCargoObbBase(
           point_base, envelope_footprint, 0.0F, 0.0F)) {
     result.classification = PendingPointClass::UNRESOLVED_INSIDE_PENDING;

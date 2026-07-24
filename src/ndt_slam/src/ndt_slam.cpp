@@ -3183,6 +3183,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                         "fusion_pending_minimum_authority_confidence"]
                         .as<float>(0.55F),
                     0.0F, 1.0F);
+            cargo_warning_level2_prelude_frames_ = std::clamp(
+                cargo_safety["warning_level2_prelude_frames"]
+                    .as<int>(2),
+                1, 10);
         }
         cargo_obstacle_tracker_.setConfig(obstacle_tracker_config);
         CargoObstacleTrackerConfig pending_obstacle_tracker_config =
@@ -3600,7 +3604,11 @@ void NdtSlamNode::resetCargoForHookState(
     cargo_pending_unresolved_inside_points_ = 0U;
     cargo_pending_external_shell_points_ = 0U;
     cargo_origin_exclusion_active_ = false;
+    cargo_preload_origin_component_ = StaticHeightComponent{};
     cargo_origin_component_ = StaticHeightComponent{};
+    cargo_origin_exclusion_component_ = StaticHeightComponent{};
+    cargo_origin_exclusion_attempt_generation_ = 0U;
+    cargo_origin_exclusion_attempt_component_id_ = 0U;
     revealed_support_observer_.reset();
     revealed_support_observation_ = RevealedSupportObservation{};
     cargo_swing_monitor_.reset();
@@ -3646,6 +3654,8 @@ void NdtSlamNode::resetCargoForHookState(
     cargo_safety_temporal_filter_.reset();
     cargo_obstacle_tracker_.reset();
     pending_cargo_obstacle_tracker_.reset();
+    pending_warning_escalation_ = CargoWarningEscalationState{};
+    formal_warning_escalation_ = CargoWarningEscalationState{};
     pending_obstacle_context_lifecycle_id_ = 0U;
     pending_obstacle_context_track_segment_id_ = 0U;
     pending_obstacle_context_envelope_source_ =
@@ -10167,7 +10177,11 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
     selected_payload_stamp_ = ros::Time();
     cargo_lift_origin_binder_.reset();
     cargo_lift_origin_result_ = CargoLiftOriginResult{};
+    cargo_preload_origin_component_ = StaticHeightComponent{};
     cargo_origin_component_ = StaticHeightComponent{};
+    cargo_origin_exclusion_component_ = StaticHeightComponent{};
+    cargo_origin_exclusion_attempt_generation_ = 0U;
+    cargo_origin_exclusion_attempt_component_id_ = 0U;
     revealed_support_observer_.reset();
     revealed_support_observation_ = RevealedSupportObservation{};
     pending_cargo_envelope_ = PendingCargoEnvelope{};
@@ -10187,6 +10201,8 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
         cargo_safety_temporal_filter_.reset();
         cargo_obstacle_tracker_.reset();
         pending_cargo_obstacle_tracker_.reset();
+        pending_warning_escalation_ = CargoWarningEscalationState{};
+        formal_warning_escalation_ = CargoWarningEscalationState{};
         pending_obstacle_context_lifecycle_id_ = 0U;
         pending_obstacle_context_track_segment_id_ = 0U;
         pending_obstacle_context_envelope_source_ =
@@ -12672,7 +12688,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
                 footprint.raw_size_long_short.y(),
                 candidate_footprint_config.maximum_long_side_m,
                 candidate_footprint_config.maximum_short_side_m,
-                hypothesis.component_indices.size());
+                cluster_indices[component_index].indices.size());
             continue;
         }
         const float z_low = component_z[static_cast<std::size_t>(
@@ -15922,6 +15938,9 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         cargo_geometry_fusion_.reset();
         cargo_frozen_geometry_ = CargoFrozenGeometry{};
         cargo_origin_component_ = StaticHeightComponent{};
+        cargo_origin_exclusion_component_ = StaticHeightComponent{};
+        cargo_origin_exclusion_attempt_generation_ = 0U;
+        cargo_origin_exclusion_attempt_component_id_ = 0U;
         revealed_support_observer_.reset();
         revealed_support_observation_ = RevealedSupportObservation{};
         pending_cargo_self_evidence_ = PendingCargoSelfEvidence{};
@@ -15938,6 +15957,8 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         trusted_cargo_pose_lifecycle_id_ = 0U;
         trusted_cargo_pose_track_segment_id_ = 0U;
         pending_cargo_obstacle_tracker_.reset();
+        pending_warning_escalation_ = CargoWarningEscalationState{};
+        formal_warning_escalation_ = CargoWarningEscalationState{};
         pending_obstacle_context_lifecycle_id_ = 0U;
         pending_obstacle_context_track_segment_id_ = 0U;
         pending_obstacle_context_envelope_source_ =
@@ -16035,6 +16056,45 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
     }
 
     std::vector<StaticHeightComponent> origin_components;
+    const auto append_static_origin_candidate =
+        [&](const StaticHeightComponent& component) {
+            if (!component.valid ||
+                !authorizeStaticEvidence(component.authority)
+                     .formal_origin_authorized) {
+                return;
+            }
+            const bool already_present = std::any_of(
+                lift_input.candidates.begin(), lift_input.candidates.end(),
+                [&](const CargoOriginCandidate& candidate) {
+                    return candidate.component_id == component.component_id &&
+                        candidate.map_generation ==
+                            component.map_generation;
+                });
+            if (already_present) return;
+            CargoOriginCandidate candidate;
+            candidate.component_id = component.component_id;
+            candidate.source = component.authority ==
+                    StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE
+                ? CargoOriginCandidateSource::OPERATOR_APPROVED_BASELINE
+                : CargoOriginCandidateSource::RUNTIME_MATURE_STATIC;
+            candidate.authority = component.authority;
+            candidate.center_map = component.center_map;
+            candidate.length_m = component.length_m;
+            candidate.width_m = component.width_m;
+            candidate.yaw_map_rad = component.yaw_map_rad;
+            candidate.top_z95_map = component.top_z95_map;
+            candidate.support_z_map = component.support_z_map;
+            candidate.uncertainty_m = component.uncertainty_m;
+            candidate.occupied_cells = component.members.size();
+            candidate.point_count = component.point_count;
+            candidate.map_generation = component.map_generation;
+            candidate.members = component.members;
+            candidate.hook_anchor_distance_m =
+                component.hook_anchor_distance_m;
+            candidate.candidate_overlap = component.candidate_overlap;
+            candidate.anchor_overlap = component.anchor_overlap;
+            lift_input.candidates.push_back(std::move(candidate));
+        };
     if (height_field && anchor_map.allFinite()) {
         const Eigen::Matrix3d rotation = pose_map_base.so3().matrix();
         const float base_pose_yaw_map = static_cast<float>(
@@ -16071,33 +16131,19 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         origin_components = static_origin_component_extractor_.extract(
             *height_field, component_query);
         for (const StaticHeightComponent& component : origin_components) {
-            if (!component.valid) continue;
-            CargoOriginCandidate candidate;
-            candidate.component_id = component.component_id;
-            candidate.source = component.authority ==
-                    StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE
-                ? CargoOriginCandidateSource::OPERATOR_APPROVED_BASELINE
-                : CargoOriginCandidateSource::RUNTIME_MATURE_STATIC;
-            candidate.authority = component.authority;
-            candidate.center_map = component.center_map;
-            candidate.length_m = component.length_m;
-            candidate.width_m = component.width_m;
-            candidate.yaw_map_rad = component.yaw_map_rad;
-            candidate.top_z95_map = component.top_z95_map;
-            candidate.support_z_map = component.support_z_map;
-            candidate.uncertainty_m = component.uncertainty_m;
-            candidate.occupied_cells = component.members.size();
-            candidate.point_count = component.point_count;
-            candidate.map_generation = component.map_generation;
-            candidate.members = component.members;
-            candidate.hook_anchor_distance_m =
-                component.hook_anchor_distance_m;
-            candidate.candidate_overlap = component.candidate_overlap;
-            candidate.anchor_overlap = component.anchor_overlap;
-            lift_input.candidates.push_back(candidate);
+            append_static_origin_candidate(component);
         }
+        if (!hook_loaded && detection_current &&
+            !origin_components.empty()) {
+            // Capture the latest authoritative component before gravity
+            // transitions to LOADED. Later frames must continue to observe
+            // these original map cells even after the hook/cargo moves and
+            // the current-anchor query no longer overlaps them.
+            cargo_preload_origin_component_ = origin_components.front();
+        }
+        append_static_origin_candidate(cargo_preload_origin_component_);
+        append_static_origin_candidate(cargo_origin_component_);
 
-        cargo_origin_component_ = StaticHeightComponent{};
         if (cargo_lift_origin_result_.valid) {
             const auto bound = std::find_if(
                 origin_components.begin(), origin_components.end(),
@@ -16109,34 +16155,43 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
                 });
             if (bound != origin_components.end()) {
                 cargo_origin_component_ = *bound;
+            } else if (
+                cargo_preload_origin_component_.valid &&
+                cargo_preload_origin_component_.component_id ==
+                    cargo_lift_origin_result_.origin.component_id &&
+                cargo_preload_origin_component_.map_generation ==
+                    cargo_lift_origin_result_.origin.map_generation) {
+                cargo_origin_component_ =
+                    cargo_preload_origin_component_;
             }
         }
         if (cargo_origin_component_.valid && hook_loaded &&
             observation_cloud_base) {
-                RevealedSupportObservationInput support_input;
-                support_input.stamp_sec = stamp.toSec();
-                support_input.cargo_lifecycle_id = cargo_lifecycle_id_;
-                support_input.map_generation =
-                    cargo_origin_component_.map_generation;
-                support_input.origin_component = cargo_origin_component_;
-                support_input.observation_cloud_base =
-                    observation_cloud_base;
-                support_input.T_map_base = pose_map_base;
-                support_input.cell_size_m =
-                    height_field->config().cell_size_m;
-                revealed_support_observation_ =
-                    revealed_support_observer_.update(support_input);
-                lift_input.revealed_support_valid =
-                    revealed_support_observation_.valid;
-                lift_input.revealed_support_stamp_sec =
-                    revealed_support_observation_.evidence_stamp_sec;
-                lift_input.revealed_support_z_map =
-                    revealed_support_observation_.robust_support_z_map;
-                lift_input.revealed_support_coverage =
-                    revealed_support_observation_.coverage;
+            RevealedSupportObservationInput support_input;
+            support_input.stamp_sec = stamp.toSec();
+            support_input.cargo_lifecycle_id = cargo_lifecycle_id_;
+            support_input.map_generation =
+                cargo_origin_component_.map_generation;
+            support_input.origin_component = cargo_origin_component_;
+            support_input.observation_cloud_base =
+                observation_cloud_base;
+            support_input.T_map_base = pose_map_base;
+            support_input.cell_size_m =
+                height_field->config().cell_size_m;
+            revealed_support_observation_ =
+                revealed_support_observer_.update(support_input);
+            lift_input.revealed_support_valid =
+                revealed_support_observation_.valid;
+            lift_input.revealed_support_stamp_sec =
+                revealed_support_observation_.evidence_stamp_sec;
+            lift_input.revealed_support_z_map =
+                revealed_support_observation_.robust_support_z_map;
+            lift_input.revealed_support_coverage =
+                revealed_support_observation_.coverage;
         }
     } else {
-        cargo_origin_component_ = StaticHeightComponent{};
+        append_static_origin_candidate(cargo_preload_origin_component_);
+        append_static_origin_candidate(cargo_origin_component_);
     }
 
     if (retired_cargo_signature_valid_ && retired_cargo_shape_.valid &&
@@ -16199,7 +16254,6 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         cargo_lift_origin_result_.state = CargoLiftEventState::INVALID;
         cargo_lift_origin_result_.reason = "lift_origin_binding_disabled";
     }
-    cargo_origin_component_ = StaticHeightComponent{};
     if (cargo_lift_origin_result_.valid) {
         const auto bound = std::find_if(
             origin_components.begin(), origin_components.end(),
@@ -16211,7 +16265,85 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
             });
         if (bound != origin_components.end()) {
             cargo_origin_component_ = *bound;
+        } else if (
+            cargo_preload_origin_component_.valid &&
+            cargo_preload_origin_component_.component_id ==
+                cargo_lift_origin_result_.origin.component_id &&
+            cargo_preload_origin_component_.map_generation ==
+                cargo_lift_origin_result_.origin.map_generation) {
+            cargo_origin_component_ = cargo_preload_origin_component_;
+        } else if (
+            !cargo_origin_component_.valid ||
+            cargo_origin_component_.component_id !=
+                cargo_lift_origin_result_.origin.component_id ||
+            cargo_origin_component_.map_generation !=
+                cargo_lift_origin_result_.origin.map_generation) {
+            cargo_origin_component_ = StaticHeightComponent{};
         }
+    }
+    if (height_field && cargo_origin_component_.valid &&
+        authorizeStaticEvidence(cargo_origin_component_.authority)
+            .formal_origin_authorized &&
+        (cargo_origin_exclusion_attempt_generation_ !=
+             height_field->mapGeneration() ||
+         cargo_origin_exclusion_attempt_component_id_ !=
+             cargo_origin_component_.component_id)) {
+        cargo_origin_exclusion_attempt_generation_ =
+            height_field->mapGeneration();
+        cargo_origin_exclusion_attempt_component_id_ =
+            cargo_origin_component_.component_id;
+        cargo_origin_exclusion_component_ = StaticHeightComponent{};
+        if (cargo_origin_component_.map_generation ==
+            height_field->mapGeneration()) {
+            cargo_origin_exclusion_component_ =
+                cargo_origin_component_;
+        } else {
+            // The clean/static field may be rebuilt while a lift is active.
+            // Re-resolve the same pickup-place component in the new
+            // generation for obstacle exclusion only. The original snapshot
+            // remains unchanged as the physical thickness baseline.
+            StaticHeightComponentQuery exclusion_query;
+            exclusion_query.hook_anchor_map =
+                cargo_origin_component_.center_map;
+            exclusion_query.candidate_valid = true;
+            exclusion_query.candidate_center_map =
+                cargo_origin_component_.center_map;
+            exclusion_query.candidate_length_m =
+                cargo_origin_component_.length_m;
+            exclusion_query.candidate_width_m =
+                cargo_origin_component_.width_m;
+            exclusion_query.candidate_yaw_map_rad =
+                cargo_origin_component_.yaw_map_rad;
+            exclusion_query.expected_top_valid = true;
+            exclusion_query.expected_top_z_map =
+                cargo_origin_component_.top_z95_map;
+            exclusion_query.map_generation =
+                height_field->mapGeneration();
+            const auto refreshed_components =
+                static_origin_component_extractor_.extract(
+                    *height_field, exclusion_query);
+            const float maximum_top_error_m = std::max(
+                0.25F, 3.0F *
+                    cargo_origin_component_.uncertainty_m);
+            const auto refreshed = std::find_if(
+                refreshed_components.begin(),
+                refreshed_components.end(),
+                [&](const StaticHeightComponent& component) {
+                    return component.valid &&
+                        component.authority ==
+                            cargo_origin_component_.authority &&
+                        std::abs(component.top_z95_map -
+                                 cargo_origin_component_.top_z95_map) <=
+                            maximum_top_error_m;
+                });
+            if (refreshed != refreshed_components.end()) {
+                cargo_origin_exclusion_component_ = *refreshed;
+            }
+        }
+    } else if (!height_field || !cargo_origin_component_.valid) {
+        cargo_origin_exclusion_component_ = StaticHeightComponent{};
+        cargo_origin_exclusion_attempt_generation_ = 0U;
+        cargo_origin_exclusion_attempt_component_id_ = 0U;
     }
 
     PendingCargoEnvelopeInput pending_input;
@@ -16875,6 +17007,7 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
             cargo_lift_origin_result_.origin.width_m;
     }
     if (authorized_origin &&
+        !cargo_lift_origin_result_.thickness_ready &&
         std::isfinite(cargo_lift_origin_result_.static_thickness_m)) {
         geometry_frame.thickness.push_back({
             CargoThicknessSource::STATIC_ORIGIN_TOP_SUPPORT,
@@ -16945,6 +17078,14 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         << static_cast<int>(cargo_lift_origin_result_.origin.source)
         << ",\"lift_origin_component_id\":"
         << cargo_lift_origin_result_.origin.component_id
+        << ",\"preload_origin_component_id\":"
+        << cargo_preload_origin_component_.component_id
+        << ",\"bound_origin_snapshot_valid\":"
+        << (cargo_origin_component_.valid ? "true" : "false")
+        << ",\"origin_exclusion_component_id\":"
+        << cargo_origin_exclusion_component_.component_id
+        << ",\"origin_exclusion_generation\":"
+        << cargo_origin_exclusion_component_.map_generation
         << ",\"static_authority\":\""
         << staticEvidenceAuthorityName(snapshot_authority)
         << "\",\"origin_authority\":\""
@@ -16966,6 +17107,13 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         << diagnostic_float(cargo_lift_origin_result_.static_thickness_m)
         << ",\"revealed_thickness_m\":"
         << diagnostic_float(cargo_lift_origin_result_.revealed_thickness_m)
+        << ",\"revealed_support_valid\":"
+        << (revealed_support_observation_.valid ? "true" : "false")
+        << ",\"revealed_support_coverage\":"
+        << diagnostic_float(revealed_support_observation_.coverage)
+        << ",\"revealed_support_reason\":\""
+        << revealed_support_observation_.reason
+        << "\""
         << ",\"geometry_fusion_valid\":"
         << (cargo_frozen_geometry_.valid ? "true" : "false")
         << ",\"geometry_frozen\":"
@@ -17096,6 +17244,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
     if (!pending_warning_query_allowed ||
         pending_obstacle_context_changed) {
         pending_cargo_obstacle_tracker_.reset();
+        pending_warning_escalation_ = CargoWarningEscalationState{};
         pending_obstacle_context_lifecycle_id_ =
             pending_warning_query_allowed ? cargo_lifecycle_id_ : 0U;
         pending_obstacle_context_track_segment_id_ =
@@ -17367,9 +17516,13 @@ void NdtSlamNode::runPendingCargoAvoidance(
             selected_pending_evidence = &selected;
         }
     }
+    // Separation and temporal obstacle authorization are distinct facts.
+    // A current external-shell cluster proves separation; the tracker below
+    // independently decides whether that cluster has enough identity and
+    // geometry history to authorize 17/18.
     fusion_input.pending_external_separation_valid =
         fusion_input.pending_self_evidence_valid &&
-        selected_pending_evidence != nullptr;
+        !pending_observations.empty();
     fusion_input.pending_external_obstacle_authorized =
         pending_obstacle_decision.confirmed_hazard &&
         selected_pending_evidence != nullptr;
@@ -17428,23 +17581,24 @@ void NdtSlamNode::runPendingCargoAvoidance(
         query.shell_m = shell_m;
         const StaticEvidenceAuthorization origin_authorization =
             authorizeStaticEvidence(
-                cargo_lift_origin_result_.origin.authority);
+                cargo_origin_exclusion_component_.authority);
         query.exclusion_authorized =
             hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED &&
-            cargo_lifecycle_id_ != 0U && cargo_lift_origin_result_.valid &&
+            cargo_lifecycle_id_ != 0U &&
+            cargo_origin_exclusion_component_.valid &&
             origin_authorization.formal_origin_authorized &&
-            cargo_lift_origin_result_.origin.component_id != 0U &&
-            cargo_lift_origin_result_.origin.map_generation ==
+            cargo_origin_exclusion_component_.component_id != 0U &&
+            cargo_origin_exclusion_component_.map_generation ==
                 height_field->mapGeneration() &&
-            !cargo_lift_origin_result_.origin.members.empty();
+            !cargo_origin_exclusion_component_.members.empty();
         if (query.exclusion_authorized) {
             query.excluded_component_id =
-                cargo_lift_origin_result_.origin.component_id;
+                cargo_origin_exclusion_component_.component_id;
             query.excluded_component_generation =
-                cargo_lift_origin_result_.origin.map_generation;
+                cargo_origin_exclusion_component_.map_generation;
             query.excluded_members.insert(
-                cargo_lift_origin_result_.origin.members.begin(),
-                cargo_lift_origin_result_.origin.members.end());
+                cargo_origin_exclusion_component_.members.begin(),
+                cargo_origin_exclusion_component_.members.end());
         }
         cargo_origin_exclusion_active_ = query.exclusion_authorized;
         static_result = height_field->query(query);
@@ -17510,8 +17664,67 @@ void NdtSlamNode::runPendingCargoAvoidance(
         fusion_input.static_session_manifest_valid;
     // Pending geometry is never sufficient to authorize CLEAR.
     fusion_input.static_clear_contract_valid = false;
-    const CargoAvoidanceFusionResult fused = fuseCargoAvoidanceRisk(
+    CargoAvoidanceFusionResult fused = fuseCargoAvoidanceRisk(
         fusion_input, cargo_avoidance_fusion_config_);
+    const std::int32_t pending_requested_warning_code =
+        fused.official_valid ? fused.official_code : 0;
+    bool pending_level2_prelude_applied = false;
+    if (fused.pending_warning_authorized && fused.official_valid &&
+        fusion_input.pending_external_obstacle_track_id != 0U &&
+        (fused.official_code == CargoSafetyEvaluator::kLevel1Code ||
+         fused.official_code == CargoSafetyEvaluator::kLevel2Code)) {
+        const double escalation_gap_sec =
+            pending_warning_escalation_.valid
+            ? stamp.toSec() -
+                  pending_warning_escalation_.last_warning_stamp_sec
+            : std::numeric_limits<double>::infinity();
+        const bool same_warning_track =
+            pending_warning_escalation_.valid &&
+            pending_warning_escalation_.cargo_lifecycle_id ==
+                cargo_lifecycle_id_ &&
+            pending_warning_escalation_.cargo_track_id ==
+                pending_track_context_id &&
+            pending_warning_escalation_.obstacle_track_id ==
+                fusion_input.pending_external_obstacle_track_id &&
+            escalation_gap_sec >= 0.0 &&
+            escalation_gap_sec <=
+                pending_cargo_obstacle_tracker_.config().stale_track_sec;
+        if (!same_warning_track) {
+            pending_warning_escalation_ =
+                CargoWarningEscalationState{};
+            pending_warning_escalation_.valid = true;
+            pending_warning_escalation_.cargo_lifecycle_id =
+                cargo_lifecycle_id_;
+            pending_warning_escalation_.cargo_track_id =
+                pending_track_context_id;
+            pending_warning_escalation_.obstacle_track_id =
+                fusion_input.pending_external_obstacle_track_id;
+        }
+        if (fused.official_code ==
+            CargoSafetyEvaluator::kLevel2Code) {
+            // A genuine 3-5 m warning fully satisfies the prelude. The same
+            // obstacle may escalate immediately if it subsequently enters
+            // the 3 m zone.
+            pending_warning_escalation_.level2_frames =
+                cargo_warning_level2_prelude_frames_;
+        } else if (
+            pending_warning_escalation_.level2_frames <
+                cargo_warning_level2_prelude_frames_) {
+            ++pending_warning_escalation_.level2_frames;
+            fused.official_code = CargoSafetyEvaluator::kLevel2Code;
+            fused.provisional_status = "NEAR_5M";
+            fused.reason =
+                "pending_level2_prelude_before_level1";
+            pending_level2_prelude_applied = true;
+        }
+        pending_warning_escalation_.last_warning_stamp_sec =
+            stamp.toSec();
+    } else {
+        // A fault/unresolved frame terminates the published warning segment.
+        // If the hazard becomes authoritative again it must visibly restart
+        // at level 2 instead of restoring a latched level 1 after code 33.
+        pending_warning_escalation_.level2_frames = 0;
+    }
 
     std_msgs::String debug;
     std::ostringstream stream;
@@ -17523,12 +17736,27 @@ void NdtSlamNode::runPendingCargoAvoidance(
            << static_cast<int>(cargo_lift_origin_result_.origin.source)
            << ",\"lift_origin_component_id\":"
            << cargo_lift_origin_result_.origin.component_id
+           << ",\"preload_origin_component_id\":"
+           << cargo_preload_origin_component_.component_id
+           << ",\"bound_origin_snapshot_valid\":"
+           << (cargo_origin_component_.valid ? "true" : "false")
+           << ",\"origin_exclusion_component_id\":"
+           << cargo_origin_exclusion_component_.component_id
+           << ",\"origin_exclusion_generation\":"
+           << cargo_origin_exclusion_component_.map_generation
            << ",\"lift_origin_reason\":\""
            << cargo_lift_origin_result_.reason
            << "\",\"lift_confirm_count\":"
            << cargo_lift_origin_result_.lift_confirm_count
            << ",\"thickness_confirm_count\":"
            << cargo_lift_origin_result_.thickness_confirm_count
+           << ",\"revealed_support_valid\":"
+           << (revealed_support_observation_.valid ? "true" : "false")
+           << ",\"revealed_support_coverage\":"
+           << revealed_support_observation_.coverage
+           << ",\"revealed_support_reason\":\""
+           << revealed_support_observation_.reason
+           << "\""
            << ",\"geometry_fusion_valid\":"
            << (cargo_frozen_geometry_.valid ? "true" : "false")
            << ",\"geometry_frozen\":"
@@ -17642,6 +17870,12 @@ void NdtSlamNode::runPendingCargoAvoidance(
                       .pending_warning_promotion_policy)
            << "\",\"pending_warning_authorized\":"
            << (fused.pending_warning_authorized ? "true" : "false")
+           << ",\"pending_requested_warning_code\":"
+           << pending_requested_warning_code
+           << ",\"pending_level2_prelude_applied\":"
+           << (pending_level2_prelude_applied ? "true" : "false")
+           << ",\"pending_level2_prelude_frames\":"
+           << pending_warning_escalation_.level2_frames
            << ",\"pending_authority_reason\":\""
            << fused.pending_authority_reason
            << "\",\"pending_external_obstacle_track_id\":"
@@ -17713,9 +17947,16 @@ void NdtSlamNode::runPendingCargoAvoidance(
     if (fused.pending_warning_authorized) {
         provisional_live_evidence = selected_pending_evidence;
     }
+    const bool use_staged_live_geometry =
+        pending_level2_prelude_applied &&
+        provisional_live_evidence != nullptr &&
+        provisional_live_evidence->warning_code ==
+            CargoSafetyEvaluator::kLevel1Code &&
+        provisional_code == CargoSafetyEvaluator::kLevel2Code;
     const bool use_live_geometry = fused.risk_live &&
         provisional_live_evidence != nullptr &&
-        provisional_live_evidence->warning_code == provisional_code;
+        (provisional_live_evidence->warning_code == provisional_code ||
+         use_staged_live_geometry);
     if (use_live_geometry) {
         const CargoSafetyClusterEvidence& evidence =
             *provisional_live_evidence;
@@ -18333,6 +18574,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             pending_cargo_shape_continuity_ =
                 PendingCargoShapeContinuity{};
             pending_cargo_obstacle_tracker_.reset();
+            pending_warning_escalation_ = CargoWarningEscalationState{};
+            formal_warning_escalation_ = CargoWarningEscalationState{};
             pending_obstacle_context_lifecycle_id_ = 0U;
             pending_obstacle_context_track_segment_id_ = 0U;
             pending_obstacle_context_envelope_source_ =
@@ -18343,7 +18586,12 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 CargoEnvelopeShapeSource::NONE;
             pending_obstacle_context_recognition_state_ =
                 HookCargoLockState::EMPTY;
+            cargo_preload_origin_component_ = StaticHeightComponent{};
             cargo_origin_component_ = StaticHeightComponent{};
+            cargo_origin_exclusion_component_ =
+                StaticHeightComponent{};
+            cargo_origin_exclusion_attempt_generation_ = 0U;
+            cargo_origin_exclusion_attempt_component_id_ = 0U;
             revealed_support_observer_.reset();
             revealed_support_observation_ = RevealedSupportObservation{};
             cargo_swing_monitor_.reset();
@@ -20130,24 +20378,25 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             cargo_safety_evaluator_.config().level2_distance_m;
         const StaticEvidenceAuthorization origin_authorization =
             authorizeStaticEvidence(
-                cargo_lift_origin_result_.origin.authority);
+                cargo_origin_exclusion_component_.authority);
         static_query.exclusion_authorized =
             hook.valid &&
             hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED &&
-            cargo_lifecycle_id_ != 0U && cargo_lift_origin_result_.valid &&
+            cargo_lifecycle_id_ != 0U &&
+            cargo_origin_exclusion_component_.valid &&
             origin_authorization.formal_origin_authorized &&
-            cargo_lift_origin_result_.origin.component_id != 0U &&
-            cargo_lift_origin_result_.origin.map_generation ==
+            cargo_origin_exclusion_component_.component_id != 0U &&
+            cargo_origin_exclusion_component_.map_generation ==
                 static_height_field->mapGeneration() &&
-            !cargo_lift_origin_result_.origin.members.empty();
+            !cargo_origin_exclusion_component_.members.empty();
         if (static_query.exclusion_authorized) {
             static_query.excluded_component_id =
-                cargo_lift_origin_result_.origin.component_id;
+                cargo_origin_exclusion_component_.component_id;
             static_query.excluded_component_generation =
-                cargo_lift_origin_result_.origin.map_generation;
+                cargo_origin_exclusion_component_.map_generation;
             static_query.excluded_members.insert(
-                cargo_lift_origin_result_.origin.members.begin(),
-                cargo_lift_origin_result_.origin.members.end());
+                cargo_origin_exclusion_component_.members.begin(),
+                cargo_origin_exclusion_component_.members.end());
         }
         cargo_origin_exclusion_active_ =
             static_query.exclusion_authorized;
@@ -20220,9 +20469,77 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     avoidance_input.static_clear_contract_valid = static_contract &&
         static_authorization.official_clear_authorized;
 
-    const CargoAvoidanceFusionResult fused_avoidance =
+    CargoAvoidanceFusionResult fused_avoidance =
         fuseCargoAvoidanceRisk(
             avoidance_input, cargo_avoidance_fusion_config_);
+    bool formal_level2_prelude_applied = false;
+    if (fused_avoidance.official_valid &&
+        (fused_avoidance.official_code ==
+             CargoSafetyEvaluator::kLevel1Code ||
+         fused_avoidance.official_code ==
+             CargoSafetyEvaluator::kLevel2Code)) {
+        const double escalation_gap_sec =
+            formal_warning_escalation_.valid
+            ? stamp.toSec() -
+                  formal_warning_escalation_.last_warning_stamp_sec
+            : std::numeric_limits<double>::infinity();
+        const bool same_warning_track =
+            formal_warning_escalation_.valid &&
+            formal_warning_escalation_.cargo_lifecycle_id ==
+                cargo_lifecycle_id_ &&
+            formal_warning_escalation_.cargo_track_id ==
+                cargo_fusion_track_id_ &&
+            formal_warning_escalation_.obstacle_track_id ==
+                cargo_obstacle_track_id_ &&
+            escalation_gap_sec >= 0.0 &&
+            escalation_gap_sec <=
+                cargo_obstacle_tracker_.config().stale_track_sec;
+        if (!same_warning_track) {
+            formal_warning_escalation_ =
+                CargoWarningEscalationState{};
+            formal_warning_escalation_.valid = true;
+            formal_warning_escalation_.cargo_lifecycle_id =
+                cargo_lifecycle_id_;
+            formal_warning_escalation_.cargo_track_id =
+                cargo_fusion_track_id_;
+            formal_warning_escalation_.obstacle_track_id =
+                cargo_obstacle_track_id_;
+        }
+        if (fused_avoidance.official_code ==
+            CargoSafetyEvaluator::kLevel2Code) {
+            formal_warning_escalation_.level2_frames =
+                cargo_warning_level2_prelude_frames_;
+        } else if (
+            formal_warning_escalation_.level2_frames <
+                cargo_warning_level2_prelude_frames_) {
+            ++formal_warning_escalation_.level2_frames;
+            fused_avoidance.official_code =
+                CargoSafetyEvaluator::kLevel2Code;
+            fused_avoidance.reason =
+                "level2_prelude_before_level1";
+            formal_level2_prelude_applied = true;
+        }
+        formal_warning_escalation_.last_warning_stamp_sec =
+            stamp.toSec();
+    } else {
+        // Do not carry a completed prelude through code 33/14 or another
+        // non-warning result. Every new official warning segment begins with
+        // level 2, including a briefly interrupted track.
+        formal_warning_escalation_.level2_frames = 0;
+    }
+    if (formal_level2_prelude_applied &&
+        last_cargo_safety_result_.warning_valid &&
+        last_cargo_safety_result_.warning_code ==
+            CargoSafetyEvaluator::kLevel1Code) {
+        last_cargo_safety_result_.warning_code =
+            CargoSafetyEvaluator::kLevel2Code;
+        last_cargo_safety_result_.reason =
+            fused_avoidance.reason;
+        if (last_cargo_safety_result_.has_cluster_evidence) {
+            last_cargo_safety_result_.most_dangerous_cluster.warning_code =
+                CargoSafetyEvaluator::kLevel2Code;
+        }
+    }
     if (fused_avoidance.official_valid &&
         (fused_avoidance.official_code ==
              CargoSafetyEvaluator::kLevel1Code ||

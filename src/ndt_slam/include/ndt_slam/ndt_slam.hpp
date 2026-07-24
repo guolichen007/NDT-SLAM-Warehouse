@@ -2016,7 +2016,18 @@ private:
     StaticHeightFieldConfig static_height_field_config_;
     StaticHeightComponentExtractorConfig static_origin_component_config_;
     StaticHeightComponentExtractor static_origin_component_extractor_;
+    // Captured while the hook is still EMPTY. This immutable, authoritative
+    // component is the lift-origin reference after the cargo and hook move
+    // away from the pickup location.
+    StaticHeightComponent cargo_preload_origin_component_;
     StaticHeightComponent cargo_origin_component_;
+    // Same physical origin re-resolved in the current height-field
+    // generation. It is used only to exclude the pickup-place cargo residue
+    // from static obstacle queries; the immutable component above remains the
+    // thickness baseline.
+    StaticHeightComponent cargo_origin_exclusion_component_;
+    std::uint64_t cargo_origin_exclusion_attempt_generation_ = 0U;
+    std::uint64_t cargo_origin_exclusion_attempt_component_id_ = 0U;
     RevealedSupportObserver revealed_support_observer_;
     RevealedSupportObservation revealed_support_observation_;
     CargoAvoidanceFusionConfig cargo_avoidance_fusion_config_;
@@ -2112,6 +2123,20 @@ private:
     // to prove that an already-separated live cluster has a stable external
     // identity before a provisional 17/18 can become official.
     CargoObstacleTracker pending_cargo_obstacle_tracker_;
+    struct CargoWarningEscalationState {
+        bool valid = false;
+        std::uint64_t cargo_lifecycle_id = 0U;
+        std::uint64_t cargo_track_id = 0U;
+        std::uint64_t obstacle_track_id = 0U;
+        int level2_frames = 0;
+        double last_warning_stamp_sec = 0.0;
+    };
+    // A newly authorized obstacle that is already inside 3 m must first be
+    // published as level 2. This preserves the operational 5 m -> 3 m
+    // escalation contract without weakening obstacle identity/provenance.
+    int cargo_warning_level2_prelude_frames_ = 2;
+    CargoWarningEscalationState pending_warning_escalation_;
+    CargoWarningEscalationState formal_warning_escalation_;
     std::uint64_t pending_obstacle_context_lifecycle_id_ = 0U;
     std::uint64_t pending_obstacle_context_track_segment_id_ = 0U;
     PendingCargoEnvelopeSource pending_obstacle_context_envelope_source_ =

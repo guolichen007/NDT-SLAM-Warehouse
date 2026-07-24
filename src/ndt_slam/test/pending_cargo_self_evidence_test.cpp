@@ -64,5 +64,20 @@ TEST(PendingCargoSelfEvidenceTest, RetiredIdentityPointCanBeRemoved) {
   EXPECT_EQ(classified.classification, PendingPointClass::IDENTITY_SELF);
 }
 
+TEST(PendingCargoSelfEvidenceTest,
+     CargoVerticalBoundaryFragmentCannotBecomeZeroDistanceObstacle) {
+  auto input = retiredInput();
+  input.identity_points_base.emplace_back(0.0F, 0.0F, 0.5F);
+  const auto evidence = buildPendingCargoSelfEvidence(input);
+  ASSERT_TRUE(evidence.valid);
+  auto pending = envelope();
+  pending.vertical_uncertainty_m = 0.05F;
+  const auto classified = classifyPendingCargoPoint(
+      Eigen::Vector3f(0.0F, 0.0F, 1.31F), pending, evidence, 2.0F);
+  EXPECT_EQ(classified.classification,
+            PendingPointClass::UNRESOLVED_INSIDE_PENDING);
+  EXPECT_FLOAT_EQ(classified.envelope_distance_m, 0.0F);
+}
+
 }  // namespace
 }  // namespace ndt_slam

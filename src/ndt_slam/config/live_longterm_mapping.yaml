@@ -756,6 +756,10 @@ cargo_safety:
   # an explicit unsafe compatibility mode and must not be used in production.
   fusion_pending_warning_promotion_policy: evidence_backed_only
   fusion_pending_minimum_authority_confidence: 0.55
+  # If an independently authorized obstacle is first acquired inside 3 m,
+  # publish two fresh level-2 frames before escalating that same track to 17.
+  # A track already observed as level 2 at 3-5 m escalates immediately at 3 m.
+  warning_level2_prelude_frames: 2
   # Compatibility kill switch only. true does not bypass the typed policy.
   fusion_provisional_warning_to_official_code: true
   motion_corridor_enabled: true
