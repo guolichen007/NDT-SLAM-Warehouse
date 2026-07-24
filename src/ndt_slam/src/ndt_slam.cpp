@@ -2631,7 +2631,21 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             cargo_geometry_fusion_config_.maximum_shrink_per_frame_m =
                 geometry["maximum_shrink_per_frame_m"].as<float>(0.03F);
             cargo_geometry_fusion_config_.immediate_expand_enabled =
-                geometry["immediate_expand_enabled"].as<bool>(true);
+                geometry["immediate_expand_enabled"].as<bool>(false);
+            cargo_geometry_fusion_config_
+                .conservative_expand_confirm_frames =
+                    std::max(
+                        1,
+                        geometry["conservative_expand_confirm_frames"]
+                            .as<int>(8));
+            cargo_geometry_fusion_config_
+                .minimum_live_shape_confidence_for_expand =
+                    std::clamp(
+                        geometry[
+                            "minimum_live_shape_confidence_for_expand"]
+                            .as<float>(0.85F),
+                        0.0F,
+                        1.0F);
             cargo_geometry_fusion_config_.minimum_live_dimension_support =
                 static_cast<std::size_t>(std::max(
                     1, geometry["minimum_live_dimension_support"].as<int>(30)));
@@ -2658,11 +2672,11 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         if (config["pending_cargo_envelope"]) {
             const YAML::Node pending = config["pending_cargo_envelope"];
             pending_cargo_envelope_config_.configured_length_m =
-                pending["configured_length_m"].as<float>(3.0F);
+                pending["configured_length_m"].as<float>(1.5F);
             pending_cargo_envelope_config_.configured_width_m =
-                pending["configured_width_m"].as<float>(2.0F);
+                pending["configured_width_m"].as<float>(1.0F);
             pending_cargo_envelope_config_.configured_height_m =
-                pending["configured_height_m"].as<float>(1.5F);
+                pending["configured_height_m"].as<float>(1.0F);
             pending_cargo_envelope_config_.configured_center_offset_z_m =
                 pending["configured_center_offset_z_m"].as<float>(-1.50F);
             pending_cargo_envelope_config_.horizontal_margin_m =
@@ -3041,6 +3055,12 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             obstacle_tracker_config.stale_track_sec = std::max(
                 obstacle_tracker_config.maximum_observation_gap_sec,
                 cargo_safety["obstacle_track_stale_sec"].as<double>(1.00));
+            obstacle_tracker_config.embedded_distance_threshold_m =
+                std::clamp(
+                    cargo_safety["embedded_obstacle_distance_threshold_m"]
+                        .as<float>(0.05F),
+                    0.0F,
+                    0.25F);
             obstacle_tracker_config.require_static_cargo_for_warning =
                 cargo_safety["require_static_cargo_for_warning"]
                     .as<bool>(true);
@@ -17926,6 +17946,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
     fusion_input.pending_external_geometry_valid =
         fusion_input.pending_external_obstacle_authorized &&
         pending_obstacle_decision.selected_large_geometry_valid;
+    fusion_input.live_obstacle_origin_resolved =
+        pending_obstacle_decision.selected_embedded_authorized;
     if (fusion_input.pending_external_obstacle_authorized) {
         fusion_input.live.available =
             external_live_input.obstacle_observation_valid;
@@ -18219,6 +18241,14 @@ void NdtSlamNode::runPendingCargoAvoidance(
            << ",\"pending_external_geometry_valid\":"
            << (fusion_input.pending_external_geometry_valid
                    ? "true" : "false")
+           << ",\"pending_external_embedded\":"
+           << (pending_obstacle_decision.selected_embedded
+                   ? "true" : "false")
+           << ",\"pending_external_embedded_authorized\":"
+           << (pending_obstacle_decision.selected_embedded_authorized
+                   ? "true" : "false")
+           << ",\"pending_external_separated_observations\":"
+           << pending_obstacle_decision.selected_separated_observations
            << ",\"risk_live\":"
            << (fused.risk_live ? "true" : "false")
            << ",\"risk_static\":"
@@ -20594,6 +20624,13 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                       static_cargo_min_occupied_cells
                << " obstacle_track_id="
                << obstacle_track_decision.selected_track_id
+               << " obstacle_embedded="
+               << (obstacle_track_decision.selected_embedded ? 1 : 0)
+               << " embedded_authorized="
+               << (obstacle_track_decision.selected_embedded_authorized
+                       ? 1 : 0)
+               << " separated_observations="
+               << obstacle_track_decision.selected_separated_observations
                << " association_reset_reason="
                << obstacle_track_decision
                       .selected_association_reset_reason
@@ -20754,6 +20791,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         effective_cargo_envelope_.can_authorize_clear &&
         formal_use.formal_removal_valid;
     avoidance_input.pending_envelope_valid = false;
+    avoidance_input.live_obstacle_origin_resolved =
+        obstacle_track_decision.selected_embedded_authorized;
     avoidance_input.live.available =
         last_cargo_safety_result_.input_valid;
     avoidance_input.live.reliable =

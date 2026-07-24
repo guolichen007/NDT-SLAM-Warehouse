@@ -156,7 +156,7 @@ TEST(PendingCargoEnvelopeTest, MapSessionChangeClearsOffsetIdentity) {
 }
 
 TEST(PendingCargoEnvelopeTest,
-     ConfiguredFallbackRemainsFourByThreeWhenGeometryUnknown) {
+     ConfiguredFallbackUsesSmallCargoProfileWhenGeometryUnknown) {
   auto input = loadedInput();
   input.hook_default_pose = pose(
       10.0, Eigen::Vector3f(0.0F, -2.0F, 1.5F),
@@ -164,9 +164,9 @@ TEST(PendingCargoEnvelopeTest,
 
   const auto result = buildPendingCargoEnvelope(input, exactConfig());
   ASSERT_TRUE(result.valid);
-  EXPECT_FLOAT_EQ(result.length_m, 4.0F);
-  EXPECT_FLOAT_EQ(result.width_m, 3.0F);
-  EXPECT_FLOAT_EQ(result.height_m, 3.0F);
+  EXPECT_FLOAT_EQ(result.length_m, 1.5F);
+  EXPECT_FLOAT_EQ(result.width_m, 1.0F);
+  EXPECT_FLOAT_EQ(result.height_m, 1.0F);
   CargoPresenceResult presence;
   presence.cargo_present = true;
   EXPECT_FALSE(resolveEffectiveCargoEnvelope(

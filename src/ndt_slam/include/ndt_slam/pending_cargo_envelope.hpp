@@ -74,9 +74,9 @@ const char* pendingCargoEnvelopeSourceName(
     PendingCargoEnvelopeSource source) noexcept;
 
 struct PendingCargoEnvelopeConfig {
-  float configured_length_m = 3.0F;
-  float configured_width_m = 2.0F;
-  float configured_height_m = 1.5F;
+  float configured_length_m = 1.5F;
+  float configured_width_m = 1.0F;
+  float configured_height_m = 1.0F;
   // base_link Z points upward. The configured cargo center is below the
   // physical hook anchor, so the default offset is negative.
   float configured_center_offset_z_m = -1.50F;
@@ -140,9 +140,9 @@ enum class EffectiveCargoEnvelopeSource : std::uint8_t {
 };
 
 struct CargoEnvelopeResolverConfig {
-  float configured_length_m = 3.0F;
-  float configured_width_m = 2.0F;
-  float configured_height_m = 1.5F;
+  float configured_length_m = 1.5F;
+  float configured_width_m = 1.0F;
+  float configured_height_m = 1.0F;
   float configured_center_z_m = -1.50F;
   float horizontal_uncertainty_m = 1.00F;
   float vertical_uncertainty_m = 0.50F;

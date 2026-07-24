@@ -84,9 +84,12 @@ TEST(CargoGeometryFusionTest, FrozenShapeOnlyUpdatesCenterAndBottom) {
   EXPECT_NEAR(result.bottom_m, 3.75F - result.height_m, 1.0e-5F);
 }
 
-TEST(CargoGeometryFusionTest, LargerMeasurementExpandsImmediately) {
+TEST(CargoGeometryFusionTest,
+     LargerMeasurementNeedsContinuousHighConfidenceConfirmation) {
   CargoGeometryFusionConfig config;
   config.minimum_confirm_frames = 1;
+  config.conservative_expand_confirm_frames = 3;
+  config.immediate_expand_enabled = false;
   config.minimum_physical_length_m = 0.30F;
   config.minimum_physical_width_m = 0.20F;
   config.formal_transition_start_length_m = 0.30F;
@@ -100,6 +103,16 @@ TEST(CargoGeometryFusionTest, LargerMeasurementExpandsImmediately) {
   larger.dimension_observation_complete = true;
   larger.dimension_support_points = 100U;
   larger.dimension_shape_confidence = 0.9F;
+  const float original_length = result.length_m;
+  const float original_width = result.width_m;
+  result = fusion.update(larger);
+  EXPECT_FLOAT_EQ(result.length_m, original_length);
+  EXPECT_FLOAT_EQ(result.width_m, original_width);
+  larger.stamp_sec = 1.2;
+  result = fusion.update(larger);
+  EXPECT_FLOAT_EQ(result.length_m, original_length);
+  EXPECT_FLOAT_EQ(result.width_m, original_width);
+  larger.stamp_sec = 1.3;
   result = fusion.update(larger);
   EXPECT_FLOAT_EQ(result.length_m, 4.5F);
   EXPECT_FLOAT_EQ(result.width_m, 2.0F);

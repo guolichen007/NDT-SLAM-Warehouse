@@ -28,6 +28,12 @@ struct CargoObstacleTrackerConfig {
   float level1_warning_distance_m = 3.0F;
   float level2_warning_distance_m = 5.0F;
   float acquisition_distance_m = 7.0F;
+  // A newly created cluster already embedded in the cargo footprint is
+  // ambiguous: it is commonly residual cargo self-points. It may issue a
+  // warning only after this same track was independently observed outside
+  // the embedded band, or when authoritative static provenance proves it is
+  // a warehouse obstacle.
+  float embedded_distance_threshold_m = 0.05F;
   double maximum_observation_gap_sec = 0.60;
   double stale_track_sec = 1.00;
   float association_max_centroid_distance_m = 0.75F;
@@ -105,6 +111,9 @@ struct CargoObstacleTrack {
   bool large_cluster_geometry_valid = false;
   ExternalProvenance provenance = ExternalProvenance::NONE;
   bool provenance_valid = false;
+  int separated_validated_observations = 0;
+  bool separated_obstacle_history_valid = false;
+  bool current_embedded = false;
   std::vector<std::int64_t> occupied_map_cells;
   std::vector<std::int64_t> identity_anchor_map_cells;
   Eigen::Vector2f first_cargo_center_map = Eigen::Vector2f::Zero();
@@ -134,6 +143,9 @@ struct CargoObstacleTrackerDecision {
   bool selected_large_geometry_valid = false;
   ExternalProvenance selected_provenance = ExternalProvenance::NONE;
   bool selected_provenance_valid = false;
+  bool selected_embedded = false;
+  bool selected_embedded_authorized = false;
+  int selected_separated_observations = 0;
   int selected_static_provenance_streak = 0;
   double selected_static_age_sec = 0.0;
   float selected_track_cell_overlap = 0.0F;

@@ -717,6 +717,10 @@ cargo_safety:
   # map cells (or when a future map/pre-cargo source explicitly proves it).
   static_provenance_min_cargo_motion_m: 0.30
   obstacle_track_stale_sec: 1.00
+  # A cluster born already inside the cargo footprint is normally residual
+  # cargo self-points. It cannot warn until the same track was first observed
+  # outside this band, unless authoritative static provenance proves it.
+  embedded_obstacle_distance_threshold_m: 0.05
   require_static_cargo_for_warning: true
   static_cargo_min_voxel_points: 80
   # Disabled until the upstream merged-cloud message carries an honest raw
@@ -804,13 +808,13 @@ status_codes:
 pending_cargo_envelope:
   # Visual-only fallback when no physical shape has been measured. It is not a
   # minimum floor for LiDAR/retired/static shapes and cannot authorize 17/18.
-  # Display/query fallback for a LOADED lifecycle before a reliable shape is
-  # available. It covers the observed 2.59-2.84 x 1.12-1.60 x 0.32-1.15 m
-  # cargo family with margin. This source remains provisional: it cannot
-  # authorize CLEAR, map removal, MapCommit, or a positive 17/18 warning.
-  configured_length_m: 3.0
-  configured_width_m: 2.0
-  configured_height_m: 1.5
+  # Small-cargo display/query fallback for a LOADED lifecycle before a
+  # reliable physical shape is available. Large cargo is expected to retain
+  # measured/retired geometry. This identity-free source remains provisional:
+  # it cannot authorize CLEAR, map removal, MapCommit, or positive 17/18.
+  configured_length_m: 1.5
+  configured_width_m: 1.0
+  configured_height_m: 1.0
   # base_link Z is upward: cargo_center_z = hook_anchor_z + this offset.
   # A suspended cargo envelope is centered below the hook, hence negative.
   configured_center_offset_z_m: -1.50
@@ -890,7 +894,12 @@ cargo_geometry_fusion:
   configured_bottom_margin_m: 0.10
   conservative_shrink_confirm_frames: 8
   maximum_shrink_per_frame_m: 0.03
-  immediate_expand_enabled: true
+  # Frozen cargo dimensions are lifecycle-stable. A larger observation must
+  # be high confidence and persist continuously; a single merged component
+  # can no longer inflate the formal safety envelope.
+  immediate_expand_enabled: false
+  conservative_expand_confirm_frames: 8
+  minimum_live_shape_confidence_for_expand: 0.85
   minimum_live_dimension_support: 30
   minimum_live_shape_confidence_for_shrink: 0.75
   minimum_physical_length_m: 0.30

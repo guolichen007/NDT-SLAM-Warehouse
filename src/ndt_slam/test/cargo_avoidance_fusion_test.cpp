@@ -241,5 +241,19 @@ TEST(CargoAvoidanceFusion, MoreSevereSourceWins) {
   EXPECT_EQ(result.official_code, 17);
 }
 
+TEST(CargoAvoidanceFusion,
+     UnresolvedEmbeddedLiveClusterCannotWarnOrAuthorizeClear) {
+  auto input = validInput();
+  input.live.hazard = true;
+  input.live.warning_code = 17;
+  input.live.distance_m = 0.0F;
+  input.live_obstacle_origin_resolved = false;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 34);
+  EXPECT_FALSE(result.risk_live);
+  EXPECT_EQ(result.reason, "embedded_obstacle_origin_unresolved");
+}
+
 }  // namespace
 }  // namespace ndt_slam

@@ -164,12 +164,17 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
   const bool live_reliable = input.live.available && input.live.reliable;
   const bool static_reliable = static_risk_contract &&
       input.static_map.available && input.static_map.reliable;
+  const bool unresolved_embedded_live_hazard =
+      live_reliable && input.live.hazard &&
+      warningCode(input.live.warning_code) &&
+      !input.live_obstacle_origin_resolved;
 
-  result.risk_live = live_reliable && input.live.hazard &&
+  result.risk_live = live_reliable && input.live_obstacle_origin_resolved &&
+      input.live.hazard &&
       warningCode(input.live.warning_code);
   result.risk_static = static_reliable && input.static_map.hazard &&
       warningCode(input.static_map.warning_code);
-  if (live_reliable) {
+  if (live_reliable && input.live_obstacle_origin_resolved) {
     combineMetric(input.live.distance_m, &result.distance_m);
     combineMetric(input.live.clearance_m, &result.clearance_m);
   }
@@ -178,7 +183,9 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     combineMetric(input.static_map.clearance_m, &result.clearance_m);
   }
 
-  const bool live_clear_observed = live_reliable && !result.risk_live &&
+  const bool live_clear_observed =
+      live_reliable && input.live_obstacle_origin_resolved &&
+      !result.risk_live &&
       input.live.coverage >= config.minimum_live_coverage_for_clear;
   result.map_live_conflict = result.risk_static && live_clear_observed;
 
@@ -213,6 +220,14 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
       result.provisional_status = "QUERY_NOT_AUTHORIZED";
       result.pending_authority_reason =
           "pending_warning_query_not_authorized";
+      result.reason = "pending_hazard_not_authorized:" +
+          result.pending_authority_reason;
+      return result;
+    }
+    if (unresolved_embedded_live_hazard) {
+      result.provisional_status = "SOURCE_UNRESOLVED";
+      result.pending_authority_reason =
+          "embedded_obstacle_origin_unresolved";
       result.reason = "pending_hazard_not_authorized:" +
           result.pending_authority_reason;
       return result;
@@ -258,6 +273,12 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
         : (result.risk_live && result.risk_static
                ? "live_and_static_hazard"
                : (result.risk_live ? "live_hazard" : "static_hazard"));
+    return result;
+  }
+
+  if (unresolved_embedded_live_hazard) {
+    result.official_code = kObstacleInvalid;
+    result.reason = "embedded_obstacle_origin_unresolved";
     return result;
   }
 

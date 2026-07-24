@@ -183,6 +183,39 @@ TEST(CargoObstacleTracker, UnresolvedNearZeroTrackCannotPublishHazard) {
       tracker.update(2.0, {unresolved}).confirmed_hazard);
 }
 
+TEST(CargoObstacleTracker,
+     TrackBornEmbeddedNeedsSeparatedHistoryOrIndependentProvenance) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  CargoObstacleObservation embedded = hazard(0U, 0.0F, 0.0F);
+  embedded.footprint_distance_m = 0.0F;
+  tracker.update(1.0, {embedded});
+  tracker.update(1.2, {embedded});
+  const CargoObstacleTrackerDecision decision =
+      tracker.update(1.4, {embedded});
+  EXPECT_FALSE(decision.confirmed_hazard);
+  EXPECT_TRUE(decision.selected_embedded);
+  EXPECT_FALSE(decision.selected_embedded_authorized);
+  EXPECT_EQ(decision.reason, "embedded_obstacle_origin_unresolved");
+}
+
+TEST(CargoObstacleTracker,
+     PreviouslySeparatedTrackRetainsRealCollisionWarningAtContact) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  CargoObstacleObservation approaching = hazard(0U, 0.0F, 0.0F);
+  approaching.footprint_distance_m = 2.0F;
+  tracker.update(1.0, {approaching});
+  tracker.update(1.2, {approaching});
+  ASSERT_TRUE(tracker.update(1.4, {approaching}).confirmed_hazard);
+
+  CargoObstacleObservation contact = approaching;
+  contact.footprint_distance_m = 0.0F;
+  const CargoObstacleTrackerDecision decision =
+      tracker.update(1.6, {contact});
+  EXPECT_TRUE(decision.confirmed_hazard) << decision.reason;
+  EXPECT_TRUE(decision.selected_embedded);
+  EXPECT_TRUE(decision.selected_embedded_authorized);
+}
+
 TEST(CargoObstacleTracker, UnvalidatedFrameResetsValidatedStreak) {
   CargoObstacleTracker tracker(ordinaryHazardConfig());
   CargoObstacleObservation observation = hazard(0U, 0.0F, 0.0F);

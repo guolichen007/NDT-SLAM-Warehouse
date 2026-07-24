@@ -63,6 +63,10 @@ bool validConfig(const CargoObstacleTrackerConfig& config) {
           config.level1_warning_distance_m &&
       std::isfinite(config.acquisition_distance_m) &&
       config.acquisition_distance_m > config.level2_warning_distance_m &&
+      std::isfinite(config.embedded_distance_threshold_m) &&
+      config.embedded_distance_threshold_m >= 0.0F &&
+      config.embedded_distance_threshold_m <
+          config.level1_warning_distance_m &&
       std::isfinite(config.maximum_observation_gap_sec) &&
       config.maximum_observation_gap_sec > 0.0 &&
       std::isfinite(config.stale_track_sec) &&
@@ -329,6 +333,13 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.provenance = observation.provenance;
       track.provenance_valid =
           authorizesStaticObstacle(observation.provenance);
+      track.current_embedded =
+          observation.footprint_distance_m <
+          config_.embedded_distance_threshold_m;
+      track.separated_validated_observations =
+          observation.source_validated && !track.current_embedded ? 1 : 0;
+      track.separated_obstacle_history_valid =
+          track.separated_validated_observations >= config_.confirm_frames;
       track.occupied_map_cells = observation.occupied_map_cells;
       track.identity_anchor_map_cells = observation.occupied_map_cells;
       track.first_cargo_center_valid = observation.cargo_center_valid &&
@@ -443,6 +454,19 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.provenance = observation.provenance;
     }
     track.provenance_valid = authorizesStaticObstacle(track.provenance);
+    track.current_embedded =
+        observation.footprint_distance_m <
+        config_.embedded_distance_threshold_m;
+    if (observation.source_validated && !track.current_embedded) {
+      track.separated_validated_observations = consecutive
+          ? track.separated_validated_observations + 1 : 1;
+      if (track.separated_validated_observations >=
+          config_.confirm_frames) {
+        track.separated_obstacle_history_valid = true;
+      }
+    } else if (!track.current_embedded) {
+      track.separated_validated_observations = 0;
+    }
     track.occupied_map_cells = observation.occupied_map_cells;
     const bool static_provenance_frame = observation.source_validated &&
         track.large_cluster_geometry_valid &&
@@ -494,6 +518,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
          track.geometry_validated_consecutive_observations >=
              config_.confirm_frames) &&
         track.current_source_validated &&
+        (!track.current_embedded ||
+         track.separated_obstacle_history_valid ||
+         track.provenance_valid) &&
         (!config_.require_static_cargo_for_warning || track.static_obstacle);
     if (warning_authorized &&
         (selected == nullptr || moreDangerous(track, *selected))) {
@@ -516,6 +543,13 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         diagnostic->large_cluster_geometry_valid;
     decision.selected_provenance = diagnostic->provenance;
     decision.selected_provenance_valid = diagnostic->provenance_valid;
+    decision.selected_embedded = diagnostic->current_embedded;
+    decision.selected_embedded_authorized =
+        !diagnostic->current_embedded ||
+        diagnostic->separated_obstacle_history_valid ||
+        diagnostic->provenance_valid;
+    decision.selected_separated_observations =
+        diagnostic->separated_validated_observations;
     decision.selected_static_provenance_streak =
         diagnostic->static_provenance_consecutive_observations;
     decision.selected_static_age_sec =
@@ -536,12 +570,16 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.warning_code = selected->warning_code;
     decision.reason = "persistent_obstacle_track_confirmed";
   } else if (decision.hazard_observed) {
-    if (!config_.require_static_cargo_for_warning) {
-      decision.reason = "persistent_obstacle_track_pending";
-    } else if (diagnostic == nullptr) {
+    if (diagnostic == nullptr) {
       decision.reason = "static_track_association_reset";
     } else if (!diagnostic->current_source_validated) {
       decision.reason = "current_source_unvalidated";
+    } else if (diagnostic->current_embedded &&
+               !diagnostic->separated_obstacle_history_valid &&
+               !diagnostic->provenance_valid) {
+      decision.reason = "embedded_obstacle_origin_unresolved";
+    } else if (!config_.require_static_cargo_for_warning) {
+      decision.reason = "persistent_obstacle_track_pending";
     } else if (config_.require_large_geometry_for_warning &&
                (!diagnostic->large_cluster_geometry_valid ||
                 diagnostic->geometry_validated_consecutive_observations <

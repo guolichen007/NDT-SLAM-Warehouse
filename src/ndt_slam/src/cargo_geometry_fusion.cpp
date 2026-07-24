@@ -20,6 +20,9 @@ bool validConfig(const CargoGeometryFusionConfig& config) {
       config.configured_bottom_margin_m >= 0.0F &&
       config.conservative_shrink_confirm_frames > 0 &&
       config.maximum_shrink_per_frame_m > 0.0F &&
+      config.conservative_expand_confirm_frames > 0 &&
+      config.minimum_live_shape_confidence_for_expand >= 0.0F &&
+      config.minimum_live_shape_confidence_for_expand <= 1.0F &&
       config.minimum_live_dimension_support > 0U &&
       config.minimum_live_shape_confidence_for_shrink >= 0.0F &&
       config.minimum_live_shape_confidence_for_shrink <= 1.0F &&
@@ -106,6 +109,10 @@ void CargoGeometryFusion::reset() {
   last_stamp_sec_ = 0.0;
   shrink_confirm_count_ = 0;
   shrink_track_segment_id_ = 0U;
+  expand_confirm_count_ = 0;
+  expand_track_segment_id_ = 0U;
+  pending_expand_length_m_ = 0.0F;
+  pending_expand_width_m_ = 0.0F;
   shape_confirm_count_ = 0;
   shape_confirm_track_segment_id_ = 0U;
 }
@@ -141,9 +148,23 @@ CargoFrozenGeometry CargoGeometryFusion::update(
   }
 
   if (result_.frozen) {
+    const bool observation_continuous =
+        previous_stamp_sec <= 0.0 ||
+        frame.stamp_sec - previous_stamp_sec <=
+            config_.maximum_observation_gap_sec;
     if (frame.track_segment_id != shrink_track_segment_id_) {
       shrink_confirm_count_ = 0;
       shrink_track_segment_id_ = frame.track_segment_id;
+    }
+    if (frame.track_segment_id != expand_track_segment_id_ ||
+        !observation_continuous) {
+      expand_confirm_count_ = 0;
+      expand_track_segment_id_ = frame.track_segment_id;
+      pending_expand_length_m_ = 0.0F;
+      pending_expand_width_m_ = 0.0F;
+    }
+    if (!observation_continuous) {
+      shrink_confirm_count_ = 0;
     }
     result_.track_segment_id = frame.track_segment_id;
     if (frame.center_valid && frame.center.allFinite()) {
@@ -176,8 +197,51 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         result_.length_m = std::max(result_.length_m, frame.length_m);
         result_.width_m = std::max(result_.width_m, frame.width_m);
         shrink_confirm_count_ = 0;
+        expand_confirm_count_ = 0;
+        pending_expand_length_m_ = 0.0F;
+        pending_expand_width_m_ = 0.0F;
+      } else if (expands &&
+                 frame.dimension_shape_confidence >=
+                     config_.minimum_live_shape_confidence_for_expand) {
+        shrink_confirm_count_ = 0;
+        const float supported_length =
+            std::max(result_.length_m, frame.length_m);
+        const float supported_width =
+            std::max(result_.width_m, frame.width_m);
+        if (expand_confirm_count_ == 0) {
+          pending_expand_length_m_ = supported_length;
+          pending_expand_width_m_ = supported_width;
+        } else {
+          // Use the lower bound supported by every frame in the streak. One
+          // contaminated large frame cannot dictate the frozen dimensions.
+          pending_expand_length_m_ =
+              std::min(pending_expand_length_m_, supported_length);
+          pending_expand_width_m_ =
+              std::min(pending_expand_width_m_, supported_width);
+        }
+        ++expand_confirm_count_;
+        if (expand_confirm_count_ >=
+            config_.conservative_expand_confirm_frames) {
+          result_.length_m =
+              std::max(result_.length_m, pending_expand_length_m_);
+          result_.width_m =
+              std::max(result_.width_m, pending_expand_width_m_);
+          expand_confirm_count_ = 0;
+          pending_expand_length_m_ = 0.0F;
+          pending_expand_width_m_ = 0.0F;
+        }
+      } else if (expands) {
+        // A mixed larger/smaller weak observation cannot exploit the shrink
+        // branch to alter either frozen dimension.
+        shrink_confirm_count_ = 0;
+        expand_confirm_count_ = 0;
+        pending_expand_length_m_ = 0.0F;
+        pending_expand_width_m_ = 0.0F;
       } else if (frame.length_m < result_.length_m ||
                  frame.width_m < result_.width_m) {
+        expand_confirm_count_ = 0;
+        pending_expand_length_m_ = 0.0F;
+        pending_expand_width_m_ = 0.0F;
         ++shrink_confirm_count_;
         if (shrink_confirm_count_ >=
             config_.conservative_shrink_confirm_frames) {
@@ -194,16 +258,22 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         }
       } else {
         shrink_confirm_count_ = 0;
+        expand_confirm_count_ = 0;
+        pending_expand_length_m_ = 0.0F;
+        pending_expand_width_m_ = 0.0F;
       }
     } else {
       // Partial sides, tiny clusters and weak identities may only retain the
       // conservative frozen dimensions; they never authorize shrinkage.
       shrink_confirm_count_ = 0;
+      expand_confirm_count_ = 0;
+      pending_expand_length_m_ = 0.0F;
+      pending_expand_width_m_ = 0.0F;
     }
     result_.valid = frame.center_valid && frame.center.allFinite() &&
         std::isfinite(result_.bottom_m);
     result_.reason = result_.valid
-        ? "frozen_geometry_pose_and_asymmetric_dimensions_updated"
+        ? "frozen_geometry_pose_and_confirmed_dimensions_updated"
         : "frozen_geometry_pose_or_top_invalid";
     return result_;
   }
@@ -371,6 +441,7 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         config_.configured_bottom_margin_m;
     result_.reason = "geometry_frozen";
     shrink_track_segment_id_ = frame.track_segment_id;
+    expand_track_segment_id_ = frame.track_segment_id;
   } else if (result_.confirm_frames >= config_.minimum_confirm_frames) {
     result_.reason = "formal_shape_confirmation_pending";
   }

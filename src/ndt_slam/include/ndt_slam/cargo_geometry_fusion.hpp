@@ -37,7 +37,12 @@ struct CargoGeometryFusionConfig {
   float configured_bottom_margin_m = 0.10F;
   int conservative_shrink_confirm_frames = 8;
   float maximum_shrink_per_frame_m = 0.03F;
-  bool immediate_expand_enabled = true;
+  // Frozen cargo does not physically grow during one lifting lifecycle.
+  // Expansion therefore needs a high-confidence continuous confirmation
+  // streak. The legacy immediate mode remains an explicit opt-in only.
+  bool immediate_expand_enabled = false;
+  int conservative_expand_confirm_frames = 8;
+  float minimum_live_shape_confidence_for_expand = 0.85F;
   std::size_t minimum_live_dimension_support = 30U;
   float minimum_live_shape_confidence_for_shrink = 0.75F;
   float minimum_physical_length_m = 0.30F;
@@ -115,6 +120,10 @@ class CargoGeometryFusion {
   double last_stamp_sec_ = 0.0;
   int shrink_confirm_count_ = 0;
   std::uint64_t shrink_track_segment_id_ = 0U;
+  int expand_confirm_count_ = 0;
+  std::uint64_t expand_track_segment_id_ = 0U;
+  float pending_expand_length_m_ = 0.0F;
+  float pending_expand_width_m_ = 0.0F;
   int shape_confirm_count_ = 0;
   std::uint64_t shape_confirm_track_segment_id_ = 0U;
 };

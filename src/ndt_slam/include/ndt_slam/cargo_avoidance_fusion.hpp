@@ -60,6 +60,11 @@ struct CargoAvoidanceFusionInput {
   bool pending_external_provenance_valid = false;
   bool pending_external_geometry_valid = false;
   float pending_authority_confidence = 0.0F;
+  // False when a live cluster first appeared already embedded in the cargo
+  // footprint without prior separated-track history or independent static
+  // provenance. Such evidence is diagnostic only and must not become 17/18
+  // or be interpreted as a clear observation.
+  bool live_obstacle_origin_resolved = true;
   bool static_session_manifest_valid = false;
   bool static_session_hash_valid = false;
   bool static_session_uuid_valid = false;
