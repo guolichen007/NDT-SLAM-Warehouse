@@ -439,6 +439,7 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
       ? CargoRopeLengthSource::MEASURED
       : CargoRopeLengthSource::CONFIG_FALLBACK;
   const bool angle_authoritative =
+      input.hook_anchor_xy_authoritative &&
       input.hook_anchor_z_authoritative &&
       measured_vertical_separation_valid;
   // A numerically plausible separation from a non-authoritative anchor Z is
@@ -579,6 +580,7 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
       (hoist_up || config_.allow_skew_alarm_without_hoist_up) &&
       offset_authoritative;
   const bool immediate_skew_offset =
+      offset_authoritative &&
       offset_m >= config_.skew_immediate_offset_m;
   if (immediate_skew_offset) {
     // A first-frame extreme offset is an immediate sway alarm, but it is not
@@ -587,7 +589,8 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     skew_alarm_authority_missing = !hoist_alarm_authorized;
   }
   const bool immediate_sway_alarm =
-      offset_m >= config_.immediate_alarm_offset_m ||
+      (offset_authoritative &&
+       offset_m >= config_.immediate_alarm_offset_m) ||
       (angle_authoritative &&
        angle_deg >= config_.immediate_alarm_angle_deg);
   if (immediate_sway_alarm) {
@@ -598,16 +601,21 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     sway_below_end_stamp_sec_ = 0.0;
   }
   const bool formal_alarm_measurement =
-      offset_m >= config_.alarm_offset_m ||
+      (offset_authoritative &&
+       offset_m >= config_.alarm_offset_m) ||
       (angle_authoritative && angle_deg >= config_.alarm_angle_deg);
   if (formal_alarm_measurement) {
     last_severe_measurement_stamp_sec_ = input.stamp_sec;
   }
+  const bool authoritative_sway_measurement =
+      offset_authoritative || angle_authoritative;
   const bool angle_below_end = !angle_authoritative ||
       angle_deg <= config_.sway_end_angle_deg;
-  const bool below_end = angle_below_end &&
-      offset_m <= config_.sway_end_offset_m &&
-      horizontal_speed <= config_.sway_end_speed_mps;
+  const bool offset_below_end = !offset_authoritative ||
+      (offset_m <= config_.sway_end_offset_m &&
+       horizontal_speed <= config_.sway_end_speed_mps);
+  const bool below_end = authoritative_sway_measurement &&
+      angle_below_end && offset_below_end;
   if (immediate_alarm_latched_) {
     const bool minimum_hold_complete = sway_alarm_enter_stamp_sec_ > 0.0 &&
         input.stamp_sec - sway_alarm_enter_stamp_sec_ >=
@@ -645,23 +653,29 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
     } else {
       sway = CargoSwayState::SETTLING;
     }
-  } else if (history_duration >= config_.minimum_valid_observation_sec) {
+  } else if (history_duration >= config_.minimum_valid_observation_sec &&
+             authoritative_sway_measurement) {
     if (formal_alarm_measurement) {
       sway = CargoSwayState::SWAY_ALARM;
     } else if ((angle_authoritative &&
                 angle_deg >= config_.warning_angle_deg) ||
-               offset_m >= config_.warning_offset_m ||
-               horizontal_speed >= config_.warning_speed_mps ||
-               (input.crane_motion_state ==
-                    CargoPhysicalMotionState::STATIONARY &&
-                stationary_duration >= config_.stationary_settle_delay_sec &&
-                oscillation_zero_crossings >= 1 &&
-                oscillation_amplitude >= config_.warning_offset_m)) {
+               (offset_authoritative &&
+                (offset_m >= config_.warning_offset_m ||
+                 horizontal_speed >= config_.warning_speed_mps ||
+                 (input.crane_motion_state ==
+                      CargoPhysicalMotionState::STATIONARY &&
+                  stationary_duration >=
+                      config_.stationary_settle_delay_sec &&
+                  oscillation_zero_crossings >= 1 &&
+                  oscillation_amplitude >=
+                      config_.warning_offset_m)))) {
       sway = CargoSwayState::SWAY_WARNING;
     } else if ((angle_authoritative &&
                 angle_deg >= config_.normal_angle_deg) ||
-               horizontal_speed >= config_.normal_speed_mps ||
-               oscillation_amplitude >= 0.5F * config_.warning_offset_m) {
+               (offset_authoritative &&
+                (horizontal_speed >= config_.normal_speed_mps ||
+                 oscillation_amplitude >=
+                     0.5F * config_.warning_offset_m))) {
       sway = CargoSwayState::SWAY_DETECTED;
     } else {
       sway = CargoSwayState::NORMAL;
@@ -679,6 +693,7 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
   if (history_duration >= config_.minimum_valid_observation_sec) {
     mean_angle_deg = std::atan2(
         mean_offset.norm(), rope_length) * kRadToDeg;
+    if (offset_authoritative) {
     const bool skew_angle_suspect = angle_authoritative &&
         mean_angle_deg >= config_.skew_suspect_angle_deg;
     const bool skew_offset_suspect =
@@ -723,6 +738,11 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
         skew = CargoSkewPullState::SKEW_PULL_ALARM;
       }
     } else {
+      skew_alarm_candidate_stamp_sec_ = 0.0;
+    }
+    } else {
+      // Configured/default hook XY is diagnostic only. It cannot establish
+      // a DC offset, oscillation history, sway state, or skew-pull state.
       skew_alarm_candidate_stamp_sec_ = 0.0;
     }
 
@@ -923,15 +943,22 @@ CargoSwingResult CargoSwingMonitor::update(const CargoSwingInput& input) {
              torsion == CargoTorsionState::TORSION_DETECTED) {
     result_.recommended_action = CargoSwingRecommendedAction::WATCH;
   }
-  result_.reason = torsion_evidence_stale
-      ? "torsion_orientation_evidence_stale_sway_skew_valid"
-      : (result_.alarm_inhibited
-      ? "skew_alarm_authority_unavailable"
-      : (measurement_gap_reset
-             ? "current_measurement_after_gap_reset"
-             : (rope_source == CargoRopeLengthSource::CONFIG_FALLBACK
-             ? "current_measurement_config_rope_fallback"
-             : "current_measurement")));
+  if (torsion_evidence_stale) {
+    result_.reason =
+        "torsion_orientation_evidence_stale_sway_skew_valid";
+  } else if (result_.alarm_inhibited) {
+    result_.reason = "skew_alarm_authority_unavailable";
+  } else if (!offset_authoritative) {
+    result_.reason =
+        "hook_anchor_xy_nonauthoritative_diagnostic_only";
+  } else if (measurement_gap_reset) {
+    result_.reason = "current_measurement_after_gap_reset";
+  } else if (
+      rope_source == CargoRopeLengthSource::CONFIG_FALLBACK) {
+    result_.reason = "current_measurement_config_rope_fallback";
+  } else {
+    result_.reason = "current_measurement";
+  }
   if (skew == CargoSkewPullState::SKEW_PULL_ALARM) {
     result_.reason = "stop_hoist_and_travel";
   }

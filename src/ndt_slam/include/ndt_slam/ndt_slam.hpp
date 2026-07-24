@@ -1409,8 +1409,11 @@ private:
         Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f size_visible = Eigen::Vector3f::Zero();
         bool oriented_footprint_valid = false;
+        bool oriented_footprint_clamped = false;
         Eigen::Vector2f footprint_center_base = Eigen::Vector2f::Zero();
         Eigen::Vector2f footprint_length_width = Eigen::Vector2f::Zero();
+        Eigen::Vector2f footprint_raw_length_width =
+            Eigen::Vector2f::Zero();
         float footprint_yaw_base_rad = 0.0F;
         float orientation_confidence = 0.0F;
         float z05 = 0.0f;
@@ -1755,7 +1758,7 @@ private:
         float formal_vertical_evidence_hold_sec = 2.00F;
         float direct_bottom_soft_stale_sec = 1.50F;
         float velocity_model_uncertainty_mps = 0.05F;
-        float association_max_xy_gate_m = 0.80F;
+        float association_max_xy_gate_m = 1.05F;
         float reacquisition_max_xy_gate_m = 0.55F;
         float association_max_z_gate_m = 0.90F;
         float reacquisition_max_z_gate_m = 0.65F;
@@ -2059,6 +2062,12 @@ private:
     float pending_lost_growth_m_ = 0.0F;
     bool pending_retired_pose_plausible_ = true;
     std::string pending_retired_pose_reject_reason_ = "not_retired";
+    bool trusted_cargo_pose_valid_ = false;
+    Eigen::Vector3f trusted_cargo_pose_center_base_ =
+        Eigen::Vector3f::Zero();
+    ros::Time trusted_cargo_pose_stamp_;
+    std::uint64_t trusted_cargo_pose_lifecycle_id_ = 0U;
+    std::uint64_t trusted_cargo_pose_track_segment_id_ = 0U;
     std::uint64_t cargo_lifecycle_sequence_ = 0U;
     std::uint64_t cargo_lifecycle_id_ = 0U;
     std::uint64_t cargo_track_segment_id_ = 0U;
@@ -2287,6 +2296,7 @@ private:
                              const HookCargoBottomEstimate& bottom,
                              const ros::Time& stamp,
                              CargoPoseSource source);
+    void rememberTrustedCargoPose(const ros::Time& stamp);
     RigidCargoGeometry buildCurrentRigidCargoGeometryForPose(
         const Sophus::SE3d& pose_map_base,
         const ros::Time& stamp);

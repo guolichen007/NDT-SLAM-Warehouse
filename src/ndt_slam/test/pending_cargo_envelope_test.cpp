@@ -306,6 +306,44 @@ TEST(PendingCargoEnvelopeTest, RetiredEnvelopeBelowGroundIsRejected) {
   EXPECT_EQ(result.reason, "retired_pose_below_local_ground");
 }
 
+TEST(PendingCargoEnvelopeTest,
+     CurrentAssociatedLidarPoseDoesNotRequireGroundReference) {
+  PendingCargoVerticalPlausibilityInput input;
+  input.envelope_valid = true;
+  input.center_z_base = 2.1F;
+  input.height_m = 1.1F;
+  input.vertical_uncertainty_m = 0.15F;
+  input.minimum_height_m = 0.30F;
+  input.maximum_height_m = 5.0F;
+  input.current_lidar_pose_authoritative = true;
+
+  const auto result = evaluatePendingCargoVerticalPlausibility(input);
+  EXPECT_TRUE(result.valid) << result.reason;
+}
+
+TEST(PendingCargoEnvelopeTest,
+     ShortHoldUsesSameTrackTrustedCenterButRejectsLargeZJump) {
+  PendingCargoVerticalPlausibilityInput input;
+  input.envelope_valid = true;
+  input.center_z_base = 2.3F;
+  input.height_m = 1.1F;
+  input.vertical_uncertainty_m = 0.10F;
+  input.minimum_height_m = 0.30F;
+  input.maximum_height_m = 5.0F;
+  input.trusted_center_valid = true;
+  input.trusted_center_z_base = 2.1F;
+  input.trusted_center_age_sec = 2.0;
+  ASSERT_TRUE(evaluatePendingCargoVerticalPlausibility(input).valid);
+
+  input.center_z_base = -4.0F;
+  const auto rejected =
+      evaluatePendingCargoVerticalPlausibility(input);
+  EXPECT_FALSE(rejected.valid);
+  EXPECT_EQ(
+      rejected.reason,
+      "retired_pose_trusted_center_discontinuity");
+}
+
 TEST(PendingCargoEnvelopeTest, EmptyHookCannotCreateEnvelope) {
   auto input = loadedInput();
   input.hook_loaded = false;

@@ -58,7 +58,9 @@ bool authorizePendingWarning(
     return false;
   }
   if (!input.pending_pose_physically_plausible) {
-    *reason = "pending_pose_physically_implausible";
+    *reason = input.pending_warning_state_reason.empty()
+        ? "pending_pose_physically_implausible"
+        : input.pending_warning_state_reason;
     return false;
   }
   if (!input.pending_warning_query_allowed) {
@@ -200,7 +202,9 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     if (!input.pending_pose_physically_plausible) {
       result.provisional_status = "POSE_REJECTED";
       result.pending_authority_reason =
-          "pending_pose_physically_implausible";
+          input.pending_warning_state_reason.empty()
+          ? "pending_pose_physically_implausible"
+          : input.pending_warning_state_reason;
       result.reason = "pending_hazard_not_authorized:" +
           result.pending_authority_reason;
       return result;

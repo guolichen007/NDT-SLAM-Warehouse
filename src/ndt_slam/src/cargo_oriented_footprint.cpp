@@ -227,6 +227,14 @@ CargoOrientedFootprint estimateCargoOrientedFootprint(
     }
     result.center_base = centroid + long_mid * long_axis +
         short_mid * short_axis;
+    result.raw_size_long_short =
+        Eigen::Vector2f(long_size, short_size);
+    result.long_side_clamped =
+        long_size > config.maximum_long_side_m + 1.0e-4F ||
+        long_size < config.minimum_long_side_m - 1.0e-4F;
+    result.short_side_clamped =
+        short_size > config.maximum_short_side_m + 1.0e-4F ||
+        short_size < config.minimum_short_side_m - 1.0e-4F;
     long_size = std::clamp(
         long_size, config.minimum_long_side_m, config.maximum_long_side_m);
     short_size = std::clamp(

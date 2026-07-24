@@ -58,6 +58,17 @@ TEST(CargoOrientedFootprintTest, PercentilesRejectSingleExtentOutlier) {
     EXPECT_LT(result.size_long_short.y(), 1.2F);
 }
 
+TEST(CargoOrientedFootprintTest, ReportsDimensionClamping) {
+    CargoOrientedFootprintConfig config;
+    config.maximum_long_side_m = 3.0F;
+    const auto result = estimateCargoOrientedFootprint(
+        rectangle(4.0F, 0.8F, 0.0F), config);
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_TRUE(result.long_side_clamped);
+    EXPECT_GT(result.raw_size_long_short.x(), 3.0F);
+    EXPECT_FLOAT_EQ(result.size_long_short.x(), 3.0F);
+}
+
 TEST(CargoOrientedFootprintTest, SquareDoesNotInventOrientation) {
     const auto result = estimateCargoOrientedFootprint(
         rectangle(1.0F, 1.0F, 0.4F));

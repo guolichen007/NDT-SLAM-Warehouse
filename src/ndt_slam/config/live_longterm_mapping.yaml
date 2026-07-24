@@ -796,9 +796,13 @@ status_codes:
 pending_cargo_envelope:
   # Visual-only fallback when no physical shape has been measured. It is not a
   # minimum floor for LiDAR/retired/static shapes and cannot authorize 17/18.
-  configured_length_m: 4.0
-  configured_width_m: 3.0
-  configured_height_m: 3.0
+  # Display/query fallback for a LOADED lifecycle before a reliable shape is
+  # available. It covers the observed 2.59-2.84 x 1.12-1.60 x 0.32-1.15 m
+  # cargo family with margin. This source remains provisional: it cannot
+  # authorize CLEAR, map removal, MapCommit, or a positive 17/18 warning.
+  configured_length_m: 3.0
+  configured_width_m: 2.0
+  configured_height_m: 1.5
   # base_link Z is upward: cargo_center_z = hook_anchor_z + this offset.
   # A suspended cargo envelope is centered below the hook, hence negative.
   configured_center_offset_z_m: -1.50
@@ -1101,7 +1105,10 @@ hook_cargo_lock:
   formal_vertical_evidence_hold_sec: 2.00
   direct_bottom_soft_stale_sec: 2.00
   velocity_model_uncertainty_mps: 0.05
-  association_max_xy_gate_m: 0.80
+  # LOST_HOLD grows from the strict 0.55 m gate toward this bounded ceiling
+  # using accumulated position uncertainty. OBB support and frozen-shape
+  # checks remain mandatory, so the wider gate is not a nearest-cluster jump.
+  association_max_xy_gate_m: 1.05
   reacquisition_max_xy_gate_m: 0.55
   association_max_z_gate_m: 0.90
   reacquisition_max_z_gate_m: 0.65

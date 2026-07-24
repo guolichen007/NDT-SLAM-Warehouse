@@ -25,6 +25,9 @@ struct CargoOrientedFootprint {
     bool valid = false;
     Eigen::Vector2f center_base = Eigen::Vector2f::Zero();
     Eigen::Vector2f size_long_short = Eigen::Vector2f::Zero();
+    Eigen::Vector2f raw_size_long_short = Eigen::Vector2f::Zero();
+    bool long_side_clamped = false;
+    bool short_side_clamped = false;
     float yaw_base_rad = 0.0F;
     float eigenvalue_ratio = 1.0F;
     float geometric_aspect_ratio = 1.0F;

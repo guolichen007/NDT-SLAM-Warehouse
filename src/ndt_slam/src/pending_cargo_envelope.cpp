@@ -153,7 +153,7 @@ PendingCargoEnvelope combinePoseAndShape(
   }
   const double age_sec = std::max(
       0.0, evaluation_stamp_sec - pose.evidence_stamp_sec);
-  // The configured 4x3x3 box is a source of last resort, not a physical floor
+  // The configured fallback box is a source of last resort, not a physical floor
   // for measured/current, retired, or static-origin shapes. Position loss is
   // computed by the caller from the last reliable pose timestamp and carried
   // in pose.horizontal_uncertainty_m; pose evidence age is diagnostic only.
@@ -372,7 +372,11 @@ evaluatePendingCargoVerticalPlausibility(
       input.minimum_height_m < 0.0F ||
       input.maximum_height_m < input.minimum_height_m ||
       !std::isfinite(input.maximum_ground_penetration_m) ||
-      input.maximum_ground_penetration_m < 0.0F) {
+      input.maximum_ground_penetration_m < 0.0F ||
+      !std::isfinite(input.maximum_trusted_center_age_sec) ||
+      input.maximum_trusted_center_age_sec < 0.0 ||
+      !std::isfinite(input.maximum_trusted_center_z_delta_m) ||
+      input.maximum_trusted_center_z_delta_m < 0.0F) {
     result.reason = "retired_vertical_interval_invalid";
     return result;
   }
@@ -391,6 +395,10 @@ evaluatePendingCargoVerticalPlausibility(
   }
 
   bool reference_available = false;
+  bool trusted_center_used = false;
+  if (input.current_lidar_pose_authoritative) {
+    reference_available = true;
+  }
   if (input.local_ground_valid &&
       std::isfinite(input.local_ground_z_base)) {
     reference_available = true;
@@ -416,12 +424,33 @@ evaluatePendingCargoVerticalPlausibility(
       return result;
     }
   }
+  if (!reference_available && input.trusted_center_valid &&
+      std::isfinite(input.trusted_center_z_base) &&
+      std::isfinite(input.trusted_center_age_sec) &&
+      input.trusted_center_age_sec >= 0.0 &&
+      input.trusted_center_age_sec <=
+          input.maximum_trusted_center_age_sec) {
+    const float center_delta =
+        std::abs(input.center_z_base - input.trusted_center_z_base);
+    if (center_delta >
+        input.maximum_trusted_center_z_delta_m +
+            input.vertical_uncertainty_m) {
+      result.reason = "retired_pose_trusted_center_discontinuity";
+      return result;
+    }
+    reference_available = true;
+    trusted_center_used = true;
+  }
   if (!reference_available) {
     result.reason = "retired_pose_ground_reference_unavailable";
     return result;
   }
   result.valid = true;
-  result.reason = "retired_pose_physically_plausible";
+  result.reason = input.current_lidar_pose_authoritative
+      ? "current_lidar_pose_physically_plausible"
+      : (trusted_center_used
+             ? "held_pose_matches_trusted_center"
+             : "retired_pose_physically_plausible");
   return result;
 }
 

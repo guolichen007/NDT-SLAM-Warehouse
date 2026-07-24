@@ -74,9 +74,9 @@ const char* pendingCargoEnvelopeSourceName(
     PendingCargoEnvelopeSource source) noexcept;
 
 struct PendingCargoEnvelopeConfig {
-  float configured_length_m = 4.0F;
-  float configured_width_m = 3.0F;
-  float configured_height_m = 3.0F;
+  float configured_length_m = 3.0F;
+  float configured_width_m = 2.0F;
+  float configured_height_m = 1.5F;
   // base_link Z points upward. The configured cargo center is below the
   // physical hook anchor, so the default offset is negative.
   float configured_center_offset_z_m = -1.50F;
@@ -140,9 +140,9 @@ enum class EffectiveCargoEnvelopeSource : std::uint8_t {
 };
 
 struct CargoEnvelopeResolverConfig {
-  float configured_length_m = 4.0F;
-  float configured_width_m = 3.0F;
-  float configured_height_m = 3.0F;
+  float configured_length_m = 3.0F;
+  float configured_width_m = 2.0F;
+  float configured_height_m = 1.5F;
   float configured_center_z_m = -1.50F;
   float horizontal_uncertainty_m = 1.00F;
   float vertical_uncertainty_m = 0.50F;
@@ -197,6 +197,16 @@ struct PendingCargoVerticalPlausibilityInput {
   float maximum_ground_penetration_m = 0.50F;
   bool hook_anchor_z_authoritative = false;
   float hook_anchor_z_base = std::numeric_limits<float>::quiet_NaN();
+  // A current identity-associated LiDAR observation is itself a physical
+  // pose measurement. Short holds and retired poses may instead be checked
+  // against the last such measurement from the same lifecycle/track.
+  bool current_lidar_pose_authoritative = false;
+  bool trusted_center_valid = false;
+  float trusted_center_z_base = std::numeric_limits<float>::quiet_NaN();
+  double trusted_center_age_sec =
+      std::numeric_limits<double>::infinity();
+  double maximum_trusted_center_age_sec = 8.0;
+  float maximum_trusted_center_z_delta_m = 0.75F;
 };
 
 struct PendingCargoVerticalPlausibilityResult {

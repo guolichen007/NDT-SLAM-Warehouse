@@ -309,11 +309,12 @@ TEST(CargoSwingMonitorTest, ConfiguredHookAnchorCannotCauseFormalSkewAlarm) {
   input.hoist_motion_state = HoistMotionState::UP;
   input.measured_center_base.x() = 0.8F;
   const auto result = monitor.update(input);
+  EXPECT_EQ(result.sway_state, CargoSwayState::NOT_EVALUATED);
   EXPECT_EQ(result.skew_pull_state,
-            CargoSkewPullState::SKEW_PULL_SUSPECTED);
-  EXPECT_TRUE(result.alarm_inhibited);
+            CargoSkewPullState::NOT_EVALUATED);
+  EXPECT_FALSE(result.alarm_inhibited);
   EXPECT_EQ(result.recommended_action,
-            CargoSwingRecommendedAction::INHIBIT_HOIST_UP);
+            CargoSwingRecommendedAction::NONE);
 }
 
 TEST(CargoSwingMonitorTest, FreshMeasuredHookAnchorCanAuthorizeAngle) {
