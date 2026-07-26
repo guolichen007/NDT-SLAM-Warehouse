@@ -38,6 +38,7 @@ struct CargoObstacleTrackerConfig {
   double stale_track_sec = 1.00;
   float association_max_centroid_distance_m = 0.75F;
   float association_max_top_step_m = 0.75F;
+  int association_neighbor_cell_radius = 1;
   float static_track_cell_overlap_min = 0.20F;
   float static_track_iou_min = 0.10F;
   float static_provenance_min_cargo_motion_m = 0.30F;
@@ -121,6 +122,7 @@ struct CargoObstacleTrack {
   float maximum_cargo_displacement_m = 0.0F;
   float last_cell_overlap = 0.0F;
   float last_cell_iou = 0.0F;
+  float last_neighbor_cell_overlap = 0.0F;
   float last_anchor_cell_overlap = 0.0F;
   float last_association_cost = 0.0F;
   std::string association_reset_reason;
@@ -150,6 +152,7 @@ struct CargoObstacleTrackerDecision {
   double selected_static_age_sec = 0.0;
   float selected_track_cell_overlap = 0.0F;
   float selected_track_iou = 0.0F;
+  float selected_track_neighbor_cell_overlap = 0.0F;
   float selected_association_cost = 0.0F;
   std::string selected_association_reset_reason;
   std::uint64_t created_track_count = 0U;

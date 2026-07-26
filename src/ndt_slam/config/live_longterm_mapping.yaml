@@ -708,6 +708,10 @@ cargo_safety:
   maximum_clearance_step_m: 0.75
   obstacle_track_association_distance_m: 0.75
   obstacle_track_association_top_step_m: 0.75
+  # Permit one 0.25 m cell of cluster-boundary jitter. Exact overlap and
+  # centroid prediction still win the cost; this only preserves identity for
+  # adjacent fragments of the same physical obstacle.
+  obstacle_track_association_neighbor_cell_radius: 1
   # Large warehouse stacks retain identity by stable map-frame occupied cells,
   # even when their visible centroid changes with viewpoint.
   static_track_cell_overlap_min: 0.20
@@ -863,7 +867,10 @@ static_origin_component:
   neighbor_interval_gap_tolerance_m: 0.12
   maximum_support_height_difference_m: 0.18
   maximum_component_cells: 4096
-  minimum_component_cells: 4
+  # Three connected 0.25 m cells retain at least 18 layer points and cover
+  # the observed small-cargo footprint. Every cell must still be temporally
+  # mature, and runtime origins must predate the active cargo lifecycle.
+  minimum_component_cells: 3
   maximum_anchor_distance_m: 2.0
   minimum_candidate_overlap: 0.15
 

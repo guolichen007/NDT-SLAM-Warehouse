@@ -29,22 +29,34 @@ bool validConfig(const CargoLiftOriginConfig& config) {
 
 int sourcePriority(CargoOriginCandidateSource source) {
   switch (source) {
-    case CargoOriginCandidateSource::RETIRED_FORMAL_SHAPE: return 4;
-    case CargoOriginCandidateSource::OPERATOR_APPROVED_BASELINE: return 3;
-    case CargoOriginCandidateSource::RUNTIME_MATURE_STATIC: return 2;
+    case CargoOriginCandidateSource::OPERATOR_APPROVED_BASELINE: return 4;
+    case CargoOriginCandidateSource::RUNTIME_MATURE_STATIC: return 3;
+    case CargoOriginCandidateSource::RETIRED_FORMAL_SHAPE: return 2;
     case CargoOriginCandidateSource::CONFIGURED_ENVELOPE: return 1;
   }
   return 0;
 }
 
+bool formalStaticOrigin(const CargoOriginCandidate& candidate) {
+  if (!authorizeStaticEvidence(candidate.authority)
+           .formal_origin_authorized) {
+    return false;
+  }
+  return candidate.source ==
+             CargoOriginCandidateSource::OPERATOR_APPROVED_BASELINE ||
+      (candidate.source ==
+           CargoOriginCandidateSource::RUNTIME_MATURE_STATIC &&
+       candidate.predates_cargo_lifecycle);
+}
+
 bool usable(const CargoOriginCandidate& candidate,
             const CargoLiftOriginConfig& config) {
   const float height = candidate.top_z95_map - candidate.support_z_map;
-  const bool authority_valid =
+  const bool provisional_source =
       candidate.source == CargoOriginCandidateSource::RETIRED_FORMAL_SHAPE ||
-      candidate.source == CargoOriginCandidateSource::CONFIGURED_ENVELOPE ||
-      authorizeStaticEvidence(candidate.authority)
-          .formal_origin_authorized;
+      candidate.source == CargoOriginCandidateSource::CONFIGURED_ENVELOPE;
+  const bool authority_valid = provisional_source ||
+      formalStaticOrigin(candidate);
   return candidate.center_map.allFinite() &&
       std::isfinite(candidate.length_m) && candidate.length_m > 0.0F &&
       std::isfinite(candidate.width_m) && candidate.width_m > 0.0F &&
@@ -55,6 +67,23 @@ bool usable(const CargoOriginCandidate& candidate,
       candidate.uncertainty_m >= 0.0F && authority_valid &&
       std::isfinite(height) && height >= config.minimum_height_m &&
       height <= config.maximum_height_m;
+}
+
+float candidateScore(const CargoOriginCandidate& candidate,
+                     const CargoLiftOriginInput& input) {
+  const float distance =
+      (candidate.center_map - input.hook_anchor_map).norm();
+  const float top_error = input.current_top_valid
+      ? std::abs(candidate.top_z95_map - input.current_top_z_map)
+      : 0.0F;
+  // Formal static origin evidence always outranks provisional retired/config
+  // geometry. Overlap and distance choose among candidates of the same
+  // authority class.
+  return (formalStaticOrigin(candidate) ? 1000.0F : 0.0F) +
+      100.0F * candidate.candidate_overlap +
+      20.0F * candidate.anchor_overlap - 5.0F * distance - top_error +
+      2.0F * static_cast<float>(sourcePriority(candidate.source)) +
+      0.001F * static_cast<float>(candidate.point_count);
 }
 
 }  // namespace
@@ -171,6 +200,37 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
       last_valid_thickness_stamp_sec_ = 0.0;
       last_consumed_support_stamp_sec_ = 0.0;
       last_consumed_top_stamp_sec_ = 0.0;
+    } else if (!formalStaticOrigin(result_.origin)) {
+      const CargoOriginCandidate* upgrade = nullptr;
+      float upgrade_score = -std::numeric_limits<float>::infinity();
+      for (const CargoOriginCandidate& candidate : input.candidates) {
+        if (!usable(candidate, config_) ||
+            !formalStaticOrigin(candidate)) {
+          continue;
+        }
+        const float distance =
+            (candidate.center_map - input.hook_anchor_map).norm();
+        if (distance > config_.maximum_anchor_distance_m) continue;
+        const float score = candidateScore(candidate, input);
+        if (!upgrade || score > upgrade_score) {
+          upgrade = &candidate;
+          upgrade_score = score;
+        }
+      }
+      if (upgrade) {
+        result_ = CargoLiftOriginResult{};
+        result_.origin = *upgrade;
+        result_.valid = true;
+        result_.state = CargoLiftEventState::ORIGIN_BINDING;
+        result_.static_thickness_m =
+            upgrade->top_z95_map - upgrade->support_z_map;
+        result_.reason = "formal_static_origin_upgraded";
+        bound_component_id_ = upgrade->component_id;
+        last_valid_lift_stamp_sec_ = 0.0;
+        last_valid_thickness_stamp_sec_ = 0.0;
+        last_consumed_support_stamp_sec_ = 0.0;
+        last_consumed_top_stamp_sec_ = 0.0;
+      }
     }
   }
   if (!result_.valid &&
@@ -193,13 +253,7 @@ CargoLiftOriginResult CargoLiftOriginBinder::update(
       const float distance =
           (candidate.center_map - input.hook_anchor_map).norm();
       if (distance > config_.maximum_anchor_distance_m) continue;
-      const float top_error = input.current_top_valid
-          ? std::abs(candidate.top_z95_map - input.current_top_z_map)
-          : 0.0F;
-      const float score = 100.0F * candidate.candidate_overlap +
-          20.0F * candidate.anchor_overlap - 5.0F * distance - top_error +
-          2.0F * static_cast<float>(sourcePriority(candidate.source)) +
-          0.001F * static_cast<float>(candidate.point_count) +
+      const float score = candidateScore(candidate, input) +
           (candidate.component_id == bound_component_id_ ? 10.0F : 0.0F);
       if (!selected || score > selected_score) {
         selected = &candidate;

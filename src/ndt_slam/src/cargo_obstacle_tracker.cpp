@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace ndt_slam {
@@ -54,6 +55,56 @@ float cellIou(const std::vector<std::int64_t>& left,
       static_cast<float>(union_size);
 }
 
+std::pair<std::int32_t, std::int32_t> unpackCell(
+    std::int64_t key) {
+  const std::uint64_t packed = static_cast<std::uint64_t>(key);
+  return {
+      static_cast<std::int32_t>(
+          static_cast<std::uint32_t>(packed >> 32U)),
+      static_cast<std::int32_t>(static_cast<std::uint32_t>(packed))};
+}
+
+std::int64_t packCell(std::int32_t x, std::int32_t y) {
+  const std::uint64_t packed =
+      (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32U) |
+      static_cast<std::uint32_t>(y);
+  return static_cast<std::int64_t>(packed);
+}
+
+float directionalNeighborCellOverlap(
+    const std::vector<std::int64_t>& source,
+    const std::vector<std::int64_t>& target,
+    int radius) {
+  if (source.empty() || target.empty() || radius <= 0) return 0.0F;
+  std::size_t matched = 0U;
+  for (const std::int64_t key : source) {
+    const auto xy = unpackCell(key);
+    bool found = false;
+    for (int dx = -radius; dx <= radius && !found; ++dx) {
+      for (int dy = -radius; dy <= radius; ++dy) {
+        if (std::binary_search(
+                target.begin(), target.end(),
+                packCell(xy.first + dx, xy.second + dy))) {
+          found = true;
+          break;
+        }
+      }
+    }
+    if (found) ++matched;
+  }
+  return static_cast<float>(matched) /
+      static_cast<float>(source.size());
+}
+
+float neighborCellOverlap(
+    const std::vector<std::int64_t>& left,
+    const std::vector<std::int64_t>& right,
+    int radius) {
+  return std::max(
+      directionalNeighborCellOverlap(left, right, radius),
+      directionalNeighborCellOverlap(right, left, radius));
+}
+
 bool validConfig(const CargoObstacleTrackerConfig& config) {
   return config.confirm_frames >= 2 && config.minimum_points > 0U &&
       std::isfinite(config.level1_warning_distance_m) &&
@@ -75,6 +126,8 @@ bool validConfig(const CargoObstacleTrackerConfig& config) {
       config.association_max_centroid_distance_m > 0.0F &&
       std::isfinite(config.association_max_top_step_m) &&
       config.association_max_top_step_m > 0.0F &&
+      config.association_neighbor_cell_radius >= 0 &&
+      config.association_neighbor_cell_radius <= 2 &&
       std::isfinite(config.static_track_cell_overlap_min) &&
       config.static_track_cell_overlap_min > 0.0F &&
       config.static_track_cell_overlap_min <= 1.0F &&
@@ -267,6 +320,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     float best_cost = std::numeric_limits<float>::infinity();
     float best_overlap = 0.0F;
     float best_iou = 0.0F;
+    float best_neighbor_overlap = 0.0F;
     for (std::size_t index = 0; index < tracks_.size(); ++index) {
       if (track_assigned[index]) continue;
       const CargoObstacleTrack& track = tracks_[index];
@@ -284,10 +338,18 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
           observation.occupied_map_cells, track.occupied_map_cells);
       const float iou = cellIou(
           observation.occupied_map_cells, track.occupied_map_cells);
+      const float neighbor_overlap = neighborCellOverlap(
+          observation.occupied_map_cells, track.occupied_map_cells,
+          config_.association_neighbor_cell_radius);
+      const bool neighboring_fragment_match =
+          neighbor_overlap >= config_.static_track_cell_overlap_min &&
+          centroid_distance <=
+              2.0F * config_.association_max_centroid_distance_m;
       const bool spatial_match = centroid_distance <=
               config_.association_max_centroid_distance_m ||
           overlap >= config_.static_track_cell_overlap_min ||
-          iou >= config_.static_track_iou_min;
+          iou >= config_.static_track_iou_min ||
+          neighboring_fragment_match;
       if (!spatial_match ||
           std::abs(observation.top_z95_map - track.top_z95_map) >
               config_.association_max_top_step_m) {
@@ -299,11 +361,14 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
           (observation.occupied_map_cells.empty() ||
                    track.occupied_map_cells.empty()
                ? 1.0F
-               : 1.0F - std::max(overlap, iou));
+               : 1.0F - std::max(
+                     std::max(overlap, iou),
+                     0.80F * neighbor_overlap));
       if (cost < best_cost) {
         best_cost = cost;
         best_overlap = overlap;
         best_iou = iou;
+        best_neighbor_overlap = neighbor_overlap;
         best_index = index;
       }
     }
@@ -414,6 +479,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
             : 0;
     track.last_cell_overlap = best_overlap;
     track.last_cell_iou = best_iou;
+    track.last_neighbor_cell_overlap = best_neighbor_overlap;
     track.last_anchor_cell_overlap = cellOverlap(
         observation.occupied_map_cells,
         track.identity_anchor_map_cells);
@@ -560,6 +626,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
             : 0.0;
     decision.selected_track_cell_overlap = diagnostic->last_cell_overlap;
     decision.selected_track_iou = diagnostic->last_cell_iou;
+    decision.selected_track_neighbor_cell_overlap =
+        diagnostic->last_neighbor_cell_overlap;
     decision.selected_association_cost = diagnostic->last_association_cost;
     decision.selected_association_reset_reason =
         diagnostic->association_reset_reason;

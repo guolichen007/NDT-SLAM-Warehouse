@@ -22,6 +22,15 @@ CargoOriginCandidate approvedCandidate() {
   return candidate;
 }
 
+CargoOriginCandidate matureRuntimeCandidate() {
+  CargoOriginCandidate candidate = approvedCandidate();
+  candidate.component_id = 8U;
+  candidate.source = CargoOriginCandidateSource::RUNTIME_MATURE_STATIC;
+  candidate.authority = StaticEvidenceAuthority::RUNTIME_MATURE;
+  candidate.predates_cargo_lifecycle = true;
+  return candidate;
+}
+
 CargoLiftOriginInput loadedInput(double stamp) {
   CargoLiftOriginInput input;
   input.stamp_sec = stamp;
@@ -95,6 +104,40 @@ TEST(CargoLiftOriginBinderTest, UnverifiedStaticCannotBindFormalOrigin) {
   const auto result = binder.update(input);
   EXPECT_FALSE(result.valid);
   EXPECT_EQ(result.reason, "no_local_authorized_origin_candidate");
+}
+
+TEST(CargoLiftOriginBinderTest,
+     RuntimeOriginMustPredateCurrentCargoLifecycle) {
+  CargoLiftOriginBinder binder;
+  auto input = loadedInput(1.0);
+  input.hook_was_empty = true;
+  input.candidates = {matureRuntimeCandidate()};
+  input.candidates.front().predates_cargo_lifecycle = false;
+  const auto result = binder.update(input);
+  EXPECT_FALSE(result.valid);
+  EXPECT_EQ(result.reason, "no_local_authorized_origin_candidate");
+}
+
+TEST(CargoLiftOriginBinderTest,
+     ProvisionalOriginUpgradesToPredatingRuntimeOrigin) {
+  CargoLiftOriginBinder binder;
+  auto first = loadedInput(1.0);
+  first.hook_was_empty = true;
+  first.candidates.front().source =
+      CargoOriginCandidateSource::CONFIGURED_ENVELOPE;
+  first.candidates.front().authority =
+      StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+  ASSERT_TRUE(binder.update(first).valid);
+
+  auto upgraded = loadedInput(1.1);
+  upgraded.candidates = {first.candidates.front(),
+                         matureRuntimeCandidate()};
+  const auto result = binder.update(upgraded);
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.origin.component_id, 8U);
+  EXPECT_EQ(result.origin.source,
+            CargoOriginCandidateSource::RUNTIME_MATURE_STATIC);
+  EXPECT_TRUE(result.origin.predates_cargo_lifecycle);
 }
 
 TEST(CargoLiftOriginBinderTest, InvalidFrameBreaksThicknessConfirmation) {

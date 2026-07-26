@@ -2566,7 +2566,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     1, component["maximum_component_cells"].as<int>(4096)));
             static_origin_component_config_.minimum_component_cells =
                 static_cast<std::size_t>(std::max(
-                    1, component["minimum_component_cells"].as<int>(4)));
+                    1, component["minimum_component_cells"].as<int>(3)));
             static_origin_component_config_.maximum_anchor_distance_m =
                 component["maximum_anchor_distance_m"].as<float>(2.0F);
             static_origin_component_config_.minimum_candidate_overlap =
@@ -3038,6 +3038,13 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 std::max(0.05F,
                     cargo_safety["obstacle_track_association_top_step_m"]
                         .as<float>(0.75F));
+            obstacle_tracker_config.association_neighbor_cell_radius =
+                std::clamp(
+                    cargo_safety[
+                        "obstacle_track_association_neighbor_cell_radius"]
+                        .as<int>(1),
+                    0,
+                    2);
             obstacle_tracker_config.static_track_cell_overlap_min =
                 std::clamp(
                     cargo_safety["static_track_cell_overlap_min"]
@@ -3705,6 +3712,7 @@ void NdtSlamNode::resetCargoForHookState(
     cargo_bottom_fusion_.reset();
     cargo_fusion_track_active_ = false;
     cargo_static_evidence_track_start_sequence_ = 0U;
+    cargo_static_evidence_lifecycle_boundary_valid_ = false;
     formal_cargo_removal_authorized_ = false;
     formal_cargo_removal_track_id_ = 0U;
     formal_cargo_removal_stamp_ = ros::Time();
@@ -8609,6 +8617,7 @@ void NdtSlamNode::updatePoseFromLoopClosure(
         pending_static_free_cells_.clear();
     }
     cargo_static_evidence_track_start_sequence_ = 0U;
+    cargo_static_evidence_lifecycle_boundary_valid_ = false;
     if (persistent_map_enabled_) {
         flush_tiles_pending_.store(true, std::memory_order_release);
     }
@@ -9409,6 +9418,7 @@ bool NdtSlamNode::rebuildMapService(std_srvs::Empty::Request& request, std_srvs:
         pending_static_free_cells_.clear();
     }
     cargo_static_evidence_track_start_sequence_ = 0U;
+    cargo_static_evidence_lifecycle_boundary_valid_ = false;
     if (persistent_map_enabled_) {
         flush_tiles_pending_.store(true, std::memory_order_release);
         map_maintenance_pending_.store(true, std::memory_order_release);
@@ -11949,6 +11959,14 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"origin_authority\": \""
       << staticEvidenceAuthorityName(
              cargo_lift_origin_result_.origin.authority) << "\",\n";
+    f << "  \"origin_predates_cargo_lifecycle\": "
+      << (cargo_lift_origin_result_.origin.predates_cargo_lifecycle
+              ? "true" : "false") << ",\n";
+    f << "  \"cargo_lifecycle_static_boundary_valid\": "
+      << (cargo_static_evidence_lifecycle_boundary_valid_
+              ? "true" : "false") << ",\n";
+    f << "  \"cargo_lifecycle_static_start_sequence\": "
+      << cargo_static_evidence_track_start_sequence_ << ",\n";
     f << "  \"formal_thickness_authorized\": "
       << (authorizeStaticEvidence(
                   cargo_lift_origin_result_.origin.authority)
@@ -16206,6 +16224,13 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         ++cargo_lifecycle_sequence_;
         if (cargo_lifecycle_sequence_ == 0U) ++cargo_lifecycle_sequence_;
         cargo_lifecycle_id_ = cargo_lifecycle_sequence_;
+        // Static provenance is relative to gravity-confirmed cargo presence,
+        // not the later LiDAR lock transition. Capturing it here prevents
+        // current cargo points observed during a long Pending interval from
+        // being relabeled as a pre-cargo origin/obstacle.
+        cargo_static_evidence_track_start_sequence_ =
+            static_obstacle_evidence_index_.latestObservationSequence();
+        cargo_static_evidence_lifecycle_boundary_valid_ = true;
         cargo_lift_origin_binder_.reset();
         cargo_geometry_fusion_.reset();
         cargo_frozen_geometry_ = CargoFrozenGeometry{};
@@ -16348,6 +16373,8 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
                 ? CargoOriginCandidateSource::OPERATOR_APPROVED_BASELINE
                 : CargoOriginCandidateSource::RUNTIME_MATURE_STATIC;
             candidate.authority = component.authority;
+            candidate.predates_cargo_lifecycle =
+                component.predates_cargo_lifecycle;
             candidate.center_map = component.center_map;
             candidate.length_m = component.length_m;
             candidate.width_m = component.width_m;
@@ -16400,6 +16427,42 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         }
         origin_components = static_origin_component_extractor_.extract(
             *height_field, component_query);
+        for (StaticHeightComponent& component : origin_components) {
+            if (component.authority ==
+                StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE) {
+                component.predates_cargo_lifecycle = true;
+                continue;
+            }
+            if (!hook_loaded) {
+                // The component is already mature and physically present
+                // before the LOAD edge; preserve that fact in the snapshot.
+                component.predates_cargo_lifecycle = true;
+                continue;
+            }
+            component.predates_cargo_lifecycle =
+                evidence_snapshot &&
+                cargo_static_evidence_lifecycle_boundary_valid_ &&
+                !component.members.empty();
+            if (!component.predates_cargo_lifecycle) continue;
+            std::set<std::int64_t> checked_cells;
+            for (const StaticHeightLayerNodeId& member :
+                 component.members) {
+                if (!checked_cells.insert(member.cell_key).second) continue;
+                const auto found =
+                    evidence_snapshot->cells.find(member.cell_key);
+                if (found == evidence_snapshot->cells.end() ||
+                    found->second.first_observation_sequence == 0U ||
+                    found->second.first_observation_sequence >
+                        cargo_static_evidence_track_start_sequence_ ||
+                    cargo_static_evidence_track_start_sequence_ -
+                            found->second.first_observation_sequence <
+                        static_obstacle_evidence_index_.config()
+                            .pre_cargo_minimum_sequence_gap) {
+                    component.predates_cargo_lifecycle = false;
+                    break;
+                }
+            }
+        }
         for (const StaticHeightComponent& component : origin_components) {
             append_static_origin_candidate(component);
         }
@@ -17361,7 +17424,10 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         << "\",\"origin_authority\":\""
         << staticEvidenceAuthorityName(
                cargo_lift_origin_result_.origin.authority)
-        << "\",\"formal_thickness_authorized\":"
+        << "\",\"origin_predates_cargo_lifecycle\":"
+        << (cargo_lift_origin_result_.origin.predates_cargo_lifecycle
+                ? "true" : "false")
+        << ",\"formal_thickness_authorized\":"
         << (authorized_origin ? "true" : "false")
         << ",\"official_static_risk_authorized\":"
         << (authorizeStaticEvidence(snapshot_authority)
@@ -18264,7 +18330,10 @@ void NdtSlamNode::runPendingCargoAvoidance(
            << "\",\"origin_authority\":\""
            << staticEvidenceAuthorityName(
                   cargo_lift_origin_result_.origin.authority)
-           << "\",\"formal_thickness_authorized\":"
+           << "\",\"origin_predates_cargo_lifecycle\":"
+           << (cargo_lift_origin_result_.origin.predates_cargo_lifecycle
+                   ? "true" : "false")
+           << ",\"formal_thickness_authorized\":"
            << (authorizeStaticEvidence(
                        cargo_lift_origin_result_.origin.authority)
                        .formal_thickness_authorized
@@ -18912,6 +18981,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         presence_input);
 
     if (cargo_presence_result_.clear_allowed) {
+        cargo_static_evidence_track_start_sequence_ = 0U;
+        cargo_static_evidence_lifecycle_boundary_valid_ = false;
         if (!cargo_hook_state_initialized_ || cargo_previous_hook_loaded_) {
             cargo_lift_origin_binder_.reset();
             cargo_lift_origin_result_ = CargoLiftOriginResult{};
@@ -18994,8 +19065,14 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     if (active_track && !cargo_fusion_track_active_) {
         ++cargo_fusion_track_id_;
         if (cargo_fusion_track_id_ == 0U) ++cargo_fusion_track_id_;
-        cargo_static_evidence_track_start_sequence_ =
-            static_obstacle_evidence_index_.latestObservationSequence();
+        if (!cargo_static_evidence_lifecycle_boundary_valid_) {
+            // Compatibility fallback for a retained track restored without a
+            // preceding presence edge; never overwrite an existing lifecycle
+            // boundary with the later lock time.
+            cargo_static_evidence_track_start_sequence_ =
+                static_obstacle_evidence_index_.latestObservationSequence();
+            cargo_static_evidence_lifecycle_boundary_valid_ = true;
+        }
         cargo_bottom_fusion_.reset();
         cargo_origin_height_valid_ = false;
         cargo_origin_height_m_ = 0.0F;
@@ -19004,7 +19081,6 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_bottom_fusion_.reset();
         cargo_origin_height_valid_ = false;
         formal_cargo_removal_authorized_ = false;
-        cargo_static_evidence_track_start_sequence_ = 0U;
     }
     updateCargoLiftAndGeometryFusion(
         hook, observation_cloud_base, pose_map_base, stamp, active_track,
@@ -20631,6 +20707,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                        ? 1 : 0)
                << " separated_observations="
                << obstacle_track_decision.selected_separated_observations
+               << " neighbor_cell_overlap="
+               << obstacle_track_decision
+                      .selected_track_neighbor_cell_overlap
                << " association_reset_reason="
                << obstacle_track_decision
                       .selected_association_reset_reason

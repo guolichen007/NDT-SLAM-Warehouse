@@ -56,6 +56,7 @@ struct CargoOriginCandidate {
       CargoOriginCandidateSource::CONFIGURED_ENVELOPE;
   StaticEvidenceAuthority authority =
       StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+  bool predates_cargo_lifecycle = false;
   Eigen::Vector2f center_map = Eigen::Vector2f::Zero();
   float length_m = 0.0F;
   float width_m = 0.0F;

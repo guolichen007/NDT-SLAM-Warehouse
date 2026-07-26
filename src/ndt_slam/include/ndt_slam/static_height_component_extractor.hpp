@@ -16,7 +16,7 @@ struct StaticHeightComponentExtractorConfig {
   float neighbor_interval_gap_tolerance_m = 0.12F;
   float maximum_support_height_difference_m = 0.18F;
   std::size_t maximum_component_cells = 4096U;
-  std::size_t minimum_component_cells = 4U;
+  std::size_t minimum_component_cells = 3U;
   float maximum_anchor_distance_m = 2.0F;
   float minimum_candidate_overlap = 0.15F;
 };
@@ -40,6 +40,11 @@ struct StaticHeightComponent {
   std::uint64_t map_generation = 0U;
   StaticEvidenceAuthority authority =
       StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+  // Runtime-mature evidence may become available after LOAD_DETECTED, but it
+  // is a valid pickup baseline only when every member cell was first observed
+  // before the current cargo lifecycle. Operator-approved baselines are
+  // authoritative independently of the runtime sequence.
+  bool predates_cargo_lifecycle = false;
   std::vector<StaticHeightLayerNodeId> members;
   Eigen::Vector2f center_map = Eigen::Vector2f::Zero();
   float length_m = 0.0F;

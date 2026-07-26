@@ -2166,6 +2166,7 @@ private:
     ros::WallTime cargo_static_summary_last_wall_;
     std::atomic<std::uint64_t> static_evidence_epoch_{1U};
     std::uint64_t cargo_static_evidence_track_start_sequence_ = 0U;
+    bool cargo_static_evidence_lifecycle_boundary_valid_ = false;
     std::uint64_t advanceStaticEvidenceEpoch();
     CargoMotionCorridorConfig cargo_motion_corridor_config_;
     std::size_t cargo_directional_pretrack_clusters_ = 0U;

@@ -73,6 +73,29 @@ TEST(CargoObstacleTracker, JumpingClustersCannotShareConfirmationCount) {
   EXPECT_EQ(decision.selected_confirm_count, 1);
 }
 
+TEST(CargoObstacleTracker,
+     AdjacentCellFragmentRetainsObstacleIdentityAcrossCentroidShift) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  CargoObstacleObservation first = hazard(0U, 0.0F, 0.0F);
+  first.occupied_map_cells = {100};
+  const CargoObstacleTrackerDecision initial =
+      tracker.update(1.0, {first});
+  ASSERT_NE(initial.selected_track_id, 0U);
+
+  CargoObstacleObservation adjacent = hazard(0U, 1.0F, 0.0F);
+  adjacent.occupied_map_cells = {101};
+  const CargoObstacleTrackerDecision associated =
+      tracker.update(1.2, {adjacent});
+  EXPECT_EQ(associated.selected_track_id, initial.selected_track_id);
+  EXPECT_GT(associated.selected_track_neighbor_cell_overlap, 0.0F);
+
+  CargoObstacleObservation implausibly_far = hazard(0U, 3.0F, 0.0F);
+  implausibly_far.occupied_map_cells = {102};
+  const CargoObstacleTrackerDecision reset =
+      tracker.update(1.4, {implausibly_far});
+  EXPECT_NE(reset.selected_track_id, initial.selected_track_id);
+}
+
 TEST(CargoObstacleTracker, RepeatedStampDoesNotAdvanceTrack) {
   CargoObstacleTracker tracker(ordinaryHazardConfig());
   tracker.update(1.0, {hazard(0U, 0.0F, 0.0F)});
