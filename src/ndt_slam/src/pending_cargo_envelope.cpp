@@ -310,14 +310,14 @@ PendingCargoEnvelope buildPendingCargoEnvelope(
                          config.maximum_candidate_age_sec,
                          input.cargo_lifecycle_id)) {
     shape = input.active_locked_shape;
-  } else if (usableShape(input.current_high_quality_shape, input.stamp_sec,
-                         config.maximum_candidate_age_sec,
-                         input.cargo_lifecycle_id)) {
-    shape = input.current_high_quality_shape;
   } else if (usableShape(input.current_tracked_bounded_shape, input.stamp_sec,
                          config.candidate_shape_hold_sec,
                          input.cargo_lifecycle_id)) {
     shape = input.current_tracked_bounded_shape;
+  } else if (usableShape(input.current_high_quality_shape, input.stamp_sec,
+                         config.maximum_candidate_age_sec,
+                         input.cargo_lifecycle_id)) {
+    shape = input.current_high_quality_shape;
   } else if (usableShape(input.retired_locked_shape, input.stamp_sec,
                          config.maximum_retired_age_sec,
                          input.cargo_lifecycle_id)) {

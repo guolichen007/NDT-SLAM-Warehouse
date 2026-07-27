@@ -35,7 +35,10 @@ enum class CargoVerticalPoseSource : std::uint8_t {
     DIRECT_TOP = 1,
     LOCKED_OBB_POINT_SUPPORT = 2,
     PREDICTION = 3,
-    DISPLAY_FROZEN = 4
+    DISPLAY_FROZEN = 4,
+    // Robust center/height obtained from the multi-frame provisional LiDAR
+    // window at the formal lock transition.
+    PROVISIONAL_MEDIAN = 5
 };
 
 const char* cargoVerticalPoseSourceName(

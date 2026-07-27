@@ -54,6 +54,8 @@ const char* cargoVerticalPoseSourceName(
             return "DIRECT_TOP";
         case CargoVerticalPoseSource::LOCKED_OBB_POINT_SUPPORT:
             return "LOCKED_OBB_POINT_SUPPORT";
+        case CargoVerticalPoseSource::PROVISIONAL_MEDIAN:
+            return "PROVISIONAL_MEDIAN";
         case CargoVerticalPoseSource::PREDICTION:
             return "PREDICTION";
         case CargoVerticalPoseSource::DISPLAY_FROZEN:

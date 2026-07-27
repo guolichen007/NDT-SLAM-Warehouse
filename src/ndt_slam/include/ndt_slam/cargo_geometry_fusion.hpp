@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <string>
 #include <vector>
@@ -22,12 +23,16 @@ const char* cargoThicknessSourceName(CargoThicknessSource source) noexcept;
 
 struct CargoGeometryFusionConfig {
   std::size_t minimum_independent_sources = 2U;
-  // Formal height requires the post-lift revealed-support difference and a
-  // contemporaneous LiDAR side extent. Static origin height alone is useful
-  // diagnostics/fallback evidence but is correlated with the map-difference
-  // path and cannot replace either physical source.
-  bool require_revealed_and_live_thickness = true;
+  // Formal height requires one authoritative pre-lift static observation
+  // (the bound origin height or its post-lift revealed support) plus a
+  // contemporaneous LiDAR extent. Retired/configured geometry cannot replace
+  // either physical side of this pair.
+  bool require_authoritative_static_and_live_thickness = true;
   int minimum_confirm_frames = 5;
+  // Shape quality is evaluated in a bounded recent window. This preserves the
+  // multi-frame requirement without allowing one partial/occluded scan to
+  // erase several good observations from the same physical track segment.
+  int shape_confirmation_window_frames = 8;
   double maximum_observation_gap_sec = 0.50;
   float maximum_source_disagreement_m = 0.25F;
   float maximum_fused_uncertainty_m = 0.20F;
@@ -97,6 +102,7 @@ struct CargoFrozenGeometry {
   float bottom_m = std::numeric_limits<float>::quiet_NaN();
   float conservative_bottom_m = std::numeric_limits<float>::quiet_NaN();
   int confirm_frames = 0;
+  int shape_confirm_frames = 0;
   std::size_t independent_sources = 0U;
   std::vector<CargoThicknessSource> accepted_sources;
   std::string reason = "not_initialized";
@@ -126,6 +132,7 @@ class CargoGeometryFusion {
   float pending_expand_width_m_ = 0.0F;
   int shape_confirm_count_ = 0;
   std::uint64_t shape_confirm_track_segment_id_ = 0U;
+  std::deque<bool> shape_quality_window_;
 };
 
 }  // namespace ndt_slam

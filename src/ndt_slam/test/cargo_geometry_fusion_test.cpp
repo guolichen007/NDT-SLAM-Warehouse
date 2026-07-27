@@ -45,6 +45,20 @@ TEST(CargoGeometryFusionTest, FreezesAfterIndependentConsistentSources) {
   EXPECT_LT(result.conservative_bottom_m, result.bottom_m);
 }
 
+TEST(CargoGeometryFusionTest,
+     AuthoritativeOriginAndLiveExtentCanFreezeFormalThickness) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  CargoGeometryFusion fusion(config);
+  auto value = frame(1.0);
+  value.thickness.front().source =
+      CargoThicknessSource::STATIC_ORIGIN_TOP_SUPPORT;
+  const auto result = fusion.update(value);
+  EXPECT_TRUE(result.valid) << result.reason;
+  EXPECT_TRUE(result.frozen);
+  EXPECT_EQ(result.independent_sources, 2U);
+}
+
 TEST(CargoGeometryFusionTest, ConfiguredFallbackIsNotIndependentEvidence) {
   CargoGeometryFusion fusion;
   auto value = frame(1.0);
@@ -279,6 +293,25 @@ TEST(CargoGeometryFusionTest, PartialSideCannotFreezeFormalEnvelope) {
   const auto result = fusion.update(partial);
   EXPECT_FALSE(result.frozen);
   EXPECT_EQ(result.reason, "formal_shape_confirmation_pending");
+}
+
+TEST(CargoGeometryFusionTest,
+     OnePartialScanDoesNotEraseSameSegmentShapeEvidence) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 3;
+  config.shape_confirmation_window_frames = 4;
+  CargoGeometryFusion fusion(config);
+
+  EXPECT_FALSE(fusion.update(frame(1.0)).frozen);
+  auto partial = frame(1.1);
+  partial.dimension_observation_complete = false;
+  EXPECT_FALSE(fusion.update(partial).frozen);
+  auto good = frame(1.2);
+  EXPECT_FALSE(fusion.update(good).frozen);
+  good.stamp_sec = 1.3;
+  const auto result = fusion.update(good);
+  EXPECT_TRUE(result.frozen) << result.reason;
+  EXPECT_EQ(result.shape_confirm_frames, 3);
 }
 
 }  // namespace

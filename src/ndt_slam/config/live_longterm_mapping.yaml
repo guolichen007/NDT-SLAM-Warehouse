@@ -896,7 +896,14 @@ cargo_lift_origin:
 
 cargo_geometry_fusion:
   minimum_independent_sources: 2
+  # Formal thickness always combines an authoritative pre-lift static height
+  # (bound origin or revealed support) with the current LiDAR extent.
+  # Configured and retired shapes remain pending-only and cannot substitute.
+  require_authoritative_static_and_live_thickness: true
   minimum_confirm_frames: 5
+  # Five good dimension observations are required inside the latest eight;
+  # a single partial scan no longer erases the whole same-track window.
+  shape_confirmation_window_frames: 8
   maximum_observation_gap_sec: 0.5
   maximum_source_disagreement_m: 0.25
   maximum_fused_uncertainty_m: 0.20
@@ -916,9 +923,9 @@ cargo_geometry_fusion:
   minimum_live_shape_confidence_for_shrink: 0.75
   minimum_physical_length_m: 0.30
   minimum_physical_width_m: 0.20
-  # Formal geometry starts from the multi-frame measured shape. The 4x3x3
-  # configured box remains a pending-only conservative envelope and must not
-  # inflate a physically confirmed cargo into a false obstacle query.
+  # Formal geometry starts from the multi-frame measured shape. The configured
+  # fallback remains pending-only and must not inflate a physically confirmed
+  # cargo into a false obstacle query.
   formal_transition_start_length_m: 0.30
   formal_transition_start_width_m: 0.20
   configured_fallback_is_formal_floor: false
@@ -1062,7 +1069,9 @@ hook_cargo_lock:
   # shape/yaw freezing cannot happen from orientation concentration alone.
   geometry_confirm_frames: 4
   size_init_window: 5
-  lost_hold_sec: 3.0
+  # Gravity-confirmed cargo persists through short rotating/occluded views.
+  # Five seconds retains the locked identity while uncertainty grows.
+  lost_hold_sec: 5.0
   lost_clear_sec: 8.0
   strong_min_points: 30
   weak_min_points: 5
@@ -1155,7 +1164,7 @@ hook_cargo_lock:
   rearm_empty_confirm_sec: 1.0
   # A process that remains LOADED can reuse only the retired formal signature;
   # it must pass this separate multi-frame identity/geometry gate.
-  loaded_reacquire_confirm_frames: 5
+  loaded_reacquire_confirm_frames: 3
   self_cargo_base_margin_xy_m: 0.15
   self_cargo_base_margin_z_m: 0.12
   self_cargo_max_margin_xy_m: 0.40

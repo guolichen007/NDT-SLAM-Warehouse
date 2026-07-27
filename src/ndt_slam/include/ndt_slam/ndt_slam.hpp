@@ -1702,7 +1702,7 @@ private:
         int lock_confirm_frames = 3;
         int geometry_confirm_frames = 4;
         int size_init_window = 5;
-        float lost_hold_sec = 3.0f;
+        float lost_hold_sec = 5.0f;
         float lost_clear_sec = 8.0f;
         int strong_min_points = 30;
         int weak_min_points = 5;
@@ -1774,7 +1774,7 @@ private:
         float locked_obb_min_short_axis_coverage = 0.12F;
         float lost_velocity_decay_tau_sec = 0.30F;
         float rearm_empty_confirm_sec = 1.0F;
-        int loaded_reacquire_confirm_frames = 5;
+        int loaded_reacquire_confirm_frames = 3;
         float self_cargo_base_margin_xy_m = 0.15F;
         float self_cargo_base_margin_z_m = 0.12F;
         float self_cargo_max_margin_xy_m = 0.40F;
