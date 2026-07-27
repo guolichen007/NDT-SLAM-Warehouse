@@ -41,6 +41,10 @@ struct CargoMotionCorridorInput {
   Eigen::Vector2f obstacle_nearest_map = Eigen::Vector2f::Zero();
   Eigen::Vector2f obstacle_centroid_map = Eigen::Vector2f::Zero();
   float current_footprint_distance_m = 0.0F;
+  // Acquisition-only observations build obstacle identity outside the 5 m
+  // warning shell. Without authoritative motion they use a radial fallback;
+  // they never publish 17/18 because the caller marks them warning-ineligible.
+  bool acquisition_only = false;
 };
 
 struct CargoMotionCorridorDecision {
@@ -55,8 +59,9 @@ struct CargoMotionCorridorDecision {
 };
 
 // Near-contact hazards are always retained. Beyond the near field, a valid
-// velocity creates a future swept corridor; absent motion authority is
-// explicitly reported as RADIAL_FALLBACK rather than silently filtered.
+// velocity creates a future swept corridor. Acquisition-only calls fall back
+// to radial tracking when direction is unavailable or stationary; ordinary
+// warning calls preserve the stationary emergency-shell policy.
 CargoMotionCorridorDecision evaluateCargoMotionCorridor(
     const CargoMotionCorridorConfig& config,
     const CargoMotionCorridorInput& input);

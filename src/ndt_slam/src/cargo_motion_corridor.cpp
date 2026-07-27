@@ -63,9 +63,15 @@ CargoMotionCorridorDecision evaluateCargoMotionCorridor(
   if (!config.enabled || !input.velocity_valid) {
     decision.mode = CargoSafetySpatialMode::RADIAL_FALLBACK;
     decision.eligible = true;
-    decision.reason = config.enabled
-        ? "motion_unavailable_radial_fallback"
-        : "motion_corridor_disabled_radial_fallback";
+    if (input.acquisition_only) {
+      decision.reason = config.enabled
+          ? "motion_unavailable_radial_acquisition"
+          : "motion_corridor_disabled_radial_acquisition";
+    } else {
+      decision.reason = config.enabled
+          ? "motion_unavailable_radial_fallback"
+          : "motion_corridor_disabled_radial_fallback";
+    }
     return decision;
   }
 
@@ -73,6 +79,11 @@ CargoMotionCorridorDecision evaluateCargoMotionCorridor(
     decision.mode = CargoSafetySpatialMode::STATIONARY_GUARD;
     decision.corridor_half_width_m =
         config.immediate_near_field_m + input.horizontal_uncertainty_m;
+    if (input.acquisition_only) {
+      decision.eligible = true;
+      decision.reason = "stationary_radial_acquisition";
+      return decision;
+    }
     decision.eligible = input.current_footprint_distance_m <=
         config.immediate_near_field_m;
     decision.reason = decision.eligible

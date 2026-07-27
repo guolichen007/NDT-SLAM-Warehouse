@@ -86,6 +86,34 @@ TEST(CargoMotionCorridor, ValidZeroVelocityUsesStationaryGuard) {
   EXPECT_EQ(decision.mode, CargoSafetySpatialMode::STATIONARY_GUARD);
 }
 
+TEST(CargoMotionCorridor,
+     StationaryAcquisitionBuildsRadialTrackWithoutChangingWarningPolicy) {
+  CargoMotionCorridorInput input = movingInput(6.0F, 1.5F);
+  input.cargo_velocity_map.setZero();
+  input.current_footprint_distance_m = 6.0F;
+  input.acquisition_only = true;
+  const auto decision = evaluateCargoMotionCorridor(
+      CargoMotionCorridorConfig{}, input);
+  EXPECT_TRUE(decision.valid);
+  EXPECT_TRUE(decision.eligible);
+  EXPECT_EQ(decision.mode, CargoSafetySpatialMode::STATIONARY_GUARD);
+  EXPECT_EQ(decision.reason, "stationary_radial_acquisition");
+}
+
+TEST(CargoMotionCorridor,
+     MissingVelocityAcquisitionUsesRadialTrackFallback) {
+  CargoMotionCorridorInput input = movingInput(6.0F, 1.5F);
+  input.velocity_valid = false;
+  input.current_footprint_distance_m = 6.0F;
+  input.acquisition_only = true;
+  const auto decision = evaluateCargoMotionCorridor(
+      CargoMotionCorridorConfig{}, input);
+  EXPECT_TRUE(decision.valid);
+  EXPECT_TRUE(decision.eligible);
+  EXPECT_EQ(decision.mode, CargoSafetySpatialMode::RADIAL_FALLBACK);
+  EXPECT_EQ(decision.reason, "motion_unavailable_radial_acquisition");
+}
+
 TEST(CargoMotionCorridor, StationaryEmergencyShellRemainsEligible) {
   CargoMotionCorridorInput input = movingInput(0.1F, 0.0F);
   input.cargo_velocity_map.setZero();

@@ -39,6 +39,15 @@ struct CargoAvoidanceFusionConfig {
 
 struct CargoAvoidanceFusionInput {
   bool localization_valid = false;
+  // Warning authority is withheld while cargo motion/direction is not
+  // authoritative. Tracking continues outside this fusion contract.
+  bool warning_motion_authorized = true;
+  // A code-17 source must belong to a track confirmed outside the 3 m shell.
+  bool near_field_history_authorized = true;
+  // Raw evaluator candidate used only by the two authorization gates above.
+  // It cannot directly become an official warning.
+  bool warning_candidate_present = false;
+  std::int32_t warning_candidate_code = 0;
   bool formal_cargo_geometry_valid = false;
   bool formal_cargo_bottom_valid = false;
   bool formal_clear_authorized = false;

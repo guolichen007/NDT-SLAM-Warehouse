@@ -28,6 +28,10 @@ struct CargoObstacleTrackerConfig {
   float level1_warning_distance_m = 3.0F;
   float level2_warning_distance_m = 5.0F;
   float acquisition_distance_m = 7.0F;
+  // A level-1 warning must belong to a track that was first confirmed beyond
+  // the 3 m shell. This prevents a newly segmented cargo/self cluster from
+  // appearing directly as code 17.
+  bool require_far_field_history_for_level1 = true;
   // A newly created cluster already embedded in the cargo footprint is
   // ambiguous: it is commonly residual cargo self-points. It may issue a
   // warning only after this same track was independently observed outside
@@ -78,8 +82,8 @@ struct CargoObstacleObservation {
   Eigen::Vector2f cargo_center_map = Eigen::Vector2f::Zero();
   bool cargo_center_valid = false;
   std::uint16_t warning_code = 0U;
-  // False for a 5-7 m directional acquisition observation. Such a frame may
-  // build identity/provenance history but can never publish 17/18.
+  // False for a 5-7 m acquisition observation. Such a frame may build
+  // identity/provenance history but can never publish 17/18.
   bool warning_eligible = true;
   bool source_validated = true;
   float validation_shell_m = 0.0F;
@@ -115,6 +119,9 @@ struct CargoObstacleTrack {
   int separated_validated_observations = 0;
   bool separated_obstacle_history_valid = false;
   bool current_embedded = false;
+  int far_field_validated_observations = 0;
+  bool far_field_history_valid = false;
+  bool current_near_field = false;
   std::vector<std::int64_t> occupied_map_cells;
   std::vector<std::int64_t> identity_anchor_map_cells;
   Eigen::Vector2f first_cargo_center_map = Eigen::Vector2f::Zero();
@@ -148,6 +155,9 @@ struct CargoObstacleTrackerDecision {
   bool selected_embedded = false;
   bool selected_embedded_authorized = false;
   int selected_separated_observations = 0;
+  bool selected_near_field = false;
+  bool selected_near_field_authorized = false;
+  int selected_far_field_observations = 0;
   int selected_static_provenance_streak = 0;
   double selected_static_age_sec = 0.0;
   float selected_track_cell_overlap = 0.0F;
@@ -161,11 +171,11 @@ struct CargoObstacleTrackerDecision {
   std::string reason = "not_evaluated";
 };
 
-// Associates warning clusters and directional 5-7 m acquisition clusters in
-// map coordinates. Confirmation is owned by each physical track, so a
-// different per-frame "most dangerous" winner cannot advance or reset
-// another obstacle's evidence count. Acquisition-only observations can mature
-// identity/provenance but never authorize a warning.
+// Associates warning clusters and directional/radial 5-7 m acquisition
+// clusters in map coordinates. Confirmation is owned by each physical track,
+// so a different per-frame "most dangerous" winner cannot advance or reset
+// another obstacle's evidence count. Acquisition-only observations can
+// mature identity/provenance but never authorize a warning.
 class CargoObstacleTracker {
  public:
   explicit CargoObstacleTracker(

@@ -242,6 +242,36 @@ TEST(CargoAvoidanceFusion, MoreSevereSourceWins) {
 }
 
 TEST(CargoAvoidanceFusion,
+     StationaryHazardIsCode33WhileTrackingRemainsDiagnostic) {
+  CargoAvoidanceFusionInput input = validInput();
+  input.warning_motion_authorized = false;
+  input.live.available = false;
+  input.live.reliable = false;
+  input.warning_candidate_present = true;
+  input.warning_candidate_code = 18;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 33);
+  EXPECT_EQ(
+      result.reason,
+      "motion_not_authoritative_warning_suppressed_track_preserved");
+}
+
+TEST(CargoAvoidanceFusion,
+     Level1NeedsConfirmedHistoryOutsideThreeMeters) {
+  CargoAvoidanceFusionInput input = validInput();
+  input.near_field_history_authorized = false;
+  input.live.available = false;
+  input.live.reliable = false;
+  input.warning_candidate_present = true;
+  input.warning_candidate_code = 17;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 33);
+  EXPECT_EQ(result.reason, "near_field_track_missing_far_history");
+}
+
+TEST(CargoAvoidanceFusion,
      UnresolvedEmbeddedLiveClusterCannotWarnOrAuthorizeClear) {
   auto input = validInput();
   input.live.hazard = true;

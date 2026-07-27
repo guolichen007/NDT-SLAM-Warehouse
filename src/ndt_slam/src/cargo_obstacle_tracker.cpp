@@ -401,10 +401,17 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.current_embedded =
           observation.footprint_distance_m <
           config_.embedded_distance_threshold_m;
+      track.current_near_field =
+          observation.footprint_distance_m <=
+          config_.level1_warning_distance_m;
       track.separated_validated_observations =
           observation.source_validated && !track.current_embedded ? 1 : 0;
       track.separated_obstacle_history_valid =
           track.separated_validated_observations >= config_.confirm_frames;
+      track.far_field_validated_observations =
+          observation.source_validated && !track.current_near_field ? 1 : 0;
+      track.far_field_history_valid =
+          track.far_field_validated_observations >= config_.confirm_frames;
       track.occupied_map_cells = observation.occupied_map_cells;
       track.identity_anchor_map_cells = observation.occupied_map_cells;
       track.first_cargo_center_valid = observation.cargo_center_valid &&
@@ -533,6 +540,23 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     } else if (!track.current_embedded) {
       track.separated_validated_observations = 0;
     }
+    track.current_near_field =
+        observation.footprint_distance_m <=
+        config_.level1_warning_distance_m;
+    if (!track.far_field_history_valid) {
+      if (observation.source_validated && !track.current_near_field) {
+        track.far_field_validated_observations = consecutive
+            ? track.far_field_validated_observations + 1 : 1;
+        if (track.far_field_validated_observations >=
+            config_.confirm_frames) {
+          track.far_field_history_valid = true;
+        }
+      } else {
+        // Near-field or unvalidated frames break the required continuous
+        // approach history; they must not be accumulated across gaps.
+        track.far_field_validated_observations = 0;
+      }
+    }
     track.occupied_map_cells = observation.occupied_map_cells;
     const bool static_provenance_frame = observation.source_validated &&
         track.large_cluster_geometry_valid &&
@@ -580,6 +604,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     }
     const bool warning_authorized = track.current_warning_eligible &&
         warningCode(track.warning_code) && track.confirmed &&
+        (!config_.require_far_field_history_for_level1 ||
+         track.warning_code != kLevel1 ||
+         track.far_field_history_valid) &&
         (!config_.require_large_geometry_for_warning ||
          track.geometry_validated_consecutive_observations >=
              config_.confirm_frames) &&
@@ -616,6 +643,12 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         diagnostic->provenance_valid;
     decision.selected_separated_observations =
         diagnostic->separated_validated_observations;
+    decision.selected_near_field = diagnostic->current_near_field;
+    decision.selected_near_field_authorized =
+        !diagnostic->current_near_field ||
+        diagnostic->far_field_history_valid;
+    decision.selected_far_field_observations =
+        diagnostic->far_field_validated_observations;
     decision.selected_static_provenance_streak =
         diagnostic->static_provenance_consecutive_observations;
     decision.selected_static_age_sec =
@@ -646,6 +679,11 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
                !diagnostic->separated_obstacle_history_valid &&
                !diagnostic->provenance_valid) {
       decision.reason = "embedded_obstacle_origin_unresolved";
+    } else if (config_.require_far_field_history_for_level1 &&
+               diagnostic->warning_code == kLevel1 &&
+               diagnostic->current_near_field &&
+               !diagnostic->far_field_history_valid) {
+      decision.reason = "near_field_track_missing_far_history";
     } else if (!config_.require_static_cargo_for_warning) {
       decision.reason = "persistent_obstacle_track_pending";
     } else if (config_.require_large_geometry_for_warning &&

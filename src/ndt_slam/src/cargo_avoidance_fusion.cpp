@@ -189,6 +189,34 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
       input.live.coverage >= config.minimum_live_coverage_for_clear;
   result.map_live_conflict = result.risk_static && live_clear_observed;
 
+  const bool warning_candidate =
+      result.risk_live || result.risk_static ||
+      (input.warning_candidate_present &&
+       warningCode(input.warning_candidate_code));
+  if (warning_candidate &&
+      !input.warning_motion_authorized) {
+    result.official_code = kCargoInvalid;
+    result.reason =
+        "motion_not_authoritative_warning_suppressed_track_preserved";
+    result.provisional_status = "MOTION_GATED";
+    result.pending_authority_reason = "motion_not_authoritative";
+    return result;
+  }
+
+  const bool level1_risk =
+      (result.risk_live && input.live.warning_code == kNear3m) ||
+      (result.risk_static && input.static_map.warning_code == kNear3m) ||
+      (input.warning_candidate_present &&
+       input.warning_candidate_code == kNear3m);
+  if (level1_risk && !input.near_field_history_authorized) {
+    result.official_code = kCargoInvalid;
+    result.reason = "near_field_track_missing_far_history";
+    result.provisional_status = "NEAR_FIELD_HISTORY_PENDING";
+    result.pending_authority_reason =
+        "near_field_track_missing_far_history";
+    return result;
+  }
+
   if (!formal_cargo) {
     result.official_code = kCargoInvalid;
     result.reason = "cargo_recognition_or_geometry_invalid";

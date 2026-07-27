@@ -45,6 +45,7 @@ CargoObstacleObservation directionalPretrack(
 CargoObstacleTrackerConfig ordinaryHazardConfig() {
   CargoObstacleTrackerConfig config;
   config.require_static_cargo_for_warning = false;
+  config.require_far_field_history_for_level1 = false;
   return config;
 }
 
@@ -131,7 +132,9 @@ TEST(CargoObstacleTracker,
 
 TEST(CargoObstacleTracker,
      MaturePretrackDoesNotDelayAccurateLevel1AtThreeMeters) {
-  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_level1 = true;
+  CargoObstacleTracker tracker(config);
   tracker.update(1.0, {directionalPretrack(10U, 0.0F, 0.0F)});
   tracker.update(1.2, {directionalPretrack(10U, 0.02F, 0.0F)});
   tracker.update(1.4, {directionalPretrack(10U, 0.04F, 0.0F)});
@@ -142,6 +145,35 @@ TEST(CargoObstacleTracker,
       tracker.update(1.6, {level1});
   EXPECT_TRUE(warned.confirmed_hazard) << warned.reason;
   EXPECT_EQ(warned.warning_code, 17U);
+}
+
+TEST(CargoObstacleTracker,
+     Level1FirstSeenInsideThreeMetersWaitsForFarFieldHistory) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_level1 = true;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation near = hazard(0U, 0.0F, 0.0F, 17U);
+  near.footprint_distance_m = 2.0F;
+  tracker.update(1.0, {near});
+  tracker.update(1.2, {near});
+  const CargoObstacleTrackerDecision suppressed =
+      tracker.update(1.4, {near});
+  EXPECT_FALSE(suppressed.confirmed_hazard);
+  EXPECT_TRUE(suppressed.selected_near_field);
+  EXPECT_FALSE(suppressed.selected_near_field_authorized);
+  EXPECT_EQ(suppressed.reason, "near_field_track_missing_far_history");
+
+  CargoObstacleObservation far = near;
+  far.footprint_distance_m = 4.0F;
+  far.warning_code = 18U;
+  tracker.update(1.6, {far});
+  tracker.update(1.8, {far});
+  ASSERT_TRUE(tracker.update(2.0, {far}).confirmed_hazard);
+  const CargoObstacleTrackerDecision authorized =
+      tracker.update(2.2, {near});
+  EXPECT_TRUE(authorized.confirmed_hazard) << authorized.reason;
+  EXPECT_TRUE(authorized.selected_near_field_authorized);
+  EXPECT_EQ(authorized.warning_code, 17U);
 }
 
 TEST(CargoObstacleTracker,
