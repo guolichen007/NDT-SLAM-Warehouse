@@ -38,7 +38,10 @@ struct StaticObstacleEvidenceConfig {
   std::size_t minimum_matched_cells = 6U;
   std::size_t maximum_query_area_cells = 4096U;
   std::uint64_t pre_cargo_minimum_sequence_gap = 2U;
-  double maximum_observation_gap_sec = 5.0;
+  // Clean-map observations are produced by asynchronous map maintenance,
+  // not at the LiDAR frame rate. Keep this above the normal keyframe/commit
+  // cadence so four genuinely distinct clean builds can mature a cell.
+  double maximum_observation_gap_sec = 30.0;
   std::uint64_t maximum_observation_sequence_gap = 2U;
 };
 

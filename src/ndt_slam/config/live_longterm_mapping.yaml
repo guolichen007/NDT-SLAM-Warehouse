@@ -754,10 +754,12 @@ cargo_safety:
   static_map_minimum_matched_cells: 6
   static_map_maximum_query_area_cells: 4096
   static_map_pre_cargo_sequence_gap: 2
-  # Clean builds are asynchronous and routinely complete slower than 0.8 s.
-  # This gap still requires adjacent build sequence IDs; it tolerates build
-  # latency without treating NOT_IN_VIEW frames as continuous evidence.
-  static_map_max_observation_gap_sec: 5.0
+  # Static observations advance only after asynchronous map maintenance.
+  # With a 2 s minimum keyframe interval and maintenance every 3 commits, 5 s
+  # was below even the theoretical fastest cadence and starved every cell.
+  # Sequence adjacency is still mandatory, so this only tolerates production
+  # rebuild latency; NOT_IN_VIEW/free observations cannot fabricate maturity.
+  static_map_max_observation_gap_sec: 30.0
   static_map_max_sequence_gap: 1
   # Sparse 2.5D+ height field. Only mature/approved cells enter formal use.
   static_height_z_bin_m: 0.10
@@ -900,6 +902,11 @@ cargo_geometry_fusion:
   # (bound origin or revealed support) with the current LiDAR extent.
   # Configured and retired shapes remain pending-only and cannot substitute.
   require_authoritative_static_and_live_thickness: true
+  # If static maturity is not yet available, eight good LiDAR frames may
+  # freeze a degraded avoidance-only box. It can emit positive 17/18 hazards,
+  # but can never authorize CLEAR 14, cargo-point removal or MapCommit.
+  allow_degraded_live_only_freeze: true
+  degraded_live_only_uncertainty_floor_m: 0.25
   minimum_confirm_frames: 5
   # Five good dimension observations are required inside the latest eight;
   # a single partial scan no longer erases the whole same-track window.
@@ -1246,7 +1253,10 @@ odom_anchored_cargo_box:
   min_size_y: 0.20
   min_size_z: 0.20
   max_size_x: 4.00
-  max_size_y: 1.60
+  # Server observations repeatedly measured 1.61-1.85 m wide cargo. The old
+  # 1.60 m cap clipped every such footprint and destabilized aspect/identity
+  # confirmation; point, area, confidence and multi-frame gates remain intact.
+  max_size_y: 2.00
   max_size_z: 2.00
 
   size_margin_x: 0.10

@@ -28,6 +28,11 @@ struct CargoGeometryFusionConfig {
   // contemporaneous LiDAR extent. Retired/configured geometry cannot replace
   // either physical side of this pair.
   bool require_authoritative_static_and_live_thickness = true;
+  // A stable multi-frame LiDAR height may freeze a geometry for positive
+  // avoidance when the static layer is unavailable. This degraded geometry
+  // never authorizes CLEAR, cargo-point removal, or MapCommit filtering.
+  bool allow_degraded_live_only_freeze = true;
+  float degraded_live_only_uncertainty_floor_m = 0.25F;
   int minimum_confirm_frames = 5;
   // Shape quality is evaluated in a bounded recent window. This preserves the
   // multi-frame requirement without allowing one partial/occluded scan to
@@ -70,6 +75,9 @@ struct CargoGeometryFrame {
   std::uint64_t cargo_lifecycle_id = 0U;
   std::uint64_t track_segment_id = 0U;
   double stamp_sec = 0.0;
+  // Degraded single-source freezing is allowed only after the recognition
+  // state machine has established a formal same-lifecycle cargo lock.
+  bool formal_track_locked = false;
   bool center_valid = false;
   Eigen::Vector3f center = Eigen::Vector3f::Zero();
   bool footprint_valid = false;
@@ -91,6 +99,8 @@ struct CargoGeometryFrame {
 struct CargoFrozenGeometry {
   bool valid = false;
   bool frozen = false;
+  bool formal_authorized = false;
+  bool degraded_live_only = false;
   std::uint64_t cargo_lifecycle_id = 0U;
   std::uint64_t track_segment_id = 0U;
   Eigen::Vector3f center = Eigen::Vector3f::Zero();
@@ -133,6 +143,8 @@ class CargoGeometryFusion {
   int shape_confirm_count_ = 0;
   std::uint64_t shape_confirm_track_segment_id_ = 0U;
   std::deque<bool> shape_quality_window_;
+  int formal_promotion_confirm_count_ = 0;
+  std::uint64_t formal_promotion_track_segment_id_ = 0U;
 };
 
 }  // namespace ndt_slam

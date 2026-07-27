@@ -11,6 +11,7 @@ CargoGeometryFrame frame(double stamp, float live_height = 1.50F,
   value.cargo_lifecycle_id = 11U;
   value.track_segment_id = 1U;
   value.stamp_sec = stamp;
+  value.formal_track_locked = true;
   value.center_valid = true;
   value.center = Eigen::Vector3f(0.0F, 0.0F, 2.0F);
   value.footprint_valid = true;
@@ -56,6 +57,103 @@ TEST(CargoGeometryFusionTest,
   const auto result = fusion.update(value);
   EXPECT_TRUE(result.valid) << result.reason;
   EXPECT_TRUE(result.frozen);
+  EXPECT_TRUE(result.formal_authorized);
+  EXPECT_FALSE(result.degraded_live_only);
+  EXPECT_EQ(result.independent_sources, 2U);
+}
+
+TEST(CargoGeometryFusionTest,
+     StableLiveOnlyHeightFreezesDegradedWithoutFormalAuthority) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 2;
+  config.shape_confirmation_window_frames = 4;
+  config.allow_degraded_live_only_freeze = true;
+  CargoGeometryFusion fusion(config);
+  auto live_only = frame(1.0);
+  live_only.thickness = {
+      {CargoThicknessSource::LIVE_VISIBLE_EXTENT,
+       1.50F, 0.12F, 0.9F, true}};
+
+  EXPECT_FALSE(fusion.update(live_only).frozen);
+  live_only.stamp_sec = 1.1;
+  EXPECT_FALSE(fusion.update(live_only).frozen);
+  live_only.stamp_sec = 1.2;
+  EXPECT_FALSE(fusion.update(live_only).frozen);
+  live_only.stamp_sec = 1.3;
+  const auto result = fusion.update(live_only);
+  ASSERT_TRUE(result.valid) << result.reason;
+  EXPECT_TRUE(result.frozen);
+  EXPECT_FALSE(result.formal_authorized);
+  EXPECT_TRUE(result.degraded_live_only);
+  EXPECT_EQ(result.independent_sources, 1U);
+  EXPECT_GE(
+      result.height_uncertainty_m,
+      config.degraded_live_only_uncertainty_floor_m);
+  EXPECT_EQ(result.reason, "geometry_frozen_degraded_live_only");
+}
+
+TEST(CargoGeometryFusionTest,
+     LiveOnlyHeightRemainsBlockedWhenDegradedModeIsDisabled) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  config.allow_degraded_live_only_freeze = false;
+  CargoGeometryFusion fusion(config);
+  auto live_only = frame(1.0);
+  live_only.thickness = {
+      {CargoThicknessSource::LIVE_VISIBLE_EXTENT,
+       1.50F, 0.12F, 0.9F, true}};
+
+  const auto result = fusion.update(live_only);
+  EXPECT_FALSE(result.valid);
+  EXPECT_FALSE(result.frozen);
+  EXPECT_FALSE(result.formal_authorized);
+  EXPECT_EQ(result.reason, "independent_thickness_sources_insufficient");
+}
+
+TEST(CargoGeometryFusionTest,
+     LiveOnlyCandidateCannotFreezeBeforeFormalTrackLock) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  config.shape_confirmation_window_frames = 2;
+  CargoGeometryFusion fusion(config);
+  auto live_only = frame(1.0);
+  live_only.formal_track_locked = false;
+  live_only.thickness = {
+      {CargoThicknessSource::LIVE_VISIBLE_EXTENT,
+       1.50F, 0.12F, 0.9F, true}};
+
+  EXPECT_FALSE(fusion.update(live_only).frozen);
+  live_only.stamp_sec = 1.1;
+  const auto result = fusion.update(live_only);
+  EXPECT_FALSE(result.valid);
+  EXPECT_FALSE(result.frozen);
+  EXPECT_FALSE(result.formal_authorized);
+  EXPECT_EQ(result.reason, "independent_thickness_sources_insufficient");
+}
+
+TEST(CargoGeometryFusionTest,
+     DegradedGeometryPromotesAfterAuthoritativePairConfirms) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 2;
+  config.shape_confirmation_window_frames = 4;
+  CargoGeometryFusion fusion(config);
+  auto live_only = frame(1.0);
+  live_only.thickness = {
+      {CargoThicknessSource::LIVE_VISIBLE_EXTENT,
+       1.50F, 0.12F, 0.9F, true}};
+  for (int index = 0; index < 4; ++index) {
+    live_only.stamp_sec = 1.0 + 0.1 * index;
+    fusion.update(live_only);
+  }
+  ASSERT_TRUE(fusion.result().degraded_live_only);
+
+  auto authoritative = frame(1.4);
+  auto result = fusion.update(authoritative);
+  EXPECT_FALSE(result.formal_authorized);
+  authoritative.stamp_sec = 1.5;
+  result = fusion.update(authoritative);
+  EXPECT_TRUE(result.formal_authorized);
+  EXPECT_FALSE(result.degraded_live_only);
   EXPECT_EQ(result.independent_sources, 2U);
 }
 

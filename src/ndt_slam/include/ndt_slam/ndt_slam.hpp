@@ -1485,7 +1485,7 @@ private:
         float min_size_y = 0.20f;
         float min_size_z = 0.20f;
         float max_size_x = 2.50f;
-        float max_size_y = 1.60f;
+        float max_size_y = 2.00f;
         float max_size_z = 2.00f;
 
         float size_margin_x = 0.10f;

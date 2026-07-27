@@ -625,10 +625,13 @@ def static_evidence_contract_failures() -> list[str]:
     paths = (
         Path("src/ndt_slam/include/ndt_slam/static_obstacle_evidence_index.hpp"),
         Path("src/ndt_slam/src/static_obstacle_evidence_index.cpp"),
+        Path("src/ndt_slam/include/ndt_slam/cargo_geometry_fusion.hpp"),
+        Path("src/ndt_slam/src/cargo_geometry_fusion.cpp"),
         Path("src/ndt_slam/src/ndt_slam.cpp"),
         Path("src/ndt_slam/src/runtime_diagnostics.cpp"),
         Path("src/ndt_slam/config/live_longterm_mapping.yaml"),
         Path("src/ndt_slam/test/static_obstacle_evidence_index_test.cpp"),
+        Path("src/ndt_slam/test/cargo_geometry_fusion_test.cpp"),
         Path("tests/test_static_manifest_contract.py"),
     )
     try:
@@ -649,7 +652,12 @@ def static_evidence_contract_failures() -> list[str]:
         "temporally_mature",
         "kSchemaVersion = 3U",
         "matureCellCount",
-        "static_map_max_observation_gap_sec: 5.0",
+        "static_map_max_observation_gap_sec: 30.0",
+        "allow_degraded_live_only_freeze",
+        "geometry_frozen_degraded_live_only",
+        "frame.formal_track_locked",
+        "cargo_frozen_geometry_.formal_authorized &&",
+        "StableLiveOnlyHeightFreezesDegradedWithoutFormalAuthority",
         "fusion_pending_warning_promotion_policy: evidence_backed_only",
         "static_map_max_sequence_gap: 1",
         "StaticEvidenceMutationResult",
