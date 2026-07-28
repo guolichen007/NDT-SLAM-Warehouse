@@ -1,46 +1,115 @@
 # CHANGELOG
 
-## [Unreleased] - Server Validation RC
+## [Unreleased] - Field-validated obstacle avoidance RC
 
 ### Added
 
-- Unified read-only server monitor, 60/600-second safety windows, append-safe
-  run artifacts, final JSON/Markdown reports, service templates, and a single
-  validation runbook from exact-SHA preflight through archive.
-- Explicit temporal maturity in static-evidence schema v3 and a cross-restart
-  suspension marker which blocks stale Manifest authorization.
-
-- Persistent static-obstacle evidence with immutable bounded query snapshots,
-  clean-map provenance, versioned sidecar manifests, and point-coordinate tile
-  partitioning.
-- Per-cell clean/invalidation versions, consecutive observation streaks, and
-  detailed `static_evidence.csv`, cargo CSV, topic, runtime-status, and
-  periodic summary diagnostics.
-- Top-derived frozen-thickness formal cargo height and an independent periodic
-  MemoryGuard timer.
+- Cargo geometry fusion: formal frozen-shape vs. degraded live-only geometry
+  with distinct safety authority (formal can clear; degraded can only warn).
+- Pending cargo envelope: positive-warning temporary geometry for newly
+  appearing obstacles before formal confirmation.
+- External obstacle tracker with near-field / far-field history,
+  independent static provenance, and embedded/separated track distinction.
+- `CargoSwingMonitor`: skew-pull detection, sway oscillation tracking,
+  hoist anchor authority, rope-length measurement integration.
+- `CargoLiftOriginBinder`: lift origin tracking and frozen-thickness
+  formal cargo height.
+- `StaticHeightField` and `StaticHeightComponentExtractor`: uncertainty-aware
+  static height from map evidence.
+- `MapSessionSnapshot`: coherent map session save/load with manifest.
+- `StaticEvidenceAuthorization`: immutable bounded query snapshots,
+  clean-map provenance, and versioned sidecar manifests.
+- `RevealedSupportObserver`: cargo bottom fusion from direct top measurement
+  and frozen thickness.
+- `CargoPhysicalMotionEstimator`: physical-speed-bounded cargo center update.
+- `CargoPresenceStateMachine`: EMPTY→CANDIDATE→LOCKED→LOST_HOLD lifecycle
+  with short formal-hold timeout and fault-closed 33.
+- `CargoSafetyEvaluator`: 14/17/18/30–35 typed safety contract with
+  formal-clear authority gating.
+- `cargo_alarm_heartbeat_node`: typed `CargoSafetyStatus` contract validation,
+  5 Hz status re-publish, duplicate-stamp rejection.
+- Server monitor v2 with cargo telemetry integration and 60/600 s safety
+  windows.
+- Comprehensive gtest suites: cargo avoidance, geometry fusion, swing monitor,
+  pending envelope, obstacle tracker, static evidence authorization,
+  static height field, lift origin binder, physical motion estimator,
+  presence state machine, map session snapshot, revealed support observer.
+- Python test contracts: map load transaction, server monitor, safety
+  aggregator, cargo geometry classification, typed callback time validation.
 
 ### Changed
 
-- Old hard-coded monitor/deploy scripts are compatibility wrappers around the
-  package ops tools; the SLAM service lock is held for the full process
-  lifetime and launch safety/runtime arguments are explicit.
-
-- Stale clean workers may confirm cells that were not invalidated by a newer
-  build; newer invalidation tombstones always win.
-- Lifecycle changes make the previous manifest inactive and retain it as a
-  last-good archive until a mature current-epoch snapshot is atomically
+- Cargo safety is now an explicit typed contract with formal authority
+  separation (formal vs. degraded geometry).
+- Obstacle tracking requires independent static provenance before issuing
+  Level 2 warnings; near-field track missing far history is not sufficient.
+- Pending envelope requires consecutive stable evidence before warning.
+- Static map authorization uses current-query coverage, cell count, height,
+  source validation, and observation history.
+- Lifecycle changes make previous manifest inactive and retain it as
+  last-good archive until mature current-epoch snapshot is atomically
   committed.
-- Static-map authorization uses current-query coverage, cell count, height,
-  source validation, and observation history. IoU remains diagnostic so
-  partial visibility does not reject a valid dense static map.
+- Old monitor/deploy scripts are compatibility wrappers around
+  `server_monitorctl.sh`.
+- Server validation is SHA-gated with explicit preflight, manifest, and
+  PASS/FAIL/NOT_RUN preservation.
+- CI enforces static contracts (yaml, repository integrity, cargo safety
+  e2e, compileall, unittest, git diff) on every push.
 
-### Known limitations
+### Fixed
 
-- Main-controller integration is not accepted and no production tag is issued.
-- Ubuntu clean build/tests and sequential/long-duration Bag results remain
-  release gates to be executed on the ROS Noetic validation host.
-- Source, geometry, association, formal-height, tile, and memory thresholds
-  remain field-validation parameters; this RC does not lower safety gates.
+- Degraded geometry can now safely produce positive 17/18 warnings without
+  being blocked by a previous formal-authority requirement (the core fix
+  of `8d7d7ee`).
+- Motion safety hold gaps closed: remaining edge cases where conservative
+  evidence could be dropped.
+- Envelope authority separated from motion safety; persistent envelope
+  and skew authority covered by tests.
+- Loaded cargo envelope and motion safety hardened.
+- Pending cargo envelope growth bounded.
+- Cargo monitoring gated under gravity evidence conflict.
+- Normal lifecycle no longer produces spurious Code 35.
+- False-positive Code 17 from pending cargo growth addressed.
+
+### Safety
+
+- Code 17 / 18 only represent real spatial collision risk.
+- Localization, gravity, cargo height, obstacle evidence, and internal
+  faults only produce 30–35.
+- Degraded geometry **cannot** produce CLEAR 14, remove cargo points,
+  exclude from static map, or commit to MapCommit.
+- Formal-clear requires all authorities (formal geometry, valid observation,
+  no obstacle, all contracts satisfied).
+- LOST_HOLD expiry outputs 33 and stops formal map removal.
+- Duplicate timestamps, heartbeat ticks, and single-frame CLEAR do not
+  advance confirmation.
+- Stale pending envelope cannot keep session ready.
+- Static evidence from map alone cannot bypass `current_source_unvalidated`
+  or `cargo_residual_source_unresolved` fail-safe 34.
+
+### Field Validation
+
+2026-07-27 / 2026-07-28 field verification of `8d7d7ee`:
+
+- SLAM: 235 × Code 18, 53 × Code 17, 24 independent avoidance episodes
+- Controller: 243 × Code 18 received, 224 × S3 sends, 2.2 s rate limit,
+  < 1 s first callback-to-send latency
+- SLAM and controller logs from different dates; not a single synchronized
+  frame-by-frame run
+- S3 independent gate path (total-gate closed) not covered
+
+Tag: `validation-obstacle-avoidance-20260728` → `8d7d7ee`
+
+### Known Limitations
+
+- Independent S3 gate-off field case pending
+- Persistent map report layer not yet implemented
+- NDT fitness auto-fuse pending
+- Relocalization final acceptance pending
+- Torsion HOIST_MISSING diagnostics (2 cargo_swing_monitor test failures)
+- Obstacle tracker boundary conditions (10 test failures, known at 8d7d7ee)
+- Cargo component fusion edge cases (2 test failures, known at 8d7d7ee)
+- Controller-side Code 17 → S3 path requires separate field verification
 
 ## Cargo safety and localization production hardening (2026-07)
 

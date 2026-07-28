@@ -1,27 +1,138 @@
 # NDT-SLAM Warehouse
 
-> Release status: **Server Validation RC candidate**. Main-controller
-> integration is disabled/not accepted, no production tag has been issued,
-> and the typed cargo-safety contract remains schema v6.
+ROS1 / Noetic warehouse crane localization, persistent mapping,
+suspended-cargo tracking and collision avoidance.
 
-面向室内仓库和天车作业的 ROS1 NDT 定位、长期建图、吊物跟踪与避障工程。
+## Project Status
 
-当前生产链路同时维护定位、五层地图和一条正式吊物安全协议。吊物一旦确认，系统冻结稳健二维定向包围框的长、宽、方向和高度；作业期间只更新刚体中心，因此框会随平移与起升实时移动，不会因单帧稀疏点云改变形状。
+**Field-validated obstacle-avoidance RC.**
 
-## 核心行为
+Validated:
+- NDT localization and long-term map runtime
+- cargo detection and rigid cargo tracking
+- degraded positive-warning geometry
+- external obstacle tracking
+- Code 18 (3–5 m collision risk)
+- Code 17 (≤3 m collision risk with authorized history)
+- Code 18 → external main controller → S3 voice alarm path
 
-- 定位：结构优先的 NDT 输入，结构不足时进入 EKF prediction-only，不回退到整片地面。
-- 静止保持：`STATIONARY_HOLD -> MOVING_CONFIRM -> CATCH_UP -> MOVING`，随机累计漂移不能直接解除静止状态。
-- 吊物几何：同一份 `LockedCargoShape + LiveCargoPose` 同时服务于 RViz、Cargo Bottom、避障、自体点剔除、NDT 输入和 MapCommit。
-- 生命周期：`EMPTY -> CANDIDATE -> LOCKED -> LOST_HOLD -> EMPTY`。`LOST_HOLD` 保留 marker，但正式安全/地图剔除只在短 `formal_hold_sec` 内使用真实时间戳证据；超时后故障闭锁为 33。
-- 正式安全码：`14` 为 CLEAR；`17` 为 3 m 内且垂直净空小于 0.8 m；`18` 为 3–5 m 且垂直净空小于 0.8 m；`30–35` 为系统或证据故障。
-- Gravity：输入话题统一为 `/gravity`。`AUXILIARY` 模式下 LiDAR 是主信号，Gravity 不可用不能永久阻断紧凑货物检测。
-- 地图：同次发布的 registration/display/ground/objects/objects_clean 使用同一内容代次；空层也会发布同代空消息，避免 RViz 保留旧层。
-- 控制台：生产默认只显示吊物状态、安全码变化和不可忽略的运行时错误；逐帧定位、地图和性能数据继续写入 CSV。
+Not yet production-release complete:
+- independent S3 gate-off field case (total-gate closed, S3 trigger)
+- NDT relocalization final acceptance
+- persistent map report layer
+- NDT fitness auto-fuse
+- remaining P3 diagnostics (torsion HOIST_MISSING, tracker boundary conditions)
 
-## 构建
+This is not a production release. The software is not a safety-certified device;
+deployment must retain external emergency stops, limit switches, and site
+safety policies.
 
-Ubuntu / ROS Noetic：
+## Architecture
+
+```
+Dual LiDAR
+    │
+    ▼
+pointcloud_merger
+    │
+    ▼
+NDT Localization ───────────────────► odom / map / TF
+    │
+    ├── Cargo Detection
+    │      │
+    │      ▼
+    │   Cargo Lifecycle (EMPTY → CANDIDATE → LOCKED → LOST_HOLD)
+    │      │
+    │      ▼
+    │   Cargo Geometry
+    │      ├── Formal geometry (frozen shape + live pose)
+    │      └── Degraded positive-warning geometry (live-only)
+    │
+    ├── External Obstacle Tracker
+    │
+    ▼
+Cargo Avoidance Fusion
+    │
+    ├── 14 CLEAR
+    ├── 17 NEAR_3M   (≤3 m, vertical clearance < 0.8 m)
+    ├── 18 NEAR_5M   (3–5 m, vertical clearance < 0.8 m)
+    └── 30–35 FAULT / INVALID
+    │
+    ▼
+CargoSafetyStatus (typed, schema v6)
+    │
+    ▼
+cargo_alarm_heartbeat_node (contract validation + 5 Hz status re-publish)
+    │
+    ▼
+/cargo_avoidance/status_code (std_msgs/Int32)
+    │
+    ▼
+External Main Controller (maintained outside this repository)
+    │
+    ▼
+S3 Voice Alarm
+```
+
+## Safety Contract
+
+### Status Codes
+
+| Code | Meaning |
+|---:|---|
+| 14 | CLEAR — no collision risk; obstacle geometry may be NaN when no obstacle present |
+| 17 | NEAR_3M — obstacle ≤3 m from cargo OBB, vertical clearance < 0.8 m |
+| 18 | NEAR_5M — obstacle 3–5 m from cargo OBB, vertical clearance < 0.8 m |
+| 30 | System not ready, state timeout, or source timeline rollback |
+| 31 | Localization invalid |
+| 32 | Gravity / load-cell signal invalid |
+| 33 | Cargo evidence invalid (geometry, bottom, height, or formal-hold timeout) |
+| 34 | Obstacle evidence insufficient or invalid |
+| 35 | Configuration, schema, non-finite value, or internal contract error |
+
+### Geometry Authority
+
+The system distinguishes between formal and degraded geometry. This
+distinction is a core safety property of the `8d7d7ee` baseline:
+
+**Formal geometry** (frozen shape, authorised by static+live convergence):
+
+| Operation | Allowed |
+|---|---|
+| Positive 17 / 18 | YES |
+| CLEAR 14 (all contracts satisfied) | YES |
+| Cargo point removal from registration | YES |
+| Static map exclusion | YES |
+| MapCommit exclusion | YES |
+
+**Degraded live-only geometry** (positive-warning only, no clear authority):
+
+| Operation | Allowed |
+|---|---|
+| Positive 17 / 18 | YES |
+| CLEAR 14 | **NO** |
+| Cargo point removal | **NO** |
+| Static map exclusion | **NO** |
+| MapCommit exclusion | **NO** |
+
+A stable live-only geometry may freeze after formal track lock, but it
+retains `formal_authorized=false`. It only upgrades to formal when static
+and live physical sources converge continuously.
+
+### Heartbeat Node
+
+`cargo_alarm_heartbeat_node`:
+- Validates `CargoSafetyStatus` typed contract
+- Accepts fresh progressing source stamps (new code takes effect immediately)
+- Re-publishes current status code at 5 Hz
+- Duplicate source stamps do not produce new evidence
+
+Spatial and temporal evidence confirmation occurs upstream in the safety /
+obstacle tracking pipeline, not in the heartbeat node.
+
+## Build
+
+Ubuntu / ROS Noetic:
 
 ```bash
 cd ~/NDT-slam-ws
@@ -31,182 +142,113 @@ catkin build --no-status
 source devel/setup.bash
 ```
 
-Windows 只用于源码修改和静态合同检查，不能替代 ROS/PCL/Sophus 编译与 bag 验收。
+Windows is for source editing and static contract checks only; it cannot
+replace ROS / PCL / Sophus compilation or bag acceptance.
 
-## 启动
+## Run
 
-现场服务器（真实传感器时间、持久化地图）：
+Production server (real sensor timestamps, persistent map):
 
 ```bash
 roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
   use_sim_time:=false use_rviz:=false persistent_map:=true
 ```
 
-服务器验收建议使用统一入口，自动建立独立运行目录、启动只读监控并生成报告：
+Server validation with unified entrypoint:
 
 ```bash
 rosrun ndt_slam run_server_validation.sh prepare \
-  --workspace ~/NDT-slam-ws --expected-sha <EXPECTED_SHA> --run-id rc1-live-001
+  --workspace ~/NDT-slam-ws --expected-sha <SHA> --run-id rc1-live-001
 rosrun ndt_slam run_server_validation.sh start \
-  --workspace ~/NDT-slam-ws --expected-sha <EXPECTED_SHA> --run-id rc1-live-001
+  --workspace ~/NDT-slam-ws --expected-sha <SHA> --run-id rc1-live-001
 ```
 
-完整顺序、停止、报告和归档命令见
-[服务器验收 Runbook](src/ndt_slam/doc/server_validation_runbook.md)。
-
-Bag 验收（仿真时间、非持久化测试地图）：
+Bag acceptance (simulation time, non-persistent test map):
 
 ```bash
 roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
   use_sim_time:=true use_rviz:=true persistent_map:=false
-```
-
-随后必须使用 `--clock` 播放 bag：
-
-```bash
 rosbag play /path/to/warehouse.bag --clock
 ```
 
-正式配置位于：
+## Main-controller Integration
 
-```text
-src/ndt_slam/config/live_longterm_mapping.yaml
-src/ndt_slam/config/merger_params.yaml
-```
+The controller application is maintained outside this repository.
 
-## 吊物框合同
+NDT-SLAM publishes:
 
-检测阶段从货物点计算稳健二维 OBB：
-
-1. 过滤非有限点并计算中心化协方差；
-2. 以主特征向量得到轴向 yaw（`yaw` 与 `yaw + pi` 等价）；
-3. 使用 P08/P92 投影范围抑制离群点；
-4. 同时检查几何长宽比、特征值比和多帧方向集中度；
-5. 达到确认帧数后冻结 `length/width/height/yaw`。
-
-锁定后：
-
-- `LiveCargoPose.center_base` 由当前 LiDAR 观测做有界滤波更新；
-- 起升只改变中心 Z，不因绝对 bottom/top 变化而错误进入 LOST；
-- 正式 marker 和旧兼容 marker 都使用同一 map-frame yaw；
-- Cargo Bottom 在 OBB 局部坐标中统计支撑点、跨度和网格覆盖；
-- 避障距离按点到旋转矩形的真实二维距离计算；
-- 正式货物点从 registration/MapCommit 中按同一 OBB 剔除。
-
-若货物近似正方形或方向证据不稳定，系统不会伪造一个方向；它会继续保持候选或已有冻结方向。
-
-## 安全协议
-
-NDT-SLAM 权威类型化输出（主系统必须订阅）：
-
-```text
-/cargo_avoidance/safety_status
-lidar_slam2_msgs/CargoSafetyStatus schema v6
-```
-
-Heartbeat 派生简码输出（兼容显示与冗余心跳）：
-
-```text
-/cargo_avoidance/status_code
-std_msgs/Int32
-```
-
-长时静态证据链为 `MapCommit objects -> 连续观测 -> clean-map 确认 ->
-immutable StaticEvidenceSnapshot -> PRE_CARGO_OCCUPANCY/STATIC_MAP_MATCH ->
-CargoObstacleTracker -> 17/18 或 34`。长期地图只提供独立静态 provenance，
-绝不能绕过 `current_source_unvalidated` 或
-`cargo_residual_source_unresolved` 的 fail-safe 34。
-
-状态定义：
-
-| Code | 含义 |
-|---:|---|
-| 14 | 无碰撞风险；无障碍时障碍几何允许为 NaN |
-| 17 | 障碍距吊物 OBB 不超过 3 m，且垂直净空小于 0.8 m |
-| 18 | 障碍距吊物 OBB 大于 3 m、不超过 5 m，且垂直净空小于 0.8 m |
-| 30 | 系统未就绪、状态超时或源时间轴回退帧 |
-| 31 | 定位无效 |
-| 32 | Gravity/称重信号无效 |
-| 33 | 吊物证据无效，包括几何、底部、高度或正式保持超时 |
-| 34 | 障碍证据不足或无效 |
-| 35 | 配置、Schema、非有限值或内部合同错误 |
-
-新鲜且时间戳前进的正式状态立即生效；重复时间戳不能推进任何状态，heartbeat 只重发当前码。时间戳回退帧输出 30 并建立新 epoch，下一条前进时间戳可恢复。
-
-## 主要 Topic
-
-| Topic | 内容 |
+| Topic | Type |
 |---|---|
-| `/odom` | 运行位姿 |
-| `/ndt_slam/runtime_path` | 实时轨迹 |
-| `/merged_points` | 合并后的当前帧点云 |
-| `/map` | registration 层 |
-| `/display_map` | 全量显示层 |
-| `/display_map_ground` | 地面层 |
-| `/display_map_objects` | 原始静态物体层 |
-| `/display_map_objects_clean` | 清理后的静态物体层 |
-| `/cargo_core_bbox_marker` | 正式冻结形状、实时移动的吊物框 |
-| `/cargo_tight_box_marker` | 使用相同刚体几何的兼容框 |
-| `/cargo_warning_zone_marker` | 与吊物方向一致的 3 m / 5 m 区域 |
-| `/cargo_avoidance/status_code` | 14/17/18/30–35 安全码 |
+| `/cargo_avoidance/safety_status` | `lidar_slam2_msgs/CargoSafetyStatus` |
+| `/cargo_avoidance/status_code` | `std_msgs/Int32` |
 
-RViz 的 Fixed Frame 使用 `map`。若只看到当前帧点云，应先检查五个地图 topic 是否均在发布以及同一时刻的 `header.seq` 是否一致，而不是修改 RViz 左侧显示配置。
+The verified external integration maps **Code 18 to S3 voice alarm**.
+Controller-side source code and release lifecycle are managed independently.
 
-## 诊断
+Code 17 → controller S3 mapping: SLAM-side Code 17 output is field-observed;
+controller-side Code 17 behaviour requires separate verification if needed.
 
-生产配置默认：
+## Field Validation
 
-```yaml
-logging:
-  debug_perf: false
-  summary_interval_sec: 10.0
+2026-07-27 / 2026-07-28 field verification:
 
-debug:
-  runtime_diagnostics:
-    enabled: true
-    console_health_enabled: false
-    console_risk_enabled: true
-    cargo_console_enabled: true
-    csv_enabled: true
-```
+| Item | Count / Value |
+|---|---|
+| SLAM Code 18 observations | 235 |
+| SLAM Code 17 observations | 53 |
+| Independent SLAM avoidance episodes | 24 |
+| Controller Code 18 receptions | 243 |
+| S3 voice sends | 224 |
+| S3 rate limit | 2.2 s |
+| First observed controller alarm latency | < 1 s |
 
-终端保留：
+These are two independent field runs (SLAM 2026-07-27, controller 2026-07-28),
+not a single synchronized frame-by-frame log. The S3 independent gate path
+(total-gate closed scenario) was not covered by these runs.
 
-- `CargoLock` / `CARGO_HEALTH`；
-- `SAFETY_WARN` / `SAFETY_FAULT` 以及安全码或 reason 变化；
-- `SO3Guard` 失败、非有限 NDT、时间 epoch 重置和节点级错误。
+Detailed evidence: [docs/validation/obstacle_avoidance_e2e_20260727_20260728.md](docs/validation/obstacle_avoidance_e2e_20260727_20260728.md)
 
-逐帧性能、可观测性、registration 模式和地图门控写入 diagnostics 目录。运行风险只按 ENTER/CHANGE/REPEAT/CLEAR 事件输出，相同状态 10 秒内不重复。
+## Documentation
 
-## 工程文档
+Technical documentation (current master reference):
 
-- [系统架构](src/ndt_slam/doc/architecture.md)
-- [定位运行时](src/ndt_slam/doc/localization_runtime.md)
-- [吊物跟踪与安全](src/ndt_slam/doc/cargo_tracking_and_safety.md)
-- [地图生命周期](src/ndt_slam/doc/map_lifecycle.md)
-- [配置说明](src/ndt_slam/doc/configuration.md)
-- [部署](src/ndt_slam/doc/deployment.md)
-- [运行与运维](src/ndt_slam/doc/operations.md)
-- [服务器监控](src/ndt_slam/doc/server_monitoring.md)
-- [服务器验收 Runbook](src/ndt_slam/doc/server_validation_runbook.md)
-- [测试与验收](src/ndt_slam/doc/testing_and_acceptance.md)
-- [故障排查](src/ndt_slam/doc/troubleshooting.md)
+- [Architecture](src/ndt_slam/doc/architecture.md)
+- [Localization Runtime](src/ndt_slam/doc/localization_runtime.md)
+- [Cargo Tracking & Safety](src/ndt_slam/doc/cargo_tracking_and_safety.md)
+- [Map Lifecycle](src/ndt_slam/doc/map_lifecycle.md)
+- [Configuration](src/ndt_slam/doc/configuration.md)
+- [Deployment](src/ndt_slam/doc/deployment.md)
+- [Operations](src/ndt_slam/doc/operations.md)
+- [Server Monitoring](src/ndt_slam/doc/server_monitoring.md)
+- [Server Validation Runbook](src/ndt_slam/doc/server_validation_runbook.md)
+- [Testing & Acceptance](src/ndt_slam/doc/testing_and_acceptance.md)
+- [Troubleshooting](src/ndt_slam/doc/troubleshooting.md)
 
-## 静态检查
+Historical evidence, design decisions, and incident reports:
+[docs/](docs/)
+
+## Static Checks
 
 ```bash
 git diff --check
-python scripts/regression/check_repository_integrity.py
-python scripts/regression/check_cargo_safety_e2e.py
+python3 scripts/regression/run_static_contracts.py
+python3 scripts/regression/check_repository_integrity.py
+python3 scripts/regression/check_cargo_safety_e2e.py
+python3 -m compileall scripts tests tools
+python3 -m unittest discover
 ```
 
-Ubuntu 还必须按顺序执行 clean build、gtest、静止漂移 bag、真实移动 catch-up、吊物起升/平移、17/18/14 空间合同和第二次 bag 时间 epoch 回退测试。
+Ubuntu must also complete: clean build, gtest, stationary-drift bag, real
+moving catch-up, cargo lift/translation, 17/18/14 spatial contracts, and
+second bag time-epoch rollback test.
 
-## 验收重点
+## Known Limitations
 
-- 横向实际货物的框长轴应与点云长轴一致，而不是固定沿 map/base 轴。
-- LOCKED 后长宽、高度、yaw 保持不变，中心随吊物连续移动。
-- 起升过程中不能因 bottom Z 变化进入 LOST。
-- 短时点云破碎不能直接解释为明确无货，也不能产生错误 CLEAR。
-- 只有真实空间碰撞风险输出 17/18；定位、Gravity、证据质量问题只能输出 30–35。
-- 五层地图在 RViz 中持续可见，且同次发布 `header.seq` 一致。
+- Independent S3 gate-off field case pending (total-gate closed scenario)
+- Persistent map report layer not yet implemented
+- NDT fitness auto-fuse pending
+- Relocalization final acceptance pending
+- Torsion HOIST_MISSING diagnostics (2 gtest failures in cargo_swing_monitor)
+- Obstacle tracker boundary conditions (10 gtest failures, known as of 8d7d7ee)
+- Cargo component fusion edge cases (2 gtest failures, known as of 8d7d7ee)
+- Controller-side Code 17 → S3 path not yet field-verified
