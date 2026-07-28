@@ -1,4 +1,4 @@
-name: repository-and-catkin
+name: 仓库与ROS编译
 
 on:
   push:
@@ -9,13 +9,35 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  noetic:
+  静态合同:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: 运行静态仓库合同
+        run: |
+          python3 scripts/regression/run_static_contracts.py
+
+  文档合同:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: 检查文档合同
+        run: |
+          python3 scripts/regression/check_docs_contract.py
+
+  ROS编译与测试:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    needs: [静态合同, 文档合同]
     container: ros:noetic-ros-base-focal
     steps:
-      - name: Install checkout prerequisites
+      - name: 安装检出依赖
         run: |
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates
@@ -24,12 +46,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Static repository contracts
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          python3 scripts/regression/run_static_contracts.py
-
-      - name: Install ROS build dependencies
+      - name: 安装ROS编译依赖
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
@@ -40,7 +57,7 @@ jobs:
           rosdep update
           rosdep install --from-paths src --ignore-src --rosdistro noetic -r -y
 
-      - name: Install pinned Sophus and g2o CMake dependencies
+      - name: 安装Sophus和g2o
         shell: bash
         run: |
           git clone https://github.com/strasdat/Sophus.git /tmp/Sophus
@@ -61,7 +78,7 @@ jobs:
           cmake --install /tmp/g2o/build
           ldconfig
 
-      - name: Clean catkin build
+      - name: Clean catkin编译
         shell: bash
         run: |
           source /opt/ros/noetic/setup.bash
@@ -69,7 +86,7 @@ jobs:
           catkin clean -y
           catkin build --no-status
 
-      - name: Unit tests
+      - name: 单元测试
         shell: bash
         run: |
           source /opt/ros/noetic/setup.bash

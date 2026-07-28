@@ -1,5 +1,9 @@
 * @guolichen007
 
-src/ndt_slam/include/ndt_slam/cargo_* @guolichen007
-src/ndt_slam/src/cargo_* @guolichen007
-src/lidar_slam2_msgs/msg/CargoSafetyStatus.msg @guolichen007
+/src/ndt_slam/src/cargo_* @guolichen007
+/src/ndt_slam/include/ndt_slam/cargo_* @guolichen007
+/src/ndt_slam/config/live_longterm_mapping.yaml @guolichen007
+/src/lidar_slam2_msgs/msg/CargoSafetyStatus.msg @guolichen007
+/.github/workflows/ @guolichen007
+/SAFETY.md @guolichen007
+/SECURITY.md @guolichen007
