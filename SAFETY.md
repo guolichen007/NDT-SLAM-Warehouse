@@ -1,105 +1,100 @@
-# Safety
+# 运行安全
 
-This project implements a typed cargo-safety contract for warehouse crane
-operations. It is not a safety-certified device.
+本项目实现了面向仓库天车作业的类型化吊物安全合同。本软件不是安全认证设备。
 
-## Status Codes
+## 安全码
 
-| Code | Meaning | Authority |
+| Code | 含义 | 授权来源 |
 |---:|---|---|
-| 14 | CLEAR — no collision risk | Requires formal geometry + all contracts |
-| 17 | NEAR_3M — ≤3 m, clearance < 0.8 m | Formal or degraded geometry |
-| 18 | NEAR_5M — 3–5 m, clearance < 0.8 m | Formal or degraded geometry |
-| 30 | System not ready | Fault |
-| 31 | Localization invalid | Fault |
-| 32 | Gravity / load-cell invalid | Fault |
-| 33 | Cargo evidence invalid | Fault |
-| 34 | Obstacle evidence invalid | Fault |
-| 35 | Internal contract error | Fault |
+| 14 | CLEAR — 无碰撞风险 | 必须 Formal Geometry + 全部合同满足 |
+| 17 | NEAR_3M — ≤3m，净空<0.8m | Formal 或 Degraded Geometry |
+| 18 | NEAR_5M — 3-5m，净空<0.8m | Formal 或 Degraded Geometry |
+| 30 | 系统未就绪 / 时间轴回退 | 故障 |
+| 31 | 定位无效 | 故障 |
+| 32 | Gravity / 称重无效 | 故障 |
+| 33 | 吊物证据无效 | 故障 |
+| 34 | 障碍证据不足 | 故障 |
+| 35 | 内部合同错误 | 故障 |
 
-## Key Safety Properties
+## 关键安全属性
 
-### 14 is explicit CLEAR
+### 14 是明确的 CLEAR
 
-Code 14 means the system has positively determined no collision risk. It
-requires:
-- Formal (authorized) cargo geometry
-- Valid obstacle observation with no detected hazard
-- All safety contracts satisfied
+Code 14 表示系统已正向确定无碰撞风险。要求：
+- Formal（已授权）吊物几何
+- 有效障碍观测且未检测到危险
+- 全部安全合同满足
 
-Degraded geometry **cannot** produce Code 14.
+Degraded Geometry 不能产生 Code 14。
 
-### 17 / 18 are positive collision warnings
+### 17 / 18 是正向碰撞风险
 
-Code 17 and 18 mean a real spatial collision risk has been detected. They
-require:
-- A valid obstacle track at the reported distance
-- Vertical clearance below 0.8 m
-- Consecutive validated observations
+Code 17 和 18 表示已检测到真实空间碰撞风险。要求：
+- 有效障碍追踪，位于报告距离
+- 垂直净空低于 0.8m
+- 连续验证观测
 
-### 30–35 are not CLEAR
+### 30-35 不是 CLEAR
 
-Codes 30–35 represent system faults or evidence problems. They must never
-be interpreted as "safe" or "clear." If the system cannot positively
-determine safety, it outputs a fault code.
+Code 30-35 代表系统故障或证据问题。不得将其解释为"安全"或"无风险"。如果系统不能正向确定安全，则输出故障码。
 
-### Degraded geometry: warn but don't clear
+### 降级几何：可告警不可 CLEAR
 
-Live-only (degraded) geometry that has not achieved formal authorization:
-- **CAN** produce positive 17 / 18 warnings
-- **CANNOT** produce CLEAR 14
-- **CANNOT** remove cargo points from registration
-- **CANNOT** exclude from static map
-- **CANNOT** commit to MapCommit
+未获得 Formal 授权的 live-only（Degraded）几何：
+- 可以产生正向 17 / 18 告警
+- 不能产生 CLEAR 14
+- 不能从 registration 剔除货物点
+- 不能排除静态地图中的货物区域
+- 不能授权 MapCommit 排除
 
-### Display markers are not safety evidence
+### Display Marker 不携带安全权威
 
-RViz markers (cargo_core_bbox_marker, cargo_tight_box_marker,
-cargo_warning_zone_marker) are visualization aids. They do not carry
-safety authority.
+RViz marker（cargo_core_bbox_marker、cargo_tight_box_marker、cargo_warning_zone_marker）是可视化辅助工具，不携带安全权威。
 
-### Historical / retired evidence
+### 历史 / 退役证据
 
-Stale evidence (expired LOST_HOLD, retired static snapshots, old pending
-envelopes) cannot produce CLEAR or authorize map mutation.
+过期证据（LOST_HOLD 超时、退役静态快照、旧 Pending Envelope）不能产生 CLEAR 或授权地图变更。
 
-## Deployment Safety
+## 部署安全
 
-This software is not a safety-certified device. Deployment must retain:
+部署时必须保留：
+- 外部急停回路
+- 物理限位开关
+- 现场安全策略和流程
+- 独立运行监督
 
-- External emergency stop circuits
-- Physical limit switches
-- Site safety policies and procedures
-- Independent operational oversight
+类型化安全合同（CargoSafetyStatus schema v6）是正式安全输出。下游控制器必须：
+- 将 Code 30-35 视为非 CLEAR
+- 不能因缺少 17/18 推断为 CLEAR
+- 对安全状态流实现独立超时/Watchdog
+- 保持独立安全逻辑
 
-The typed safety contract (CargoSafetyStatus schema v6) is the authoritative
-output. Downstream controllers must:
-- Treat codes 30–35 as non-clear
-- Not infer CLEAR from absence of 17/18
-- Implement their own timeout / watchdog on the status stream
-- Maintain independent safety logic
+## 安全行为变更要求
 
-## Changing Safety Behaviour
+任何修改以下内容的 PR 必须：
+- 安全码（14、17、18、30-35）
+- 距离阈值（3m、5m）
+- 净空阈值（0.8m）
+- 消息 Schema
+- 几何授权规则
+- 来源验证 fail-safe
 
-Any PR that changes:
-- Warning codes (14, 17, 18, 30–35)
-- Distance bands (3 m, 5 m)
-- Clearance threshold (0.8 m)
-- Message schema
-- Geometry authority rules
-- Source-validation fail-safe
+必须：
+- 显式声明安全合同影响
+- 提供变更前后 SHA
+- 通过静态合同、clean build、gtest、bag 和现场验证
+- 不能仅依赖 Windows 检查
 
-Must:
-- State the safety-contract impact explicitly
-- Include before/after SHA
-- Pass static contracts, clean build, gtest, bag, and field verification
-- Not rely on Windows-only checks
+## 现场验证基线
 
-## Validation Baseline
+| 证据 | 日期 | 内容 |
+|---|---|---|
+| SLAM 侧 | 2026-07-27 | Code 17/18 正向输出，24 独立避障片段 |
+| 主控侧 | 2026-07-28 | Code 18 接收→S3 发送 |
 
-Field-validated safety baseline:
-- **SHA**: `8d7d7eed0548321bf0646232f374fe95a29990dd`
-- **Tag**: `validation-obstacle-avoidance-20260728`
-- **Evidence**: Code 18 → S3 voice alarm path confirmed in field
+两次现场运行为不同日期独立运行，不是同步逐帧一一对应。S3 独立闸门路径（总闸关闭场景）未被此批 case 覆盖。
 
-Roll back to this SHA if a regression in safety behaviour is suspected.
+验证基线 SHA：`8d7d7eed0548321bf0646232f374fe95a29990dd`
+验证 Tag：`validation-obstacle-avoidance-20260728`
+
+如怀疑安全行为退化，回滚到该 SHA。
