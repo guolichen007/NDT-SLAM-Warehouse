@@ -20,7 +20,7 @@ motion_gate:
 
 ## 关键帧 Active Window
 
-最近 80 个关键帧保留完整 cloud_，超出的释放 cloud_：
+最近 80 个关键帧保留完整 `cloud_`，超出的释放 `cloud_`：
 
 ```yaml
 online_cache:
@@ -30,7 +30,7 @@ online_cache:
 
 ## 磁盘 Tile 增量落盘
 
-20m × 20m tile，4 层（registration/display/ground/objects）：
+20m × 20m tile，五层地图（registration / display / ground / objects / objects_clean）：
 
 ```yaml
 persistent_map:

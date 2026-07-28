@@ -1,5 +1,23 @@
 # 测试与验收
 
+## 质量状态定义
+
+| 状态 | 含义 |
+|---|---|
+| **PASS** | 0 个活跃失败，全部通过 |
+| **FAIL** | ≥1 个活跃失败 |
+| **SKIPPED** | 跳过执行 |
+| **DISABLED** | 测试被禁用 |
+| **NOT_RUN** | 未执行（不能标为 PASS） |
+| **KNOWN_BASELINE_FAILURE** | 已知基线失败，非本次变更引入。仍然为 FAIL 状态，不满足发布准入条件 |
+| **REGRESSION_STATUS=NO_NEW_FAILURES** | 与基线比较无新增失败。不改变测试总状态 |
+
+### 重要
+
+- "KNOWN_BASELINE_FAILURE" 不能写成 PASS
+- NOT_RUN 不能写成 PASS
+- 测试结果以 `catkin_test_results --verbose` 输出为唯一来源
+
 ## Windows 静态项
 
 ```powershell
@@ -18,7 +36,7 @@ python -m unittest tests.test_server_monitor
 
 ## 顺序 bag 场景
 
-- 静止 8 秒且 raw 漂移累计 0.7 m：不得退出保持、不得写 local/persistent map。
+- 静止 8 秒且 raw 漂移累计 0.7m：不得退出保持、不得写 local/persistent map。
 - 三帧同方向真实运动：进入 MOVING_CONFIRM、有限 CATCH_UP、下一帧恢复写图。
 - 横向吊物平移/起升：冻结尺寸/yaw，中心连续跟随。
 - LOST_HOLD：短窗扩张 OBB；超时 marker 保持但 code 33、剔除关闭。
@@ -31,7 +49,4 @@ python -m unittest tests.test_server_monitor
 
 无崩溃、无非有限位姿、无 full-ground fallback、无单帧 CLEAR、安全码与几何一致、五层同代、CSV 字段完整、终端无逐帧洪泛。
 
-服务器运行必须保留 `run_manifest.json`、`final_summary.json` 和
-`final_report.md`。报告中的 Ubuntu build、gtest、Bag、soak 若未实际执行，
-必须为 `NOT_RUN`，不得用监控采样自动替代。操作顺序见
-[Server Validation Runbook](server_validation_runbook.md)。
+服务器运行必须保留 `run_manifest.json`、`final_summary.json` 和 `final_report.md`。报告中的 Ubuntu build、gtest、Bag、soak 若未实际执行，必须为 `NOT_RUN`，不得用监控采样自动替代。操作顺序见 [Server Validation Runbook](server_validation_runbook.md)。
