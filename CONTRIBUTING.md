@@ -1,26 +1,83 @@
 # Contributing
 
-This repository carries a typed cargo-safety contract. Changes to warning
-codes, the 3 m / 5 m distance bands, the 0.8 m clearance, message schema, or
-source-validation fail-safe require an explicit safety-contract review.
+## Branch Discipline
 
-Use a topic branch and keep history linear. Before requesting review, record
-the exact target SHA and run the repository checks:
+| Prefix | Purpose | Merge target |
+|---|---|---|
+| `fix/*` | Bug fixes, safety patches | `master` |
+| `feature/*` | New capabilities | `master` |
+| `chore/*` | Engineering, docs, CI | `master` |
+| `docs/*` | Documentation-only changes | `master` |
+| `refactor/*` | Code restructuring (no behaviour change) | `master` |
+| `experiment/*` | Exploratory work | Do not merge |
 
-```bash
-git diff --check
-python3 scripts/regression/check_yaml_duplicate_keys.py
-python3 scripts/regression/check_repository_integrity.py
-python3 scripts/regression/check_cargo_safety_e2e.py
+Keep history linear. Branch from and rebase onto the latest `master`.
+Never force-push `master`.
+
+## Commit Style
+
+Use conventional commit prefixes scoped to the subsystem:
+
+```
+fix(cargo):
+fix(safety):
+feat(mapping):
+feat(monitor):
+chore(repo):
+docs:
+test:
+ci:
 ```
 
-ROS Noetic builds/tests and Bag/server results must be reported separately;
-do not mark them passed from a Windows-only checkout. Never force-push master.
-Release candidates are reviewed by PR and then integrated with
-`git merge --ff-only` after required checks pass.
+## Safety-contract PR Requirements
 
-Server validation evidence must include `run_manifest.json`,
-`reports/final_summary.json`, and `reports/final_report.md`. Attach the exact
-SHA and preserve PASS/FAIL/NOT_RUN values; never label an unexecuted Ubuntu,
-Bag, or soak item as passed. Generated maps, bags, and `server_runs/` do not
-belong in Git.
+Any PR that touches cargo safety behaviour must include:
+
+```
+INPUT_SHA:
+OUTPUT_SHA:
+
+Safety contract impact:
+- [ ] Code 14 (CLEAR)
+- [ ] Code 17 (NEAR_3M)
+- [ ] Code 18 (NEAR_5M)
+- [ ] Code 30-35 (FAULT/INVALID)
+- [ ] Cargo point removal from registration
+- [ ] Static map exclusion
+- [ ] MapCommit exclusion
+- [ ] Localization
+- [ ] Message schema
+
+Runtime behaviour changed: YES / NO
+Rollback SHA:
+```
+
+## Verification Checklist
+
+Before requesting review:
+
+- [ ] `git diff --check`
+- [ ] `python3 scripts/regression/run_static_contracts.py`
+- [ ] `python3 scripts/regression/check_repository_integrity.py`
+- [ ] `python3 scripts/regression/check_cargo_safety_e2e.py`
+- [ ] `python3 -m compileall scripts tests tools`
+- [ ] `python3 -m unittest discover`
+- [ ] Ubuntu clean catkin build
+- [ ] Ubuntu gtest (`catkin run_tests && catkin_test_results`)
+- [ ] Bag acceptance (if runtime behaviour changed)
+- [ ] Server runtime (if runtime behaviour changed)
+- [ ] Field case (if safety contract changed)
+
+Unavailable environment-specific checks must be marked **NOT_RUN**, never
+reported as passed. Windows-only checks are not sufficient for ROS builds,
+tests, bag, or field verification.
+
+## Server Validation Evidence
+
+Server validation runs must preserve:
+- `run_manifest.json`
+- `reports/final_summary.json`
+- `reports/final_report.md`
+
+Attach the exact SHA. Never label an unexecuted item as passed.
+Generated maps, bags, and `server_runs/` do not belong in Git.
