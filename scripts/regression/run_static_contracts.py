@@ -47,6 +47,10 @@ def main() -> int:
             [python, "scripts/regression/check_cargo_safety_e2e.py"],
         ),
         (
+            "docs_contract",
+            [python, "scripts/regression/check_docs_contract.py"],
+        ),
+        (
             "compileall",
             [python, "-m", "compileall", "-q", "scripts",
              "src/ndt_slam/scripts", "tests"],
