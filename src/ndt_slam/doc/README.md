@@ -31,4 +31,3 @@ Current-master reference. For historical evidence and design decisions, see
 
 - [Testing & Acceptance](testing_and_acceptance.md) — gtest, bag, static contracts
 - [Troubleshooting](troubleshooting.md) — common failure modes and recovery
-- [Roadmap](roadmap.md) — planned work
