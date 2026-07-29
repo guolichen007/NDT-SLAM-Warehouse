@@ -2641,8 +2641,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 geometry["maximum_fused_uncertainty_m"].as<float>(0.20F);
             cargo_geometry_fusion_config_.minimum_height_m =
                 geometry["minimum_height_m"].as<float>(0.30F);
-            cargo_geometry_fusion_config_.maximum_height_m =
-                geometry["maximum_height_m"].as<float>(5.00F);
+            cargo_geometry_fusion_config_.maximum_height_m = std::min(
+                geometry["maximum_height_m"].as<float>(2.00F),
+                odom_anchor_config_.max_size_z);
             cargo_geometry_fusion_config_.huber_delta_m =
                 geometry["huber_delta_m"].as<float>(0.20F);
             cargo_geometry_fusion_config_.configured_bottom_margin_m =
@@ -5031,7 +5032,8 @@ void NdtSlamNode::processCloudThread() {
                     hook_lock_.state ==
                             HookCargoLockState::GEOMETRY_CONFIRMING &&
                         hook_fixed_cargo_.valid &&
-                        hook_fixed_cargo_.oriented_footprint_valid
+                        hook_fixed_cargo_.oriented_footprint_valid &&
+                        !hook_fixed_cargo_.oriented_footprint_clamped
                     ? visualization_msgs::Marker::ADD
                     : visualization_msgs::Marker::DELETE;
                 provisional_marker.pose.orientation.w = 1.0;
@@ -5054,7 +5056,7 @@ void NdtSlamNode::processCloudThread() {
                     provisional_marker.scale.y =
                         hook_fixed_cargo_.footprint_length_width.y();
                     provisional_marker.scale.z = std::max(
-                        0.05F, hook_fixed_cargo_.visible_height);
+                        0.05F, hook_fixed_cargo_.size_visible.z());
                     provisional_marker.color.r = 1.0F;
                     provisional_marker.color.g = 0.75F;
                     provisional_marker.color.b = 0.0F;
@@ -16883,9 +16885,18 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
     if (active_track && hook_lock_.locked_shape.valid) {
         auto& shape = pending_input.active_locked_shape;
         shape.valid = true;
-        shape.length_m = hook_lock_.locked_shape.length_m;
-        shape.width_m = hook_lock_.locked_shape.width_m;
-        shape.height_m = hook_lock_.locked_shape.height_m;
+        shape.length_m = std::clamp(
+            hook_lock_.locked_shape.length_m,
+            odom_anchor_config_.min_size_x,
+            odom_anchor_config_.max_size_x);
+        shape.width_m = std::clamp(
+            hook_lock_.locked_shape.width_m,
+            odom_anchor_config_.min_size_y,
+            odom_anchor_config_.max_size_y);
+        shape.height_m = std::clamp(
+            hook_lock_.locked_shape.height_m,
+            odom_anchor_config_.min_size_z,
+            odom_anchor_config_.max_size_z);
         shape.yaw_rad = hook_lock_.locked_shape.yaw_base_rad;
         shape.uncertainty_m = std::max(
             hook_lock_.horizontal_tracking_residual_m, 0.05F);
@@ -16916,6 +16927,7 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
 
         const bool high_quality_shape =
             hook_fixed_cargo_.oriented_footprint_valid &&
+            !hook_fixed_cargo_.oriented_footprint_clamped &&
             hook_fixed_cargo_.core_points_base &&
             hook_fixed_cargo_.core_points_base->size() >=
                 cargo_geometry_fusion_config_.minimum_live_dimension_support &&
@@ -16928,16 +16940,27 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
                     .minimum_live_shape_confidence_for_shrink;
         auto& shape = pending_input.current_high_quality_shape;
         shape.valid = high_quality_shape;
-        shape.length_m = hook_fixed_cargo_.oriented_footprint_valid
+        const float measured_length =
+            hook_fixed_cargo_.oriented_footprint_valid
             ? hook_fixed_cargo_.footprint_length_width.x()
             : hook_fixed_cargo_.size_visible.x();
-        shape.width_m = hook_fixed_cargo_.oriented_footprint_valid
+        const float measured_width =
+            hook_fixed_cargo_.oriented_footprint_valid
             ? hook_fixed_cargo_.footprint_length_width.y()
             : hook_fixed_cargo_.size_visible.y();
-        shape.height_m = hook_fixed_bottom_.valid
+        const float measured_height = hook_fixed_bottom_.valid
             ? hook_fixed_bottom_.height
             : std::max(hook_fixed_cargo_.visible_height,
                        hook_fixed_config_.min_visible_height);
+        shape.length_m = std::clamp(
+            measured_length, odom_anchor_config_.min_size_x,
+            odom_anchor_config_.max_size_x);
+        shape.width_m = std::clamp(
+            measured_width, odom_anchor_config_.min_size_y,
+            odom_anchor_config_.max_size_y);
+        shape.height_m = std::clamp(
+            measured_height, odom_anchor_config_.min_size_z,
+            odom_anchor_config_.max_size_z);
         shape.yaw_rad = hook_fixed_cargo_.oriented_footprint_valid
             ? hook_fixed_cargo_.footprint_yaw_base_rad : 0.0F;
         shape.uncertainty_m = std::max(
@@ -16952,7 +16975,7 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         const bool candidate_state =
             hook_lock_.state == HookCargoLockState::CANDIDATE ||
             hook_lock_.state == HookCargoLockState::GEOMETRY_CONFIRMING;
-        const bool weak_shape_evidence = candidate_state &&
+        const bool weak_shape_evidence = shape.valid && candidate_state &&
             hook_lock_.provisional_track_id != 0U &&
             measured_size.allFinite() &&
             measured_size.x() >= odom_anchor_config_.min_size_x &&
@@ -16984,7 +17007,26 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
                     cargo_lifecycle_id_;
                 pending_cargo_shape_continuity_.provisional_track_id =
                     hook_lock_.provisional_track_id;
-                pending_cargo_shape_continuity_.size_m = measured_size;
+                // A new lifecycle has no trustworthy size history. Seed its
+                // pending/RViz envelope from the configured conservative box
+                // and let the existing per-second limiter admit persistent
+                // larger observations. This preserves confirmed long loads
+                // without letting one merged first frame define the episode.
+                const Eigen::Vector3f configured_seed(
+                    std::clamp(
+                        pending_cargo_envelope_config_.configured_length_m,
+                        odom_anchor_config_.min_size_x,
+                        odom_anchor_config_.max_size_x),
+                    std::clamp(
+                        pending_cargo_envelope_config_.configured_width_m,
+                        odom_anchor_config_.min_size_y,
+                        odom_anchor_config_.max_size_y),
+                    std::clamp(
+                        pending_cargo_envelope_config_.configured_height_m,
+                        odom_anchor_config_.min_size_z,
+                        odom_anchor_config_.max_size_z));
+                pending_cargo_shape_continuity_.size_m =
+                    measured_size.cwiseMin(configured_seed);
             } else {
                 const float dt = static_cast<float>(std::max(
                     0.0, stamp.toSec() -
@@ -17118,9 +17160,18 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
 
         auto& shape = pending_input.retired_locked_shape;
         shape.valid = true;
-        shape.length_m = retired_cargo_shape_.length_m;
-        shape.width_m = retired_cargo_shape_.width_m;
-        shape.height_m = retired_cargo_shape_.height_m;
+        shape.length_m = std::clamp(
+            retired_cargo_shape_.length_m,
+            odom_anchor_config_.min_size_x,
+            odom_anchor_config_.max_size_x);
+        shape.width_m = std::clamp(
+            retired_cargo_shape_.width_m,
+            odom_anchor_config_.min_size_y,
+            odom_anchor_config_.max_size_y);
+        shape.height_m = std::clamp(
+            retired_cargo_shape_.height_m,
+            odom_anchor_config_.min_size_z,
+            odom_anchor_config_.max_size_z);
         shape.yaw_rad = retired_cargo_shape_.yaw_base_rad;
         shape.uncertainty_m = 0.15F;
         shape.evidence_stamp_sec = retired_cargo_stamp_.toSec();
@@ -17138,9 +17189,16 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         auto& shape = pending_input.static_origin_shape;
         const CargoOriginCandidate& origin = cargo_lift_origin_result_.origin;
         shape.valid = true;
-        shape.length_m = origin.length_m;
-        shape.width_m = origin.width_m;
-        shape.height_m = origin.top_z95_map - origin.support_z_map;
+        shape.length_m = std::clamp(
+            origin.length_m, odom_anchor_config_.min_size_x,
+            odom_anchor_config_.max_size_x);
+        shape.width_m = std::clamp(
+            origin.width_m, odom_anchor_config_.min_size_y,
+            odom_anchor_config_.max_size_y);
+        shape.height_m = std::clamp(
+            origin.top_z95_map - origin.support_z_map,
+            odom_anchor_config_.min_size_z,
+            odom_anchor_config_.max_size_z);
         const Eigen::Matrix3d rotation = pose_map_base.so3().matrix();
         const float base_pose_yaw_map = static_cast<float>(
             std::atan2(rotation(1, 0), rotation(0, 0)));
@@ -17156,9 +17214,18 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         cargo_frozen_geometry_.cargo_lifecycle_id == cargo_lifecycle_id_) {
         auto& shape = pending_input.formal_frozen_shape;
         shape.valid = true;
-        shape.length_m = cargo_frozen_geometry_.length_m;
-        shape.width_m = cargo_frozen_geometry_.width_m;
-        shape.height_m = cargo_frozen_geometry_.height_m;
+        shape.length_m = std::clamp(
+            cargo_frozen_geometry_.length_m,
+            odom_anchor_config_.min_size_x,
+            odom_anchor_config_.max_size_x);
+        shape.width_m = std::clamp(
+            cargo_frozen_geometry_.width_m,
+            odom_anchor_config_.min_size_y,
+            odom_anchor_config_.max_size_y);
+        shape.height_m = std::clamp(
+            cargo_frozen_geometry_.height_m,
+            odom_anchor_config_.min_size_z,
+            odom_anchor_config_.max_size_z);
         shape.yaw_rad = cargo_frozen_geometry_.yaw_rad;
         shape.uncertainty_m = cargo_frozen_geometry_.height_uncertainty_m;
         shape.evidence_stamp_sec = stamp.toSec();
@@ -17557,9 +17624,13 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         origin_authorization.formal_thickness_authorized;
     if (authorized_origin) {
         geometry_frame.static_length_lower_bound_m =
-            cargo_lift_origin_result_.origin.length_m;
+            std::min(
+                cargo_lift_origin_result_.origin.length_m,
+                odom_anchor_config_.max_size_x);
         geometry_frame.static_width_lower_bound_m =
-            cargo_lift_origin_result_.origin.width_m;
+            std::min(
+                cargo_lift_origin_result_.origin.width_m,
+                odom_anchor_config_.max_size_y);
     }
     if (authorized_origin &&
         !cargo_lift_origin_result_.thickness_ready &&
@@ -21741,17 +21812,29 @@ NdtSlamNode::HookCargoBottomEstimate NdtSlamNode::estimateCargoBottom(const Hook
         return result;
     }
 
-    // 计算 z05, z50, z95
+    // Reuse the detector's configured robust vertical percentiles. Computing a
+    // second P05/P95 span here previously bypassed both the P08/P92 outlier
+    // policy and max_size_z, so the pending/fused RViz box could reach 2.9 m
+    // even though size_visible.z() had already been bounded to 2.0 m.
     std::vector<float> z_values;
     for (const auto& p : detection.core_points_base->points) {
         z_values.push_back(p.z);
     }
     std::sort(z_values.begin(), z_values.end());
 
-    float z05 = z_values[static_cast<size_t>(z_values.size() * 0.05)];
-    float z50 = z_values[static_cast<size_t>(z_values.size() * 0.50)];
-    float z95 = z_values[static_cast<size_t>(z_values.size() * 0.95)];
-    float visible_height = z95 - z05;
+    const float z05 = detection.z05;
+    const float z50 =
+        z_values[static_cast<size_t>(z_values.size() * 0.50)];
+    const float z95 = detection.z95;
+    if (!std::isfinite(z05) || !std::isfinite(z95) || z95 <= z05) {
+        result.source = "invalid";
+        result.uncertainty = hook_fixed_config_.invalid_uncertainty;
+        return result;
+    }
+    const float raw_visible_height = z95 - z05;
+    const float visible_height = std::clamp(
+        raw_visible_height, odom_anchor_config_.min_size_z,
+        odom_anchor_config_.max_size_z);
 
     // 检查 side_visible
     int bottom_band_points = 0;
@@ -21761,13 +21844,15 @@ NdtSlamNode::HookCargoBottomEstimate NdtSlamNode::estimateCargoBottom(const Hook
         }
     }
 
-    bool side_visible = visible_height >= hook_fixed_config_.visible_side_min_height &&
+    bool side_visible = raw_visible_height >= hook_fixed_config_.visible_side_min_height &&
                         bottom_band_points >= hook_fixed_config_.bottom_band_min_points;
 
     if (side_visible) {
         result.valid = true;
-        result.bottom_z_base = z05;
         result.top_z_base = z95;
+        // Preserve the robust upper surface and move the lower edge upward
+        // when the observed span exceeds the configured physical height.
+        result.bottom_z_base = z95 - visible_height;
         result.height = visible_height;
         result.source = "points_visible_side";
         result.uncertainty = hook_fixed_config_.points_uncertainty;
@@ -21783,8 +21868,9 @@ NdtSlamNode::HookCargoBottomEstimate NdtSlamNode::estimateCargoBottom(const Hook
         }
 
         if (debug_cfg_.debug_cargo_bottom) {
-            ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec, "[CargoBottom] source=points_visible_side z05=%.2f z50=%.2f z95=%.2f visible_h=%.2f band_pts=%d bottom=%.2f top=%.2f h=%.2f unc=%.2f conf=%.2f",
-                              z05, z50, z95, visible_height, bottom_band_points,
+            ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec, "[CargoBottom] source=points_visible_side z05=%.2f z50=%.2f z95=%.2f raw_h=%.2f bounded_h=%.2f band_pts=%d bottom=%.2f top=%.2f h=%.2f unc=%.2f conf=%.2f",
+                              z05, z50, z95, raw_visible_height,
+                              visible_height, bottom_band_points,
                               result.bottom_z_base, result.top_z_base, result.height,
                               result.uncertainty, result.confidence);
         }
@@ -21808,8 +21894,8 @@ NdtSlamNode::HookCargoBottomEstimate NdtSlamNode::estimateCargoBottom(const Hook
         result.confidence = 0.0f;
 
         if (debug_cfg_.debug_cargo_bottom) {
-            ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec, "[CargoBottom] source=invalid reason=no_side_no_height_memory z05=%.2f z95=%.2f visible_h=%.2f",
-                              z05, z95, visible_height);
+            ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec, "[CargoBottom] source=invalid reason=no_side_no_height_memory z05=%.2f z95=%.2f raw_h=%.2f bounded_h=%.2f",
+                              z05, z95, raw_visible_height, visible_height);
         }
     }
 

@@ -42,7 +42,9 @@ struct CargoGeometryFusionConfig {
   float maximum_source_disagreement_m = 0.25F;
   float maximum_fused_uncertainty_m = 0.20F;
   float minimum_height_m = 0.30F;
-  float maximum_height_m = 5.00F;
+  // Keep fusion on the same physical height contract as the live detector.
+  // Otherwise a pending/live observation can bypass max_size_z.
+  float maximum_height_m = 2.00F;
   float huber_delta_m = 0.20F;
   float configured_bottom_margin_m = 0.10F;
   int conservative_shrink_confirm_frames = 8;

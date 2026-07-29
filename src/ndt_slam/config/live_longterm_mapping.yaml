@@ -915,7 +915,9 @@ cargo_geometry_fusion:
   maximum_source_disagreement_m: 0.25
   maximum_fused_uncertainty_m: 0.20
   minimum_height_m: 0.30
-  maximum_height_m: 5.00
+  # Use the same physical height ceiling as odom_anchored_cargo_box so live
+  # bottom/fusion paths cannot bypass max_size_z.
+  maximum_height_m: 2.00
   huber_delta_m: 0.20
   configured_bottom_margin_m: 0.10
   conservative_shrink_confirm_frames: 8
@@ -1252,7 +1254,9 @@ odom_anchored_cargo_box:
   min_size_x: 0.30
   min_size_y: 0.20
   min_size_z: 0.20
-  max_size_x: 4.00
+  # Retain long-load support while rejecting the observed 3.72-3.90 m
+  # first-frame mixtures at the formal/pending clamped-footprint gate.
+  max_size_x: 3.50
   # Server observations repeatedly measured 1.61-1.85 m wide cargo. The old
   # 1.60 m cap clipped every such footprint and destabilized aspect/identity
   # confirmation; point, area, confidence and multi-frame gates remain intact.
