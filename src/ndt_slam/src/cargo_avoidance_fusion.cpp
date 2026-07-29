@@ -124,6 +124,77 @@ bool authorizePendingWarning(
   return true;
 }
 
+bool authorizePendingStaticWarning(
+    const CargoAvoidanceFusionInput& input,
+    const CargoAvoidanceFusionConfig& config,
+    std::string* reason) {
+  if (!config.allow_static_only_pending_warning) {
+    *reason = "static_pending_warning_policy_disabled";
+    return false;
+  }
+  if (!input.pending_recognition_state_allows_warning) {
+    *reason = input.pending_warning_state_reason.empty()
+        ? "recognition_state_not_warning_authorized"
+        : input.pending_warning_state_reason;
+    return false;
+  }
+  if (!input.pending_pose_physically_plausible) {
+    *reason = input.pending_warning_state_reason.empty()
+        ? "pending_pose_physically_implausible"
+        : input.pending_warning_state_reason;
+    return false;
+  }
+  if (!input.pending_warning_query_allowed) {
+    *reason = "pending_warning_query_not_authorized";
+    return false;
+  }
+  if (config.pending_warning_promotion_policy ==
+      PendingWarningPromotionPolicy::DISABLED) {
+    *reason = "policy_disabled";
+    return false;
+  }
+  if (!pendingSourceCanCarryIdentity(input.pending_envelope_source)) {
+    *reason = "envelope_source_not_identity_backed";
+    return false;
+  }
+  if (!pendingPoseCanCarryIdentity(input.pending_pose_source)) {
+    *reason = "pose_source_not_identity_backed";
+    return false;
+  }
+  if (!input.pending_self_evidence_valid) {
+    *reason = "cargo_self_evidence_missing";
+    return false;
+  }
+  if (!std::isfinite(input.pending_authority_confidence) ||
+      input.pending_authority_confidence <
+          config.pending_minimum_authority_confidence) {
+    *reason = "pending_cargo_identity_confidence_low";
+    return false;
+  }
+  if (!input.pending_static_obstacle_authorized ||
+      input.pending_static_obstacle_id == 0U) {
+    *reason = "static_obstacle_identity_missing";
+    return false;
+  }
+  if (input.pending_static_obstacle_confirmations <
+      config.pending_minimum_obstacle_confirmations) {
+    *reason = "static_obstacle_confirmation_pending";
+    return false;
+  }
+  if (!input.pending_static_provenance_valid) {
+    *reason = "static_obstacle_provenance_invalid";
+    return false;
+  }
+  if (!std::isfinite(input.pending_static_authority_confidence) ||
+      input.pending_static_authority_confidence <
+          config.pending_minimum_authority_confidence) {
+    *reason = "static_obstacle_authority_confidence_low";
+    return false;
+  }
+  *reason = "identity_and_static_obstacle_confirmed";
+  return true;
+}
+
 }  // namespace
 
 const char* pendingWarningPromotionPolicyName(
@@ -208,7 +279,13 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
       (result.risk_static && input.static_map.warning_code == kNear3m) ||
       (input.warning_candidate_present &&
        input.warning_candidate_code == kNear3m);
-  if (level1_risk && !input.near_field_history_authorized) {
+  std::string static_level1_authority_reason;
+  const bool static_level1_independently_proven =
+      !formal_cargo && result.risk_static &&
+      authorizePendingStaticWarning(
+          input, config, &static_level1_authority_reason);
+  if (level1_risk && !input.near_field_history_authorized &&
+      !static_level1_independently_proven) {
     result.official_code = kCargoInvalid;
     result.reason = "near_field_track_missing_far_history";
     result.provisional_status = "NEAR_FIELD_HISTORY_PENDING";
@@ -252,7 +329,7 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
           result.pending_authority_reason;
       return result;
     }
-    if (unresolved_embedded_live_hazard) {
+    if (unresolved_embedded_live_hazard && !result.risk_static) {
       result.provisional_status = "SOURCE_UNRESOLVED";
       result.pending_authority_reason =
           "embedded_obstacle_origin_unresolved";
@@ -261,25 +338,46 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
       return result;
     }
     if (result.risk_live || result.risk_static) {
-      // A pending 17/18 is an identity-bearing live-cluster decision. Static
-      // height evidence may corroborate or increase diagnostics, but cannot
-      // replace the concrete obstacle track that owns code/distance/clearance.
-      const std::int32_t provisional = result.risk_live
-          ? input.live.warning_code : input.static_map.warning_code;
+      const std::int32_t provisional = moreSevere(
+          result.risk_live ? input.live.warning_code : 0,
+          result.risk_static ? input.static_map.warning_code : 0);
       result.provisional_status = provisional == kNear3m
           ? "NEAR_3M" : "NEAR_5M";
-      result.pending_warning_authorized = result.risk_live &&
-          authorizePendingWarning(
-              input, config, &result.pending_authority_reason);
-      if (!result.risk_live) {
-        result.pending_authority_reason =
-            "static_hazard_requires_confirmed_live_obstacle_track";
-      }
+      std::string live_reason = "live_hazard_not_present";
+      std::string static_reason = "static_hazard_not_present";
+      result.pending_live_warning_authorized = result.risk_live &&
+          authorizePendingWarning(input, config, &live_reason);
+      result.pending_static_warning_authorized = result.risk_static &&
+          authorizePendingStaticWarning(input, config, &static_reason);
+      result.pending_warning_authorized =
+          result.pending_live_warning_authorized ||
+          result.pending_static_warning_authorized;
       if (result.pending_warning_authorized) {
-        result.official_code = provisional;
+        result.official_code = moreSevere(
+            result.pending_live_warning_authorized
+                ? input.live.warning_code : 0,
+            result.pending_static_warning_authorized
+                ? input.static_map.warning_code : 0);
         result.official_valid = true;
-        result.reason = "pending_positive_warning_authorized";
+        if (result.pending_live_warning_authorized &&
+            result.pending_static_warning_authorized) {
+          result.pending_authority_reason =
+              "live_and_static_pending_hazard_confirmed";
+          result.reason = "pending_live_and_static_warning_authorized";
+        } else if (result.pending_live_warning_authorized) {
+          result.pending_authority_reason = live_reason;
+          result.reason = "pending_live_warning_authorized";
+        } else {
+          result.pending_authority_reason = static_reason;
+          result.reason = "pending_static_warning_authorized";
+        }
       } else {
+        result.pending_authority_reason = result.risk_live
+            ? live_reason : static_reason;
+        if (result.risk_live && result.risk_static) {
+          result.pending_authority_reason =
+              "live=" + live_reason + ";static=" + static_reason;
+        }
         result.reason = "pending_hazard_not_authorized:" +
             result.pending_authority_reason;
       }

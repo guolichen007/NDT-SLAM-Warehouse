@@ -122,6 +122,7 @@ set(LIBRARY_SOURCES
   src/cargo_box_estimator.cpp
   # v8-stable-r3: CraneMotionEKF
   src/crane_motion_ekf.cpp
+  src/ndt_fitness_circuit_breaker.cpp
   src/stationary_motion_policy.cpp
   src/registration_cloud_builder.cpp
   src/ndt_observability.cpp
@@ -129,6 +130,7 @@ set(LIBRARY_SOURCES
   src/rigid_transform_conversion.cpp
   # Asynchronous local/global NDT relocalization
   src/ndt_relocalizer.cpp
+  src/relocalization_confirmation_policy.cpp
   # Runtime diagnostics (1.0x/1.5x acceptance testing)
   src/runtime_diagnostics.cpp
   # Formal cargo bottom and structured safety-status pipeline
@@ -149,6 +151,7 @@ set(LIBRARY_SOURCES
   src/revealed_support_observer.cpp
   src/cargo_geometry_fusion.cpp
   src/cargo_avoidance_fusion.cpp
+  src/pending_static_hazard_tracker.cpp
   src/cargo_presence_state_machine.cpp
   src/cargo_physical_motion_estimator.cpp
   src/pending_cargo_envelope.cpp
@@ -346,6 +349,13 @@ if(CATKIN_ENABLE_TESTING)
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
+  catkin_add_gtest(pending_static_hazard_tracker_test
+    test/pending_static_hazard_tracker_test.cpp)
+  if(TARGET pending_static_hazard_tracker_test)
+    target_link_libraries(pending_static_hazard_tracker_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
   catkin_add_gtest(static_evidence_authorization_test
     test/static_evidence_authorization_test.cpp)
   if(TARGET static_evidence_authorization_test)
@@ -428,6 +438,20 @@ if(CATKIN_ENABLE_TESTING)
   if(TARGET relocalization_scan_context_test)
     target_link_libraries(relocalization_scan_context_test
       ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(relocalization_confirmation_policy_test
+    test/relocalization_confirmation_policy_test.cpp)
+  if(TARGET relocalization_confirmation_policy_test)
+    target_link_libraries(relocalization_confirmation_policy_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(ndt_fitness_circuit_breaker_test
+    test/ndt_fitness_circuit_breaker_test.cpp)
+  if(TARGET ndt_fitness_circuit_breaker_test)
+    target_link_libraries(ndt_fitness_circuit_breaker_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(hook_load_state_filter_test

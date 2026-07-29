@@ -35,6 +35,7 @@ struct CargoAvoidanceFusionConfig {
       PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY;
   int pending_minimum_obstacle_confirmations = 3;
   float pending_minimum_authority_confidence = 0.55F;
+  bool allow_static_only_pending_warning = true;
 };
 
 struct CargoAvoidanceFusionInput {
@@ -69,6 +70,11 @@ struct CargoAvoidanceFusionInput {
   bool pending_external_provenance_valid = false;
   bool pending_external_geometry_valid = false;
   float pending_authority_confidence = 0.0F;
+  bool pending_static_obstacle_authorized = false;
+  std::uint32_t pending_static_obstacle_id = 0U;
+  int pending_static_obstacle_confirmations = 0;
+  bool pending_static_provenance_valid = false;
+  float pending_static_authority_confidence = 0.0F;
   // False when a live cluster first appeared already embedded in the cargo
   // footprint without prior separated-track history or independent static
   // provenance. Such evidence is diagnostic only and must not become 17/18
@@ -95,6 +101,8 @@ struct CargoAvoidanceFusionResult {
   bool risk_static = false;
   bool map_live_conflict = false;
   bool pending_warning_authorized = false;
+  bool pending_live_warning_authorized = false;
+  bool pending_static_warning_authorized = false;
   std::string pending_authority_reason = "not_evaluated";
   std::string provisional_status = "UNKNOWN";
 };

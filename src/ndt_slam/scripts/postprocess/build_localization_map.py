@@ -8,9 +8,73 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import numpy as np
 from pathlib import Path
 from collections import defaultdict
+
+
+LOCALIZATION_REPORT_REQUIRED_KEYS = {
+    'input_file',
+    'ground_model_file',
+    'original_points',
+    'output_points',
+    'config',
+}
+
+
+def write_json_atomic(filename, payload, required_keys=None):
+    """Atomically write and verify a JSON report in the destination directory."""
+    destination = Path(filename)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    required = set(required_keys or ())
+    if not isinstance(payload, dict):
+        raise TypeError('JSON report payload must be a dictionary')
+    missing = sorted(required.difference(payload))
+    if missing:
+        raise ValueError(f"JSON report missing required keys: {missing}")
+
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode='w',
+                encoding='utf-8',
+                newline='\n',
+                dir=str(destination.parent),
+                prefix=f'.{destination.name}.',
+                suffix='.tmp',
+                delete=False) as report_file:
+            temp_name = report_file.name
+            json.dump(
+                payload,
+                report_file,
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            report_file.write('\n')
+            report_file.flush()
+            os.fsync(report_file.fileno())
+
+        with open(temp_name, 'r', encoding='utf-8') as report_file:
+            staged_payload = json.load(report_file)
+        if staged_payload != payload:
+            raise IOError('staged JSON report verification failed')
+
+        os.replace(temp_name, destination)
+        temp_name = None
+
+        with open(destination, 'r', encoding='utf-8') as report_file:
+            committed_payload = json.load(report_file)
+        if committed_payload != payload:
+            raise IOError('committed JSON report verification failed')
+    finally:
+        if temp_name is not None:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+
 
 def read_pcd(filename):
     """读取 PCD 文件"""
@@ -261,8 +325,11 @@ def main():
     }
 
     report_file = os.path.join(output_dir, 'localization_map_report.json')
-    with open(report_file, 'w') as f:
-        json.dump(report, f, indent=2)
+    write_json_atomic(
+        report_file,
+        report,
+        required_keys=LOCALIZATION_REPORT_REQUIRED_KEYS,
+    )
     print(f"  报告已保存: {report_file}")
 
     print(f"\n{'='*60}")

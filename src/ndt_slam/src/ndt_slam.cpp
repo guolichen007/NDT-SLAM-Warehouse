@@ -5,6 +5,7 @@
 #include "ndt_slam/registration_input_policy.hpp"
 #include "ndt_slam/rigid_transform_conversion.hpp"
 #include "ndt_slam/pending_origin_binding_policy.hpp"
+#include "ndt_slam/relocalization_confirmation_policy.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -1672,6 +1673,47 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                      map_commit_max_fitness_);
         }
 
+        NdtFitnessCircuitBreakerConfig fitness_circuit_config;
+        if (config["ndt_health"]) {
+            const auto nh = config["ndt_health"];
+            fitness_circuit_config.enabled =
+                nh["fitness_circuit_enabled"].as<bool>(true);
+            fitness_circuit_config.window_size =
+                static_cast<std::size_t>(std::max(
+                    10, nh["fitness_circuit_window_size"].as<int>(120)));
+            fitness_circuit_config.warmup_samples =
+                static_cast<std::size_t>(std::clamp(
+                    nh["fitness_circuit_warmup_samples"].as<int>(30),
+                    5, static_cast<int>(
+                           fitness_circuit_config.window_size)));
+            fitness_circuit_config.median_multiplier =
+                nh["fitness_circuit_median_multiplier"].as<double>(2.0);
+            fitness_circuit_config.mad_multiplier =
+                nh["fitness_circuit_mad_multiplier"].as<double>(6.0);
+            fitness_circuit_config.recovery_threshold_ratio =
+                nh["fitness_circuit_recovery_ratio"].as<double>(0.70);
+            fitness_circuit_config.enter_confirmations =
+                nh["fitness_circuit_enter_confirmations"].as<int>(3);
+            fitness_circuit_config.recovery_confirmations =
+                nh["fitness_circuit_recovery_confirmations"].as<int>(5);
+        }
+        fitness_circuit_config.minimum_adaptive_threshold = std::max(
+            0.01, fitness_warning_threshold_);
+        fitness_circuit_config.hard_reject_threshold = std::max(
+            fitness_circuit_config.minimum_adaptive_threshold + 0.01,
+            map_commit_max_fitness_);
+        ndt_fitness_circuit_breaker_.setConfig(fitness_circuit_config);
+        ROS_DEBUG(
+            "[NDT-FitnessCircuit] enabled=%d window=%zu warmup=%zu "
+            "adaptive_min=%.3f hard=%.3f enter=%d recover=%d",
+            fitness_circuit_config.enabled ? 1 : 0,
+            fitness_circuit_config.window_size,
+            fitness_circuit_config.warmup_samples,
+            fitness_circuit_config.minimum_adaptive_threshold,
+            fitness_circuit_config.hard_reject_threshold,
+            fitness_circuit_config.enter_confirmations,
+            fitness_circuit_config.recovery_confirmations);
+
         // v8-stable-r3: SoftYawFilter 参数
         // ICP is disabled in the production profile. Parse every field so
         // `enabled: false` is an executable gate, not documentation.
@@ -3256,6 +3298,11 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                         "fusion_pending_minimum_authority_confidence"]
                         .as<float>(0.55F),
                     0.0F, 1.0F);
+            cargo_avoidance_fusion_config_
+                .allow_static_only_pending_warning =
+                    cargo_safety[
+                        "fusion_allow_static_only_pending_warning"]
+                        .as<bool>(true);
             const float configured_acquisition_distance_m =
                 cargo_safety["collision_tracking_acquisition_distance_m"]
                     .as<float>(7.0F);
@@ -3281,6 +3328,15 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             true;
         pending_cargo_obstacle_tracker_.setConfig(
             pending_obstacle_tracker_config);
+        PendingStaticHazardTrackerConfig pending_static_tracker_config;
+        pending_static_tracker_config.minimum_confirmations =
+            obstacle_tracker_config.confirm_frames;
+        pending_static_tracker_config.maximum_observation_gap_sec =
+            obstacle_tracker_config.maximum_observation_gap_sec;
+        pending_static_tracker_config.minimum_cell_overlap =
+            obstacle_tracker_config.static_track_cell_overlap_min;
+        pending_static_hazard_tracker_.setConfig(
+            pending_static_tracker_config);
         if (cargo_safety) {
             cargo_motion_corridor_config_.enabled =
                 cargo_safety["motion_corridor_enabled"].as<bool>(true);
@@ -3750,6 +3806,7 @@ void NdtSlamNode::resetCargoForHookState(
     cargo_safety_temporal_filter_.reset();
     cargo_obstacle_tracker_.reset();
     pending_cargo_obstacle_tracker_.reset();
+    pending_static_hazard_tracker_.reset();
     pending_obstacle_context_lifecycle_id_ = 0U;
     pending_obstacle_context_track_segment_id_ = 0U;
     pending_obstacle_context_envelope_source_ =
@@ -5588,6 +5645,7 @@ void NdtSlamNode::processCloudThread() {
         bool frame_registration_quality_valid = false;
         bool frame_severe_degeneracy =
             frame_ndt_observability.severely_degenerate;
+        NdtFitnessCircuitDecision frame_fitness_decision;
         Sophus::SE3d frame_raw_ndt_pose = current_pose_;
         double frame_raw_increment_m = 0.0;
         static Sophus::SE3d last_local_map_pose = Sophus::SE3d();
@@ -5796,6 +5854,25 @@ void NdtSlamNode::processCloudThread() {
                         consecutive_high_fitness_ = 0;
                         ndt_health_bad_ = false;
                     }
+                    frame_fitness_decision =
+                        ndt_fitness_circuit_breaker_.update(fitness_score);
+                    if (frame_fitness_decision.transitioned_open) {
+                        ROS_ERROR(
+                            "[NDT-FitnessCircuit] OPEN fitness=%.4f "
+                            "median=%.4f mad=%.4f threshold=%.4f reason=%s",
+                            fitness_score,
+                            frame_fitness_decision.median,
+                            frame_fitness_decision.mad,
+                            frame_fitness_decision.adaptive_threshold,
+                            frame_fitness_decision.reason.c_str());
+                    } else if (
+                        frame_fitness_decision.transitioned_closed) {
+                        ROS_WARN(
+                            "[NDT-FitnessCircuit] CLOSED fitness=%.4f "
+                            "recovery_threshold=%.4f",
+                            fitness_score,
+                            frame_fitness_decision.recovery_threshold);
+                    }
                     if (!result.isZero() && !result.hasNaN()) {
                         // PCL registration output is approximate. Never pass
                         // its matrix to Sophus' asserting matrix constructor.
@@ -5867,17 +5944,24 @@ void NdtSlamNode::processCloudThread() {
 
                         // v8-stable-r3: CraneMotionEKF update
                         Sophus::SE3d ekf_pose = new_pose;
-                        bool ndt_accepted = true;
+                        bool ndt_accepted =
+                            frame_fitness_decision.allow_measurement;
+                        bool localization_output_available = true;
 
                         // V3: 慢帧保护 - 检查是否需要使用 EKF prediction
-                        bool use_prediction = false;
-                        std::string reject_reason_slow = "NONE";
+                        bool use_prediction =
+                            !frame_fitness_decision.allow_measurement;
+                        std::string reject_reason_slow = use_prediction
+                            ? "NDT_FITNESS_CIRCUIT_OPEN" : "NONE";
                         if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
                             // 物理步长保护
                             if (crane_motion_ekf_.isNonPhysicalStep(
                                     last_raw_step_, ndt_time_ms, last_sensor_dt_)) {
                                 use_prediction = true;
-                                reject_reason_slow = "NONPHYSICAL_NDT_CORRECTION";
+                                if (frame_fitness_decision.allow_measurement) {
+                                    reject_reason_slow =
+                                        "NONPHYSICAL_NDT_CORRECTION";
+                                }
                                 ROS_WARN_THROTTLE(2.0, "[NDT-guard] nonphysical correction: raw_step=%.3f ndt_ms=%.1f dt=%.3f",
                                                  last_raw_step_, ndt_time_ms, last_sensor_dt_);
                             }
@@ -5886,8 +5970,15 @@ void NdtSlamNode::processCloudThread() {
                         const auto ekf_start = DiagClock::now();
                         if (crane_motion_ekf_enabled_) {
                             if (!crane_motion_ekf_.initialized()) {
-                                crane_motion_ekf_.initialize(new_pose, msg->header.stamp);
-                                ekf_pose = new_pose;
+                                if (use_prediction) {
+                                    ndt_accepted = false;
+                                    localization_output_available = false;
+                                    ekf_pose = current_pose_;
+                                } else {
+                                    crane_motion_ekf_.initialize(
+                                        new_pose, msg->header.stamp);
+                                    ekf_pose = new_pose;
+                                }
                             } else if (use_prediction) {
                                 // A published prediction must advance EKF x/P/stamp.
                                 ekf_pose = crane_motion_ekf_.predictWithoutMeasurement(
@@ -5903,7 +5994,11 @@ void NdtSlamNode::processCloudThread() {
                                     &frame_ndt_observability);
                             }
 
-                            ndt_accepted = crane_motion_ekf_.status().ndt_accepted;
+                            if (crane_motion_ekf_.initialized()) {
+                                ndt_accepted =
+                                    frame_fitness_decision.allow_measurement &&
+                                    crane_motion_ekf_.status().ndt_accepted;
+                            }
                             if (ndt_accepted) {
                                 ekf_accept_count_.fetch_add(1, std::memory_order_relaxed);
                             } else {
@@ -5911,7 +6006,8 @@ void NdtSlamNode::processCloudThread() {
                             }
 
                             // EKF 日志：debug_ekf 开启时输出
-                            if (debug_cfg_.debug_ekf) {
+                            if (debug_cfg_.debug_ekf &&
+                                crane_motion_ekf_.initialized()) {
                                 const auto& ekf_status = crane_motion_ekf_.status();
                                 ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec,
                                     "[EKF] pred=(%.2f,%.2f) ndt=(%.2f,%.2f) out=(%.2f,%.2f) "
@@ -5937,12 +6033,18 @@ void NdtSlamNode::processCloudThread() {
                                     ekf_status.step_limited ? 1 : 0,
                                     ekf_status.reject_reason.c_str());
                             }
+                        } else if (use_prediction) {
+                            ndt_accepted = false;
+                            localization_output_available = false;
+                            ekf_pose = current_pose_;
                         }
 
                         frame_ndt_accepted = ndt_accepted;
-                        frame_prediction_only = crane_motion_ekf_enabled_
-                            ? crane_motion_ekf_.status().prediction_only
-                            : !ndt_accepted;
+                        frame_prediction_only =
+                            crane_motion_ekf_enabled_ &&
+                                    crane_motion_ekf_.initialized()
+                                ? crane_motion_ekf_.status().prediction_only
+                                : !ndt_accepted;
                         frame_registration_quality_valid =
                             ndt_accepted && std::isfinite(fitness_score) &&
                             fitness_score <= map_commit_max_fitness_ &&
@@ -5978,7 +6080,8 @@ void NdtSlamNode::processCloudThread() {
                         // - 下一帧 NDT initial guess
                         // 约束只在发布和 keyframe 存储时应用
 
-                        registration_success = true;
+                        registration_success =
+                            localization_output_available;
 
                         }
                     } else if (crane_motion_ekf_enabled_ &&
@@ -6174,6 +6277,7 @@ void NdtSlamNode::processCloudThread() {
         if (ndt_attempted_this_frame) {
             const bool frame_ndt_healthy =
                 last_ndt_converged_ && ndt_safe_pose_valid_this_frame &&
+                frame_fitness_decision.allow_measurement &&
                 std::isfinite(last_ndt_fitness_) &&
                 (!crane_motion_ekf_enabled_ ||
                  crane_motion_ekf_.status().ndt_accepted);
@@ -6189,8 +6293,9 @@ void NdtSlamNode::processCloudThread() {
                 ? ros::Time::now()
                 : msg->header.stamp;
             const bool runtime_ndt_accepted =
-                !crane_motion_ekf_enabled_ ||
-                crane_motion_ekf_.status().ndt_accepted;
+                frame_fitness_decision.allow_measurement &&
+                (!crane_motion_ekf_enabled_ ||
+                 crane_motion_ekf_.status().ndt_accepted);
 
             // v8-stable-r3-hotfix-minimal: selectPublishedPose 已透传
             const auto publish_odom_start = DiagClock::now();
@@ -6531,7 +6636,7 @@ void NdtSlamNode::processCloudThread() {
             // 从 EKF 获取状态（安全访问）
             double diag_innovation = 0.0;
             double diag_max_allowed_step = 0.0;
-            bool diag_prediction_only = false;
+            bool diag_prediction_only = frame_prediction_only;
             std::string diag_reject_reason = "NONE";
             try {
                 if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
@@ -6729,44 +6834,16 @@ void NdtSlamNode::processCloudThread() {
                         "NDT_NOT_CONVERGED", "NDT_RISK");
                 }
             }
-            const double robust_fitness_median =
-                runtime_diag_.fitnessStats().median();
-            const double robust_fitness_mad =
-                runtime_diag_.fitnessStats().mad();
-            const bool fitness_warm =
-                runtime_diag_.fitnessStats().count() >= 30U;
-            const double rolling_fitness_threshold = std::max(
-                robust_fitness_median * 2.0,
-                robust_fitness_median +
-                    5.0 * std::max(1.0e-4, robust_fitness_mad));
-            const bool fitness_spike_candidate =
-                ndt_attempted_this_frame && last_ndt_converged_ &&
-                std::isfinite(last_ndt_fitness_) && fitness_warm &&
-                last_ndt_fitness_ >= map_commit_max_fitness_ &&
-                last_ndt_fitness_ >= rolling_fitness_threshold;
-            static int fitness_spike_enter_frames = 0;
-            static int fitness_spike_clear_frames = 0;
-            static bool fitness_spike_active = false;
-            if (fitness_spike_candidate) {
-                ++fitness_spike_enter_frames;
-                fitness_spike_clear_frames = 0;
-                if (fitness_spike_enter_frames >= 3) {
-                    fitness_spike_active = true;
-                    runtime_diag_.logNdtRiskFitnessSpike(
-                        diag_frame_index_, diag_last_cloud_stamp_,
-                        last_ndt_fitness_, robust_fitness_median,
-                        robust_fitness_mad, map_commit_max_fitness_,
-                        last_ndt_converged_, last_raw_step_, diag_innovation);
-                }
-            } else if (ndt_attempted_this_frame) {
-                fitness_spike_enter_frames = 0;
-                if (fitness_spike_active &&
-                    ++fitness_spike_clear_frames >= 3) {
-                    runtime_diag_.clearConsoleRisk(
-                        "NDT_FITNESS_SPIKE", "NDT_RISK");
-                    fitness_spike_active = false;
-                    fitness_spike_clear_frames = 0;
-                }
+            if (frame_fitness_decision.transitioned_open) {
+                runtime_diag_.logNdtRiskFitnessSpike(
+                    diag_frame_index_, diag_last_cloud_stamp_,
+                    last_ndt_fitness_, frame_fitness_decision.median,
+                    frame_fitness_decision.mad,
+                    frame_fitness_decision.adaptive_threshold,
+                    last_ndt_converged_, last_raw_step_, diag_innovation);
+            } else if (frame_fitness_decision.transitioned_closed) {
+                runtime_diag_.clearConsoleRisk(
+                    "NDT_FITNESS_SPIKE", "NDT_RISK");
             }
 
             // Frame overrun 检测
@@ -9297,6 +9374,7 @@ bool NdtSlamNode::installLoadedRuntimeMap(
         ndt_.swap(candidate.ndt);
 
         crane_motion_ekf_.reset();
+        ndt_fitness_circuit_breaker_.reset();
         frame_count_ = 0;
         filtered_yaw_initialized_ = false;
         path_msg_.poses.clear();
@@ -10011,66 +10089,73 @@ void NdtSlamNode::consumeRelocalizationResult(
     if (!relocalization_enabled_) return;
     RelocalizationResult result;
     if (!relocalizer_.takeResult(result)) return;
-    if (result.map_generation !=
-            map_rebuild_generation_.load(std::memory_order_acquire) ||
-        result.pose_version !=
-            keyframe_pose_version_.load(std::memory_order_acquire)) {
-        relocalization_confirmation_count_ = 0;
-        publishRelocalizationStatus(
-            "DEGRADED", "stale_map_or_pose_generation_discarded");
-        return;
-    }
     if (relocalization_state_ == RelocalizationState::IDLE &&
         relocalization_pose_reliable_ &&
         !relocalization_force_global_.load(std::memory_order_acquire)) return;
-    if (result.frame_index <= relocalization_last_result_frame_) return;
-    relocalization_last_result_frame_ = result.frame_index;
 
-    const double result_age_sec = stamp.toSec() - result.stamp_sec;
-    if (frame_index > result.frame_index +
-            static_cast<std::uint64_t>(relocalization_result_max_age_frames_) ||
-        !std::isfinite(result_age_sec) || result_age_sec < -0.05 ||
-        result_age_sec > relocalization_result_max_age_sec_) {
-        relocalization_confirmation_count_ = 0;
-        publishRelocalizationStatus("DEGRADED", "stale_result_discarded");
+    RelocalizationConfirmationConfig confirmation_config;
+    confirmation_config.required_confirmations =
+        relocalization_confirm_frames_;
+    confirmation_config.maximum_age_frames =
+        static_cast<std::uint64_t>(
+            relocalization_result_max_age_frames_);
+    confirmation_config.maximum_age_sec =
+        relocalization_result_max_age_sec_;
+    confirmation_config.maximum_translation_delta_m =
+        relocalization_confirm_translation_m_;
+    confirmation_config.maximum_yaw_delta_deg =
+        relocalization_confirm_yaw_deg_;
+    RelocalizationConfirmationInput confirmation_input;
+    confirmation_input.result = result;
+    confirmation_input.current_frame_index = frame_index;
+    confirmation_input.current_stamp_sec = stamp.toSec();
+    confirmation_input.expected_map_generation =
+        map_rebuild_generation_.load(std::memory_order_acquire);
+    confirmation_input.expected_pose_version =
+        keyframe_pose_version_.load(std::memory_order_acquire);
+    confirmation_input.last_result_frame =
+        relocalization_last_result_frame_;
+    confirmation_input.previous_confirmation_count =
+        relocalization_confirmation_count_;
+    confirmation_input.previous_correction =
+        relocalization_confirmation_pose_;
+    const RelocalizationConfirmationDecision decision =
+        evaluateRelocalizationConfirmation(
+            confirmation_input, confirmation_config);
+
+    if (decision.update_last_result_frame) {
+        relocalization_last_result_frame_ =
+            decision.last_result_frame;
+    }
+    if (decision.outcome ==
+        RelocalizationConfirmationOutcome::DISCARD_DUPLICATE) {
         return;
     }
-    if (!result.valid) {
+    if (decision.outcome ==
+            RelocalizationConfirmationOutcome::DISCARD_IDENTITY ||
+        decision.outcome ==
+            RelocalizationConfirmationOutcome::DISCARD_STALE ||
+        decision.outcome ==
+            RelocalizationConfirmationOutcome::DISCARD_INVALID) {
         relocalization_confirmation_count_ = 0;
+        relocalization_confirmation_pose_ = Sophus::SE3d();
         relocalization_state_ = RelocalizationState::DEGRADED;
-        publishRelocalizationStatus("DEGRADED", result.reason);
+        publishRelocalizationStatus("DEGRADED", decision.reason);
         return;
     }
 
-    const auto yaw_of = [](const Sophus::SE3d& pose) {
-        const Eigen::Matrix3d r = pose.so3().matrix();
-        return std::atan2(r(1, 0), r(0, 0));
-    };
-    const Sophus::SE3d correction =
-        result.pose * result.reference_pose.inverse();
-    bool consistent = false;
-    if (relocalization_confirmation_count_ > 0) {
-        const double translation =
-            (correction.translation().head<2>() -
-             relocalization_confirmation_pose_.translation().head<2>()).norm();
-        const double yaw_delta_deg = std::abs(std::atan2(
-            std::sin(yaw_of(correction) - yaw_of(relocalization_confirmation_pose_)),
-            std::cos(yaw_of(correction) - yaw_of(relocalization_confirmation_pose_)))) *
-            180.0 / M_PI;
-        consistent = translation <= relocalization_confirm_translation_m_ &&
-                     yaw_delta_deg <= relocalization_confirm_yaw_deg_;
-    }
-
-    relocalization_confirmation_pose_ = correction;
-    relocalization_confirmation_count_ = consistent
-        ? relocalization_confirmation_count_ + 1 : 1;
+    relocalization_confirmation_pose_ = decision.correction;
+    relocalization_confirmation_count_ =
+        decision.confirmation_count;
     relocalization_state_ = RelocalizationState::CONFIRMING;
     publishRelocalizationStatus(
         "CONFIRMING", "count=" +
         std::to_string(relocalization_confirmation_count_) +
-        " fitness=" + std::to_string(result.fitness));
+        " fitness=" + std::to_string(result.fitness) +
+        " reason=" + decision.reason);
 
-    if (relocalization_confirmation_count_ >= relocalization_confirm_frames_) {
+    if (decision.outcome ==
+        RelocalizationConfirmationOutcome::CONFIRMED) {
         // The worker result belongs to an earlier sensor frame. Preserve the
         // short-term motion observed since that job so a fast diagonal move
         // is not pulled backwards to a stale absolute pose.
@@ -10241,6 +10326,7 @@ void NdtSlamNode::applyRelocalizedPose(
     if (crane_motion_ekf_enabled_) {
         crane_motion_ekf_.initialize(recovered, stamp);
     }
+    ndt_fitness_circuit_breaker_.reset();
     const Eigen::Matrix3d rotation = recovered.so3().matrix();
     filtered_yaw_rad_ = std::atan2(rotation(1, 0), rotation(0, 0));
     filtered_yaw_initialized_ = true;
@@ -10323,6 +10409,7 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
         cargo_safety_temporal_filter_.reset();
         cargo_obstacle_tracker_.reset();
         pending_cargo_obstacle_tracker_.reset();
+        pending_static_hazard_tracker_.reset();
         pending_obstacle_context_lifecycle_id_ = 0U;
         pending_obstacle_context_track_segment_id_ = 0U;
         pending_obstacle_context_envelope_source_ =
@@ -16220,6 +16307,7 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
     std::uint8_t provisional_provenance_type,
     bool provisional_provenance_valid,
     bool provisional_large_geometry_valid,
+    bool provisional_static_geometry_authorized,
     float provisional_confidence,
     float provisional_cargo_bottom_z_map,
     float provisional_cargo_bottom_uncertainty_m) {
@@ -16255,7 +16343,8 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
         provisional_obstacle_track_id > 0U &&
         provisional_confirmations > 0U &&
         provisional_provenance_valid &&
-        provisional_large_geometry_valid &&
+        (provisional_large_geometry_valid ||
+         provisional_static_geometry_authorized) &&
         std::isfinite(provisional_confidence) &&
         provisional_confidence >=
             cargo_avoidance_fusion_config_
@@ -16450,6 +16539,7 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         trusted_cargo_pose_lifecycle_id_ = 0U;
         trusted_cargo_pose_track_segment_id_ = 0U;
         pending_cargo_obstacle_tracker_.reset();
+        pending_static_hazard_tracker_.reset();
         pending_obstacle_context_lifecycle_id_ = 0U;
         pending_obstacle_context_track_segment_id_ = 0U;
         pending_obstacle_context_envelope_source_ =
@@ -17990,6 +18080,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
     if (!pending_tracking_query_allowed ||
         pending_obstacle_context_changed) {
         pending_cargo_obstacle_tracker_.reset();
+        pending_static_hazard_tracker_.reset();
         // The formal tracker is prewarmed from pending observations below.
         // A cargo/envelope/pose context change invalidates that prehistory as
         // well, preventing an obstacle authorization from crossing cargo
@@ -18465,6 +18556,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
     StaticHeightQueryResult static_result;
     const auto height_field = std::atomic_load(&static_height_field_);
     const auto evidence_snapshot = static_obstacle_evidence_index_.snapshot();
+    bool pending_static_origin_exclusion_authorized = false;
     if (height_field && envelope.valid &&
         pending_warning_query_allowed) {
         const Eigen::Vector3d center_map_3d = pose_map_base *
@@ -18501,6 +18593,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
                 cargo_origin_exclusion_component_.members.end());
         }
         cargo_origin_exclusion_active_ = query.exclusion_authorized;
+        pending_static_origin_exclusion_authorized =
+            query.exclusion_authorized;
         static_result = height_field->query(query);
         fusion_input.static_map.available = static_result.valid;
         fusion_input.static_map.coverage =
@@ -18564,6 +18658,45 @@ void NdtSlamNode::runPendingCargoAvoidance(
         fusion_input.static_session_manifest_valid;
     // Pending geometry is never sufficient to authorize CLEAR.
     fusion_input.static_clear_contract_valid = false;
+    const StaticEvidenceAuthorization query_static_authorization =
+        authorizeStaticEvidence(static_result.strongest_authority);
+    PendingStaticHazardObservation static_hazard_observation;
+    static_hazard_observation.stamp_sec = stamp.toSec();
+    static_hazard_observation.cargo_lifecycle_id =
+        cargo_lifecycle_id_;
+    static_hazard_observation.map_generation = height_field
+        ? height_field->mapGeneration() : 0U;
+    static_hazard_observation.authority_valid =
+        fusion_input.static_risk_contract_valid &&
+        query_static_authorization.official_static_risk_authorized &&
+        pending_static_origin_exclusion_authorized &&
+        pending_identity_context_valid &&
+        pending_warning_query_allowed;
+    static_hazard_observation.query_valid = static_result.valid;
+    static_hazard_observation.query_bounded =
+        static_result.bounded && fusion_input.static_map.reliable;
+    static_hazard_observation.hazard =
+        fusion_input.static_map.hazard;
+    static_hazard_observation.warning_code =
+        fusion_input.static_map.warning_code;
+    static_hazard_observation.matched_cell_keys =
+        static_result.matched_cell_keys;
+    const PendingStaticHazardDecision pending_static_decision =
+        pending_static_hazard_tracker_.update(
+            std::move(static_hazard_observation));
+    fusion_input.pending_static_obstacle_authorized =
+        pending_static_decision.authorized;
+    fusion_input.pending_static_obstacle_id =
+        pending_static_decision.authorized
+            ? pending_static_decision.obstacle_id : 0U;
+    fusion_input.pending_static_obstacle_confirmations =
+        pending_static_decision.confirmations;
+    fusion_input.pending_static_provenance_valid =
+        pending_static_decision.authorized &&
+        fusion_input.static_risk_contract_valid &&
+        pending_static_origin_exclusion_authorized;
+    fusion_input.pending_static_authority_confidence =
+        fusion_input.pending_static_provenance_valid ? 1.0F : 0.0F;
     CargoAvoidanceFusionResult fused = fuseCargoAvoidanceRisk(
         fusion_input, cargo_avoidance_fusion_config_);
 
@@ -18719,6 +18852,20 @@ void NdtSlamNode::runPendingCargoAvoidance(
                       .pending_warning_promotion_policy)
            << "\",\"pending_warning_authorized\":"
            << (fused.pending_warning_authorized ? "true" : "false")
+           << ",\"pending_live_warning_authorized\":"
+           << (fused.pending_live_warning_authorized ? "true" : "false")
+           << ",\"pending_static_warning_authorized\":"
+           << (fused.pending_static_warning_authorized ? "true" : "false")
+           << ",\"pending_static_origin_exclusion_authorized\":"
+           << (pending_static_origin_exclusion_authorized
+                   ? "true" : "false")
+           << ",\"pending_static_obstacle_id\":"
+           << pending_static_decision.obstacle_id
+           << ",\"pending_static_confirmations\":"
+           << pending_static_decision.confirmations
+           << ",\"pending_static_tracker_reason\":\""
+           << pending_static_decision.reason
+           << "\""
            << ",\"collision_tracking_acquisition_distance_m\":"
            << cargo_collision_tracking_acquisition_distance_m_
            << ",\"pending_directional_pretrack_clusters\":"
@@ -18811,12 +18958,19 @@ void NdtSlamNode::runPendingCargoAvoidance(
     float provisional_clearance =
         std::numeric_limits<float>::quiet_NaN();
     const CargoSafetyClusterEvidence* provisional_live_evidence = nullptr;
-    if (fused.pending_warning_authorized) {
+    if (fused.pending_live_warning_authorized) {
         provisional_live_evidence = selected_pending_evidence;
     }
-    const bool use_live_geometry = fused.risk_live &&
+    const bool use_live_geometry =
+        fused.pending_live_warning_authorized &&
+        fused.risk_live &&
         provisional_live_evidence != nullptr &&
         provisional_live_evidence->warning_code == provisional_code;
+    const bool use_static_geometry =
+        fused.pending_static_warning_authorized &&
+        fused.risk_static &&
+        fusion_input.static_map.warning_code == provisional_code &&
+        !use_live_geometry;
     if (use_live_geometry) {
         const CargoSafetyClusterEvidence& evidence =
             *provisional_live_evidence;
@@ -18832,8 +18986,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
             evidence.nearest_point_base.y,
             evidence.obstacle_top_z95_m);
         provisional_top_map = static_cast<float>(obstacle_map.z());
-    } else if (fused.risk_static &&
-               fusion_input.static_map.warning_code == provisional_code) {
+    } else if (use_static_geometry) {
         provisional_count = static_cast<std::uint32_t>(std::min<std::size_t>(
             static_result.matched_cells,
             std::numeric_limits<std::uint32_t>::max()));
@@ -18849,25 +19002,43 @@ void NdtSlamNode::runPendingCargoAvoidance(
                   std::numeric_limits<std::uint32_t>::max()))
             : 0U;
     const std::uint32_t provisional_obstacle_track_id =
-        fused.pending_warning_authorized
-            ? fusion_input.pending_external_obstacle_track_id : 0U;
+        use_live_geometry
+            ? fusion_input.pending_external_obstacle_track_id
+            : (use_static_geometry
+                   ? fusion_input.pending_static_obstacle_id : 0U);
     const std::uint32_t provisional_confirmations =
-        fused.pending_warning_authorized
-            ? fusion_input.pending_external_obstacle_confirmations : 0U;
+        use_live_geometry
+            ? fusion_input.pending_external_obstacle_confirmations
+            : (use_static_geometry
+                   ? static_cast<std::uint32_t>(std::max(
+                         0, fusion_input
+                                .pending_static_obstacle_confirmations))
+                   : 0U);
     const std::uint8_t provisional_provenance_type =
-        fused.pending_warning_authorized
+        use_live_geometry
             ? static_cast<std::uint8_t>(
                   pending_obstacle_decision.selected_provenance)
-            : lidar_slam2_msgs::CargoSafetyStatus::PROVENANCE_NONE;
+            : (use_static_geometry
+                   ? static_cast<std::uint8_t>(
+                         ExternalProvenance::STATIC_MAP_MATCH)
+                   : lidar_slam2_msgs::CargoSafetyStatus::PROVENANCE_NONE);
     const bool provisional_provenance_valid =
-        fused.pending_warning_authorized &&
-        fusion_input.pending_external_provenance_valid;
+        (use_live_geometry &&
+         fusion_input.pending_external_provenance_valid) ||
+        (use_static_geometry &&
+         fusion_input.pending_static_provenance_valid);
     const bool provisional_large_geometry_valid =
-        fused.pending_warning_authorized &&
+        use_live_geometry &&
         fusion_input.pending_external_geometry_valid;
+    const bool provisional_static_geometry_authorized =
+        use_static_geometry &&
+        fusion_input.pending_static_obstacle_authorized;
     const float provisional_confidence =
-        fused.pending_warning_authorized
-            ? fusion_input.pending_authority_confidence : 0.0F;
+        use_live_geometry
+            ? fusion_input.pending_authority_confidence
+            : (use_static_geometry
+                   ? fusion_input.pending_static_authority_confidence
+                   : 0.0F);
     float provisional_cargo_bottom_z_map =
         std::numeric_limits<float>::quiet_NaN();
     if (fused.pending_warning_authorized) {
@@ -18888,7 +19059,9 @@ void NdtSlamNode::runPendingCargoAvoidance(
         provisional_clearance, provisional_cargo_track_id,
         provisional_obstacle_track_id, provisional_confirmations,
         provisional_provenance_type, provisional_provenance_valid,
-        provisional_large_geometry_valid, provisional_confidence,
+        provisional_large_geometry_valid,
+        provisional_static_geometry_authorized,
+        provisional_confidence,
         provisional_cargo_bottom_z_map,
         envelope.vertical_uncertainty_m);
 
@@ -19436,6 +19609,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             pending_cargo_shape_continuity_ =
                 PendingCargoShapeContinuity{};
             pending_cargo_obstacle_tracker_.reset();
+            pending_static_hazard_tracker_.reset();
             pending_obstacle_context_lifecycle_id_ = 0U;
             pending_obstacle_context_track_segment_id_ = 0U;
             pending_obstacle_context_envelope_source_ =
@@ -22633,6 +22807,9 @@ void NdtSlamNode::bindNdtInputTarget(
 
     target_version_ = content_version;
     last_target_points_ = static_cast<int>(target->size());
+    if (last_actual_target_source_ != source) {
+        ndt_fitness_circuit_breaker_.reset();
+    }
     last_actual_target_source_ = source;
     last_target_reason_ = reason;
 }

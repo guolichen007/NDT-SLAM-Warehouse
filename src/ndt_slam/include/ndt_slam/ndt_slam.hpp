@@ -59,6 +59,7 @@
 #include <ndt_slam/static_height_component_extractor.hpp>
 #include <ndt_slam/static_evidence_authorization.hpp>
 #include <ndt_slam/cargo_avoidance_fusion.hpp>
+#include <ndt_slam/pending_static_hazard_tracker.hpp>
 #include <ndt_slam/cargo_presence_state_machine.hpp>
 #include <ndt_slam/cargo_physical_motion_estimator.hpp>
 #include <ndt_slam/cargo_lift_origin_binder.hpp>
@@ -77,6 +78,7 @@
 
 // v8-stable-r3: CraneMotionEKF
 #include <ndt_slam/crane_motion_ekf.hpp>
+#include <ndt_slam/ndt_fitness_circuit_breaker.hpp>
 #include <ndt_slam/crane_pose_constraint.hpp>
 #include <ndt_slam/clean_map_builder.hpp>
 #include <ndt_slam/ndt_relocalizer.hpp>
@@ -508,6 +510,7 @@ private:
     // ========== v8-stable-r3: CraneMotionEKF ==========
     CraneMotionEKF crane_motion_ekf_;
     CraneMotionEKFConfig crane_motion_ekf_cfg_;
+    NdtFitnessCircuitBreaker ndt_fitness_circuit_breaker_;
     bool crane_motion_ekf_enabled_ = true;
     bool map_commit_requires_ndt_accept_ = true;
     double map_commit_max_fitness_ = 2.0;
@@ -2043,6 +2046,7 @@ private:
     RevealedSupportObserver revealed_support_observer_;
     RevealedSupportObservation revealed_support_observation_;
     CargoAvoidanceFusionConfig cargo_avoidance_fusion_config_;
+    PendingStaticHazardTracker pending_static_hazard_tracker_;
     CargoPresenceConfig cargo_presence_config_;
     CargoPresenceStateMachine cargo_presence_state_machine_;
     CargoPresenceResult cargo_presence_result_;
@@ -2439,6 +2443,7 @@ private:
                                      std::uint8_t provisional_provenance_type = 0U,
                                      bool provisional_provenance_valid = false,
                                      bool provisional_large_geometry_valid = false,
+                                     bool provisional_static_geometry_authorized = false,
                                      float provisional_confidence = 0.0F,
                                      float provisional_cargo_bottom_z_map =
                                          std::numeric_limits<float>::quiet_NaN(),

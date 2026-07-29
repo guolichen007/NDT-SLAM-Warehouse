@@ -25,6 +25,33 @@ CargoAvoidanceFusionInput validInput() {
   return input;
 }
 
+CargoAvoidanceFusionInput pendingStaticHazardInput() {
+  auto input = validInput();
+  input.formal_cargo_geometry_valid = false;
+  input.formal_cargo_bottom_valid = false;
+  input.pending_envelope_valid = true;
+  input.pending_envelope_source =
+      PendingCargoEnvelopeSource::CURRENT_CANDIDATE;
+  input.pending_pose_source =
+      CargoEnvelopePoseSource::CURRENT_ASSOCIATED_LIDAR;
+  input.pending_recognition_state_allows_warning = true;
+  input.pending_pose_physically_plausible = true;
+  input.pending_warning_query_allowed = true;
+  input.pending_self_evidence_valid = true;
+  input.pending_authority_confidence = 0.8F;
+  input.pending_static_obstacle_authorized = true;
+  input.pending_static_obstacle_id = 0x80000009U;
+  input.pending_static_obstacle_confirmations = 3;
+  input.pending_static_provenance_valid = true;
+  input.pending_static_authority_confidence = 1.0F;
+  input.live.available = false;
+  input.live.reliable = false;
+  input.static_map.hazard = true;
+  input.static_map.warning_code = 17;
+  input.static_map.distance_m = 2.0F;
+  return input;
+}
+
 TEST(CargoAvoidanceFusion, ClearNeedsBothReliableSources) {
   auto input = validInput();
   const auto result = fuseCargoAvoidanceRisk(input);
@@ -228,6 +255,60 @@ TEST(CargoAvoidanceFusion, PendingUnverifiedStaticRemainsAdvisoryOnly) {
   EXPECT_EQ(result.official_code, 33);
   EXPECT_FALSE(result.risk_static);
   EXPECT_EQ(result.provisional_status, "CLEAR_NOT_AUTHORIZED");
+}
+
+TEST(CargoAvoidanceFusion,
+     ConfirmedAuthoritativeStaticPendingHazardCanWarnWithoutLiveCloud) {
+  const auto result =
+      fuseCargoAvoidanceRisk(pendingStaticHazardInput());
+  ASSERT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 17);
+  EXPECT_TRUE(result.pending_warning_authorized);
+  EXPECT_FALSE(result.pending_live_warning_authorized);
+  EXPECT_TRUE(result.pending_static_warning_authorized);
+  EXPECT_EQ(
+      result.reason, "pending_static_warning_authorized");
+}
+
+TEST(CargoAvoidanceFusion,
+     StaticPendingHazardNeedsStableRegionConfirmation) {
+  auto input = pendingStaticHazardInput();
+  input.static_map.warning_code = 18;
+  input.pending_static_obstacle_authorized = false;
+  input.pending_static_obstacle_confirmations = 2;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 33);
+  EXPECT_FALSE(result.pending_static_warning_authorized);
+  EXPECT_EQ(
+      result.pending_authority_reason,
+      "static_obstacle_identity_missing");
+}
+
+TEST(CargoAvoidanceFusion,
+     StaticPendingHazardCannotBypassCargoIdentityConfidence) {
+  auto input = pendingStaticHazardInput();
+  input.pending_authority_confidence = 0.20F;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(
+      result.pending_authority_reason,
+      "pending_cargo_identity_confidence_low");
+}
+
+TEST(CargoAvoidanceFusion,
+     ConfirmedStaticPendingHazardSurvivesAmbiguousLiveSelfPoints) {
+  auto input = pendingStaticHazardInput();
+  input.live.available = true;
+  input.live.reliable = true;
+  input.live.hazard = true;
+  input.live.warning_code = 17;
+  input.live_obstacle_origin_resolved = false;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  ASSERT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 17);
+  EXPECT_TRUE(result.pending_static_warning_authorized);
+  EXPECT_FALSE(result.pending_live_warning_authorized);
 }
 
 TEST(CargoAvoidanceFusion, MoreSevereSourceWins) {

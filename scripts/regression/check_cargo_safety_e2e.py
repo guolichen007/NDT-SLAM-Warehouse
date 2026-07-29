@@ -63,6 +63,8 @@ def main() -> int:
     static_authorization_test = read(
         "src/ndt_slam/test/static_evidence_authorization_test.cpp")
     map_session = read("src/ndt_slam/src/map_session_snapshot.cpp")
+    fitness_circuit = read(
+        "src/ndt_slam/src/ndt_fitness_circuit_breaker.cpp")
 
     for source in ("src/cargo_bottom_fusion.cpp", "src/cargo_safety_evaluator.cpp"):
         require(source in cmake, f"CMake does not compile {source}", failures)
@@ -491,9 +493,12 @@ def main() -> int:
             "cargo safety evidence is incomplete in frame diagnostics",
             failures)
     require("NDT_SKIPPED_BOOTSTRAP" in node and
-            "fitnessStats().count() >= 30U" in node and
-            "last_ndt_fitness_ >= map_commit_max_fitness_" in node,
-            "NDT skipped-state or mature absolute fitness spike gate is missing",
+            "ndt_fitness_circuit_breaker_.update(fitness_score)" in node and
+            "frame_fitness_decision.allow_measurement" in node and
+            "hard_fitness_limit_circuit_open" in fitness_circuit and
+            "adaptive_fitness_circuit_open" in fitness_circuit and
+            "ndt_fitness_circuit_breaker_test" in cmake,
+            "NDT skipped-state or adaptive fitness circuit is missing",
             failures)
 
     for source in (
