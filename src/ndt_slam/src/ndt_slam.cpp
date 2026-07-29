@@ -13226,8 +13226,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     float x95 = xs[static_cast<int>(n * p_high)];
     float y05 = ys[static_cast<int>(n * p_low)];
     float y95 = ys[static_cast<int>(n * p_high)];
-    float z05 = zs[0];
-    float z95 = zs[n - 1];
+    float z05 = zs[static_cast<int>(n * p_low)];
+    float z95 = zs[static_cast<int>(n * p_high)];
 
     // 根据 symmetry_mode 计算尺寸
     float sx, sy;
