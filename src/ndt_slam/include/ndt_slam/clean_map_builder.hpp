@@ -21,6 +21,10 @@ struct CleanMapDenyRange {
 struct CleanMapBuildInput {
     float cell_size_m = 0.15F;
     std::vector<Eigen::Vector3f> object_points;
+    // The last coherent clean layer is a retention baseline, not a synthetic
+    // observation. A cell may reuse these exact points while its current raw
+    // content has not yet reached the temporal observation threshold.
+    std::vector<Eigen::Vector3f> previous_clean_points;
     std::vector<Eigen::Vector3f> payload_candidate_points;
     std::map<CleanMapCell, int> observation_counts;
     std::set<CleanMapCell> deny_cells;
@@ -42,6 +46,8 @@ struct CleanMapBuildResult {
     int protected_cells = 0;
     int protected_points = 0;
     int human_denied_cells = 0;
+    int retained_cells = 0;
+    int retained_points = 0;
 };
 
 enum class CleanMapBuildAction {

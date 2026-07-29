@@ -73,6 +73,7 @@ CleanMapBuildResult buildCleanMapFromSnapshot(
 
     float global_min_z = std::numeric_limits<float>::infinity();
     std::map<CleanMapCell, std::vector<std::size_t>> object_indices;
+    std::map<CleanMapCell, std::vector<std::size_t>> previous_clean_indices;
     std::map<CleanMapCell, std::vector<std::size_t>> payload_indices;
     std::map<CleanMapCell, float> maximum_height;
     std::map<CleanMapCell, double> distance_sum;
@@ -95,6 +96,13 @@ CleanMapBuildResult buildCleanMapFromSnapshot(
             distance_sum[item.first] += std::hypot(point.x(), point.y());
             ++finite_count[item.first];
         }
+    }
+    for (std::size_t index = 0U;
+         index < input.previous_clean_points.size(); ++index) {
+        const Eigen::Vector3f& point = input.previous_clean_points[index];
+        if (!point.allFinite()) continue;
+        previous_clean_indices[cellFor(point, input.cell_size_m)].push_back(
+            index);
     }
     for (std::size_t index = 0U;
          index < input.payload_candidate_points.size(); ++index) {
@@ -145,13 +153,35 @@ CleanMapBuildResult buildCleanMapFromSnapshot(
         const auto observation = input.observation_counts.find(cell);
         const int observation_count = observation ==
             input.observation_counts.end() ? 0 : observation->second;
+        const auto ranges = input.deny_ranges.find(cell);
+        if (observation_count < minimumObservationsForDistance(distance)) {
+            const auto previous = previous_clean_indices.find(cell);
+            if (previous == previous_clean_indices.end()) continue;
+
+            const int retained_before = result.retained_points;
+            for (const std::size_t index : previous->second) {
+                const Eigen::Vector3f& point =
+                    input.previous_clean_points[index];
+                if (input.use_3d_deny &&
+                    ranges != input.deny_ranges.end() &&
+                    pointDeniedByRange(point, ranges->second)) {
+                    ++result.denied_points;
+                    continue;
+                }
+                result.clean_points.push_back(point);
+                ++result.retained_points;
+            }
+            if (result.retained_points > retained_before) {
+                ++result.retained_cells;
+                ++result.passed_cells;
+            }
+            continue;
+        }
         if (maximum_height[cell] < minimumHeightForDistance(distance) ||
-            count < 3 ||
-            observation_count < minimumObservationsForDistance(distance)) {
+            count < 3) {
             continue;
         }
 
-        const auto ranges = input.deny_ranges.find(cell);
         for (const std::size_t index : item.second) {
             const Eigen::Vector3f& point = input.object_points[index];
             if (input.use_3d_deny && ranges != input.deny_ranges.end() &&

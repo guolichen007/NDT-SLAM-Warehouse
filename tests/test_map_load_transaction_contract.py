@@ -10,6 +10,9 @@ STATIC_TEST = (
 KEYFRAME_TEST = (
     ROOT / "src/ndt_slam/test/relocalization_scan_context_test.cpp"
 ).read_text(encoding="utf-8")
+CLEAN_BUILDER = (
+    ROOT / "src/ndt_slam/src/clean_map_builder.cpp"
+).read_text(encoding="utf-8")
 
 
 def section(start: str, end: str) -> str:
@@ -69,6 +72,22 @@ class MapLoadTransactionContractTest(unittest.TestCase):
         positions = [body.index(token) for token in required]
         success = body.index("response.success = true;")
         self.assertTrue(all(position < success for position in positions))
+
+    def test_CleanRebuildRetainsPreviousLayerWithoutForgingObservations(self):
+        body = section(
+            "void NdtSlamNode::startCleanMapRebuildJob()",
+            "void NdtSlamNode::consumeCleanMapRebuildResult(",
+        )
+        self.assertIn(
+            "source_bundle.objects_clean = clone(objects_clean_map_);", body
+        )
+        self.assertIn("input.previous_clean_points", body)
+        self.assertIn(
+            "observation_count < minimumObservationsForDistance(distance)",
+            CLEAN_BUILDER,
+        )
+        self.assertIn("input.previous_clean_points[index]", CLEAN_BUILDER)
+        self.assertNotIn("bev_observation_count_[", body)
 
 
 if __name__ == "__main__":

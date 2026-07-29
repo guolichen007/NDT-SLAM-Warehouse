@@ -21,6 +21,87 @@ TEST(CleanMapBuilder, KeepsObservableVerticalStructure) {
     EXPECT_EQ(result.passed_cells, 1);
 }
 
+TEST(CleanMapBuilder, RetainsExactPreviousCellUntilObservationThreshold) {
+    auto input = observableCell();
+    input.observation_counts[{0, 0}] = 1;
+    input.previous_clean_points = {
+        {0.04F, 0.04F, 0.1F}, {0.05F, 0.05F, 0.7F}};
+
+    const auto result = buildCleanMapFromSnapshot(input);
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    ASSERT_EQ(result.clean_points.size(), 2U);
+    EXPECT_FLOAT_EQ(result.clean_points[0].z(), 0.1F);
+    EXPECT_FLOAT_EQ(result.clean_points[1].z(), 0.7F);
+    EXPECT_EQ(result.retained_cells, 1);
+    EXPECT_EQ(result.retained_points, 2);
+    EXPECT_EQ(result.passed_cells, 1);
+}
+
+TEST(CleanMapBuilder, PartialObservationDoesNotEraseUnobservedRegion) {
+    CleanMapBuildInput input;
+    input.object_points = {
+        {0.01F, 0.01F, 0.0F}, {0.02F, 0.02F, 0.4F},
+        {0.03F, 0.03F, 0.8F}, {1.51F, 0.01F, 0.0F},
+        {1.52F, 0.02F, 0.4F}, {1.53F, 0.03F, 0.8F}};
+    input.previous_clean_points = {
+        {1.54F, 0.04F, 0.1F}, {1.55F, 0.05F, 0.7F}};
+    input.observation_counts[{0, 0}] = 2;
+
+    const auto result = buildCleanMapFromSnapshot(input);
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.clean_points.size(), 5U);
+    EXPECT_EQ(result.passed_cells, 2);
+    EXPECT_EQ(result.retained_cells, 1);
+    EXPECT_EQ(result.retained_points, 2);
+}
+
+TEST(CleanMapBuilder, RebuildsFromRawAfterObservationThreshold) {
+    auto input = observableCell();
+    input.previous_clean_points = {{0.04F, 0.04F, 0.2F}};
+
+    const auto result = buildCleanMapFromSnapshot(input);
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.clean_points.size(), 3U);
+    EXPECT_EQ(result.retained_cells, 0);
+    EXPECT_EQ(result.retained_points, 0);
+}
+
+TEST(CleanMapBuilder, ExplicitDenyStillRemovesRetainedCell) {
+    auto input = observableCell();
+    input.observation_counts[{0, 0}] = 1;
+    input.previous_clean_points = {
+        {0.04F, 0.04F, 0.1F}, {0.05F, 0.05F, 0.7F}};
+    input.deny_cells.insert({0, 0});
+
+    const auto result = buildCleanMapFromSnapshot(input);
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_TRUE(result.clean_points.empty());
+    EXPECT_EQ(result.retained_cells, 0);
+    EXPECT_EQ(result.denied_cells, 1);
+}
+
+TEST(CleanMapBuilder, ThreeDimensionalDenyAppliesToRetainedCell) {
+    auto input = observableCell();
+    input.observation_counts[{0, 0}] = 1;
+    input.previous_clean_points = {
+        {0.04F, 0.04F, 0.1F}, {0.05F, 0.05F, 0.7F}};
+    input.use_3d_deny = true;
+    input.deny_ranges[{0, 0}].push_back({0.5F, 0.9F});
+
+    const auto result = buildCleanMapFromSnapshot(input);
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    ASSERT_EQ(result.clean_points.size(), 1U);
+    EXPECT_FLOAT_EQ(result.clean_points.front().z(), 0.1F);
+    EXPECT_EQ(result.retained_cells, 1);
+    EXPECT_EQ(result.retained_points, 1);
+    EXPECT_EQ(result.denied_points, 1);
+}
+
 TEST(CleanMapBuilder, ProtectWinsOverDenyAndRestoresCandidate) {
     auto input = observableCell();
     input.deny_cells.insert({0, 0});

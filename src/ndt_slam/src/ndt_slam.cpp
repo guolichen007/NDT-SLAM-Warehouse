@@ -4034,11 +4034,20 @@ void NdtSlamNode::startCleanMapRebuildJob() {
         source_bundle.display = clone(display_map_);
         source_bundle.ground = clone(ground_map_);
         source_bundle.objects = clone(objects_map_);
+        source_bundle.objects_clean = clone(objects_clean_map_);
     }
     if (source_bundle.objects) {
         input.object_points.reserve(source_bundle.objects->size());
         for (const auto& point : source_bundle.objects->points) {
             input.object_points.emplace_back(point.x, point.y, point.z);
+        }
+    }
+    if (source_bundle.objects_clean) {
+        input.previous_clean_points.reserve(
+            source_bundle.objects_clean->size());
+        for (const auto& point : source_bundle.objects_clean->points) {
+            input.previous_clean_points.emplace_back(
+                point.x, point.y, point.z);
         }
     }
     if (rebuild_payload_candidate_) {
@@ -4516,12 +4525,14 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
         result.bundle.source_stamp.isZero()
             ? stamp : result.bundle.source_stamp);
     ROS_DEBUG("[CleanMapWorker] source=%llu points=%zu cells=%d/%d "
-              "denied=%d protected=%d installed_current=%d duration_ms=%.1f",
+              "denied=%d protected=%d retained_cells=%d retained_points=%d "
+              "installed_current=%d duration_ms=%.1f",
               static_cast<unsigned long long>(
                   result.source_objects_version),
               result.build.clean_points.size(), result.build.passed_cells,
               result.build.total_cells, result.build.denied_cells,
-              result.build.protected_cells,
+              result.build.protected_cells, result.build.retained_cells,
+              result.build.retained_points,
               installed_as_current ? 1 : 0, result.duration_ms);
 }
 
