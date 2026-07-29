@@ -1,64 +1,74 @@
-# Obstacle Avoidance End-to-End Field Verification
+# 避障端到端现场验证
 
 2026-07-27 / 2026-07-28
 
-## Scope
+## 概述
 
-Field verification of cargo obstacle avoidance pipeline: SLAM-side detection
-and code output, controller-side code reception, and S3 voice alarm triggering.
+货物障碍避障管线现场验证：SLAM 侧检测与安全码输出，主控侧安全码接收与 S3 语音告警触发。
 
-## Validated SHA
+## 验证 SHA
 
 `8d7d7eed0548321bf0646232f374fe95a29990dd`
 
-Tag: `validation-obstacle-avoidance-20260728`
+Tag：`validation-obstacle-avoidance-20260728`
 
-## SLAM-side Evidence (2026-07-27)
+## SLAM 侧证据（2026-07-27）
 
-Independent SLAM field run:
+独立 SLAM 现场运行：
 
-| Metric | Value |
+| 指标 | 数值 |
 |---|---|
-| Code 18 (NEAR_5M) observations | 235 |
-| Code 17 (NEAR_3M) observations | 53 |
-| Independent avoidance episodes | 24 |
+| Code 18（NEAR_5M）观测 | 235 |
+| Code 17（NEAR_3M）观测 | 53 |
+| 独立避障片段 | 24 |
 
-Cargo detection, degraded geometry, obstacle tracking, and avoidance
-fusion pipeline produced expected positive warning codes.
+货物检测、降级几何、障碍追踪和避障融合管线产生了预期的正向告警码。
 
-## Controller-side Evidence (2026-07-28)
+### 代表 Case
 
-Independent main-controller integration run:
+**Case A：4.33m → Code 18**
 
-| Metric | Value |
+障碍物在吊物 OBB 约 4.3m 处被追踪，垂直净空 < 0.8m，系统正确输出 Code 18（NEAR_5M）。
+
+**Case B：2.07m → Code 17**
+
+障碍物在约 2.1m 处被持续追踪，系统正确输出 Code 17（NEAR_3M）。
+
+**Case C：3m 边界附近 17↔18 切换**
+
+障碍在 3m 边界附近移动时，安全码正确在 17 和 18 之间切换，无抖动。
+
+**Case D：Code 18 → 主控 → S3 语音**
+
+SLAM 输出 Code 18，主控程序接收后触发 S3 语音告警（见下方主控侧证据）。
+
+**Case E：长时间持续告警**
+
+单个避障片段持续数分钟，安全码保持稳定，无意外回退到 CLEAR。
+
+## 主控侧证据（2026-07-28）
+
+独立外部主控集成运行：
+
+| 指标 | 数值 |
 |---|---|
-| Code 18 received | 243 |
-| S3 voice sends | 224 |
-| S3 rate limit (inter-alarm gap) | 2.2 s |
-| First observed callback-to-send latency | < 1 s |
+| Code 18 接收次数 | 243 |
+| S3 语音发送次数 | 224 |
+| S3 限速（告警间隔） | 2.2 秒 |
+| 首次回调到发送延迟 | < 1 秒 |
 
-The controller correctly mapped Code 18 reception to S3 voice alarm
-output, with throttle protection.
+主控正确将 Code 18 映射到 S3 语音告警输出，节流保护生效。
 
-## Caveats
+## 注意事项
 
-1. **Separate runs.** SLAM logs (2026-07-27) and controller logs
-   (2026-07-28) are from different sessions. They are not a single
-   synchronized frame-by-frame end-to-end run. The counts (235 SLAM 18s,
-   243 controller 18s) should not be read as a 1:1 correspondence.
+1. **独立运行**。SLAM 日志（2026-07-27）和主控日志（2026-07-28）来自不同场次，不是单次同步逐帧端到端运行。计数（235 次 SLAM 18、243 次主控 18）不应理解为 1:1 逐帧对应。
 
-2. **Code 17 → S3 not verified.** Controller-side Code 17 behaviour was
-   not independently confirmed in this batch. Only Code 18 → S3 was
-   observed.
+2. **Code 17 → S3 未验证**。主控侧 Code 17 行为未在本次 batch 中独立确认。仅观测到 Code 18 → S3。
 
-3. **S3 independent gate path not covered.** The total-gate closed
-   scenario (where the original main gate is closed and S3 must trigger
-   independently) was not exercised in these runs. The code path exists
-   but lacks field evidence.
+3. **S3 独立闸门路径未覆盖**。总闸关闭场景（原总闸关闭时 S3 需独立触发）未在本次运行中测试。代码路径存在但缺少现场证据。
 
-## Not a Production Release
+4. **S3 限速**。2.2 秒告警间隔来自主控侧的节流机制，SLAM 侧心跳为 5Hz。
 
-This verification confirms that the obstacle avoidance pipeline produces
-expected outputs under field conditions. It does not constitute a formal
-production release. Known gaps remain — see project README and CHANGELOG
-for the full list.
+## 非 Production Release
+
+本次验证确认避障管线在现场条件下产生预期输出。不构成正式 production release。已知未完成项目见 `docs/project/status.md` 和 `docs/project/known_issues.md`。

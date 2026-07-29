@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: 运行静态仓库合同
         run: |
           python3 scripts/regression/run_static_contracts.py
@@ -27,6 +29,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: 检查文档合同
         run: |
           python3 scripts/regression/check_docs_contract.py

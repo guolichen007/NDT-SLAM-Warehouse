@@ -7,7 +7,7 @@
 NDT-SLAM Warehouse 是面向室内仓库和天车作业的 ROS1 Noetic 工程。系统同时维护
 NDT 定位、长期在线建图、五层地图输出和一条完整的吊物安全协议。
 
-当前现场验证基线：[`validation-obstacle-avoidance-20260728`](https://github.com/guolichen007/NDT-SLAM-Warehouse/releases/tag/validation-obstacle-avoidance-20260728)（`8d7d7ee`）。
+当前现场验证基线：[`validation-obstacle-avoidance-20260728`](https://github.com/guolichen007/NDT-SLAM-Warehouse/tree/validation-obstacle-avoidance-20260728)（`8d7d7ee`）。
 
 > 本软件不是安全认证设备。部署时必须保留外部急停、限位开关和现场安全策略。
 
@@ -19,7 +19,7 @@ NDT 定位、长期在线建图、五层地图输出和一条完整的吊物安�
 - **吊物刚体跟踪**：稳健二维 OBB 检测，锁定后冻结长/宽/高/yaw，作业期间只更新中心。起升不会导致错误丢失。
 - **多源几何融合**：Formal Geometry（冻结形状，经静态+实时来源连续一致授权）和 Degraded Geometry（仅实时正向告警）。
 - **障碍物追踪与安全码**：Code 14（CLEAR）/ 17（≤3m）/ 18（3-5m）/ 30-35（故障），只由真实空间碰撞风险产生正向告警。
-- **主控集成**：Code 18 → 外部主控程序 → S3 语音告警链路已现场验证。
+- **主控集成**：Code 18 → 外部主控程序 → S3 语音告警，已取得现场证据。
 - **服务器监控**：统一运维入口、SHA 门禁验证、CSV 诊断输出、只读安全窗口。
 
 ## 系统架构
@@ -137,11 +137,11 @@ rosbag play /path/to/warehouse.bag --clock
 
 ## 现场验证基线
 
-验证 Tag：[`validation-obstacle-avoidance-20260728`](https://github.com/guolichen007/NDT-SLAM-Warehouse/releases/tag/validation-obstacle-avoidance-20260728) → `8d7d7ee`
+验证 Tag：[`validation-obstacle-avoidance-20260728`](https://github.com/guolichen007/NDT-SLAM-Warehouse/tree/validation-obstacle-avoidance-20260728) → `8d7d7ee`
 
-已验证：
-- Code 17 / Code 18 正向安全输出（SLAM 侧：235×18, 53×17, 24 独立避障片段）
-- Code 18 → 外部主控程序 → S3 语音告警链路（主控侧：243×Code18 接收, 224×S3 发送, <1s 延迟）
+已取得现场证据：
+- SLAM 侧：已观测 Code 17/18 正向安全告警（235×18, 53×17, 24 独立避障片段）
+- 外部主控侧：已观测 Code 18 接收并触发 S3 语音告警（243×Code18, 224×S3, <1s 延迟）
 
 详细证据：[避障端到端现场验证](docs/validation/obstacle_avoidance_e2e_20260727_20260728.md)
 

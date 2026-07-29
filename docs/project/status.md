@@ -1,6 +1,6 @@
 # 项目状态
 
-当前 master 基线：`d0371873c8a80de6fe365fa26c2f599bf68d71ae`
+当前 master 基线：`9d20dffbc66166fb2f74ff9b175fbc4282a4462e`
 
 现场验证基线：`8d7d7eed0548321bf0646232f374fe95a29990dd`（`validation-obstacle-avoidance-20260728`）
 
@@ -41,6 +41,11 @@
 
 ## 版本状态
 
-当前版本：**Field-validated obstacle avoidance RC**
+| 维度 | 状态 |
+|---|---|
+| **仓库工程状态** | `MASTER_ENTERPRISE_ENGINEERED` |
+| **避障基线状态** | `FIELD_VALIDATED_RC` |
+| **质量门禁状态** | `FAIL_KNOWN_BASELINE`（14 个活跃 gtest 失败） |
+| **Production Release 状态** | `BLOCKED`（gtest 未清零、Bag 未验收、S3 独立闸门未验证） |
 
-不构成正式 production release。
+`FIELD_VALIDATED_RC` 仅表示避障算法基线（`8d7d7ee`）已取得现场验证证据，不表示当前 master 已达到正式发布准入条件。

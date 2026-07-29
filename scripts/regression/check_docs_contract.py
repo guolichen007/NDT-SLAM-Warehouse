@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
-"""检查文档合同：链接有效性、README 禁止项、过期引用、索引一致性。"""
+"""检查文档合同：链接有效性、README 禁止项、中文规范、过期引用、索引一致性。"""
 
 import os
 import re
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 技术标识符允许列表（中文检查时不视为违规）
+TECH_ALLOWLIST = {
+    'ROS', 'NDT', 'EKF', 'SLAM', 'API', 'CI', 'GitHub', 'Git',
+    'Formal', 'Degraded', 'MapCommit', 'CargoSafetyStatus',
+    'Code', 'Topic', 'Service', 'Tag', 'SHA', 'TF',
+    'LiDAR', 'PCL', 'Sophus', 'g2o', 'TBB', 'OpenCV',
+    'NDT-SLAM', 'NDT-SLAM-Warehouse', 'RViz', 'Noetic',
+    'OBB', 'EKF', 'Gravity', 'Marker', 'Schema',
+    'Cargo', 'Heartbeat', 'Manifest', 'Bundle',
+    'PASS', 'FAIL', 'NOT_RUN', 'KNOWN_BASELINE_FAILURE',
+    'CLEAR', 'NEAR_3M', 'NEAR_5M', 'LOST_HOLD',
+    'EMPTY', 'CANDIDATE', 'LOCKED',
+}
 
 
 def find_md_files(root, exclude_dirs=None):
@@ -51,21 +65,41 @@ def check_markdown_links(md_files):
 
 
 def check_readme_forbidden(readme_path):
-    """检查 README 不应包含的内容。"""
+    """检查 README 不应包含的内容（作为标题或章节，导航链接中的引用除外）。"""
     if not os.path.exists(readme_path):
         return ["README.md 不存在"]
     with open(readme_path, 'r', encoding='utf-8', errors='replace') as f:
-        content = f.read()
+        lines = f.readlines()
+    # 只检查标题行（以 # 开头）和非链接行中的禁止词
     forbidden = [
         'Known Limitations',
         'Not yet',
         'TODO',
         'NOT_RUN',
+        '待完成',
+        '待验证',
+        '待开发',
+        '已知问题',
+        '后续优化',
+        '下一步',
     ]
     errors = []
-    for term in forbidden:
-        if term in content:
-            errors.append(f"README.md 包含禁止项: '{term}'")
+    for lineno, line in enumerate(lines, 1):
+        stripped = line.strip()
+        # 跳过硬编码技术术语（如 ROS, NDT 等）
+        for term in forbidden:
+            if term in stripped:
+                # 如果在链接中 [text](url)，允许
+                if re.search(r'\[.*' + re.escape(term) + r'.*\]\(', stripped):
+                    continue
+                # 如果是 Markdown 标题（以 # 开头），不允许
+                if stripped.startswith('#'):
+                    errors.append(
+                        f"{readme_path}:{lineno}: README 标题含禁止项: '{term}'")
+                # 如果不在链接中
+                elif '](' not in stripped:
+                    errors.append(
+                        f"{readme_path}:{lineno}: README 含禁止项: '{term}'")
     return errors
 
 
@@ -96,6 +130,32 @@ def check_roadmap_not_in_tech_docs():
     if os.path.exists(roadmap_path):
         return ["roadmap.md 不应存在于 src/ndt_slam/doc/（已移至 docs/project/）"]
     return []
+
+
+def check_canonical_docs_language(tech_doc_dir):
+    """检查技术文档的标题和说明是否为中文。允许技术标识符出现英文。"""
+    # 应该中文化的英文模式（Markdown 标题中出现）
+    english_title_patterns = [
+        (r'^# (Contributing|Branch Discipline|Purpose|Commit Style|'
+         r'Safety-contract PR Requirements|Verification Checklist|'
+         r'Server Validation Evidence|Testing & Acceptance|Troubleshooting|'
+         r'Known Limitations|Not yet|TODO)',
+         '英文标题'),
+    ]
+    errors = []
+    if not os.path.isdir(tech_doc_dir):
+        return errors
+    for fname in os.listdir(tech_doc_dir):
+        if not fname.endswith('.md'):
+            continue
+        fpath = os.path.join(tech_doc_dir, fname)
+        with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+            for lineno, line in enumerate(f, 1):
+                for pattern, desc in english_title_patterns:
+                    if re.match(pattern, line.strip()):
+                        errors.append(
+                            f"{fpath}:{lineno}: {desc}: {line.strip()[:60]}")
+    return errors
 
 
 def check_docs_index_links(index_dir):
@@ -142,7 +202,11 @@ def main():
     # 4. Roadmap 位置
     all_errors.extend(check_roadmap_not_in_tech_docs())
 
-    # 5. Docs 索引链接
+    # 5. 技术文档中文标题检查
+    tech_doc_dir = os.path.join(REPO_ROOT, 'src', 'ndt_slam', 'doc')
+    all_errors.extend(check_canonical_docs_language(tech_doc_dir))
+
+    # 6. Docs 索引链接
     docs_dir = os.path.join(REPO_ROOT, 'docs')
     if os.path.isdir(docs_dir):
         all_errors.extend(check_docs_index_links(docs_dir))

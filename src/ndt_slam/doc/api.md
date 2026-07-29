@@ -9,7 +9,7 @@
 | 话题 | 消息类型 | 说明 |
 |---|---|---|
 | `/merged_points` | `sensor_msgs/PointCloud2` | 合并后点云（由外部 pointcloud_merger 提供），YAML 参数 `pointcloud_topic` 配置 |
-| `/gravity` | `std_msgs/Float32` 或同类 | 称重/Gravity 信号，YAML 参数 `gravity_topic` 配置 |
+| `/gravity` | `std_msgs/Float32` | 称重电压信号（YAML 参数 `hook_load_state.topic`，默认 `/gravity`） |
 
 ## 输出话题
 
