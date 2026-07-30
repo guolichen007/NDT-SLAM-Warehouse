@@ -34,7 +34,8 @@ systemd service 模板。服务文件不再硬编码用户和路径，必须通�
 ```bash
 sudo rosrun ndt_slam install_server_services.sh \
   --workspace ~/NDT-slam-ws --user "$(id -un)" \
-  --data-root ~/NDT-slam-ws/maps/live/current
+  --data-root ~/NDT-slam-ws/maps/live/current \
+  --yes --enable
 ```
 
 该入口修正了旧服务反向 `! flock` 的错误；flock 现在覆盖 SLAM 整个
@@ -42,9 +43,28 @@ ExecStart 生命周期。
 
 ## 启动
 
+手动调试/验收：
+
 ```bash
+cd ~/NDT-slam-ws
+source devel/setup.bash
+export NDT_SLAM_DATA_ROOT="$PWD/maps/live/current"
 roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
-  use_sim_time:=false persistent_map:=true
+  use_sim_time:=false use_rviz:=true persistent_map:=true \
+  use_ndt_recovery_watchdog:=true
+```
+
+生产 systemd：
+
+```bash
+sudo systemctl start ndt-slam.service ndt-slam-monitor.service
+sudo systemctl status ndt-slam.service ndt-slam-monitor.service
+```
+
+停止时先停只读 monitor，再停 SLAM。显式停止不会被 `Restart=always` 重新拉起：
+
+```bash
+sudo systemctl stop ndt-slam-monitor.service ndt-slam.service
 ```
 
 bag 验收使用 `use_sim_time:=true` 且 `rosbag play --clock`。第二次播放较小时间戳时不重启 heartbeat，用于验证 epoch 恢复。
@@ -66,7 +86,8 @@ bag 验收使用 `use_sim_time:=true` 且 `rosbag play --clock`。第二次播�
 
 `Restart=always` 是长期生产服务的预期语义。有限时长 bag、单次调试或其他应在
 正常结束后保持停止的任务，应直接使用隔离的 `roslaunch`/bag 验收入口，不要复用
-该生产 unit。
+该生产 unit。手动 launch 没有 systemd 监督；看门狗硬恢复只会安全结束当前 launch，
+不会自动启动新进程。
 
 ## 发布前门禁
 

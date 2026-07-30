@@ -1,5 +1,35 @@
 # 运行与运维
 
+## 运行入口
+
+手动调试/验收：
+
+```bash
+cd ~/NDT-slam-ws
+source devel/setup.bash
+export NDT_SLAM_DATA_ROOT="$PWD/maps/live/current"
+roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
+  use_sim_time:=false use_rviz:=true persistent_map:=true \
+  use_ndt_recovery_watchdog:=true
+```
+
+生产服务：
+
+```bash
+sudo systemctl start ndt-slam.service ndt-slam-monitor.service
+sudo systemctl status ndt-slam.service ndt-slam-monitor.service
+journalctl -u ndt-slam.service -u ndt-slam-monitor.service -f
+```
+
+停止服务：
+
+```bash
+sudo systemctl stop ndt-slam-monitor.service ndt-slam.service
+```
+
+安装或更新 unit 必须使用
+[`install_server_services.sh`](deployment.md)，不要手工复制 `.service.in` 模板。
+
 ## 启动后检查
 
 1. `/merged_points`、`/odom`、TF 和 `/ndt_slam/runtime_path` 持续前进。
@@ -16,6 +46,13 @@ rosrun ndt_slam server_monitorctl.sh snapshot
 ```
 
 监控是只读进程，typed safety 是权威源，simple status code 只做一致性校验。
+定位恢复的现场观察命令：
+
+```bash
+rostopic echo /ndt_slam/relocalization_status
+rosservice call /ndt_slam/relocalize
+tail -f "$NDT_SLAM_DATA_ROOT/recovery_watchdog/events.jsonl"
+```
 
 ## 关键事件日志
 

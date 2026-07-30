@@ -11,14 +11,15 @@ NDT 定位、长期在线建图、五层地图输出和一条完整的吊物安�
 
 > 本软件不是安全认证设备。部署时必须保留外部急停、限位开关和现场安全策略。
 
-当前实现已在 `f57d68a` 补充 NDT fitness 自适应熔断、重定位多帧确认、
-Pending 静态障碍正向告警和定位地图报告原子写入。该实现的 Windows 静态检查与
-历史现场证据分开管理；现场验证 Tag 不会随代码提交自动前移。
+当前主线已包含 NDT fitness 自适应熔断、重定位多帧确认、全图静态地图恢复、
+长期失败看门狗、Pending 静态障碍正向告警和定位地图报告原子写入。当前实现的
+Windows 静态检查与历史现场证据分开管理；现场验证 Tag 不会随代码提交自动前移。
 
 ## 核心能力
 
 - **双雷达融合定位**：结构优先 NDT 配准 + 各向异性 EKF + 静止保持策略。结构不足时进入 prediction-only，不回退到整片地面。
 - **定位故障隔离**：按目标云分布建立自适应 fitness 基线；持续恶化时隔离 NDT 测量和地图提交，恢复后再闭合。异步重定位结果需满足身份、时效和多帧一致性。
+- **定位自动恢复**：局部恢复失败后优先使用 `objects_clean` 静态地图做有界全图搜索；长期无法恢复时由看门狗落盘证据并请求 systemd 重启全栈，同时限制重启风暴。
 - **长期在线建图**：MotionGate 静止不建图，关键帧 active window，20m×20m tile 增量落盘，MemoryGuard/DiskGuard 保护。
 - **五层地图输出**：registration / display / ground / objects / objects_clean，同代发布，`header.seq` 一致。
 - **吊物刚体跟踪**：稳健二维 OBB 检测，锁定后冻结长/宽/高/yaw，作业期间只更新中心。起升不会导致错误丢失。
@@ -36,9 +37,12 @@ Pending 静态障碍正向告警和定位地图报告原子写入。该实现的
   ├── 定位链路
   │   ├── RegistrationCloudBuilder（结构保持）
   │   ├── NDT + NdtObservability
+  │   ├── NdtFitnessCircuitBreaker
+  │   ├── 局部/全局重定位（objects_clean 静态地图优先）
   │   ├── 各向异性 EKF（CraneMotionEKF）
   │   ├── StationaryMotionPolicy
-  │   └── MapCommit → Clean Worker → 五层 MapLayerBundle
+  │   ├── MapCommit → Clean Worker → 五层 MapLayerBundle
+  │   └── NDT Recovery Watchdog → systemd 全栈监督
   │
   └── 吊物安全链路
       ├── Cargo Observation → 生命周期（EMPTY→CANDIDATE→LOCKED→LOST_HOLD）
@@ -97,11 +101,32 @@ Windows 仅用于源码编辑和静态合同检查，不能替代 ROS/PCL/Sophus
 
 ## 启动
 
-生产服务器（真实传感器时间、持久化地图）：
+手动调试/验收（真实传感器时间、带 RViz 和看门狗）：
 
 ```bash
+cd ~/NDT-slam-ws
+source devel/setup.bash
+export NDT_SLAM_DATA_ROOT="$PWD/maps/live/current"
 roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
-  use_sim_time:=false use_rviz:=false persistent_map:=true
+  use_sim_time:=false use_rviz:=true persistent_map:=true \
+  use_ndt_recovery_watchdog:=true
+```
+
+手动运行没有外部进程监督；看门狗请求硬恢复时会安全结束 launch，但不会自行重拉。
+长期生产使用 systemd：
+
+```bash
+sudo rosrun ndt_slam install_server_services.sh \
+  --workspace ~/NDT-slam-ws --user "$(id -un)" \
+  --data-root ~/NDT-slam-ws/maps/live/current --yes --enable
+sudo systemctl start ndt-slam.service ndt-slam-monitor.service
+sudo systemctl status ndt-slam.service ndt-slam-monitor.service
+```
+
+停止生产服务：
+
+```bash
+sudo systemctl stop ndt-slam-monitor.service ndt-slam.service
 ```
 
 服务器验收统一入口：
@@ -123,7 +148,9 @@ rosbag play /path/to/warehouse.bag --clock
 
 该 launch 默认启动 SLAM、NDT 恢复看门狗和 RViz。RViz 中全量
 `display_map` 默认关闭以避免大点云拖慢界面，需要时可手工开启；这不会关闭
-`objects_clean` 等运行显示。生产 systemd 服务保持 `use_rviz:=false`。
+`objects_clean` 等运行显示。生产 systemd 服务固定使用 `use_rviz:=false`。
+完整安装、有效配置检查和故障恢复命令见[部署](src/ndt_slam/doc/deployment.md)与
+[运行与运维](src/ndt_slam/doc/operations.md)。
 
 ## 主要话题与接口
 

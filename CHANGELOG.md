@@ -18,6 +18,10 @@
 - `CargoSafetyEvaluator`：14/17/18/30-35 类型化安全合同，含正式 CLEAR 授权门控。
 - `cargo_alarm_heartbeat_node`：类型化 `CargoSafetyStatus` 合同校验、5Hz 状态重发、重复时间戳拒绝。
 - 服务器监控 v2：集成货物遥测和 60/600 秒安全窗口。
+- NDT 恢复看门狗：持续退化时先请求进程内重定位，长期失败时落盘证据并由
+  systemd 有界重启全栈。
+- 全局重定位在局部恢复失败后优先使用 `objects_clean` 静态地图，并以
+  ScanContext 与有界最远点网格补充全图候选。
 - 完整 gtest 套件：货物避障、几何融合、摆动监控、Pending Envelope、障碍追踪、静态证据授权、静态高度场、起吊原点绑定、物理运动估计、存在状态机、地图会话快照、揭示支撑观测。
 - Python 测试合同：地图加载事务、服务器监控、安全聚合器、货物几何分类、类型化回调时间验证。
 
@@ -30,6 +34,9 @@
 - 生命周期变更使上一个 Manifest 变为非活跃，保留为最近良好归档，直到成熟当前 epoch 快照被原子提交。
 - 旧 monitor/deploy 脚本为 `server_monitorctl.sh` 的兼容包装。
 - 服务器验证为 SHA 门控，显式 preflight、Manifest 和 PASS/FAIL/NOT_RUN 保留。
+- 生产 systemd unit 使用 `Restart=always` 接管 roslaunch 正常返回场景；
+  安装器同时验证 SLAM/monitor 的渲染配置和 drop-in 合并后的最终生效配置。
+- RViz 默认关闭全量 `display_map`，保留必要运行显示，降低大点云界面负担。
 - CI 在每次 push 时执行静态合同。
 
 ### 修复
@@ -42,6 +49,9 @@
 - 货物监控在 Gravity 证据冲突下被门控。
 - 正常生命周期不再产生误报 Code 35。
 - Pending Cargo Growth 导致的误报 Code 17 已修复。
+- 修复持续高 fitness 后无法恢复：错误 NDT 测量不再污染 EKF/地图，局部恢复失败后
+  可升级为静态全图重定位，并在超过硬门限时请求全栈重启。
+- 修复全局重定位结果沿用局部 0.5 秒时效窗口而被过早丢弃的问题。
 
 ### 安全
 
@@ -69,8 +79,7 @@ Tag：`validation-obstacle-avoidance-20260728` → `8d7d7ee`
 
 - S3 独立闸门现场 case 待完成
 - 持久地图报告层尚未实现
-- NDT fitness 自动熔断待完成
-- 重定位最终验收待完成
+- NDT fitness 熔断、全局重定位与看门狗仍待 Ubuntu、Bag 和现场验收
 - Torsion HOIST_MISSING 诊断（2 个 cargo_swing_monitor 测试失败）
 - 障碍追踪器边界条件（10 个测试失败，8d7d7ee 基线已知）
 - 货物组件融合边界情况（2 个测试失败，8d7d7ee 基线已知）

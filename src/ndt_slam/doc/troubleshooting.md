@@ -20,6 +20,28 @@
 
 检查 registration mode、静态物体点数、ground fraction、占用覆盖和 observability ratio。禁止重新开启 full-ground fallback；应改善传感器覆盖、外参或结构采样。
 
+## NDT 持续退化或反复重启
+
+先检查 `/ndt_slam/relocalization_status` 和
+`$NDT_SLAM_DATA_ROOT/recovery_watchdog/events.jsonl`。`soft_relocalize` 表示已请求
+进程内恢复，`hard_restart` 表示已请求 systemd 重启全栈，`restart_suppressed`
+表示 15 分钟重启预算已耗尽，此时应检查雷达输入、静态地图和磁盘证据，不要继续
+手工循环重启。
+
+若日志记录了 `hard_restart` 但进程没有重新拉起，先确认当前入口：手动
+`roslaunch` 没有外部 supervisor，只会安全退出。生产服务检查：
+
+```bash
+sudo systemctl status ndt-slam.service ndt-slam-monitor.service
+sudo systemctl show ndt-slam.service \
+  -p Restart -p RestartUSec -p StartLimitIntervalUSec \
+  -p StartLimitBurst -p ExecStart
+journalctl -u ndt-slam.service -u ndt-slam-monitor.service -f
+```
+
+如安装器报告有效配置失败，使用 `systemctl cat` 检查 drop-in；不要绕过检查直接
+启动旧 unit。
+
 ## 静止时错误移动或地图增长
 
 检查 Motion 状态变化 reason、raw 增量方向一致性、EKF 速度、CATCH_UP residual，以及 local/persistent 两个写入许可。累计 raw drift 本身不构成移动证据。
