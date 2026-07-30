@@ -89,7 +89,7 @@ require_unit_text() {
 slam_unit=/etc/systemd/system/ndt-slam.service
 monitor_unit=/etc/systemd/system/ndt-slam-monitor.service
 for unit_file in "$slam_unit" "$monitor_unit"; do
-  if grep -Eq '@(USER|WORKSPACE|DATA_ROOT|ENV_FILE)@' "$unit_file"; then
+  if grep -Eq '@[A-Z_][A-Z0-9_]*@' "$unit_file"; then
     fail_rendered_unit "$(basename "$unit_file") contains an unresolved placeholder"
   fi
   require_unit_line "$unit_file" "User=$service_user"
@@ -97,6 +97,8 @@ for unit_file in "$slam_unit" "$monitor_unit"; do
   require_unit_line "$unit_file" "EnvironmentFile=$env_file"
 done
 
+require_unit_line "$slam_unit" 'StartLimitIntervalSec=300'
+require_unit_line "$slam_unit" 'StartLimitBurst=5'
 require_unit_line "$slam_unit" 'Restart=always'
 require_unit_line "$slam_unit" 'RestartSec=5'
 require_unit_text "$slam_unit" '/usr/bin/flock --no-fork --exclusive --nonblock'
@@ -112,9 +114,16 @@ require_unit_line "$monitor_unit" 'After=ndt-slam.service'
 require_unit_line "$monitor_unit" 'Wants=ndt-slam.service'
 require_unit_line "$monitor_unit" 'Restart=always'
 require_unit_line "$monitor_unit" 'RestartSec=10'
+require_unit_line "$monitor_unit" 'TimeoutStopSec=30'
 require_unit_text "$monitor_unit" \
   'exec rosrun ndt_slam server_runtime_monitor.py'
+require_unit_text "$monitor_unit" \
+  '--workspace "$NDT_SLAM_WORKSPACE"'
 require_unit_text "$monitor_unit" '--persistent-root "$NDT_SLAM_DATA_ROOT"'
+require_unit_text "$monitor_unit" \
+  '--config "$(rospack find ndt_slam)/config/server_monitor.yaml"'
+require_unit_text "$monitor_unit" \
+  '--lock-file "$NDT_SLAM_WORKSPACE/server_runs/.service-monitor.lock"'
 
 systemctl daemon-reload
 
@@ -157,6 +166,8 @@ require_effective_text() {
 
 require_effective_exact ndt-slam.service Restart always
 require_effective_exact ndt-slam.service RestartUSec 5s
+require_effective_exact ndt-slam.service StartLimitIntervalUSec 5min
+require_effective_exact ndt-slam.service StartLimitBurst 5
 require_effective_exact ndt-slam.service User "$service_user"
 require_effective_exact ndt-slam.service WorkingDirectory "$workspace"
 require_effective_text ndt-slam.service EnvironmentFiles "$env_file"
@@ -170,13 +181,20 @@ require_effective_text ndt-slam.service ExecStart \
 
 require_effective_exact ndt-slam-monitor.service Restart always
 require_effective_exact ndt-slam-monitor.service RestartUSec 10s
+require_effective_exact ndt-slam-monitor.service TimeoutStopUSec 30s
 require_effective_exact ndt-slam-monitor.service User "$service_user"
 require_effective_exact ndt-slam-monitor.service WorkingDirectory "$workspace"
 require_effective_text ndt-slam-monitor.service EnvironmentFiles "$env_file"
 require_effective_text ndt-slam-monitor.service ExecStart \
   'server_runtime_monitor.py'
 require_effective_text ndt-slam-monitor.service ExecStart \
+  '--workspace'
+require_effective_text ndt-slam-monitor.service ExecStart \
   '--persistent-root'
+require_effective_text ndt-slam-monitor.service ExecStart \
+  'server_monitor.yaml'
+require_effective_text ndt-slam-monitor.service ExecStart \
+  '.service-monitor.lock'
 
 if $enable; then
   systemctl enable ndt-slam.service ndt-slam-monitor.service

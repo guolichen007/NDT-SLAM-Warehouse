@@ -175,6 +175,8 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "[Service]", 1
         )[1]
         self.assertIn("Restart=always", monitor_service_section)
+        self.assertIn("RestartSec=10", monitor_service_section)
+        self.assertIn("TimeoutStopSec=30", monitor_service_section)
         self.assertNotIn(
             "Restart=on-failure", monitor_service_section
         )
@@ -189,6 +191,15 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "server_runtime_monitor.py", INSTALLER
         )
         self.assertIn(
+            '--workspace "$NDT_SLAM_WORKSPACE"', INSTALLER
+        )
+        self.assertIn(
+            "server_monitor.yaml", INSTALLER
+        )
+        self.assertIn(
+            ".service-monitor.lock", INSTALLER
+        )
+        self.assertIn(
             "warehouse_live_longterm_mapping.launch", INSTALLER
         )
         self.assertIn(
@@ -199,6 +210,10 @@ class SafetyRecoveryContractTest(unittest.TestCase):
         )
         self.assertIn("systemctl show", INSTALLER)
         self.assertIn("EnvironmentFiles", INSTALLER)
+        self.assertIn("StartLimitIntervalUSec", INSTALLER)
+        self.assertIn("StartLimitBurst", INSTALLER)
+        self.assertIn("TimeoutStopUSec", INSTALLER)
+        self.assertIn("@[A-Z_][A-Z0-9_]*@", INSTALLER)
         self.assertIn("(check drop-ins)", INSTALLER)
 
     def test_NewPoliciesAreBuiltAndHaveUnitTests(self):

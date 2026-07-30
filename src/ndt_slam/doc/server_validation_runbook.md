@@ -68,11 +68,12 @@ sudo rosrun ndt_slam install_server_services.sh \
   --data-root "$WS/maps/live/current"
 sudo systemctl cat ndt-slam.service ndt-slam-monitor.service
 sudo systemctl show ndt-slam.service \
-  -p Restart -p RestartUSec -p User -p WorkingDirectory \
+  -p Restart -p RestartUSec -p StartLimitIntervalUSec \
+  -p StartLimitBurst -p User -p WorkingDirectory \
   -p EnvironmentFiles -p ExecStart
 sudo systemctl show ndt-slam-monitor.service \
-  -p Restart -p RestartUSec -p User -p WorkingDirectory \
-  -p EnvironmentFiles -p ExecStart
+  -p Restart -p RestartUSec -p TimeoutStopUSec \
+  -p User -p WorkingDirectory -p EnvironmentFiles -p ExecStart
 ```
 
 确认 launch 参数显式为 `use_sim_time:=false use_rviz:=false
