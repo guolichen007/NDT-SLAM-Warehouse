@@ -15,6 +15,7 @@
 
 ## 验证证据
 
+- [避障运行证据审查 2026-07-29/30](validation/obstacle_avoidance_runtime_evidence_review_20260729_20260730.md) — 长时间运行统计、版本边界与补充验收项
 - [避障端到端现场验证 2026-07-27/28](validation/obstacle_avoidance_e2e_20260727_20260728.md)
 - [实图审计 2026-07-21](validation/real_map_audit_20260721.md)
 - [Windows 静态合同结果 2026-07-21](validation/windows_static_contract_result_20260721.md)

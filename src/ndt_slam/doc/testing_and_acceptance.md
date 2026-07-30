@@ -25,10 +25,22 @@ git diff --check
 python scripts/regression/check_yaml_duplicate_keys.py
 python scripts/regression/check_repository_integrity.py
 python scripts/regression/check_cargo_safety_e2e.py
-python -m unittest tests.test_server_monitor
+python scripts/regression/check_docs_contract.py
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
 这些检查覆盖源码完整性、UTF-8、YAML 重复键、关键安全链和静态架构合同，不替代 C++ 编译。
+
+## 运行证据归属
+
+- 现场运行必须从 `run_manifest.json` 或等价机器记录获取完整 SHA，不能用报告撰写时
+  所在分支代替运行时版本。
+- 自由文本 `reason` 只能辅助定位。消息 Schema、类型化字段和采集 SHA 才是安全语义
+  的依据；旧原因串不能验证后续提交新增的代码路径。
+- 不同场次的 SLAM 与主控日志只能证明链路各段可工作，不能计算同一事件的端到端
+  延迟或宣称 1:1 对应。
+- 没有人工标注、独立传感器真值或可复核场景清单时，不报告零误报、零漏报。
+- `obstacle_provenance_type` 必须按采集版本的 `CargoSafetyStatus.msg` 枚举解释。
 
 ## Ubuntu 编译项
 
@@ -50,3 +62,5 @@ python -m unittest tests.test_server_monitor
 无崩溃、无非有限位姿、无 full-ground fallback、无单帧 CLEAR、安全码与几何一致、五层同代、CSV 字段完整、终端无逐帧洪泛。
 
 服务器运行必须保留 `run_manifest.json`、`final_summary.json` 和 `final_report.md`。报告中的 Ubuntu build、gtest、Bag、soak 若未实际执行，必须为 `NOT_RUN`，不得用监控采样自动替代。操作顺序见 [Server Validation Runbook](server_validation_runbook.md)。
+
+对应版本：`f57d68a`。

@@ -52,6 +52,16 @@ max_z_step  = max_z_speed  * sensor_dt + margin
 - 连续确认后可升级
 - 旧 Pending Envelope 不能保持 session ready
 
+Pending 阶段同时评估实时障碍与静态地图风险。实时来源暂不可用时，静态路径必须满足
+来源区域排除授权、查询有效且有界、同一 cargo lifecycle、同一 map generation、稳定
+地图 cell 区域连续匹配等条件，才能发布正向 17/18。该路径使用独立静态 obstacle ID
+命名空间，并在时间间隔过大、生命周期变化、地图代际变化、来源失效、风险消失或区域
+重匹配失败时重置。
+
+静态 Pending 路径永不授权 CLEAR，也不借用实时 track 身份。运行诊断分别输出
+`pending_live_warning_authorized` 和 `pending_static_warning_authorized`，不能再把旧的
+`pending_positive_warning_authorized` 原因串当作两条路径的共同证据。
+
 ## LOST_HOLD 双生命周期
 
 - **显示**：保留到 `lost_clear_sec`，用于操作员识别，降级样式不表示安全有效。
@@ -117,3 +127,5 @@ EMPTY 阶段可采集起吊前高度，但无抬升/运动证据不得把地面�
 - Skew-pull：持续性方向偏移
 - Torsion：扭转（需要非正方形货物）
 - 吊钩锚点授权（真实 hoist 信号 vs 配置值）
+
+对应版本：`f57d68a`。
