@@ -67,10 +67,18 @@ sudo rosrun ndt_slam install_server_services.sh \
   --workspace "$WS" --user "$(id -un)" \
   --data-root "$WS/maps/live/current"
 sudo systemctl cat ndt-slam.service ndt-slam-monitor.service
+sudo systemctl show ndt-slam.service \
+  -p Restart -p RestartUSec -p User -p WorkingDirectory \
+  -p EnvironmentFiles -p ExecStart
+sudo systemctl show ndt-slam-monitor.service \
+  -p Restart -p RestartUSec -p User -p WorkingDirectory \
+  -p EnvironmentFiles -p ExecStart
 ```
 
 确认 launch 参数显式为 `use_sim_time:=false use_rviz:=false
-persistent_map:=true`。确认路径后可用 `--yes --enable` 非交互安装/启用。
+persistent_map:=true`。安装器会在 `daemon-reload` 后检查最终生效值，因此危险的
+drop-in 覆盖会直接导致安装失败；仅查看主 unit 文件不足以排除此风险。确认路径后
+可用 `--yes --enable` 非交互安装/启用。
 
 ## 7–8. 启动 SLAM 和 monitor
 

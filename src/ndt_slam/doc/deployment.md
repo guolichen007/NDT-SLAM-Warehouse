@@ -56,10 +56,17 @@ bag 验收使用 `use_sim_time:=true` 且 `rosbag play --clock`。第二次播�
 `systemctl stop` 时 systemd 不会重启该服务。
 部署后必须确认 unit 使用仓库当前模板，旧 unit 的较长 `RestartSec` 不会自动更新。
 不要手工复制未展开的 `.service.in`。每次更新该分支后重新执行
-`install_server_services.sh`；安装器会覆盖 unit、检查 `Restart=always`、
-`RestartSec=5` 和 `use_ndt_recovery_watchdog:=true`，随后执行
-`systemctl daemon-reload`。`StartLimitIntervalSec=300` 与 `StartLimitBurst=5`
-位于 `[Unit]` 段，在看门狗自身预算之外提供 systemd 级重启风暴保护。
+`install_server_services.sh`。安装器会同时验证 SLAM 和 monitor 的渲染结果，
+包括用户、路径、重启策略与核心 `ExecStart`，随后执行 `systemctl daemon-reload`，
+再通过 `systemctl show` 校验最终生效的配置。drop-in 可以增加资源限制、日志等
+配置，但若覆盖 `Restart`、`RestartSec`、运行用户、工作目录、环境文件或核心
+启动命令，安装会失败并打印合并后的 unit，必须先处理冲突。
+`StartLimitIntervalSec=300` 与 `StartLimitBurst=5` 位于 `[Unit]` 段，在看门狗
+自身预算之外提供 systemd 级重启风暴保护。
+
+`Restart=always` 是长期生产服务的预期语义。有限时长 bag、单次调试或其他应在
+正常结束后保持停止的任务，应直接使用隔离的 `roslaunch`/bag 验收入口，不要复用
+该生产 unit。
 
 ## 发布前门禁
 

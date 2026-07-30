@@ -54,6 +54,9 @@ $NDT_SLAM_DATA_ROOT/recovery_watchdog/state.json
 
 `events.jsonl` 记录软恢复、硬重启和重启抑制；`state.json` 原子保存重启窗口历史。
 现场验收应同时保留 systemd journal、上述两份证据和对应提交 SHA。
+外部告警必须解析 `events.jsonl` 的稳定 JSON `action` 字段，并关注
+`soft_relocalize`、`hard_restart`、`restart_suppressed`；不得依赖
+`logfatal` 的完整文本，日志措辞不属于机器接口。
 
 ## 吊物观察
 

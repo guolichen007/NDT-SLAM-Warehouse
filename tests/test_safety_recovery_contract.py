@@ -24,6 +24,9 @@ WATCHDOG = (
 SERVICE = (
     ROOT / "src/ndt_slam/scripts/ops/ndt-slam.service.in"
 ).read_text(encoding="utf-8")
+MONITOR_SERVICE = (
+    ROOT / "src/ndt_slam/scripts/ops/ndt-slam-monitor.service.in"
+).read_text(encoding="utf-8")
 INSTALLER = (
     ROOT / "src/ndt_slam/scripts/ops/install_server_services.sh"
 ).read_text(encoding="utf-8")
@@ -159,9 +162,44 @@ class SafetyRecoveryContractTest(unittest.TestCase):
         self.assertIn("StartLimitBurst=5", unit_section)
         self.assertNotIn("StartLimitIntervalSec", service_section)
         self.assertIn("Restart=always", service_section)
+        self.assertNotIn("Restart=on-failure", service_section)
+        self.assertEqual(service_section.count("Restart="), 1)
+        self.assertIn('"@DATA_ROOT@/.ndt-slam.lock"', SERVICE)
+
+        self.assertIn("After=ndt-slam.service", MONITOR_SERVICE)
+        self.assertIn("Wants=ndt-slam.service", MONITOR_SERVICE)
+        self.assertIn(
+            "server_runtime_monitor.py", MONITOR_SERVICE
+        )
+        monitor_service_section = MONITOR_SERVICE.split(
+            "[Service]", 1
+        )[1]
+        self.assertIn("Restart=always", monitor_service_section)
+        self.assertNotIn(
+            "Restart=on-failure", monitor_service_section
+        )
+        self.assertEqual(
+            monitor_service_section.count("Restart="), 1
+        )
+
+        self.assertIn("monitor_unit=", INSTALLER)
         self.assertIn("RestartSec=5", INSTALLER)
-        self.assertIn("cannot recover a clean roslaunch exit", INSTALLER)
-        self.assertIn("does not enforce the recovery watchdog", INSTALLER)
+        self.assertIn("RestartSec=10", INSTALLER)
+        self.assertIn(
+            "server_runtime_monitor.py", INSTALLER
+        )
+        self.assertIn(
+            "warehouse_live_longterm_mapping.launch", INSTALLER
+        )
+        self.assertIn(
+            "use_ndt_recovery_watchdog:=true", INSTALLER
+        )
+        self.assertIn(
+            "contains obsolete Restart=on-failure", INSTALLER
+        )
+        self.assertIn("systemctl show", INSTALLER)
+        self.assertIn("EnvironmentFiles", INSTALLER)
+        self.assertIn("(check drop-ins)", INSTALLER)
 
     def test_NewPoliciesAreBuiltAndHaveUnitTests(self):
         required = (

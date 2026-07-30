@@ -69,20 +69,115 @@ for unit in ndt-slam.service ndt-slam-monitor.service; do
   chmod 0644 "/etc/systemd/system/$unit"
 done
 
-grep -Fqx 'RestartSec=5' /etc/systemd/system/ndt-slam.service || {
-  echo "installed ndt-slam.service has unexpected RestartSec" >&2
+fail_rendered_unit() {
+  echo "rendered unit validation failed: $1" >&2
   exit 4
 }
-grep -Fqx 'Restart=always' /etc/systemd/system/ndt-slam.service || {
-  echo "installed ndt-slam.service cannot recover a clean roslaunch exit" >&2
-  exit 4
+require_unit_line() {
+  local unit_file="$1"
+  local expected="$2"
+  grep -Fqx "$expected" "$unit_file" ||
+    fail_rendered_unit "$(basename "$unit_file") missing line: $expected"
 }
-grep -Fq 'use_ndt_recovery_watchdog:=true' \
-  /etc/systemd/system/ndt-slam.service || {
-  echo "installed ndt-slam.service does not enforce the recovery watchdog" >&2
-  exit 4
+require_unit_text() {
+  local unit_file="$1"
+  local expected="$2"
+  grep -Fq "$expected" "$unit_file" ||
+    fail_rendered_unit "$(basename "$unit_file") missing text: $expected"
 }
+
+slam_unit=/etc/systemd/system/ndt-slam.service
+monitor_unit=/etc/systemd/system/ndt-slam-monitor.service
+for unit_file in "$slam_unit" "$monitor_unit"; do
+  if grep -Eq '@(USER|WORKSPACE|DATA_ROOT|ENV_FILE)@' "$unit_file"; then
+    fail_rendered_unit "$(basename "$unit_file") contains an unresolved placeholder"
+  fi
+  require_unit_line "$unit_file" "User=$service_user"
+  require_unit_line "$unit_file" "WorkingDirectory=$workspace"
+  require_unit_line "$unit_file" "EnvironmentFile=$env_file"
+done
+
+require_unit_line "$slam_unit" 'Restart=always'
+require_unit_line "$slam_unit" 'RestartSec=5'
+require_unit_text "$slam_unit" '/usr/bin/flock --no-fork --exclusive --nonblock'
+require_unit_text "$slam_unit" "$data_root/.ndt-slam.lock"
+require_unit_text "$slam_unit" \
+  'exec roslaunch ndt_slam warehouse_live_longterm_mapping.launch'
+require_unit_text "$slam_unit" 'use_ndt_recovery_watchdog:=true'
+if grep -Fq 'Restart=on-failure' "$slam_unit"; then
+  fail_rendered_unit "ndt-slam.service contains obsolete Restart=on-failure"
+fi
+
+require_unit_line "$monitor_unit" 'After=ndt-slam.service'
+require_unit_line "$monitor_unit" 'Wants=ndt-slam.service'
+require_unit_line "$monitor_unit" 'Restart=always'
+require_unit_line "$monitor_unit" 'RestartSec=10'
+require_unit_text "$monitor_unit" \
+  'exec rosrun ndt_slam server_runtime_monitor.py'
+require_unit_text "$monitor_unit" '--persistent-root "$NDT_SLAM_DATA_ROOT"'
+
 systemctl daemon-reload
+
+fail_effective_unit() {
+  local unit="$1"
+  local reason="$2"
+  echo "effective unit validation failed: $unit: $reason" >&2
+  systemctl cat --no-pager "$unit" >&2 || true
+  exit 5
+}
+effective_property() {
+  local unit="$1"
+  local property="$2"
+  local value
+  if ! value="$(systemctl show "$unit" --property="$property" --value)"; then
+    fail_effective_unit "$unit" "cannot read property $property"
+  fi
+  printf '%s' "$value"
+}
+require_effective_exact() {
+  local unit="$1"
+  local property="$2"
+  local expected="$3"
+  local actual
+  actual="$(effective_property "$unit" "$property")"
+  [[ "$actual" == "$expected" ]] ||
+    fail_effective_unit "$unit" \
+      "$property expected '$expected' but is '$actual' (check drop-ins)"
+}
+require_effective_text() {
+  local unit="$1"
+  local property="$2"
+  local expected="$3"
+  local actual
+  actual="$(effective_property "$unit" "$property")"
+  [[ "$actual" == *"$expected"* ]] ||
+    fail_effective_unit "$unit" \
+      "$property does not contain '$expected' (check drop-ins)"
+}
+
+require_effective_exact ndt-slam.service Restart always
+require_effective_exact ndt-slam.service RestartUSec 5s
+require_effective_exact ndt-slam.service User "$service_user"
+require_effective_exact ndt-slam.service WorkingDirectory "$workspace"
+require_effective_text ndt-slam.service EnvironmentFiles "$env_file"
+require_effective_text ndt-slam.service ExecStart '/usr/bin/flock'
+require_effective_text ndt-slam.service ExecStart \
+  "$data_root/.ndt-slam.lock"
+require_effective_text ndt-slam.service ExecStart \
+  'warehouse_live_longterm_mapping.launch'
+require_effective_text ndt-slam.service ExecStart \
+  'use_ndt_recovery_watchdog:=true'
+
+require_effective_exact ndt-slam-monitor.service Restart always
+require_effective_exact ndt-slam-monitor.service RestartUSec 10s
+require_effective_exact ndt-slam-monitor.service User "$service_user"
+require_effective_exact ndt-slam-monitor.service WorkingDirectory "$workspace"
+require_effective_text ndt-slam-monitor.service EnvironmentFiles "$env_file"
+require_effective_text ndt-slam-monitor.service ExecStart \
+  'server_runtime_monitor.py'
+require_effective_text ndt-slam-monitor.service ExecStart \
+  '--persistent-root'
+
 if $enable; then
   systemctl enable ndt-slam.service ndt-slam-monitor.service
 fi

@@ -90,20 +90,26 @@ class NdtRecoveryWatchdogTest(unittest.TestCase):
             )
 
     def test_HardRestartReturns75FromMainThreadAfterCleanup(self):
+        calls = []
+
         class FakeTimer:
-            shutdown_called = False
+            def __init__(self):
+                self.shutdown_called = False
 
             def shutdown(self):
                 self.shutdown_called = True
+                calls.append("timer.shutdown")
 
         class FakeRospy:
-            shutdown_reason = ""
+            def __init__(self):
+                self.shutdown_reason = ""
 
             def is_shutdown(self):
                 return False
 
             def signal_shutdown(self, reason):
                 self.shutdown_reason = reason
+                calls.append("rospy.signal_shutdown")
 
         watchdog = WATCHDOG.RosRecoveryWatchdog.__new__(
             WATCHDOG.RosRecoveryWatchdog
@@ -119,6 +125,53 @@ class NdtRecoveryWatchdogTest(unittest.TestCase):
             watchdog.rospy.shutdown_reason,
             "persistent localization failure",
         )
+        self.assertEqual(
+            calls, ["timer.shutdown", "rospy.signal_shutdown"]
+        )
+
+    def test_ExternalShutdownReturnsZeroWithoutRestartCleanup(self):
+        class UnexpectedTimer:
+            def shutdown(self):
+                raise AssertionError(
+                    "external shutdown must not stop the timer twice"
+                )
+
+        class FakeRospy:
+            def __init__(self):
+                self.shutdown_reason = None
+
+            def is_shutdown(self):
+                return True
+
+            def signal_shutdown(self, reason):
+                self.shutdown_reason = reason
+
+        watchdog = WATCHDOG.RosRecoveryWatchdog.__new__(
+            WATCHDOG.RosRecoveryWatchdog
+        )
+        watchdog.rospy = FakeRospy()
+        watchdog.timer = UnexpectedTimer()
+        watchdog.restart_requested = threading.Event()
+
+        self.assertEqual(watchdog.run(), 0)
+        self.assertIsNone(watchdog.rospy.shutdown_reason)
+
+    def test_TimerCallbackStopsAfterRestartWasRequested(self):
+        class UnexpectedRospy:
+            def __getattr__(self, name):
+                raise AssertionError(
+                    f"timer callback continued via rospy.{name}"
+                )
+
+        watchdog = WATCHDOG.RosRecoveryWatchdog.__new__(
+            WATCHDOG.RosRecoveryWatchdog
+        )
+        watchdog.rospy = UnexpectedRospy()
+        watchdog.status = object()
+        watchdog.restart_requested = threading.Event()
+        watchdog.restart_requested.set()
+
+        watchdog._timer_callback(None)
 
 
 if __name__ == "__main__":
