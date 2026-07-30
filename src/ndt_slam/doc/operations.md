@@ -33,9 +33,17 @@ rosrun ndt_slam server_monitorctl.sh snapshot
 - 15 分钟最多允许 3 次完整重启，达到预算后保持运行并记录
   `restart_suppressed`，防止传感器或地图故障引起重启风暴。
 
-看门狗是 `required` roslaunch 节点。生产 `ndt-slam.service` 使用
-`Restart=on-failure`，因此退出会终止当前 launch 并在 5 秒后重启整套建图定位链。
+看门狗是 `required` roslaunch 节点。required 会终止当前 launch，但 ROS Noetic 的
+roslaunch 可能在完成清理后返回 0；生产 `ndt-slam.service` 因此使用
+`Restart=always`，并在 5 秒后重启整套建图定位链。
 直接手工执行 `roslaunch` 时没有外部 supervisor，只会安全退出，不会自行拉起。
+硬恢复不再从 ROS 定时器线程调用 `os._exit`：定时器只设置重启事件，主线程关闭
+timer、调用 ROS shutdown，再返回 75。这样看门狗自身完成正常清理，roslaunch 仍能
+识别非零退出并按 required 语义优雅停止其余节点。
+
+`required` 是有意的 fail-safe 边界：看门狗异常退出时不允许 SLAM 在失去长期恢复
+保护后静默继续运行。证据目录不可写、软重定位服务暂时不可用等外部错误均在节点内
+捕获并记录，不会直接造成看门狗崩溃；真正的进程异常才触发整栈重启。
 
 证据默认写入：
 

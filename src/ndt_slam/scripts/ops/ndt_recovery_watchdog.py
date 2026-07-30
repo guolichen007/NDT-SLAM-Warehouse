@@ -16,6 +16,7 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
@@ -201,8 +202,8 @@ class RosRecoveryWatchdog:
         from std_srvs.srv import Empty
 
         self.rospy = rospy
-        self.empty_service = Empty
         self.status: Optional[RecoveryStatus] = None
+        self.restart_requested = threading.Event()
         self.started_at = time.time()
         config = WatchdogConfig(
             startup_grace_sec=float(
@@ -306,7 +307,7 @@ class RosRecoveryWatchdog:
         )
 
     def _timer_callback(self, _event: Any) -> None:
-        if self.status is None:
+        if self.status is None or self.restart_requested.is_set():
             return
         now = time.time()
         decision = self.policy.observe(self.status, now)
@@ -350,19 +351,29 @@ class RosRecoveryWatchdog:
 
         self.rospy.logfatal(
             "[NdtRecoveryWatchdog] persistent localization failure; "
-            "exiting 75 for supervised full-stack restart; evidence=%s",
+            "requesting orderly exit 75 for supervised full-stack restart; "
+            "evidence=%s",
             self.events_path,
         )
-        os._exit(75)
+        self.restart_requested.set()
+
+    def run(self) -> int:
+        """Wait in the main thread so exit 75 runs normal Python/ROS cleanup."""
+        while not self.rospy.is_shutdown():
+            if self.restart_requested.wait(timeout=0.2):
+                self.timer.shutdown()
+                self.rospy.signal_shutdown(
+                    "persistent localization failure"
+                )
+                return 75
+        return 0
 
 
 def main() -> int:
     import rospy
 
     rospy.init_node("ndt_recovery_watchdog")
-    RosRecoveryWatchdog()
-    rospy.spin()
-    return 0
+    return RosRecoveryWatchdog().run()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 
 
@@ -87,6 +88,37 @@ class NdtRecoveryWatchdogTest(unittest.TestCase):
             self.assertEqual(
                 WATCHDOG.read_restart_history(state_path), [1.0, 2.0]
             )
+
+    def test_HardRestartReturns75FromMainThreadAfterCleanup(self):
+        class FakeTimer:
+            shutdown_called = False
+
+            def shutdown(self):
+                self.shutdown_called = True
+
+        class FakeRospy:
+            shutdown_reason = ""
+
+            def is_shutdown(self):
+                return False
+
+            def signal_shutdown(self, reason):
+                self.shutdown_reason = reason
+
+        watchdog = WATCHDOG.RosRecoveryWatchdog.__new__(
+            WATCHDOG.RosRecoveryWatchdog
+        )
+        watchdog.rospy = FakeRospy()
+        watchdog.timer = FakeTimer()
+        watchdog.restart_requested = threading.Event()
+        watchdog.restart_requested.set()
+
+        self.assertEqual(watchdog.run(), 75)
+        self.assertTrue(watchdog.timer.shutdown_called)
+        self.assertEqual(
+            watchdog.rospy.shutdown_reason,
+            "persistent localization failure",
+        )
 
 
 if __name__ == "__main__":

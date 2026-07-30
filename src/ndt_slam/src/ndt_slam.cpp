@@ -10319,19 +10319,33 @@ void NdtSlamNode::updateRelocalization(
             relocalization_cfg_.target_crop_radius_m * 0.75);
         const double z = current_pose_.translation().z();
         if (min_x <= max_x && min_y <= max_y) {
-            const int x_segments = std::max(
-                1, static_cast<int>(std::ceil((max_x - min_x) / grid)));
-            const int y_segments = std::max(
-                1, static_cast<int>(std::ceil((max_y - min_y) / grid)));
+            // A corrupt/outlier map bound must not create an unbounded
+            // intermediate grid. The fixed cap still covers both bounds and
+            // only changes the spacing for unusually large maps.
+            const double span_x =
+                static_cast<double>(max_x) - static_cast<double>(min_x);
+            const double span_y =
+                static_cast<double>(max_y) - static_cast<double>(min_y);
+            const auto bounded_segments = [grid](double span) {
+                constexpr int kMaxCoarseGridAxisSegments = 64;
+                const double requested = std::ceil(span / grid);
+                if (!std::isfinite(requested) ||
+                    requested >= kMaxCoarseGridAxisSegments) {
+                    return kMaxCoarseGridAxisSegments;
+                }
+                return std::max(1, static_cast<int>(requested));
+            };
+            const int x_segments = bounded_segments(span_x);
+            const int y_segments = bounded_segments(span_y);
             std::vector<Eigen::Vector2d> grid_points;
             grid_points.reserve(
                 static_cast<std::size_t>((x_segments + 1) *
                                          (y_segments + 1)));
             for (int xi = 0; xi <= x_segments; ++xi) {
-                const double x = min_x + (max_x - min_x) *
+                const double x = static_cast<double>(min_x) + span_x *
                     static_cast<double>(xi) / x_segments;
                 for (int yi = 0; yi <= y_segments; ++yi) {
-                    const double y = min_y + (max_y - min_y) *
+                    const double y = static_cast<double>(min_y) + span_y *
                         static_cast<double>(yi) / y_segments;
                     grid_points.emplace_back(x, y);
                 }

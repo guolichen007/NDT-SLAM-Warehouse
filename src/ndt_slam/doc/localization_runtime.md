@@ -61,6 +61,8 @@ map-frame 重定位被清除。
 每个异步任务都复制目标云快照并记录 `map_source`，不会在 worker 中读取正在变化的
 运行地图。ScanContext 提示优先执行，剩余候选预算由最远点网格覆盖整幅地图，避免
 候选数量上限只截取地图一角。局部任务最多 12 个候选；全局任务最多 48 个候选。
+粗网格每个坐标轴最多划分 64 段，因此异常边界或离群点只能改变网格间距，不能造成
+无上限的中间数组和瞬时内存峰值。
 
 全局搜索保留 map generation、pose version、重复帧和两次一致确认门禁，但使用独立的
 `global_result_max_age_frames` 与 `global_result_max_age_sec`。这是为了允许有界全图

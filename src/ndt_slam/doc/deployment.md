@@ -51,8 +51,15 @@ bag 验收使用 `use_sim_time:=true` 且 `rosbag play --clock`。第二次播�
 
 生产 launch 默认包含 `ndt_recovery_watchdog.py`。连续重定位失败超过硬门限时，
 该 required 节点会记录 `$NDT_SLAM_DATA_ROOT/recovery_watchdog/` 证据并以非零码
-结束 launch；`ndt-slam.service` 的 `Restart=on-failure` 在 5 秒后重启全栈。
+结束 launch。ROS Noetic 的 required 语义负责停止整套 launch，但 roslaunch 本身可能
+正常返回，因此生产 unit 使用 `Restart=always`，在 5 秒后重启全栈；显式执行
+`systemctl stop` 时 systemd 不会重启该服务。
 部署后必须确认 unit 使用仓库当前模板，旧 unit 的较长 `RestartSec` 不会自动更新。
+不要手工复制未展开的 `.service.in`。每次更新该分支后重新执行
+`install_server_services.sh`；安装器会覆盖 unit、检查 `Restart=always`、
+`RestartSec=5` 和 `use_ndt_recovery_watchdog:=true`，随后执行
+`systemctl daemon-reload`。`StartLimitIntervalSec=300` 与 `StartLimitBurst=5`
+位于 `[Unit]` 段，在看门狗自身预算之外提供 systemd 级重启风暴保护。
 
 ## 发布前门禁
 

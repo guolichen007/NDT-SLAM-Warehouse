@@ -68,6 +68,20 @@ for unit in ndt-slam.service ndt-slam-monitor.service; do
       "$template_dir/$unit.in" > "/etc/systemd/system/$unit"
   chmod 0644 "/etc/systemd/system/$unit"
 done
+
+grep -Fqx 'RestartSec=5' /etc/systemd/system/ndt-slam.service || {
+  echo "installed ndt-slam.service has unexpected RestartSec" >&2
+  exit 4
+}
+grep -Fqx 'Restart=always' /etc/systemd/system/ndt-slam.service || {
+  echo "installed ndt-slam.service cannot recover a clean roslaunch exit" >&2
+  exit 4
+}
+grep -Fq 'use_ndt_recovery_watchdog:=true' \
+  /etc/systemd/system/ndt-slam.service || {
+  echo "installed ndt-slam.service does not enforce the recovery watchdog" >&2
+  exit 4
+}
 systemctl daemon-reload
 if $enable; then
   systemctl enable ndt-slam.service ndt-slam-monitor.service

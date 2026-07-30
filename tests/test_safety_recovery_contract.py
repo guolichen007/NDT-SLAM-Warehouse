@@ -18,6 +18,15 @@ LAUNCH = (
 RVIZ = (
     ROOT / "src/ndt_slam/launch/rviz.rviz"
 ).read_text(encoding="utf-8")
+WATCHDOG = (
+    ROOT / "src/ndt_slam/scripts/ops/ndt_recovery_watchdog.py"
+).read_text(encoding="utf-8")
+SERVICE = (
+    ROOT / "src/ndt_slam/scripts/ops/ndt-slam.service.in"
+).read_text(encoding="utf-8")
+INSTALLER = (
+    ROOT / "src/ndt_slam/scripts/ops/install_server_services.sh"
+).read_text(encoding="utf-8")
 
 
 def section(start: str, end: str) -> str:
@@ -117,6 +126,8 @@ class SafetyRecoveryContractTest(unittest.TestCase):
         )
         self.assertIn("coarse_map_farthest_grid", update)
         self.assertIn("job.candidate_limit", update)
+        self.assertIn("kMaxCoarseGridAxisSegments = 64", update)
+        self.assertIn("static_cast<double>(max_x)", update)
 
         apply_pose = section(
             "void NdtSlamNode::applyRelocalizedPose(",
@@ -138,6 +149,19 @@ class SafetyRecoveryContractTest(unittest.TestCase):
         display_block = RVIZ[block_start:block_end]
         self.assertIn("Enabled: false", display_block)
         self.assertIn("Value: false", display_block)
+
+        self.assertNotIn("os._exit", WATCHDOG)
+        self.assertIn("restart_requested.wait", WATCHDOG)
+        self.assertIn("return 75", WATCHDOG)
+        self.assertIn("use_ndt_recovery_watchdog:=true", SERVICE)
+        unit_section, service_section = SERVICE.split("[Service]", 1)
+        self.assertIn("StartLimitIntervalSec=300", unit_section)
+        self.assertIn("StartLimitBurst=5", unit_section)
+        self.assertNotIn("StartLimitIntervalSec", service_section)
+        self.assertIn("Restart=always", service_section)
+        self.assertIn("RestartSec=5", INSTALLER)
+        self.assertIn("cannot recover a clean roslaunch exit", INSTALLER)
+        self.assertIn("does not enforce the recovery watchdog", INSTALLER)
 
     def test_NewPoliciesAreBuiltAndHaveUnitTests(self):
         required = (
