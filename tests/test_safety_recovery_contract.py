@@ -9,6 +9,15 @@ NODE = (ROOT / "src/ndt_slam/src/ndt_slam.cpp").read_text(
 CMAKE = (ROOT / "src/ndt_slam/CMakeLists.txt").read_text(
     encoding="utf-8"
 )
+CONFIG = (
+    ROOT / "src/ndt_slam/config/live_longterm_mapping.yaml"
+).read_text(encoding="utf-8")
+LAUNCH = (
+    ROOT / "src/ndt_slam/launch/warehouse_live_longterm_mapping.launch"
+).read_text(encoding="utf-8")
+RVIZ = (
+    ROOT / "src/ndt_slam/launch/rviz.rviz"
+).read_text(encoding="utf-8")
 
 
 def section(start: str, end: str) -> str:
@@ -80,6 +89,55 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "RelocalizationConfirmationOutcome::DISCARD_IDENTITY",
             body,
         )
+
+    def test_GlobalRecoveryUsesCleanStaticMapAndDedicatedAge(self):
+        consume = section(
+            "void NdtSlamNode::consumeRelocalizationResult(",
+            "void NdtSlamNode::updateRelocalization(",
+        )
+        self.assertIn("RelocalizationMode::GLOBAL", consume)
+        self.assertIn(
+            "relocalization_global_result_max_age_frames_", consume
+        )
+        self.assertIn(
+            "relocalization_global_result_max_age_sec_", consume
+        )
+
+        update = section(
+            "void NdtSlamNode::updateRelocalization(",
+            "void NdtSlamNode::applyRelocalizedPose(",
+        )
+        clean = update.index("objects_clean_map_")
+        registration = update.index(
+            'job.map_source = "global_registration_fallback"'
+        )
+        self.assertLess(clean, registration)
+        self.assertIn(
+            'job.map_source = "objects_clean_static"', update
+        )
+        self.assertIn("coarse_map_farthest_grid", update)
+        self.assertIn("job.candidate_limit", update)
+
+        apply_pose = section(
+            "void NdtSlamNode::applyRelocalizedPose(",
+            "void NdtSlamNode::resetCargoAfterPoseDiscontinuity(",
+        )
+        self.assertIn("objects_clean_map_", apply_pose)
+        self.assertIn("result.map_source", apply_pose)
+
+    def test_WatchdogAndRvizDefaultsAreWired(self):
+        self.assertIn("ndt_recovery_watchdog.py", CMAKE)
+        self.assertIn('required="true"', LAUNCH)
+        self.assertIn("hard_restart_bad_frames", LAUNCH)
+        self.assertIn("global_result_max_age_sec: 12.0", CONFIG)
+        self.assertIn("global_max_candidates: 48", CONFIG)
+
+        name = RVIZ.index("Name: display_map")
+        block_start = RVIZ.rfind("    - Alpha:", 0, name)
+        block_end = RVIZ.find("    - Alpha:", name)
+        display_block = RVIZ[block_start:block_end]
+        self.assertIn("Enabled: false", display_block)
+        self.assertIn("Value: false", display_block)
 
     def test_NewPoliciesAreBuiltAndHaveUnitTests(self):
         required = (

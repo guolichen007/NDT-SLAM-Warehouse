@@ -49,6 +49,11 @@ roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
 
 bag 验收使用 `use_sim_time:=true` 且 `rosbag play --clock`。第二次播放较小时间戳时不重启 heartbeat，用于验证 epoch 恢复。
 
+生产 launch 默认包含 `ndt_recovery_watchdog.py`。连续重定位失败超过硬门限时，
+该 required 节点会记录 `$NDT_SLAM_DATA_ROOT/recovery_watchdog/` 证据并以非零码
+结束 launch；`ndt-slam.service` 的 `Restart=on-failure` 在 5 秒后重启全栈。
+部署后必须确认 unit 使用仓库当前模板，旧 unit 的较长 `RestartSec` 不会自动更新。
+
 ## 发布前门禁
 
 - 本地/远端 SHA 一致且工作区干净；

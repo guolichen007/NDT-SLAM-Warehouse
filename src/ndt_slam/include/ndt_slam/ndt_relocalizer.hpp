@@ -24,7 +24,7 @@ struct RelocalizationConfig {
     bool enabled = true;
     int min_source_points = 800;
     int min_target_points = 1200;
-    int max_candidates = 12;
+    int max_candidates = 64;
     int max_iterations = 35;
     int num_threads = 2;
     double resolution = 1.0;
@@ -58,6 +58,8 @@ struct RelocalizationJob {
     pcl::PointCloud<pcl::PointXYZ>::Ptr source;
     pcl::PointCloud<pcl::PointXYZ>::Ptr map;
     std::vector<RelocalizationSeed> seeds;
+    int candidate_limit = 0;
+    std::string map_source;
 };
 
 struct RelocalizationResult {
@@ -75,6 +77,7 @@ struct RelocalizationResult {
     int candidates_tested = 0;
     int keyframe_id = -1;
     std::string seed_source;
+    std::string map_source;
     std::string reason;
 };
 

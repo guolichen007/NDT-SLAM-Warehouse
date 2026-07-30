@@ -461,7 +461,11 @@ private:
     int relocalization_request_interval_frames_ = 3;
     int relocalization_result_max_age_frames_ = 8;
     double relocalization_result_max_age_sec_ = 0.50;
+    int relocalization_global_result_max_age_frames_ = 120;
+    double relocalization_global_result_max_age_sec_ = 12.0;
     int relocalization_cooldown_frames_ = 12;
+    int relocalization_local_max_candidates_ = 12;
+    int relocalization_global_max_candidates_ = 48;
     int relocalization_global_hint_count_ = 4;
     double relocalization_global_min_similarity_ = 0.55;
     double relocalization_local_xy_window_m_ = 1.5;

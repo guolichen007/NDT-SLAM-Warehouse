@@ -121,6 +121,10 @@ roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
 rosbag play /path/to/warehouse.bag --clock
 ```
 
+该 launch 默认启动 SLAM、NDT 恢复看门狗和 RViz。RViz 中全量
+`display_map` 默认关闭以避免大点云拖慢界面，需要时可手工开启；这不会关闭
+`objects_clean` 等运行显示。生产 systemd 服务保持 `use_rviz:=false`。
+
 ## 主要话题与接口
 
 | Topic | 类型 | 说明 |

@@ -56,6 +56,16 @@ python -m unittest discover -s tests -p "test_*.py"
 - 小件、弱反射、HAG 残余、聚类不足：UNKNOWN 不得变成空载 CLEAR。
 - 连续提交快于 clean：仍发布完整 bundle，最终收敛到最新工作图。
 - 不重启 heartbeat 第二次播放 bag：回退帧 30，新 epoch 后恢复。
+- 注入连续高 fitness：5 帧后进入 DEGRADED，15 帧后进入全局搜索；不得把失败匹配
+  写入 EKF 或地图。
+- 让全局 worker 耗时超过 0.5 秒但小于 12 秒：结果不得仅因局部时效门限被丢弃，
+  且仍需相同 map generation、pose version 和两次一致确认。
+- 清空 ScanContext 提示并把初始位姿放在地图一角：全局候选必须覆盖地图不同区域，
+  不能按嵌套循环只搜索一个角落。
+- 连续退化超过软恢复门限：看门狗只调用一次 `/ndt_slam/relocalize`；超过硬门限后
+  写入 JSONL/state 并由 systemd 完整重启。15 分钟第 4 次必须被抑制。
+- 启动 RViz：`display_map` 默认关闭，`objects_clean` 等必要轻量显示保持原配置；
+  操作者可以手工开启全量显示层。
 
 ## 通过标准
 

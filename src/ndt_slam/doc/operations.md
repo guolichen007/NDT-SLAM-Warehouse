@@ -21,6 +21,32 @@ rosrun ndt_slam server_monitorctl.sh snapshot
 
 必须立即输出：SO3Guard、非有限 NDT、首次 prediction-only、定位/重定位切换、Motion 状态切换、安全 code/reason 变化。运行风险使用 `ENTER/CHANGE/REPEAT/CLEAR`；相同风险 10 秒内不重复刷屏。
 
+## NDT 恢复看门狗
+
+生产 launch 默认启动 `ndt_recovery_watchdog.py`，订阅
+`/ndt_slam/relocalization_status`。它只在连续退化状态上采取动作：
+
+- 启动后 30 秒为宽限期；
+- 连续退化 8 秒时调用 `/ndt_slam/relocalize`，优先使用进程内静态地图恢复；
+- 连续退化 45 秒，或退化至少 15 秒且 `bad_frames >= 300` 时，先落盘证据，再以
+  75 退出；
+- 15 分钟最多允许 3 次完整重启，达到预算后保持运行并记录
+  `restart_suppressed`，防止传感器或地图故障引起重启风暴。
+
+看门狗是 `required` roslaunch 节点。生产 `ndt-slam.service` 使用
+`Restart=on-failure`，因此退出会终止当前 launch 并在 5 秒后重启整套建图定位链。
+直接手工执行 `roslaunch` 时没有外部 supervisor，只会安全退出，不会自行拉起。
+
+证据默认写入：
+
+```text
+$NDT_SLAM_DATA_ROOT/recovery_watchdog/events.jsonl
+$NDT_SLAM_DATA_ROOT/recovery_watchdog/state.json
+```
+
+`events.jsonl` 记录软恢复、硬重启和重启抑制；`state.json` 原子保存重启窗口历史。
+现场验收应同时保留 systemd journal、上述两份证据和对应提交 SHA。
+
 ## 吊物观察
 
 LOCKED 后关注冻结尺寸/yaw、实时中心、中心 residual、position source、pose/height evidence age。LOST_HOLD 超过 `formal_hold_sec` 后 marker 可存在，但安全应为 33且正式剔除关闭。

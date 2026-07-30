@@ -16,6 +16,7 @@
     <arg name="hook_cargo_removal_enabled" default="true"/>
     <arg name="cargo_warning_enabled" default="true"/>
     <arg name="use_cargo_alarm_heartbeat" default="true"/>
+    <arg name="use_ndt_recovery_watchdog" default="true"/>
     <!-- Optional override for all nodes that read live_longterm_mapping.yaml.
          Default keeps the original path; bag harness passes a sandbox copy. -->
     <arg name="config_file" default="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
@@ -44,6 +45,28 @@
                value="$(arg hook_cargo_removal_enabled)"/>
         <param name="cargo_warning_enabled"
                value="$(arg cargo_warning_enabled)"/>
+    </node>
+
+    <!-- A required node is used deliberately: after bounded in-process
+         recovery fails, exit 75 tears down this roslaunch. The production
+         systemd unit restarts the entire stack and the watchdog records the
+         cause before exiting. -->
+    <node name="ndt_recovery_watchdog"
+          pkg="ndt_slam"
+          type="ndt_recovery_watchdog.py"
+          output="screen"
+          required="true"
+          if="$(arg use_ndt_recovery_watchdog)">
+        <param name="status_topic" value="/ndt_slam/relocalization_status"/>
+        <param name="relocalize_service" value="/ndt_slam/relocalize"/>
+        <param name="startup_grace_sec" value="30.0"/>
+        <param name="soft_relocalize_after_sec" value="8.0"/>
+        <param name="hard_restart_after_sec" value="45.0"/>
+        <param name="hard_restart_bad_frames" value="300"/>
+        <param name="hard_restart_bad_frames_after_sec" value="15.0"/>
+        <param name="healthy_reset_sec" value="10.0"/>
+        <param name="restart_window_sec" value="900.0"/>
+        <param name="max_restarts_in_window" value="3"/>
     </node>
 
     <!-- Formal status heartbeat. safety_status is authoritative; status_code
@@ -99,4 +122,3 @@
     <param name="mode" value="longterm_mapping"/>
     <param name="config_file" value="$(arg config_file)"/>
 </launch>
-

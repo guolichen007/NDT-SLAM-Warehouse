@@ -50,6 +50,24 @@ Bootstrap 是一次性生命周期。完成后地图暂时缩小不会重新进�
 身份变化、过期、非法或不一致结果会被丢弃并重置确认链。保留中的吊物刚体锁不因
 map-frame 重定位被清除。
 
+### 全局恢复目标与搜索预算
+
+局部恢复仍使用当前 `local_map_`。进入全局恢复后，目标云按以下顺序选择：
+
+1. 点数满足下限的 `objects_clean_map_` 静态快照；
+2. `global_map_` 配准粗图；
+3. `local_map_` 最后降级目标。
+
+每个异步任务都复制目标云快照并记录 `map_source`，不会在 worker 中读取正在变化的
+运行地图。ScanContext 提示优先执行，剩余候选预算由最远点网格覆盖整幅地图，避免
+候选数量上限只截取地图一角。局部任务最多 12 个候选；全局任务最多 48 个候选。
+
+全局搜索保留 map generation、pose version、重复帧和两次一致确认门禁，但使用独立的
+`global_result_max_age_frames` 与 `global_result_max_age_sec`。这是为了允许有界全图
+搜索完成，不是放宽实时 NDT fitness 或接受过期地图结果。恢复确认后，局部目标优先
+从同一 clean 静态图重新裁剪，并同时重置 EKF、fitness 熔断器和依赖 map-frame 的
+吊物证据。
+
 ## NDT fitness 自适应熔断
 
 固定 fitness 阈值容易受目标云密度影响。运行时以最近窗口的中位数和 MAD 建立目标云

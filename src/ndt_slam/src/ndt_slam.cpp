@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <Eigen/Geometry>
 #include <memory>
@@ -2519,8 +2520,19 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 2, r["result_max_age_frames"].as<int>(8));
             relocalization_result_max_age_sec_ = std::max(
                 0.10, r["result_max_age_sec"].as<double>(0.50));
+            relocalization_global_result_max_age_frames_ = std::max(
+                relocalization_result_max_age_frames_,
+                r["global_result_max_age_frames"].as<int>(120));
+            relocalization_global_result_max_age_sec_ = std::max(
+                relocalization_result_max_age_sec_,
+                r["global_result_max_age_sec"].as<double>(12.0));
             relocalization_cooldown_frames_ = std::max(
                 1, r["cooldown_frames"].as<int>(12));
+            relocalization_local_max_candidates_ = std::clamp(
+                r["local_max_candidates"].as<int>(12), 1, 32);
+            relocalization_global_max_candidates_ = std::clamp(
+                r["global_max_candidates"].as<int>(48),
+                relocalization_local_max_candidates_, 64);
             relocalization_global_hint_count_ = std::clamp(
                 r["global_hint_count"].as<int>(4), 1, 12);
             relocalization_global_min_similarity_ =
@@ -2544,7 +2556,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             relocalization_cfg_.min_target_points =
                 r["min_target_points"].as<int>(1200);
             relocalization_cfg_.max_candidates =
-                r["max_candidates"].as<int>(12);
+                r["max_candidates"].as<int>(64);
             relocalization_cfg_.max_iterations =
                 r["max_iterations"].as<int>(35);
             relocalization_cfg_.num_threads =
@@ -8963,6 +8975,9 @@ bool NdtSlamNode::relocalizeService(std_srvs::Empty::Request& request, std_srvs:
     }
     // Non-blocking and fail-safe: never reset pose to the map origin. The
     // next usable cloud launches a forced global search.
+    relocalization_confirmation_count_ = 0;
+    relocalization_confirmation_pose_ = Sophus::SE3d();
+    relocalization_last_submit_frame_ = 0;
     relocalization_force_global_.store(true, std::memory_order_release);
     ROS_WARN("[Relocalization] manual global search queued");
     return true;
@@ -10009,9 +10024,10 @@ bool NdtSlamNode::saveMapSessionAtomic(const std::string& session_dir,
 
 void NdtSlamNode::performRelocalization() {
     if (!relocalization_enabled_) return;
+    relocalization_confirmation_count_ = 0;
+    relocalization_confirmation_pose_ = Sophus::SE3d();
+    relocalization_last_submit_frame_ = 0;
     relocalization_force_global_.store(true, std::memory_order_release);
-
-    // 简单的重定位：重置位姿
 }
 
 std::vector<RelocalizationSeed> NdtSlamNode::buildLocalRelocalizationSeeds(
@@ -10096,11 +10112,17 @@ void NdtSlamNode::consumeRelocalizationResult(
     RelocalizationConfirmationConfig confirmation_config;
     confirmation_config.required_confirmations =
         relocalization_confirm_frames_;
+    const bool global_result =
+        result.mode == RelocalizationMode::GLOBAL;
     confirmation_config.maximum_age_frames =
         static_cast<std::uint64_t>(
-            relocalization_result_max_age_frames_);
+            global_result
+                ? relocalization_global_result_max_age_frames_
+                : relocalization_result_max_age_frames_);
     confirmation_config.maximum_age_sec =
-        relocalization_result_max_age_sec_;
+        global_result
+            ? relocalization_global_result_max_age_sec_
+            : relocalization_result_max_age_sec_;
     confirmation_config.maximum_translation_delta_m =
         relocalization_confirm_translation_m_;
     confirmation_config.maximum_yaw_delta_deg =
@@ -10247,11 +10269,27 @@ void NdtSlamNode::updateRelocalization(
     job.mode = global ? RelocalizationMode::GLOBAL : RelocalizationMode::LOCAL;
     job.reference_pose = current_pose_;
     job.source.reset(new pcl::PointCloud<pcl::PointXYZ>(*registration_cloud));
+    job.candidate_limit = global
+        ? relocalization_global_max_candidates_
+        : relocalization_local_max_candidates_;
 
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
-        const auto& selected_map = global && global_map_ && !global_map_->empty()
-            ? global_map_ : local_map_;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr selected_map;
+        if (global && objects_clean_map_ &&
+            static_cast<int>(objects_clean_map_->size()) >=
+                relocalization_cfg_.min_target_points) {
+            selected_map = objects_clean_map_;
+            job.map_source = "objects_clean_static";
+        } else if (global && global_map_ && !global_map_->empty()) {
+            selected_map = global_map_;
+            job.map_source = "global_registration_fallback";
+        } else {
+            selected_map = local_map_;
+            job.map_source = global
+                ? "local_registration_fallback"
+                : "local_registration";
+        }
         if (!selected_map || selected_map->empty()) {
             publishRelocalizationStatus("DEGRADED", "map_unavailable");
             return;
@@ -10263,9 +10301,11 @@ void NdtSlamNode::updateRelocalization(
         ? buildGlobalRelocalizationSeeds(job.source)
         : buildLocalRelocalizationSeeds(current_pose_);
 
-    // A loaded PCD may not have a keyframe database. Fall back to a bounded
-    // coarse map grid instead of pretending global recovery succeeded.
-    if (global && job.seeds.empty() && job.map && !job.map->empty()) {
+    // ScanContext hints are evaluated first. A globally distributed coarse
+    // grid then fills the remaining budget, so a missing or misleading hint
+    // cannot restrict recovery to the first corner of a loaded/static map.
+    if (global && job.map && !job.map->empty() &&
+        static_cast<int>(job.seeds.size()) < job.candidate_limit) {
         float min_x = std::numeric_limits<float>::max();
         float max_x = std::numeric_limits<float>::lowest();
         float min_y = std::numeric_limits<float>::max();
@@ -10278,27 +10318,79 @@ void NdtSlamNode::updateRelocalization(
         const double grid = std::max(6.0,
             relocalization_cfg_.target_crop_radius_m * 0.75);
         const double z = current_pose_.translation().z();
-        for (double x = min_x; x <= max_x &&
-             static_cast<int>(job.seeds.size()) <
-                 relocalization_cfg_.max_candidates; x += grid) {
-            for (double y = min_y; y <= max_y &&
-                 static_cast<int>(job.seeds.size()) <
-                     relocalization_cfg_.max_candidates; y += grid) {
-                for (const double yaw : {0.0, M_PI_2, M_PI, -M_PI_2}) {
+        if (min_x <= max_x && min_y <= max_y) {
+            const int x_segments = std::max(
+                1, static_cast<int>(std::ceil((max_x - min_x) / grid)));
+            const int y_segments = std::max(
+                1, static_cast<int>(std::ceil((max_y - min_y) / grid)));
+            std::vector<Eigen::Vector2d> grid_points;
+            grid_points.reserve(
+                static_cast<std::size_t>((x_segments + 1) *
+                                         (y_segments + 1)));
+            for (int xi = 0; xi <= x_segments; ++xi) {
+                const double x = min_x + (max_x - min_x) *
+                    static_cast<double>(xi) / x_segments;
+                for (int yi = 0; yi <= y_segments; ++yi) {
+                    const double y = min_y + (max_y - min_y) *
+                        static_cast<double>(yi) / y_segments;
+                    grid_points.emplace_back(x, y);
+                }
+            }
+
+            const int remaining =
+                job.candidate_limit - static_cast<int>(job.seeds.size());
+            const int spatial_budget = std::max(1, (remaining + 3) / 4);
+            std::vector<Eigen::Vector2d> selected_points;
+            selected_points.reserve(static_cast<std::size_t>(spatial_budget));
+            selected_points.emplace_back(
+                std::clamp(current_pose_.translation().x(),
+                           static_cast<double>(min_x),
+                           static_cast<double>(max_x)),
+                std::clamp(current_pose_.translation().y(),
+                           static_cast<double>(min_y),
+                           static_cast<double>(max_y)));
+
+            while (static_cast<int>(selected_points.size()) < spatial_budget &&
+                   selected_points.size() < grid_points.size()) {
+                double best_distance = -1.0;
+                std::size_t best_index = 0;
+                for (std::size_t index = 0; index < grid_points.size();
+                     ++index) {
+                    double nearest = std::numeric_limits<double>::infinity();
+                    for (const auto& selected : selected_points) {
+                        nearest = std::min(
+                            nearest,
+                            (grid_points[index] - selected).squaredNorm());
+                    }
+                    if (nearest > best_distance) {
+                        best_distance = nearest;
+                        best_index = index;
+                    }
+                }
+                selected_points.push_back(grid_points[best_index]);
+                grid_points.erase(grid_points.begin() +
+                                  static_cast<std::ptrdiff_t>(best_index));
+            }
+
+            for (const auto& point : selected_points) {
+                for (const double yaw :
+                     {0.0, M_PI_2, M_PI, -M_PI_2}) {
+                    if (static_cast<int>(job.seeds.size()) >=
+                        job.candidate_limit) break;
                     RelocalizationSeed seed;
                     seed.pose = Sophus::SE3d(
                         Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ())
                             .toRotationMatrix(),
-                        Eigen::Vector3d(x, y, z));
-                    seed.source = "coarse_map_grid";
+                        Eigen::Vector3d(point.x(), point.y(), z));
+                    seed.source = "coarse_map_farthest_grid";
                     job.seeds.push_back(std::move(seed));
-                    if (static_cast<int>(job.seeds.size()) >=
-                        relocalization_cfg_.max_candidates) break;
                 }
             }
         }
     }
 
+    const std::string submitted_map_source = job.map_source;
+    const std::size_t submitted_candidates = job.seeds.size();
     if (job.seeds.empty() || !relocalizer_.submit(std::move(job))) {
         publishRelocalizationStatus("DEGRADED", "no_search_candidates");
         return;
@@ -10309,7 +10401,8 @@ void NdtSlamNode::updateRelocalization(
         : RelocalizationState::SEARCHING_LOCAL;
     publishRelocalizationStatus(
         global ? "SEARCHING_GLOBAL" : "SEARCHING_LOCAL",
-        "bad_frames=" + std::to_string(relocalization_bad_frames_));
+        "target=" + submitted_map_source +
+        " candidates=" + std::to_string(submitted_candidates));
 }
 
 void NdtSlamNode::applyRelocalizedPose(
@@ -10334,14 +10427,20 @@ void NdtSlamNode::applyRelocalizedPose(
     // Recenter the runtime map without changing the persistent global map.
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
-        if (global_map_ && !global_map_->empty()) {
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr recovery_map =
+            objects_clean_map_ &&
+                    static_cast<int>(objects_clean_map_->size()) >=
+                        relocalization_cfg_.min_target_points
+                ? objects_clean_map_
+                : global_map_;
+        if (recovery_map && !recovery_map->empty()) {
             pcl::PointCloud<pcl::PointXYZ>::Ptr recentered(
                 new pcl::PointCloud<pcl::PointXYZ>);
             const Eigen::Vector3d center = recovered.translation();
             const double radius_sq =
                 relocalization_cfg_.target_crop_radius_m *
                 relocalization_cfg_.target_crop_radius_m;
-            for (const auto& p : global_map_->points) {
+            for (const auto& p : recovery_map->points) {
                 const double dx = p.x - center.x();
                 const double dy = p.y - center.y();
                 if (dx * dx + dy * dy <= radius_sq) recentered->push_back(p);
@@ -10374,7 +10473,10 @@ void NdtSlamNode::applyRelocalizedPose(
         std::string(result.mode == RelocalizationMode::GLOBAL
                         ? "global" : "local") +
         " fitness=" + std::to_string(result.fitness) +
-        " seed=" + result.seed_source);
+        " seed=" + result.seed_source +
+        " target=" + result.map_source +
+        " elapsed_ms=" + std::to_string(result.elapsed_ms) +
+        " candidates=" + std::to_string(result.candidates_tested));
     tracking_cv_.notify_all();
 }
 

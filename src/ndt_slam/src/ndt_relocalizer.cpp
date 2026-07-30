@@ -162,6 +162,7 @@ RelocalizationResult NdtRelocalizer::run(const RelocalizationJob& job) const {
     best.stamp_sec = job.stamp_sec;
     best.mode = job.mode;
     best.reference_pose = job.reference_pose;
+    best.map_source = job.map_source;
 
     RelocalizationConfig config;
     {
@@ -175,8 +176,11 @@ RelocalizationResult NdtRelocalizer::run(const RelocalizationJob& job) const {
         return best;
     }
 
+    const int requested_candidates =
+        job.candidate_limit > 0 ? job.candidate_limit : config.max_candidates;
     const int candidate_count = std::min<int>(
-        config.max_candidates, static_cast<int>(job.seeds.size()));
+        std::min(config.max_candidates, requested_candidates),
+        static_cast<int>(job.seeds.size()));
     for (int index = 0; index < candidate_count; ++index) {
         const RelocalizationSeed& seed = job.seeds[index];
         auto cropped = cropAround(job.map, seed.pose.translation(),

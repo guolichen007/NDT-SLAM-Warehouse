@@ -8,6 +8,11 @@
 - `ndt_observability`：中度/严重特征值比和弱方向膨胀系数。
 - `stationary_policy`：进入/退出确认、方向余弦、CATCH_UP 步长与完成条件。
 - `motion_gate`：持久关键帧门限；不能代替 stationary policy。
+- `relocalization.result_max_age_*`：局部异步结果时效；不得为迁就全图搜索而放宽。
+- `relocalization.global_result_max_age_*`：全局静态地图搜索专用时效，仍受地图代际和
+  位姿版本门禁约束。
+- `relocalization.local_max_candidates/global_max_candidates`：局部与全局任务预算；
+  `max_candidates` 是 worker 的绝对硬上限。
 
 ## 吊物
 
