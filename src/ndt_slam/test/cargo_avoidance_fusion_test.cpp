@@ -52,6 +52,13 @@ CargoAvoidanceFusionInput pendingStaticHazardInput() {
   return input;
 }
 
+CargoAvoidanceFusionConfig pendingPromotionConfig() {
+  CargoAvoidanceFusionConfig config;
+  config.pending_warning_promotion_policy =
+      PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY;
+  return config;
+}
+
 TEST(CargoAvoidanceFusion, ClearNeedsBothReliableSources) {
   auto input = validInput();
   const auto result = fuseCargoAvoidanceRisk(input);
@@ -160,12 +167,32 @@ TEST(CargoAvoidanceFusion, EvidenceBackedPendingHazardCanWarn) {
   input.pending_authority_confidence = 0.8F;
   input.live.hazard = true;
   input.live.warning_code = 18;
-  CargoAvoidanceFusionConfig config;
+  const CargoAvoidanceFusionConfig config = pendingPromotionConfig();
   const auto result = fuseCargoAvoidanceRisk(input, config);
   ASSERT_TRUE(result.official_valid);
   EXPECT_EQ(result.official_code, 18);
   EXPECT_NE(result.official_code, 14);
   EXPECT_TRUE(result.pending_warning_authorized);
+}
+
+TEST(CargoAvoidanceFusion, PendingWarningPromotionIsDisabledByDefault) {
+  auto input = pendingStaticHazardInput();
+  input.static_map.hazard = false;
+  input.live.available = true;
+  input.live.reliable = true;
+  input.live.hazard = true;
+  input.live.warning_code = 18;
+  input.pending_external_separation_valid = true;
+  input.pending_external_obstacle_authorized = true;
+  input.pending_external_obstacle_track_id = 9U;
+  input.pending_external_obstacle_confirmations = 3;
+  input.pending_external_provenance_valid = true;
+  input.pending_external_geometry_valid = true;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 33);
+  EXPECT_FALSE(result.pending_live_warning_authorized);
+  EXPECT_EQ(result.pending_authority_reason, "policy_disabled");
 }
 
 TEST(CargoAvoidanceFusion, PendingNeedsStableExternalObstacleIdentity) {
@@ -260,7 +287,8 @@ TEST(CargoAvoidanceFusion, PendingUnverifiedStaticRemainsAdvisoryOnly) {
 TEST(CargoAvoidanceFusion,
      ConfirmedAuthoritativeStaticPendingHazardCanWarnWithoutLiveCloud) {
   const auto result =
-      fuseCargoAvoidanceRisk(pendingStaticHazardInput());
+      fuseCargoAvoidanceRisk(
+          pendingStaticHazardInput(), pendingPromotionConfig());
   ASSERT_TRUE(result.official_valid);
   EXPECT_EQ(result.official_code, 17);
   EXPECT_TRUE(result.pending_warning_authorized);
@@ -276,7 +304,8 @@ TEST(CargoAvoidanceFusion,
   input.static_map.warning_code = 18;
   input.pending_static_obstacle_authorized = false;
   input.pending_static_obstacle_confirmations = 2;
-  const auto result = fuseCargoAvoidanceRisk(input);
+  const auto result = fuseCargoAvoidanceRisk(
+      input, pendingPromotionConfig());
   EXPECT_FALSE(result.official_valid);
   EXPECT_EQ(result.official_code, 33);
   EXPECT_FALSE(result.pending_static_warning_authorized);
@@ -289,7 +318,8 @@ TEST(CargoAvoidanceFusion,
      StaticPendingHazardCannotBypassCargoIdentityConfidence) {
   auto input = pendingStaticHazardInput();
   input.pending_authority_confidence = 0.20F;
-  const auto result = fuseCargoAvoidanceRisk(input);
+  const auto result = fuseCargoAvoidanceRisk(
+      input, pendingPromotionConfig());
   EXPECT_FALSE(result.official_valid);
   EXPECT_EQ(
       result.pending_authority_reason,
@@ -304,7 +334,8 @@ TEST(CargoAvoidanceFusion,
   input.live.hazard = true;
   input.live.warning_code = 17;
   input.live_obstacle_origin_resolved = false;
-  const auto result = fuseCargoAvoidanceRisk(input);
+  const auto result = fuseCargoAvoidanceRisk(
+      input, pendingPromotionConfig());
   ASSERT_TRUE(result.official_valid);
   EXPECT_EQ(result.official_code, 17);
   EXPECT_TRUE(result.pending_static_warning_authorized);

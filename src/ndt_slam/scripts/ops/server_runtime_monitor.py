@@ -147,6 +147,83 @@ def append_csv(path: Path, fieldnames: Sequence[str], row: Mapping[str, Any]) ->
         writer.writerow(dict(row))
 
 
+def bounded_setdefault(mapping: Dict[Any, Any], key: Any, default: Any,
+                       max_entries: int) -> Tuple[Any, bool]:
+    """Insert a recent keyed statistic without allowing unbounded growth."""
+    if key in mapping:
+        return mapping[key], False
+    limit = max(1, int(max_entries))
+    evicted = False
+    while len(mapping) >= limit:
+        mapping.pop(next(iter(mapping)))
+        evicted = True
+    mapping[key] = default
+    return mapping[key], evicted
+
+
+def _monitor_process_may_own_run(run_dir: Path) -> bool:
+    """Fail safe when a retained run may still have a live monitor process."""
+    pid_path = run_dir / "monitor.pid"
+    try:
+        pid_text = pid_path.read_text(encoding="utf-8").strip()
+        if not pid_text.isdigit():
+            return False
+        pid = int(pid_text)
+        os.kill(pid, 0)
+    except PermissionError:
+        # A live process owned by another user is still potentially active.
+        return True
+    except (ProcessLookupError, OSError, ValueError):
+        return False
+    try:
+        cmdline = Path("/proc/{}/cmdline".format(pid)).read_bytes()
+    except OSError:
+        # Preserve data when process identity cannot be inspected.
+        return True
+    command = cmdline.replace(b"\0", b" ").decode("utf-8", errors="replace")
+    return ("server_runtime_monitor" in command and
+            str(run_dir.resolve()) in command)
+
+
+def prune_run_directories(runs_root: Path, keep_runs: int,
+                          protected_run: Optional[Path] = None) -> List[Path]:
+    """Remove oldest completed monitor runs while preserving active data."""
+    root = runs_root.expanduser().resolve()
+    if not root.is_dir():
+        return []
+    limit = max(1, int(keep_runs))
+    protected = protected_run.expanduser().resolve() if protected_run else None
+    candidates: List[Path] = []
+    for entry in root.iterdir():
+        if (entry.name.startswith(".") or entry.is_symlink() or
+                not entry.is_dir() or
+                not (entry / "run_manifest.json").is_file()):
+            continue
+        resolved = entry.resolve()
+        if resolved.parent != root:
+            continue
+        candidates.append(resolved)
+    def modified_time(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return float("inf")
+
+    candidates.sort(key=lambda path: (modified_time(path), path.name),
+                    reverse=True)
+    removed: List[Path] = []
+    for candidate in candidates[limit:]:
+        if candidate == protected or _monitor_process_may_own_run(candidate):
+            continue
+        try:
+            shutil.rmtree(candidate)
+        except OSError:
+            # Retention failure must not prevent safety monitoring startup.
+            continue
+        removed.append(candidate)
+    return removed
+
+
 @dataclasses.dataclass(frozen=True)
 class SafetyRecord:
     wall_time: float
@@ -182,7 +259,6 @@ class SafetyAggregator:
         self.start_wall_time: Optional[float] = None
         self.track_created = 0
         self.track_reset = 0
-        self.unique_track_ids: set[int] = set()
         self._last_track_id = 0
         self._fault34_started: Optional[float] = None
         self._hazard_started: Optional[Tuple[int, float]] = None
@@ -260,8 +336,6 @@ class SafetyAggregator:
                     {"code": float(prior_code), "duration_sec": max(0.0, wall - started)})
             self._hazard_started = None
 
-        if record.obstacle_track_id > 0:
-            self.unique_track_ids.add(record.obstacle_track_id)
         if record.obstacle_track_id != self._last_track_id:
             if record.obstacle_track_id > 0:
                 self.track_created += 1
@@ -731,8 +805,8 @@ class AsyncRunWriter:
     """Single bounded writer thread; callbacks never perform disk I/O."""
 
     def __init__(self, run_dir: Path, max_queue: int = 4096,
-                 rotation_size_mb: float = 50.0,
-                 rotation_count: int = 5) -> None:
+                 rotation_size_mb: float = 20.0,
+                 rotation_count: int = 2) -> None:
         self.run_dir = run_dir
         self.queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue(maxsize=max_queue)
         self.stop_event = threading.Event()
@@ -783,7 +857,7 @@ class AsyncRunWriter:
 
     def _rotate(self, path: Path) -> None:
         try:
-            path.relative_to(self.run_dir / "logs")
+            path.relative_to(self.run_dir)
         except ValueError:
             return
         if self.rotation_bytes <= 0 or not path.exists() or path.stat().st_size < self.rotation_bytes:
@@ -817,6 +891,11 @@ def load_config(path: Optional[Path]) -> Dict[str, Any]:
         "static_status_freshness_sec": 2.0,
         "cargo_episode_geometry_max_samples": 10000,
         "writer_queue_size": 4096,
+        "max_tracked_identities": 2048,
+        "max_throttle_keys": 2048,
+        "output_retention_runs": 20,
+        "log_rotation_size_mb": 20,
+        "log_rotation_count": 2,
         # Root-level keys from server_monitor.yaml
         "motion_capture": {},
         "fallback_cargo_envelope": {},
@@ -1112,9 +1191,14 @@ class RosRuntimeMonitor:
             (self.run_dir / relative).mkdir(parents=True, exist_ok=True)
         self.writer = AsyncRunWriter(
             self.run_dir, int(config.get("writer_queue_size", 4096)),
-            float(config.get("log_rotation_size_mb", 50.0)),
-            int(config.get("log_rotation_count", 5)))
+            float(config.get("log_rotation_size_mb", 20.0)),
+            int(config.get("log_rotation_count", 2)))
         self.aggregator = SafetyAggregator(config.get("windows_sec", DEFAULT_WINDOWS))
+        self.quiet_stdout = bool(getattr(args, "quiet_stdout", False))
+        self._max_tracked_identities = max(
+            1, int(config.get("max_tracked_identities", 2048)))
+        self._max_throttle_keys = max(
+            1, int(config.get("max_throttle_keys", 2048)))
         self.aggregator_lock = threading.Lock()
         self._state_lock = threading.RLock()
         self.runtime_path = Path(args.persistent_root).expanduser().resolve() / "runtime_status.json"
@@ -1180,10 +1264,6 @@ class RosRuntimeMonitor:
         self.terminal_path_exercised = False
         self.active_path_last_error: Optional[str] = None
         self.monitor_degraded = False
-        self._geo_track_samples: Dict[int, int] = {}
-        self._geo_track_episodes: Dict[int, str] = {}
-        self._geo_last_authoritative: Dict[int, float] = {}
-
         # Typed recognition and suspended-motion observability. These values
         # are read-only mirrors; they never feed ROS parameters or control.
         self._recognition_state_counts: Counter[int] = Counter()
@@ -1222,6 +1302,8 @@ class RosRuntimeMonitor:
         self._swing_stale_active = False
         self._recognition_track_stats: Dict[str, Dict[str, Any]] = {}
         self._swing_track_stats: Dict[str, Dict[str, Any]] = {}
+        self._recognition_track_stats_evicted = 0
+        self._swing_track_stats_evicted = 0
         self._last_loaded_without_lock_event_wall = 0.0
         self._last_sway_warning_event_wall = 0.0
         self._last_skew_suspected_event_wall = 0.0
@@ -1304,7 +1386,8 @@ class RosRuntimeMonitor:
             reason=payload.get("reason", "-"))
         self.writer.submit("text", ("logs/monitor.log", line))
         self.writer.submit("text", ("logs/cargo_terminal.log", line))
-        print(line, flush=True)
+        if not self.quiet_stdout:
+            print(line, flush=True)
 
     def _archive_typed_event(self, relative: str,
                              event: Mapping[str, Any]) -> None:
@@ -1568,7 +1651,8 @@ class RosRuntimeMonitor:
         track_key = "{}:{}:{}".format(
             self._recognition_epoch, int(message.cargo_lifecycle_id),
             int(message.track_segment_id))
-        track_stats = self._recognition_track_stats.setdefault(track_key, {
+        track_stats, evicted = bounded_setdefault(
+            self._recognition_track_stats, track_key, {
             "source_epoch": self._recognition_epoch,
             "cargo_lifecycle_id": int(message.cargo_lifecycle_id),
             "track_segment_id": int(message.track_segment_id),
@@ -1576,7 +1660,8 @@ class RosRuntimeMonitor:
             "state_counts": {},
             "failure_count": 0,
             "maximum_recognition_age_sec": 0.0,
-        })
+        }, self._max_tracked_identities)
+        self._recognition_track_stats_evicted += int(evicted)
         track_stats["samples"] += 1
         state_key = str(state)
         track_stats["state_counts"][state_key] = (
@@ -1741,7 +1826,8 @@ class RosRuntimeMonitor:
         track_key = "{}:{}:{}".format(
             self._swing_epoch, int(message.cargo_lifecycle_id),
             int(message.track_segment_id))
-        track_stats = self._swing_track_stats.setdefault(track_key, {
+        track_stats, evicted = bounded_setdefault(
+            self._swing_track_stats, track_key, {
             "source_epoch": self._swing_epoch,
             "cargo_lifecycle_id": int(message.cargo_lifecycle_id),
             "track_segment_id": int(message.track_segment_id),
@@ -1756,7 +1842,8 @@ class RosRuntimeMonitor:
             "maximum_yaw_error_deg": 0.0,
             "longest_sway_warning_sec": 0.0,
             "longest_skew_suspected_sec": 0.0,
-        })
+        }, self._max_tracked_identities)
+        self._swing_track_stats_evicted += int(evicted)
         track_stats["samples"] += 1
         track_stats["track_id"] = int(message.track_id)
         for field, value in (("sway_state_counts", sway),
@@ -1901,11 +1988,6 @@ class RosRuntimeMonitor:
             if len(self._episode_geometry) == self._episode_geometry.maxlen:
                 self._episode_geometry_dropped_count += 1
             self._episode_geometry.append(dict(parsed))
-            track_id = int(parsed.get("track_id", 0))
-            if formal_operational and track_id > 0:
-                self._geo_track_samples[track_id] = (
-                    self._geo_track_samples.get(track_id, 0) + 1)
-
         csv_fields = [
             "wall_time", "cargo_episode_id", "stamp", "track_id",
             "track_state", "lock_state",
@@ -2359,6 +2441,11 @@ class RosRuntimeMonitor:
         last = self._map_health_events_suppressed.get(key, 0.0)
         if now - last < interval:
             return
+        if key not in self._map_health_events_suppressed:
+            while len(self._map_health_events_suppressed) >= \
+                    self._max_throttle_keys:
+                self._map_health_events_suppressed.pop(
+                    next(iter(self._map_health_events_suppressed)))
         self._map_health_events_suppressed[key] = now
         self._emit_event({
             "event": event_type,
@@ -2450,7 +2537,8 @@ class RosRuntimeMonitor:
             event=event.get("event", "EVENT"), code=event.get("code", "-"),
             reason=event.get("reason", "-"),
             obstacle_track_id=event.get("obstacle_track_id", 0))
-        print(line, flush=True)
+        if not self.quiet_stdout:
+            print(line, flush=True)
         self.writer.submit("text", ("logs/monitor.log", line))
         self.writer.submit("jsonl", ("samples/safety_events.jsonl", dict(event)))
         if event.get("event") != "SAFETY_REPEAT":
@@ -2766,6 +2854,13 @@ class RosRuntimeMonitor:
             total_tile_points += layer_points
             layer_stats[layer] = {"files": layer_count, "points": layer_points, "bytes": layer_bytes}
 
+        active_tile_keys = {
+            "{}/{}".format(entry["layer"], entry["tile"])
+            for entry in tile_catalog
+        }
+        for stale_key in set(self._tile_health_cache) - active_tile_keys:
+            self._tile_health_cache.pop(stale_key, None)
+
         # ── layer ratio anomalies ──
         display_points = layer_stats.get("tiles_display", {}).get("points", 0)
         ratio_alerts: List[str] = []
@@ -2991,6 +3086,10 @@ class RosRuntimeMonitor:
             "swing_source_stamp_rollbacks": self._swing_rollback_count,
             "cargo_recognition_track_stats": self._recognition_track_stats,
             "cargo_swing_track_stats": self._swing_track_stats,
+            "cargo_recognition_track_stats_evicted":
+                self._recognition_track_stats_evicted,
+            "cargo_swing_track_stats_evicted":
+                self._swing_track_stats_evicted,
             "gravity_data_ready": self.gravity_message_count > 0,
             "cargo_monitor_state": cargo_monitor_state,
             "cargo_monitor_active": cargo_monitor_active,
@@ -3199,7 +3298,8 @@ class RosRuntimeMonitor:
                 try:
                     cargo_line = self._cargo_terminal_line(
                         now, pipeline, summary.get("current") or {})
-                    print(cargo_line, flush=True)
+                    if not self.quiet_stdout:
+                        print(cargo_line, flush=True)
                     self.writer.submit("text", (
                         "logs/cargo_terminal.log", cargo_line))
                     self.terminal_path_exercised = True
@@ -3259,7 +3359,8 @@ class RosRuntimeMonitor:
                           hz=float(summary["runtime"].get("odom_hz") or 0.0),
                           rss=summary["runtime"].get("rss_mb"),
                           ratio=window.get("code_duration_ratio", {}))
-                print(health_line, flush=True)
+                if not self.quiet_stdout:
+                    print(health_line, flush=True)
                 self.writer.submit("text", ("logs/monitor.log", health_line))
                 self.last_summary_wall = now
                 self.snapshot_requested = False
@@ -3330,6 +3431,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--replay", default="")
     parser.add_argument("--windows", default="")
     parser.add_argument("--summary-sec", type=float, default=None)
+    parser.add_argument("--quiet-stdout", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -3351,6 +3453,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     run_dir = Path(args.run_dir).expanduser().resolve()
     create_run_manifest(run_dir, args)
+    removed_runs = prune_run_directories(
+        workspace / "server_runs",
+        int(config.get("output_retention_runs", 20)),
+        protected_run=run_dir)
+    if removed_runs and not args.quiet_stdout:
+        print("pruned monitor runs: {}".format(
+            ", ".join(path.name for path in removed_runs)), flush=True)
     lock_path = Path(args.lock_file).expanduser() if args.lock_file else run_dir / "monitor.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_stream = lock_path.open("a+")

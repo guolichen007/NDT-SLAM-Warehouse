@@ -17,7 +17,8 @@
 它每秒读取 `runtime_status.json`、Manifest 状态、`/proc/<pid>` 和磁盘容量。
 默认不订阅 `/map`、`/display_map*` 等大型 PointCloud2。回调只更新有界内存
 和有界队列；独立 writer thread 负责 CSV/JSONL。队列满时记录 dropped 数，
-不阻塞 SLAM 回调。
+不阻塞 SLAM 回调。每个 track 统计表和事件节流表也有独立容量上限，超限时淘汰
+最早条目并在摘要中记录淘汰计数。
 
 ## 事件与窗口
 
@@ -55,7 +56,10 @@ server_runs/<run_id>/
 
 CSV 只在空文件写一次表头，监控重启继续 append；`live_summary.json` 使用同目录
 tmp + rename 原子替换。默认 Bag 仅含 odom、typed safety、simple code 和静态
-证据调试消息，不录制大型点云。
+证据调试消息，不录制大型点云。由监控 writer 管理的追加型 CSV、JSONL 和文本文件默认在 20 MB
+轮转并保留 2 个历史段；每次监控启动会按 `output_retention_runs` 删除最旧的已结束
+运行目录（默认保留 20 次）。当前运行、仍可能被监控进程占用的目录、隐藏目录、
+符号链接和没有 `run_manifest.json` 的人工目录均不会删除。
 
 ## 日常命令
 
@@ -63,6 +67,8 @@ tmp + rename 原子替换。默认 Bag 仅含 odom、typed safety、simple code 
 rosrun ndt_slam server_monitorctl.sh start \
   --workspace ~/NDT-slam-ws --run-id rc1-live-001 \
   --expected-sha <EXPECTED_SHA>
+# 后台启动后立即留在当前终端持续查看吊物/避障信息：
+rosrun ndt_slam server_monitorctl.sh start --follow
 rosrun ndt_slam server_monitorctl.sh status
 rosrun ndt_slam server_monitorctl.sh follow
 rosrun ndt_slam server_monitorctl.sh snapshot
@@ -70,12 +76,18 @@ rosrun ndt_slam server_monitorctl.sh stop
 rosrun ndt_slam server_monitorctl.sh report
 ```
 
+`start` 默认后台运行并在成功后打印 `follow` 命令；这是脚本和验收流程依赖的兼容
+语义。`start --follow` 会在启动就绪后执行同一个跟随器，按 Ctrl-C 只退出查看，
+不会停止后台监控。需要结束采集时必须显式执行 `stop`。
+
 报告的 `NOT_RUN` 永远不会自动解释为 PASS。监控只生成证据，不能代替 Ubuntu
 clean build、gtest、Bag 或长期 soak 的人工验收。
 
-## 服务与通知扩展
+## 服务与通知扩展（当前停用）
 
-`install_server_services.sh` 根据显式 workspace/user/data-root 生成两个 unit。
+现阶段运行不启用 systemd，使用手动 `roslaunch` 与上述 `monitorctl` 命令。
+`install_server_services.sh` 和 unit 模板仅保留给未来部署，不应在当前服务器执行。
+模板可根据显式 workspace/user/data-root 生成两个 unit。
 SLAM 的 flock 覆盖整个 ExecStart 生命周期；monitor 在 SLAM 后启动并可自动
 重连。通知渠道应消费 `safety_events.jsonl` 或 `live_summary.json`，不得让邮件、
 Slack 等网络调用进入 ROS 回调或安全判定线程。

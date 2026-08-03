@@ -13,6 +13,9 @@ monitor:
   avoidance_pipeline_grace_sec: 0.4
   static_status_freshness_sec: 2.0
   cargo_episode_geometry_max_samples: 10000
+  # Bound per-track and throttling dictionaries during long unattended runs.
+  max_tracked_identities: 2048
+  max_throttle_keys: 2048
   sustained_33_sec: 5.0
   sustained_34_sec: 5.0
   repeat_period_sec: 30.0
@@ -22,8 +25,9 @@ monitor:
   manifest_warmup_sec: 60.0
 
   output_retention_runs: 20
-  log_rotation_size_mb: 50
-  log_rotation_count: 5
+  # Applied to every writer-managed append-only CSV/JSONL/text output.
+  log_rotation_size_mb: 20
+  log_rotation_count: 2
   optional_lightweight_rosbag: false
 
 # ── Fallback cargo envelope (disabled by default) ──

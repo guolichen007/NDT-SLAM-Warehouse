@@ -1,5 +1,6 @@
 import csv
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -10,14 +11,17 @@ OPS = Path(__file__).resolve().parents[1] / "src" / "ndt_slam" / "scripts" / "op
 sys.path.insert(0, str(OPS))
 
 from server_runtime_monitor import (  # noqa: E402
+    AsyncRunWriter,
     AvoidancePipelineObserver,
     CargoMonitorGate,
     RosRuntimeMonitor,
     SafetyAggregator,
     append_csv,
     atomic_write_json,
+    bounded_setdefault,
     is_runtime_status_stale,
     normalize_timeout_status,
+    prune_run_directories,
     classify_cargo_geometry,
     cargo_monitor_ready,
     select_static_status,
@@ -351,6 +355,48 @@ class StaticStatusSelectionTest(unittest.TestCase):
 
 
 class AppendSafeOutputTest(unittest.TestCase):
+    def test_all_append_only_outputs_rotate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            writer = AsyncRunWriter(
+                run_dir, max_queue=16,
+                rotation_size_mb=0.00001, rotation_count=2)
+            writer.submit("jsonl", (
+                "samples/events.jsonl", {"payload": "first-record"}))
+            writer.submit("jsonl", (
+                "samples/events.jsonl", {"payload": "second-record"}))
+            writer.close()
+            current = run_dir / "samples/events.jsonl"
+            self.assertTrue(current.is_file())
+            self.assertTrue(current.with_name("events.jsonl.1").is_file())
+
+    def test_run_retention_removes_only_old_manifest_runs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "server_runs"
+            root.mkdir()
+            runs = []
+            for index in range(4):
+                run = root / "run-{}".format(index)
+                atomic_write_json(run / "run_manifest.json", {"run": index})
+                os.utime(run, (100 + index, 100 + index))
+                runs.append(run)
+            unrelated = root / "operator-notes"
+            unrelated.mkdir()
+            removed = prune_run_directories(
+                root, keep_runs=2, protected_run=runs[-1])
+            self.assertEqual({path.name for path in removed},
+                             {"run-0", "run-1"})
+            self.assertTrue(runs[-1].is_dir())
+            self.assertTrue(unrelated.is_dir())
+
+    def test_keyed_statistics_are_bounded(self):
+        values = {}
+        for index in range(5):
+            _, evicted = bounded_setdefault(
+                values, str(index), {"index": index}, max_entries=3)
+        self.assertTrue(evicted)
+        self.assertEqual(list(values), ["2", "3", "4"])
+
     def test_atomic_live_summary(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "live_summary.json"

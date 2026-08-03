@@ -37,13 +37,13 @@ max_z_step  = max_z_speed  * sensor_dt + margin
 ### Degraded Geometry（降级几何）
 
 仅由实时 LiDAR 观测支持，未获得静态+实时双源一致授权：
-- 只能产生正向 17/18 告警
+- 生产配置下只保留诊断，不产生正式 14/17/18
 - **不能**产生 CLEAR 14
 - **不能**正式剔除货物点
 - **不能**排除静态地图区域
 - **不能**授权 MapCommit 排除
 
-稳定 live-only 几何可在 Track Lock 后冻结，但保持 `formal_authorized=false`。仅当静态+实时物理来源连续一致后才升级为 Formal。
+稳定 live-only 几何可在 Track Lock 后冻结，但保持 `formal_authorized=false`。仅当静态+实时物理来源连续一致后才升级为 Formal。`evidence_backed_only` 仍保留为受控调试开关，不是生产默认值。
 
 ### Pending Envelope（待确认包围盒）
 
@@ -52,13 +52,12 @@ max_z_step  = max_z_speed  * sensor_dt + margin
 - 连续确认后可升级
 - 旧 Pending Envelope 不能保持 session ready
 
-Pending 阶段同时评估实时障碍与静态地图风险。实时来源暂不可用时，静态路径必须满足
-来源区域排除授权、查询有效且有界、同一 cargo lifecycle、同一 map generation、稳定
-地图 cell 区域连续匹配等条件，才能发布正向 17/18。该路径使用独立静态 obstacle ID
-命名空间，并在时间间隔过大、生命周期变化、地图代际变化、来源失效、风险消失或区域
-重匹配失败时重置。
+Pending 阶段仍评估实时障碍与静态地图风险并积累 track、来源和区域连续性证据，但生产
+配置 `fusion_pending_warning_promotion_policy: disabled` 会在最终融合层阻止这些风险升级为
+正式 17/18，系统保持 Code 33。这样尺寸仍在变化或双源几何不一致时，膨胀包围盒与快速
+track churn 只能进入诊断数据，不能触发主控告警。
 
-静态 Pending 路径永不授权 CLEAR，也不借用实时 track 身份。运行诊断分别输出
+Pending 路径永不授权 CLEAR，也不借用另一条路径的 track 身份。运行诊断分别输出
 `pending_live_warning_authorized` 和 `pending_static_warning_authorized`，不能再把旧的
 `pending_positive_warning_authorized` 原因串当作两条路径的共同证据。
 

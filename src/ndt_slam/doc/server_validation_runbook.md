@@ -60,31 +60,23 @@ rosrun ndt_slam run_server_validation.sh prepare \
 若希望入口同时执行第 3/4 步，追加 `--build-and-test`。首次没有 Manifest 时
 输出 `FIRST_RUN`；这不是“已有恢复证据通过”。
 
-## 6. 安装/检查 service
+## 6. 手动启动 SLAM（当前模式）
 
 ```bash
-sudo rosrun ndt_slam install_server_services.sh \
-  --workspace "$WS" --user "$(id -un)" \
-  --data-root "$WS/maps/live/current"
-sudo systemctl cat ndt-slam.service ndt-slam-monitor.service
-sudo systemctl show ndt-slam.service \
-  -p Restart -p RestartUSec -p StartLimitIntervalUSec \
-  -p StartLimitBurst -p User -p WorkingDirectory \
-  -p EnvironmentFiles -p ExecStart
-sudo systemctl show ndt-slam-monitor.service \
-  -p Restart -p RestartUSec -p TimeoutStopUSec \
-  -p User -p WorkingDirectory -p EnvironmentFiles -p ExecStart
+cd "$WS"
+source devel/setup.bash
+export NDT_SLAM_DATA_ROOT="$WS/maps/live/current"
+roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
+  use_sim_time:=false use_rviz:=false persistent_map:=true \
+  use_ndt_recovery_watchdog:=true
 ```
 
-确认 launch 参数显式为 `use_sim_time:=false use_rviz:=false
-persistent_map:=true`。安装器会在 `daemon-reload` 后检查最终生效值，因此危险的
-drop-in 覆盖会直接导致安装失败；仅查看主 unit 文件不足以排除此风险。确认路径后
-可用 `--yes --enable` 非交互安装/启用。
+现阶段 systemd 暂停使用，不安装或启动 unit。保持此终端运行；看门狗请求硬恢复时
+会保存证据并安全退出，但没有外部 supervisor 自动重拉。
 
 ## 7–8. 启动 SLAM 和 monitor
 
 ```bash
-sudo systemctl start ndt-slam.service
 rosrun ndt_slam run_server_validation.sh start \
   --workspace "$WS" --expected-sha "$SHA" --run-id "$RUN_ID"
 ```
@@ -97,7 +89,6 @@ rosrun ndt_slam run_server_validation.sh start \
 ```bash
 rosrun ndt_slam server_monitorctl.sh status --workspace "$WS" --run-id "$RUN_ID"
 rosrun ndt_slam server_monitorctl.sh follow --workspace "$WS" --run-id "$RUN_ID"
-journalctl -u ndt-slam.service -f
 ```
 
 17/18、故障和 reason 变化立即输出；周期摘要不应逐帧刷屏。

@@ -6,7 +6,10 @@ usage() {
 Usage: server_monitorctl.sh <start|stop|restart|status|follow|snapshot|report|doctor>
   [--workspace PATH] [--run-id ID] [--config PATH]
   [--summary-sec N] [--windows 60,600] [--expected-sha SHA]
-  [--json]
+  [--follow] [--json]
+
+`start` keeps the monitor in the background. Use `start --follow` to attach
+to the live cargo/safety stream immediately; Ctrl-C stops only the viewer.
 EOF
 }
 
@@ -20,6 +23,7 @@ summary_sec=""
 windows=""
 expected_sha=""
 json_output=false
+follow_output=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --workspace) workspace="$2"; shift 2 ;;
@@ -28,6 +32,7 @@ while [[ $# -gt 0 ]]; do
     --summary-sec) summary_sec="$2"; shift 2 ;;
     --windows) windows="$2"; shift 2 ;;
     --expected-sha) expected_sha="$2"; shift 2 ;;
+    --follow) follow_output=true; shift ;;
     --json) json_output=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
@@ -502,7 +507,7 @@ start_monitor() {
   fi
   args=(--workspace "$workspace" --run-id "$run_id" --run-dir "$run_dir"
         --persistent-root "${NDT_SLAM_DATA_ROOT:-$workspace/maps/live/current}"
-        --config "$config" --lock-file "$lock_file")
+        --config "$config" --lock-file "$lock_file" --quiet-stdout)
   [[ -z "$expected_sha" ]] || args+=(--expected-sha "$expected_sha")
   [[ -z "$windows" ]] || args+=(--windows "$windows")
   [[ -z "$summary_sec" ]] || args+=(--summary-sec "$summary_sec")
@@ -615,6 +620,13 @@ PY
   fi
 
   echo "monitor started pid=$pid run_id=$run_id dir=$run_dir ready=yes"
+  echo "live output: rosrun ndt_slam server_monitorctl.sh follow --workspace '$workspace' --run-id '$run_id'"
+}
+
+follow_monitor() {
+  mkdir -p "$run_dir/logs"
+  touch "$run_dir/logs/monitor.log"
+  exec tail -n 50 -F "$run_dir/logs/monitor.log"
 }
 
 stop_monitor() {
@@ -813,15 +825,19 @@ status_text() {
 # ─── dispatch ────────────────────────────────────────────────────────────────────
 
 case "$action" in
-  start) start_monitor ;;
+  start)
+    start_monitor
+    if $follow_output; then follow_monitor; fi
+    ;;
   stop) stop_monitor ;;
-  restart) stop_monitor || true; start_monitor ;;
+  restart)
+    stop_monitor || true
+    start_monitor
+    if $follow_output; then follow_monitor; fi
+    ;;
   status) print_status ;;
   doctor) run_doctor ;;
-  follow)
-    touch "$run_dir/logs/monitor.log"
-    exec tail -F "$run_dir/logs/monitor.log"
-    ;;
+  follow) follow_monitor ;;
   snapshot)
     pid="$(monitor_pid)" || { echo "monitor not running" >&2; exit 1; }
     kill -USR1 "$pid"

@@ -12,19 +12,19 @@ NDT 定位、长期在线建图、五层地图输出和一条完整的吊物安�
 > 本软件不是安全认证设备。部署时必须保留外部急停、限位开关和现场安全策略。
 
 当前主线已包含 NDT fitness 自适应熔断、重定位多帧确认、全图静态地图恢复、
-长期失败看门狗、Pending 静态障碍正向告警和定位地图报告原子写入。当前实现的
+长期失败看门狗、Pending 风险诊断和定位地图报告原子写入。当前实现的
 Windows 静态检查与历史现场证据分开管理；现场验证 Tag 不会随代码提交自动前移。
 
 ## 核心能力
 
 - **双雷达融合定位**：结构优先 NDT 配准 + 各向异性 EKF + 静止保持策略。结构不足时进入 prediction-only，不回退到整片地面。
 - **定位故障隔离**：按目标云分布建立自适应 fitness 基线；持续恶化时隔离 NDT 测量和地图提交，恢复后再闭合。异步重定位结果需满足身份、时效和多帧一致性。
-- **定位自动恢复**：局部恢复失败后优先使用 `objects_clean` 静态地图做有界全图搜索；长期无法恢复时由看门狗落盘证据并请求 systemd 重启全栈，同时限制重启风暴。
+- **定位自动恢复**：局部恢复失败后优先使用 `objects_clean` 静态地图做有界全图搜索；长期无法恢复时由看门狗落盘证据并安全结束当前 launch，等待当前人工运行策略重新启动。
 - **长期在线建图**：MotionGate 静止不建图，关键帧 active window，20m×20m tile 增量落盘，MemoryGuard/DiskGuard 保护。
 - **五层地图输出**：registration / display / ground / objects / objects_clean，同代发布，`header.seq` 一致。
 - **吊物刚体跟踪**：稳健二维 OBB 检测，锁定后冻结长/宽/高/yaw，作业期间只更新中心。起升不会导致错误丢失。
-- **多源几何融合**：Formal Geometry（冻结形状，经静态+实时来源连续一致授权）和 Degraded Geometry（仅实时正向告警）。
-- **Pending 静态风险**：实时障碍暂缺时，只有通过来源排除、稳定地图区域和连续确认的静态风险可以产生 17/18；该路径不能产生 CLEAR。
+- **多源几何融合**：Formal Geometry（冻结形状，经静态+实时来源连续一致授权）和 Degraded Geometry（诊断与显式调试用途）。
+- **Pending 风险门禁**：生产配置下未冻结几何只输出 Code 33 和诊断证据，不得产生 14/17/18；`evidence_backed_only` 仅允许在受控调试中显式启用。
 - **障碍物追踪与安全码**：Code 14（CLEAR）/ 17（≤3m）/ 18（3-5m）/ 30-35（故障），只由真实空间碰撞风险产生正向告警。
 - **主控集成**：Code 18 → 外部主控程序 → S3 语音告警，已取得现场证据。
 - **服务器监控**：统一运维入口、SHA 门禁验证、CSV 诊断输出、只读安全窗口。
@@ -42,13 +42,13 @@ Windows 静态检查与历史现场证据分开管理；现场验证 Tag 不会�
   │   ├── 各向异性 EKF（CraneMotionEKF）
   │   ├── StationaryMotionPolicy
   │   ├── MapCommit → Clean Worker → 五层 MapLayerBundle
-  │   └── NDT Recovery Watchdog → systemd 全栈监督
+  │   └── NDT Recovery Watchdog → 软重定位 / 证据落盘 / 安全退出
   │
   └── 吊物安全链路
       ├── Cargo Observation → 生命周期（EMPTY→CANDIDATE→LOCKED→LOST_HOLD）
       ├── CargoGeometryFusion
       │   ├── Formal Geometry（可 CLEAR、可 map exclusion、可 MapCommit）
-      │   └── Degraded Geometry（仅正向 17/18 告警）
+      │   └── Degraded Geometry（生产仅诊断，不能输出正式安全码）
       ├── Cargo Bottom
       ├── CargoObstacleTracker
       ├── CargoAvoidanceFusion → CargoSafetyStatus
@@ -75,7 +75,7 @@ Windows 静态检查与历史现场证据分开管理；现场验证 Tag 不会�
 
 | 操作 | Formal Geometry | Degraded Geometry |
 |---|---|---|
-| 正向 17/18 告警 | 允许 | 允许 |
+| 正向 17/18 告警 | 允许 | **生产配置禁止** |
 | CLEAR 14 | 允许（全部合同满足） | **禁止** |
 | 货物点从 registration 剔除 | 允许 | **禁止** |
 | 静态地图排除 | 允许 | **禁止** |
@@ -113,20 +113,14 @@ roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
 ```
 
 手动运行没有外部进程监督；看门狗请求硬恢复时会安全结束 launch，但不会自行重拉。
-长期生产使用 systemd：
+现阶段 systemd 模式暂时停用，不执行 unit 安装、enable 或 start。监控使用：
 
 ```bash
-sudo rosrun ndt_slam install_server_services.sh \
-  --workspace ~/NDT-slam-ws --user "$(id -un)" \
-  --data-root ~/NDT-slam-ws/maps/live/current --yes --enable
-sudo systemctl start ndt-slam.service ndt-slam-monitor.service
-sudo systemctl status ndt-slam.service ndt-slam-monitor.service
-```
-
-停止生产服务：
-
-```bash
-sudo systemctl stop ndt-slam-monitor.service ndt-slam.service
+rosrun ndt_slam server_monitorctl.sh start --follow \
+  --workspace ~/NDT-slam-ws
+# 另一个终端停止后台监控：
+rosrun ndt_slam server_monitorctl.sh stop \
+  --workspace ~/NDT-slam-ws
 ```
 
 服务器验收统一入口：
@@ -148,7 +142,7 @@ rosbag play /path/to/warehouse.bag --clock
 
 该 launch 默认启动 SLAM、NDT 恢复看门狗和 RViz。RViz 中全量
 `display_map` 默认关闭以避免大点云拖慢界面，需要时可手工开启；这不会关闭
-`objects_clean` 等运行显示。生产 systemd 服务固定使用 `use_rviz:=false`。
+`objects_clean` 等运行显示。无 RViz 运行时显式传入 `use_rviz:=false`。
 完整安装、有效配置检查和故障恢复命令见[部署](src/ndt_slam/doc/deployment.md)与
 [运行与运维](src/ndt_slam/doc/operations.md)。
 

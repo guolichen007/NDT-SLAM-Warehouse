@@ -3273,11 +3273,16 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     0.0F, 1.0F);
             const std::string pending_promotion_policy =
                 cargo_safety["fusion_pending_warning_promotion_policy"]
-                    .as<std::string>("evidence_backed_only");
+                    .as<std::string>("disabled");
             if (pending_promotion_policy == "disabled") {
                 cargo_avoidance_fusion_config_
                     .pending_warning_promotion_policy =
                         PendingWarningPromotionPolicy::DISABLED;
+            } else if (pending_promotion_policy ==
+                       "evidence_backed_only") {
+                cargo_avoidance_fusion_config_
+                    .pending_warning_promotion_policy =
+                        PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY;
             } else if (pending_promotion_policy ==
                        "legacy_any_pending") {
                 cargo_avoidance_fusion_config_
@@ -3289,7 +3294,11 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             } else {
                 cargo_avoidance_fusion_config_
                     .pending_warning_promotion_policy =
-                        PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY;
+                        PendingWarningPromotionPolicy::DISABLED;
+                ROS_ERROR_STREAM(
+                    "[CargoAvoidance] unknown pending warning promotion "
+                    "policy='" << pending_promotion_policy
+                    << "'; fail-safe disabled pending 17/18 promotion");
             }
             // The legacy bool remains a one-way compatibility kill switch.
             // A historical 'true' never re-enables unsafe any-pending

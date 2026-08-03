@@ -32,7 +32,7 @@ struct CargoAvoidanceSourceRisk {
 struct CargoAvoidanceFusionConfig {
   float minimum_live_coverage_for_clear = 0.05F;
   PendingWarningPromotionPolicy pending_warning_promotion_policy =
-      PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY;
+      PendingWarningPromotionPolicy::DISABLED;
   int pending_minimum_obstacle_confirmations = 3;
   float pending_minimum_authority_confidence = 0.55F;
   bool allow_static_only_pending_warning = true;

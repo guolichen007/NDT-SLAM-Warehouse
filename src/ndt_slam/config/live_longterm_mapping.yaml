@@ -776,10 +776,10 @@ cargo_safety:
   static_height_maximum_merge_gap_m: 0.18
   # Clear 14 requires live ROI coverage plus a reliable static contract.
   fusion_minimum_live_coverage_for_clear: 0.05
-  # Pending geometry may promote 17/18 only after cargo-self separation and a
-  # temporally confirmed external obstacle identity. "legacy_any_pending" is
-  # an explicit unsafe compatibility mode and must not be used in production.
-  fusion_pending_warning_promotion_policy: evidence_backed_only
+  # Production fail-safe: geometry that has not reached formal freeze remains
+  # diagnostic code 33 and cannot promote 17/18. evidence_backed_only is an
+  # explicit commissioning opt-in; legacy_any_pending must never be used.
+  fusion_pending_warning_promotion_policy: disabled
   fusion_pending_minimum_authority_confidence: 0.55
   # Track low-clearance obstacles before they enter the warning shell:
   # directionally when motion is authoritative, radially while stationary or
@@ -787,7 +787,7 @@ cargo_safety:
   # and cannot itself publish 17/18.
   collision_tracking_acquisition_distance_m: 7.0
   # Compatibility kill switch only. true does not bypass the typed policy.
-  fusion_provisional_warning_to_official_code: true
+  fusion_provisional_warning_to_official_code: false
   motion_corridor_enabled: true
   motion_corridor_immediate_near_field_m: 0.30
   motion_corridor_minimum_speed_mps: 0.05

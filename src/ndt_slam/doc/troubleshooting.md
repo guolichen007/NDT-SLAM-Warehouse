@@ -24,23 +24,13 @@
 
 先检查 `/ndt_slam/relocalization_status` 和
 `$NDT_SLAM_DATA_ROOT/recovery_watchdog/events.jsonl`。`soft_relocalize` 表示已请求
-进程内恢复，`hard_restart` 表示已请求 systemd 重启全栈，`restart_suppressed`
+进程内恢复，`hard_restart` 表示已请求外部监督器重启全栈，`restart_suppressed`
 表示 15 分钟重启预算已耗尽，此时应检查雷达输入、静态地图和磁盘证据，不要继续
 手工循环重启。
 
 若日志记录了 `hard_restart` 但进程没有重新拉起，先确认当前入口：手动
-`roslaunch` 没有外部 supervisor，只会安全退出。生产服务检查：
-
-```bash
-sudo systemctl status ndt-slam.service ndt-slam-monitor.service
-sudo systemctl show ndt-slam.service \
-  -p Restart -p RestartUSec -p StartLimitIntervalUSec \
-  -p StartLimitBurst -p ExecStart
-journalctl -u ndt-slam.service -u ndt-slam-monitor.service -f
-```
-
-如安装器报告有效配置失败，使用 `systemctl cat` 检查 drop-in；不要绕过检查直接
-启动旧 unit。
+`roslaunch` 没有外部 supervisor，只会安全退出。当前 systemd 模式停用，因此这是
+预期行为；保留终端日志和 watchdog 证据，排除输入或地图问题后再人工重新启动。
 
 ## 静止时错误移动或地图增长
 

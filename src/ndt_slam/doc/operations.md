@@ -13,22 +13,9 @@ roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
   use_ndt_recovery_watchdog:=true
 ```
 
-生产服务：
-
-```bash
-sudo systemctl start ndt-slam.service ndt-slam-monitor.service
-sudo systemctl status ndt-slam.service ndt-slam-monitor.service
-journalctl -u ndt-slam.service -u ndt-slam-monitor.service -f
-```
-
-停止服务：
-
-```bash
-sudo systemctl stop ndt-slam-monitor.service ndt-slam.service
-```
-
-安装或更新 unit 必须使用
-[`install_server_services.sh`](deployment.md)，不要手工复制 `.service.in` 模板。
+现阶段暂不启用 systemd。服务器运行使用手动 `roslaunch`；unit 与安装器只保留为
+未来部署模板，不要在当前服务器执行 `install_server_services.sh`、`systemctl enable`
+或 `systemctl start ndt-slam*`。
 
 ## 启动后检查
 
@@ -40,10 +27,15 @@ sudo systemctl stop ndt-slam-monitor.service ndt-slam.service
 统一入口：
 
 ```bash
+rosrun ndt_slam server_monitorctl.sh start --follow
 rosrun ndt_slam server_monitorctl.sh status
 rosrun ndt_slam server_monitorctl.sh follow
 rosrun ndt_slam server_monitorctl.sh snapshot
 ```
+
+`start` 单独使用时后台启动，成功后返回终端并打印持续查看命令；需要启动后直接看到
+吊物与避障输出时使用 `start --follow`。按 Ctrl-C 只退出查看，监控仍在后台运行；
+结束监控使用 `server_monitorctl.sh stop`。
 
 监控是只读进程，typed safety 是权威源，simple status code 只做一致性校验。
 定位恢复的现场观察命令：
@@ -90,7 +82,8 @@ $NDT_SLAM_DATA_ROOT/recovery_watchdog/state.json
 ```
 
 `events.jsonl` 记录软恢复、硬重启和重启抑制；`state.json` 原子保存重启窗口历史。
-现场验收应同时保留 systemd journal、上述两份证据和对应提交 SHA。
+当前手动运行模式的现场验收应同时保留 roslaunch 终端日志、上述两份证据、监控运行
+目录和对应提交 SHA。
 外部告警必须解析 `events.jsonl` 的稳定 JSON `action` 字段，并关注
 `soft_relocalize`、`hard_restart`、`restart_suppressed`；不得依赖
 `logfatal` 的完整文本，日志措辞不属于机器接口。

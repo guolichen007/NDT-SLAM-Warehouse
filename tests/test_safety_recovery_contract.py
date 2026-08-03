@@ -30,6 +30,18 @@ MONITOR_SERVICE = (
 INSTALLER = (
     ROOT / "src/ndt_slam/scripts/ops/install_server_services.sh"
 ).read_text(encoding="utf-8")
+MONITOR = (
+    ROOT / "src/ndt_slam/scripts/ops/server_runtime_monitor.py"
+).read_text(encoding="utf-8")
+MONITOR_CTL = (
+    ROOT / "src/ndt_slam/scripts/ops/server_monitorctl.sh"
+).read_text(encoding="utf-8")
+MONITOR_CONFIG = (
+    ROOT / "src/ndt_slam/config/server_monitor.yaml"
+).read_text(encoding="utf-8")
+FUSION_HEADER = (
+    ROOT / "src/ndt_slam/include/ndt_slam/cargo_avoidance_fusion.hpp"
+).read_text(encoding="utf-8")
 
 
 def section(start: str, end: str) -> str:
@@ -39,6 +51,39 @@ def section(start: str, end: str) -> str:
 
 
 class SafetyRecoveryContractTest(unittest.TestCase):
+    def test_PendingWarningsRequireExplicitCommissioningOptIn(self):
+        self.assertIn(
+            "fusion_pending_warning_promotion_policy: disabled", CONFIG
+        )
+        self.assertIn(
+            "fusion_provisional_warning_to_official_code: false", CONFIG
+        )
+        parser = section(
+            "const std::string pending_promotion_policy =",
+            "cargo_collision_tracking_acquisition_distance_m_ =",
+        )
+        self.assertIn('.as<std::string>("disabled")', parser)
+        self.assertIn("unknown pending warning promotion", parser)
+        self.assertIn("PendingWarningPromotionPolicy::DISABLED", parser)
+        self.assertIn(
+            "pending_warning_promotion_policy =\n"
+            "      PendingWarningPromotionPolicy::DISABLED",
+            FUSION_HEADER,
+        )
+
+    def test_MonitorRetentionAndForegroundFollowAreWired(self):
+        self.assertIn("prune_run_directories(", MONITOR)
+        self.assertIn("output_retention_runs", MONITOR)
+        self.assertIn("path.relative_to(self.run_dir)", MONITOR)
+        self.assertIn("max_tracked_identities", MONITOR)
+        self.assertIn("max_throttle_keys", MONITOR)
+        self.assertIn('parser.add_argument("--quiet-stdout"', MONITOR)
+        self.assertIn("output_retention_runs: 20", MONITOR_CONFIG)
+        self.assertIn("max_tracked_identities: 2048", MONITOR_CONFIG)
+        self.assertIn("--follow) follow_output=true", MONITOR_CTL)
+        self.assertIn("--quiet-stdout", MONITOR_CTL)
+        self.assertIn("tail -n 50 -F", MONITOR_CTL)
+
     def test_StaticPendingHazardRequiresIndependentAuthority(self):
         body = section(
             "void NdtSlamNode::runPendingCargoAvoidance(",
