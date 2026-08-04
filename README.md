@@ -23,8 +23,8 @@ Windows 静态检查与历史现场证据分开管理；现场验证 Tag 不会�
 - **长期在线建图**：MotionGate 静止不建图，关键帧 active window，20m×20m tile 增量落盘，MemoryGuard/DiskGuard 保护。
 - **五层地图输出**：registration / display / ground / objects / objects_clean，同代发布，`header.seq` 一致。
 - **吊物刚体跟踪**：稳健二维 OBB 检测，锁定后冻结长/宽/高/yaw，作业期间只更新中心。起升不会导致错误丢失。
-- **多源几何融合**：Formal Geometry（冻结形状，经静态+实时来源连续一致授权）和 Degraded Geometry（诊断与显式调试用途）。
-- **Pending 风险门禁**：生产配置下未冻结几何只输出 Code 33 和诊断证据，不得产生 14/17/18；`evidence_backed_only` 仅允许在受控调试中显式启用。
+- **多源几何融合**：起吊前静态基线与起吊后约束融合形成 `PENDING / POSITIVE_ONLY / FORMAL` 三级授权；可见高度按下界处理，不再因厚度源差异永久卡死。
+- **正向风险门禁**：`POSITIVE_ONLY` 只在身份、稳健实测尺寸和保守底面连续确认后允许 17/18；无危险时保持 33，只有 `FORMAL` 可输出 14、剔除货物点和授权 MapCommit。
 - **障碍物追踪与安全码**：Code 14（CLEAR）/ 17（≤3m）/ 18（3-5m）/ 30-35（故障），只由真实空间碰撞风险产生正向告警。
 - **主控集成**：Code 18 → 外部主控程序 → S3 语音告警，已取得现场证据。
 - **服务器监控**：统一运维入口、SHA 门禁验证、CSV 诊断输出、只读安全窗口。
@@ -47,8 +47,9 @@ Windows 静态检查与历史现场证据分开管理；现场验证 Tag 不会�
   └── 吊物安全链路
       ├── Cargo Observation → 生命周期（EMPTY→CANDIDATE→LOCKED→LOST_HOLD）
       ├── CargoGeometryFusion
-      │   ├── Formal Geometry（可 CLEAR、可 map exclusion、可 MapCommit）
-      │   └── Degraded Geometry（生产仅诊断，不能输出正式安全码）
+      │   ├── PENDING（证据积累，不输出正式风险码）
+      │   ├── POSITIVE_ONLY（只允许可靠的 17/18）
+      │   └── FORMAL（可 CLEAR、可 map exclusion、可 MapCommit）
       ├── Cargo Bottom
       ├── CargoObstacleTracker
       ├── CargoAvoidanceFusion → CargoSafetyStatus
@@ -62,8 +63,8 @@ Windows 静态检查与历史现场证据分开管理；现场验证 Tag 不会�
 | Code | 含义 | 授权来源 |
 |---:|---|---|
 | 14 | CLEAR — 无碰撞风险 | 仅 Formal Geometry + 全部合同满足 |
-| 17 | NEAR_3M — ≤3m，垂直净空<0.8m | Formal 或 Degraded Geometry |
-| 18 | NEAR_5M — 3-5m，垂直净空<0.8m | Formal 或 Degraded Geometry |
+| 17 | NEAR_3M — ≤3m，垂直净空<0.8m | FORMAL 或 POSITIVE_ONLY |
+| 18 | NEAR_5M — 3-5m，垂直净空<0.8m | FORMAL 或 POSITIVE_ONLY |
 | 30 | 系统未就绪 / 时间轴回退 | 故障 |
 | 31 | 定位无效 | 故障 |
 | 32 | Gravity/称重信号无效 | 故障 |
@@ -73,13 +74,16 @@ Windows 静态检查与历史现场证据分开管理；现场验证 Tag 不会�
 
 ### 几何权限
 
-| 操作 | Formal Geometry | Degraded Geometry |
-|---|---|---|
-| 正向 17/18 告警 | 允许 | **生产配置禁止** |
-| CLEAR 14 | 允许（全部合同满足） | **禁止** |
-| 货物点从 registration 剔除 | 允许 | **禁止** |
-| 静态地图排除 | 允许 | **禁止** |
-| MapCommit 排除 | 允许 | **禁止** |
+| 操作 | PENDING | POSITIVE_ONLY | FORMAL |
+|---|---|---|---|
+| 正向 17/18 告警 | 禁止 | 允许（障碍证据也须通过） | 允许 |
+| 无危险时输出 | 33 | 33 | 14（全部合同满足） |
+| 货物点从 registration 剔除 | 禁止 | 禁止 | 允许 |
+| 静态地图/MapCommit 排除 | 禁止 | 禁止 | 允许 |
+
+起吊前基线只在 `EMPTY + 静止 + 定位可靠` 时从同代静态高度场建立，记录顶面、支撑面、
+OBB、成员网格和 MAD；不使用 odom Z 推导厚度。地图代次变化、时间回退或锚点与组件
+距离超过 0.5m 会使该证据失效，避免 NDT 漂移把另一处静态物体绑定为本次货物。
 
 ### Heartbeat 节点
 

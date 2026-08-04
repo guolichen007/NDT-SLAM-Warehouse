@@ -67,6 +67,7 @@
 #include <ndt_slam/pending_cargo_envelope.hpp>
 #include <ndt_slam/pending_cargo_self_evidence.hpp>
 #include <ndt_slam/revealed_support_observer.hpp>
+#include <ndt_slam/cargo_preload_baseline_tracker.hpp>
 #include <ndt_slam/cargo_swing_monitor.hpp>
 #include <ndt_slam/cargo_motion_corridor.hpp>
 #include <ndt_slam/cargo_residual_classifier.hpp>
@@ -2039,6 +2040,9 @@ private:
     // component is the lift-origin reference after the cargo and hook move
     // away from the pickup location.
     StaticHeightComponent cargo_preload_origin_component_;
+    CargoPreloadBaselineConfig cargo_preload_baseline_config_;
+    CargoPreloadBaselineTracker cargo_preload_baseline_tracker_;
+    CargoPreloadBaselineResult cargo_preload_baseline_result_;
     StaticHeightComponent cargo_origin_component_;
     // Same physical origin re-resolved in the current height-field
     // generation. It is used only to exclude the pickup-place cargo residue
@@ -2083,6 +2087,7 @@ private:
         Eigen::Vector3f center_base = Eigen::Vector3f::Zero();
         float yaw_base_rad = 0.0F;
         bool yaw_authoritative = false;
+        std::deque<Eigen::Vector3f> seed_sizes;
         double last_update_stamp_sec = 0.0;
         double last_reliable_shape_stamp_sec = 0.0;
     };
@@ -2157,6 +2162,11 @@ private:
         CargoEnvelopeShapeSource::NONE;
     HookCargoLockState pending_obstacle_context_recognition_state_ =
         HookCargoLockState::EMPTY;
+    bool pending_obstacle_context_geometry_valid_ = false;
+    Eigen::Vector3f pending_obstacle_context_center_base_ =
+        Eigen::Vector3f::Zero();
+    Eigen::Vector3f pending_obstacle_context_size_m_ =
+        Eigen::Vector3f::Zero();
     StaticObstacleEvidenceIndex static_obstacle_evidence_index_;
     std::shared_ptr<const StaticHeightField> static_height_field_;
     bool verified_map_session_loaded_ = false;
@@ -2287,29 +2297,6 @@ private:
     HookLoadSnapshot hook_load_snapshot_;
     std::uint8_t last_processed_hook_load_state_ =
         lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN;
-    struct OriginHeightSample {
-        float height_m = 0.0F;
-        Eigen::Vector2f center_base = Eigen::Vector2f::Zero();
-        Eigen::Vector2f center_map = Eigen::Vector2f::Zero();
-        Eigen::Vector2f size_xy = Eigen::Vector2f::Zero();
-        float confidence = 0.0F;
-        ros::Time stamp;
-    };
-    std::deque<OriginHeightSample> empty_hook_height_history_;
-    std::size_t empty_hook_height_history_max_samples_ = 10U;
-    double origin_history_max_age_sec_ = 2.0;
-    double origin_future_stamp_tolerance_sec_ = 0.05;
-    float origin_history_max_position_spread_m_ = 0.35F;
-    float origin_match_max_distance_m_ = 0.50F;
-    float origin_height_max_mad_m_ = 0.10F;
-    float origin_height_max_range_m_ = 0.25F;
-    float origin_size_max_relative_deviation_ = 0.30F;
-    float origin_min_confidence_ = 0.50F;
-    bool pending_origin_height_valid_ = false;
-    float pending_origin_height_m_ = 0.0F;
-    Eigen::Vector2f pending_origin_center_base_ = Eigen::Vector2f::Zero();
-    ros::Time pending_origin_stamp_;
-
     // OdomAnchorBox 新函数
     HookCargoDetection detectCargoAroundOdomAnchor(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
@@ -2425,6 +2412,7 @@ private:
         const std::string& evidence_reason,
         bool evidence_initialized = true,
         bool provisional_positive_warning = false,
+        bool formal_cargo_authorized = false,
         bool formal_clear_authorized = false) const;
     void publishHookOnlySafetyStatus(const HookLoadSnapshot& hook,
                                      const ros::Time& stamp,
@@ -2458,13 +2446,6 @@ private:
     void resetCargoForHookState(bool preserve_origin_height,
                                 bool preserve_retired_signature = false);
     bool hookAllowsMapCommit() const;
-    void recordEmptyHookOriginHeight(float height_m,
-                                     const Eigen::Vector2f& center_base,
-                                     const Eigen::Vector2f& center_map,
-                                     const Eigen::Vector2f& size_xy,
-                                     float confidence,
-                                     const ros::Time& stamp);
-
     // ========== Runtime Diagnostics (1.0x/1.5x acceptance testing) ==========
     RuntimeDiagnostics runtime_diag_;
     RuntimeDiagnosticsConfig runtime_diag_config_;

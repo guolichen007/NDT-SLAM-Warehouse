@@ -58,9 +58,8 @@ class CargoBoundingBoxContractTest(unittest.TestCase):
         self.assertIn(
             "!hook_fixed_cargo_.oriented_footprint_clamped", body
         )
-        self.assertIn(
-            "const bool weak_shape_evidence = shape.valid &&", body
-        )
+        self.assertIn("continuity.seed_sizes.size() >= 3U", body)
+        self.assertIn("relative_mad.maxCoeff() <= 0.30F", body)
         self.assertIn(
             "shape.height_m = std::clamp(\n"
             "            measured_height, odom_anchor_config_.min_size_z,\n"
@@ -79,16 +78,17 @@ class CargoBoundingBoxContractTest(unittest.TestCase):
             body,
         )
 
-    def test_NewEpisodeStartsFromConservativeBoundedShape(self):
+    def test_NewEpisodeStartsFromRobustMeasuredShape(self):
         body = section(
             "void NdtSlamNode::updateCargoLiftAndGeometryFusion(",
             "void NdtSlamNode::runPendingCargoAvoidance(",
         )
-        self.assertIn("const Eigen::Vector3f configured_seed(", body)
-        self.assertIn("measured_size.cwiseMin(configured_seed);", body)
-        self.assertNotIn(
-            "pending_cargo_shape_continuity_.size_m = measured_size;", body
-        )
+        self.assertIn("continuity.seed_sizes.push_back(measured_size);", body)
+        self.assertIn("continuity.seed_sizes.size() >= 3U", body)
+        self.assertIn("Eigen::Vector3f robust_size", body)
+        self.assertIn("Eigen::Vector3f robust_mad", body)
+        self.assertIn("relative_mad.maxCoeff() <= 0.30F", body)
+        self.assertNotIn("measured_size.cwiseMin(configured_seed);", body)
 
     def test_ProvisionalRvizMarkerCannotBypassPhysicalBounds(self):
         body = section(
@@ -100,6 +100,19 @@ class CargoBoundingBoxContractTest(unittest.TestCase):
         )
         self.assertIn("hook_fixed_cargo_.size_visible.z()", body)
         self.assertNotIn("hook_fixed_cargo_.visible_height", body)
+
+    def test_ConfiguredFallbackIsNotDisplayedAsMeasuredCandidate(self):
+        self.assertIn(
+            "const bool nominal_shape_evidence_ready = envelope.valid &&",
+            NODE,
+        )
+        self.assertIn(
+            "CargoEnvelopeShapeSource::CONFIGURED_CONSERVATIVE_DEFAULT",
+            NODE,
+        )
+        self.assertIn(
+            "marker.action = nominal_shape_evidence_ready", NODE
+        )
 
     def test_RuntimeHeightAndLengthCapsCloseAlternatePaths(self):
         fusion_config = CONFIG.split("cargo_geometry_fusion:", 1)[1].split(

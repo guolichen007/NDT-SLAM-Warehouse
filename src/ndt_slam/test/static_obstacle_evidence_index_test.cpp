@@ -16,7 +16,8 @@ StaticObstacleEvidenceConfig testConfig() {
   config.minimum_height_overlap = 0.50F;
   config.minimum_matched_cells = 2U;
   config.pre_cargo_minimum_sequence_gap = 1U;
-  config.maximum_observation_gap_sec = 2.0;
+  config.immature_max_observation_gap_sec = 2.0;
+  config.immature_gap_retention_ratio = 0.50;
   config.maximum_observation_sequence_gap = 1U;
   return config;
 }
@@ -121,7 +122,7 @@ TEST(StaticObstacleEvidenceIndexTest,
 TEST(StaticObstacleEvidenceIndexTest,
      ObservationGapResetsAuthorizationStreak) {
   auto config = testConfig();
-  config.maximum_observation_gap_sec = 0.5;
+  config.immature_max_observation_gap_sec = 0.5;
   StaticObstacleEvidenceIndex index(config);
   index.reset(8U);
   index.observeFilteredCells(twoCells(), 1.0, 8U, 1U);
@@ -229,11 +230,11 @@ TEST(StaticObstacleEvidenceIndexTest,
 }
 
 TEST(StaticObstacleEvidenceIndexTest,
-     CleanConfirmedButImmatureCellCannotAccumulateAcrossGaps) {
+     ExpiredImmatureHistoryCannotAuthorizeAfterOneNewObservation) {
   auto config = testConfig();
   config.minimum_observations = 3U;
   config.minimum_stable_duration_sec = 1.0;
-  config.maximum_observation_gap_sec = 0.5;
+  config.immature_max_observation_gap_sec = 0.5;
   StaticObstacleEvidenceIndex index(config);
   index.reset(21U);
   index.observeFilteredCells(twoCells(), 1.0, 21U, 1U);
@@ -254,11 +255,57 @@ TEST(StaticObstacleEvidenceIndexTest,
 }
 
 TEST(StaticObstacleEvidenceIndexTest,
+     WarehouseRevisitsWithinImmatureWindowCanMature) {
+  auto config = testConfig();
+  config.minimum_observations = 4U;
+  config.minimum_stable_duration_sec = 1.0;
+  config.immature_max_observation_gap_sec = 300.0;
+  StaticObstacleEvidenceIndex index(config);
+  index.reset(28U);
+
+  index.observeFilteredCells(twoCells(), 1.0, 28U, 1U);
+  index.observeFilteredCells(twoCells(), 61.0, 28U, 2U);
+  index.observeFilteredCells(twoCells(), 121.0, 28U, 3U);
+  index.observeFilteredCells(twoCells(), 181.0, 28U, 4U);
+  index.confirmCleanCells(twoCells(), {}, 181.0, 28U, 1U);
+
+  EXPECT_EQ(index.matureCellCount(), 2U);
+  EXPECT_EQ(index.diagnostics().reset_by_time_gap, 0U);
+  EXPECT_TRUE(index.query(queryFor(28U)).authorized);
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
+     ExpiredImmatureHistoryDecaysInsteadOfBeingDiscarded) {
+  auto config = testConfig();
+  config.minimum_observations = 4U;
+  config.minimum_stable_duration_sec = 1.0;
+  config.immature_max_observation_gap_sec = 0.5;
+  config.immature_gap_retention_ratio = 0.50;
+  StaticObstacleEvidenceIndex index(config);
+  index.reset(32U);
+
+  index.observeFilteredCells(twoCells(), 1.0, 32U, 1U);
+  index.observeFilteredCells(twoCells(), 1.4, 32U, 2U);
+  index.observeFilteredCells(twoCells(), 1.8, 32U, 3U);
+  index.observeFilteredCells(twoCells(), 2.8, 32U, 4U);
+  index.confirmCleanCells(twoCells(), {}, 2.8, 32U, 1U);
+
+  const auto snapshot = index.snapshot();
+  ASSERT_TRUE(snapshot);
+  ASSERT_FALSE(snapshot->cells.empty());
+  EXPECT_EQ(snapshot->cells.begin()->second.consecutive_observation_count,
+            2U);
+  EXPECT_EQ(index.diagnostics().decayed_by_time_gap, 2U);
+  EXPECT_EQ(index.matureCellCount(), 0U);
+  EXPECT_FALSE(index.query(queryFor(32U)).authorized);
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
      AdjacentAsynchronousCleanBuildsMatureWithinConfiguredGap) {
   auto config = testConfig();
   config.minimum_observations = 4U;
   config.minimum_stable_duration_sec = 1.0;
-  config.maximum_observation_gap_sec = 5.0;
+  config.immature_max_observation_gap_sec = 5.0;
   StaticObstacleEvidenceIndex index(config);
   index.reset(29U);
   index.observeFilteredCells(twoCells(), 1.0, 29U, 1U);

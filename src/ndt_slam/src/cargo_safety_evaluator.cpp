@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <vector>
 
 #include <Eigen/Core>
@@ -38,6 +39,16 @@ bool isValidConfig(const CargoSafetyConfig& config) {
            isFinite(config.obstacle_top_percentile) &&
            config.obstacle_top_percentile >= 0.0f &&
            config.obstacle_top_percentile <= 1.0f &&
+           isFinite(config.obstacle_bottom_percentile) &&
+           config.obstacle_bottom_percentile >= 0.0F &&
+           config.obstacle_bottom_percentile < config.obstacle_top_percentile &&
+           isFinite(config.obstacle_vertical_bin_size_m) &&
+           config.obstacle_vertical_bin_size_m > 0.0F &&
+           isFinite(config.obstacle_min_vertical_continuity_ratio) &&
+           config.obstacle_min_vertical_continuity_ratio >= 0.0F &&
+           config.obstacle_min_vertical_continuity_ratio <= 1.0F &&
+           isFinite(config.overhead_separation_margin_m) &&
+           config.overhead_separation_margin_m >= 0.0F &&
            isFinite(config.obstacle_uncertainty_floor_m) &&
            config.obstacle_uncertainty_floor_m >= 0.0f &&
            isFinite(config.obstacle_uncertainty_max_m) &&
@@ -458,8 +469,37 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
 
         evidence.obstacle_max_z_m =
             *std::max_element(z_values.begin(), z_values.end());
+        evidence.obstacle_min_z_m =
+            *std::min_element(z_values.begin(), z_values.end());
         evidence.obstacle_top_z95_m =
             nearestRankPercentile(&z_values, config_.obstacle_top_percentile);
+        evidence.obstacle_bottom_z05_m =
+            nearestRankPercentile(&z_values, config_.obstacle_bottom_percentile);
+        evidence.obstacle_vertical_span_m = std::max(
+            0.0F, evidence.obstacle_top_z95_m -
+                evidence.obstacle_bottom_z05_m);
+        std::set<int> occupied_vertical_bins;
+        for (const float z : z_values) {
+            if (z < evidence.obstacle_bottom_z05_m ||
+                z > evidence.obstacle_top_z95_m) {
+                continue;
+            }
+            occupied_vertical_bins.insert(static_cast<int>(std::floor(
+                (z - evidence.obstacle_bottom_z05_m) /
+                config_.obstacle_vertical_bin_size_m)));
+        }
+        const int expected_vertical_bins = std::max(
+            1, static_cast<int>(std::floor(
+                evidence.obstacle_vertical_span_m /
+                config_.obstacle_vertical_bin_size_m)) + 1);
+        evidence.vertical_continuity_ratio = std::clamp(
+            static_cast<float>(occupied_vertical_bins.size()) /
+                static_cast<float>(expected_vertical_bins),
+            0.0F, 1.0F);
+        evidence.entirely_above_cargo =
+            evidence.obstacle_bottom_z05_m >
+            input.footprint_base.max_z +
+                config_.overhead_separation_margin_m;
         evidence.obstacle_tail_spread_m =
             std::max(0.0f, evidence.obstacle_max_z_m - evidence.obstacle_top_z95_m);
         evidence.obstacle_uncertainty_m = std::clamp(
@@ -482,8 +522,13 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
             return result;
         }
 
-        const bool low_clearance = evidence.conservative_clearance_m <
-                                   config_.minimum_vertical_clearance_m;
+        const bool vertically_continuous =
+            evidence.vertical_continuity_ratio >=
+                config_.obstacle_min_vertical_continuity_ratio;
+        const bool low_clearance = !evidence.entirely_above_cargo &&
+            vertically_continuous &&
+            evidence.conservative_clearance_m <
+                config_.minimum_vertical_clearance_m;
         if (low_clearance &&
             evidence.footprint_distance_m <= config_.level1_distance_m) {
             evidence.warning_code = kLevel1Code;

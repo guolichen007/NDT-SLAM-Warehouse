@@ -40,6 +40,16 @@ immutable snapshot，以及 Manifest 指向的 persistent committed snapshot。
 MapCommit 只累积连续观测；clean worker 才能确认授权。人体、吊物历史和三维
 动态 deny 生成带版本 tombstone，同轮或更旧 clean 结果不得重新插入该单元。
 
+大仓库的同一位置可能数分钟后才被再次看到。未成熟单元在 300 秒窗口内继续累计；
+超过窗口时只按 `static_map_immature_gap_retention_ratio` 衰减计数和有效稳定时长，
+不会把未观测的墙钟时间算作稳定时间，也不会把历史直接清零。`NOT_IN_VIEW` 只暂停，
+明确 `observed_free` 仍立即建立 tombstone 并撤销该格。成熟单元不按时间过期，仅在
+明确空闲/deny、loop closure 或地图生命周期切换时失效。
+
+衰减历史不具备降级授权：单元仍须同时满足 clean-confirmed、观测数和稳定时长门槛。
+持久化快照加载通过事务把已验证单元统一重绑定到当前 generation；普通运行时的代次
+不一致则保持 fail-safe 拒绝，避免把旧坐标系证据带进新地图。
+
 `reset`、`load_map`、重定位/闭环和全图重建会推进 lifecycle epoch。运行时立即
 切换到空的 fail-safe snapshot；磁盘上的当前 Manifest 被移动为 inactive
 last-good 归档。只有当前 epoch、clean-confirmed 且达到最小持久化单元数的新

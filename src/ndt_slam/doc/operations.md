@@ -92,6 +92,19 @@ $NDT_SLAM_DATA_ROOT/recovery_watchdog/state.json
 
 LOCKED 后关注冻结尺寸/yaw、实时中心、中心 residual、position source、pose/height evidence age。LOST_HOLD 超过 `formal_hold_sec` 后 marker 可存在，但安全应为 33且正式剔除关闭。
 
+本版还应同时观察 `runtime_status.json` 中的：
+
+- `cargo_preload_baseline_*`：EMPTY 基线是否达到 5/8 帧、地图代次及空间一致性；
+- `geometry_authorization`：应按 `PENDING → POSITIVE_ONLY → FORMAL` 单向升级；
+- `geometry_thickness_lower_bound_m/upper_bound_m`：实时可见高度只作为下界；
+- `geometry_conservative_*`：顶面参考、跟踪余量、基线/MAD 余量和安全余量；
+- pending 障碍的 `bottom_z05/top_z95/vertical_continuity/entirely_above`；
+- 障碍 Track 的保留或重置 reason。
+
+`POSITIVE_ONLY` 下检测到可靠危险可以输出 17/18；没有危险时必须保持 33，而不是 14。
+原始 Pending 风险仍应出现 `policy_disabled`，不能通过修改
+`fusion_pending_warning_promotion_policy` 恢复旧版告警。
+
 ## 地图观察
 
 raw 提交快于 clean 时允许发布较旧但完整的 bundle。不得看到同一 seq 下 raw/clean 内容代次混合。reset/load 后旧 worker 结果不得重新出现。
@@ -112,5 +125,10 @@ index，且目录中没有长期残留 `.tmp`。生命周期重建期间允许�
 cell 数、clean build applied/snapshot-only/discarded、33/34 reason 分布和 obstacle
 track churn。`cargo_frames.csv` 与 `static_evidence.csv` 必须持续写入；终端仅保留
 安全事件、吊物状态变化和十秒静态证据摘要。
+
+静态证据摘要中同时观察 `decayed_by_time_gap`、`reset_by_time_gap`、
+`observed_free` 与 `temporally_mature`。仓库大范围巡航时前者缓慢增长是正常衰减；
+若 `reset_by_time_gap` 快速增长且 mature 长期不增，检查实际配置是否仍使用旧的
+30 秒窗口。`observed_free` 增长必须对应真实可观测空闲区域，不能把视野外缺测当空闲。
 
 每次运行的目录、字段和事件窗口见 [服务器监控](server_monitoring.md)。

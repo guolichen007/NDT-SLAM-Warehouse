@@ -149,45 +149,36 @@ def runtime_so3_contract_failures() -> list[str]:
 
 
 def pending_origin_contract_failures() -> list[str]:
+    """Validate the EMPTY-state static baseline that replaced LiDAR history."""
     failures: list[str] = []
     node_path = Path("src/ndt_slam/src/ndt_slam.cpp")
-    policy_path = Path(
-        "src/ndt_slam/src/pending_origin_binding_policy.cpp")
+    header_path = Path(
+        "src/ndt_slam/include/ndt_slam/cargo_preload_baseline_tracker.hpp")
+    source_path = Path(
+        "src/ndt_slam/src/cargo_preload_baseline_tracker.cpp")
     config_path = Path("src/ndt_slam/config/live_longterm_mapping.yaml")
     try:
         node = (ROOT / node_path).read_text(encoding="utf-8")
-        policy = (ROOT / policy_path).read_text(encoding="utf-8")
+        header = (ROOT / header_path).read_text(encoding="utf-8")
+        source = (ROOT / source_path).read_text(encoding="utf-8")
         config = (ROOT / config_path).read_text(encoding="utf-8")
     except OSError as error:
-        return [f"pending origin contract cannot be read: {error}"]
+        return [f"preload baseline contract cannot be read: {error}"]
 
     for token in (
-            "evaluatePendingOriginBinding",
-            "PendingOriginAction::KEEP_WAITING_FOR_LIDAR_TIME",
-            "PendingOriginAction::ATTACH",
-            "PendingOriginAction::DISCARD_EXPIRED",
-            "PendingOriginAction::DISCARD_SPATIAL_MISMATCH",
-            "PendingOriginAction::DISCARD_INVALID"):
-        if token not in node + policy:
-            failures.append(f"pending origin contract missing {token!r}")
-
-    keep_case = re.search(
-        r"case\s+PendingOriginAction::KEEP_WAITING_FOR_LIDAR_TIME\s*:"
-        r"(?P<body>.*?)case\s+PendingOriginAction::ATTACH\s*:",
-        node,
-        re.DOTALL,
-    )
-    if keep_case is None:
-        failures.append("pending origin KEEP branch is missing")
-    elif "pending_origin_height_valid_ = false" in keep_case.group("body"):
-        failures.append("pending origin KEEP branch clears pending evidence")
-
-    for token in (
-            "origin_future_stamp_tolerance_sec: 0.05",
-            "source_time_rollback",
-            "lidar_time_rollback"):
-        if token not in node + config:
-            failures.append(f"pending origin epoch/config guard missing {token!r}")
+            "CargoPreloadBaselineTracker",
+            "minimum_confirm_frames = 5",
+            "window_frames = 8",
+            "maximum_anchor_component_distance_m = 0.50F",
+            "previous.map_generation",
+            "source_time_invalid_or_rollback",
+            "anchor_component_spatially_uncertain",
+            "cargo_preload_baseline_tracker_.update",
+            "cargo_preload_baseline:"):
+        if token not in node + header + source + config:
+            failures.append(f"preload baseline contract missing {token!r}")
+    if "recordEmptyHookOriginHeight" in node:
+        failures.append("retired EMPTY LiDAR origin history is still reachable")
     return failures
 
 
@@ -289,7 +280,7 @@ def runtime_visualization_contract_failures() -> list[str]:
         "current_rigid_cargo_geometry_",
         "rigid_suspended_track",
         "last_good_height_hold",
-        "last_good_localization_hold",
+        "localization_invalid_delete",
         "marker.action = lifecycle.show",
         "cargo_marker:",
         "estimateCargoOrientedFootprint",
@@ -647,17 +638,20 @@ def static_evidence_contract_failures() -> list[str]:
         "invalidated_versions_",
         "consecutive_observation_count",
         "consecutive_stable_duration_sec",
-        "maximum_observation_gap_sec",
+        "immature_max_observation_gap_sec",
+        "immature_gap_retention_ratio",
+        "decayed_by_time_gap",
         "maximum_observation_sequence_gap",
         "temporally_mature",
         "kSchemaVersion = 3U",
         "matureCellCount",
-        "static_map_max_observation_gap_sec: 30.0",
-        "allow_degraded_live_only_freeze",
-        "geometry_frozen_degraded_live_only",
+        "static_map_immature_max_observation_gap_sec: 300.0",
+        "static_map_immature_gap_retention_ratio: 0.50",
+        "allow_positive_only_without_static_baseline",
+        "geometry_frozen_positive_only_live_bound",
         "frame.formal_track_locked",
         "cargo_frozen_geometry_.formal_authorized &&",
-        "StableLiveOnlyHeightFreezesDegradedWithoutFormalAuthority",
+        "StableLiveOnlyHeightFormsPositiveOnlyWithoutFormalAuthority",
         "fusion_pending_warning_promotion_policy: disabled",
         "fusion_provisional_warning_to_official_code: false",
         "static_map_max_sequence_gap: 1",
@@ -672,7 +666,9 @@ def static_evidence_contract_failures() -> list[str]:
         "ObservationGapResetsAuthorizationStreak",
         "StaleCleanResultCannotUndoNewerInvalidation",
         "SparseCurrentObservationMatchesDenseStaticMap",
-        "CleanConfirmedButImmatureCellCannotAccumulateAcrossGaps",
+        "ExpiredImmatureHistoryCannotAuthorizeAfterOneNewObservation",
+        "WarehouseRevisitsWithinImmatureWindowCanMature",
+        "ExpiredImmatureHistoryDecaysInsteadOfBeingDiscarded",
         "EmptyMapCommitBreaksConsecutiveObservation",
         "MatureCellRemainsAuthorizedUntilInvalidated",
         "ImmatureSnapshotDoesNotReplaceLastGoodManifest",

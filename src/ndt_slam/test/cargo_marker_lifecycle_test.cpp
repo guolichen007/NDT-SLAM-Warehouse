@@ -65,7 +65,7 @@ TEST(CargoMarkerLifecycleTest, ExplicitEmptyDeletesImmediately) {
     EXPECT_FALSE(lifecycle.update(input).show);
 }
 
-TEST(CargoMarkerLifecycleTest, LocalizationFailureFreezesGrayBox) {
+TEST(CargoMarkerLifecycleTest, LocalizationFailureDeletesImmediately) {
     CargoMarkerLifecycle lifecycle;
     CargoMarkerLifecycleInput input;
     input.stamp_sec = 1.0;
@@ -77,9 +77,9 @@ TEST(CargoMarkerLifecycleTest, LocalizationFailureFreezesGrayBox) {
     input.stamp_sec = 1.2;
     input.geometry_valid = false;
     input.localization_valid = false;
-    const auto held = lifecycle.update(input);
-    EXPECT_TRUE(held.show);
-    EXPECT_EQ(held.style, CargoMarkerStyle::LOCALIZATION_DEGRADED);
+    const auto deleted = lifecycle.update(input);
+    EXPECT_FALSE(deleted.show);
+    EXPECT_EQ(deleted.reason, "localization_invalid_delete");
 }
 
 TEST(CargoMarkerLifecycleTest, SourceEpochRollbackDropsOldGeometry) {

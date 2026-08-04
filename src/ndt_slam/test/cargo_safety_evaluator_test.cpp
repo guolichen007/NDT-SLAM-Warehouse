@@ -493,6 +493,34 @@ TEST(CargoSafetyEvaluator, Level1HasPriorityAcrossClusters) {
               CargoSafetyEvaluator::kSafeCode);
 }
 
+TEST(CargoSafetyEvaluator, EntireClusterAboveCargoDoesNotWarn) {
+    CargoSafetyInput input = baseInput();
+    addCluster(&input, 2.0F, 4.20F);
+    const CargoSafetyResult result = CargoSafetyEvaluator().evaluate(input);
+    ASSERT_TRUE(result.warning_valid) << result.reason;
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kSafeCode);
+    ASSERT_TRUE(result.has_cluster_evidence);
+    EXPECT_TRUE(result.most_dangerous_cluster.entirely_above_cargo);
+}
+
+TEST(CargoSafetyEvaluator, VerticallyContinuousHighWallStillWarns) {
+    CargoSafetyInput input = baseInput();
+    auto cloud = mutableObstacleCloud(&input);
+    for (int index = 0; index < 32; ++index) {
+        cloud->push_back(pcl::PointXYZ(
+            2.0F + 0.003F * static_cast<float>(index % 3),
+            0.003F * static_cast<float>(index % 4),
+            0.20F + 0.10F * static_cast<float>(index)));
+    }
+    const CargoSafetyResult result = CargoSafetyEvaluator().evaluate(input);
+    ASSERT_TRUE(result.warning_valid) << result.reason;
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel1Code);
+    ASSERT_TRUE(result.has_cluster_evidence);
+    EXPECT_FALSE(result.most_dangerous_cluster.entirely_above_cargo);
+    EXPECT_GE(result.most_dangerous_cluster.vertical_continuity_ratio,
+              0.45F);
+}
+
 TEST(CargoSafetyEvaluator, NeverExcludesObstacleBelowFusedBottom) {
     CargoSafetyInput input = baseInput();
     auto cloud = mutableObstacleCloud(&input);

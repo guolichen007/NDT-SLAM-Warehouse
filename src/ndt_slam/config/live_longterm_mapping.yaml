@@ -681,25 +681,16 @@ hook_load_signal:
   # Only independent, localization-valid LiDAR detection frames can confirm
   # the no-cargo state. Rate-limited frames and heartbeat ticks never count.
   lidar_empty_confirm_frames: 3
-  origin_history_samples: 10
-  # Origin-height evidence is accepted only from a recent, spatially stable
-  # EMPTY interval and may be consumed by one EMPTY->LOADED lifecycle.
-  origin_history_max_age_sec: 2.0
-  # Gravity may lead an older LiDAR frame by this much without consuming or
-  # discarding the pending origin; a later LiDAR frame performs the binding.
-  origin_future_stamp_tolerance_sec: 0.05
-  origin_history_max_position_spread_m: 0.35
-  origin_match_max_distance_m: 0.50
-  origin_height_max_mad_m: 0.10
-  origin_height_max_range_m: 0.25
-  origin_size_max_relative_deviation: 0.30
-  origin_min_confidence: 0.50
   formal_removal_max_age_sec: 0.80
 
 cargo_safety:
   level1_distance_m: 3.0
   level2_distance_m: 5.0
   minimum_vertical_clearance_m: 0.80
+  obstacle_bottom_percentile: 0.05
+  obstacle_vertical_bin_size_m: 0.10
+  obstacle_min_vertical_continuity_ratio: 0.45
+  overhead_separation_margin_m: 0.10
   minimum_roi_coverage_ratio: 0.05
   maximum_obstacle_cloud_age_sec: 0.50
   # 17/18 need three independent, spatially continuous obstacle clusters.
@@ -746,8 +737,12 @@ cargo_safety:
   static_cargo_min_long_side_m: 0.80
   static_cargo_min_height_span_m: 0.40
   static_cargo_min_occupied_cells: 12
-  static_cargo_confirm_frames: 8
-  static_cargo_confirm_sec: 1.0
+  # Authoritative map/pre-cargo provenance needs only three fresh LiDAR
+  # confirmations. A previously unmapped fixed obstacle uses the stricter
+  # five-frame, 0.8 s persistence gate.
+  known_static_confirm_frames: 3
+  static_cargo_confirm_frames: 5
+  static_cargo_confirm_sec: 0.8
   obstacle_track_static_velocity_mps: 0.08
   # Long-term static evidence is built only from the clean objects stream
   # after Human/Cargo/swept-volume removal. Safety performs a bounded cell
@@ -763,11 +758,12 @@ cargo_safety:
   static_map_maximum_query_area_cells: 4096
   static_map_pre_cargo_sequence_gap: 2
   # Static observations advance only after asynchronous map maintenance.
-  # With a 2 s minimum keyframe interval and maintenance every 3 commits, 5 s
-  # was below even the theoretical fastest cadence and starved every cell.
-  # Sequence adjacency is still mandatory, so this only tolerates production
-  # rebuild latency; NOT_IN_VIEW/free observations cannot fabricate maturity.
-  static_map_max_observation_gap_sec: 30.0
+  # Large-warehouse revisits may be minutes apart. Immature observations inside
+  # this window accumulate normally; older evidence is halved instead of being
+  # discarded. NOT_IN_VIEW never adds stable time and an observed-free cell is
+  # still invalidated immediately. Mature cells do not expire by wall time.
+  static_map_immature_max_observation_gap_sec: 300.0
+  static_map_immature_gap_retention_ratio: 0.50
   static_map_max_sequence_gap: 1
   # Sparse 2.5D+ height field. Only mature/approved cells enter formal use.
   static_height_z_bin_m: 0.10
@@ -889,6 +885,23 @@ static_origin_component:
   maximum_anchor_distance_m: 2.0
   minimum_candidate_overlap: 0.15
 
+# Independent EMPTY-state pickup baseline. It reads only authoritative
+# map-frame top/support layers while the crane is stationary and localization
+# is healthy. Odom Z is deliberately excluded from thickness estimation.
+cargo_preload_baseline:
+  minimum_confirm_frames: 5
+  window_frames: 8
+  maximum_observation_gap_sec: 0.5
+  maximum_center_step_m: 0.35
+  maximum_thickness_step_m: 0.25
+  maximum_thickness_mad_m: 0.10
+  maximum_size_relative_step: 0.30
+  maximum_anchor_component_distance_m: 0.50
+  # Reject the sparse 3-cell pickup components seen in the 8/3-8/4 run.
+  # Insufficient static coverage falls back to POSITIVE_ONLY live geometry.
+  minimum_occupied_cells: 6
+  maximum_component_uncertainty_m: 0.20
+
 cargo_lift_origin:
   enabled: true
   maximum_anchor_distance_m: 2.0
@@ -905,16 +918,13 @@ cargo_lift_origin:
   maximum_height_m: 5.00
 
 cargo_geometry_fusion:
-  minimum_independent_sources: 2
-  # Formal thickness always combines an authoritative pre-lift static height
-  # (bound origin or revealed support) with the current LiDAR extent.
-  # Configured and retired shapes remain pending-only and cannot substitute.
-  require_authoritative_static_and_live_thickness: true
-  # If static maturity is not yet available, eight good LiDAR frames may
-  # freeze a degraded avoidance-only box. It can emit positive 17/18 hazards,
-  # but can never authorize CLEAR 14, cargo-point removal or MapCommit.
-  allow_degraded_live_only_freeze: true
-  degraded_live_only_uncertainty_floor_m: 0.25
+  # Stable live bounds may freeze a positive-only geometry when the static
+  # baseline is unavailable or conflicts with the visible LiDAR extent. This
+  # path can emit 17/18 but never authorizes CLEAR/removal/MapCommit.
+  allow_positive_only_without_static_baseline: true
+  positive_only_uncertainty_floor_m: 0.25
+  allow_positive_only_on_source_conflict: true
+  positive_only_confirm_frames: 5
   minimum_confirm_frames: 5
   # Five good dimension observations are required inside the latest eight;
   # a single partial scan no longer erases the whole same-track window.

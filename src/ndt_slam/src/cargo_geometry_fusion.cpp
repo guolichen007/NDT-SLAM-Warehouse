@@ -10,12 +10,14 @@ namespace ndt_slam {
 namespace {
 
 bool validConfig(const CargoGeometryFusionConfig& config) {
-  return config.minimum_independent_sources > 0U &&
-      config.minimum_confirm_frames > 0 &&
+  return config.minimum_confirm_frames > 0 &&
       config.shape_confirmation_window_frames >=
           config.minimum_confirm_frames &&
-      std::isfinite(config.degraded_live_only_uncertainty_floor_m) &&
-      config.degraded_live_only_uncertainty_floor_m > 0.0F &&
+      config.shape_confirmation_window_frames >=
+          config.positive_only_confirm_frames &&
+      std::isfinite(config.positive_only_uncertainty_floor_m) &&
+      config.positive_only_uncertainty_floor_m > 0.0F &&
+      config.positive_only_confirm_frames > 0 &&
       config.maximum_observation_gap_sec > 0.0 &&
       config.maximum_source_disagreement_m > 0.0F &&
       config.maximum_fused_uncertainty_m > 0.0F &&
@@ -56,6 +58,7 @@ bool validDimensionEvidence(const CargoGeometryFrame& frame,
 
 struct WeightedHeight {
   CargoThicknessSource source;
+  CargoThicknessConstraint constraint;
   float height;
   float uncertainty;
   float weight;
@@ -94,6 +97,32 @@ const char* cargoThicknessSourceName(CargoThicknessSource source) noexcept {
   return "CONFIGURED_FALLBACK";
 }
 
+const char* cargoThicknessConstraintName(
+    CargoThicknessConstraint constraint) noexcept {
+  switch (constraint) {
+    case CargoThicknessConstraint::FULL_MEASUREMENT:
+      return "FULL_MEASUREMENT";
+    case CargoThicknessConstraint::LOWER_BOUND:
+      return "LOWER_BOUND";
+    case CargoThicknessConstraint::PRIOR_ONLY:
+      return "PRIOR_ONLY";
+  }
+  return "PRIOR_ONLY";
+}
+
+const char* cargoGeometryAuthorizationName(
+    CargoGeometryAuthorization authorization) noexcept {
+  switch (authorization) {
+    case CargoGeometryAuthorization::PENDING:
+      return "PENDING";
+    case CargoGeometryAuthorization::POSITIVE_ONLY:
+      return "POSITIVE_ONLY";
+    case CargoGeometryAuthorization::FORMAL:
+      return "FORMAL";
+  }
+  return "PENDING";
+}
+
 CargoGeometryFusion::CargoGeometryFusion(
     const CargoGeometryFusionConfig& config) {
   setConfig(config);
@@ -129,7 +158,9 @@ CargoFrozenGeometry CargoGeometryFusion::update(
   const double previous_stamp_sec = last_stamp_sec_;
   if (!std::isfinite(frame.stamp_sec) || frame.stamp_sec <= 0.0 ||
       (last_stamp_sec_ > 0.0 && frame.stamp_sec <= last_stamp_sec_)) {
-    result_.valid = false;
+    const auto config = config_;
+    reset();
+    config_ = config;
     result_.reason = "source_time_invalid_or_rollback";
     return result_;
   }
@@ -167,7 +198,8 @@ CargoFrozenGeometry CargoGeometryFusion::update(
       formal_promotion_track_segment_id_ = frame.track_segment_id;
     }
     if (!result_.formal_authorized) {
-      const CargoThicknessObservation* best_static = nullptr;
+      const CargoThicknessObservation* static_origin = nullptr;
+      const CargoThicknessObservation* revealed_support = nullptr;
       const CargoThicknessObservation* best_live = nullptr;
       const auto observation_weight =
           [](const CargoThicknessObservation& observation) {
@@ -187,45 +219,81 @@ CargoFrozenGeometry CargoGeometryFusion::update(
             observation.confidence > 0.0F;
         if (!usable) continue;
         if (observation.source ==
-                CargoThicknessSource::LIVE_VISIBLE_EXTENT) {
+                CargoThicknessSource::LIVE_VISIBLE_EXTENT &&
+            observation.constraint ==
+                CargoThicknessConstraint::FULL_MEASUREMENT) {
           if (!best_live ||
               observation_weight(observation) >
                   observation_weight(*best_live)) {
             best_live = &observation;
           }
-        } else if (
-            observation.source ==
-                CargoThicknessSource::STATIC_ORIGIN_TOP_SUPPORT ||
-            observation.source ==
-                CargoThicknessSource::MAP_DIFF_REVEALED_SUPPORT) {
-          if (!best_static ||
-              observation_weight(observation) >
-                  observation_weight(*best_static)) {
-            best_static = &observation;
+        } else if (observation.source ==
+                   CargoThicknessSource::STATIC_ORIGIN_TOP_SUPPORT) {
+          if (!static_origin || observation_weight(observation) >
+                  observation_weight(*static_origin)) {
+            static_origin = &observation;
+          }
+        } else if (observation.source ==
+                   CargoThicknessSource::MAP_DIFF_REVEALED_SUPPORT) {
+          if (!revealed_support || observation_weight(observation) >
+                  observation_weight(*revealed_support)) {
+            revealed_support = &observation;
           }
         }
       }
+      const CargoThicknessObservation* best_static =
+          revealed_support ? revealed_support : static_origin;
+      const bool static_revealed_consistent = static_origin &&
+          revealed_support &&
+          static_origin->constraint ==
+              CargoThicknessConstraint::FULL_MEASUREMENT &&
+          revealed_support->constraint ==
+              CargoThicknessConstraint::FULL_MEASUREMENT &&
+          std::abs(static_origin->height_m - revealed_support->height_m) <=
+              config_.maximum_source_disagreement_m;
+      const bool static_live_consistent = best_static && best_live &&
+          best_static->constraint ==
+              CargoThicknessConstraint::FULL_MEASUREMENT &&
+          std::abs(best_static->height_m - best_live->height_m) <=
+              config_.maximum_source_disagreement_m;
       const bool promotion_consistent =
           frame.formal_track_locked &&
           frame.center_valid && frame.center.allFinite() &&
           validDimensionEvidence(frame, config_) &&
-          best_static && best_live &&
-          std::abs(best_static->height_m - best_live->height_m) <=
-              config_.maximum_source_disagreement_m &&
-          std::abs(best_static->height_m - result_.height_m) <=
-              config_.maximum_source_disagreement_m &&
-          std::abs(best_live->height_m - result_.height_m) <=
-              config_.maximum_source_disagreement_m;
+          (static_revealed_consistent || static_live_consistent);
       formal_promotion_confirm_count_ = promotion_consistent
           ? formal_promotion_confirm_count_ + 1 : 0;
       if (formal_promotion_confirm_count_ >=
           config_.minimum_confirm_frames) {
         result_.formal_authorized = true;
         result_.degraded_live_only = false;
+        result_.authorization = CargoGeometryAuthorization::FORMAL;
+        result_.source_conflict = false;
         result_.independent_sources = 2U;
-        result_.accepted_sources = {
-            best_static->source,
-            CargoThicknessSource::LIVE_VISIBLE_EXTENT};
+        if (static_revealed_consistent) {
+          result_.accepted_sources = {
+              CargoThicknessSource::STATIC_ORIGIN_TOP_SUPPORT,
+              CargoThicknessSource::MAP_DIFF_REVEALED_SUPPORT};
+          result_.height_m = std::max(
+              static_origin->height_m, revealed_support->height_m);
+          result_.height_uncertainty_m = std::max(
+              static_origin->uncertainty_m,
+              revealed_support->uncertainty_m);
+        } else {
+          result_.accepted_sources = {
+              best_static->source,
+              CargoThicknessSource::LIVE_VISIBLE_EXTENT};
+          result_.height_m = std::max(
+              best_static->height_m, best_live->height_m);
+          result_.height_uncertainty_m = std::max(
+              best_static->uncertainty_m, best_live->uncertainty_m);
+        }
+        result_.thickness_lower_bound_m = std::max(
+            config_.minimum_height_m,
+            result_.height_m - result_.height_uncertainty_m);
+        result_.thickness_upper_bound_m = std::min(
+            config_.maximum_height_m,
+            result_.height_m + result_.height_uncertainty_m);
       }
     }
     if (frame.track_segment_id != shrink_track_segment_id_) {
@@ -252,11 +320,26 @@ CargoFrozenGeometry CargoGeometryFusion::update(
       result_.bottom_m = frame.center.z() - 0.5F * result_.height_m;
     }
     if (std::isfinite(result_.bottom_m)) {
-      result_.conservative_bottom_m = result_.bottom_m -
-          std::max(0.0F, frame.top_uncertainty_m) -
-          result_.height_uncertainty_m -
-          std::max(0.0F, frame.tracking_uncertainty_m) -
+      result_.conservative_top_reference_m =
+          result_.bottom_m + result_.height_m;
+      result_.conservative_tracking_allowance_m =
+          std::max(0.0F, frame.tracking_uncertainty_m);
+      result_.conservative_baseline_allowance_m =
+          result_.formal_authorized
+              ? std::max(0.0F, frame.top_uncertainty_m)
+              : std::max(0.15F, 3.0F *
+                    std::max(0.0F, frame.top_uncertainty_m));
+      result_.conservative_safety_margin_m =
           config_.configured_bottom_margin_m;
+      result_.conservative_bottom_m =
+          result_.conservative_top_reference_m -
+          (result_.formal_authorized
+               ? result_.height_m + result_.height_uncertainty_m
+               : std::max(result_.height_m,
+                          result_.thickness_upper_bound_m)) -
+          result_.conservative_tracking_allowance_m -
+          result_.conservative_baseline_allowance_m -
+          result_.conservative_safety_margin_m;
     }
     const bool dimension_quality_valid =
         validDimensionEvidence(frame, config_);
@@ -349,9 +432,9 @@ CargoFrozenGeometry CargoGeometryFusion::update(
     result_.valid = frame.center_valid && frame.center.allFinite() &&
         std::isfinite(result_.bottom_m);
     result_.reason = result_.valid
-        ? (result_.formal_authorized
+        ? (result_.authorization == CargoGeometryAuthorization::FORMAL
                ? "frozen_formal_geometry_pose_updated"
-               : "frozen_degraded_geometry_pose_updated")
+               : "frozen_positive_only_geometry_pose_updated")
         : "frozen_geometry_pose_or_top_invalid";
     return result_;
   }
@@ -394,7 +477,7 @@ CargoFrozenGeometry CargoGeometryFusion::update(
     const float weight = observation.confidence /
         (observation.uncertainty_m * observation.uncertainty_m);
     const WeightedHeight candidate{
-        observation.source, observation.height_m,
+        observation.source, observation.constraint, observation.height_m,
         observation.uncertainty_m, weight};
     const auto found = best_by_source.find(observation.source);
     if (found == best_by_source.end() ||
@@ -402,14 +485,13 @@ CargoFrozenGeometry CargoGeometryFusion::update(
       best_by_source[observation.source] = candidate;
     }
   }
-  std::vector<WeightedHeight> values;
   std::size_t independent_sources = 0U;
   bool has_static_origin = false;
   bool has_revealed_support = false;
-  bool has_live_visible_extent = false;
   for (const auto& item : best_by_source) {
-    values.push_back(item.second);
-    if (item.first != CargoThicknessSource::CONFIGURED_FALLBACK) {
+    if (item.first != CargoThicknessSource::CONFIGURED_FALLBACK &&
+        item.first != CargoThicknessSource::RETIRED_LOCKED_SHAPE &&
+        item.second.constraint != CargoThicknessConstraint::PRIOR_ONLY) {
       ++independent_sources;
     }
     has_static_origin =
@@ -420,90 +502,134 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         has_revealed_support ||
         item.first ==
             CargoThicknessSource::MAP_DIFF_REVEALED_SUPPORT;
-    has_live_visible_extent =
-        has_live_visible_extent ||
-        item.first == CargoThicknessSource::LIVE_VISIBLE_EXTENT;
   }
   result_.cargo_lifecycle_id = frame.cargo_lifecycle_id;
   result_.track_segment_id = frame.track_segment_id;
   result_.independent_sources = independent_sources;
   const bool has_authoritative_static_height =
       has_static_origin || has_revealed_support;
-  const bool has_formal_static_live_pair =
-      has_authoritative_static_height && has_live_visible_extent;
-  const bool degraded_live_only_candidate =
-      config_.allow_degraded_live_only_freeze &&
-      frame.formal_track_locked &&
-      has_live_visible_extent && !has_authoritative_static_height;
-  if (independent_sources < config_.minimum_independent_sources &&
-      !degraded_live_only_candidate) {
+  const auto best = [&](CargoThicknessSource source)
+      -> const WeightedHeight* {
+    const auto found = best_by_source.find(source);
+    return found == best_by_source.end() ? nullptr : &found->second;
+  };
+  const WeightedHeight* static_origin = best(
+      CargoThicknessSource::STATIC_ORIGIN_TOP_SUPPORT);
+  const WeightedHeight* revealed = best(
+      CargoThicknessSource::MAP_DIFF_REVEALED_SUPPORT);
+  const WeightedHeight* live = best(
+      CargoThicknessSource::LIVE_VISIBLE_EXTENT);
+  const bool static_origin_is_full = static_origin &&
+      static_origin->constraint ==
+          CargoThicknessConstraint::FULL_MEASUREMENT;
+  const bool revealed_is_full = revealed &&
+      revealed->constraint ==
+          CargoThicknessConstraint::FULL_MEASUREMENT;
+  const auto mutually_consistent = [&](const WeightedHeight* lhs,
+                                       const WeightedHeight* rhs) {
+    return lhs && rhs &&
+        std::abs(lhs->height - rhs->height) <=
+            config_.maximum_source_disagreement_m;
+  };
+  const bool static_revealed_formal = static_origin_is_full &&
+      revealed_is_full && mutually_consistent(static_origin, revealed);
+  const WeightedHeight* best_static = revealed ? revealed : static_origin;
+  const bool live_is_full = live && live->constraint ==
+      CargoThicknessConstraint::FULL_MEASUREMENT;
+  const bool static_live_formal = best_static &&
+      best_static->constraint ==
+          CargoThicknessConstraint::FULL_MEASUREMENT && live_is_full &&
+      mutually_consistent(best_static, live);
+  const bool has_formal_pair = static_revealed_formal || static_live_formal;
+  const bool source_conflict = best_static && live &&
+      live->height > best_static->height +
+          config_.maximum_source_disagreement_m;
+  const bool lower_bound_compatible = best_static && live &&
+      live->constraint == CargoThicknessConstraint::LOWER_BOUND &&
+      live->height <= best_static->height +
+          config_.maximum_source_disagreement_m;
+  const bool positive_only_candidate = frame.formal_track_locked && live &&
+      ((!best_static &&
+        config_.allow_positive_only_without_static_baseline) ||
+       (best_static && lower_bound_compatible) ||
+       (source_conflict &&
+        config_.allow_positive_only_on_source_conflict));
+
+  if (!has_formal_pair && !positive_only_candidate) {
     result_.valid = false;
-    result_.reason = "independent_thickness_sources_insufficient";
-    result_.confirm_frames = 0;
-    pending_valid_ = false;
-    return result_;
-  }
-  if (config_.require_authoritative_static_and_live_thickness &&
-      !has_formal_static_live_pair &&
-      !degraded_live_only_candidate) {
-    result_.valid = false;
-    result_.reason =
-        "authoritative_static_and_live_thickness_required";
-    result_.confirm_frames = 0;
-    pending_valid_ = false;
-    return result_;
-  }
-  if (degraded_live_only_candidate) {
-    // Never let configured or retired estimates make a live-only candidate
-    // look like independent physical corroboration. Its height is derived
-    // exclusively from the multi-frame LiDAR extent and receives an explicit
-    // conservative uncertainty floor below.
-    values.erase(
-        std::remove_if(
-            values.begin(), values.end(),
-            [](const WeightedHeight& value) {
-              return value.source !=
-                  CargoThicknessSource::LIVE_VISIBLE_EXTENT;
-            }),
-        values.end());
-    result_.independent_sources = 1U;
-  }
-  float minimum = values.front().height;
-  float maximum = values.front().height;
-  for (const auto& value : values) {
-    minimum = std::min(minimum, value.height);
-    maximum = std::max(maximum, value.height);
-  }
-  if (maximum - minimum > config_.maximum_source_disagreement_m) {
-    result_.valid = false;
-    result_.reason = "thickness_source_disagreement";
+    result_.authorization = CargoGeometryAuthorization::PENDING;
+    result_.reason = has_authoritative_static_height && live
+        ? "thickness_full_measurement_confirmation_pending"
+        : "independent_thickness_sources_insufficient";
     result_.confirm_frames = 0;
     pending_valid_ = false;
     return result_;
   }
 
-  const float median = weightedMedian(values);
-  float weighted_sum = 0.0F;
-  float weight_sum = 0.0F;
-  for (const auto& value : values) {
-    const float residual = std::abs(value.height - median);
-    const float huber = residual <= config_.huber_delta_m
-        ? 1.0F : config_.huber_delta_m / residual;
-    const float robust_weight = value.weight * huber;
-    weighted_sum += robust_weight * value.height;
-    weight_sum += robust_weight;
+  std::vector<WeightedHeight> selected_values;
+  if (has_formal_pair) {
+    if (static_revealed_formal) {
+      selected_values = {*static_origin, *revealed};
+    } else {
+      selected_values = {*best_static, *live};
+    }
+  } else {
+    // Positive-only geometry uses the union of credible physical bounds. A
+    // visible LiDAR extent is a lower bound on thickness, not an independent
+    // point estimate that may invalidate the pre-lift baseline forever.
+    if (best_static) selected_values.push_back(*best_static);
+    selected_values.push_back(*live);
   }
-  const float fused = weighted_sum / std::max(weight_sum, 1.0e-6F);
-  float residual_variance = 0.0F;
-  for (const auto& value : values) {
-    const float residual = value.height - fused;
-    residual_variance += value.weight * residual * residual;
+
+  float fused = 0.0F;
+  float uncertainty = 0.0F;
+  float lower_bound = 0.0F;
+  float upper_bound = 0.0F;
+  for (const auto& value : selected_values) {
+    lower_bound = std::max(lower_bound, value.height);
+    upper_bound = std::max(
+        upper_bound, value.height + value.uncertainty);
   }
-  residual_variance /= std::max(weight_sum, 1.0e-6F);
-  const float uncertainty = std::sqrt(
-      1.0F / std::max(weight_sum, 1.0e-6F) + residual_variance);
+  if (!has_formal_pair) {
+    fused = std::clamp(lower_bound, config_.minimum_height_m,
+                       config_.maximum_height_m);
+    upper_bound = std::clamp(upper_bound, fused,
+                             config_.maximum_height_m);
+    uncertainty = std::max(
+        upper_bound - fused,
+        config_.positive_only_uncertainty_floor_m);
+    upper_bound = std::min(
+        config_.maximum_height_m,
+        std::max(upper_bound, fused + uncertainty));
+  } else {
+    const float median = weightedMedian(selected_values);
+    float weighted_sum = 0.0F;
+    float weight_sum = 0.0F;
+    for (const auto& value : selected_values) {
+      const float residual = std::abs(value.height - median);
+      const float huber = residual <= config_.huber_delta_m
+          ? 1.0F : config_.huber_delta_m / residual;
+      const float robust_weight = value.weight * huber;
+      weighted_sum += robust_weight * value.height;
+      weight_sum += robust_weight;
+    }
+    fused = weighted_sum / std::max(weight_sum, 1.0e-6F);
+    float residual_variance = 0.0F;
+    for (const auto& value : selected_values) {
+      const float residual = value.height - fused;
+      residual_variance += value.weight * residual * residual;
+    }
+    residual_variance /= std::max(weight_sum, 1.0e-6F);
+    uncertainty = std::sqrt(
+        1.0F / std::max(weight_sum, 1.0e-6F) + residual_variance);
+    lower_bound = std::max(
+        config_.minimum_height_m, fused - uncertainty);
+    upper_bound = std::min(
+        config_.maximum_height_m, fused + uncertainty);
+  }
   if (!std::isfinite(fused) || !std::isfinite(uncertainty) ||
-      uncertainty > config_.maximum_fused_uncertainty_m) {
+      (has_formal_pair &&
+       uncertainty > config_.maximum_fused_uncertainty_m)) {
     result_.valid = false;
     result_.reason = "fused_thickness_uncertainty_exceeded";
     result_.confirm_frames = 0;
@@ -519,27 +645,35 @@ CargoFrozenGeometry CargoGeometryFusion::update(
   pending_uncertainty_m_ = uncertainty;
   pending_valid_ = true;
   result_.accepted_sources.clear();
-  for (const auto& value : values) {
+  for (const auto& value : selected_values) {
     result_.accepted_sources.push_back(value.source);
   }
+  result_.source_conflict = source_conflict;
+  result_.thickness_lower_bound_m = lower_bound;
+  result_.thickness_upper_bound_m = upper_bound;
   // A numerically usable candidate is not frozen geometry. Even after a
   // live-only freeze, runtime callers must check formal_authorized before
   // granting CLEAR/removal authority.
   result_.valid = false;
-  const int required_confirm_frames = degraded_live_only_candidate
-      ? std::max(
-            config_.minimum_confirm_frames,
-            config_.shape_confirmation_window_frames)
-      : config_.minimum_confirm_frames;
-  result_.reason = degraded_live_only_candidate
-      ? "degraded_live_thickness_confirmation_pending"
-      : "thickness_confirmation_pending";
+  const int required_confirm_frames = has_formal_pair
+      ? config_.minimum_confirm_frames
+      : config_.positive_only_confirm_frames;
+  result_.reason = has_formal_pair
+      ? "formal_thickness_confirmation_pending"
+      : (source_conflict
+             ? "positive_only_source_conflict_confirmation_pending"
+             : (lower_bound_compatible
+                    ? "positive_only_lower_bound_confirmation_pending"
+                    : "positive_only_live_confirmation_pending"));
   if (result_.confirm_frames >= required_confirm_frames &&
       shape_confirm_count_ >= required_confirm_frames) {
     result_.frozen = true;
     result_.valid = true;
-    result_.formal_authorized = has_formal_static_live_pair;
-    result_.degraded_live_only = degraded_live_only_candidate;
+    result_.formal_authorized = has_formal_pair;
+    result_.degraded_live_only = !has_formal_pair;
+    result_.authorization = has_formal_pair
+        ? CargoGeometryAuthorization::FORMAL
+        : CargoGeometryAuthorization::POSITIVE_ONLY;
     result_.center = frame.center;
     result_.length_m = std::max(
         std::max(frame.length_m,
@@ -553,29 +687,40 @@ CargoFrozenGeometry CargoGeometryFusion::update(
                  frame.static_width_lower_bound_m));
     result_.height_m = fused;
     result_.yaw_rad = frame.yaw_rad;
-    result_.height_uncertainty_m = degraded_live_only_candidate
-        ? std::max(
-              uncertainty,
-              config_.degraded_live_only_uncertainty_floor_m)
-        : uncertainty;
+    result_.height_uncertainty_m = uncertainty;
     result_.bottom_m = frame.observed_top_valid &&
             std::isfinite(frame.observed_top_m)
         ? frame.observed_top_m - fused
         : frame.center.z() - 0.5F * fused;
-    result_.conservative_bottom_m = result_.bottom_m -
-        std::max(0.0F, frame.top_uncertainty_m) -
-        result_.height_uncertainty_m -
-        std::max(0.0F, frame.tracking_uncertainty_m) -
+    result_.conservative_top_reference_m =
+        result_.bottom_m + result_.height_m;
+    result_.conservative_tracking_allowance_m =
+        std::max(0.0F, frame.tracking_uncertainty_m);
+    result_.conservative_baseline_allowance_m = has_formal_pair
+        ? std::max(0.0F, frame.top_uncertainty_m)
+        : std::max(0.15F, 3.0F *
+              std::max(0.0F, frame.top_uncertainty_m));
+    result_.conservative_safety_margin_m =
         config_.configured_bottom_margin_m;
+    result_.conservative_bottom_m =
+        result_.conservative_top_reference_m -
+        (has_formal_pair
+             ? result_.height_m + result_.height_uncertainty_m
+             : result_.thickness_upper_bound_m) -
+        result_.conservative_tracking_allowance_m -
+        result_.conservative_baseline_allowance_m -
+        result_.conservative_safety_margin_m;
     result_.reason = result_.formal_authorized
-        ? "geometry_frozen_formal_static_live"
-        : "geometry_frozen_degraded_live_only";
+        ? "geometry_frozen_formal_constraints"
+        : (source_conflict
+               ? "geometry_frozen_positive_only_source_conflict"
+               : "geometry_frozen_positive_only_live_bound");
     shrink_track_segment_id_ = frame.track_segment_id;
     expand_track_segment_id_ = frame.track_segment_id;
   } else if (result_.confirm_frames >= required_confirm_frames) {
-    result_.reason = degraded_live_only_candidate
-        ? "degraded_live_shape_confirmation_pending"
-        : "formal_shape_confirmation_pending";
+    result_.reason = has_formal_pair
+        ? "formal_shape_confirmation_pending"
+        : "positive_only_shape_confirmation_pending";
   }
   return result_;
 }

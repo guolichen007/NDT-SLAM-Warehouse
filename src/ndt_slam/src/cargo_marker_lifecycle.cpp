@@ -45,22 +45,28 @@ CargoMarkerLifecycleDecision CargoMarkerLifecycle::update(
         return decision;
     }
 
+    if (!input.localization_valid) {
+        // Map-frame geometry cannot be predicted safely without a valid map
+        // pose. Delete immediately instead of freezing the last map position
+        // and presenting it as a current cargo box in RViz.
+        has_last_geometry_ = false;
+        last_geometry_ = CargoBoxGeometry{};
+        decision.reason = "localization_invalid_delete";
+        return decision;
+    }
+
     if (input.geometry_valid && input.geometry.valid) {
         has_last_geometry_ = true;
         last_geometry_stamp_sec_ = input.stamp_sec;
         last_geometry_ = input.geometry;
         decision.show = true;
         decision.geometry = input.geometry;
-        decision.style = !input.localization_valid
-            ? CargoMarkerStyle::LOCALIZATION_DEGRADED
-            : (input.safety_height_valid
-                   ? CargoMarkerStyle::VALID
-                   : CargoMarkerStyle::HEIGHT_DEGRADED);
-        decision.reason = input.localization_valid
-            ? (input.safety_height_valid
-                   ? "current_geometry_and_height"
-                   : "current_geometry_height_invalid")
-            : "current_geometry_localization_invalid";
+        decision.style = input.safety_height_valid
+            ? CargoMarkerStyle::VALID
+            : CargoMarkerStyle::HEIGHT_DEGRADED;
+        decision.reason = input.safety_height_valid
+            ? "current_geometry_and_height"
+            : "current_geometry_height_invalid";
         return decision;
     }
 
@@ -72,12 +78,8 @@ CargoMarkerLifecycleDecision CargoMarkerLifecycle::update(
         decision.show = true;
         decision.using_last_good_geometry = true;
         decision.geometry = last_geometry_;
-        decision.style = input.localization_valid
-            ? CargoMarkerStyle::HEIGHT_DEGRADED
-            : CargoMarkerStyle::LOCALIZATION_DEGRADED;
-        decision.reason = input.localization_valid
-            ? "last_good_height_hold"
-            : "last_good_localization_hold";
+        decision.style = CargoMarkerStyle::HEIGHT_DEGRADED;
+        decision.reason = "last_good_height_hold";
         return decision;
     }
 

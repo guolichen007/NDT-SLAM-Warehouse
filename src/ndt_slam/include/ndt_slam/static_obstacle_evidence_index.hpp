@@ -38,10 +38,15 @@ struct StaticObstacleEvidenceConfig {
   std::size_t minimum_matched_cells = 6U;
   std::size_t maximum_query_area_cells = 4096U;
   std::uint64_t pre_cargo_minimum_sequence_gap = 2U;
-  // Clean-map observations are produced by asynchronous map maintenance,
-  // not at the LiDAR frame rate. Keep this above the normal keyframe/commit
-  // cadence so four genuinely distinct clean builds can mature a cell.
-  double maximum_observation_gap_sec = 30.0;
+  // Clean-map observations are produced by asynchronous map maintenance and
+  // warehouse revisits may be minutes apart. This window applies only while a
+  // cell is immature; mature cells remain authorized until explicit negative
+  // evidence or a map lifecycle transition invalidates them.
+  double immature_max_observation_gap_sec = 300.0;
+  // Evidence older than the immature window is weakened instead of discarded.
+  // This preserves useful history without allowing a few ancient samples to
+  // authorize a cell indefinitely.
+  double immature_gap_retention_ratio = 0.50;
   std::uint64_t maximum_observation_sequence_gap = 2U;
 };
 
@@ -65,9 +70,9 @@ struct StaticEvidenceCell {
   float max_z = 0.0F;
   bool clean_map_confirmed = false;
   // Clean-map confirmation and temporal maturity are deliberately separate.
-  // Once mature, a cell stays authorized until an explicit deny tombstone;
-  // an immature clean cell must still build one uninterrupted observation
-  // streak.
+  // Once mature, a cell stays authorized until an explicit deny tombstone or
+  // map lifecycle transition. Immature history may decay across a long revisit
+  // gap, but can never bypass clean-map confirmation or maturity thresholds.
   bool temporally_mature = false;
   std::uint64_t first_observation_sequence = 0U;
   std::uint64_t last_observation_sequence = 0U;
@@ -98,6 +103,7 @@ struct StaticEvidenceDiagnostics {
   std::size_t pending_observation_count = 0U;
   std::size_t pending_stable_duration = 0U;
   std::uint64_t reset_by_time_gap = 0U;
+  std::uint64_t decayed_by_time_gap = 0U;
   std::uint64_t reset_by_sequence_gap = 0U;
   std::uint64_t invalidated_by_tombstone = 0U;
   std::uint64_t generation_mismatch = 0U;

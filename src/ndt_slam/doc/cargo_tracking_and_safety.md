@@ -24,26 +24,43 @@ max_z_step  = max_z_speed  * sensor_dt + margin
 
 ## 几何融合（CargoGeometryFusion）
 
-`CargoGeometryFusion` 是 8d7d7ee 基线核心设计，管理两种几何授权级别：
+### 起吊前基线
 
-### Formal Geometry（正式几何）
+独立的 `CargoPreloadBaselineTracker` 在 `EMPTY`、车辆静止且定位可靠时直接读取静态
+高度场，不依赖被 EMPTY 门控关闭的实时货物检测。最近 8 帧中至少 5 帧稳定后保存
+顶面、局部支撑面、OBB、成员网格、地图代次和 MAD，并在 `EMPTY→LOADED` 生命周期中
+复用。它不读取 odom Z；NDT 只提供地图 XY 位姿和静止状态。锚点与静态组件距离超过
+0.5m、少于 6 个授权网格、组件不确定度超过 0.2m、地图代次/组件身份变化、时间回退
+或观测间隔超限都会清空该候选。
 
-由静态地图证据和实时 LiDAR 观测连续一致后授权：
-- 冻结形状（长/宽/高/yaw）经多源确认
-- 可以产生 CLEAR 14（当所有安全合同同时满足）
-- 可以正式剔除货物点（registration、MapCommit）
-- 可以排除静态地图中的货物区域
+### 厚度约束
 
-### Degraded Geometry（降级几何）
+- `FULL_MEASUREMENT`：起吊前 top-support、露底复核或确实可见底边的完整测量；
+- `LOWER_BOUND`：普通实时 LiDAR 可见高度，只证明货物至少这么厚；
+- `PRIOR_ONLY`：退役形状或配置先验，不计作独立物理证据。
 
-仅由实时 LiDAR 观测支持，未获得静态+实时双源一致授权：
-- 生产配置下只保留诊断，不产生正式 14/17/18
-- **不能**产生 CLEAR 14
-- **不能**正式剔除货物点
-- **不能**排除静态地图区域
-- **不能**授权 MapCommit 排除
+同一批实时点只计一次。静态完整厚度与实时下界冲突时不再平均，也不再用
+`thickness_source_disagreement` 永久清零；系统采用两者上界，并按下式形成保守底面：
 
-稳定 live-only 几何可在 Track Lock 后冻结，但保持 `formal_authorized=false`。仅当静态+实时物理来源连续一致后才升级为 Formal。`evidence_backed_only` 仍保留为受控调试开关，不是生产默认值。
+```text
+conservative_bottom = top_reference
+                    - thickness_upper_bound
+                    - tracking_allowance
+                    - max(0.15m, 3 * top_MAD)
+                    - safety_margin
+```
+
+### 三级授权
+
+| 级别 | 形成条件 | 允许行为 |
+|---|---|---|
+| `PENDING` | 身份、形状或厚度约束不足 | 仅积累证据，正式状态保持 33 |
+| `POSITIVE_ONLY` | Track 已锁定，最近窗口内至少 5 帧稳健尺寸与保守底面成立 | 有真实危险可输出 17/18；无危险输出 33 |
+| `FORMAL` | 静态基线+露底复核，或静态基线+明确可见底边连续一致 | 可输出 14，并可剔除货物点和授权 MapCommit |
+
+没有静态地图时，锁定形状以不少于 50% 高度不确定度形成实时下界，满足多帧条件后
+可进入 `POSITIVE_ONLY`；没有锁定形状则保持 `PENDING`。地图代次变化会撤销旧的正式
+授权，必须用当前代次证据重建。
 
 ### Pending Envelope（待确认包围盒）
 
@@ -53,9 +70,8 @@ max_z_step  = max_z_speed  * sensor_dt + margin
 - 旧 Pending Envelope 不能保持 session ready
 
 Pending 阶段仍评估实时障碍与静态地图风险并积累 track、来源和区域连续性证据，但生产
-配置 `fusion_pending_warning_promotion_policy: disabled` 会在最终融合层阻止这些风险升级为
-正式 17/18，系统保持 Code 33。这样尺寸仍在变化或双源几何不一致时，膨胀包围盒与快速
-track churn 只能进入诊断数据，不能触发主控告警。
+配置 `fusion_pending_warning_promotion_policy: disabled` 会阻止原始 Pending 风险升级为
+正式 17/18。该开关不阻止已经通过稳健几何确认的 `POSITIVE_ONLY` 正向告警。
 
 Pending 路径永不授权 CLEAR，也不借用另一条路径的 track 身份。运行诊断分别输出
 `pending_live_warning_authorized` 和 `pending_static_warning_authorized`，不能再把旧的
@@ -85,8 +101,8 @@ EMPTY 阶段可采集起吊前高度，但无抬升/运动证据不得把地面�
 | Code | 合同 |
 |---:|---|
 | 14 | 无空间碰撞风险。必须 Formal Geometry + 有效观测无检测障碍 + 全部安全合同满足 |
-| 17 | OBB 距离 ≤ 3m 且保守垂直净空 < 0.8m。Formal 或 Degraded Geometry 均可 |
-| 18 | 3m < OBB 距离 ≤ 5m 且保守垂直净空 < 0.8m。Formal 或 Degraded Geometry 均可 |
+| 17 | OBB 距离 ≤ 3m 且保守垂直净空 < 0.8m。FORMAL 或 POSITIVE_ONLY 均可 |
+| 18 | 3m < OBB 距离 ≤ 5m 且保守垂直净空 < 0.8m。FORMAL 或 POSITIVE_ONLY 均可 |
 | 30-35 | 系统、定位、Gravity、吊物、障碍或内部证据故障 |
 
 17/18 只表达真实空间碰撞风险。新鲜正式状态立即生效；重复 stamp、heartbeat tick 和单帧 CLEAR 都不能伪造恢复证据。
@@ -113,7 +129,14 @@ EMPTY 阶段可采集起吊前高度，但无抬升/运动证据不得把地面�
 
 ### 近场/远场历史
 
-障碍在进入告警范围之前需要建立远场历史。near_field_track_missing_far_history 的 track 不能直接产生告警。
+已由 `STATIC_MAP_MATCH` 或 `PRE_CARGO_OCCUPANCY` 证明的静态障碍连续 3 帧即可授权；
+首次在 3m 内出现时不强制要求远场历史。未入静态地图的大型固定物体要求至少 5 帧且
+持续不少于 0.8 秒。人员状小簇、稀疏点和快速变化点簇不能仅凭距离授权告警。
+
+障碍 Track 还记录稳健底面、顶面和垂直连续性。整体位于货物上方的悬空簇、孤立高点
+或垂直连续性不足的点簇不会触发；从地面连续延伸到货物高度以上的墙体仍会触发。
+envelope 的 pose/shape/source 枚举切换不清空同一障碍 Track，只有生命周期改变、身份
+断裂，或伴随实际位置/尺寸跳变的 Track 段变化才重置。
 
 ### 34 决策
 

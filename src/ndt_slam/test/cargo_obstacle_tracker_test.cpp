@@ -348,7 +348,7 @@ TEST(CargoObstacleTracker, StaticCargoRequiresIndependentProvenance) {
   EXPECT_FALSE(tracker.tracks().front().static_obstacle);
 }
 
-TEST(CargoObstacleTracker, StaticDurationStartsWithIndependentProvenance) {
+TEST(CargoObstacleTracker, KnownStaticNeedsOnlyThreeFreshConfirmations) {
   CargoObstacleTrackerConfig config;
   config.static_cargo_confirm_frames = 3;
   config.static_cargo_confirm_sec = 1.0;
@@ -362,8 +362,22 @@ TEST(CargoObstacleTracker, StaticDurationStartsWithIndependentProvenance) {
   observation.provenance = ExternalProvenance::STATIC_MAP_MATCH;
   EXPECT_FALSE(tracker.update(2.0, {observation}).confirmed_hazard);
   EXPECT_FALSE(tracker.update(2.2, {observation}).confirmed_hazard);
-  EXPECT_FALSE(tracker.update(2.4, {observation}).confirmed_hazard);
-  EXPECT_TRUE(tracker.update(3.0, {observation}).confirmed_hazard);
+  EXPECT_TRUE(tracker.update(2.4, {observation}).confirmed_hazard);
+}
+
+TEST(CargoObstacleTracker,
+     KnownStaticLevel1DoesNotRequireFarFieldHistory) {
+  CargoObstacleTracker tracker;
+  CargoObstacleObservation observation =
+      staticCargo(0U, 0.0F, 0.0F, 17U);
+  observation.footprint_distance_m = 2.99F;
+  EXPECT_FALSE(tracker.update(1.0, {observation}).confirmed_hazard);
+  EXPECT_FALSE(tracker.update(1.2, {observation}).confirmed_hazard);
+  const CargoObstacleTrackerDecision decision =
+      tracker.update(1.4, {observation});
+  EXPECT_TRUE(decision.confirmed_hazard) << decision.reason;
+  EXPECT_EQ(decision.warning_code, 17U);
+  EXPECT_TRUE(decision.selected_near_field_authorized);
 }
 
 TEST(CargoObstacleTracker, OutsideCargoShellAloneIsNotIndependentProvenance) {

@@ -23,10 +23,9 @@
   → 货物生命周期（EMPTY → CANDIDATE → LOCKED → LOST_HOLD）
   → Track Lock（冻结长/宽/高/yaw）
   → CargoGeometryFusion
-      ├── Formal Geometry（静态+实时来源连续一致授权）
-      │     可 CLEAR 14、可 removal、可 map exclusion、可 MapCommit
-      └── Degraded Geometry（仅实时来源）
-            仅正向 17/18 告警，不授权 CLEAR/removal/exclusion
+      ├── PENDING（证据积累，正式状态保持 33）
+      ├── POSITIVE_ONLY（仅正向 17/18，不授权 CLEAR/removal/exclusion）
+      └── FORMAL（可 CLEAR 14、可 removal、可 map exclusion、可 MapCommit）
   → Pending Envelope（新出现障碍临时告警几何）
   → Cargo Bottom（支撑点/跨度/网格覆盖/底部高度）
   → CargoObstacleTracker（近场/远场历史、静态 provenance、独立/嵌入 track）
@@ -48,7 +47,7 @@
 ## 吊物职责边界
 
 - **检测与锁定**：稳健二维 OBB（中心化协方差主轴、P08/P92 投影范围、长宽比、特征值比、多帧轴向集中度）。确认后冻结 `length/width/height/yaw`。
-- **CargoGeometryFusion**：管理 Formal 和 Degraded 两种几何授权级别。稳定 live-only 几何可在 Track Lock 后冻结，但保持 `formal_authorized=false`；仅静态+实时物理来源连续一致后才升级为 Formal。
+- **CargoGeometryFusion**：管理 `PENDING / POSITIVE_ONLY / FORMAL` 三级授权。实时可见高度是厚度下界；稳定锁定形状可形成 POSITIVE_ONLY，完整物理测量复核后才升级为 FORMAL。
 - **LiveCargoPose**：保存中心、真实证据时间、计算时间、来源和位置不确定度。作业期间只更新中心，起升只改变 Z。
 - **CargoMarkerLifecycle**：显示生命周期。显示保持不等于正式安全证据有效。
 - **CargoSafetyEvaluator**：只根据空间碰撞关系产生 14/17/18，证据故障产生 30-35。

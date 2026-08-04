@@ -149,6 +149,7 @@ set(LIBRARY_SOURCES
   src/static_height_component_extractor.cpp
   src/cargo_lift_origin_binder.cpp
   src/revealed_support_observer.cpp
+  src/cargo_preload_baseline_tracker.cpp
   src/cargo_geometry_fusion.cpp
   src/cargo_avoidance_fusion.cpp
   src/pending_static_hazard_tracker.cpp
@@ -339,6 +340,13 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_geometry_fusion_test.cpp)
   if(TARGET cargo_geometry_fusion_test)
     target_link_libraries(cargo_geometry_fusion_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_preload_baseline_tracker_test
+    test/cargo_preload_baseline_tracker_test.cpp)
+  if(TARGET cargo_preload_baseline_tracker_test)
+    target_link_libraries(cargo_preload_baseline_tracker_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 

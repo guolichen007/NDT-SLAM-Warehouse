@@ -144,6 +144,7 @@ bool validConfig(const CargoObstacleTrackerConfig& config) {
       std::isfinite(config.static_cargo_min_height_span_m) &&
       config.static_cargo_min_height_span_m > 0.0F &&
       config.static_cargo_min_occupied_cells > 0U &&
+      config.known_static_confirm_frames >= config.confirm_frames &&
       config.static_cargo_confirm_frames >= config.confirm_frames &&
       std::isfinite(config.static_cargo_confirm_sec) &&
       config.static_cargo_confirm_sec >= 0.0 &&
@@ -171,6 +172,12 @@ bool validObservation(const CargoObstacleObservation& observation,
                 config.acquisition_distance_m;
   return observation.centroid_map.allFinite() &&
       std::isfinite(observation.top_z95_map) &&
+      std::isfinite(observation.bottom_z05_map) &&
+      observation.top_z95_map >= observation.bottom_z05_map &&
+      std::isfinite(observation.vertical_continuity_ratio) &&
+      observation.vertical_continuity_ratio >= 0.0F &&
+      observation.vertical_continuity_ratio <= 1.0F &&
+      (!observation.warning_eligible || !observation.entirely_above_cargo) &&
       std::isfinite(observation.footprint_distance_m) &&
       observation.footprint_distance_m >= 0.0F &&
       std::isfinite(observation.conservative_clearance_m) &&
@@ -379,6 +386,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       if (next_track_id_ == 0U) next_track_id_ = 1U;
       track.centroid_map = observation.centroid_map;
       track.top_z95_map = observation.top_z95_map;
+      track.bottom_z05_map = observation.bottom_z05_map;
+      track.vertical_continuity_ratio =
+          observation.vertical_continuity_ratio;
+      track.entirely_above_cargo = observation.entirely_above_cargo;
       track.footprint_distance_m = observation.footprint_distance_m;
       track.conservative_clearance_m =
           observation.conservative_clearance_m;
@@ -471,6 +482,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     }
     track.centroid_map = observation.centroid_map;
     track.top_z95_map = observation.top_z95_map;
+    track.bottom_z05_map = observation.bottom_z05_map;
+    track.vertical_continuity_ratio =
+        observation.vertical_continuity_ratio;
+    track.entirely_above_cargo = observation.entirely_above_cargo;
     track.footprint_distance_m = observation.footprint_distance_m;
     track.conservative_clearance_m = observation.conservative_clearance_m;
     track.point_count = observation.point_count;
@@ -579,13 +594,21 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.observed_this_cycle = true;
     track.confirmed = track.validated_consecutive_observations >=
         config_.confirm_frames;
+    const bool known_static_source =
+        track.provenance == ExternalProvenance::STATIC_MAP_MATCH ||
+        track.provenance == ExternalProvenance::PRE_CARGO_OCCUPANCY;
+    const int required_static_frames = known_static_source
+        ? config_.known_static_confirm_frames
+        : config_.static_cargo_confirm_frames;
+    const double required_static_duration_sec = known_static_source
+        ? 0.0 : config_.static_cargo_confirm_sec;
     track.static_obstacle = track.confirmed &&
         track.static_provenance_consecutive_observations >=
-            config_.static_cargo_confirm_frames &&
+            required_static_frames &&
         track.static_provenance_first_stamp_sec > 0.0 &&
         stamp_sec - track.static_provenance_first_stamp_sec +
                 kStampEpsilonSec >=
-            config_.static_cargo_confirm_sec;
+            required_static_duration_sec;
     track.current_source_index = observation.source_index;
     track.current_source_validated = observation.source_validated;
     track.current_warning_eligible =
@@ -606,7 +629,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         warningCode(track.warning_code) && track.confirmed &&
         (!config_.require_far_field_history_for_level1 ||
          track.warning_code != kLevel1 ||
-         track.far_field_history_valid) &&
+         track.far_field_history_valid || track.provenance_valid) &&
         (!config_.require_large_geometry_for_warning ||
          track.geometry_validated_consecutive_observations >=
              config_.confirm_frames) &&
@@ -646,7 +669,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.selected_near_field = diagnostic->current_near_field;
     decision.selected_near_field_authorized =
         !diagnostic->current_near_field ||
-        diagnostic->far_field_history_valid;
+        diagnostic->far_field_history_valid ||
+        diagnostic->provenance_valid;
     decision.selected_far_field_observations =
         diagnostic->far_field_validated_observations;
     decision.selected_static_provenance_streak =
@@ -682,7 +706,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     } else if (config_.require_far_field_history_for_level1 &&
                diagnostic->warning_code == kLevel1 &&
                diagnostic->current_near_field &&
-               !diagnostic->far_field_history_valid) {
+               !diagnostic->far_field_history_valid &&
+               !diagnostic->provenance_valid) {
       decision.reason = "near_field_track_missing_far_history";
     } else if (!config_.require_static_cargo_for_warning) {
       decision.reason = "persistent_obstacle_track_pending";
@@ -698,12 +723,22 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
                diagnostic->last_anchor_cell_overlap < 0.50F) {
       decision.reason = "static_velocity_not_stable";
     } else if (diagnostic->static_provenance_consecutive_observations <
-               config_.static_cargo_confirm_frames) {
+               ((diagnostic->provenance ==
+                     ExternalProvenance::STATIC_MAP_MATCH ||
+                 diagnostic->provenance ==
+                     ExternalProvenance::PRE_CARGO_OCCUPANCY)
+                    ? config_.known_static_confirm_frames
+                    : config_.static_cargo_confirm_frames)) {
       decision.reason = "static_frames_pending";
     } else if (diagnostic->static_provenance_first_stamp_sec <= 0.0 ||
                stamp_sec - diagnostic->static_provenance_first_stamp_sec +
                        kStampEpsilonSec <
-                   config_.static_cargo_confirm_sec) {
+                   ((diagnostic->provenance ==
+                         ExternalProvenance::STATIC_MAP_MATCH ||
+                     diagnostic->provenance ==
+                         ExternalProvenance::PRE_CARGO_OCCUPANCY)
+                        ? 0.0
+                        : config_.static_cargo_confirm_sec)) {
       decision.reason = "static_duration_pending";
     } else if (!diagnostic->association_reset_reason.empty()) {
       decision.reason = "static_track_association_reset";

@@ -60,6 +60,7 @@ struct CargoObstacleTrackerConfig {
   float static_cargo_min_long_side_m = 0.80F;
   float static_cargo_min_height_span_m = 0.40F;
   std::size_t static_cargo_min_occupied_cells = 12U;
+  int known_static_confirm_frames = 3;
   int static_cargo_confirm_frames = 8;
   double static_cargo_confirm_sec = 1.0;
   float static_velocity_threshold_mps = 0.08F;
@@ -69,6 +70,9 @@ struct CargoObstacleObservation {
   std::size_t source_index = 0U;
   Eigen::Vector3f centroid_map = Eigen::Vector3f::Zero();
   float top_z95_map = std::numeric_limits<float>::quiet_NaN();
+  float bottom_z05_map = 0.0F;
+  float vertical_continuity_ratio = 1.0F;
+  bool entirely_above_cargo = false;
   float footprint_distance_m = std::numeric_limits<float>::infinity();
   float conservative_clearance_m =
       std::numeric_limits<float>::quiet_NaN();
@@ -95,6 +99,9 @@ struct CargoObstacleTrack {
   Eigen::Vector3f centroid_map = Eigen::Vector3f::Zero();
   Eigen::Vector3f velocity_map = Eigen::Vector3f::Zero();
   float top_z95_map = std::numeric_limits<float>::quiet_NaN();
+  float bottom_z05_map = 0.0F;
+  float vertical_continuity_ratio = 1.0F;
+  bool entirely_above_cargo = false;
   float footprint_distance_m = std::numeric_limits<float>::infinity();
   float conservative_clearance_m =
       std::numeric_limits<float>::quiet_NaN();

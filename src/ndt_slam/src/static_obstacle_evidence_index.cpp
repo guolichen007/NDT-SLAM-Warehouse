@@ -35,8 +35,11 @@ bool validConfig(const StaticObstacleEvidenceConfig& config) {
       config.minimum_matched_cells > 0U &&
       config.maximum_query_area_cells >= config.minimum_matched_cells &&
       config.maximum_query_area_cells <= kMaximumBoundedQueryCells &&
-      std::isfinite(config.maximum_observation_gap_sec) &&
-      config.maximum_observation_gap_sec > 0.0 &&
+      std::isfinite(config.immature_max_observation_gap_sec) &&
+      config.immature_max_observation_gap_sec > 0.0 &&
+      std::isfinite(config.immature_gap_retention_ratio) &&
+      config.immature_gap_retention_ratio >= 0.0 &&
+      config.immature_gap_retention_ratio < 1.0 &&
       config.maximum_observation_sequence_gap > 0U;
 }
 
@@ -258,22 +261,30 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
               : 0U;
       const bool continuous = std::isfinite(delta) &&
           delta > kStampEpsilonSec &&
-          delta <= config_.maximum_observation_gap_sec &&
+          delta <= config_.immature_max_observation_gap_sec &&
           sequence_gap == 1U;
       if (continuous) {
         cell.consecutive_stable_duration_sec += delta;
       } else if (sequence_gap == 1U && !cell.temporally_mature) {
-        // An adjacent build that arrives after the configured time gap starts
-        // a new continuous-time streak. A larger sequence gap represents one
-        // or more NOT_IN_VIEW builds and pauses the streak without increasing
-        // its duration or clearing its observation count.
-        cell.consecutive_observation_count = 0U;
-        cell.consecutive_stable_duration_sec = 0.0;
+        // A warehouse revisit beyond the immature window weakens the previous
+        // evidence instead of deleting it. The unobserved wall-clock gap is
+        // never added to stable duration; explicit visible-free evidence above
+        // still removes the cell immediately.
+        const auto retained_count = static_cast<std::uint32_t>(std::floor(
+            static_cast<double>(cell.consecutive_observation_count) *
+            config_.immature_gap_retention_ratio));
+        cell.consecutive_observation_count = retained_count;
+        cell.consecutive_stable_duration_sec *=
+            config_.immature_gap_retention_ratio;
         cell.first_seen_sec = stamp_sec;
         cell.first_observation_sequence = latest_observation_sequence_;
         cell.min_z = geometry.min_z;
         cell.max_z = geometry.max_z;
-        ++diagnostics_totals_.reset_by_time_gap;
+        if (retained_count == 0U) {
+          ++diagnostics_totals_.reset_by_time_gap;
+        } else {
+          ++diagnostics_totals_.decayed_by_time_gap;
+        }
       } else if (sequence_gap == 0U && !cell.temporally_mature) {
         cell.consecutive_observation_count = 0U;
         cell.consecutive_stable_duration_sec = 0.0;

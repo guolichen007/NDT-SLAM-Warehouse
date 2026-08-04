@@ -21,18 +21,35 @@ enum class CargoThicknessSource : std::uint8_t {
 
 const char* cargoThicknessSourceName(CargoThicknessSource source) noexcept;
 
+enum class CargoThicknessConstraint : std::uint8_t {
+  FULL_MEASUREMENT = 0,
+  LOWER_BOUND = 1,
+  PRIOR_ONLY = 2,
+};
+
+const char* cargoThicknessConstraintName(
+    CargoThicknessConstraint constraint) noexcept;
+
+enum class CargoGeometryAuthorization : std::uint8_t {
+  PENDING = 0,
+  POSITIVE_ONLY = 1,
+  FORMAL = 2,
+};
+
+const char* cargoGeometryAuthorizationName(
+    CargoGeometryAuthorization authorization) noexcept;
+
 struct CargoGeometryFusionConfig {
-  std::size_t minimum_independent_sources = 2U;
-  // Formal height requires one authoritative pre-lift static observation
-  // (the bound origin height or its post-lift revealed support) plus a
-  // contemporaneous LiDAR extent. Retired/configured geometry cannot replace
-  // either physical side of this pair.
-  bool require_authoritative_static_and_live_thickness = true;
-  // A stable multi-frame LiDAR height may freeze a geometry for positive
-  // avoidance when the static layer is unavailable. This degraded geometry
-  // never authorizes CLEAR, cargo-point removal, or MapCommit filtering.
-  bool allow_degraded_live_only_freeze = true;
-  float degraded_live_only_uncertainty_floor_m = 0.25F;
+  // A stable multi-frame LiDAR lower bound may form a POSITIVE_ONLY geometry
+  // when no current static baseline exists. It never authorizes CLEAR,
+  // cargo-point removal, or MapCommit filtering.
+  bool allow_positive_only_without_static_baseline = true;
+  float positive_only_uncertainty_floor_m = 0.25F;
+  // A conflicting but stable live lower bound must not permanently deadlock
+  // positive avoidance. It may create a conservative POSITIVE_ONLY geometry;
+  // CLEAR/removal/map-commit still require FORMAL authorization.
+  bool allow_positive_only_on_source_conflict = true;
+  int positive_only_confirm_frames = 5;
   int minimum_confirm_frames = 5;
   // Shape quality is evaluated in a bounded recent window. This preserves the
   // multi-frame requirement without allowing one partial/occluded scan to
@@ -71,6 +88,8 @@ struct CargoThicknessObservation {
   float uncertainty_m = std::numeric_limits<float>::quiet_NaN();
   float confidence = 0.0F;
   bool valid = false;
+  CargoThicknessConstraint constraint =
+      CargoThicknessConstraint::FULL_MEASUREMENT;
 };
 
 struct CargoGeometryFrame {
@@ -103,6 +122,9 @@ struct CargoFrozenGeometry {
   bool frozen = false;
   bool formal_authorized = false;
   bool degraded_live_only = false;
+  CargoGeometryAuthorization authorization =
+      CargoGeometryAuthorization::PENDING;
+  bool source_conflict = false;
   std::uint64_t cargo_lifecycle_id = 0U;
   std::uint64_t track_segment_id = 0U;
   Eigen::Vector3f center = Eigen::Vector3f::Zero();
@@ -111,8 +133,15 @@ struct CargoFrozenGeometry {
   float height_m = 0.0F;
   float yaw_rad = 0.0F;
   float height_uncertainty_m = 1.0F;
+  float thickness_lower_bound_m = 0.0F;
+  float thickness_upper_bound_m = 0.0F;
   float bottom_m = std::numeric_limits<float>::quiet_NaN();
   float conservative_bottom_m = std::numeric_limits<float>::quiet_NaN();
+  float conservative_top_reference_m =
+      std::numeric_limits<float>::quiet_NaN();
+  float conservative_tracking_allowance_m = 0.0F;
+  float conservative_baseline_allowance_m = 0.0F;
+  float conservative_safety_margin_m = 0.0F;
   int confirm_frames = 0;
   int shape_confirm_frames = 0;
   std::size_t independent_sources = 0U;

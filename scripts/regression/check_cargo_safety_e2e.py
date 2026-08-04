@@ -268,18 +268,24 @@ def main() -> int:
             "hook_policy_guard.lock();" in node[lock_function:candidate_branch],
             "REQUIRED Gravity snapshot is not held across lock transition",
             failures)
-    origin_capture = node.find("if (hook_is_empty && localization_evidence_valid")
-    origin_record = node.find("recordEmptyHookOriginHeight(", origin_capture)
-    tracking_update = node.find("if (hook_allows_tracking)", origin_capture)
-    require(origin_capture >= 0 and origin_record >= 0 and tracking_update >= 0 and
-            origin_record < tracking_update and
-            "!hook_fixed_cargo_.lidar_lift_evidence" in
-                node[origin_capture:origin_record],
-            "AUXILIARY origin-height capture remains hidden behind tracking",
+    empty_baseline_call = node.find(
+        "Keep the EMPTY-state static-origin observer alive")
+    early_return = node.find("return;", empty_baseline_call)
+    baseline_update = node.find(
+        "cargo_preload_baseline_tracker_.update(preload_input)")
+    require(empty_baseline_call >= 0 and early_return > empty_baseline_call and
+            baseline_update >= 0 and
+            "updateCargoLiftAndGeometryFusion(" in
+                node[empty_baseline_call:early_return],
+            "EMPTY static preload baseline is hidden behind cargo tracking",
             failures)
-    require("if (active_track && !cargo_origin_height_valid_)" in node and
-            "cargo_origin_height_track_id_ = cargo_fusion_track_id_" in node,
-            "late Gravity LOADED origin cannot attach to an active track",
+    preload_source = (
+        ROOT / "src/ndt_slam/src/cargo_preload_baseline_tracker.cpp"
+    ).read_text(encoding="utf-8")
+    require("cargo_preload_origin_component_" in node and
+            "append_static_origin_candidate(" in node and
+            "preload_baseline_ready" in preload_source,
+            "preload baseline cannot attach to the loaded lifecycle",
             failures)
     require("publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_" in node,
             "legacy payload compatibility output does not consume fusion", failures)

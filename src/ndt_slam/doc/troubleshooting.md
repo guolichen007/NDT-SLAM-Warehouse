@@ -39,9 +39,31 @@
 ## 安全码不符合预期
 
 - 17/18：核对旋转 OBB 距离和保守垂直净空；
-- 33：核对 pose/height evidence age，不能用 evaluation stamp 刷新；
+- 33：核对 pose/height evidence age 与 `geometry_authorization`；
 - 34：检查障碍 ROI 覆盖、有限点和聚类；
 - 30：检查超时或时间回退；下一条新 epoch 前进时间戳应恢复。
+
+### 几何长期不授权
+
+先区分三个状态，不要把旧日志中的 `pending_positive_warning_authorized` 当作几何冻结：
+
+- `PENDING`：检查 EMPTY 阶段是否静止、定位是否可靠、锚点到组件是否 ≤0.5m，以及
+  `cargo_preload_baseline_reason`；
+- `POSITIVE_ONLY`：说明可靠正向避障已经可用，但完整厚度尚未复核；无危险输出 33
+  是预期行为；
+- `FORMAL`：检查露底覆盖或明确可见底边是否提供第二个完整物理测量。
+
+`source_time_invalid_or_rollback`、地图代次变化和生命周期变化会主动撤销旧授权。
+`anchor_component_spatially_uncertain` 表示 NDT XY 漂移或候选绑定距离过大，不应降低
+0.5m 门限来强行复用另一处静态组件。
+
+### clearance 与日志字段看似不一致
+
+预警使用的是保守净空，除了货物底面和障碍顶面，还会扣除跟踪误差、顶面 MAD、
+障碍不确定度和安全余量。应读取 `geometry_conservative_*` 与 obstacle interval 字段逐项
+核对。整体位于货物上方的簇应显示 `entirely_above=true` 并被拒绝；孤立高点应因稳健
+分位数或垂直连续性门限被拒绝。若底面仍出现单帧大跳，检查刚体 pose source、sensor dt
+和 `live_pose_max_z_speed_mps`，不要改回未冻结 Pending 框。
 
 ### 34 原因决策表
 
@@ -70,3 +92,7 @@
 - CSV 没有新行：检查 writer dropped、目录权限和磁盘；重启会 append，不会覆盖历史。
 - service 启动失败：用 `systemctl cat` 确认由安装器生成，旧的反向 `! flock` unit 必须删除。
 - `.suspended` 长期存在：当前 epoch 尚未成熟或文件系统激活失败，保持 fail-safe 34，禁止手工把 last-good 改名为 active。
+- 静态 mature cell 长期过少：确认 `static_map_immature_max_observation_gap_sec=300`
+  和 `static_map_immature_gap_retention_ratio=0.50` 已加载；对照
+  `decayed_by_time_gap` 与 `observed_free`。前者表示跨长回访的安全衰减，后者才会
+  删除证据。不要通过取消 clean-confirmed 门槛来“加速”，否则动态残留会进入正式避障。
