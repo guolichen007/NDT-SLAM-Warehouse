@@ -1261,6 +1261,11 @@ private:
     std::atomic<std::uint64_t> persistent_display_tile_count_{0U};
     std::atomic<std::uint64_t> persistent_display_source_points_{0U};
     std::atomic<std::uint64_t> persistent_display_published_points_{0U};
+    bool pointcloud_z_guard_enabled_ = true;
+    double pointcloud_minimum_z_m_ = -4.0;
+    double pointcloud_maximum_z_m_ = 10.0;
+    std::atomic<std::uint64_t> pointcloud_nonfinite_rejected_{0U};
+    std::atomic<std::uint64_t> pointcloud_z_outlier_rejected_{0U};
     double delta_translation_ = 0.0;
     double delta_yaw_ = 0.0;
     double average_process_time_ms_ = 0.0;
@@ -2250,6 +2255,8 @@ private:
     std::string cargo_safety_spatial_mode_ = "RADIAL_FALLBACK";
     std::size_t cargo_corridor_eligible_clusters_ = 0U;
     std::size_t cargo_corridor_rejected_clusters_ = 0U;
+    std::size_t cargo_corridor_angle_rejected_clusters_ = 0U;
+    std::size_t cargo_static_directional_rejected_cells_ = 0U;
     std::size_t cargo_residual_self_clusters_ = 0U;
     std::size_t cargo_residual_unknown_clusters_ = 0U;
     std::int32_t cargo_last_requested_code_ =

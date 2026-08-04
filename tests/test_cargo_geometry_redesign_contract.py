@@ -26,6 +26,24 @@ TRACKER_SOURCE = (
 MARKER_SOURCE = (
     PACKAGE / "src/cargo_marker_lifecycle.cpp"
 ).read_text(encoding="utf-8")
+MOTION_HEADER = (
+    PACKAGE / "include/ndt_slam/cargo_motion_corridor.hpp"
+).read_text(encoding="utf-8")
+MOTION_SOURCE = (
+    PACKAGE / "src/cargo_motion_corridor.cpp"
+).read_text(encoding="utf-8")
+MOTION_TEST = (
+    PACKAGE / "test/cargo_motion_corridor_test.cpp"
+).read_text(encoding="utf-8")
+STATIC_HEIGHT_HEADER = (
+    PACKAGE / "include/ndt_slam/static_height_field.hpp"
+).read_text(encoding="utf-8")
+STATIC_HEIGHT_SOURCE = (
+    PACKAGE / "src/static_height_field.cpp"
+).read_text(encoding="utf-8")
+STATIC_HEIGHT_TEST = (
+    PACKAGE / "test/static_height_field_test.cpp"
+).read_text(encoding="utf-8")
 STATIC_EVIDENCE_HEADER = (
     PACKAGE / "include/ndt_slam/static_obstacle_evidence_index.hpp"
 ).read_text(encoding="utf-8")
@@ -126,6 +144,60 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         self.assertNotIn("pending_obstacle_context_envelope_source_ !=", reset_expression)
         self.assertNotIn("pending_obstacle_context_pose_source_ !=", reset_expression)
         self.assertNotIn("pending_obstacle_context_shape_source_ !=", reset_expression)
+
+    def test_forward_ninety_degree_sector_gates_all_warning_sources(self):
+        self.assertIn(
+            "motion_corridor_forward_half_angle_deg: 45.0", CONFIG
+        )
+        self.assertIn("forward_half_angle_deg = 45.0F", MOTION_HEADER)
+        self.assertIn("cargoPointInForwardSector", MOTION_HEADER)
+        self.assertIn("cargoPointInForwardSector", MOTION_SOURCE)
+        self.assertIn("obstacle_outside_forward_sector", MOTION_SOURCE)
+        self.assertIn("FortyFiveDegreeBoundaryIsIncluded", MOTION_TEST)
+        self.assertIn(
+            "SideObstacleInsideWideRectangleIsAngleRejected", MOTION_TEST
+        )
+
+        pending_start = NODE.index(
+            "void NdtSlamNode::runPendingCargoAvoidance("
+        )
+        pending_end = NODE.index(
+            "void NdtSlamNode::cargoSwingHookAnchorCallback(",
+            pending_start,
+        )
+        pending = NODE[pending_start:pending_end]
+        self.assertIn("const bool raw_warning_candidate =", pending)
+        self.assertIn(
+            "raw_warning_candidate || acquisition_candidate", pending
+        )
+        self.assertIn(
+            "raw_warning_candidate &&\n"
+            "                    corridor_decision.eligible",
+            pending,
+        )
+        self.assertIn("query.directional_filter_enabled", pending)
+        self.assertIn("pending_angle_rejected_clusters", pending)
+        self.assertIn("static_hazard_observation.authority_valid", pending)
+        self.assertIn("pending_warning_motion_authorized;", pending)
+
+        self.assertIn("directional_filter_enabled", STATIC_HEIGHT_HEADER)
+        self.assertIn("forward_half_angle_deg", STATIC_HEIGHT_HEADER)
+        self.assertIn("cargoPointInForwardSector", STATIC_HEIGHT_SOURCE)
+        self.assertIn(
+            "DirectionalQueryRejectsSideStaticStructure", STATIC_HEIGHT_TEST
+        )
+        formal_start = NODE.index(
+            "void NdtSlamNode::updateAndPublishCargoSafetyPipeline("
+        )
+        formal = NODE[formal_start:]
+        self.assertIn(
+            "static_query.directional_filter_enabled =\n"
+            "            motion_corridor_authoritative",
+            formal,
+        )
+        self.assertIn(
+            "cargo_static_directional_rejected_cells_", formal
+        )
 
     def test_marker_deletes_on_localization_loss(self):
         self.assertIn('"localization_invalid_delete"', MARKER_SOURCE)

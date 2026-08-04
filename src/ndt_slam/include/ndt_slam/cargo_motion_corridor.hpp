@@ -24,6 +24,9 @@ struct CargoMotionCorridorConfig {
   // time-horizon projection at low crane speeds. This is tracking lookahead,
   // not a warning threshold.
   float minimum_prediction_distance_m = 7.0F;
+  // The running path uses a 90-degree forward sector by default: 45 degrees
+  // on either side of the authoritative motion vector.
+  float forward_half_angle_deg = 45.0F;
   float lateral_margin_m = 0.30F;
   float rear_margin_m = 0.30F;
   float velocity_alpha = 0.35F;
@@ -55,8 +58,21 @@ struct CargoMotionCorridorDecision {
   float along_track_m = 0.0F;
   float lateral_distance_m = 0.0F;
   float corridor_half_width_m = 0.0F;
+  float forward_angle_deg = 180.0F;
   std::string reason = "not_evaluated";
 };
+
+// Shared by live-cluster and sparse-static-map filtering so Pending and
+// Formal paths cannot disagree about the configured forward sector. The
+// immediate near-field remains an all-direction contact guard.
+bool cargoPointInForwardSector(
+    const Eigen::Vector2f& cargo_center_map,
+    const Eigen::Vector2f& forward_direction_map,
+    const Eigen::Vector2f& obstacle_point_map,
+    float forward_half_angle_deg,
+    float current_footprint_distance_m,
+    float immediate_near_field_m,
+    float* absolute_angle_deg) noexcept;
 
 // Near-contact hazards are always retained. Beyond the near field, a valid
 // velocity creates a future swept corridor. Acquisition-only calls fall back

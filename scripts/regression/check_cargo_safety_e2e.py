@@ -392,12 +392,16 @@ def main() -> int:
             failures)
     require("src/cargo_motion_corridor.cpp" in cmake and
             "evaluateCargoMotionCorridor" in node and
+            "cargoPointInForwardSector" in motion_corridor and
+            "forward_half_angle_deg" in motion_corridor and
+            "obstacle_outside_forward_sector" in motion_corridor and
             "immediate_near_field_m" in motion_corridor and
             "RADIAL_FALLBACK" in motion_corridor and
             "STATIONARY_GUARD" in motion_corridor and
             "MOTION_CORRIDOR" in motion_corridor and
+            "motion_corridor_forward_half_angle_deg: 45.0" in live_config and
             "clear_no_hazard_in_motion_corridor" in node,
-            "cargo safety does not gate radial structures by a swept corridor",
+            "cargo safety does not gate radial structures by a forward sector",
             failures)
     require("src/cargo_residual_classifier.cpp" in cmake and
             "classifyCargoResidual" in node and
@@ -610,6 +614,9 @@ def main() -> int:
     require(pending_function >= 0 and next_function > pending_function and
             "fuseCargoAvoidanceRisk(" in pending_body and
             "static_height_field_" in pending_body and
+            "raw_warning_candidate || acquisition_candidate" in pending_body and
+            "query.directional_filter_enabled" in pending_body and
+            "pending_angle_rejected_clusters" in pending_body and
             "cargo_safety_evaluator_.evaluate(live_input)" in pending_body and
             "cargo_safety_evaluator_.evaluate(external_live_input)" in pending_body and
             "pending_cargo_obstacle_tracker_.update(" in pending_body and

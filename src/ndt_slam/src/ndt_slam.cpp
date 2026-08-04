@@ -1439,6 +1439,24 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             }
         }
 
+        if (config["pointcloud_sanity"]) {
+            const auto sanity = config["pointcloud_sanity"];
+            pointcloud_z_guard_enabled_ =
+                sanity["enabled"].as<bool>(true);
+            pointcloud_minimum_z_m_ =
+                sanity["minimum_z_m"].as<double>(-4.0);
+            pointcloud_maximum_z_m_ =
+                sanity["maximum_z_m"].as<double>(10.0);
+            if (!std::isfinite(pointcloud_minimum_z_m_) ||
+                !std::isfinite(pointcloud_maximum_z_m_) ||
+                pointcloud_maximum_z_m_ <= pointcloud_minimum_z_m_) {
+                ROS_ERROR("[Config] invalid pointcloud_sanity z range; "
+                          "using [-4.0, 10.0] m");
+                pointcloud_minimum_z_m_ = -4.0;
+                pointcloud_maximum_z_m_ = 10.0;
+            }
+        }
+
         if (debug_cfg_.debug_config) {
             ROS_DEBUG("=== Long-Term Mapping Config ===");
             ROS_DEBUG("  longterm_mapping: %s", longterm_mapping_enabled_ ? "true" : "false");
@@ -3420,6 +3438,19 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                       cargo_collision_tracking_acquisition_distance_m_,
                       12.0F)
                 : cargo_collision_tracking_acquisition_distance_m_;
+            const float configured_forward_half_angle_deg =
+                cargo_safety["motion_corridor_forward_half_angle_deg"]
+                    .as<float>(45.0F);
+            if (!std::isfinite(configured_forward_half_angle_deg)) {
+                ROS_ERROR("[Config] non-finite cargo motion corridor angle; "
+                          "using 45 degrees");
+                cargo_motion_corridor_config_.forward_half_angle_deg =
+                    45.0F;
+            } else {
+                cargo_motion_corridor_config_.forward_half_angle_deg =
+                    std::clamp(
+                        configured_forward_half_angle_deg, 1.0F, 90.0F);
+            }
             cargo_motion_corridor_config_.lateral_margin_m =
                 std::max(0.0F,
                     cargo_safety["motion_corridor_lateral_margin_m"]
@@ -3752,6 +3783,8 @@ void NdtSlamNode::resetCargoForHookState(
     cargo_safety_spatial_mode_ = "RADIAL_FALLBACK";
     cargo_corridor_eligible_clusters_ = 0U;
     cargo_corridor_rejected_clusters_ = 0U;
+    cargo_corridor_angle_rejected_clusters_ = 0U;
+    cargo_static_directional_rejected_cells_ = 0U;
     cargo_directional_pretrack_clusters_ = 0U;
     cargo_radial_pretrack_clusters_ = 0U;
     cargo_residual_self_clusters_ = 0U;
@@ -4739,6 +4772,38 @@ void NdtSlamNode::processCloudThread() {
         const auto ros_to_pcl_start = DiagClock::now();
         pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::fromROSMsg(*msg, *input_cloud);
+        if (pointcloud_z_guard_enabled_ && !input_cloud->empty()) {
+            pcl::PointCloud<pcl::PointXYZ>::Ptr sanitized_cloud(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            sanitized_cloud->reserve(input_cloud->size());
+            std::uint64_t nonfinite_rejected = 0U;
+            std::uint64_t z_outlier_rejected = 0U;
+            for (const pcl::PointXYZ& point : input_cloud->points) {
+                if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+                    !std::isfinite(point.z)) {
+                    ++nonfinite_rejected;
+                    continue;
+                }
+                if (point.z < pointcloud_minimum_z_m_ ||
+                    point.z > pointcloud_maximum_z_m_) {
+                    ++z_outlier_rejected;
+                    continue;
+                }
+                sanitized_cloud->push_back(point);
+            }
+            pointcloud_nonfinite_rejected_.fetch_add(
+                nonfinite_rejected, std::memory_order_relaxed);
+            pointcloud_z_outlier_rejected_.fetch_add(
+                z_outlier_rejected, std::memory_order_relaxed);
+            if (z_outlier_rejected > 0U) {
+                ROS_WARN_THROTTLE(
+                    10.0,
+                    "[PointcloudSanity] rejected=%llu z_range=[%.2f,%.2f]",
+                    static_cast<unsigned long long>(z_outlier_rejected),
+                    pointcloud_minimum_z_m_, pointcloud_maximum_z_m_);
+            }
+            input_cloud = std::move(sanitized_cloud);
+        }
         diag_stage.ros_to_pcl_ms = elapsedMs(ros_to_pcl_start);
 
         if (input_cloud->empty()) {
@@ -5701,6 +5766,16 @@ void NdtSlamNode::processCloudThread() {
                 double ndt_time_ms = std::chrono::duration<double, std::milli>(ndt_end - ndt_start).count();
                 diag_stage.ndt_ms = ndt_time_ms;
                 last_ndt_time_ms_ = ndt_time_ms;
+                if (std::isfinite(ndt_time_ms) && ndt_time_ms >= 0.0) {
+                    constexpr double kNdtTimingEmaAlpha = 0.05;
+                    if (!std::isfinite(average_ndt_time_ms_) ||
+                        average_ndt_time_ms_ <= 0.0) {
+                        average_ndt_time_ms_ = ndt_time_ms;
+                    } else {
+                        average_ndt_time_ms_ += kNdtTimingEmaAlpha *
+                            (ndt_time_ms - average_ndt_time_ms_);
+                    }
+                }
                 last_ndt_converged_ = ndt_->hasConverged();
                 if (last_ndt_converged_) {
                     ndt_converged_count_.fetch_add(1, std::memory_order_relaxed);
@@ -10625,6 +10700,10 @@ StationaryMotionDecision NdtSlamNode::updateStationaryMotionState(
     } else if (previous_runtime_motion_state_ != RuntimeMotionState::MOVING &&
                next_state == RuntimeMotionState::MOVING) {
         exitStationaryState(decision.reason);
+    } else if (is_stationary_ &&
+               next_state != RuntimeMotionState::MOVING &&
+               stationary_frame_count_ < std::numeric_limits<int>::max()) {
+        ++stationary_frame_count_;
     }
 
     if (next_state != previous_runtime_motion_state_) {
@@ -10676,7 +10755,7 @@ void NdtSlamNode::enterStationaryState(
     const std::string& reason) {
     is_stationary_ = true;
     motion_gate_stationary_ = true;
-    stationary_frame_count_ = 0;
+    stationary_frame_count_ = 1;
     ROS_INFO("[MotionState] enter_stationary anchor=(%.3f,%.3f) reason=%s",
              input.filtered_position.x(), input.filtered_position.y(),
              reason.c_str());
@@ -12030,6 +12109,18 @@ void NdtSlamNode::writeRuntimeStatus() {
       << persistent_points_bounds_rejected_.load(
              std::memory_order_relaxed)
       << ",\n";
+    f << "  \"pointcloud_z_guard_enabled\": "
+      << (pointcloud_z_guard_enabled_ ? "true" : "false") << ",\n";
+    f << "  \"pointcloud_minimum_z_m\": "
+      << pointcloud_minimum_z_m_ << ",\n";
+    f << "  \"pointcloud_maximum_z_m\": "
+      << pointcloud_maximum_z_m_ << ",\n";
+    f << "  \"pointcloud_nonfinite_rejected\": "
+      << pointcloud_nonfinite_rejected_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"pointcloud_z_outlier_rejected\": "
+      << pointcloud_z_outlier_rejected_.load(std::memory_order_relaxed)
+      << ",\n";
     f << "  \"persistent_tile_manifest_failures\": "
       << persistent_tile_manifest_failures_.load(
              std::memory_order_relaxed)
@@ -12057,6 +12148,12 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"consecutive_high_fitness\": " << consecutive_high_fitness_ << ",\n";
     f << "  \"average_process_time_ms\": " << average_process_time_ms_ << ",\n";
     f << "  \"average_ndt_time_ms\": " << average_ndt_time_ms_ << ",\n";
+    f << "  \"motion_corridor_forward_half_angle_deg\": "
+      << cargo_motion_corridor_config_.forward_half_angle_deg << ",\n";
+    f << "  \"motion_corridor_angle_rejected_clusters\": "
+      << cargo_corridor_angle_rejected_clusters_ << ",\n";
+    f << "  \"motion_corridor_static_directional_rejected_cells\": "
+      << cargo_static_directional_rejected_cells_ << ",\n";
     f << "  \"last_flush_time\": \"" << last_flush_time_local_ << "\",\n";
     f << "  \"last_active_map_rebuild_sec\": "
       << last_active_map_rebuild_time_sec_.load(std::memory_order_relaxed)
@@ -18442,6 +18539,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
     std::vector<CargoObstacleObservation> pending_observations;
     std::size_t pending_directional_pretrack_clusters = 0U;
     std::size_t pending_radial_pretrack_clusters = 0U;
+    std::size_t pending_corridor_rejected_clusters = 0U;
+    std::size_t pending_angle_rejected_clusters = 0U;
     bool pending_warning_motion_authorized = false;
     if (external_live_result.input_valid &&
         external_live_result.warning_valid &&
@@ -18469,6 +18568,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
             pending_velocity_valid = true;
         }
         pending_warning_motion_authorized =
+            cargo_motion_corridor_config_.enabled &&
             pending_velocity_valid &&
             pending_velocity_map.norm() >=
                 cargo_motion_corridor_config_.minimum_motion_speed_mps;
@@ -18477,7 +18577,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
              ++evidence_index) {
             const CargoSafetyClusterEvidence& evidence =
                 external_live_result.cluster_evidence[evidence_index];
-            const bool warning_eligible =
+            const bool raw_warning_candidate =
                 evidence.warning_code ==
                     CargoSafetyEvaluator::kLevel1Code ||
                 evidence.warning_code ==
@@ -18491,10 +18591,11 @@ void NdtSlamNode::runPendingCargoAvoidance(
                         .minimum_vertical_clearance_m &&
                 evidence.footprint_distance_m > shell_m &&
                 evidence.footprint_distance_m <= acquisition_shell_m;
+            bool warning_eligible = false;
             bool acquisition_pretrack = false;
             CargoSafetySpatialMode acquisition_mode =
                 CargoSafetySpatialMode::RADIAL_FALLBACK;
-            if (acquisition_candidate &&
+            if ((raw_warning_candidate || acquisition_candidate) &&
                 cargo_center_map_3d.allFinite()) {
                 const Eigen::Vector3d nearest_map =
                     pose_map_base *
@@ -18525,13 +18626,24 @@ void NdtSlamNode::runPendingCargoAvoidance(
                     centroid_map.head<2>().cast<float>();
                 corridor_input.current_footprint_distance_m =
                     evidence.footprint_distance_m;
-                corridor_input.acquisition_only = true;
+                corridor_input.acquisition_only = !raw_warning_candidate;
                 const CargoMotionCorridorDecision corridor_decision =
                     evaluateCargoMotionCorridor(
                         cargo_motion_corridor_config_,
                         corridor_input);
-                acquisition_pretrack = corridor_decision.eligible;
+                warning_eligible = raw_warning_candidate &&
+                    corridor_decision.eligible;
+                acquisition_pretrack = acquisition_candidate &&
+                    corridor_decision.eligible;
                 acquisition_mode = corridor_decision.mode;
+                if (raw_warning_candidate &&
+                    !corridor_decision.eligible) {
+                    ++pending_corridor_rejected_clusters;
+                    if (corridor_decision.reason ==
+                        "obstacle_outside_forward_sector") {
+                        ++pending_angle_rejected_clusters;
+                    }
+                }
             }
             if (!warning_eligible && !acquisition_pretrack) {
                 continue;
@@ -18645,7 +18757,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
                         static_decision.provenance;
                 }
             }
-            if (!warning_eligible) {
+            if (!raw_warning_candidate && acquisition_pretrack) {
                 if (acquisition_mode ==
                     CargoSafetySpatialMode::MOTION_CORRIDOR) {
                     ++pending_directional_pretrack_clusters;
@@ -18717,15 +18829,11 @@ void NdtSlamNode::runPendingCargoAvoidance(
     fusion_input.near_field_history_authorized =
         pending_obstacle_decision.selected_near_field_authorized;
     fusion_input.warning_candidate_present =
-        external_live_result.input_valid &&
-        external_live_result.warning_valid &&
-        external_live_result.fault == CargoSafetyFault::NONE &&
-        (external_live_result.warning_code ==
-             CargoSafetyEvaluator::kLevel1Code ||
-         external_live_result.warning_code ==
-             CargoSafetyEvaluator::kLevel2Code);
+        pending_obstacle_decision.confirmed_hazard &&
+        selected_pending_evidence != nullptr;
     fusion_input.warning_candidate_code =
-        external_live_result.warning_code;
+        fusion_input.warning_candidate_present
+            ? pending_obstacle_decision.warning_code : 0;
     fusion_input.live_obstacle_origin_resolved =
         pending_obstacle_decision.selected_embedded_authorized;
     if (fusion_input.pending_external_obstacle_authorized) {
@@ -18766,6 +18874,13 @@ void NdtSlamNode::runPendingCargoAvoidance(
         query.yaw_map_rad = baseYawToMap(
             envelope.yaw_base_rad, base_pose_yaw_map);
         query.shell_m = shell_m;
+        query.directional_filter_enabled =
+            pending_warning_motion_authorized;
+        query.forward_direction_map = pending_velocity_map;
+        query.forward_half_angle_deg =
+            cargo_motion_corridor_config_.forward_half_angle_deg;
+        query.immediate_near_field_m =
+            cargo_motion_corridor_config_.immediate_near_field_m;
         const StaticEvidenceAuthorization origin_authorization =
             authorizeStaticEvidence(
                 cargo_origin_exclusion_component_.authority);
@@ -18866,7 +18981,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
         query_static_authorization.official_static_risk_authorized &&
         pending_static_origin_exclusion_authorized &&
         pending_identity_context_valid &&
-        pending_warning_query_allowed;
+        pending_warning_query_allowed &&
+        pending_warning_motion_authorized;
     static_hazard_observation.query_valid = static_result.valid;
     static_hazard_observation.query_bounded =
         static_result.bounded && fusion_input.static_map.reliable;
@@ -19096,6 +19212,14 @@ void NdtSlamNode::runPendingCargoAvoidance(
            << pending_directional_pretrack_clusters
            << ",\"pending_radial_pretrack_clusters\":"
            << pending_radial_pretrack_clusters
+           << ",\"pending_corridor_rejected_clusters\":"
+           << pending_corridor_rejected_clusters
+           << ",\"pending_angle_rejected_clusters\":"
+           << pending_angle_rejected_clusters
+           << ",\"pending_forward_half_angle_deg\":"
+           << cargo_motion_corridor_config_.forward_half_angle_deg
+           << ",\"pending_static_directional_rejected_cells\":"
+           << static_result.directional_rejected_cells
            << ",\"pending_warning_motion_authorized\":"
            << (pending_warning_motion_authorized ? "true" : "false")
            << ",\"pending_near_field_history_authorized\":"
@@ -20809,6 +20933,10 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 cargoSafetySpatialModeName(corridor_decision.mode);
             if (!corridor_decision.eligible) {
                 ++cargo_corridor_rejected_clusters_;
+                if (corridor_decision.reason ==
+                    "obstacle_outside_forward_sector") {
+                    ++cargo_corridor_angle_rejected_clusters_;
+                }
                 continue;
             }
             ++cargo_corridor_eligible_clusters_;
@@ -21761,6 +21889,13 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             rigid_geometry.shape.yaw_base_rad, base_pose_yaw_map);
         static_query.shell_m =
             cargo_safety_evaluator_.config().level2_distance_m;
+        static_query.directional_filter_enabled =
+            motion_corridor_authoritative;
+        static_query.forward_direction_map = cargo_velocity_map_;
+        static_query.forward_half_angle_deg =
+            cargo_motion_corridor_config_.forward_half_angle_deg;
+        static_query.immediate_near_field_m =
+            cargo_motion_corridor_config_.immediate_near_field_m;
         // A stopped load may already have been accumulated into objects_clean
         // by an older session or an earlier unfiltered frame. Exclude only
         // static layers that lie inside the current, fresh formal rigid body.
@@ -21808,6 +21943,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_origin_exclusion_active_ =
             static_query.exclusion_authorized;
         static_height_result = static_height_field->query(static_query);
+        cargo_static_directional_rejected_cells_ =
+            static_height_result.directional_rejected_cells;
         if (static_height_result.excluded_cargo_self_layer_count > 0U) {
             ROS_INFO_THROTTLE(
                 2.0,

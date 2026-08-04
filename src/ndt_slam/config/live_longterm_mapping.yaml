@@ -268,6 +268,14 @@ active_map:
 pointcloud_watchdog:
   stale_timeout_sec: 10.0
 
+# Reject physically impossible LiDAR returns before NDT, tracking and map
+# commit. Valid warehouse structures observed on this installation remain
+# inside this sensor-frame vertical interval.
+pointcloud_sanity:
+  enabled: true
+  minimum_z_m: -4.0
+  maximum_z_m: 10.0
+
 # NDT 健康监控
 ndt_health:
   fitness_warning_threshold: 0.35
@@ -790,6 +798,8 @@ cargo_safety:
   motion_corridor_minimum_speed_mps: 0.05
   motion_corridor_prediction_horizon_sec: 3.0
   motion_corridor_minimum_prediction_distance_m: 7.0
+  # Running-path sector: forward 90 degrees (45 degrees on each side).
+  motion_corridor_forward_half_angle_deg: 45.0
   motion_corridor_lateral_margin_m: 0.30
   motion_corridor_rear_margin_m: 0.30
   motion_corridor_velocity_alpha: 0.35

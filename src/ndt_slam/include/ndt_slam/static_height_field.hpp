@@ -96,6 +96,12 @@ struct StaticHeightQuery {
   float minimum_z = -std::numeric_limits<float>::infinity();
   float maximum_z = std::numeric_limits<float>::infinity();
   std::size_t maximum_cells = 0U;
+  // Optional running-path filter. When enabled, only the forward sector plus
+  // the all-direction immediate contact shell contributes hazard/coverage.
+  bool directional_filter_enabled = false;
+  Eigen::Vector2f forward_direction_map = Eigen::Vector2f::Zero();
+  float forward_half_angle_deg = 45.0F;
+  float immediate_near_field_m = 0.30F;
   std::set<StaticHeightLayerNodeId> excluded_members;
   std::uint64_t excluded_component_id = 0U;
   std::uint64_t excluded_component_generation = 0U;
@@ -126,6 +132,7 @@ struct StaticHeightQueryResult {
   std::size_t excluded_cargo_self_layer_count = 0U;
   std::size_t clear_shell_queried_cells = 0U;
   std::size_t clear_shell_covered_cells = 0U;
+  std::size_t directional_rejected_cells = 0U;
   float coverage_ratio = 0.0F;
   float effective_coverage_ratio = 0.0F;
   float clear_shell_coverage_ratio = 0.0F;

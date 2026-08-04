@@ -51,6 +51,28 @@ def section(start: str, end: str) -> str:
 
 
 class SafetyRecoveryContractTest(unittest.TestCase):
+    def test_NdtTimingStationaryAndInputSanityDiagnosticsAdvance(self):
+        self.assertIn("pointcloud_sanity:", CONFIG)
+        self.assertIn("minimum_z_m: -4.0", CONFIG)
+        self.assertIn("maximum_z_m: 10.0", CONFIG)
+        self.assertIn("pointcloud_z_outlier_rejected_", NODE)
+        self.assertIn("pointcloud_nonfinite_rejected_", NODE)
+        self.assertIn("kNdtTimingEmaAlpha", NODE)
+        self.assertIn(
+            "average_ndt_time_ms_ += kNdtTimingEmaAlpha", NODE
+        )
+
+        stationary_update = section(
+            "StationaryMotionDecision NdtSlamNode::updateStationaryMotionState(",
+            "void NdtSlamNode::enterStationaryState(",
+        )
+        self.assertIn("++stationary_frame_count_", stationary_update)
+        stationary_entry = section(
+            "void NdtSlamNode::enterStationaryState(",
+            "void NdtSlamNode::exitStationaryState(",
+        )
+        self.assertIn("stationary_frame_count_ = 1", stationary_entry)
+
     def test_StaticEvidenceRuntimeDiagnosticsUseV3Fields(self):
         runtime = section(
             'f << "  \\"static_evidence_epoch\\": "',

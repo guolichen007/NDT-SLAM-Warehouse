@@ -1,5 +1,7 @@
 #include "ndt_slam/static_height_field.hpp"
 
+#include "ndt_slam/cargo_motion_corridor.hpp"
+
 #include <Eigen/Cholesky>
 
 #include <algorithm>
@@ -324,6 +326,14 @@ StaticHeightQueryResult StaticHeightField::query(
       !std::isfinite(input.shell_m) || input.length_m <= 0.0F ||
       input.width_m <= 0.0F || input.shell_m < 0.0F ||
       input.maximum_z < input.minimum_z ||
+      (input.directional_filter_enabled &&
+       (!input.forward_direction_map.allFinite() ||
+        input.forward_direction_map.norm() <= 1.0e-5F ||
+        !std::isfinite(input.forward_half_angle_deg) ||
+        input.forward_half_angle_deg <= 0.0F ||
+        input.forward_half_angle_deg > 90.0F ||
+        !std::isfinite(input.immediate_near_field_m) ||
+        input.immediate_near_field_m < 0.0F)) ||
       (input.cargo_self_exclusion_authorized &&
        (!std::isfinite(input.cargo_self_length_m) ||
         !std::isfinite(input.cargo_self_width_m) ||
@@ -383,6 +393,15 @@ StaticHeightQueryResult StaticHeightField::query(
       const float outside_y = std::max(std::abs(local_y) - half_width, 0.0F);
       const float distance = std::hypot(outside_x, outside_y);
       if (distance > input.shell_m + 0.5F * config_.cell_size_m) continue;
+      if (input.directional_filter_enabled &&
+          !cargoPointInForwardSector(
+              input.center_map, input.forward_direction_map,
+              centerFor(key, config_.cell_size_m),
+              input.forward_half_angle_deg, distance,
+              input.immediate_near_field_m, nullptr)) {
+        ++result.directional_rejected_cells;
+        continue;
+      }
       ++result.clear_shell_queried_cells;
       const StaticHeightCell* height_cell = cell(key);
       if (!height_cell) continue;

@@ -171,5 +171,33 @@ TEST(StaticHeightFieldTest,
   EXPECT_NEAR(result.nearest_horizontal_distance_m, 0.75F, 0.26F);
 }
 
+TEST(StaticHeightFieldTest, DirectionalQueryRejectsSideStaticStructure) {
+  StaticHeightField field;
+  auto objects = layer(2.0F, 0.0F, 1.2F);
+  const auto side = layer(0.0F, 2.0F, 1.5F);
+  objects.insert(objects.end(), side.begin(), side.end());
+  ASSERT_TRUE(field.build(
+      objects, {},
+      StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE).valid);
+
+  StaticHeightQuery query;
+  query.center_map = Eigen::Vector2f::Zero();
+  query.length_m = 0.5F;
+  query.width_m = 0.5F;
+  query.shell_m = 3.0F;
+  query.minimum_z = 0.0F;
+  query.maximum_z = 3.0F;
+  query.directional_filter_enabled = true;
+  query.forward_direction_map = Eigen::Vector2f(1.0F, 0.0F);
+  query.forward_half_angle_deg = 45.0F;
+  query.immediate_near_field_m = 0.30F;
+
+  const auto result = field.query(query);
+  ASSERT_TRUE(result.valid);
+  EXPECT_EQ(result.matched_cells, 1U);
+  EXPECT_GT(result.directional_rejected_cells, 0U);
+  EXPECT_NEAR(result.nearest_horizontal_distance_m, 1.75F, 0.26F);
+}
+
 }  // namespace
 }  // namespace ndt_slam

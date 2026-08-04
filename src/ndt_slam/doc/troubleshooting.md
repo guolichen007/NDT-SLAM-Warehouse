@@ -38,7 +38,7 @@
 
 ## 安全码不符合预期
 
-- 17/18：核对旋转 OBB 距离和保守垂直净空；
+- 17/18：核对旋转 OBB 距离、保守垂直净空和运行方向夹角；夹角绝对值超过 45° 时，除 0.30m 接触保护外不应告警；
 - 33：核对 pose/height evidence age 与 `geometry_authorization`；
 - 34：检查障碍 ROI 覆盖、有限点和聚类；
 - 30：检查超时或时间回退；下一条新 epoch 前进时间戳应恢复。
@@ -56,6 +56,19 @@
 `source_time_invalid_or_rollback`、地图代次变化和生命周期变化会主动撤销旧授权。
 `anchor_component_spatially_uncertain` 表示 NDT XY 漂移或候选绑定距离过大，不应降低
 0.5m 门限来强行复用另一处静态组件。
+
+### NDT 平均耗时恒为 0、静止帧恒为 0 或地图出现异常 Z
+
+首次有效 NDT 配准后，`average_ndt_time_ms` 使用指数滑动平均更新；如果仍为 0，先确认
+是否一直处于 prediction-only。进入静止状态的第一帧 `stationary_frame_count=1`，随后应
+逐帧递增，移动或时间回退时归零。
+
+输入点云默认丢弃非有限点以及传感器坐标 Z 不在 `[-4m, 10m]` 的点，并在
+`runtime_status.json` 记录累计计数。这能阻止新的极端回波进入 NDT、跟踪和地图，但不会
+静默删除旧持久化地图中的历史点；旧会话应先用离线审计工具确认后再在 Linux 端单独治理。
+`OUT_OF_APPROVED_MAP_BOUNDS` 在主动探索批准区域之外时是审计告警，不应自动删除 tile。
+RSS 随活动地图和静态证据增长但仍低于既有内存门限时先观察是否平台化，不以缩短证据
+寿命的方式掩盖增长。
 
 ### clearance 与日志字段看似不一致
 

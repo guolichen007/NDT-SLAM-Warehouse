@@ -102,6 +102,16 @@ LOCKED 后关注冻结尺寸/yaw、实时中心、中心 residual、position sou
 - 障碍 Track 的保留或重置 reason。
 
 `POSITIVE_ONLY` 下检测到可靠危险可以输出 17/18；没有危险时必须保持 33，而不是 14。
+
+运行时同时核对 `motion_corridor_forward_half_angle_deg=45`、
+`motion_corridor_angle_rejected_clusters` 和 Pending JSON 中的
+`pending_angle_rejected_clusters`。实时点簇与静态高度查询必须使用同一个前方 ±45° 门禁；
+侧方计数增长但 17/18 不增长是预期行为。0.30m 内的接触保护不受方向门禁限制。
+
+`runtime_status.json` 中的 `average_ndt_time_ms` 应在首次有效配准后变为正数，
+`stationary_frame_count` 应在持续静止时递增。输入点云的非有限点和超出配置 Z 范围的点
+分别累计到 `pointcloud_nonfinite_rejected` 与 `pointcloud_z_outlier_rejected`；后者持续快速
+增长时应检查雷达外参和原始数据，而不是放宽地图高度范围。
 原始 Pending 风险默认使用 `evidence_backed_only`：只有身份、独立外部障碍 Track、来源、
 几何和置信度证据全部通过时才可输出 17/18；否则保持 33 并给出具体门禁原因。禁止使用
 `legacy_any_pending` 恢复旧版无差别告警。若需紧急关闭该路径，可将兼容熔断开关

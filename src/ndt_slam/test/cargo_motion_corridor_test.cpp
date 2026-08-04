@@ -56,7 +56,30 @@ TEST(CargoMotionCorridor, SideRearObstacleIsExcluded) {
       CargoMotionCorridorConfig{}, movingInput(-2.0F, 2.0F));
   EXPECT_TRUE(decision.valid);
   EXPECT_FALSE(decision.eligible);
-  EXPECT_EQ(decision.reason, "obstacle_outside_motion_corridor");
+  EXPECT_EQ(decision.reason, "obstacle_outside_forward_sector");
+}
+
+TEST(CargoMotionCorridor, FortyFiveDegreeBoundaryIsIncluded) {
+  CargoMotionCorridorInput input = movingInput(1.5F, 1.5F);
+  input.cargo_length_m = 4.0F;
+  input.cargo_width_m = 0.5F;
+  input.cargo_yaw_map_rad = 1.57079632679F;
+  const auto decision = evaluateCargoMotionCorridor(
+      CargoMotionCorridorConfig{}, input);
+  EXPECT_TRUE(decision.eligible);
+  EXPECT_NEAR(decision.forward_angle_deg, 45.0F, 0.01F);
+}
+
+TEST(CargoMotionCorridor, SideObstacleInsideWideRectangleIsAngleRejected) {
+  CargoMotionCorridorInput input = movingInput(1.0F, 1.5F);
+  input.cargo_length_m = 4.0F;
+  input.cargo_width_m = 0.5F;
+  input.cargo_yaw_map_rad = 1.57079632679F;
+  const auto decision = evaluateCargoMotionCorridor(
+      CargoMotionCorridorConfig{}, input);
+  EXPECT_FALSE(decision.eligible);
+  EXPECT_GT(decision.forward_angle_deg, 45.0F);
+  EXPECT_EQ(decision.reason, "obstacle_outside_forward_sector");
 }
 
 TEST(CargoMotionCorridor, ImmediateNearFieldAlwaysWins) {
