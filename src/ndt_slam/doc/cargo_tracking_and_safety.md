@@ -69,9 +69,10 @@ conservative_bottom = top_reference
 - 连续确认后可升级
 - 旧 Pending Envelope 不能保持 session ready
 
-Pending 阶段仍评估实时障碍与静态地图风险并积累 track、来源和区域连续性证据，但生产
-配置 `fusion_pending_warning_promotion_policy: disabled` 会阻止原始 Pending 风险升级为
-正式 17/18。该开关不阻止已经通过稳健几何确认的 `POSITIVE_ONLY` 正向告警。
+Pending 阶段仍评估实时障碍与静态地图风险并积累 track、来源和区域连续性证据。生产
+默认 `fusion_pending_warning_promotion_policy: evidence_backed_only`，只有身份、外部障碍
+Track、来源、几何和置信度门禁全部通过时，原始 Pending 正向风险才可升级为 17/18。
+该策略不影响已经通过稳健几何确认的 `POSITIVE_ONLY` 正向告警。
 
 Pending 路径永不授权 CLEAR，也不借用另一条路径的 track 身份。运行诊断分别输出
 `pending_live_warning_authorized` 和 `pending_static_warning_authorized`，不能再把旧的

@@ -51,20 +51,46 @@ def section(start: str, end: str) -> str:
 
 
 class SafetyRecoveryContractTest(unittest.TestCase):
-    def test_PendingWarningsRequireExplicitCommissioningOptIn(self):
+    def test_StaticEvidenceRuntimeDiagnosticsUseV3Fields(self):
+        runtime = section(
+            'f << "  \\"static_evidence_epoch\\": "',
+            'f << "  \\"static_height_field_cells\\": "',
+        )
+        self.assertNotIn(".maximum_observation_gap_sec", runtime)
         self.assertIn(
-            "fusion_pending_warning_promotion_policy: disabled", CONFIG
+            "static_evidence_config.immature_max_observation_gap_sec",
+            runtime,
         )
         self.assertIn(
-            "fusion_provisional_warning_to_official_code: false", CONFIG
+            "static_evidence_config.immature_gap_retention_ratio", runtime
+        )
+        self.assertIn(
+            "static_diagnostics.decayed_by_time_gap", runtime
+        )
+
+    def test_PendingWarningsDefaultToEvidenceBackedOnly(self):
+        self.assertIn(
+            "fusion_pending_warning_promotion_policy: evidence_backed_only",
+            CONFIG,
+        )
+        self.assertIn(
+            "fusion_provisional_warning_to_official_code: true", CONFIG
         )
         parser = section(
             "const std::string pending_promotion_policy =",
             "cargo_collision_tracking_acquisition_distance_m_ =",
         )
-        self.assertIn('.as<std::string>("disabled")', parser)
+        self.assertIn(
+            '.as<std::string>("evidence_backed_only")', parser
+        )
         self.assertIn("unknown pending warning promotion", parser)
         self.assertIn("PendingWarningPromotionPolicy::DISABLED", parser)
+        self.assertIn(
+            "PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY", parser
+        )
+        self.assertIn(
+            '"fusion_provisional_warning_to_official_code"', parser
+        )
         self.assertIn(
             "pending_warning_promotion_policy =\n"
             "      PendingWarningPromotionPolicy::DISABLED",

@@ -47,7 +47,7 @@ Windows 静态检查与历史现场证据分开管理；现场验证 Tag 不会�
   └── 吊物安全链路
       ├── Cargo Observation → 生命周期（EMPTY→CANDIDATE→LOCKED→LOST_HOLD）
       ├── CargoGeometryFusion
-      │   ├── PENDING（证据积累，不输出正式风险码）
+      │   ├── PENDING（仅严格证据门控的正向风险可输出 17/18）
       │   ├── POSITIVE_ONLY（只允许可靠的 17/18）
       │   └── FORMAL（可 CLEAR、可 map exclusion、可 MapCommit）
       ├── Cargo Bottom
@@ -76,7 +76,7 @@ Windows 静态检查与历史现场证据分开管理；现场验证 Tag 不会�
 
 | 操作 | PENDING | POSITIVE_ONLY | FORMAL |
 |---|---|---|---|
-| 正向 17/18 告警 | 禁止 | 允许（障碍证据也须通过） | 允许 |
+| 正向 17/18 告警 | 仅 `evidence_backed_only` 全门禁通过时允许 | 允许（障碍证据也须通过） | 允许 |
 | 无危险时输出 | 33 | 33 | 14（全部合同满足） |
 | 货物点从 registration 剔除 | 禁止 | 禁止 | 允许 |
 | 静态地图/MapCommit 排除 | 禁止 | 禁止 | 允许 |

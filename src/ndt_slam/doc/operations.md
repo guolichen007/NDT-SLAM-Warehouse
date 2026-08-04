@@ -102,8 +102,10 @@ LOCKED 后关注冻结尺寸/yaw、实时中心、中心 residual、position sou
 - 障碍 Track 的保留或重置 reason。
 
 `POSITIVE_ONLY` 下检测到可靠危险可以输出 17/18；没有危险时必须保持 33，而不是 14。
-原始 Pending 风险仍应出现 `policy_disabled`，不能通过修改
-`fusion_pending_warning_promotion_policy` 恢复旧版告警。
+原始 Pending 风险默认使用 `evidence_backed_only`：只有身份、独立外部障碍 Track、来源、
+几何和置信度证据全部通过时才可输出 17/18；否则保持 33 并给出具体门禁原因。禁止使用
+`legacy_any_pending` 恢复旧版无差别告警。若需紧急关闭该路径，可将兼容熔断开关
+`fusion_provisional_warning_to_official_code` 设为 `false`。
 
 ## 地图观察
 

@@ -3307,7 +3307,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     0.0F, 1.0F);
             const std::string pending_promotion_policy =
                 cargo_safety["fusion_pending_warning_promotion_policy"]
-                    .as<std::string>("disabled");
+                    .as<std::string>("evidence_backed_only");
             if (pending_promotion_policy == "disabled") {
                 cargo_avoidance_fusion_config_
                     .pending_warning_promotion_policy =
@@ -12091,13 +12091,22 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"static_evidence_latest_sequence\": "
       << static_obstacle_evidence_index_.latestObservationSequence()
       << ",\n";
+    const StaticObstacleEvidenceConfig& static_evidence_config =
+        static_obstacle_evidence_index_.config();
+    // Preserve the legacy JSON key for deployed monitor compatibility while
+    // also publishing the canonical V3 name used by the configuration.
     f << "  \"static_evidence_max_observation_gap_sec\": "
-      << static_obstacle_evidence_index_.config()
-             .maximum_observation_gap_sec << ",\n";
+      << static_evidence_config.immature_max_observation_gap_sec << ",\n";
+    f << "  \"static_evidence_immature_max_observation_gap_sec\": "
+      << static_evidence_config.immature_max_observation_gap_sec << ",\n";
+    f << "  \"static_evidence_immature_gap_retention_ratio\": "
+      << static_evidence_config.immature_gap_retention_ratio << ",\n";
     const StaticEvidenceDiagnostics static_diagnostics =
         static_obstacle_evidence_index_.diagnostics();
     f << "  \"static_evidence_reset_by_time_gap\": "
       << static_diagnostics.reset_by_time_gap << ",\n";
+    f << "  \"static_evidence_decayed_by_time_gap\": "
+      << static_diagnostics.decayed_by_time_gap << ",\n";
     f << "  \"static_evidence_reset_by_sequence_gap\": "
       << static_diagnostics.reset_by_sequence_gap << ",\n";
     f << "  \"static_evidence_pending_observation_count\": "

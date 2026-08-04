@@ -31,8 +31,10 @@ V2 将“货物身份已经可靠”和“厚度已经获得正式复核”拆�
 | `degraded_live_only_uncertainty_floor_m` | 改为 `positive_only_uncertainty_floor_m` |
 
 旧字段不会被运行时读取。部署时必须使用仓库内的新 YAML，不要把旧服务器配置片段覆盖
-回来。`fusion_pending_warning_promotion_policy: disabled` 继续禁用原始 Pending 放行；
-它不影响已经通过 V2 几何确认的 `POSITIVE_ONLY` 正向告警。
+回来。生产默认使用 `fusion_pending_warning_promotion_policy: evidence_backed_only`：
+原始 Pending 只有在身份、外部障碍 Track、来源、几何和置信度门禁全部通过时才可输出
+正向 17/18，仍不能输出 CLEAR。已经通过 V2 几何确认的 `POSITIVE_ONLY` 正向告警不依赖
+该兼容路径。
 
 ## 安全边界
 
@@ -103,7 +105,7 @@ Manifest/事务加载重绑定当前代次，运行时任意代次不一致仍�
 - `/cargo_avoidance/pending_status`
 - `/cargo_avoidance/pending_envelope_marker`
 
-当重力已经确认 `LOADED` 但还没有 authoritative track 时，主节点按“当前连续候选、退役正式形状、已绑定起吊原点、配置最大包络”建立 `PendingCargoEnvelope`，执行 live 外壳和静态高度场的正向危险查询并发布 provisional 状态。该包络始终保持 `cargo_valid=false`，不会删除正式货物点、不会写入成熟静态证据、不会授权 MapCommit；默认 `fusion_provisional_warning_to_official_code=false`，即使显式开启也只能把正向危险升级为 17/18，永远不能产生 14。
+当重力已经确认 `LOADED` 但还没有 authoritative track 时，主节点按“当前连续候选、退役正式形状、已绑定起吊原点、配置最大包络”建立 `PendingCargoEnvelope`，执行 live 外壳和静态高度场的正向危险查询并发布 provisional 状态。该包络始终保持 `cargo_valid=false`，不会删除正式货物点、不会写入成熟静态证据、不会授权 MapCommit；默认 `fusion_provisional_warning_to_official_code=true` 仅允许执行 `evidence_backed_only` 的严格门控，门禁通过后只能把正向危险升级为 17/18，永远不能产生 14。设为 `false` 会作为兼容熔断开关关闭该路径，但设为 `true` 不能绕过类型化策略。
 
 新增离线工具 `tools/analyze_map_session.py`，可直接读取会话目录、上层目录或 ZIP；它不依赖 ROS/PCL，输出层哈希、点数、非有限点、包围盒、0.25 m XY 格子/XYZ 体素、层间字节相等和点集包含关系。
 

@@ -623,11 +623,12 @@ def main() -> int:
             "cargo_external_separation_unresolved" in cargo_avoidance and
             "external_obstacle_confirmation_pending" in cargo_avoidance and
             "pending_hazard_not_authorized:" in cargo_avoidance and
-            "fusion_pending_warning_promotion_policy: disabled" in
+            "fusion_pending_warning_promotion_policy: evidence_backed_only" in
             live_config and
-            "fusion_provisional_warning_to_official_code: false" in
+            "fusion_provisional_warning_to_official_code: true" in
             live_config,
-            "pending 17/18 promotion is not disabled by production config",
+            "pending 17/18 promotion is not restricted to evidence-backed "
+            "production policy",
             failures)
     require("CURRENT_CANDIDATE" in pending_envelope and
             "RETIRED_FORMAL_SHAPE" in pending_envelope and
