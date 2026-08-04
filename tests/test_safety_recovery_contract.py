@@ -21,6 +21,9 @@ RVIZ = (
 WATCHDOG = (
     ROOT / "src/ndt_slam/scripts/ops/ndt_recovery_watchdog.py"
 ).read_text(encoding="utf-8")
+SUPERVISOR = (
+    ROOT / "src/ndt_slam/scripts/ops/run_ndt_slam_supervised.sh"
+).read_text(encoding="utf-8")
 SERVICE = (
     ROOT / "src/ndt_slam/scripts/ops/ndt-slam.service.in"
 ).read_text(encoding="utf-8")
@@ -249,6 +252,19 @@ class SafetyRecoveryContractTest(unittest.TestCase):
         self.assertNotIn("os._exit", WATCHDOG)
         self.assertIn("restart_requested.wait", WATCHDOG)
         self.assertIn("return 75", WATCHDOG)
+        self.assertIn("/ndt_slam/localization_health", LAUNCH)
+        self.assertIn("localization_health_stream_stale", WATCHDOG)
+        self.assertIn("WAITING_STATIONARY", WATCHDOG)
+        self.assertIn("event_log_max_bytes", WATCHDOG)
+        self.assertIn("run_ndt_slam_supervised.sh", CMAKE)
+        self.assertIn("NDT_SLAM_SUPERVISOR_RUN_ID", SUPERVISOR)
+        self.assertIn(
+            'REQUEST_RUN_ID" == "$RUN_ID', SUPERVISOR
+        )
+        self.assertIn(
+            "user stop received; not restarting", SUPERVISOR
+        )
+        self.assertIn("restart budget exhausted (3/900s)", SUPERVISOR)
         self.assertIn("use_ndt_recovery_watchdog:=true", SERVICE)
         unit_section, service_section = SERVICE.split("[Service]", 1)
         self.assertIn("StartLimitIntervalSec=300", unit_section)
@@ -314,13 +330,49 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "src/pending_static_hazard_tracker.cpp",
             "src/ndt_fitness_circuit_breaker.cpp",
             "src/relocalization_confirmation_policy.cpp",
+            "src/localization_health_policy.cpp",
             "pending_static_hazard_tracker_test",
             "ndt_fitness_circuit_breaker_test",
             "relocalization_confirmation_policy_test",
+            "localization_health_policy_test",
         )
         for token in required:
             with self.subTest(token=token):
                 self.assertIn(token, CMAKE)
+
+    def test_PendingVelocityScopeAndStartupQuarantineContracts(self):
+        pending = section(
+            "void NdtSlamNode::runPendingCargoAvoidance(",
+            "void NdtSlamNode::cargoSwingHookAnchorCallback(",
+        )
+        declaration = pending.index(
+            "Eigen::Vector2f pending_velocity_map"
+        )
+        live_branch = pending.index(
+            "if (external_live_result.input_valid"
+        )
+        static_use = pending.index(
+            "query.forward_direction_map = pending_velocity_map"
+        )
+        self.assertLess(declaration, live_branch)
+        self.assertLess(live_branch, static_use)
+        self.assertIn("bool pending_velocity_valid = false", pending)
+
+        self.assertIn(
+            '"/ndt_slam/localization_health"', NODE
+        )
+        self.assertIn(
+            "StartupLocalizationState::STARTUP_QUARANTINE", NODE
+        )
+        self.assertIn(
+            "persistent_manifest_tile_hash_invalid", NODE
+        )
+        self.assertIn(
+            "strict_20_frame_verification_complete", NODE
+        )
+        self.assertIn(
+            "&& relocalization_pose_reliable_", NODE
+        )
 
 
 if __name__ == "__main__":

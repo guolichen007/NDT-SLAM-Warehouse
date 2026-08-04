@@ -47,10 +47,10 @@
                value="$(arg cargo_warning_enabled)"/>
     </node>
 
-    <!-- A required node is used deliberately: after bounded in-process
-         recovery fails, exit 75 tears down this roslaunch. The production
-         systemd unit restarts the entire stack and the watchdog records the
-         cause before exiting. -->
+    <!-- A required node is used deliberately. During the current systemd-off
+         deployment, run_ndt_slam_supervised.sh restarts this complete launch
+         only for process-level faults; responsive pose failures remain in
+         Code 31 quarantine and wait for strict/stationary recovery. -->
     <node name="ndt_recovery_watchdog"
           pkg="ndt_slam"
           type="ndt_recovery_watchdog.py"
@@ -58,6 +58,7 @@
           required="true"
           if="$(arg use_ndt_recovery_watchdog)">
         <param name="status_topic" value="/ndt_slam/relocalization_status"/>
+        <param name="health_topic" value="/ndt_slam/localization_health"/>
         <param name="relocalize_service" value="/ndt_slam/relocalize"/>
         <param name="startup_grace_sec" value="30.0"/>
         <param name="soft_relocalize_after_sec" value="8.0"/>
@@ -67,6 +68,9 @@
         <param name="healthy_reset_sec" value="10.0"/>
         <param name="restart_window_sec" value="900.0"/>
         <param name="max_restarts_in_window" value="3"/>
+        <param name="health_stale_sec" value="3.0"/>
+        <param name="event_log_max_bytes" value="5242880"/>
+        <param name="event_log_backups" value="5"/>
     </node>
 
     <!-- Formal status heartbeat. safety_status is authoritative; status_code

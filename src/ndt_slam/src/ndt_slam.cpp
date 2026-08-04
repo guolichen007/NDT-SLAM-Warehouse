@@ -5,6 +5,7 @@
 #include "ndt_slam/registration_input_policy.hpp"
 #include "ndt_slam/rigid_transform_conversion.hpp"
 #include "ndt_slam/relocalization_confirmation_policy.hpp"
+#include "ndt_slam/localization_health_policy.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -406,6 +407,8 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     runtime_path_pub_ = nh_.advertise<nav_msgs::Path>("/ndt_slam/runtime_path", 1, true);
     relocalization_status_pub_ = nh_.advertise<std_msgs::String>(
         "/ndt_slam/relocalization_status", 1, true);
+    localization_health_pub_ = nh_.advertise<std_msgs::String>(
+        "/ndt_slam/localization_health", 1, true);
 
     // 初始化轨迹
     path_msg_.header.frame_id = "map";
@@ -469,9 +472,25 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
              ndt_resolution_, ndt_step_size_, ndt_max_iterations_, ndt_num_threads_,
              ndt_neighbor_search_method_.c_str());
 
+    std::string startup_localization_reason;
     if (persistent_map_enabled_) {
+        restorePersistentLocalizationMap(&startup_localization_reason);
         publishPersistentDisplayMapFromTiles();
+    } else {
+        relocalization_pose_reliable_ = true;
+        startup_localization_state_ =
+            StartupLocalizationState::FRESH_MAPPING;
+        startup_localization_reason = "persistent_map_disabled";
     }
+    if (!relocalization_pose_reliable_) {
+        publishRelocalizationSafetyInvalid(
+            ros::Time::now(), startup_localization_reason);
+        relocalization_invalid_safety_published_ = true;
+    }
+    publishRelocalizationStatus(
+        relocalization_pose_reliable_ ? "IDLE" : "STARTUP_QUARANTINE",
+        startup_localization_reason);
+    publishLocalizationHealth(ros::Time::now());
     relocalizer_.configure(relocalization_cfg_);
     relocalizer_.start();
     shutdown_ = false;
@@ -622,6 +641,8 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     runtime_path_pub_ = nh_.advertise<nav_msgs::Path>("/ndt_slam/runtime_path", 1, true);
     relocalization_status_pub_ = nh_.advertise<std_msgs::String>(
         "/ndt_slam/relocalization_status", 1, true);
+    localization_health_pub_ = nh_.advertise<std_msgs::String>(
+        "/ndt_slam/localization_health", 1, true);
 
     // 初始化轨迹
     path_msg_.header.frame_id = "map";
@@ -710,9 +731,25 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
 
     // Start callbacks only after all publishers, maps, algorithms and
     // diagnostics are fully configured.
+    std::string startup_localization_reason;
     if (persistent_map_enabled_) {
+        restorePersistentLocalizationMap(&startup_localization_reason);
         publishPersistentDisplayMapFromTiles();
+    } else {
+        relocalization_pose_reliable_ = true;
+        startup_localization_state_ =
+            StartupLocalizationState::FRESH_MAPPING;
+        startup_localization_reason = "persistent_map_disabled";
     }
+    if (!relocalization_pose_reliable_) {
+        publishRelocalizationSafetyInvalid(
+            ros::Time::now(), startup_localization_reason);
+        relocalization_invalid_safety_published_ = true;
+    }
+    publishRelocalizationStatus(
+        relocalization_pose_reliable_ ? "IDLE" : "STARTUP_QUARANTINE",
+        startup_localization_reason);
+    publishLocalizationHealth(ros::Time::now());
     relocalizer_.configure(relocalization_cfg_);
     relocalizer_.start();
     shutdown_ = false;
@@ -2532,6 +2569,19 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 r["confirm_translation_m"].as<double>(0.35);
             relocalization_confirm_yaw_deg_ =
                 r["confirm_yaw_deg"].as<double>(5.0);
+            localization_health_config_.required_consecutive_frames =
+                std::max(1, r["health_required_frames"].as<int>(20));
+            localization_health_config_.maximum_fitness =
+                std::max(0.0,
+                    r["health_max_fitness"].as<double>(0.35));
+            localization_health_config_.maximum_innovation_m =
+                std::max(0.0,
+                    r["health_max_innovation_m"].as<double>(0.75));
+            localization_health_config_.maximum_frame_gap_sec =
+                std::max(0.05,
+                    r["health_max_frame_gap_sec"].as<double>(0.50));
+            localization_health_policy_.configure(
+                localization_health_config_);
 
             relocalization_cfg_.enabled = relocalization_enabled_;
             relocalization_cfg_.min_source_points =
@@ -4425,7 +4475,8 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
     }
     const double evidence_stamp = result.bundle.source_stamp.isZero()
         ? stamp.toSec() : result.bundle.source_stamp.toSec();
-    if (result.static_evidence_epoch ==
+    if (relocalization_pose_reliable_ &&
+        result.static_evidence_epoch ==
         static_evidence_epoch_.load(std::memory_order_acquire)) {
         static_obstacle_evidence_index_.observeCleanBuildCells(
             result.static_observed_cells,
@@ -6256,8 +6307,58 @@ void NdtSlamNode::processCloudThread() {
                 std::isfinite(last_ndt_fitness_) &&
                 (!crane_motion_ekf_enabled_ ||
                  crane_motion_ekf_.status().ndt_accepted);
+            const CraneMotionEKFStatus& health_ekf =
+                crane_motion_ekf_.status();
+            const bool health_observability_valid =
+                !ndt_observability_config_.enabled ||
+                frame_ndt_observability.valid;
+            const bool health_pose_finite =
+                new_pose.translation().allFinite() &&
+                new_pose.so3().matrix().allFinite();
+            const double health_maximum_step =
+                crane_motion_ekf_enabled_ && health_ekf.initialized
+                    ? health_ekf.max_allowed_step
+                    : crane_motion_ekf_cfg_.max_step_max_m;
+            const double health_innovation =
+                crane_motion_ekf_enabled_ && health_ekf.initialized
+                    ? health_ekf.innovation_norm : 0.0;
+            const bool health_nonphysical_correction =
+                crane_motion_ekf_.isNonPhysicalStep(
+                    last_raw_step_, last_ndt_time_ms_, last_sensor_dt_);
+            updateLocalizationHealth(
+                msg->header.stamp, last_ndt_converged_,
+                frame_ndt_accepted, frame_prediction_only,
+                health_observability_valid, health_pose_finite,
+                health_nonphysical_correction,
+                crane_motion_ekf_enabled_ && health_ekf.initialized &&
+                    health_ekf.step_limited,
+                crane_motion_ekf_enabled_ && health_ekf.initialized &&
+                    health_ekf.recovered,
+                last_ndt_fitness_, last_raw_step_, health_maximum_step,
+                health_innovation);
+            const bool recovery_health =
+                persistent_localization_map_present_
+                    ? localization_health_decision_.frame_qualified
+                    : frame_ndt_healthy;
             updateRelocalization(processing_frame_index, msg->header.stamp,
-                                 registration_cloud, frame_ndt_healthy);
+                                 registration_cloud, recovery_health);
+        } else if (persistent_localization_map_present_ &&
+                   !relocalization_pose_reliable_) {
+            // Startup global recovery must not depend on the regular NDT
+            // target being usable. A valid registration source is sufficient
+            // for the bounded global worker; the strict gate remains closed.
+            updateLocalizationHealth(
+                msg->header.stamp, false, false, true,
+                !ndt_observability_config_.enabled ||
+                    frame_ndt_observability.valid,
+                new_pose.translation().allFinite() &&
+                    new_pose.so3().matrix().allFinite(),
+                false, false, false,
+                std::numeric_limits<double>::infinity(), 0.0,
+                crane_motion_ekf_cfg_.max_step_max_m, 0.0);
+            updateRelocalization(
+                processing_frame_index, msg->header.stamp,
+                registration_cloud, false);
         }
 
         // ========== 阶段 7：发布结果（用完整点云建图）==========
@@ -6337,9 +6438,9 @@ void NdtSlamNode::processCloudThread() {
                     diag_queue_age_ms * 0.001 +
                         elapsedMs(start_time) * 0.001);
                 relocalization_invalid_safety_published_ = false;
-            } else if (!relocalization_invalid_safety_published_) {
+            } else {
                 publishRelocalizationSafetyInvalid(
-                    publish_time, "localization_degraded");
+                    publish_time, localization_health_reason_);
                 relocalization_invalid_safety_published_ = true;
             }
 
@@ -8913,6 +9014,18 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     relocalization_last_submit_frame_ = 0;
     relocalization_last_result_frame_ = 0;
     relocalization_cooldown_until_frame_ = 0;
+    localization_health_policy_.reset("reset_service");
+    localization_health_decision_ = localization_health_policy_.decision();
+    if (persistent_map_enabled_) {
+        std::string restore_reason;
+        restorePersistentLocalizationMap(&restore_reason);
+        if (!relocalization_pose_reliable_) {
+            publishRelocalizationSafetyInvalid(
+                ros::Time::now(), restore_reason);
+            publishRelocalizationStatus(
+                "STARTUP_QUARANTINE", restore_reason);
+        }
+    }
 
     cargo_marker_lifecycle_.reset();
     const ros::Time reset_stamp = ros::Time::now();
@@ -8942,6 +9055,20 @@ bool NdtSlamNode::relocalizeService(std_srvs::Empty::Request& request, std_srvs:
     relocalization_confirmation_pose_ = Sophus::SE3d();
     relocalization_last_submit_frame_ = 0;
     relocalization_force_global_.store(true, std::memory_order_release);
+    relocalization_pose_reliable_ = false;
+    relocalization_state_ = RelocalizationState::DEGRADED;
+    if (persistent_localization_map_present_) {
+        startup_localization_state_ =
+            StartupLocalizationState::STARTUP_QUARANTINE;
+        startup_quarantine_started_sec_ = ros::Time::now().toSec();
+        localization_health_policy_.reset("manual_global_search");
+        localization_health_decision_ =
+            localization_health_policy_.decision();
+        localization_health_reason_ = "manual_global_search";
+    }
+    resetCargoAfterPoseDiscontinuity();
+    publishRelocalizationSafetyInvalid(
+        ros::Time::now(), "manual_global_search");
     ROS_WARN("[Relocalization] manual global search queued");
     return true;
 }
@@ -9430,6 +9557,20 @@ bool NdtSlamNode::installLoadedRuntimeMap(
             ? RelocalizationState::DEGRADED
             : RelocalizationState::IDLE;
         relocalization_invalid_safety_published_ = relocalization_enabled_;
+        persistent_localization_map_present_ = true;
+        persistent_localization_map_valid_ = true;
+        localization_map_uuid_ = loaded_map_session_uuid_.empty()
+            ? persistentMapUuid(file_path)
+            : loaded_map_session_uuid_;
+        localization_map_generation_ = loaded_map_session_generation_;
+        startup_localization_state_ = relocalization_enabled_
+            ? StartupLocalizationState::STARTUP_QUARANTINE
+            : StartupLocalizationState::HEALTHY;
+        startup_quarantine_started_sec_ = load_stamp.toSec();
+        localization_health_policy_.reset("runtime_map_replaced");
+        localization_health_decision_ =
+            localization_health_policy_.decision();
+        localization_health_reason_ = "runtime_map_replaced";
         cargo_marker_lifecycle_.reset();
         if (relocalization_enabled_) {
             publishRelocalizationSafetyInvalid(
@@ -10041,6 +10182,20 @@ std::vector<RelocalizationSeed> NdtSlamNode::buildLocalRelocalizationSeeds(
 std::vector<RelocalizationSeed> NdtSlamNode::buildGlobalRelocalizationSeeds(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
     std::vector<RelocalizationSeed> seeds;
+    if (localization_checkpoint_valid_) {
+        const Eigen::Matrix3d rotation =
+            localization_checkpoint_pose_.so3().matrix();
+        const double yaw = std::atan2(rotation(1, 0), rotation(0, 0));
+        for (const double delta_deg : {0.0, -8.0, 8.0}) {
+            RelocalizationSeed seed;
+            seed.pose = Sophus::SE3d(
+                Eigen::AngleAxisd(yaw + delta_deg * M_PI / 180.0,
+                                  Eigen::Vector3d::UnitZ()).toRotationMatrix(),
+                localization_checkpoint_pose_.translation());
+            seed.source = "verified_checkpoint_seed";
+            seeds.push_back(std::move(seed));
+        }
+    }
     const auto hints = loop_closure_detector_.findRelocalizationHints(
         cloud, static_cast<std::size_t>(relocalization_global_hint_count_),
         relocalization_global_min_similarity_);
@@ -10153,7 +10308,21 @@ void NdtSlamNode::consumeRelocalizationResult(
         relocalization_bad_frames_ = 0;
         relocalization_good_frames_ = 0;
         relocalization_force_global_ = false;
-        relocalization_pose_reliable_ = true;
+        const bool strict_startup_verification_required =
+            persistent_localization_map_present_;
+        relocalization_pose_reliable_ =
+            !strict_startup_verification_required;
+        if (strict_startup_verification_required) {
+            startup_localization_state_ =
+                StartupLocalizationState::VERIFYING;
+            startup_quarantine_started_sec_ = stamp.toSec();
+            localization_health_policy_.reset(
+                "global_candidate_requires_strict_verification");
+            localization_health_decision_ =
+                localization_health_policy_.decision();
+            localization_health_reason_ =
+                "global_candidate_requires_strict_verification";
+        }
         relocalization_state_ = RelocalizationState::COOLDOWN;
         relocalization_cooldown_until_frame_ =
             frame_index + static_cast<std::uint64_t>(
@@ -10166,6 +10335,17 @@ void NdtSlamNode::updateRelocalization(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& registration_cloud,
     bool ndt_healthy) {
     if (!relocalization_enabled_) return;
+    if (startup_localization_state_ ==
+        StartupLocalizationState::MAP_INVALID) {
+        relocalization_pose_reliable_ = false;
+        relocalization_force_global_ = false;
+        return;
+    }
+    if (startup_localization_state_ ==
+            StartupLocalizationState::WAITING_STATIONARY &&
+        !relocalization_force_global_.load(std::memory_order_acquire)) {
+        return;
+    }
 
     if (ndt_healthy && relocalization_pose_reliable_ &&
         relocalization_state_ == RelocalizationState::COOLDOWN) {
@@ -10186,7 +10366,8 @@ void NdtSlamNode::updateRelocalization(
         }
         // Natural NDT recovery is accepted only after three consecutive
         // healthy frames; a single intermittent acceptance is not enough.
-        if (relocalization_good_frames_ >= 3) {
+        if (relocalization_good_frames_ >= 3 &&
+            !persistent_localization_map_present_) {
             relocalization_bad_frames_ = 0;
             relocalization_confirmation_count_ = 0;
             resetCargoAfterPoseDiscontinuity();
@@ -10209,6 +10390,7 @@ void NdtSlamNode::updateRelocalization(
 
     if (relocalization_pose_reliable_) {
         relocalization_pose_reliable_ = false;
+        startup_quarantine_started_sec_ = stamp.toSec();
         resetCargoAfterPoseDiscontinuity();
         publishRelocalizationSafetyInvalid(stamp, "localization_degraded");
         relocalization_invalid_safety_published_ = true;
@@ -10376,6 +10558,11 @@ void NdtSlamNode::updateRelocalization(
     relocalization_state_ = global
         ? RelocalizationState::SEARCHING_GLOBAL
         : RelocalizationState::SEARCHING_LOCAL;
+    if (global && persistent_localization_map_present_) {
+        startup_localization_state_ =
+            StartupLocalizationState::GLOBAL_SEARCH;
+        ++localization_recovery_attempts_;
+    }
     publishRelocalizationStatus(
         global ? "SEARCHING_GLOBAL" : "SEARCHING_LOCAL",
         "target=" + submitted_map_source +
@@ -10522,6 +10709,309 @@ void NdtSlamNode::publishRelocalizationStatus(
         " bad_frames=" + std::to_string(relocalization_bad_frames_);
     relocalization_status_pub_.publish(message);
     ROS_WARN_THROTTLE(1.0, "[Relocalization] %s", message.data.c_str());
+}
+
+void NdtSlamNode::publishLocalizationHealth(const ros::Time& stamp) {
+    const double stamp_sec = stamp.isZero()
+        ? ros::Time::now().toSec() : stamp.toSec();
+    if (localization_last_health_publish_sec_ > 0.0 &&
+        stamp_sec > localization_last_health_publish_sec_ &&
+        stamp_sec - localization_last_health_publish_sec_ < 0.20) {
+        return;
+    }
+    localization_last_health_publish_sec_ = stamp_sec;
+
+    const auto startup_state_name = [this]() -> const char* {
+        switch (startup_localization_state_) {
+            case StartupLocalizationState::FRESH_MAPPING:
+                return "FRESH_MAPPING";
+            case StartupLocalizationState::STARTUP_QUARANTINE:
+                return "STARTUP_QUARANTINE";
+            case StartupLocalizationState::GLOBAL_SEARCH:
+                return "GLOBAL_SEARCH";
+            case StartupLocalizationState::VERIFYING:
+                return "VERIFYING";
+            case StartupLocalizationState::WAITING_STATIONARY:
+                return "WAITING_STATIONARY";
+            case StartupLocalizationState::HEALTHY:
+                return "HEALTHY";
+            case StartupLocalizationState::MAP_INVALID:
+                return "MAP_INVALID";
+        }
+        return "UNKNOWN";
+    };
+    const auto relocalization_state_name = [this]() -> const char* {
+        switch (relocalization_state_) {
+            case RelocalizationState::IDLE: return "IDLE";
+            case RelocalizationState::DEGRADED: return "DEGRADED";
+            case RelocalizationState::SEARCHING_LOCAL:
+                return "SEARCHING_LOCAL";
+            case RelocalizationState::SEARCHING_GLOBAL:
+                return "SEARCHING_GLOBAL";
+            case RelocalizationState::CONFIRMING: return "CONFIRMING";
+            case RelocalizationState::COOLDOWN: return "COOLDOWN";
+        }
+        return "UNKNOWN";
+    };
+    const auto json_number = [](double value) {
+        if (!std::isfinite(value)) return std::string("null");
+        std::ostringstream stream;
+        stream << std::setprecision(9) << value;
+        return stream.str();
+    };
+
+    std::string motion_state = "UNKNOWN";
+    const ros::Time now = ros::Time::now();
+    {
+        std::lock_guard<std::mutex> lock(cargo_motion_input_mutex_);
+        const double age = cargo_base_motion_state_received_stamp_.isZero()
+            ? std::numeric_limits<double>::infinity()
+            : (now - cargo_base_motion_state_received_stamp_).toSec();
+        if (std::isfinite(age) && age >= 0.0 &&
+            age <= cargo_base_motion_state_timeout_sec_) {
+            if (cargo_base_motion_state_message_.data == 1U) {
+                motion_state = "MOVING";
+            } else if (cargo_base_motion_state_message_.data == 2U) {
+                motion_state = "STOPPING_SETTLE";
+            } else if (cargo_base_motion_state_message_.data == 3U) {
+                motion_state = "STATIONARY";
+            }
+        }
+    }
+    if (motion_state == "UNKNOWN" &&
+        stationary_motion_decision_.state ==
+            RuntimeMotionState::STATIONARY_HOLD) {
+        motion_state = "STATIONARY_FALLBACK";
+    }
+
+    std_msgs::String message;
+    std::ostringstream json;
+    json << "{"
+         << "\"schema_version\":1,"
+         << "\"stamp_sec\":" << json_number(stamp_sec) << ','
+         << "\"startup_state\":\"" << startup_state_name() << "\","
+         << "\"relocalization_state\":\""
+         << relocalization_state_name() << "\","
+         << "\"pose_reliable\":"
+         << (relocalization_pose_reliable_ ? "true" : "false") << ','
+         << "\"strict_verified\":"
+         << (localization_health_decision_.localization_verified
+                 ? "true" : "false") << ','
+         << "\"qualified_frames\":"
+         << localization_health_decision_.consecutive_qualified_frames << ','
+         << "\"required_frames\":"
+         << localization_health_config_.required_consecutive_frames << ','
+         << "\"ndt_converged\":"
+         << (localization_health_evidence_.ndt_converged
+                 ? "true" : "false") << ','
+         << "\"ndt_accepted\":"
+         << (localization_health_evidence_.ndt_accepted
+                 ? "true" : "false") << ','
+         << "\"prediction_only\":"
+         << (localization_health_evidence_.prediction_only
+                 ? "true" : "false") << ','
+         << "\"observability_valid\":"
+         << (localization_health_evidence_.observability_valid
+                 ? "true" : "false") << ','
+         << "\"pose_finite\":"
+         << (localization_health_evidence_.pose_finite
+                 ? "true" : "false") << ','
+         << "\"nonphysical_correction\":"
+         << (localization_health_evidence_.nonphysical_correction
+                 ? "true" : "false") << ','
+         << "\"fitness\":"
+         << json_number(localization_health_evidence_.fitness) << ','
+         << "\"raw_step_m\":"
+         << json_number(localization_health_evidence_.raw_step_m) << ','
+         << "\"maximum_allowed_step_m\":"
+         << json_number(
+                localization_health_evidence_.maximum_allowed_step_m) << ','
+         << "\"innovation_m\":"
+         << json_number(localization_health_evidence_.innovation_m) << ','
+         << "\"output_step_limited\":"
+         << (localization_health_evidence_.output_step_limited
+                 ? "true" : "false") << ','
+         << "\"ekf_recovered\":"
+         << (localization_health_evidence_.ekf_recovered
+                 ? "true" : "false") << ','
+         << "\"ekf_recovery_count\":"
+         << localization_ekf_recovery_count_ << ','
+         << "\"motion_state\":\"" << motion_state << "\","
+         << "\"map_uuid\":\""
+         << escapeJsonString(localization_map_uuid_) << "\","
+         << "\"map_generation\":" << localization_map_generation_ << ','
+         << "\"persistent_map_present\":"
+         << (persistent_localization_map_present_ ? "true" : "false")
+         << ','
+         << "\"persistent_map_valid\":"
+         << (persistent_localization_map_valid_ ? "true" : "false")
+         << ','
+         << "\"recovery_attempts\":"
+         << localization_recovery_attempts_ << ','
+         << "\"reason\":\""
+         << escapeJsonString(localization_health_reason_) << "\""
+         << "}";
+    message.data = json.str();
+    localization_health_pub_.publish(message);
+}
+
+void NdtSlamNode::updateLocalizationHealth(
+    const ros::Time& stamp, bool ndt_converged, bool ndt_accepted,
+    bool prediction_only, bool observability_valid, bool pose_finite,
+    bool nonphysical_correction, bool output_step_limited,
+    bool ekf_recovered, double fitness, double raw_step_m,
+    double maximum_allowed_step_m, double innovation_m) {
+    localization_health_evidence_.stamp_sec = stamp.toSec();
+    localization_health_evidence_.ndt_converged = ndt_converged;
+    localization_health_evidence_.ndt_accepted = ndt_accepted;
+    localization_health_evidence_.prediction_only = prediction_only;
+    localization_health_evidence_.observability_valid = observability_valid;
+    localization_health_evidence_.pose_finite = pose_finite;
+    localization_health_evidence_.nonphysical_correction =
+        nonphysical_correction;
+    localization_health_evidence_.output_step_limited = output_step_limited;
+    localization_health_evidence_.ekf_recovered = ekf_recovered;
+    localization_health_evidence_.fitness = fitness;
+    localization_health_evidence_.raw_step_m = raw_step_m;
+    localization_health_evidence_.maximum_allowed_step_m =
+        maximum_allowed_step_m;
+    localization_health_evidence_.innovation_m = innovation_m;
+    if (ekf_recovered) ++localization_ekf_recovery_count_;
+
+    if (!persistent_localization_map_present_) {
+        localization_health_decision_.frame_qualified = ndt_accepted;
+        localization_health_decision_.localization_verified =
+            relocalization_pose_reliable_;
+        localization_health_reason_ = relocalization_pose_reliable_
+            ? "fresh_mapping_runtime" : "fresh_mapping_relocalizing";
+        publishLocalizationHealth(stamp);
+        return;
+    }
+    if (!persistent_localization_map_valid_ ||
+        startup_localization_state_ ==
+            StartupLocalizationState::MAP_INVALID) {
+        relocalization_pose_reliable_ = false;
+        publishLocalizationHealth(stamp);
+        return;
+    }
+
+    const bool strict_candidate_active =
+        startup_localization_state_ ==
+            StartupLocalizationState::VERIFYING ||
+        startup_localization_state_ ==
+            StartupLocalizationState::HEALTHY;
+    if (strict_candidate_active) {
+        localization_health_decision_ =
+            localization_health_policy_.update(
+                localization_health_evidence_);
+        localization_health_reason_ = localization_health_decision_.reason;
+    } else {
+        localization_health_decision_.frame_qualified = false;
+        localization_health_decision_.localization_verified = false;
+        localization_health_decision_.consecutive_qualified_frames = 0;
+    }
+    if (localization_health_decision_.localization_verified) {
+        const bool transitioned = !relocalization_pose_reliable_;
+        relocalization_pose_reliable_ = true;
+        startup_localization_state_ = StartupLocalizationState::HEALTHY;
+        relocalization_state_ = RelocalizationState::IDLE;
+        relocalization_force_global_ = false;
+        relocalization_bad_frames_ = 0;
+        relocalization_good_frames_ = 0;
+        relocalization_invalid_safety_published_ = false;
+        if (transitioned) {
+            publishRelocalizationStatus(
+                "IDLE", "strict_20_frame_verification_complete");
+        }
+        writeLocalizationCheckpoint(stamp);
+        publishLocalizationHealth(stamp);
+        return;
+    }
+
+    if (relocalization_pose_reliable_) {
+        relocalization_pose_reliable_ = false;
+        resetCargoAfterPoseDiscontinuity();
+        publishRelocalizationSafetyInvalid(
+            stamp, "strict_health_revoked:" +
+                localization_health_decision_.reason);
+        relocalization_invalid_safety_published_ = true;
+    }
+
+    const double now_sec = stamp.toSec();
+    const bool quarantine_timed_out =
+        startup_quarantine_started_sec_ > 0.0 &&
+        std::isfinite(now_sec) &&
+        now_sec - startup_quarantine_started_sec_ >= 60.0;
+
+    bool stationary_known = false;
+    bool stationary = false;
+    {
+        std::lock_guard<std::mutex> lock(cargo_motion_input_mutex_);
+        const double age = cargo_base_motion_state_received_stamp_.isZero()
+            ? std::numeric_limits<double>::infinity()
+            : (ros::Time::now() -
+               cargo_base_motion_state_received_stamp_).toSec();
+        if (std::isfinite(age) && age >= 0.0 &&
+            age <= cargo_base_motion_state_timeout_sec_ &&
+            cargo_base_motion_state_message_.data >= 1U &&
+            cargo_base_motion_state_message_.data <= 3U) {
+            stationary_known = true;
+            stationary = cargo_base_motion_state_message_.data == 3U;
+        }
+    }
+    if (!stationary_known && observability_valid && ndt_accepted) {
+        stationary_known = true;
+        stationary = stationary_motion_decision_.state ==
+            RuntimeMotionState::STATIONARY_HOLD;
+    }
+
+    if (quarantine_timed_out &&
+        startup_localization_state_ !=
+            StartupLocalizationState::WAITING_STATIONARY) {
+        startup_localization_state_ =
+            StartupLocalizationState::WAITING_STATIONARY;
+        relocalization_force_global_ = false;
+        localization_health_reason_ =
+            "verification_timeout_waiting_stationary";
+        localization_previous_stationary_ =
+            stationary_known && stationary;
+        localization_stationary_cycle_consumed_ =
+            stationary_known && stationary;
+        publishRelocalizationStatus(
+            "WAITING_STATIONARY",
+            "responsive_node_not_hard_restarted");
+    }
+
+    if (startup_localization_state_ ==
+        StartupLocalizationState::WAITING_STATIONARY) {
+        if (stationary_known && !stationary) {
+            localization_previous_stationary_ = false;
+            localization_stationary_cycle_consumed_ = false;
+        }
+        const bool new_stationary_cycle = stationary_known && stationary &&
+            !localization_previous_stationary_ &&
+            !localization_stationary_cycle_consumed_;
+        const bool unknown_low_frequency_search = !stationary_known &&
+            (localization_last_unknown_motion_search_sec_ <= 0.0 ||
+             now_sec - localization_last_unknown_motion_search_sec_ >= 30.0);
+        if (new_stationary_cycle || unknown_low_frequency_search) {
+            relocalization_force_global_ = true;
+            relocalization_bad_frames_ =
+                relocalization_global_trigger_frames_;
+            relocalization_state_ = RelocalizationState::DEGRADED;
+            startup_localization_state_ =
+                StartupLocalizationState::GLOBAL_SEARCH;
+            localization_stationary_cycle_consumed_ = new_stationary_cycle;
+            if (unknown_low_frequency_search) {
+                localization_last_unknown_motion_search_sec_ = now_sec;
+            }
+            localization_health_reason_ = new_stationary_cycle
+                ? "new_stationary_cycle_global_search"
+                : "unknown_motion_low_frequency_global_search";
+        }
+        if (stationary_known) localization_previous_stationary_ = stationary;
+    }
+    publishLocalizationHealth(stamp);
 }
 
 void NdtSlamNode::publishRelocalizationSafetyInvalid(
@@ -11457,6 +11947,369 @@ bool NdtSlamNode::loadPersistentTileLayer(
     return true;
 }
 
+bool NdtSlamNode::loadLocalizationCheckpoint(std::string* reason) {
+    localization_checkpoint_valid_ = false;
+    const std::string path =
+        persistent_map_root_dir_ + "/localization_checkpoint.json";
+    if (!boost::filesystem::is_regular_file(path)) {
+        if (reason) *reason = "checkpoint_missing";
+        return false;
+    }
+    try {
+        const YAML::Node checkpoint = YAML::LoadFile(path);
+        if (checkpoint["schema_version"].as<int>(0) != 1 ||
+            checkpoint["map_uuid"].as<std::string>("") !=
+                localization_map_uuid_ ||
+            checkpoint["map_generation"].as<std::uint64_t>(
+                std::numeric_limits<std::uint64_t>::max()) !=
+                localization_map_generation_) {
+            if (reason) *reason = "checkpoint_map_identity_mismatch";
+            return false;
+        }
+        const YAML::Node pose = checkpoint["pose"];
+        if (!pose || !pose["translation"] || !pose["quaternion"]) {
+            if (reason) *reason = "checkpoint_pose_missing";
+            return false;
+        }
+        const YAML::Node translation = pose["translation"];
+        const YAML::Node quaternion = pose["quaternion"];
+        const Eigen::Vector3d t(
+            translation["x"].as<double>(),
+            translation["y"].as<double>(),
+            translation["z"].as<double>());
+        Eigen::Quaterniond q(
+            quaternion["w"].as<double>(),
+            quaternion["x"].as<double>(),
+            quaternion["y"].as<double>(),
+            quaternion["z"].as<double>());
+        if (!t.allFinite() || !q.coeffs().allFinite() ||
+            !std::isfinite(q.norm()) || q.norm() <= 1.0e-12) {
+            if (reason) *reason = "checkpoint_pose_nonfinite";
+            return false;
+        }
+        q.normalize();
+        localization_checkpoint_pose_ = Sophus::SE3d(q, t);
+        localization_checkpoint_valid_ = true;
+        if (reason) *reason = "checkpoint_seed_loaded";
+        return true;
+    } catch (const std::exception& error) {
+        if (reason) *reason = std::string("checkpoint_parse_failed:") +
+            error.what();
+        return false;
+    }
+}
+
+bool NdtSlamNode::writeLocalizationCheckpoint(const ros::Time& stamp) {
+    if (!persistent_localization_map_valid_ ||
+        !localization_health_decision_.localization_verified ||
+        localization_map_uuid_.empty()) {
+        return false;
+    }
+    const double stamp_sec = stamp.toSec();
+    if (!std::isfinite(stamp_sec) || stamp_sec <= 0.0 ||
+        stamp_sec - localization_last_checkpoint_write_sec_ < 5.0) {
+        return false;
+    }
+    Sophus::SE3d pose;
+    {
+        std::lock_guard<std::mutex> lock(cloud_mutex_);
+        pose = current_pose_;
+    }
+    Eigen::Quaterniond q(pose.so3().matrix());
+    if (!pose.translation().allFinite() || !q.coeffs().allFinite()) {
+        return false;
+    }
+    q.normalize();
+    const std::string path =
+        persistent_map_root_dir_ + "/localization_checkpoint.json";
+    const std::string temporary = path + ".tmp";
+    try {
+        std::ofstream output(temporary, std::ios::out | std::ios::trunc);
+        if (!output.is_open()) return false;
+        output << std::setprecision(17)
+               << "{\n"
+               << "  \"schema_version\": 1,\n"
+               << "  \"map_uuid\": \""
+               << escapeJsonString(localization_map_uuid_) << "\",\n"
+               << "  \"map_generation\": "
+               << localization_map_generation_ << ",\n"
+               << "  \"verified_stamp_sec\": " << stamp_sec << ",\n"
+               << "  \"pose\": {\n"
+               << "    \"translation\": {\"x\": "
+               << pose.translation().x() << ", \"y\": "
+               << pose.translation().y() << ", \"z\": "
+               << pose.translation().z() << "},\n"
+               << "    \"quaternion\": {\"x\": " << q.x()
+               << ", \"y\": " << q.y() << ", \"z\": " << q.z()
+               << ", \"w\": " << q.w() << "}\n"
+               << "  }\n"
+               << "}\n";
+        output.flush();
+        const bool stream_ok = output.good();
+        output.close();
+        if (!stream_ok || std::rename(temporary.c_str(), path.c_str()) != 0) {
+            std::remove(temporary.c_str());
+            return false;
+        }
+        localization_last_checkpoint_write_sec_ = stamp_sec;
+        localization_checkpoint_pose_ = pose;
+        localization_checkpoint_valid_ = true;
+        return true;
+    } catch (const std::exception&) {
+        std::remove(temporary.c_str());
+        return false;
+    }
+}
+
+bool NdtSlamNode::restorePersistentLocalizationMap(std::string* reason) {
+    persistent_localization_map_present_ = false;
+    persistent_localization_map_valid_ = false;
+    localization_map_uuid_ = persistentMapUuid(persistent_map_root_dir_);
+
+    const boost::filesystem::path registration_directory =
+        boost::filesystem::path(persistent_map_root_dir_) /
+        "tiles_registration";
+    if (!persistent_map_enabled_ ||
+        !boost::filesystem::is_directory(registration_directory)) {
+        relocalization_pose_reliable_ = true;
+        startup_localization_state_ =
+            StartupLocalizationState::FRESH_MAPPING;
+        if (reason) *reason = "fresh_mapping_no_persistent_tiles";
+        return true;
+    }
+    boost::system::error_code iterator_error;
+    for (boost::filesystem::directory_iterator it(
+             registration_directory, iterator_error), end;
+         !iterator_error && it != end; it.increment(iterator_error)) {
+        if (boost::filesystem::is_regular_file(it->path()) &&
+            it->path().extension() == ".pcd") {
+            persistent_localization_map_present_ = true;
+            break;
+        }
+    }
+    if (iterator_error) {
+        persistent_localization_map_present_ = true;
+        persistent_localization_map_valid_ = false;
+        relocalization_pose_reliable_ = false;
+        relocalization_force_global_ = false;
+        relocalization_state_ = RelocalizationState::DEGRADED;
+        startup_localization_state_ = StartupLocalizationState::MAP_INVALID;
+        bootstrap_local_map_complete_ = true;
+        localization_health_reason_ =
+            "persistent_registration_scan_failed";
+        if (reason) *reason = localization_health_reason_;
+        return false;
+    }
+    if (!persistent_localization_map_present_) {
+        relocalization_pose_reliable_ = true;
+        startup_localization_state_ =
+            StartupLocalizationState::FRESH_MAPPING;
+        if (reason) *reason = "fresh_mapping_no_registration_tiles";
+        return true;
+    }
+
+    const auto fail_quarantine = [this, reason](const std::string& detail) {
+        persistent_localization_map_valid_ = false;
+        relocalization_pose_reliable_ = false;
+        relocalization_force_global_ = false;
+        relocalization_state_ = RelocalizationState::DEGRADED;
+        startup_localization_state_ = StartupLocalizationState::MAP_INVALID;
+        bootstrap_local_map_complete_ = true;
+        localization_health_reason_ = detail;
+        if (reason) *reason = detail;
+        return false;
+    };
+
+    const std::string manifest_path =
+        persistent_map_root_dir_ + "/persistent_map_manifest.json";
+    if (!boost::filesystem::is_regular_file(manifest_path)) {
+        return fail_quarantine("persistent_manifest_missing");
+    }
+    try {
+        const YAML::Node manifest = YAML::LoadFile(manifest_path);
+        if (manifest["schema"].as<std::string>("") !=
+                "ndt_slam_persistent_tile_catalog" ||
+            manifest["schema_version"].as<int>(0) != 1) {
+            return fail_quarantine("persistent_manifest_schema_invalid");
+        }
+        if (manifest["map_uuid"].as<std::string>("") !=
+            localization_map_uuid_) {
+            return fail_quarantine("persistent_manifest_uuid_mismatch");
+        }
+        const double manifest_tile_size =
+            manifest["tile_size_m"].as<double>(0.0);
+        if (!std::isfinite(manifest_tile_size) ||
+            std::abs(manifest_tile_size - tile_size_m_) > 1.0e-6) {
+            return fail_quarantine("persistent_manifest_tile_size_mismatch");
+        }
+        const YAML::Node layers = manifest["layers"];
+        for (const char* layer_name :
+             {"registration", "display", "ground", "objects"}) {
+            const std::string expected_directory =
+                std::string("tiles_") + layer_name;
+            const YAML::Node entries = layers[layer_name];
+            if (!entries || !entries.IsSequence()) {
+                return fail_quarantine(
+                    std::string("persistent_manifest_layer_missing:") +
+                    layer_name);
+            }
+            std::set<std::string> manifest_paths;
+            for (std::size_t entry_index = 0U;
+                 entry_index < entries.size(); ++entry_index) {
+                const YAML::Node entry = entries[entry_index];
+                const std::string relative =
+                    entry["path"].as<std::string>("");
+                const boost::filesystem::path relative_path(relative);
+                bool unsafe = relative.empty() || relative_path.is_absolute();
+                for (const auto& component : relative_path) {
+                    if (component.string() == "..") unsafe = true;
+                }
+                if (unsafe ||
+                    relative_path.parent_path().generic_string() !=
+                        expected_directory ||
+                    relative_path.extension() != ".pcd" ||
+                    !manifest_paths.insert(
+                        relative_path.generic_string()).second) {
+                    return fail_quarantine(
+                        "persistent_manifest_unsafe_tile_path");
+                }
+                const boost::filesystem::path tile_path =
+                    boost::filesystem::path(persistent_map_root_dir_) /
+                    relative_path;
+                if (!boost::filesystem::is_regular_file(tile_path)) {
+                    return fail_quarantine(
+                        "persistent_manifest_tile_missing:" + relative);
+                }
+                boost::system::error_code size_error;
+                const std::uintmax_t actual_bytes =
+                    boost::filesystem::file_size(tile_path, size_error);
+                const auto manifest_bytes =
+                    entry["bytes"].as<unsigned long long>(0ULL);
+                if (size_error || actual_bytes !=
+                    static_cast<std::uintmax_t>(manifest_bytes)) {
+                    return fail_quarantine(
+                        "persistent_manifest_tile_size_invalid:" + relative);
+                }
+                std::string hash_reason;
+                const std::string actual_hash =
+                    MapSessionSnapshot::sha256File(
+                        tile_path.string(), &hash_reason);
+                if (actual_hash.empty() || actual_hash !=
+                    entry["sha256"].as<std::string>("")) {
+                    return fail_quarantine(
+                        "persistent_manifest_tile_hash_invalid:" + relative);
+                }
+            }
+            std::set<std::string> disk_paths;
+            const boost::filesystem::path layer_directory =
+                boost::filesystem::path(persistent_map_root_dir_) /
+                expected_directory;
+            boost::system::error_code catalog_error;
+            for (boost::filesystem::directory_iterator it(
+                     layer_directory, catalog_error), end;
+                 !catalog_error && it != end;
+                 it.increment(catalog_error)) {
+                if (boost::filesystem::is_regular_file(it->path()) &&
+                    it->path().extension() == ".pcd") {
+                    disk_paths.insert(
+                        (boost::filesystem::path(expected_directory) /
+                         it->path().filename()).generic_string());
+                }
+            }
+            if (catalog_error || disk_paths != manifest_paths) {
+                return fail_quarantine(
+                    std::string("persistent_manifest_catalog_mismatch:") +
+                    layer_name);
+            }
+        }
+    } catch (const std::exception& error) {
+        return fail_quarantine(
+            std::string("persistent_manifest_parse_failed:") + error.what());
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr registration;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr display;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ground;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr objects;
+    std::string layer_reason;
+    if (!loadPersistentTileLayer(
+            "tiles_registration", &registration, &layer_reason) ||
+        !loadPersistentTileLayer("tiles_display", &display, &layer_reason) ||
+        !loadPersistentTileLayer("tiles_ground", &ground, &layer_reason) ||
+        !loadPersistentTileLayer("tiles_objects", &objects, &layer_reason)) {
+        return fail_quarantine(layer_reason);
+    }
+    if (!registration || static_cast<int>(registration->size()) <
+            relocalization_cfg_.min_target_points) {
+        return fail_quarantine("persistent_registration_below_min_points");
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr objects_clean(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    const auto static_snapshot = static_obstacle_evidence_index_.snapshot();
+    if (objects && static_snapshot &&
+        std::isfinite(static_snapshot->cell_size_m) &&
+        static_snapshot->cell_size_m > 0.0F) {
+        objects_clean->reserve(objects->size());
+        for (const pcl::PointXYZ& point : objects->points) {
+            if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+                !std::isfinite(point.z)) continue;
+            const auto key = packStaticEvidenceCell(
+                static_cast<std::int32_t>(std::floor(
+                    point.x / static_snapshot->cell_size_m)),
+                static_cast<std::int32_t>(std::floor(
+                    point.y / static_snapshot->cell_size_m)));
+            const auto found = static_snapshot->cells.find(key);
+            if (found == static_snapshot->cells.end()) continue;
+            const StaticEvidenceCell& cell = found->second;
+            const bool current = cell.clean_map_confirmed &&
+                cell.map_generation == static_snapshot->map_generation;
+            const bool authorized =
+                static_snapshot->authority ==
+                    StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE
+                ? current : current && cell.temporally_mature;
+            if (authorized) objects_clean->push_back(point);
+        }
+        localization_map_generation_ = static_snapshot->map_generation;
+    }
+    objects_clean->width =
+        static_cast<std::uint32_t>(objects_clean->size());
+    objects_clean->height = 1U;
+    objects_clean->is_dense = true;
+
+    global_map_ = registration;
+    display_map_ = display;
+    ground_map_ = ground;
+    objects_map_ = objects;
+    objects_clean_map_ = objects_clean;
+    // Share the immutable restored registration cloud until a confirmed
+    // global result recenters local_map_. This avoids a full-map duplicate at
+    // startup; map writes remain blocked throughout quarantine.
+    local_map_ = registration;
+    ++local_map_version_;
+    bootstrap_local_map_complete_ = true;
+    sealCurrentMapLayerBundleLocked(ros::Time::now());
+    persistent_localization_map_valid_ = true;
+    relocalization_pose_reliable_ = false;
+    relocalization_force_global_ = true;
+    relocalization_bad_frames_ = relocalization_global_trigger_frames_;
+    relocalization_state_ = RelocalizationState::DEGRADED;
+    startup_localization_state_ =
+        StartupLocalizationState::STARTUP_QUARANTINE;
+    startup_quarantine_started_sec_ = ros::Time::now().toSec();
+    localization_health_policy_.reset("startup_quarantine");
+    localization_health_reason_ = "persistent_map_requires_global_search";
+    std::string checkpoint_reason;
+    loadLocalizationCheckpoint(&checkpoint_reason);
+    if (reason) {
+        *reason = "persistent_map_restored:registration=" +
+            std::to_string(registration->size()) + ":objects_clean=" +
+            std::to_string(objects_clean->size()) + ":" +
+            checkpoint_reason;
+    }
+    return true;
+}
+
 bool NdtSlamNode::assemblePersistentSessionLayers(
     const std::shared_ptr<const StaticEvidenceSnapshot>& static_evidence,
     MapSessionLayers* layers,
@@ -12381,7 +13234,9 @@ bool NdtSlamNode::canCommit() {
     return commit_enabled_
         && !mapping_paused_by_memory_guard_
         && !disk_guard_triggered_
-        && !ndt_health_bad_;
+        && !ndt_health_bad_
+        && relocalization_pose_reliable_
+        && !tracking_lost_.load(std::memory_order_acquire);
 }
 
 // ========== 内存保护实现 ==========
@@ -18565,6 +19420,11 @@ void NdtSlamNode::runPendingCargoAvoidance(
     std::size_t pending_corridor_rejected_clusters = 0U;
     std::size_t pending_angle_rejected_clusters = 0U;
     bool pending_warning_motion_authorized = false;
+    // Shared by both the live-cloud and static-map obstacle paths. Keep the
+    // conservative invalid default unless the current EKF state is based on
+    // an accepted NDT measurement.
+    Eigen::Vector2f pending_velocity_map = Eigen::Vector2f::Zero();
+    bool pending_velocity_valid = false;
     if (external_live_result.input_valid &&
         external_live_result.warning_valid &&
         external_live_result.fault == CargoSafetyFault::NONE) {
@@ -18578,8 +19438,6 @@ void NdtSlamNode::runPendingCargoAvoidance(
             pose_map_base.so3().matrix();
         const float map_base_yaw = static_cast<float>(std::atan2(
             map_base_rotation(1, 0), map_base_rotation(0, 0)));
-        Eigen::Vector2f pending_velocity_map = Eigen::Vector2f::Zero();
-        bool pending_velocity_valid = false;
         const CraneMotionEKFStatus& pending_ekf_status =
             crane_motion_ekf_.status();
         if (pending_ekf_status.initialized &&

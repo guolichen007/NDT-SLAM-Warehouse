@@ -75,6 +75,7 @@
 #include <ndt_slam/cargo_track_policy.hpp>
 #include <ndt_slam/cargo_component_fusion.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
+#include <ndt_slam/localization_health_policy.hpp>
 #include <set>
 
 // v8-stable-r3: CraneMotionEKF
@@ -292,6 +293,16 @@ private:
                                      const std::string& detail);
     void publishRelocalizationSafetyInvalid(const ros::Time& stamp,
                                              const std::string& reason);
+    void updateLocalizationHealth(
+        const ros::Time& stamp, bool ndt_converged, bool ndt_accepted,
+        bool prediction_only, bool observability_valid, bool pose_finite,
+        bool nonphysical_correction, bool output_step_limited,
+        bool ekf_recovered, double fitness, double raw_step_m,
+        double maximum_allowed_step_m, double innovation_m);
+    void publishLocalizationHealth(const ros::Time& stamp);
+    bool restorePersistentLocalizationMap(std::string* reason);
+    bool loadLocalizationCheckpoint(std::string* reason);
+    bool writeLocalizationCheckpoint(const ros::Time& stamp);
 
     // 动态点过滤（统计离群点去除）
     pcl::PointCloud<pcl::PointXYZ>::Ptr filterDynamicPoints(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
@@ -314,6 +325,7 @@ private:
     ros::Publisher path_pub_;
     ros::Publisher runtime_path_pub_;
     ros::Publisher relocalization_status_pub_;
+    ros::Publisher localization_health_pub_;
 
     // 轨迹历史
     nav_msgs::Path path_msg_;
@@ -452,6 +464,16 @@ private:
         COOLDOWN = 5
     };
 
+    enum class StartupLocalizationState : std::uint8_t {
+        FRESH_MAPPING = 0,
+        STARTUP_QUARANTINE = 1,
+        GLOBAL_SEARCH = 2,
+        VERIFYING = 3,
+        WAITING_STATIONARY = 4,
+        HEALTHY = 5,
+        MAP_INVALID = 6
+    };
+
     NdtRelocalizer relocalizer_;
     RelocalizationConfig relocalization_cfg_;
     RelocalizationState relocalization_state_ = RelocalizationState::IDLE;
@@ -482,9 +504,30 @@ private:
     std::uint64_t relocalization_cooldown_until_frame_ = 0;
     std::uint64_t relocalization_last_result_frame_ = 0;
     std::atomic<bool> relocalization_force_global_{false};
-    bool relocalization_pose_reliable_ = true;
+    bool relocalization_pose_reliable_ = false;
     bool relocalization_invalid_safety_published_ = false;
     Sophus::SE3d relocalization_confirmation_pose_;
+    StartupLocalizationState startup_localization_state_ =
+        StartupLocalizationState::FRESH_MAPPING;
+    LocalizationHealthConfig localization_health_config_;
+    LocalizationHealthPolicy localization_health_policy_;
+    LocalizationHealthDecision localization_health_decision_;
+    LocalizationHealthEvidence localization_health_evidence_;
+    std::string localization_health_reason_ = "startup_not_evaluated";
+    std::string localization_map_uuid_;
+    std::uint64_t localization_map_generation_ = 0U;
+    bool persistent_localization_map_present_ = false;
+    bool persistent_localization_map_valid_ = false;
+    bool localization_checkpoint_valid_ = false;
+    Sophus::SE3d localization_checkpoint_pose_;
+    double startup_quarantine_started_sec_ = 0.0;
+    double localization_last_health_publish_sec_ = 0.0;
+    double localization_last_checkpoint_write_sec_ = 0.0;
+    double localization_last_unknown_motion_search_sec_ = 0.0;
+    bool localization_previous_stationary_ = false;
+    bool localization_stationary_cycle_consumed_ = false;
+    int localization_recovery_attempts_ = 0;
+    std::uint64_t localization_ekf_recovery_count_ = 0U;
 
     // ========== 调试配置 ==========
     struct DebugConfig {

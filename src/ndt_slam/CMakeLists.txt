@@ -131,6 +131,7 @@ set(LIBRARY_SOURCES
   # Asynchronous local/global NDT relocalization
   src/ndt_relocalizer.cpp
   src/relocalization_confirmation_policy.cpp
+  src/localization_health_policy.cpp
   # Runtime diagnostics (1.0x/1.5x acceptance testing)
   src/runtime_diagnostics.cpp
   # Formal cargo bottom and structured safety-status pipeline
@@ -455,6 +456,13 @@ if(CATKIN_ENABLE_TESTING)
       ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
   endif()
 
+  catkin_add_gtest(localization_health_policy_test
+    test/localization_health_policy_test.cpp)
+  if(TARGET localization_health_policy_test)
+    target_link_libraries(localization_health_policy_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
   catkin_add_gtest(ndt_fitness_circuit_breaker_test
     test/ndt_fitness_circuit_breaker_test.cpp)
   if(TARGET ndt_fitness_circuit_breaker_test)
@@ -562,6 +570,7 @@ catkin_install_python(PROGRAMS
 )
 
 install(PROGRAMS
+  scripts/ops/run_ndt_slam_supervised.sh
   scripts/ops/server_monitorctl.sh
   scripts/ops/server_monitor_bag_validate.sh
   scripts/ops/server_preflight.sh

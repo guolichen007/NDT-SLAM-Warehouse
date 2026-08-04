@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Bounded NDT relocalization watchdog with an offline-testable policy.
+"""NDT recovery watchdog for strict health and a foreground supervisor.
 
-The ROS wrapper first requests the in-process global relocalizer. If the
-latched recovery state remains degraded for a configured interval, this
-required roslaunch node records durable evidence and exits non-zero. The
-production systemd unit then restarts the complete launch. A persisted restart
-budget prevents a damaged sensor or map from creating an unbounded restart
-loop.
+Responsive localization failures stay quarantined and recover in-process.
+Only a stale health stream or an unresponsive recovery service requests a
+bounded full-stack restart from the foreground supervisor.
 """
 
 from __future__ import annotations
@@ -37,6 +34,16 @@ class RecoveryStatus:
     raw: str
 
 
+@dataclasses.dataclass(frozen=True)
+class LocalizationHealth:
+    startup_state: str
+    relocalization_state: str
+    pose_reliable: bool
+    strict_verified: bool
+    reason: str
+    raw: Mapping[str, Any]
+
+
 @dataclasses.dataclass
 class WatchdogConfig:
     startup_grace_sec: float = 30.0
@@ -47,6 +54,9 @@ class WatchdogConfig:
     healthy_reset_sec: float = 10.0
     restart_window_sec: float = 900.0
     max_restarts_in_window: int = 3
+    health_stale_sec: float = 3.0
+    event_log_max_bytes: int = 5 * 1024 * 1024
+    event_log_backups: int = 5
 
 
 @dataclasses.dataclass(frozen=True)
@@ -65,6 +75,29 @@ def parse_relocalization_status(message: str) -> Optional[RecoveryStatus]:
         state=state_match.group(1).upper(),
         bad_frames=int(bad_frames_match.group(1)),
         raw=message.strip(),
+    )
+
+
+def parse_localization_health(message: str) -> Optional[LocalizationHealth]:
+    try:
+        payload = json.loads(message or "")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        return None
+    startup_state = str(payload.get("startup_state", "")).upper()
+    relocalization_state = str(
+        payload.get("relocalization_state", "")
+    ).upper()
+    if not startup_state or not relocalization_state:
+        return None
+    return LocalizationHealth(
+        startup_state=startup_state,
+        relocalization_state=relocalization_state,
+        pose_reliable=payload.get("pose_reliable") is True,
+        strict_verified=payload.get("strict_verified") is True,
+        reason=str(payload.get("reason", "unknown")),
+        raw=payload,
     )
 
 
@@ -123,36 +156,6 @@ class RecoveryWatchdogPolicy:
                 "none", degraded_duration, "startup_grace"
             )
 
-        hard_by_time = (
-            degraded_duration >= self.config.hard_restart_after_sec
-        )
-        hard_by_frames = (
-            status.bad_frames >= self.config.hard_restart_bad_frames
-            and degraded_duration >=
-            self.config.hard_restart_bad_frames_after_sec
-        )
-        if hard_by_time or hard_by_frames:
-            if (len(self.restart_history) >=
-                    self.config.max_restarts_in_window):
-                if self.suppression_reported:
-                    return WatchdogDecision(
-                        "none", degraded_duration,
-                        "restart_budget_already_reported"
-                    )
-                self.suppression_reported = True
-                return WatchdogDecision(
-                    "restart_suppressed", degraded_duration,
-                    "restart_budget_exhausted"
-                )
-            self.restart_history.append(now)
-            reason = (
-                "persistent_bad_frames" if hard_by_frames
-                else "persistent_degraded_state"
-            )
-            return WatchdogDecision(
-                "hard_restart", degraded_duration, reason
-            )
-
         if (not self.soft_requested and degraded_duration >=
                 self.config.soft_relocalize_after_sec):
             self.soft_requested = True
@@ -161,8 +164,28 @@ class RecoveryWatchdogPolicy:
                 "degraded_state_soft_recovery"
             )
         return WatchdogDecision(
-            "none", degraded_duration, "waiting_for_recovery"
+            "none", degraded_duration,
+            "responsive_localization_waiting_for_recovery"
         )
+
+    def process_fault(self, now: float, reason: str) -> WatchdogDecision:
+        now = float(now)
+        self.restart_history = _finite_history(
+            self.restart_history, now, self.config.restart_window_sec
+        )
+        if now - self.started_at < self.config.startup_grace_sec:
+            return WatchdogDecision("none", 0.0, "startup_grace")
+        if len(self.restart_history) >= self.config.max_restarts_in_window:
+            if self.suppression_reported:
+                return WatchdogDecision(
+                    "none", 0.0, "restart_budget_already_reported"
+                )
+            self.suppression_reported = True
+            return WatchdogDecision(
+                "restart_suppressed", 0.0, "restart_budget_exhausted"
+            )
+        self.restart_history.append(now)
+        return WatchdogDecision("hard_restart", 0.0, reason)
 
 
 def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -177,8 +200,31 @@ def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     os.replace(str(temporary), str(path))
 
 
-def append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
+def rotate_jsonl(path: Path, max_bytes: int, backups: int) -> None:
+    if max_bytes <= 0 or backups <= 0:
+        return
+    try:
+        if path.stat().st_size < max_bytes:
+            return
+    except FileNotFoundError:
+        return
+    for index in range(backups, 0, -1):
+        source = path if index == 1 else path.with_name(
+            f"{path.name}.{index - 1}"
+        )
+        target = path.with_name(f"{path.name}.{index}")
+        if not source.exists():
+            continue
+        if index == backups and target.exists():
+            target.unlink()
+        os.replace(str(source), str(target))
+
+
+def append_jsonl(path: Path, payload: Mapping[str, Any],
+                 max_bytes: int = 5 * 1024 * 1024,
+                 backups: int = 5) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    rotate_jsonl(path, max_bytes, backups)
     with path.open("a", encoding="utf-8", newline="\n") as stream:
         json.dump(payload, stream, ensure_ascii=False, sort_keys=True)
         stream.write("\n")
@@ -203,6 +249,8 @@ class RosRecoveryWatchdog:
 
         self.rospy = rospy
         self.status: Optional[RecoveryStatus] = None
+        self.health: Optional[LocalizationHealth] = None
+        self.health_received_at: Optional[float] = None
         self.restart_requested = threading.Event()
         self.started_at = time.time()
         config = WatchdogConfig(
@@ -232,6 +280,17 @@ class RosRecoveryWatchdog:
             max_restarts_in_window=int(
                 rospy.get_param("~max_restarts_in_window", 3)
             ),
+            health_stale_sec=float(
+                rospy.get_param("~health_stale_sec", 3.0)
+            ),
+            event_log_max_bytes=int(
+                rospy.get_param(
+                    "~event_log_max_bytes", 5 * 1024 * 1024
+                )
+            ),
+            event_log_backups=int(
+                rospy.get_param("~event_log_backups", 5)
+            ),
         )
         data_root = os.environ.get("NDT_SLAM_DATA_ROOT", "").strip()
         default_root = (
@@ -246,6 +305,12 @@ class RosRecoveryWatchdog:
         )
         self.state_path = self.evidence_root / "state.json"
         self.events_path = self.evidence_root / "events.jsonl"
+        self.restart_request_path = (
+            self.evidence_root / "restart_request.json"
+        )
+        self.supervisor_run_id = os.environ.get(
+            "NDT_SLAM_SUPERVISOR_RUN_ID", ""
+        ).strip()
         self.policy = RecoveryWatchdogPolicy(
             config, self.started_at,
             read_restart_history(self.state_path)
@@ -266,6 +331,14 @@ class RosRecoveryWatchdog:
         self.subscriber = rospy.Subscriber(
             status_topic, String, self._status_callback, queue_size=10
         )
+        health_topic = str(
+            rospy.get_param(
+                "~health_topic", "/ndt_slam/localization_health"
+            )
+        )
+        self.health_subscriber = rospy.Subscriber(
+            health_topic, String, self._health_callback, queue_size=10
+        )
         self.timer = rospy.Timer(
             rospy.Duration(float(rospy.get_param("~poll_sec", 1.0))),
             self._timer_callback,
@@ -275,6 +348,12 @@ class RosRecoveryWatchdog:
         parsed = parse_relocalization_status(message.data)
         if parsed is not None:
             self.status = parsed
+
+    def _health_callback(self, message: Any) -> None:
+        parsed = parse_localization_health(message.data)
+        if parsed is not None:
+            self.health = parsed
+            self.health_received_at = time.time()
 
     def _event(self, decision: WatchdogDecision,
                status: RecoveryStatus, now: float) -> Dict[str, Any]:
@@ -290,6 +369,14 @@ class RosRecoveryWatchdog:
             "restart_history": list(self.policy.restart_history),
             "status": status.raw,
             "state": status.state,
+            "health": (
+                dict(self.health.raw) if self.health is not None else None
+            ),
+            "health_age_sec": (
+                round(max(0.0, now - self.health_received_at), 3)
+                if self.health_received_at is not None else None
+            ),
+            "supervisor_run_id": self.supervisor_run_id,
             "wall_time": now,
             "wall_time_iso": time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)
@@ -297,7 +384,12 @@ class RosRecoveryWatchdog:
         }
 
     def _persist(self, event: Mapping[str, Any]) -> None:
-        append_jsonl(self.events_path, event)
+        append_jsonl(
+            self.events_path,
+            event,
+            self.policy.config.event_log_max_bytes,
+            self.policy.config.event_log_backups,
+        )
         atomic_write_json(
             self.state_path,
             {
@@ -306,14 +398,83 @@ class RosRecoveryWatchdog:
             },
         )
 
+    def _request_hard_restart(
+        self, decision: WatchdogDecision,
+        status: RecoveryStatus, now: float
+    ) -> None:
+        evidence = self._event(decision, status, now)
+        try:
+            self._persist(evidence)
+            atomic_write_json(
+                self.restart_request_path,
+                {
+                    "schema_version": 1,
+                    "action": "hard_restart",
+                    "supervisor_run_id": self.supervisor_run_id,
+                    "wall_time": now,
+                    "reason": decision.reason,
+                    "event": evidence,
+                },
+            )
+        except Exception as error:
+            self.rospy.logerr(
+                "[NdtRecoveryWatchdog] restart evidence write failed: %s",
+                error,
+            )
+            return
+        self.rospy.logfatal(
+            "[NdtRecoveryWatchdog] process-level fault; requesting "
+            "orderly exit 75 for foreground-supervised full-stack restart; "
+            "reason=%s evidence=%s",
+            decision.reason,
+            self.events_path,
+        )
+        self.restart_requested.set()
+
     def _timer_callback(self, _event: Any) -> None:
-        if self.status is None or self.restart_requested.is_set():
+        if self.restart_requested.is_set():
             return
         now = time.time()
-        decision = self.policy.observe(self.status, now)
+        fallback_status = self.status or RecoveryStatus(
+            "UNKNOWN", 0, "state=UNKNOWN bad_frames=0"
+        )
+        if self.health_received_at is None:
+            decision = self.policy.process_fault(
+                now, "localization_health_stream_missing"
+            )
+        elif now - self.health_received_at > self.policy.config.health_stale_sec:
+            decision = self.policy.process_fault(
+                now, "localization_health_stream_stale"
+            )
+        elif self.health is not None and self.health.startup_state in {
+            "MAP_INVALID", "WAITING_STATIONARY"
+        }:
+            # A responsive node has deliberately isolated an untrusted pose.
+            # More restarts cannot repair map coverage or create a stationary
+            # window, so leave recovery to the node/operator.
+            return
+        elif (
+            self.health is not None
+            and self.health.pose_reliable
+            and self.health.strict_verified
+        ):
+            healthy = RecoveryStatus(
+                "IDLE", 0, "state=IDLE bad_frames=0"
+            )
+            self.policy.observe(healthy, now)
+            return
+        elif self.status is None:
+            return
+        else:
+            decision = self.policy.observe(self.status, now)
         if decision.action == "none":
             return
-        evidence = self._event(decision, self.status, now)
+        if decision.action == "hard_restart":
+            self._request_hard_restart(
+                decision, fallback_status, now
+            )
+            return
+        evidence = self._event(decision, fallback_status, now)
         try:
             self._persist(evidence)
         except Exception as error:
@@ -338,6 +499,22 @@ class RosRecoveryWatchdog:
                     "[NdtRecoveryWatchdog] relocalize request failed: %s",
                     error,
                 )
+                fault = self.policy.process_fault(
+                    now, "relocalization_service_unresponsive"
+                )
+                if fault.action == "hard_restart":
+                    self._request_hard_restart(
+                        fault, fallback_status, now
+                    )
+                elif fault.action == "restart_suppressed":
+                    suppressed = self._event(
+                        fault, fallback_status, now
+                    )
+                    self._persist(suppressed)
+                    self.rospy.logerr(
+                        "[NdtRecoveryWatchdog] restart budget exhausted "
+                        "after recovery service failure"
+                    )
             return
         if decision.action == "restart_suppressed":
             self.rospy.logerr(
@@ -348,14 +525,6 @@ class RosRecoveryWatchdog:
                 self.events_path,
             )
             return
-
-        self.rospy.logfatal(
-            "[NdtRecoveryWatchdog] persistent localization failure; "
-            "requesting orderly exit 75 for supervised full-stack restart; "
-            "evidence=%s",
-            self.events_path,
-        )
-        self.restart_requested.set()
 
     def run(self) -> int:
         """Wait in the main thread so exit 75 runs normal Python/ROS cleanup."""

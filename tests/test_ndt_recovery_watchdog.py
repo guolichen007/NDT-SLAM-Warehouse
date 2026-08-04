@@ -4,6 +4,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import json
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +30,7 @@ class NdtRecoveryWatchdogTest(unittest.TestCase):
         self.assertEqual(status.state, "SEARCHING_GLOBAL")
         self.assertEqual(status.bad_frames, 411)
 
-    def test_SoftRecoveryPrecedesBoundedHardRestart(self):
+    def test_ResponsiveDegradationNeverRequestsBlindHardRestart(self):
         config = WATCHDOG.WatchdogConfig(
             startup_grace_sec=5.0,
             soft_relocalize_after_sec=8.0,
@@ -50,10 +51,10 @@ class NdtRecoveryWatchdogTest(unittest.TestCase):
             "state=SEARCHING_GLOBAL bad_frames=350",
         )
         self.assertEqual(
-            policy.observe(high_bad, 116.0).action, "hard_restart"
+            policy.observe(high_bad, 200.0).action, "none"
         )
 
-    def test_RestartBudgetSuppressesRestartStorm(self):
+    def test_ProcessFaultUsesBoundedRestartBudget(self):
         config = WATCHDOG.WatchdogConfig(
             startup_grace_sec=0.0,
             soft_relocalize_after_sec=1.0,
@@ -64,14 +65,26 @@ class NdtRecoveryWatchdogTest(unittest.TestCase):
         policy = WATCHDOG.RecoveryWatchdogPolicy(
             config, 100.0, (10.0, 50.0, 99.0)
         )
-        degraded = WATCHDOG.RecoveryStatus(
-            "DEGRADED", 5, "state=DEGRADED bad_frames=5"
-        )
-        policy.observe(degraded, 100.0)
-        decision = policy.observe(degraded, 103.0)
+        decision = policy.process_fault(103.0, "health_stream_stale")
         self.assertEqual(decision.action, "restart_suppressed")
         self.assertEqual(
-            policy.observe(degraded, 104.0).action, "none"
+            policy.process_fault(104.0, "health_stream_stale").action,
+            "none",
+        )
+
+    def test_LocalizationHealthRequiresSchemaAndStrictFlags(self):
+        health = WATCHDOG.parse_localization_health(
+            '{"schema_version":1,"startup_state":"VERIFYING",'
+            '"relocalization_state":"COOLDOWN","pose_reliable":false,'
+            '"strict_verified":false,"reason":"strict_frame_qualified"}'
+        )
+        self.assertIsNotNone(health)
+        self.assertEqual(health.startup_state, "VERIFYING")
+        self.assertFalse(health.pose_reliable)
+        self.assertIsNone(
+            WATCHDOG.parse_localization_health(
+                '{"schema_version":2,"startup_state":"HEALTHY"}'
+            )
         )
 
     def test_EvidenceWritersUseLfAndRoundTripHistory(self):
@@ -87,6 +100,69 @@ class NdtRecoveryWatchdogTest(unittest.TestCase):
             self.assertNotIn(b"\r\n", state_path.read_bytes())
             self.assertEqual(
                 WATCHDOG.read_restart_history(state_path), [1.0, 2.0]
+            )
+
+    def test_EventLogRotationIsBounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "events.jsonl"
+            WATCHDOG.append_jsonl(
+                event_path, {"event": "first"}, max_bytes=1, backups=2
+            )
+            WATCHDOG.append_jsonl(
+                event_path, {"event": "second"}, max_bytes=1, backups=2
+            )
+            self.assertTrue(
+                event_path.with_name("events.jsonl.1").exists()
+            )
+            self.assertLessEqual(
+                len(list(Path(directory).glob("events.jsonl*"))), 3
+            )
+
+    def test_HardRestartRequestIsAtomicAndGenerationBound(self):
+        class FakeRospy:
+            @staticmethod
+            def logerr(*_args):
+                pass
+
+            @staticmethod
+            def logfatal(*_args):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            watchdog = WATCHDOG.RosRecoveryWatchdog.__new__(
+                WATCHDOG.RosRecoveryWatchdog
+            )
+            root = Path(directory)
+            watchdog.rospy = FakeRospy()
+            watchdog.health = None
+            watchdog.health_received_at = None
+            watchdog.supervisor_run_id = "run-generation-7"
+            watchdog.state_path = root / "state.json"
+            watchdog.events_path = root / "events.jsonl"
+            watchdog.restart_request_path = root / "restart_request.json"
+            watchdog.policy = WATCHDOG.RecoveryWatchdogPolicy(
+                WATCHDOG.WatchdogConfig(startup_grace_sec=0.0), 1.0
+            )
+            watchdog.restart_requested = threading.Event()
+            decision = watchdog.policy.process_fault(
+                10.0, "localization_health_stream_stale"
+            )
+            status = WATCHDOG.RecoveryStatus(
+                "UNKNOWN", 0, "state=UNKNOWN bad_frames=0"
+            )
+            watchdog._request_hard_restart(decision, status, 10.0)
+            request = json.loads(
+                watchdog.restart_request_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                request["supervisor_run_id"], "run-generation-7"
+            )
+            self.assertEqual(request["action"], "hard_restart")
+            self.assertTrue(watchdog.restart_requested.is_set())
+            self.assertFalse(
+                watchdog.restart_request_path.with_suffix(
+                    ".json.tmp"
+                ).exists()
             )
 
     def test_HardRestartReturns75FromMainThreadAfterCleanup(self):

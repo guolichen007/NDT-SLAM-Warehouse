@@ -2,20 +2,19 @@
 
 ## 运行入口
 
-手动调试/验收：
+真实传感器标准入口：
 
 ```bash
-cd ~/NDT-slam-ws
-source devel/setup.bash
-export NDT_SLAM_DATA_ROOT="$PWD/maps/live/current"
-roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
-  use_sim_time:=false use_rviz:=true persistent_map:=true \
-  use_ndt_recovery_watchdog:=true
+cd /home/ydkj/NDT-slam-ws
+./src/ndt_slam/scripts/ops/run_ndt_slam_supervised.sh \
+  --workspace /home/ydkj/NDT-slam-ws \
+  --use-rviz true
 ```
 
-现阶段暂不启用 systemd。服务器运行使用手动 `roslaunch`；unit 与安装器只保留为
-未来部署模板，不要在当前服务器执行 `install_server_services.sh`、`systemctl enable`
-或 `systemctl start ndt-slam*`。
+supervisor 使用 `flock` 防止重复启动，直接保留 roslaunch 输出；只响应当前运行代次
+的原子重启请求。Ctrl-C、正常退出和旧代次请求均不会重启。现阶段暂不启用 systemd；
+unit 与安装器只保留为未来模板，不要执行 `install_server_services.sh`、
+`systemctl enable` 或 `systemctl start ndt-slam*`。
 
 ## 启动后检查
 
@@ -42,6 +41,7 @@ rosrun ndt_slam server_monitorctl.sh snapshot
 
 ```bash
 rostopic echo /ndt_slam/relocalization_status
+rostopic echo /ndt_slam/localization_health
 rosservice call /ndt_slam/relocalize
 tail -f "$NDT_SLAM_DATA_ROOT/recovery_watchdog/events.jsonl"
 ```
@@ -52,20 +52,20 @@ tail -f "$NDT_SLAM_DATA_ROOT/recovery_watchdog/events.jsonl"
 
 ## NDT 恢复看门狗
 
-生产 launch 默认启动 `ndt_recovery_watchdog.py`，订阅
-`/ndt_slam/relocalization_status`。它只在连续退化状态上采取动作：
+生产 launch 默认启动 `ndt_recovery_watchdog.py`，同时订阅兼容状态和
+`/ndt_slam/localization_health`：
 
 - 启动后 30 秒为宽限期；
 - 连续退化 8 秒时调用 `/ndt_slam/relocalize`，优先使用进程内静态地图恢复；
-- 连续退化 45 秒，或退化至少 15 秒且 `bad_frames >= 300` 时，先落盘证据，再以
-  75 退出；
+- 定位进程仍响应时，即使长时间 Code 31 也不盲目硬重启；60 秒未验证会进入
+  `WAITING_STATIONARY`，每个新静止周期只搜索一次，运动状态未知时每 30 秒低频搜索；
+- 只有健康消息超过 3 秒中断或重定位服务无响应，才写入当前 supervisor 代次的
+  原子请求并以 75 退出；
 - 15 分钟最多允许 3 次完整重启，达到预算后保持运行并记录
   `restart_suppressed`，防止传感器或地图故障引起重启风暴。
 
-看门狗是 `required` roslaunch 节点。required 会终止当前 launch，但 ROS Noetic 的
-roslaunch 可能在完成清理后返回 0；生产 `ndt-slam.service` 因此使用
-`Restart=always`，并在 5 秒后重启整套建图定位链。
-直接手工执行 `roslaunch` 时没有外部 supervisor，只会安全退出，不会自行拉起。
+看门狗是 `required` roslaunch 节点。required 会终止当前 launch；前台 supervisor
+以原子请求中的运行代次为准，在 5 秒后重启整套建图定位链。
 硬恢复不再从 ROS 定时器线程调用 `os._exit`：定时器只设置重启事件，主线程关闭
 timer、调用 ROS shutdown，再返回 75。这样看门狗自身完成正常清理，roslaunch 仍能
 识别非零退出并按 required 语义优雅停止其余节点。
@@ -79,9 +79,11 @@ timer、调用 ROS shutdown，再返回 75。这样看门狗自身完成正常�
 ```text
 $NDT_SLAM_DATA_ROOT/recovery_watchdog/events.jsonl
 $NDT_SLAM_DATA_ROOT/recovery_watchdog/state.json
+$NDT_SLAM_DATA_ROOT/recovery_watchdog/restart_request.json
 ```
 
-`events.jsonl` 记录软恢复、硬重启和重启抑制；`state.json` 原子保存重启窗口历史。
+`events.jsonl` 记录软恢复、硬重启和重启抑制，达到 5 MiB 后保留 5 份轮转；
+`state.json` 原子保存重启窗口历史，`restart_request.json` 绑定当前运行代次。
 当前手动运行模式的现场验收应同时保留 roslaunch 终端日志、上述两份证据、监控运行
 目录和对应提交 SHA。
 外部告警必须解析 `events.jsonl` 的稳定 JSON `action` 字段，并关注

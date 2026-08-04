@@ -20,6 +20,8 @@
 | `/odom` | `nav_msgs/Odometry` | 运行位姿 |
 | `/ndt_slam/runtime_path` | `nav_msgs/Path` | 实时轨迹 |
 | `/current_pose` | `geometry_msgs/PoseStamped` | 当前位姿 |
+| `/ndt_slam/relocalization_status` | `std_msgs/String` | 兼容的重定位状态文本 |
+| `/ndt_slam/localization_health` | `std_msgs/String` | schema v1 JSON；约 5Hz 发布严格验收、NDT/EKF、运动状态和地图身份 |
 | `/map` | `sensor_msgs/PointCloud2` | registration 层 |
 | `/display_map` | `sensor_msgs/PointCloud2` | 全量显示层 |
 | `/display_map_ground` | `sensor_msgs/PointCloud2` | 地面层 |

@@ -28,9 +28,14 @@
 表示 15 分钟重启预算已耗尽，此时应检查雷达输入、静态地图和磁盘证据，不要继续
 手工循环重启。
 
-若日志记录了 `hard_restart` 但进程没有重新拉起，先确认当前入口：手动
-`roslaunch` 没有外部 supervisor，只会安全退出。当前 systemd 模式停用，因此这是
-预期行为；保留终端日志和 watchdog 证据，排除输入或地图问题后再人工重新启动。
+若日志记录了 `hard_restart` 但进程没有重新拉起，确认是否使用
+`run_ndt_slam_supervised.sh`，并核对 `restart_request.json` 的
+`supervisor_run_id`。旧代次请求会被明确忽略；systemd 当前停用。
+
+若持续 Code 31，查看 `/ndt_slam/localization_health`：`MAP_INVALID` 表示 manifest、
+地图 UUID、瓦片大小或 SHA-256 校验失败；`VERIFYING` 必须连续 20 帧满足严格
+fitness/EKF/可观测性门限；`WAITING_STATIONARY` 表示节点和健康流仍正常，系统在等待
+下一次运动到静止周期，不应人工循环重启。
 
 ## 静止时错误移动或地图增长
 

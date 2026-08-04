@@ -37,7 +37,25 @@ CATCH_UP 每帧按上限追赶可靠结果。直到残差连续收敛，`allow_l
 
 ## Bootstrap 与重定位
 
-Bootstrap 是一次性生命周期。完成后地图暂时缩小不会重新进入启动旁路。加载已有地图直接标记 Bootstrap 完成。
+Bootstrap 是一次性生命周期。完成后地图暂时缩小不会重新进入启动旁路。没有旧瓦片
+时才允许从当前坐标系 bootstrap；检测到持久 registration 瓦片后，启动必须先校验
+manifest、地图 UUID、瓦片大小、字节数和 SHA-256，再恢复 registration 与
+`objects_clean` 定位目标。校验失败保持 `MAP_INVALID` 与 Code 31，禁止在旧目录中
+静默建立原点坐标的新地图。
+
+已有地图启动状态为：
+
+```text
+STARTUP_QUARANTINE -> GLOBAL_SEARCH -> VERIFYING -> HEALTHY
+                                         |
+                                         +-> WAITING_STATIONARY
+```
+
+全局候选只修改搜索 seed，不能直接解除隔离。必须连续 20 帧满足 NDT converged/accepted、
+fitness ≤0.35、非 prediction-only、有效可观测性、有限位姿和增量、无步长限制或 EKF
+协方差恢复，才进入 `HEALTHY/IDLE`。检查点绑定地图 UUID，只提升 seed 优先级。
+隔离期间持续 Code 31，清理旧 Marker，并禁止避障、货物删除、静态证据更新和地图提交。
+60 秒未通过但健康流仍正常时等待新的静止周期；运动中仍可搜索和验收，不提前开放避障。
 
 异步重定位结果不能单次直接写入运行位姿。确认策略依次检查：
 

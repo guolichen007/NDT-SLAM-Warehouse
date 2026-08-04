@@ -121,6 +121,12 @@ relocalization:
   global_min_similarity: 0.55
   confirm_translation_m: 0.35
   confirm_yaw_deg: 5.0
+  # A global candidate is only a seed. Existing-map startup and every
+  # recovery remain quarantined until this independent strict gate passes.
+  health_required_frames: 20
+  health_max_fitness: 0.35
+  health_max_innovation_m: 0.75
+  health_max_frame_gap_sec: 0.50
   min_source_points: 800
   min_target_points: 1200
   # Worker hard cap; each job applies the smaller local/global budget above.
