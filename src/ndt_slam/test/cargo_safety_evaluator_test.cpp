@@ -118,7 +118,8 @@ TEST(CargoSafetyDecision, EndToEndStatusCodePriorityAndFaultMask) {
     for (std::uint16_t warning : {
              static_cast<std::uint16_t>(CargoSafetyProtocol::kClear),
              static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel1Warning),
-             static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel2Warning)}) {
+             static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel2Warning),
+             static_cast<std::uint16_t>(CargoSafetyProtocol::kAnomalyReview)}) {
         const CargoSafetyDecision result =
             composeCargoSafetyDecision(formalDecision(warning));
         EXPECT_TRUE(result.valid);

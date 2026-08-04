@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover - platform dependent
 
 CLEAR_CODE = 14
 HAZARD_CODES = {17, 18}
+REVIEW_CODES = {29}
 FAULT_CODES = set(range(30, 36))
 DEFAULT_WINDOWS = (60.0, 600.0)
 RUNTIME_SAMPLE_FIELDS = (
@@ -398,10 +399,17 @@ class SafetyAggregator:
         elif previous.code != current.code:
             if previous.code in HAZARD_CODES and current.code == CLEAR_CODE:
                 kind = "SAFETY_CLEAR"
-            elif previous.code in FAULT_CODES and current.code not in FAULT_CODES:
-                kind = "SAFETY_FAULT_CLEAR"
             elif current.code in FAULT_CODES:
                 kind = "SAFETY_FAULT_ENTER"
+            elif (previous.code in REVIEW_CODES and
+                  current.code in HAZARD_CODES):
+                kind = "SAFETY_WARNING_ENTER"
+            elif previous.code in REVIEW_CODES and current.code != 29:
+                kind = "SAFETY_REVIEW_CLEAR"
+            elif current.code in REVIEW_CODES:
+                kind = "SAFETY_REVIEW_ENTER"
+            elif previous.code in FAULT_CODES and current.code not in FAULT_CODES:
+                kind = "SAFETY_FAULT_CLEAR"
             elif current.code in HAZARD_CODES:
                 kind = "SAFETY_WARNING_ENTER"
             else:
@@ -468,7 +476,9 @@ class SafetyAggregator:
             durations[record.code] += end - start
             counts[record.code] += 1
             reasons[record.reason] += 1
-            if record.obstacle_track_id > 0 or record.code in HAZARD_CODES or record.code == 34:
+            if (record.obstacle_track_id > 0 or
+                    record.code in HAZARD_CODES.union(REVIEW_CODES) or
+                    record.code == 34):
                 evidence_samples += 1
                 authorized += int(record.static_authorized)
                 source_unvalidated += int(not record.source_validated)
@@ -497,6 +507,9 @@ class SafetyAggregator:
         warning_events = sum(1 for event in self.events
                              if event.get("event") == "SAFETY_WARNING_ENTER" and
                              event.get("wall_time", 0.0) >= cutoff)
+        review_events = sum(1 for event in self.events
+                            if event.get("event") == "SAFETY_REVIEW_ENTER" and
+                            event.get("wall_time", 0.0) >= cutoff)
         result = {
             "window_sec": window,
             "samples": len(records),
@@ -511,6 +524,7 @@ class SafetyAggregator:
             "current_33_sec": current_streak[33],
             "current_34_sec": current_streak[34],
             "warning_events": warning_events,
+            "review_events": review_events,
             "completed_warning_durations": list(self.hazard_event_durations),
             "unique_obstacle_tracks": len({r.obstacle_track_id for r in records if r.obstacle_track_id > 0}),
             "track_created": local_track_created,
@@ -3098,7 +3112,8 @@ class RosRuntimeMonitor:
         self.writer.submit("atomic_json", ("reports/live_summary.json", summary))
         current = summary.get("current") or {}
         repeat_period = float(self.config.get("repeat_period_sec", 30.0))
-        if (int(current.get("code", 0)) in HAZARD_CODES.union(FAULT_CODES) and
+        if (int(current.get("code", 0)) in
+                HAZARD_CODES.union(REVIEW_CODES).union(FAULT_CODES) and
                 wall - self.last_safety_repeat_wall >= repeat_period):
             self._emit_event({"event": "SAFETY_REPEAT", "wall_time": wall,
                               "code": current.get("code"),

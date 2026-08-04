@@ -140,10 +140,12 @@ CargoSafetyPhaseSelection deriveCargoSafetyDecisionPhase(
         input.warning_code == 0U ||
         input.warning_code == CargoSafetyProtocol::kClear ||
         input.warning_code == CargoSafetyProtocol::kLevel1Warning ||
-        input.warning_code == CargoSafetyProtocol::kLevel2Warning;
+        input.warning_code == CargoSafetyProtocol::kLevel2Warning ||
+        input.warning_code == CargoSafetyProtocol::kAnomalyReview;
     const bool positive_warning = input.warning_valid &&
         (input.warning_code == CargoSafetyProtocol::kLevel1Warning ||
-         input.warning_code == CargoSafetyProtocol::kLevel2Warning) &&
+         input.warning_code == CargoSafetyProtocol::kLevel2Warning ||
+         input.warning_code == CargoSafetyProtocol::kAnomalyReview) &&
         input.obstacle_evidence_ready &&
         (input.pending_positive_warning || input.formal_cargo_valid) &&
         !input.cargo_fault && !input.obstacle_fault;
@@ -241,7 +243,8 @@ bool cargoSafetyDecisionSelfConsistent(
     const bool warning =
         decision.requested_code == CargoSafetyProtocol::kClear ||
         decision.requested_code == CargoSafetyProtocol::kLevel1Warning ||
-        decision.requested_code == CargoSafetyProtocol::kLevel2Warning;
+        decision.requested_code == CargoSafetyProtocol::kLevel2Warning ||
+        decision.requested_code == CargoSafetyProtocol::kAnomalyReview;
     if (warning) {
         return decision.valid && decision.warning_valid &&
             decision.warning_code == decision.requested_code &&

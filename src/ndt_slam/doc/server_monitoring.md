@@ -1,8 +1,8 @@
 # 服务器监控体系
 
 `server_runtime_monitor.py` 是正式的只读监控入口。它不创建 Publisher、
-不修改 ROS 参数、不写地图与 Manifest，也不参与 14/17/18/30–35 的判定。
-监控故障不会改变主系统输出；`CargoSafetyStatus schema v6` 始终是安全权威源。
+不修改 ROS 参数、不写地图与 Manifest，也不参与 14/17/18/29/30–35 的判定。
+监控故障不会改变主系统输出；`CargoSafetyStatus schema v7` 始终是安全权威源。
 
 ## 数据流
 
@@ -22,7 +22,7 @@
 
 ## 事件与窗口
 
-以下变化立即打印并写入 `safety_events.jsonl`：code/reason 变化、17/18
+以下变化立即打印并写入 `safety_events.jsonl`：code/reason 变化、17/18、29 待复核事件
 进入和解除、30–35 进入和解除、Obstacle Track 变化、静态授权变化、源时间
 回退、typed/simple code 不一致、SLAM 进程重启。相同 mismatch 不重复刷屏。
 
@@ -31,7 +31,7 @@
 - 各安全码样本、时间占比和 reason 分布；
 - 最长/当前连续 33、34；
 - 34→14 恢复和 34→17/18 确认时间；
-- 17/18 事件、unique track、track churn/min；
+- 17/18 正式告警事件、29 待复核事件、unique track、track churn/min；
 - 静态授权、source-unvalidated、geometry-rejected 比率；
 - odom Hz/age、位姿步长 P50/P95/max；
 - RSS、线程、FD、磁盘、runtime status 新鲜度与重启次数；

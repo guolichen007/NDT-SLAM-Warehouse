@@ -221,7 +221,7 @@ target_link_libraries(cargo_forbidden_zone_node
 )
 
 # Independent wall-clock status heartbeat. This is the sole publisher of the
-# simple 14/17/18/30-35 status-code interface.
+# simple 14/17/18/29/30-35 status-code interface.
 add_executable(cargo_alarm_heartbeat_node src/cargo_alarm_heartbeat_node.cpp)
 add_dependencies(cargo_alarm_heartbeat_node ${catkin_EXPORTED_TARGETS})
 target_link_libraries(cargo_alarm_heartbeat_node ${catkin_LIBRARIES})

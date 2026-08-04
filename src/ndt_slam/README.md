@@ -23,7 +23,7 @@ roslaunch ndt_slam mapping.launch
 - 静止、移动确认和 CATCH_UP 分别控制运行位姿、local map 和持久 MapCommit。
 - 吊物确认后冻结 OBB 长宽高与轴向 yaw，只更新实时中心。
 - LOST_HOLD 的 marker 显示和正式安全证据使用不同时间窗；证据过期输出 33并停止正式剔除。
-- 14/17/18 只表示空间碰撞关系，30-35 表示系统或证据故障。
+- 14/17/18 表示已确认的空间碰撞关系，29 表示接触级或突发近场异常待人工复核，30-35 表示系统或证据故障。
 - 五层正式地图只从同一不可变 `MapLayerBundle` 发布和保存。
 
 ## 关键 Topic
@@ -37,7 +37,7 @@ roslaunch ndt_slam mapping.launch
 | `/cargo_core_bbox_marker` | 冻结形状、实时中心的正式吊物框 |
 | `/cargo_avoidance/bottom_estimate` | 正式底部高度与 OBB 几何 |
 | `/cargo_avoidance/safety_status` | 正式安全证据 |
-| `/cargo_avoidance/status_code` | 14/17/18/30-35 输出 |
+| `/cargo_avoidance/status_code` | 14/17/18/29/30-35 输出 |
 
 ## 配置
 

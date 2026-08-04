@@ -38,7 +38,8 @@
 
 ## 安全码不符合预期
 
-- 17/18：核对旋转 OBB 距离、保守垂直净空和运行方向夹角；夹角绝对值超过 45° 时，除 0.30m 接触保护外不应告警；
+- 17/18：核对旋转 OBB 距离、保守垂直净空和运行方向夹角；夹角绝对值超过 45° 时不应输出正式告警；
+- 29：检查 `reason`。`review_immediate_contact_guard` 表示 0.30m 全方向接触候选，`review_level1_without_approach_history` 表示未经历 18 就突然进入 3m；保存现场图片并核对是否为货物自身点云或 Track 错乱；
 - 33：核对 pose/height evidence age 与 `geometry_authorization`；
 - 34：检查障碍 ROI 覆盖、有限点和聚类；
 - 30：检查超时或时间回退；下一条新 epoch 前进时间戳应恢复。

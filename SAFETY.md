@@ -9,6 +9,7 @@
 | 14 | CLEAR — 无碰撞风险 | 必须 Formal Geometry + 全部合同满足 |
 | 17 | NEAR_3M — ≤3m，净空<0.8m | Formal 或 Degraded Geometry |
 | 18 | NEAR_5M — 3-5m，净空<0.8m | Formal 或 Degraded Geometry |
+| 29 | ANOMALY_REVIEW — 接触级或突发近场异常 | 人工复核，不授权正式避障动作 |
 | 30 | 系统未就绪 / 时间轴回退 | 故障 |
 | 31 | 定位无效 | 故障 |
 | 32 | Gravity / 称重无效 | 故障 |
@@ -33,6 +34,11 @@ Code 17 和 18 表示已检测到真实空间碰撞风险。要求：
 - 有效障碍追踪，位于报告距离
 - 垂直净空低于 0.8m
 - 连续验证观测
+- 正常接近链必须先建立 3-5m 的 Code 18 远场历史，随后才可输出 Code 17
+
+### 29 是异常待人工复核
+
+Code 29 保留异常现场，但不等价于 Code 17/18，也不授权下游执行正式避障动作。距离货物不超过 0.30m 的全方向接触候选，以及没有 Code 18 接近历史而突然出现在 3m 内的候选，统一输出 29。类型化消息同时携带距离、保守净空、货物/障碍 Track、来源、连续帧数和 `reason`，监控以 `SAFETY_REVIEW` 独立记录，供人工保存图片和判断是否为货物自身识别错乱。
 
 ### 30-35 不是 CLEAR
 
@@ -63,8 +69,9 @@ RViz marker（cargo_core_bbox_marker、cargo_tight_box_marker、cargo_warning_zo
 - 现场安全策略和流程
 - 独立运行监督
 
-类型化安全合同（CargoSafetyStatus schema v6）是正式安全输出。下游控制器必须：
+类型化安全合同（CargoSafetyStatus schema v7）是正式安全输出。下游控制器必须：
 - 将 Code 30-35 视为非 CLEAR
+- 将 Code 29 视为待人工复核状态，不映射为 Code 17/18 或 CLEAR
 - 不能因缺少 17/18 推断为 CLEAR
 - 对安全状态流实现独立超时/Watchdog
 - 保持独立安全逻辑

@@ -106,7 +106,7 @@ LOCKED 后关注冻结尺寸/yaw、实时中心、中心 residual、position sou
 运行时同时核对 `motion_corridor_forward_half_angle_deg=45`、
 `motion_corridor_angle_rejected_clusters` 和 Pending JSON 中的
 `pending_angle_rejected_clusters`。实时点簇与静态高度查询必须使用同一个前方 ±45° 门禁；
-侧方计数增长但 17/18 不增长是预期行为。0.30m 内的接触保护不受方向门禁限制。
+侧方计数增长但 17/18 不增长是预期行为。0.30m 内的接触保护不受方向门禁限制，但只输出 Code 29；没有先出现 18 而突然出现的近场候选也输出 29。看到 29 时应保存 RViz/相机画面，并结合类型化消息中的 `reason`、距离、净空、Track 和来源进行人工复核。
 
 `runtime_status.json` 中的 `average_ndt_time_ms` 应在首次有效配准后变为正数，
 `stationary_frame_count` 应在持续静止时递增。输入点云的非有限点和超出配置 Z 范围的点

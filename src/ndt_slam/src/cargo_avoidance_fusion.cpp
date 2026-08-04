@@ -10,6 +10,7 @@ namespace {
 constexpr std::int32_t kClear = 14;
 constexpr std::int32_t kNear3m = 17;
 constexpr std::int32_t kNear5m = 18;
+constexpr std::int32_t kAnomalyReview = 29;
 constexpr std::int32_t kLocalizationInvalid = 31;
 constexpr std::int32_t kCargoInvalid = 33;
 constexpr std::int32_t kObstacleInvalid = 34;
@@ -243,8 +244,10 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
   result.risk_live = live_reliable && input.live_obstacle_origin_resolved &&
       input.live.hazard &&
       warningCode(input.live.warning_code);
-  result.risk_static = static_reliable && input.static_map.hazard &&
-      warningCode(input.static_map.warning_code);
+  const bool static_hazard_observed = static_reliable &&
+      input.static_map.hazard && warningCode(input.static_map.warning_code);
+  result.risk_static = static_hazard_observed &&
+      input.static_hazard_track_confirmed;
   if (live_reliable && input.live_obstacle_origin_resolved) {
     combineMetric(input.live.distance_m, &result.distance_m);
     combineMetric(input.live.clearance_m, &result.clearance_m);
@@ -264,6 +267,29 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
       result.risk_live || result.risk_static ||
       (input.warning_candidate_present &&
        warningCode(input.warning_candidate_code));
+  if (input.anomaly_review_candidate) {
+    result.official_valid = true;
+    result.official_code = kAnomalyReview;
+    result.anomaly_review = true;
+    result.anomaly_review_live = input.anomaly_review_live;
+    result.anomaly_review_static = input.anomaly_review_static;
+    result.reason = input.anomaly_review_reason.empty()
+        ? "avoidance_anomaly_review_required"
+        : input.anomaly_review_reason;
+    result.provisional_status = "REVIEW_REQUIRED";
+    result.pending_authority_reason = result.reason;
+    result.distance_m = input.anomaly_review_distance_m;
+    result.clearance_m = input.anomaly_review_clearance_m;
+    return result;
+  }
+  if (static_hazard_observed && !input.static_hazard_track_confirmed &&
+      !result.risk_live && !input.warning_candidate_present) {
+    result.official_code = kObstacleInvalid;
+    result.reason = "static_hazard_track_confirmation_pending";
+    result.provisional_status = "TRACK_CONFIRMATION_PENDING";
+    result.pending_authority_reason = result.reason;
+    return result;
+  }
   if (warning_candidate &&
       !input.warning_motion_authorized) {
     result.official_code = kCargoInvalid;
@@ -274,23 +300,26 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     return result;
   }
 
-  const bool level1_risk =
+  const bool live_level1_risk =
       (result.risk_live && input.live.warning_code == kNear3m) ||
-      (result.risk_static && input.static_map.warning_code == kNear3m) ||
       (input.warning_candidate_present &&
        input.warning_candidate_code == kNear3m);
-  std::string static_level1_authority_reason;
-  const bool static_level1_independently_proven =
-      !formal_cargo && result.risk_static &&
-      authorizePendingStaticWarning(
-          input, config, &static_level1_authority_reason);
-  if (level1_risk && !input.near_field_history_authorized &&
-      !static_level1_independently_proven) {
-    result.official_code = kCargoInvalid;
-    result.reason = "near_field_track_missing_far_history";
-    result.provisional_status = "NEAR_FIELD_HISTORY_PENDING";
+  const bool static_level1_risk =
+      result.risk_static && input.static_map.warning_code == kNear3m;
+  const bool live_level1_without_history = live_level1_risk &&
+      !input.live_near_field_history_authorized;
+  const bool static_level1_without_history = static_level1_risk &&
+      !input.static_near_field_history_authorized;
+  if (live_level1_without_history || static_level1_without_history) {
+    result.official_valid = true;
+    result.official_code = kAnomalyReview;
+    result.anomaly_review = true;
+    result.anomaly_review_live = live_level1_without_history;
+    result.anomaly_review_static = static_level1_without_history;
+    result.reason = "review_level1_without_approach_history";
+    result.provisional_status = "REVIEW_REQUIRED";
     result.pending_authority_reason =
-        "near_field_track_missing_far_history";
+        "level1_without_approach_history";
     return result;
   }
 

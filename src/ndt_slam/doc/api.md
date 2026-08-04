@@ -41,8 +41,8 @@
 
 | 话题 | 消息类型 | 说明 |
 |---|---|---|
-| `/cargo_avoidance/safety_status` | `lidar_slam2_msgs/CargoSafetyStatus` | 正式安全状态（schema v6），含安全码、距离、净空、几何来源、时间戳 |
-| `/cargo_avoidance/status_code` | `std_msgs/Int32` | Heartbeat 简码输出（14/17/18/30-35） |
+| `/cargo_avoidance/safety_status` | `lidar_slam2_msgs/CargoSafetyStatus` | 正式安全状态（schema v7），含安全码、距离、净空、几何来源、时间戳 |
+| `/cargo_avoidance/status_code` | `std_msgs/Int32` | Heartbeat 简码输出（14/17/18/29/30-35） |
 
 ### 吊物诊断
 
@@ -66,14 +66,14 @@
 
 ## 消息类型
 
-### CargoSafetyStatus（schema v6）
+### CargoSafetyStatus（schema v7）
 
 正式安全输出消息，定义于 `src/lidar_slam2_msgs/msg/CargoSafetyStatus.msg`。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `header` | `std_msgs/Header` | 时间戳为证据评估时间 |
-| `status_code` | `int32` | 14/17/18/30-35 |
+| `status_code` | `int32` | 14/17/18/29/30-35 |
 | `min_distance_m` | `float64` | 最近障碍距离 |
 | `vertical_clearance_m` | `float64` | 垂直净空 |
 | `geometry_source` | `int32` | 几何来源（Formal/Degraded） |
@@ -95,7 +95,7 @@
 
 ### 安全输出
 
-类型化输出 `/cargo_avoidance/safety_status`（`CargoSafetyStatus` schema v6）是主控程序的安全权威输入。
+类型化输出 `/cargo_avoidance/safety_status`（`CargoSafetyStatus` schema v7）是主控程序的安全权威输入。Code 29 是异常证据复核状态：下游应保存现场信息，但不得把它映射为 17/18 或 CLEAR。
 
 Heartbeat 简码 `/cargo_avoidance/status_code`（`std_msgs/Int32`）供兼容显示和冗余心跳。
 

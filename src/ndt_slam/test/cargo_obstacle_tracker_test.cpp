@@ -161,6 +161,7 @@ TEST(CargoObstacleTracker,
   EXPECT_FALSE(suppressed.confirmed_hazard);
   EXPECT_TRUE(suppressed.selected_near_field);
   EXPECT_FALSE(suppressed.selected_near_field_authorized);
+  EXPECT_FALSE(suppressed.selected_far_field_history_valid);
   EXPECT_EQ(suppressed.reason, "near_field_track_missing_far_history");
 
   CargoObstacleObservation far = near;
@@ -173,6 +174,7 @@ TEST(CargoObstacleTracker,
       tracker.update(2.2, {near});
   EXPECT_TRUE(authorized.confirmed_hazard) << authorized.reason;
   EXPECT_TRUE(authorized.selected_near_field_authorized);
+  EXPECT_TRUE(authorized.selected_far_field_history_valid);
   EXPECT_EQ(authorized.warning_code, 17U);
 }
 
@@ -366,7 +368,7 @@ TEST(CargoObstacleTracker, KnownStaticNeedsOnlyThreeFreshConfirmations) {
 }
 
 TEST(CargoObstacleTracker,
-     KnownStaticLevel1DoesNotRequireFarFieldHistory) {
+     KnownStaticLevel1ConfirmsTrackButReportsMissingFarFieldHistory) {
   CargoObstacleTracker tracker;
   CargoObstacleObservation observation =
       staticCargo(0U, 0.0F, 0.0F, 17U);
@@ -378,6 +380,7 @@ TEST(CargoObstacleTracker,
   EXPECT_TRUE(decision.confirmed_hazard) << decision.reason;
   EXPECT_EQ(decision.warning_code, 17U);
   EXPECT_TRUE(decision.selected_near_field_authorized);
+  EXPECT_FALSE(decision.selected_far_field_history_valid);
 }
 
 TEST(CargoObstacleTracker, OutsideCargoShellAloneIsNotIndependentProvenance) {

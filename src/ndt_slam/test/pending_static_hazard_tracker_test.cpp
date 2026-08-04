@@ -90,5 +90,33 @@ TEST(PendingStaticHazardTracker, ClearObservationDropsAuthority) {
   EXPECT_EQ(tracker.update(hazard(1.4)).confirmations, 1);
 }
 
+TEST(PendingStaticHazardTracker,
+     Level1RequiresPriorConfirmedLevel2ApproachHistory) {
+  PendingStaticHazardTracker tracker;
+  auto near = hazard(1.0);
+  near.warning_code = 17;
+  tracker.update(near);
+  near.stamp_sec = 1.1;
+  tracker.update(near);
+  near.stamp_sec = 1.2;
+  const auto sudden = tracker.update(near);
+  ASSERT_TRUE(sudden.authorized);
+  EXPECT_FALSE(sudden.far_field_history_valid);
+
+  auto far = near;
+  far.warning_code = 18;
+  far.stamp_sec = 1.3;
+  tracker.update(far);
+  far.stamp_sec = 1.4;
+  tracker.update(far);
+  far.stamp_sec = 1.5;
+  const auto approached = tracker.update(far);
+  ASSERT_TRUE(approached.far_field_history_valid);
+  EXPECT_GE(approached.far_field_confirmations, 3);
+
+  near.stamp_sec = 1.6;
+  EXPECT_TRUE(tracker.update(near).far_field_history_valid);
+}
+
 }  // namespace
 }  // namespace ndt_slam

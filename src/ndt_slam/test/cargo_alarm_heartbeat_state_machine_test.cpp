@@ -22,15 +22,27 @@ StatusContractInput loadedWarning(int code) {
     input.cargo_valid = true;
     input.obstacle_valid = true;
     if (code == AlarmStateMachine::kLevel1Warning ||
-        code == AlarmStateMachine::kLevel2Warning) {
+        code == AlarmStateMachine::kLevel2Warning ||
+        code == AlarmStateMachine::kAnomalyReview) {
         input.obstacle_count = 1U;
         input.nearest_obstacle_distance_m =
-            code == AlarmStateMachine::kLevel1Warning ? 2.0 : 4.0;
+            code == AlarmStateMachine::kAnomalyReview
+                ? 0.20
+                : (code == AlarmStateMachine::kLevel1Warning ? 2.0 : 4.0);
         input.obstacle_top_z_map = 1.0;
         input.obstacle_uncertainty_m = 0.05;
         input.conservative_vertical_clearance_m = 0.70;
     }
     return input;
+}
+
+TEST(CargoAlarmHeartbeat, AnomalyReviewIsAFirstClassNonHazardCode) {
+    const auto result = validateStatusContract(
+        loadedWarning(AlarmStateMachine::kAnomalyReview));
+    EXPECT_TRUE(result.valid);
+    EXPECT_EQ(result.code, AlarmStateMachine::kAnomalyReview);
+    EXPECT_STREQ(result.reason, "anomaly_review_status");
+    EXPECT_TRUE(AlarmStateMachine::isAllowedCode(29));
 }
 
 StatusContractInput loadedClusterClear(double distance, double clearance) {

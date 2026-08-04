@@ -164,6 +164,7 @@ struct CargoObstacleTrackerDecision {
   int selected_separated_observations = 0;
   bool selected_near_field = false;
   bool selected_near_field_authorized = false;
+  bool selected_far_field_history_valid = false;
   int selected_far_field_observations = 0;
   int selected_static_provenance_streak = 0;
   double selected_static_age_sec = 0.0;

@@ -43,8 +43,22 @@ struct CargoAvoidanceFusionInput {
   // Warning authority is withheld while cargo motion/direction is not
   // authoritative. Tracking continues outside this fusion contract.
   bool warning_motion_authorized = true;
-  // A code-17 source must belong to a track confirmed outside the 3 m shell.
-  bool near_field_history_authorized = true;
+  // Each code-17 source must belong to a track confirmed outside the 3 m
+  // shell. Keeping these independent prevents one source from authorizing a
+  // sudden near-field observation reported by the other source.
+  bool live_near_field_history_authorized = true;
+  bool static_near_field_history_authorized = true;
+  bool static_hazard_track_confirmed = true;
+  // Confirmed abnormal geometry is preserved for operator review without
+  // promoting it to the normal 17/18 hazard protocol.
+  bool anomaly_review_candidate = false;
+  bool anomaly_review_live = false;
+  bool anomaly_review_static = false;
+  std::string anomaly_review_reason;
+  float anomaly_review_distance_m =
+      std::numeric_limits<float>::infinity();
+  float anomaly_review_clearance_m =
+      std::numeric_limits<float>::quiet_NaN();
   // Raw evaluator candidate used only by the two authorization gates above.
   // It cannot directly become an official warning.
   bool warning_candidate_present = false;
@@ -100,6 +114,9 @@ struct CargoAvoidanceFusionResult {
   bool risk_live = false;
   bool risk_static = false;
   bool map_live_conflict = false;
+  bool anomaly_review = false;
+  bool anomaly_review_live = false;
+  bool anomaly_review_static = false;
   bool pending_warning_authorized = false;
   bool pending_live_warning_authorized = false;
   bool pending_static_warning_authorized = false;

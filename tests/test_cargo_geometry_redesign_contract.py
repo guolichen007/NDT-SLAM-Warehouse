@@ -20,6 +20,9 @@ PRELOAD_SOURCE = (
 SAFETY_SOURCE = (
     PACKAGE / "src/cargo_safety_evaluator.cpp"
 ).read_text(encoding="utf-8")
+SAFETY_HEADER = (
+    PACKAGE / "include/ndt_slam/cargo_safety_evaluator.hpp"
+).read_text(encoding="utf-8")
 TRACKER_SOURCE = (
     PACKAGE / "src/cargo_obstacle_tracker.cpp"
 ).read_text(encoding="utf-8")
@@ -128,11 +131,16 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         self.assertIn("!evidence.entirely_above_cargo", SAFETY_SOURCE)
         self.assertIn("!observation.entirely_above_cargo", TRACKER_SOURCE)
 
-    def test_known_static_obstacles_do_not_require_far_history(self):
+    def test_known_static_obstacles_track_fast_but_do_not_bypass_17_history(self):
         self.assertIn("known_static_confirm_frames: 3", CONFIG)
         self.assertIn("static_cargo_confirm_frames: 5", CONFIG)
         self.assertIn("static_cargo_confirm_sec: 0.8", CONFIG)
         self.assertIn("track.far_field_history_valid || track.provenance_valid", TRACKER_SOURCE)
+        self.assertIn("selected_far_field_history_valid", NODE)
+        self.assertIn("pending_static_decision.far_field_history_valid", NODE)
+        self.assertNotIn("static_level1_independently_proven", (
+            PACKAGE / "src/cargo_avoidance_fusion.cpp"
+        ).read_text(encoding="utf-8"))
 
     def test_envelope_source_changes_do_not_reset_obstacle_identity(self):
         start = NODE.index("const bool pending_obstacle_context_changed =")
@@ -198,6 +206,17 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         self.assertIn(
             "cargo_static_directional_rejected_cells_", formal
         )
+
+    def test_code29_owns_immediate_and_sudden_level1_review(self):
+        self.assertIn("CODE_ANOMALY_REVIEW=29", (
+            ROOT / "src/lidar_slam2_msgs/msg/CargoSafetyStatus.msg"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("kAnomalyReview = 29", SAFETY_HEADER)
+        self.assertIn("review_immediate_contact_guard", NODE)
+        self.assertIn("review_level1_without_approach_history", NODE)
+        self.assertIn("selected_far_field_history_valid", NODE)
+        self.assertIn("pending_static_far_field_history_valid", NODE)
+        self.assertIn("CargoSafetyEvaluator::kReviewCode", NODE)
 
     def test_marker_deletes_on_localization_loss(self):
         self.assertIn('"localization_invalid_delete"', MARKER_SOURCE)

@@ -822,6 +822,7 @@ status_codes:
   clear: 14
   level1: 17
   level2: 18
+  anomaly_review: 29
   system_not_ready: 30
   localization_invalid: 31
   gravity_invalid: 32

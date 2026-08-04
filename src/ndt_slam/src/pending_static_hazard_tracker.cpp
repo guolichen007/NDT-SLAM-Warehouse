@@ -101,6 +101,8 @@ void PendingStaticHazardTracker::reset() {
   map_generation_ = 0U;
   obstacle_id_ = 0U;
   confirmations_ = 0;
+  far_field_confirmations_ = 0;
+  far_field_history_valid_ = false;
   matched_cell_keys_.clear();
 }
 
@@ -157,6 +159,8 @@ PendingStaticHazardDecision PendingStaticHazardTracker::update(
     decision.warning_code = observation.warning_code;
     decision.obstacle_id = obstacle_id_;
     decision.confirmations = confirmations_;
+    decision.far_field_confirmations = far_field_confirmations_;
+    decision.far_field_history_valid = far_field_history_valid_;
     decision.authorized =
         confirmations_ >= config_.minimum_confirmations;
     decision.reason = decision.authorized
@@ -172,8 +176,17 @@ PendingStaticHazardDecision PendingStaticHazardTracker::update(
     obstacle_id_ = makeStaticObstacleId(
         observation.map_generation, observation.matched_cell_keys);
     confirmations_ = 1;
+    far_field_confirmations_ =
+        observation.warning_code == kNear5m ? 1 : 0;
+    far_field_history_valid_ = false;
   } else {
     ++confirmations_;
+    if (observation.warning_code == kNear5m) {
+      ++far_field_confirmations_;
+    }
+  }
+  if (far_field_confirmations_ >= config_.minimum_confirmations) {
+    far_field_history_valid_ = true;
   }
   last_stamp_sec_ = observation.stamp_sec;
   matched_cell_keys_ = std::move(observation.matched_cell_keys);
@@ -181,6 +194,8 @@ PendingStaticHazardDecision PendingStaticHazardTracker::update(
   decision.warning_code = observation.warning_code;
   decision.obstacle_id = obstacle_id_;
   decision.confirmations = confirmations_;
+  decision.far_field_confirmations = far_field_confirmations_;
+  decision.far_field_history_valid = far_field_history_valid_;
   decision.authorized =
       confirmations_ >= config_.minimum_confirmations;
   decision.reason = decision.authorized

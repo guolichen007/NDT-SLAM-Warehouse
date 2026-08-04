@@ -49,6 +49,7 @@ CargoAvoidanceFusionInput pendingStaticHazardInput() {
   input.static_map.hazard = true;
   input.static_map.warning_code = 17;
   input.static_map.distance_m = 2.0F;
+  input.static_near_field_history_authorized = true;
   return input;
 }
 
@@ -285,7 +286,7 @@ TEST(CargoAvoidanceFusion, PendingUnverifiedStaticRemainsAdvisoryOnly) {
 }
 
 TEST(CargoAvoidanceFusion,
-     ConfirmedAuthoritativeStaticPendingHazardCanWarnWithoutLiveCloud) {
+     ConfirmedAuthoritativeStaticPendingHazardWithApproachHistoryCanWarn) {
   const auto result =
       fuseCargoAvoidanceRisk(
           pendingStaticHazardInput(), pendingPromotionConfig());
@@ -296,6 +297,31 @@ TEST(CargoAvoidanceFusion,
   EXPECT_TRUE(result.pending_static_warning_authorized);
   EXPECT_EQ(
       result.reason, "pending_static_warning_authorized");
+}
+
+TEST(CargoAvoidanceFusion,
+     ConfirmedStaticPendingLevel1WithoutApproachHistoryIsReview) {
+  auto input = pendingStaticHazardInput();
+  input.static_near_field_history_authorized = false;
+  const auto result =
+      fuseCargoAvoidanceRisk(input, pendingPromotionConfig());
+  ASSERT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 29);
+  EXPECT_TRUE(result.anomaly_review_static);
+  EXPECT_FALSE(result.pending_static_warning_authorized);
+}
+
+TEST(CargoAvoidanceFusion,
+     UnconfirmedStaticNearFieldCannotEmitReviewOrLevel1) {
+  auto input = pendingStaticHazardInput();
+  input.static_hazard_track_confirmed = false;
+  input.static_near_field_history_authorized = false;
+  const auto result =
+      fuseCargoAvoidanceRisk(input, pendingPromotionConfig());
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 34);
+  EXPECT_FALSE(result.anomaly_review);
+  EXPECT_EQ(result.reason, "static_hazard_track_confirmation_pending");
 }
 
 TEST(CargoAvoidanceFusion,
@@ -372,15 +398,49 @@ TEST(CargoAvoidanceFusion,
 TEST(CargoAvoidanceFusion,
      Level1NeedsConfirmedHistoryOutsideThreeMeters) {
   CargoAvoidanceFusionInput input = validInput();
-  input.near_field_history_authorized = false;
+  input.live_near_field_history_authorized = false;
   input.live.available = false;
   input.live.reliable = false;
   input.warning_candidate_present = true;
   input.warning_candidate_code = 17;
   const auto result = fuseCargoAvoidanceRisk(input);
-  EXPECT_FALSE(result.official_valid);
-  EXPECT_EQ(result.official_code, 33);
-  EXPECT_EQ(result.reason, "near_field_track_missing_far_history");
+  EXPECT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 29);
+  EXPECT_TRUE(result.anomaly_review);
+  EXPECT_EQ(result.reason, "review_level1_without_approach_history");
+}
+
+TEST(CargoAvoidanceFusion,
+     StaticFarHistoryCannotAuthorizeSuddenLiveLevel1) {
+  CargoAvoidanceFusionInput input = validInput();
+  input.live_near_field_history_authorized = false;
+  input.static_near_field_history_authorized = true;
+  input.live.available = false;
+  input.live.reliable = false;
+  input.warning_candidate_present = true;
+  input.warning_candidate_code = 17;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 29);
+  EXPECT_TRUE(result.anomaly_review_live);
+  EXPECT_FALSE(result.anomaly_review_static);
+}
+
+TEST(CargoAvoidanceFusion, ImmediateContactIsReviewNotLevel1) {
+  CargoAvoidanceFusionInput input = validInput();
+  input.live.hazard = true;
+  input.live.warning_code = 17;
+  input.anomaly_review_candidate = true;
+  input.anomaly_review_live = true;
+  input.anomaly_review_reason = "review_immediate_contact_guard";
+  input.anomaly_review_distance_m = 0.20F;
+  input.anomaly_review_clearance_m = -0.10F;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 29);
+  EXPECT_NE(result.official_code, 17);
+  EXPECT_NE(result.official_code, 18);
+  EXPECT_TRUE(result.anomaly_review_live);
 }
 
 TEST(CargoAvoidanceFusion,

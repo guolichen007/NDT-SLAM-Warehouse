@@ -30,7 +30,7 @@
   → Cargo Bottom（支撑点/跨度/网格覆盖/底部高度）
   → CargoObstacleTracker（近场/远场历史、静态 provenance、独立/嵌入 track）
   → CargoAvoidanceFusion（安全决策融合）
-  → CargoSafetyStatus（类型化输出，schema v6）
+  → CargoSafetyStatus（类型化输出，schema v7）
   → cargo_alarm_heartbeat_node（合同校验 + 5Hz 状态重发）
   → /cargo_avoidance/status_code
   → 外部主控程序
@@ -50,7 +50,7 @@
 - **CargoGeometryFusion**：管理 `PENDING / POSITIVE_ONLY / FORMAL` 三级授权。实时可见高度是厚度下界；稳定锁定形状可形成 POSITIVE_ONLY，完整物理测量复核后才升级为 FORMAL。
 - **LiveCargoPose**：保存中心、真实证据时间、计算时间、来源和位置不确定度。作业期间只更新中心，起升只改变 Z。
 - **CargoMarkerLifecycle**：显示生命周期。显示保持不等于正式安全证据有效。
-- **CargoSafetyEvaluator**：只根据空间碰撞关系产生 14/17/18，证据故障产生 30-35。
+- **CargoSafetyEvaluator**：已确认空间碰撞关系产生 14/17/18；接触级或缺少接近历史的突发近场产生待复核 Code 29；证据故障产生 30-35。
 - **cargo_alarm_heartbeat_node**：校验 `CargoSafetyStatus` 合同，接受前进时间戳的新状态，5Hz 重发。重复时间戳不产生新证据。
 
 ## 地图职责边界

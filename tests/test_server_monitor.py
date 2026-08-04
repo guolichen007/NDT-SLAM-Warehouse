@@ -42,6 +42,42 @@ def sample(code, reason="ok", track=0, **extra):
 
 
 class SafetyAggregatorTest(unittest.TestCase):
+    def test_code29_is_counted_as_review_not_warning_or_fault(self):
+        aggregate = SafetyAggregator()
+        aggregate.ingest(
+            {"requested_alarm_code": 33, "reason": "cargo_pending"},
+            source_stamp=0.9,
+            wall_time=0.9,
+        )
+        events = aggregate.ingest(
+            {
+                "requested_alarm_code": 29,
+                "reason": "review_immediate_contact_guard",
+                "warning_valid": True,
+                "evidence_state": 8,
+                "cargo_track_id": 7,
+                "obstacle_track_id": 11,
+                "nearest_obstacle_distance_m": 0.2,
+                "conservative_vertical_clearance_m": -0.1,
+            },
+            source_stamp=1.0,
+            wall_time=1.0,
+        )
+        self.assertEqual(events[0]["event"], "SAFETY_REVIEW_ENTER")
+        transition = aggregate.ingest(
+            {
+                "requested_alarm_code": 18,
+                "reason": "live_hazard",
+                "warning_valid": True,
+            },
+            source_stamp=1.1,
+            wall_time=1.1,
+        )
+        self.assertEqual(transition[0]["event"], "SAFETY_WARNING_ENTER")
+        summary = aggregate.summarize(now=1.2)
+        self.assertEqual(summary["review_events"], 1)
+        self.assertEqual(summary["warning_events"], 1)
+
     def test_sliding_window_code_duration(self):
         aggregate = SafetyAggregator((4,))
         aggregate.ingest(sample(34), source_stamp=1, wall_time=0)

@@ -106,13 +106,15 @@ enum class CargoSafetyEvidenceState : std::uint8_t {
     TRACK_CONFIRMATION_PENDING,
     SPARSE_PENDING,
     SOURCE_UNRESOLVED,
-    HARD_FAULT
+    HARD_FAULT,
+    REVIEW_REQUIRED
 };
 
 struct CargoSafetyProtocol {
     static constexpr std::int32_t kClear = 14;
     static constexpr std::int32_t kLevel1Warning = 17;
     static constexpr std::int32_t kLevel2Warning = 18;
+    static constexpr std::int32_t kAnomalyReview = 29;
     static constexpr std::int32_t kSystemNotReady = 30;
     static constexpr std::int32_t kLocalizationInvalid = 31;
     static constexpr std::int32_t kGravityInvalid = 32;
@@ -217,6 +219,7 @@ public:
     static constexpr std::uint16_t kSafeCode = 14;
     static constexpr std::uint16_t kLevel1Code = 17;
     static constexpr std::uint16_t kLevel2Code = 18;
+    static constexpr std::uint16_t kReviewCode = 29;
 
     explicit CargoSafetyEvaluator(const CargoSafetyConfig& config = CargoSafetyConfig());
 

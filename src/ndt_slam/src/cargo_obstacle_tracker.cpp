@@ -671,6 +671,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         !diagnostic->current_near_field ||
         diagnostic->far_field_history_valid ||
         diagnostic->provenance_valid;
+    decision.selected_far_field_history_valid =
+        diagnostic->far_field_history_valid;
     decision.selected_far_field_observations =
         diagnostic->far_field_validated_observations;
     decision.selected_static_provenance_streak =

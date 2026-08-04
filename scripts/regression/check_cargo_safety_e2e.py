@@ -73,9 +73,10 @@ def main() -> int:
     require("CargoBottomEstimate.msg" in messages and
             "CargoSafetyStatus.msg" in messages,
             "typed Cargo messages are not generated", failures)
-    require("SCHEMA_VERSION=6" in safety_message and
+    require("SCHEMA_VERSION=7" in safety_message and
             all(f"CODE_{name}" in safety_message for name in (
                 "CLEAR", "LEVEL1_WARNING", "LEVEL2_WARNING",
+                "ANOMALY_REVIEW",
                 "SYSTEM_NOT_READY", "LOCALIZATION_INVALID",
                 "GRAVITY_INVALID", "CARGO_INVALID", "OBSTACLE_INVALID",
                 "INTERNAL_ERROR")) and
@@ -85,8 +86,9 @@ def main() -> int:
                 "hook_signal_conflict", "EVIDENCE_HAZARD_CONFIRMED",
                 "EVIDENCE_TRACK_CONFIRMATION_PENDING",
                 "EVIDENCE_SPARSE_PENDING", "EVIDENCE_SOURCE_UNRESOLVED",
+                "EVIDENCE_REVIEW_REQUIRED",
                 "evidence_state", "obstacle_track_id")),
-            "CargoSafetyStatus v6 role/code/evidence contract is incomplete",
+            "CargoSafetyStatus v7 role/code/evidence contract is incomplete",
             failures)
 
     for include in ("cargo_bottom_fusion.hpp", "cargo_safety_evaluator.hpp",
