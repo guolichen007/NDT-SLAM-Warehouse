@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 import json
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -248,6 +249,40 @@ class NdtRecoveryWatchdogTest(unittest.TestCase):
         watchdog.restart_requested.set()
 
         watchdog._timer_callback(None)
+
+    def test_LiveLegacyProcessingSuppressesMissingHealthRestartLoop(self):
+        warnings = []
+
+        class FakeRospy:
+            @staticmethod
+            def logwarn_throttle(period, message):
+                warnings.append((period, message))
+
+        watchdog = WATCHDOG.RosRecoveryWatchdog.__new__(
+            WATCHDOG.RosRecoveryWatchdog
+        )
+        watchdog.rospy = FakeRospy()
+        watchdog.health = None
+        watchdog.health_received_at = None
+        watchdog.status = WATCHDOG.RecoveryStatus(
+            "DEGRADED", 40, "state=DEGRADED bad_frames=40"
+        )
+        watchdog.restart_requested = threading.Event()
+        watchdog.policy = WATCHDOG.RecoveryWatchdogPolicy(
+            WATCHDOG.WatchdogConfig(
+                startup_grace_sec=0.0, health_stale_sec=3.0
+            ),
+            1.0,
+        )
+
+        with mock.patch.object(WATCHDOG.time, "time", return_value=10.0):
+            watchdog.status_received_at = 1.0
+            watchdog.odom_received_at = 9.0
+            watchdog._timer_callback(None)
+
+        self.assertFalse(watchdog.restart_requested.is_set())
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("rebuild the workspace", warnings[0][1])
 
 
 if __name__ == "__main__":

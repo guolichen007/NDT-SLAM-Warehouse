@@ -507,6 +507,8 @@ private:
     bool relocalization_pose_reliable_ = false;
     bool relocalization_invalid_safety_published_ = false;
     Sophus::SE3d relocalization_confirmation_pose_;
+    Sophus::SE3d localization_quarantine_publish_pose_;
+    bool localization_quarantine_publish_pose_valid_ = false;
     StartupLocalizationState startup_localization_state_ =
         StartupLocalizationState::FRESH_MAPPING;
     LocalizationHealthConfig localization_health_config_;
@@ -2109,6 +2111,9 @@ private:
     CargoPhysicalMotionConfig cargo_physical_motion_config_;
     CargoPhysicalMotionEstimator cargo_physical_motion_estimator_;
     CargoPhysicalMotionResult cargo_physical_motion_result_;
+    // Geometry/identity may warm while localization is quarantined, but no
+    // PLC-facing cargo code may escape until strict localization is verified.
+    bool cargo_pipeline_external_output_authorized_ = true;
     std::string cargo_base_motion_state_topic_ =
         "/crane/base_motion_state";
     double cargo_base_motion_state_timeout_sec_ = 0.50;
@@ -2405,14 +2410,16 @@ private:
         const Sophus::SE3d& raw_physical_pose,
         const ros::Time& stamp,
         const ros::Time& obstacle_cloud_stamp,
-        double processing_age_sec);
+        double processing_age_sec,
+        bool external_output_authorized);
     void updateCargoLiftAndGeometryFusion(
         const HookLoadSnapshot& hook,
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
         const Sophus::SE3d& pose_map_base,
         const ros::Time& stamp,
         bool active_track,
-        bool cargo_present);
+        bool cargo_present,
+        bool map_evidence_authorized);
     void runPendingCargoAvoidance(
         const PendingCargoEnvelope& envelope,
         const HookLoadSnapshot& hook,

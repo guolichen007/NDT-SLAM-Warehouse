@@ -2571,6 +2571,15 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 r["confirm_yaw_deg"].as<double>(5.0);
             localization_health_config_.required_consecutive_frames =
                 std::max(1, r["health_required_frames"].as<int>(20));
+            localization_health_config_.minimum_qualified_frames =
+                std::clamp(
+                    r["health_minimum_qualified_frames"].as<int>(18), 1,
+                    localization_health_config_.required_consecutive_frames);
+            localization_health_config_.maximum_consecutive_failures =
+                std::clamp(
+                    r["health_maximum_consecutive_failures"].as<int>(2), 0,
+                    localization_health_config_.required_consecutive_frames -
+                        1);
             localization_health_config_.maximum_fitness =
                 std::max(0.0,
                     r["health_max_fitness"].as<double>(0.35));
@@ -3472,7 +3481,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             cargo_motion_corridor_config_.minimum_motion_speed_mps =
                 std::max(0.0F,
                     cargo_safety["motion_corridor_minimum_speed_mps"]
-                        .as<float>(0.05F));
+                        .as<float>(0.03F));
             cargo_motion_corridor_config_.prediction_horizon_sec =
                 std::max(0.5F,
                     cargo_safety[
@@ -6223,9 +6232,17 @@ void NdtSlamNode::processCloudThread() {
             const bool catch_up_blocks_local_map =
                 stationary_motion_decision_.state ==
                     RuntimeMotionState::CATCH_UP;
+            const bool quarantine_alignment_ready =
+                relocalization_pose_reliable_ ||
+                startup_localization_state_ ==
+                    StartupLocalizationState::VERIFYING ||
+                startup_localization_state_ ==
+                    StartupLocalizationState::HEALTHY;
             if (!allow_runtime_local_map_update_ ||
                 catch_up_blocks_local_map ||
-                !relocalization_pose_reliable_) {
+                !quarantine_alignment_ready ||
+                !frame_ndt_accepted ||
+                !frame_registration_quality_valid) {
                 ROS_DEBUG("[LocalMap] blocked state=%s reason=%s",
                           runtimeMotionStateName(
                               stationary_motion_decision_.state),
@@ -6377,6 +6394,21 @@ void NdtSlamNode::processCloudThread() {
             const auto publish_odom_start = DiagClock::now();
             Sophus::SE3d final_pose =
                 selectPublishedPose(constrained_pose, publish_time);
+            if (!relocalization_pose_reliable_) {
+                if (localization_health_decision_.frame_qualified &&
+                    constrained_pose.translation().allFinite() &&
+                    constrained_pose.so3().matrix().allFinite()) {
+                    localization_quarantine_publish_pose_ = constrained_pose;
+                    localization_quarantine_publish_pose_valid_ = true;
+                } else if (localization_quarantine_publish_pose_valid_) {
+                    // Never expose EKF prediction drift while the strict gate
+                    // is closed. Internal NDT/global search keeps running.
+                    final_pose = localization_quarantine_publish_pose_;
+                }
+            } else {
+                localization_quarantine_publish_pose_ = final_pose;
+                localization_quarantine_publish_pose_valid_ = true;
+            }
             if (!final_pose.translation().allFinite() ||
                 !final_pose.so3().matrix().allFinite()) {
                 ROS_ERROR_THROTTLE(
@@ -6430,13 +6462,18 @@ void NdtSlamNode::processCloudThread() {
             // Formal cargo chain: same-stamp tracked points + final odometry
             // pose -> fused bottom -> conservative per-cluster safety status.
             // The heartbeat node is the only producer of the PLC alarm topic.
+            updateAndPublishCargoSafetyPipeline(
+                feature_cloud, filtered_cloud, final_pose,
+                cargo_raw_physical_pose, publish_time,
+                msg->header.stamp,
+                diag_queue_age_ms * 0.001 +
+                    elapsedMs(start_time) * 0.001,
+                relocalization_pose_reliable_);
+            // The authorization is frame-scoped. Do not leave a quarantine
+            // decision latched into callbacks that may run before the next
+            // LiDAR frame.
+            cargo_pipeline_external_output_authorized_ = true;
             if (relocalization_pose_reliable_) {
-                updateAndPublishCargoSafetyPipeline(
-                    feature_cloud, filtered_cloud, final_pose,
-                    cargo_raw_physical_pose, publish_time,
-                    msg->header.stamp,
-                    diag_queue_age_ms * 0.001 +
-                        elapsedMs(start_time) * 0.001);
                 relocalization_invalid_safety_published_ = false;
             } else {
                 publishRelocalizationSafetyInvalid(
@@ -10304,6 +10341,8 @@ void NdtSlamNode::consumeRelocalizationResult(
         const Sophus::SE3d recovered_at_current_stamp =
             result.pose * motion_since_job;
         applyRelocalizedPose(recovered_at_current_stamp, stamp, result);
+        localization_quarantine_publish_pose_ = recovered_at_current_stamp;
+        localization_quarantine_publish_pose_valid_ = true;
         relocalization_confirmation_count_ = 0;
         relocalization_bad_frames_ = 0;
         relocalization_good_frames_ = 0;
@@ -10799,8 +10838,14 @@ void NdtSlamNode::publishLocalizationHealth(const ros::Time& stamp) {
                  ? "true" : "false") << ','
          << "\"qualified_frames\":"
          << localization_health_decision_.consecutive_qualified_frames << ','
+         << "\"evaluated_window_frames\":"
+         << localization_health_decision_.evaluated_window_frames << ','
+         << "\"consecutive_failed_frames\":"
+         << localization_health_decision_.consecutive_failed_frames << ','
          << "\"required_frames\":"
          << localization_health_config_.required_consecutive_frames << ','
+         << "\"minimum_qualified_frames\":"
+         << localization_health_config_.minimum_qualified_frames << ','
          << "\"ndt_converged\":"
          << (localization_health_evidence_.ndt_converged
                  ? "true" : "false") << ','
@@ -10921,7 +10966,7 @@ void NdtSlamNode::updateLocalizationHealth(
         relocalization_invalid_safety_published_ = false;
         if (transitioned) {
             publishRelocalizationStatus(
-                "IDLE", "strict_20_frame_verification_complete");
+                "IDLE", "strict_health_window_verification_complete");
         }
         writeLocalizationCheckpoint(stamp);
         publishLocalizationHealth(stamp);
@@ -17428,10 +17473,12 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
     cargo_temporal_candidate_code_ = 0;
     cargo_temporal_candidate_count_ = 0;
     cargo_used_previous_confirmation_ = false;
-    cargo_raw_safety_status_pub_.publish(status);
-    std_msgs::Int32 raw_status_code_msg;
-    raw_status_code_msg.data = status.requested_alarm_code;
-    cargo_raw_status_code_pub_.publish(raw_status_code_msg);
+    if (cargo_pipeline_external_output_authorized_) {
+        cargo_raw_safety_status_pub_.publish(status);
+        std_msgs::Int32 raw_status_code_msg;
+        raw_status_code_msg.data = status.requested_alarm_code;
+        cargo_raw_status_code_pub_.publish(raw_status_code_msg);
+    }
     cargo_obstacle_roi_finite_points_ = 0U;
     cargo_obstacle_roi_coverage_ratio_ = 0.0F;
     cargo_self_removed_points_ = 0U;
@@ -17453,8 +17500,10 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
     cargo_vertical_uncertainty_m_ = 0.0F;
     cargo_self_margin_xy_m_ = 0.0F;
     cargo_self_margin_z_m_ = 0.0F;
-    cargo_safety_status_pub_.publish(status);
-    logCargoSafetyStatus(status);
+    if (cargo_pipeline_external_output_authorized_) {
+        cargo_safety_status_pub_.publish(status);
+        logCargoSafetyStatus(status);
+    }
 
     lidar_slam2_msgs::CargoBottomEstimate bottom;
     bottom.header = status.header;
@@ -17525,7 +17574,9 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
         CargoBottomResult{}, stamp, safe_empty, localization_valid);
     publishPayloadTrackInfoInvalid(status.reason);
     publishCargoGeometryDebug(CargoBottomResult{}, stamp);
-    publishOperationalStatus(status, stamp);
+    if (cargo_pipeline_external_output_authorized_) {
+        publishOperationalStatus(status, stamp);
+    }
 }
 
 void NdtSlamNode::updateCargoLiftAndGeometryFusion(
@@ -17534,7 +17585,8 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
     const Sophus::SE3d& pose_map_base,
     const ros::Time& stamp,
     bool active_track,
-    bool cargo_present) {
+    bool cargo_present,
+    bool map_evidence_authorized) {
     const bool hook_loaded = cargo_present;
     const bool node_started_loaded = hook_loaded &&
         !cargo_hook_state_initialized_;
@@ -17627,7 +17679,9 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
     const Eigen::Vector3d anchor_map_3d = pose_map_base *
         Eigen::Vector3d(anchor_base.x(), anchor_base.y(), 0.0);
     const Eigen::Vector2f anchor_map = anchor_map_3d.head<2>().cast<float>();
-    const auto height_field = std::atomic_load(&static_height_field_);
+    const auto height_field = map_evidence_authorized
+        ? std::atomic_load(&static_height_field_)
+        : std::shared_ptr<const StaticHeightField>();
     if (height_field && cargo_preload_origin_component_.valid &&
         cargo_preload_origin_component_.map_generation !=
             height_field->mapGeneration()) {
@@ -17864,7 +17918,7 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
             lift_input.revealed_support_coverage =
                 revealed_support_observation_.coverage;
         }
-    } else {
+    } else if (map_evidence_authorized) {
         append_static_origin_candidate(cargo_preload_origin_component_);
         append_static_origin_candidate(cargo_origin_component_);
     }
@@ -19915,7 +19969,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
         pending_static_decision.authorized &&
         fusion_input.static_map.warning_code ==
             CargoSafetyEvaluator::kLevel1Code &&
-        !pending_static_decision.far_field_history_valid;
+        !pending_static_decision.far_field_history_valid &&
+        !fusion_input.pending_static_provenance_valid;
     fusion_input.anomaly_review_live =
         pending_live_immediate_review ||
         pending_live_sudden_level1_review;
@@ -20876,7 +20931,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const Sophus::SE3d& raw_physical_pose,
     const ros::Time& stamp,
     const ros::Time& obstacle_cloud_stamp,
-    double processing_age_sec) {
+    double processing_age_sec,
+    bool external_output_authorized) {
+    cargo_pipeline_external_output_authorized_ = external_output_authorized;
     last_cargo_pipeline_stamp_ = stamp;
     cargo_pending_self_removed_points_ = 0U;
     cargo_pending_unresolved_inside_points_ = 0U;
@@ -20988,7 +21045,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         // component after the cargo has already started moving.
         updateCargoLiftAndGeometryFusion(
             hook, observation_cloud_base, pose_map_base, stamp,
-            false, false);
+            false, false, external_output_authorized);
         publishCargoRecognitionStatus(hook, stamp);
         updateAndPublishCargoSwing(hook, stamp);
         publishHookOnlySafetyStatus(
@@ -21035,7 +21092,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     }
     updateCargoLiftAndGeometryFusion(
         hook, observation_cloud_base, pose_map_base, stamp, active_track,
-        cargo_presence_result_.cargo_present);
+        cargo_presence_result_.cargo_present, external_output_authorized);
     CargoEnvelopeResolverConfig resolver_config;
     resolver_config.configured_length_m =
         pending_cargo_envelope_config_.configured_length_m;
@@ -21088,6 +21145,13 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_physical_motion_estimator_.update(physical_input);
     updateAndPublishCargoSwing(hook, stamp);
     cargo_fusion_track_active_ = active_track;
+    if (!external_output_authorized) {
+        // Keep frame-local cargo identity and live-only geometry warm during
+        // quarantine. Map evidence, obstacle tracking and all 14/17/18/29
+        // outputs remain closed until strict localization verification.
+        formal_cargo_removal_authorized_ = false;
+        return;
+    }
     const bool frozen_geometry_ready = cargo_frozen_geometry_.valid &&
         cargo_frozen_geometry_.frozen &&
         cargo_frozen_geometry_.cargo_lifecycle_id == cargo_lifecycle_id_;
@@ -23031,7 +23095,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         formal_static_hazard_decision.authorized &&
         avoidance_input.static_map.warning_code ==
             CargoSafetyEvaluator::kLevel1Code &&
-        !formal_static_hazard_decision.far_field_history_valid;
+        !formal_static_hazard_decision.far_field_history_valid &&
+        !avoidance_input.static_risk_contract_valid;
     avoidance_input.anomaly_review_live =
         formal_live_immediate_review ||
         formal_live_sudden_level1_review;

@@ -368,10 +368,25 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "persistent_manifest_tile_hash_invalid", NODE
         )
         self.assertIn(
-            "strict_20_frame_verification_complete", NODE
+            "strict_health_window_verification_complete", NODE
         )
         self.assertIn(
-            "&& relocalization_pose_reliable_", NODE
+            "!frame_ndt_accepted", NODE
+        )
+        self.assertIn(
+            "!frame_registration_quality_valid", NODE
+        )
+        self.assertIn(
+            "quarantine_alignment_ready", NODE
+        )
+        self.assertIn(
+            "localization_quarantine_publish_pose_", NODE
+        )
+        self.assertIn(
+            "relocalization_pose_reliable_);", NODE
+        )
+        self.assertIn(
+            "if (!external_output_authorized)", NODE
         )
 
 

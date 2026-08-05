@@ -12,7 +12,8 @@ cd /home/ydkj/NDT-slam-ws
 ```
 
 supervisor 使用 `flock` 防止重复启动，直接保留 roslaunch 输出；只响应当前运行代次
-的原子重启请求。Ctrl-C、正常退出和旧代次请求均不会重启。现阶段暂不启用 systemd；
+的原子重启请求，消费成功后删除请求文件，避免同代旧标记被重复使用。Ctrl-C、正常
+退出和旧代次请求均不会重启。现阶段暂不启用 systemd；
 unit 与安装器只保留为未来模板，不要执行 `install_server_services.sh`、
 `systemctl enable` 或 `systemctl start ndt-slam*`。
 
@@ -61,6 +62,9 @@ tail -f "$NDT_SLAM_DATA_ROOT/recovery_watchdog/events.jsonl"
   `WAITING_STATIONARY`，每个新静止周期只搜索一次，运动状态未知时每 30 秒低频搜索；
 - 只有健康消息超过 3 秒中断或重定位服务无响应，才写入当前 supervisor 代次的
   原子请求并以 75 退出；
+- 若兼容的 `/ndt_slam/relocalization_status` 或 `/odom` 处理流仍在更新、但新
+  `/ndt_slam/localization_health` 从未出现，看门狗判定为源码与二进制不一致并提示重新
+  编译，不会反复重启同一个旧二进制；
 - 15 分钟最多允许 3 次完整重启，达到预算后保持运行并记录
   `restart_suppressed`，防止传感器或地图故障引起重启风暴。
 

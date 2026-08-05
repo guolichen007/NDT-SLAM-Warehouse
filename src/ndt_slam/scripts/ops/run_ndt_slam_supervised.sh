@@ -123,6 +123,9 @@ while true; do
           "$REQUEST_ACTION" == "hard_restart" &&
           "$REQUEST_CURRENT" == "1" ]]; then
       RESTART_REASON="watchdog:${REQUEST_REASON:-unknown}"
+      # Consume only the current generation's request. A later crash must not
+      # inherit a marker from an already completed restart.
+      rm -f -- "$REQUEST_FILE"
     else
       echo "[NDT supervisor] ignored stale/mismatched restart request"
     fi

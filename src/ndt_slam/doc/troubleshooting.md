@@ -33,9 +33,14 @@
 `supervisor_run_id`。旧代次请求会被明确忽略；systemd 当前停用。
 
 若持续 Code 31，查看 `/ndt_slam/localization_health`：`MAP_INVALID` 表示 manifest、
-地图 UUID、瓦片大小或 SHA-256 校验失败；`VERIFYING` 必须连续 20 帧满足严格
-fitness/EKF/可观测性门限；`WAITING_STATIONARY` 表示节点和健康流仍正常，系统在等待
+地图 UUID、瓦片大小或 SHA-256 校验失败；`VERIFYING` 必须在 20 帧窗口内至少 18 帧
+满足严格 fitness/EKF/可观测性门限，且不能连续失败超过 2 帧；`WAITING_STATIONARY`
+表示节点和健康流仍正常，系统在等待
 下一次运动到静止周期，不应人工循环重启。
+
+若看门狗提示 `localization_health` 从未出现、但兼容重定位状态或 `/odom` 仍在更新，说明拉取源码后
+尚未重新编译当前工作空间。先停止 supervisor，在 Linux/ROS 环境完成编译并重新加载
+`devel/setup.bash`；看门狗会抑制对此类版本不一致的无效硬重启。
 
 ## 静止时错误移动或地图增长
 
@@ -44,7 +49,7 @@ fitness/EKF/可观测性门限；`WAITING_STATIONARY` 表示节点和健康流�
 ## 安全码不符合预期
 
 - 17/18：核对旋转 OBB 距离、保守垂直净空和运行方向夹角；夹角绝对值超过 45° 时不应输出正式告警；
-- 29：检查 `reason`。`review_immediate_contact_guard` 表示 0.30m 全方向接触候选，`review_level1_without_approach_history` 表示未经历 18 就突然进入 3m；保存现场图片并核对是否为货物自身点云或 Track 错乱；
+- 29：检查 `reason`。`review_immediate_contact_guard` 表示 0.30m 全方向接触候选，`review_level1_without_approach_history` 表示实时新障碍未经历 18 就突然进入 3m；保存现场图片并核对是否为货物自身点云或 Track 错乱。已绑定地图身份且成熟的静态障碍不使用这一实时历史门禁，可直接输出 17；
 - 33：核对 pose/height evidence age 与 `geometry_authorization`；
 - 34：检查障碍 ROI 覆盖、有限点和聚类；
 - 30：检查超时或时间回退；下一条新 epoch 前进时间戳应恢复。

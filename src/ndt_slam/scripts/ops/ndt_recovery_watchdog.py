@@ -244,11 +244,14 @@ def read_restart_history(path: Path) -> List[float]:
 class RosRecoveryWatchdog:
     def __init__(self) -> None:
         import rospy
+        from nav_msgs.msg import Odometry
         from std_msgs.msg import String
         from std_srvs.srv import Empty
 
         self.rospy = rospy
         self.status: Optional[RecoveryStatus] = None
+        self.status_received_at: Optional[float] = None
+        self.odom_received_at: Optional[float] = None
         self.health: Optional[LocalizationHealth] = None
         self.health_received_at: Optional[float] = None
         self.restart_requested = threading.Event()
@@ -339,6 +342,10 @@ class RosRecoveryWatchdog:
         self.health_subscriber = rospy.Subscriber(
             health_topic, String, self._health_callback, queue_size=10
         )
+        odom_topic = str(rospy.get_param("~odom_topic", "/odom"))
+        self.odom_subscriber = rospy.Subscriber(
+            odom_topic, Odometry, self._odom_callback, queue_size=10
+        )
         self.timer = rospy.Timer(
             rospy.Duration(float(rospy.get_param("~poll_sec", 1.0))),
             self._timer_callback,
@@ -348,12 +355,16 @@ class RosRecoveryWatchdog:
         parsed = parse_relocalization_status(message.data)
         if parsed is not None:
             self.status = parsed
+            self.status_received_at = time.time()
 
     def _health_callback(self, message: Any) -> None:
         parsed = parse_localization_health(message.data)
         if parsed is not None:
             self.health = parsed
             self.health_received_at = time.time()
+
+    def _odom_callback(self, _message: Any) -> None:
+        self.odom_received_at = time.time()
 
     def _event(self, decision: WatchdogDecision,
                status: RecoveryStatus, now: float) -> Dict[str, Any]:
@@ -439,8 +450,33 @@ class RosRecoveryWatchdog:
             "UNKNOWN", 0, "state=UNKNOWN bad_frames=0"
         )
         if self.health_received_at is None:
+            # A source update without a rebuilt C++ binary has no health
+            # topic, but the legacy relocalization status remains live. That
+            # is a deployment mismatch, not a frozen process: restarting the
+            # same old binary can never repair it and creates a restart loop.
+            status_received_at = getattr(
+                self, "status_received_at", None
+            )
+            status_fresh = status_received_at is not None and (
+                now - status_received_at <=
+                max(3.0, self.policy.config.health_stale_sec)
+            )
+            odom_received_at = getattr(self, "odom_received_at", None)
+            odom_fresh = odom_received_at is not None and (
+                now - odom_received_at <=
+                max(3.0, self.policy.config.health_stale_sec)
+            )
+            if status_fresh or odom_fresh:
+                self.rospy.logwarn_throttle(
+                    30.0,
+                    "[NdtRecoveryWatchdog] localization_health has never "
+                    "been observed while a legacy processing stream is "
+                    "live; "
+                    "rebuild the workspace, suppressing hard restart",
+                )
+                return
             decision = self.policy.process_fault(
-                now, "localization_health_stream_missing"
+                now, "localization_control_streams_missing"
             )
         elif now - self.health_received_at > self.policy.config.health_stale_sec:
             decision = self.policy.process_fault(

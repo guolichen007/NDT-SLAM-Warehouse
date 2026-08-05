@@ -131,14 +131,14 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         self.assertIn("!evidence.entirely_above_cargo", SAFETY_SOURCE)
         self.assertIn("!observation.entirely_above_cargo", TRACKER_SOURCE)
 
-    def test_known_static_obstacles_track_fast_but_do_not_bypass_17_history(self):
+    def test_known_static_obstacles_supply_independent_17_history(self):
         self.assertIn("known_static_confirm_frames: 3", CONFIG)
         self.assertIn("static_cargo_confirm_frames: 5", CONFIG)
         self.assertIn("static_cargo_confirm_sec: 0.8", CONFIG)
         self.assertIn("track.far_field_history_valid || track.provenance_valid", TRACKER_SOURCE)
         self.assertIn("selected_far_field_history_valid", NODE)
         self.assertIn("pending_static_decision.far_field_history_valid", NODE)
-        self.assertNotIn("static_level1_independently_proven", (
+        self.assertIn("static_level1_independently_proven", (
             PACKAGE / "src/cargo_avoidance_fusion.cpp"
         ).read_text(encoding="utf-8"))
 

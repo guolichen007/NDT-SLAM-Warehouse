@@ -310,12 +310,26 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
       !input.live_near_field_history_authorized;
   const bool static_level1_without_history = static_level1_risk &&
       !input.static_near_field_history_authorized;
-  if (live_level1_without_history || static_level1_without_history) {
+  std::string independent_static_reason;
+  const bool static_level1_independently_proven =
+      static_level1_without_history && result.risk_static &&
+      (formal_cargo
+           ? (static_risk_contract && input.static_hazard_track_confirmed)
+           : authorizePendingStaticWarning(
+                 input, config, &independent_static_reason));
+  // A live obstacle that first appears inside 3 m remains abnormal (29).
+  // A mature, map-identity-bound static obstacle is different: its physical
+  // history predates this approach and is independent evidence, so requiring
+  // a newly observed far-field approach would suppress real fixed hazards.
+  if (live_level1_without_history ||
+      (static_level1_without_history &&
+       !static_level1_independently_proven)) {
     result.official_valid = true;
     result.official_code = kAnomalyReview;
     result.anomaly_review = true;
     result.anomaly_review_live = live_level1_without_history;
-    result.anomaly_review_static = static_level1_without_history;
+    result.anomaly_review_static = static_level1_without_history &&
+        !static_level1_independently_proven;
     result.reason = "review_level1_without_approach_history";
     result.provisional_status = "REVIEW_REQUIRED";
     result.pending_authority_reason =

@@ -122,8 +122,11 @@ relocalization:
   confirm_translation_m: 0.35
   confirm_yaw_deg: 5.0
   # A global candidate is only a seed. Existing-map startup and every
-  # recovery remain quarantined until this independent strict gate passes.
+  # recovery remain quarantined until 18 of a 20-frame window pass. At most
+  # two isolated failures are tolerated; temporal rollback/gaps still reset it.
   health_required_frames: 20
+  health_minimum_qualified_frames: 18
+  health_maximum_consecutive_failures: 2
   health_max_fitness: 0.35
   health_max_innovation_m: 0.75
   health_max_frame_gap_sec: 0.50
@@ -801,7 +804,9 @@ cargo_safety:
   fusion_provisional_warning_to_official_code: true
   motion_corridor_enabled: true
   motion_corridor_immediate_near_field_m: 0.30
-  motion_corridor_minimum_speed_mps: 0.05
+  # 8/5 data shows controlled crane creep at 0.03--0.11 m/s. Accept 0.03 m/s
+  # only when the NDT/EKF velocity is current and measurement-backed.
+  motion_corridor_minimum_speed_mps: 0.03
   motion_corridor_prediction_horizon_sec: 3.0
   motion_corridor_minimum_prediction_distance_m: 7.0
   # Running-path sector: forward 90 degrees (45 degrees on each side).
