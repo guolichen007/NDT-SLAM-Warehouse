@@ -82,13 +82,16 @@ CargoPreloadBaselineResult CargoPreloadBaselineTracker::update(
     window_.clear();
   }
   last_stamp_sec_ = input.stamp_sec;
-  if (!input.hook_empty || !input.localization_valid || !input.stationary) {
+  const bool motion_authorized = input.stationary ||
+      (config_.allow_moving_mature_static &&
+       input.independently_mature_static);
+  if (!input.hook_empty || !input.localization_valid || !motion_authorized) {
     window_.clear();
     result_ = CargoPreloadBaselineResult{};
     result_.reason = !input.hook_empty
         ? "hook_not_empty"
         : (!input.localization_valid ? "localization_invalid"
-                                     : "base_not_stationary");
+                                     : "base_not_stationary_or_mature");
     return result_;
   }
   if (!finiteComponent(input.component)) {

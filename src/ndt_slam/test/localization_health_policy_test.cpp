@@ -20,48 +20,48 @@ LocalizationHealthEvidence qualifiedEvidence(double stamp) {
     return evidence;
 }
 
-TEST(LocalizationHealthPolicyTest, RequiresCompleteTwentyFrameWindow) {
+TEST(LocalizationHealthPolicyTest, RequiresCompleteEightFrameWindow) {
     LocalizationHealthPolicy policy;
-    for (int frame = 1; frame < 20; ++frame) {
+    for (int frame = 1; frame < 8; ++frame) {
         const auto decision = policy.update(qualifiedEvidence(frame * 0.1));
         EXPECT_FALSE(decision.localization_verified);
         EXPECT_EQ(frame, decision.consecutive_qualified_frames);
     }
-    EXPECT_TRUE(policy.update(qualifiedEvidence(2.0)).localization_verified);
+    EXPECT_TRUE(policy.update(qualifiedEvidence(0.8)).localization_verified);
 }
 
 TEST(LocalizationHealthPolicyTest, ThreeConsecutiveFailuresRevokeVerification) {
     LocalizationHealthPolicy policy;
-    for (int frame = 1; frame <= 20; ++frame) {
+    for (int frame = 1; frame <= 8; ++frame) {
         policy.update(qualifiedEvidence(frame * 0.1));
     }
     for (int failure = 1; failure <= 2; ++failure) {
-        auto bad = qualifiedEvidence(2.0 + failure * 0.1);
+        auto bad = qualifiedEvidence(0.8 + failure * 0.1);
         bad.prediction_only = true;
         const auto decision = policy.update(bad);
         EXPECT_TRUE(decision.localization_verified);
-        EXPECT_EQ(20 - failure, decision.consecutive_qualified_frames);
+        EXPECT_EQ(8 - failure, decision.consecutive_qualified_frames);
     }
-    auto third_bad = qualifiedEvidence(2.3);
+    auto third_bad = qualifiedEvidence(1.1);
     third_bad.prediction_only = true;
     const auto revoked = policy.update(third_bad);
     EXPECT_FALSE(revoked.localization_verified);
-    EXPECT_EQ(17, revoked.consecutive_qualified_frames);
+    EXPECT_EQ(5, revoked.consecutive_qualified_frames);
     EXPECT_EQ("prediction_only", revoked.reason);
 }
 
 TEST(LocalizationHealthPolicyTest, TwoIsolatedFailuresDoNotBlockStartup) {
     LocalizationHealthPolicy policy;
-    for (int frame = 1; frame <= 20; ++frame) {
+    for (int frame = 1; frame <= 8; ++frame) {
         auto evidence = qualifiedEvidence(frame * 0.1);
-        if (frame == 7 || frame == 15) evidence.ndt_accepted = false;
+        if (frame == 3 || frame == 7) evidence.ndt_accepted = false;
         const auto decision = policy.update(evidence);
-        if (frame < 20) EXPECT_FALSE(decision.localization_verified);
+        if (frame < 8) EXPECT_FALSE(decision.localization_verified);
     }
     const auto decision = policy.decision();
     EXPECT_TRUE(decision.localization_verified);
-    EXPECT_EQ(18, decision.consecutive_qualified_frames);
-    EXPECT_EQ(20, decision.evaluated_window_frames);
+    EXPECT_EQ(6, decision.consecutive_qualified_frames);
+    EXPECT_EQ(8, decision.evaluated_window_frames);
 }
 
 TEST(LocalizationHealthPolicyTest, TimeRollbackAndGapsResetEvidence) {

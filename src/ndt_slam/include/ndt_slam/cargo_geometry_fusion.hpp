@@ -55,6 +55,9 @@ struct CargoGeometryFusionConfig {
   // multi-frame requirement without allowing one partial/occluded scan to
   // erase several good observations from the same physical track segment.
   int shape_confirmation_window_frames = 8;
+  // Initial dimensions use the robust median of the same bounded window.
+  // A dispersed window remains PENDING instead of freezing one merged scan.
+  float maximum_initial_dimension_mad_m = 0.30F;
   double maximum_observation_gap_sec = 0.50;
   float maximum_source_disagreement_m = 0.25F;
   float maximum_fused_uncertainty_m = 0.20F;
@@ -73,6 +76,9 @@ struct CargoGeometryFusionConfig {
   int conservative_expand_confirm_frames = 8;
   float minimum_live_shape_confidence_for_expand = 0.85F;
   std::size_t minimum_live_dimension_support = 30U;
+  // Initial POSITIVE_ONLY admission uses identity + support + 5/8 temporal
+  // consistency. Keep it separate from the stricter frozen-shape shrink gate.
+  float minimum_initial_shape_confidence = 0.55F;
   float minimum_live_shape_confidence_for_shrink = 0.75F;
   float minimum_physical_length_m = 0.30F;
   float minimum_physical_width_m = 0.20F;
@@ -96,8 +102,11 @@ struct CargoGeometryFrame {
   std::uint64_t cargo_lifecycle_id = 0U;
   std::uint64_t track_segment_id = 0U;
   double stamp_sec = 0.0;
-  // Degraded single-source freezing is allowed only after the recognition
-  // state machine has established a formal same-lifecycle cargo lock.
+  // Positive warnings may use a current, multi-frame cargo identity before
+  // dual-source thickness reaches FORMAL.  This never authorizes CLEAR,
+  // cargo removal, or map commits.
+  bool warning_track_stable = false;
+  // FORMAL promotion remains tied to the strict recognition lock.
   bool formal_track_locked = false;
   bool center_valid = false;
   Eigen::Vector3f center = Eigen::Vector3f::Zero();
@@ -161,9 +170,10 @@ class CargoGeometryFusion {
  private:
   CargoGeometryFusionConfig config_;
   CargoFrozenGeometry result_;
-  float pending_height_m_ = 0.0F;
-  float pending_uncertainty_m_ = 1.0F;
-  bool pending_valid_ = false;
+  std::uint64_t thickness_confirm_track_segment_id_ = 0U;
+  std::deque<float> thickness_candidate_window_;
+  bool thickness_confirmation_mode_initialized_ = false;
+  bool thickness_confirmation_formal_mode_ = false;
   double last_stamp_sec_ = 0.0;
   int shrink_confirm_count_ = 0;
   std::uint64_t shrink_track_segment_id_ = 0U;
@@ -174,6 +184,8 @@ class CargoGeometryFusion {
   int shape_confirm_count_ = 0;
   std::uint64_t shape_confirm_track_segment_id_ = 0U;
   std::deque<bool> shape_quality_window_;
+  std::deque<float> initial_length_window_;
+  std::deque<float> initial_width_window_;
   int formal_promotion_confirm_count_ = 0;
   std::uint64_t formal_promotion_track_segment_id_ = 0U;
 };

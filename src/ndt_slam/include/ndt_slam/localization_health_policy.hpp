@@ -7,8 +7,8 @@
 namespace ndt_slam {
 
 struct LocalizationHealthConfig {
-    int required_consecutive_frames = 20;
-    int minimum_qualified_frames = 18;
+    int required_consecutive_frames = 8;
+    int minimum_qualified_frames = 6;
     int maximum_consecutive_failures = 2;
     double maximum_fitness = 0.35;
     double maximum_innovation_m = 0.75;

@@ -9,6 +9,10 @@
 namespace ndt_slam {
 
 struct CargoPreloadBaselineConfig {
+  // A mature, pre-lifecycle map component already represents repeated static
+  // observations. It may be sampled while the crane is moving because odom Z
+  // is not used and component identity/generation/geometry are still checked.
+  bool allow_moving_mature_static = true;
   int minimum_confirm_frames = 5;
   int window_frames = 8;
   double maximum_observation_gap_sec = 0.50;
@@ -26,6 +30,7 @@ struct CargoPreloadBaselineInput {
   bool hook_empty = false;
   bool localization_valid = false;
   bool stationary = false;
+  bool independently_mature_static = false;
   StaticHeightComponent component;
 };
 

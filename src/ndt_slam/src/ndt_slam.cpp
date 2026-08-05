@@ -2570,10 +2570,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             relocalization_confirm_yaw_deg_ =
                 r["confirm_yaw_deg"].as<double>(5.0);
             localization_health_config_.required_consecutive_frames =
-                std::max(1, r["health_required_frames"].as<int>(20));
+                std::max(1, r["health_required_frames"].as<int>(8));
             localization_health_config_.minimum_qualified_frames =
                 std::clamp(
-                    r["health_minimum_qualified_frames"].as<int>(18), 1,
+                    r["health_minimum_qualified_frames"].as<int>(6), 1,
                     localization_health_config_.required_consecutive_frames);
             localization_health_config_.maximum_consecutive_failures =
                 std::clamp(
@@ -2674,6 +2674,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
         if (config["cargo_preload_baseline"]) {
             const YAML::Node preload = config["cargo_preload_baseline"];
+            cargo_preload_baseline_config_.allow_moving_mature_static =
+                preload["allow_moving_mature_static"].as<bool>(true);
             cargo_preload_baseline_config_.minimum_confirm_frames =
                 std::max(5, preload["minimum_confirm_frames"].as<int>(5));
             cargo_preload_baseline_config_.window_frames = std::max(
@@ -2808,6 +2810,17 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             cargo_geometry_fusion_config_.minimum_live_dimension_support =
                 static_cast<std::size_t>(std::max(
                     1, geometry["minimum_live_dimension_support"].as<int>(30)));
+            cargo_geometry_fusion_config_
+                .minimum_initial_shape_confidence =
+                    std::clamp(
+                        geometry["minimum_initial_shape_confidence"]
+                            .as<float>(0.55F),
+                        0.0F, 1.0F);
+            cargo_geometry_fusion_config_
+                .maximum_initial_dimension_mad_m = std::max(
+                    0.05F,
+                    geometry["maximum_initial_dimension_mad_m"]
+                        .as<float>(0.30F));
             cargo_geometry_fusion_config_
                 .minimum_live_shape_confidence_for_shrink =
                     geometry["minimum_live_shape_confidence_for_shrink"]
@@ -10430,6 +10443,16 @@ void NdtSlamNode::updateRelocalization(
     if (relocalization_pose_reliable_) {
         relocalization_pose_reliable_ = false;
         startup_quarantine_started_sec_ = stamp.toSec();
+        if (persistent_localization_map_present_) {
+            startup_localization_state_ =
+                StartupLocalizationState::STARTUP_QUARANTINE;
+            localization_health_policy_.reset(
+                "runtime_relocalization_quarantine");
+            localization_health_decision_ =
+                localization_health_policy_.decision();
+            localization_health_reason_ =
+                "runtime_relocalization_quarantine";
+        }
         resetCargoAfterPoseDiscontinuity();
         publishRelocalizationSafetyInvalid(stamp, "localization_degraded");
         relocalization_invalid_safety_published_ = true;
@@ -10940,11 +10963,30 @@ void NdtSlamNode::updateLocalizationHealth(
         return;
     }
 
+    // Strict evidence is a one-way admission gate after a recovery candidate.
+    // Once admitted, normal runtime transients are handled by the existing
+    // multi-frame relocalization policy, never by a one-frame strict revoke.
+    if (startup_localization_state_ ==
+            StartupLocalizationState::HEALTHY &&
+        relocalization_pose_reliable_) {
+        localization_health_decision_.frame_qualified =
+            ndt_converged && ndt_accepted && !prediction_only &&
+            observability_valid && pose_finite &&
+            !nonphysical_correction && !output_step_limited &&
+            !ekf_recovered && std::isfinite(fitness) &&
+            fitness <= localization_health_config_.maximum_fitness;
+        localization_health_decision_.localization_verified = true;
+        localization_health_reason_ =
+            localization_health_decision_.frame_qualified
+                ? "runtime_verified_pose_healthy"
+                : "runtime_transient_monitored_by_relocalization_gate";
+        publishLocalizationHealth(stamp);
+        return;
+    }
+
     const bool strict_candidate_active =
         startup_localization_state_ ==
-            StartupLocalizationState::VERIFYING ||
-        startup_localization_state_ ==
-            StartupLocalizationState::HEALTHY;
+            StartupLocalizationState::VERIFYING;
     if (strict_candidate_active) {
         localization_health_decision_ =
             localization_health_policy_.update(
@@ -12649,6 +12691,28 @@ bool NdtSlamNode::publishPersistentDisplayMapFromTiles() {
     message.header.frame_id = map_frame_;
     display_map_persistent_pub_.publish(message);
     publishDisplayMapCompat(message, true);
+    // Persistent startup restores a coherent five-layer bundle before any new
+    // map commit is allowed. Publish the non-display layers immediately as
+    // latched topics as well; otherwise RViz and diagnostics misleadingly
+    // stay empty throughout localization quarantine.
+    const MapPublicationSnapshot restored =
+        captureMapPublicationSnapshot(0U, message.header.stamp);
+    const auto publish_restored_layer = [this, &restored](
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const ros::Publisher& publisher) {
+        if (!cloud) return;
+        sensor_msgs::PointCloud2 layer_message;
+        pcl::toROSMsg(*cloud, layer_message);
+        layer_message.header.seq = static_cast<std::uint32_t>(
+            restored.generation & 0xffffffffU);
+        layer_message.header.stamp = restored.stamp;
+        layer_message.header.frame_id = map_frame_;
+        publisher.publish(layer_message);
+    };
+    publish_restored_layer(restored.registration, map_pub_);
+    publish_restored_layer(restored.ground, ground_map_pub_);
+    publish_restored_layer(restored.objects, objects_map_pub_);
+    publish_restored_layer(restored.objects_clean, objects_clean_map_pub_);
     persistent_display_tile_count_.store(
         static_cast<std::uint64_t>(tile_paths.size()),
         std::memory_order_release);
@@ -12659,7 +12723,7 @@ bool NdtSlamNode::publishPersistentDisplayMapFromTiles() {
         std::memory_order_release);
     persistent_display_last_publish_wall_ = ros::WallTime::now();
     ROS_INFO("[MapPublish] scope=persistent_tiles topic=/display_map_persistent "
-             "tiles=%zu points=%zu voxel=%.3f",
+             "tiles=%zu points=%zu voxel=%.3f restored_layers=4",
              tile_paths.size(), overview->size(), aggregate_leaf);
     return true;
 }
@@ -17858,7 +17922,22 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
             preload_input.stationary =
                 motion_gate_stationary_ || is_stationary_;
             if (!origin_components.empty()) {
-                preload_input.component = origin_components.front();
+                const auto preferred_preload = std::find_if(
+                    origin_components.begin(), origin_components.end(),
+                    [](const StaticHeightComponent& component) {
+                        return component.predates_cargo_lifecycle &&
+                            authorizeStaticEvidence(component.authority)
+                                .formal_origin_authorized;
+                    });
+                preload_input.component = preferred_preload !=
+                        origin_components.end()
+                    ? *preferred_preload : origin_components.front();
+                const StaticEvidenceAuthorization preload_authorization =
+                    authorizeStaticEvidence(
+                        preload_input.component.authority);
+                preload_input.independently_mature_static =
+                    preload_input.component.predates_cargo_lifecycle &&
+                    preload_authorization.formal_origin_authorized;
             }
             cargo_preload_baseline_result_ =
                 cargo_preload_baseline_tracker_.update(preload_input);
@@ -18754,7 +18833,11 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
     if (!hook_loaded || cargo_lifecycle_id_ == 0U) return;
     CargoGeometryFrame geometry_frame;
     geometry_frame.cargo_lifecycle_id = cargo_lifecycle_id_;
-    geometry_frame.track_segment_id = cargo_track_segment_id_;
+    // Before the formal track transition, isolate evidence by provisional
+    // identity. Track churn must restart the 5/8-frame geometry window rather
+    // than combining unrelated candidates under segment zero.
+    geometry_frame.track_segment_id = active_track
+        ? cargo_track_segment_id_ : hook_lock_.provisional_track_id;
     geometry_frame.stamp_sec = stamp.toSec();
     if (active_track && hook_lock_.locked_shape.valid &&
         hook_lock_.live_pose.valid) {
@@ -18815,6 +18898,14 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         hook_fixed_cargo_.shape_confidence;
     geometry_frame.dimension_observation_complete =
         pending_input.current_high_quality_shape.valid;
+    geometry_frame.warning_track_stable =
+        pending_cargo_self_evidence_.valid &&
+        pending_cargo_self_evidence_
+            .positive_warning_identity_authorized &&
+        (pending_cargo_self_evidence_.source ==
+             PendingCargoEnvelopeSource::CURRENT_CANDIDATE ||
+         pending_cargo_self_evidence_.source ==
+             PendingCargoEnvelopeSource::ACTIVE_LOCKED_TRACK);
     const bool formal_locked_shape_evidence = active_track &&
         hook_lock_.locked_shape.valid &&
         hook_lock_.provisional_summary.formal_lock_allowed;
@@ -18953,6 +19044,43 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
             CargoThicknessConstraint::PRIOR_ONLY});
     }
     cargo_frozen_geometry_ = cargo_geometry_fusion_.update(geometry_frame);
+    if (cargo_frozen_geometry_.valid &&
+        cargo_frozen_geometry_.frozen &&
+        cargo_frozen_geometry_.authorization ==
+            CargoGeometryAuthorization::POSITIVE_ONLY &&
+        pending_cargo_envelope_.valid &&
+        pending_cargo_envelope_.cargo_lifecycle_id ==
+            cargo_lifecycle_id_) {
+        // Keep the current identity/pose source, but use the confirmed nominal
+        // dimensions for Pending warning queries and RViz. Safety margins stay
+        // separate in the uncertainty fields, so a raw candidate cannot make
+        // the displayed box or obstacle Track jump after POSITIVE_ONLY.
+        pending_cargo_envelope_.center_base =
+            cargo_frozen_geometry_.center;
+        pending_cargo_envelope_.length_m =
+            cargo_frozen_geometry_.length_m;
+        pending_cargo_envelope_.width_m =
+            cargo_frozen_geometry_.width_m;
+        pending_cargo_envelope_.height_m =
+            cargo_frozen_geometry_.height_m;
+        pending_cargo_envelope_.yaw_base_rad =
+            cargo_frozen_geometry_.yaw_rad;
+        pending_cargo_envelope_.bottom_z_base =
+            cargo_frozen_geometry_.bottom_m;
+        pending_cargo_envelope_.top_z_base =
+            cargo_frozen_geometry_.conservative_top_reference_m;
+        pending_cargo_envelope_.horizontal_uncertainty_m = std::max(
+            pending_cargo_envelope_.horizontal_uncertainty_m,
+            cargo_frozen_geometry_.conservative_tracking_allowance_m);
+        pending_cargo_envelope_.vertical_uncertainty_m = std::max(
+            pending_cargo_envelope_.vertical_uncertainty_m,
+            std::max(
+                0.0F,
+                cargo_frozen_geometry_.bottom_m -
+                    cargo_frozen_geometry_.conservative_bottom_m));
+        pending_cargo_envelope_.reason =
+            "positive_only_confirmed_nominal_geometry";
+    }
     const bool static_physical_thickness_added = std::any_of(
         geometry_frame.thickness.begin(), geometry_frame.thickness.end(),
         [](const CargoThicknessObservation& observation) {
@@ -19124,6 +19252,14 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         << cargo_frozen_geometry_.confirm_frames
         << ",\"geometry_shape_confirm_frames\":"
         << cargo_frozen_geometry_.shape_confirm_frames
+        << ",\"geometry_warning_track_stable\":"
+        << (geometry_frame.warning_track_stable ? "true" : "false")
+        << ",\"geometry_minimum_initial_shape_confidence\":"
+        << cargo_geometry_fusion_config_
+               .minimum_initial_shape_confidence
+        << ",\"geometry_maximum_initial_dimension_mad_m\":"
+        << cargo_geometry_fusion_config_
+               .maximum_initial_dimension_mad_m
         << ",\"geometry_independent_sources\":"
         << cargo_frozen_geometry_.independent_sources
         << ",\"geometry_reason\":\""
@@ -19793,6 +19929,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
     const auto height_field = std::atomic_load(&static_height_field_);
     const auto evidence_snapshot = static_obstacle_evidence_index_.snapshot();
     bool pending_static_origin_exclusion_authorized = false;
+    bool pending_static_geometry_exclusion_authorized = false;
+    bool pending_static_self_exclusion_authorized = false;
     if (height_field && envelope.valid &&
         pending_warning_query_allowed) {
         const Eigen::Vector3d center_map_3d = pose_map_base *
@@ -19835,9 +19973,53 @@ void NdtSlamNode::runPendingCargoAvoidance(
                 cargo_origin_exclusion_component_.members.begin(),
                 cargo_origin_exclusion_component_.members.end());
         }
+        const bool pending_geometry_identity_authorized =
+            hook.state ==
+                lidar_slam2_msgs::HookLoadState::STATE_LOADED &&
+            cargo_lifecycle_id_ != 0U &&
+            pending_cargo_self_evidence_.valid &&
+            pending_cargo_self_evidence_
+                .positive_warning_identity_authorized &&
+            envelope.center_base.allFinite() &&
+            std::isfinite(envelope.vertical_uncertainty_m) &&
+            envelope.vertical_uncertainty_m >= 0.0F &&
+            std::isfinite(envelope.length_m) && envelope.length_m > 0.0F &&
+            std::isfinite(envelope.width_m) && envelope.width_m > 0.0F &&
+            std::isfinite(envelope.bottom_z_base) &&
+            std::isfinite(envelope.top_z_base) &&
+            envelope.top_z_base > envelope.bottom_z_base;
+        if (pending_geometry_identity_authorized) {
+            const Eigen::Vector3d cargo_bottom_map = pose_map_base *
+                Eigen::Vector3d(
+                    envelope.center_base.x(), envelope.center_base.y(),
+                    envelope.bottom_z_base);
+            const Eigen::Vector3d cargo_top_map = pose_map_base *
+                Eigen::Vector3d(
+                    envelope.center_base.x(), envelope.center_base.y(),
+                    envelope.top_z_base);
+            const float identity_margin = std::max(
+                0.02F, pending_cargo_self_evidence_.point_match_radius_m);
+            query.cargo_self_exclusion_authorized =
+                cargo_bottom_map.allFinite() && cargo_top_map.allFinite();
+            query.cargo_self_length_m =
+                envelope.length_m + 2.0F * identity_margin;
+            query.cargo_self_width_m =
+                envelope.width_m + 2.0F * identity_margin;
+            query.cargo_self_minimum_z = static_cast<float>(std::min(
+                cargo_bottom_map.z(), cargo_top_map.z())) -
+                envelope.vertical_uncertainty_m;
+            query.cargo_self_maximum_z = static_cast<float>(std::max(
+                cargo_bottom_map.z(), cargo_top_map.z())) +
+                envelope.vertical_uncertainty_m;
+        }
         cargo_origin_exclusion_active_ = query.exclusion_authorized;
         pending_static_origin_exclusion_authorized =
             query.exclusion_authorized;
+        pending_static_geometry_exclusion_authorized =
+            query.cargo_self_exclusion_authorized;
+        pending_static_self_exclusion_authorized =
+            pending_static_origin_exclusion_authorized ||
+            pending_static_geometry_exclusion_authorized;
         static_result = height_field->query(query);
         fusion_input.static_map.available = static_result.valid;
         fusion_input.static_map.coverage =
@@ -19912,7 +20094,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
     static_hazard_observation.authority_valid =
         fusion_input.static_risk_contract_valid &&
         query_static_authorization.official_static_risk_authorized &&
-        pending_static_origin_exclusion_authorized &&
+        pending_static_self_exclusion_authorized &&
         pending_identity_context_valid &&
         pending_warning_query_allowed &&
         pending_warning_motion_authorized;
@@ -19944,7 +20126,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
     fusion_input.pending_static_provenance_valid =
         pending_static_decision.authorized &&
         fusion_input.static_risk_contract_valid &&
-        pending_static_origin_exclusion_authorized;
+        pending_static_self_exclusion_authorized;
     fusion_input.pending_static_authority_confidence =
         fusion_input.pending_static_provenance_valid ? 1.0F : 0.0F;
     const bool pending_live_review_evidence_ready =
@@ -20193,6 +20375,14 @@ void NdtSlamNode::runPendingCargoAvoidance(
            << ",\"pending_static_origin_exclusion_authorized\":"
            << (pending_static_origin_exclusion_authorized
                    ? "true" : "false")
+           << ",\"pending_static_geometry_exclusion_authorized\":"
+           << (pending_static_geometry_exclusion_authorized
+                   ? "true" : "false")
+           << ",\"pending_static_self_exclusion_authorized\":"
+           << (pending_static_self_exclusion_authorized
+                   ? "true" : "false")
+           << ",\"pending_static_excluded_cargo_self_cells\":"
+           << static_result.excluded_cargo_self_cells
            << ",\"pending_static_obstacle_id\":"
            << pending_static_decision.obstacle_id
            << ",\"pending_static_confirmations\":"

@@ -51,14 +51,17 @@ STARTUP_QUARANTINE -> GLOBAL_SEARCH -> VERIFYING -> HEALTHY
                                          +-> WAITING_STATIONARY
 ```
 
-全局候选只修改搜索 seed，不能直接解除隔离。必须在 20 帧滑动窗口内至少 18 帧满足
+全局候选只修改搜索 seed，不能直接解除隔离。必须在最近 8 帧滑动窗口内至少 6 帧满足
 NDT converged/accepted、fitness ≤0.35、非 prediction-only、有效可观测性、有限位姿和
 增量、无步长限制或 EKF 协方差恢复，且不能连续失败超过 2 帧，才进入
-`HEALTHY/IDLE`。单帧或双帧瞬态退化不会清空全部收敛证据，连续第三帧失败会撤销授权。
+`HEALTHY/IDLE`。这是启动和重定位候选的一次性准入门；进入 HEALTHY 后，运行期短暂
+prediction-only 由已有连续坏帧重定位策略处理，不会因单帧弱证据撤销已验证位置。
 检查点绑定地图 UUID，只提升 seed 优先级。
 隔离期间持续 Code 31。已接受且质量有效的 NDT 帧可以更新临时局部定位目标，并允许
 货物身份与实时几何预热；预测帧冻结对外 odom。所有 14/17/18/29、货物删除、静态
 证据更新和持久地图提交仍被禁止，直到严格定位验收完成。
+恢复持久地图后，registration、persistent display、ground、objects 和 objects_clean
+会立即发布到 latched 话题；显示不再等待隔离结束后的第一次新地图提交。
 60 秒未通过但健康流仍正常时等待新的静止周期；运动中仍可搜索和验收，不提前开放避障。
 
 异步重定位结果不能单次直接写入运行位姿。确认策略依次检查：

@@ -11,6 +11,7 @@ CargoGeometryFrame frame(double stamp, float live_height = 1.50F,
   value.cargo_lifecycle_id = 11U;
   value.track_segment_id = 1U;
   value.stamp_sec = stamp;
+  value.warning_track_stable = true;
   value.formal_track_locked = true;
   value.center_valid = true;
   value.center = Eigen::Vector3f(0.0F, 0.0F, 2.0F);
@@ -115,7 +116,7 @@ TEST(CargoGeometryFusionTest,
 }
 
 TEST(CargoGeometryFusionTest,
-     LiveOnlyCandidateCannotFreezeBeforeFormalTrackLock) {
+     StableWarningTrackCanFreezeBeforeFormalTrackLock) {
   CargoGeometryFusionConfig config;
   config.minimum_confirm_frames = 1;
   config.shape_confirmation_window_frames = 2;
@@ -130,9 +131,90 @@ TEST(CargoGeometryFusionTest,
   EXPECT_FALSE(fusion.update(live_only).frozen);
   live_only.stamp_sec = 1.1;
   const auto result = fusion.update(live_only);
-  EXPECT_FALSE(result.valid);
-  EXPECT_FALSE(result.frozen);
+  EXPECT_TRUE(result.valid) << result.reason;
+  EXPECT_TRUE(result.frozen);
   EXPECT_FALSE(result.formal_authorized);
+  EXPECT_EQ(result.authorization,
+            CargoGeometryAuthorization::POSITIVE_ONLY);
+}
+
+TEST(CargoGeometryFusionTest,
+     FullThicknessPairCannotGrantFormalBeforeFormalTrackLock) {
+  CargoGeometryFusion fusion;
+  auto value = frame(1.0, 1.04F, 1.00F);
+  value.formal_track_locked = false;
+  CargoFrozenGeometry result;
+  for (int index = 0; index < 5; ++index) {
+    value.stamp_sec = 1.0 + 0.1 * index;
+    result = fusion.update(value);
+  }
+  ASSERT_TRUE(result.frozen) << result.reason;
+  EXPECT_FALSE(result.formal_authorized);
+  EXPECT_EQ(result.authorization,
+            CargoGeometryAuthorization::POSITIVE_ONLY);
+}
+
+TEST(CargoGeometryFusionTest,
+     FiveStableThicknessFramesInEightTolerateOneOutlier) {
+  CargoGeometryFusion fusion;
+  auto value = frame(1.0);
+  value.thickness = {{
+      CargoThicknessSource::LIVE_VISIBLE_EXTENT,
+      1.50F, 0.12F, 0.9F, true,
+      CargoThicknessConstraint::LOWER_BOUND}};
+  CargoFrozenGeometry result;
+  for (int index = 0; index < 6; ++index) {
+    value.stamp_sec = 1.0 + 0.1 * index;
+    value.thickness.front().height_m = index == 2 ? 1.90F : 1.50F;
+    result = fusion.update(value);
+  }
+  ASSERT_TRUE(result.frozen) << result.reason;
+  EXPECT_EQ(result.confirm_frames, 5);
+  EXPECT_NEAR(result.height_m, 1.50F, 1.0e-6F);
+  EXPECT_EQ(result.authorization,
+            CargoGeometryAuthorization::POSITIVE_ONLY);
+}
+
+TEST(CargoGeometryFusionTest,
+     InitialDimensionsUseWindowMedianInsteadOfLastQualifiedFrame) {
+  CargoGeometryFusion fusion;
+  auto value = frame(1.0);
+  value.formal_track_locked = false;
+  value.thickness = {{
+      CargoThicknessSource::LIVE_VISIBLE_EXTENT,
+      1.50F, 0.12F, 0.9F, true,
+      CargoThicknessConstraint::LOWER_BOUND}};
+  CargoFrozenGeometry result;
+  for (int index = 0; index < 5; ++index) {
+    value.stamp_sec = 1.0 + 0.1 * index;
+    value.length_m = index == 4 ? 5.0F : 2.40F;
+    value.width_m = index == 4 ? 2.4F : 1.20F;
+    result = fusion.update(value);
+  }
+  ASSERT_TRUE(result.frozen) << result.reason;
+  EXPECT_NEAR(result.length_m, 2.40F, 1.0e-6F);
+  EXPECT_NEAR(result.width_m, 1.20F, 1.0e-6F);
+}
+
+TEST(CargoGeometryFusionTest,
+     LiveOnlyCandidateCannotFreezeWithoutStableWarningIdentity) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  config.shape_confirmation_window_frames = 2;
+  config.positive_only_confirm_frames = 2;
+  CargoGeometryFusion fusion(config);
+  auto live_only = frame(1.0);
+  live_only.formal_track_locked = false;
+  live_only.warning_track_stable = false;
+  live_only.thickness = {
+      {CargoThicknessSource::LIVE_VISIBLE_EXTENT,
+       1.50F, 0.12F, 0.9F, true}};
+
+  EXPECT_FALSE(fusion.update(live_only).frozen);
+  live_only.stamp_sec = 1.1;
+  const auto result = fusion.update(live_only);
+  EXPECT_FALSE(result.valid);
+  EXPECT_EQ(result.authorization, CargoGeometryAuthorization::PENDING);
   EXPECT_EQ(result.reason, "independent_thickness_sources_insufficient");
 }
 
@@ -161,6 +243,33 @@ TEST(CargoGeometryFusionTest,
   EXPECT_TRUE(result.formal_authorized);
   EXPECT_FALSE(result.degraded_live_only);
   EXPECT_EQ(result.independent_sources, 2U);
+}
+
+TEST(CargoGeometryFusionTest,
+     PositiveOnlyFramesCannotCountTowardInitialFormalFreeze) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 3;
+  config.positive_only_confirm_frames = 4;
+  config.shape_confirmation_window_frames = 8;
+  CargoGeometryFusion fusion(config);
+  auto value = frame(1.0);
+  value.thickness = {{
+      CargoThicknessSource::LIVE_VISIBLE_EXTENT,
+      1.50F, 0.12F, 0.9F, true,
+      CargoThicknessConstraint::LOWER_BOUND}};
+  for (int index = 0; index < 2; ++index) {
+    value.stamp_sec = 1.0 + 0.1 * index;
+    EXPECT_FALSE(fusion.update(value).frozen);
+  }
+  value = frame(1.2);
+  auto result = fusion.update(value);
+  EXPECT_FALSE(result.frozen);
+  EXPECT_EQ(result.confirm_frames, 1);
+  value.stamp_sec = 1.3;
+  EXPECT_FALSE(fusion.update(value).frozen);
+  value.stamp_sec = 1.4;
+  result = fusion.update(value);
+  EXPECT_TRUE(result.formal_authorized) << result.reason;
 }
 
 TEST(CargoGeometryFusionTest, ConfiguredFallbackIsNotIndependentEvidence) {
@@ -474,6 +583,23 @@ TEST(CargoGeometryFusionTest,
   const auto result = fusion.update(good);
   EXPECT_TRUE(result.frozen) << result.reason;
   EXPECT_EQ(result.shape_confirm_frames, 3);
+}
+
+TEST(CargoGeometryFusionTest,
+     ProvisionalTrackChangeCannotInheritGeometryWindow) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 3;
+  config.shape_confirmation_window_frames = 4;
+  CargoGeometryFusion fusion(config);
+  EXPECT_FALSE(fusion.update(frame(1.0)).frozen);
+  auto value = frame(1.1);
+  EXPECT_FALSE(fusion.update(value).frozen);
+  value.stamp_sec = 1.2;
+  value.track_segment_id = 2U;
+  const auto changed = fusion.update(value);
+  EXPECT_FALSE(changed.frozen);
+  EXPECT_EQ(changed.confirm_frames, 1);
+  EXPECT_EQ(changed.shape_confirm_frames, 1);
 }
 
 }  // namespace

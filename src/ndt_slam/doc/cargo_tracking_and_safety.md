@@ -26,10 +26,10 @@ max_z_step  = max_z_speed  * sensor_dt + margin
 
 ### 起吊前基线
 
-独立的 `CargoPreloadBaselineTracker` 在 `EMPTY`、车辆静止且定位可靠时直接读取静态
+独立的 `CargoPreloadBaselineTracker` 在 `EMPTY` 且定位可靠时直接读取静态
 高度场，不依赖被 EMPTY 门控关闭的实时货物检测。最近 8 帧中至少 5 帧稳定后保存
 顶面、局部支撑面、OBB、成员网格、地图代次和 MAD，并在 `EMPTY→LOADED` 生命周期中
-复用。它不读取 odom Z；NDT 只提供地图 XY 位姿和静止状态。锚点与静态组件距离超过
+复用。普通组件要求车辆静止；已经独立成熟、早于本次生命周期且身份/代次/几何连续一致的静态组件允许在移动中复核。它不读取 odom Z；NDT 只提供地图 XY 位姿和运动状态。锚点与静态组件距离超过
 0.5m、少于 6 个授权网格、组件不确定度超过 0.2m、地图代次/组件身份变化、时间回退
 或观测间隔超限都会清空该候选。
 
@@ -55,11 +55,11 @@ conservative_bottom = top_reference
 | 级别 | 形成条件 | 允许行为 |
 |---|---|---|
 | `PENDING` | 身份、形状或厚度约束不足 | 仅积累证据，正式状态保持 33 |
-| `POSITIVE_ONLY` | Track 已锁定，最近窗口内至少 5 帧稳健尺寸与保守底面成立 | 有真实危险可输出 17/18；无危险输出 33 |
+| `POSITIVE_ONLY` | 当前货物身份有效，最近 8 帧内至少 5 帧实测尺寸、LiDAR 厚度约束与保守底面稳定；不要求先取得双源正式锁 | 有真实危险可输出 17/18；无危险输出 33 |
 | `FORMAL` | 静态基线+露底复核，或静态基线+明确可见底边连续一致 | 可输出 14，并可剔除货物点和授权 MapCommit |
 
 没有静态地图时，锁定形状以不少于 50% 高度不确定度形成实时下界，满足多帧条件后
-可进入 `POSITIVE_ONLY`；没有锁定形状则保持 `PENDING`。地图代次变化会撤销旧的正式
+可进入 `POSITIVE_ONLY`；没有当前身份、成员点或稳定实测形状则保持 `PENDING`。地图代次变化会撤销旧的正式
 授权，必须用当前代次证据重建。
 
 ### Pending Envelope（待确认包围盒）
@@ -72,11 +72,19 @@ conservative_bottom = top_reference
 Pending 阶段仍评估实时障碍与静态地图风险并积累 track、来源和区域连续性证据。生产
 默认 `fusion_pending_warning_promotion_policy: evidence_backed_only`，只有身份、外部障碍
 Track、来源、几何和置信度门禁全部通过时，原始 Pending 正向风险才可升级为 17/18。
-该策略不影响已经通过稳健几何确认的 `POSITIVE_ONLY` 正向告警。
+该策略不影响已经通过稳健几何确认的 `POSITIVE_ONLY` 正向告警。首次名义长宽取最近
+8 帧合格观测的中值；长度或宽度 MAD 超过 0.30 m 时继续等待，不使用最后一帧直接
+冻结，从而避免高置信度合并簇造成框瞬时放大。
 
 Pending 路径永不授权 CLEAR，也不借用另一条路径的 track 身份。运行诊断分别输出
 `pending_live_warning_authorized` 和 `pending_static_warning_authorized`，不能再把旧的
 `pending_positive_warning_authorized` 原因串当作两条路径的共同证据。
+
+Pending 静态查询不再循环依赖正式起吊原点。若当前候选已通过同生命周期身份、成员点、
+形状和时效门禁，查询会按当前名义 OBB 与垂直区间排除货物自身地图层；外部成熟静态格
+仍需独立 3 帧确认。该几何自排除只授权正向风险，不能授权 CLEAR 或地图删除。诊断字段
+`pending_static_geometry_exclusion_authorized` 与
+`pending_static_self_exclusion_authorized` 用于区分几何排除和正式原点排除。
 
 ## LOST_HOLD 双生命周期
 

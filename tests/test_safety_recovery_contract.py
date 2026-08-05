@@ -371,6 +371,15 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "strict_health_window_verification_complete", NODE
         )
         self.assertIn(
+            "runtime_transient_monitored_by_relocalization_gate", NODE
+        )
+        self.assertIn(
+            "pending_static_self_exclusion_authorized", NODE
+        )
+        self.assertIn(
+            "publish_restored_layer(restored.objects_clean", NODE
+        )
+        self.assertIn(
             "!frame_ndt_accepted", NODE
         )
         self.assertIn(

@@ -89,10 +89,37 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         self.assertIn("result_.conservative_safety_margin_m", FUSION_SOURCE)
         self.assertNotIn('result_.reason = "thickness_source_disagreement"', FUSION_SOURCE)
 
+    def test_positive_only_is_reachable_without_formal_lock_and_stays_stable(self):
+        self.assertIn("bool warning_track_stable", FUSION_HEADER)
+        self.assertIn(
+            "frame.warning_track_stable && live", FUSION_SOURCE
+        )
+        self.assertIn("minimum_initial_shape_confidence: 0.55", CONFIG)
+        self.assertIn("maximum_initial_dimension_mad_m: 0.30", CONFIG)
+        self.assertIn("thickness_candidate_window_", FUSION_SOURCE)
+        self.assertIn(
+            "positive_only_confirmed_nominal_geometry", NODE
+        )
+        self.assertIn(
+            "hook_lock_.provisional_track_id", NODE
+        )
+
+    def test_pending_static_warning_has_safe_geometry_self_exclusion(self):
+        self.assertIn(
+            "pending_static_geometry_exclusion_authorized", NODE
+        )
+        self.assertIn(
+            "pending_static_self_exclusion_authorized", NODE
+        )
+        self.assertIn("query.cargo_self_exclusion_authorized", NODE)
+        self.assertIn("excluded_cargo_self_cells", NODE)
+
     def test_preload_baseline_is_empty_static_and_map_frame_only(self):
         self.assertIn("bool hook_empty", PRELOAD_HEADER)
         self.assertIn("bool localization_valid", PRELOAD_HEADER)
         self.assertIn("bool stationary", PRELOAD_HEADER)
+        self.assertIn("allow_moving_mature_static", PRELOAD_HEADER)
+        self.assertIn("independently_mature_static", PRELOAD_HEADER)
         self.assertIn("maximum_anchor_component_distance_m = 0.50F", PRELOAD_HEADER)
         self.assertIn("minimum_occupied_cells = 6U", PRELOAD_HEADER)
         self.assertIn("maximum_component_uncertainty_m = 0.20F", PRELOAD_HEADER)

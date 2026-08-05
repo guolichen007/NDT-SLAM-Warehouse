@@ -15,6 +15,7 @@ bool validConfig(const CargoGeometryFusionConfig& config) {
           config.minimum_confirm_frames &&
       config.shape_confirmation_window_frames >=
           config.positive_only_confirm_frames &&
+      config.maximum_initial_dimension_mad_m > 0.0F &&
       std::isfinite(config.positive_only_uncertainty_floor_m) &&
       config.positive_only_uncertainty_floor_m > 0.0F &&
       config.positive_only_confirm_frames > 0 &&
@@ -30,6 +31,8 @@ bool validConfig(const CargoGeometryFusionConfig& config) {
       config.minimum_live_shape_confidence_for_expand >= 0.0F &&
       config.minimum_live_shape_confidence_for_expand <= 1.0F &&
       config.minimum_live_dimension_support > 0U &&
+      config.minimum_initial_shape_confidence >= 0.0F &&
+      config.minimum_initial_shape_confidence <= 1.0F &&
       config.minimum_live_shape_confidence_for_shrink >= 0.0F &&
       config.minimum_live_shape_confidence_for_shrink <= 1.0F &&
       config.minimum_physical_length_m > 0.0F &&
@@ -44,7 +47,8 @@ bool validConfig(const CargoGeometryFusionConfig& config) {
 }
 
 bool validDimensionEvidence(const CargoGeometryFrame& frame,
-                            const CargoGeometryFusionConfig& config) {
+                            const CargoGeometryFusionConfig& config,
+                            float minimum_shape_confidence) {
   return frame.footprint_valid &&
       std::isfinite(frame.length_m) && frame.length_m > 0.0F &&
       std::isfinite(frame.width_m) && frame.width_m > 0.0F &&
@@ -53,7 +57,7 @@ bool validDimensionEvidence(const CargoGeometryFrame& frame,
           config.minimum_live_dimension_support &&
       std::isfinite(frame.dimension_shape_confidence) &&
       frame.dimension_shape_confidence >=
-          config.minimum_live_shape_confidence_for_shrink;
+          minimum_shape_confidence;
 }
 
 struct WeightedHeight {
@@ -77,6 +81,23 @@ float weightedMedian(std::vector<WeightedHeight> values) {
     if (cumulative >= 0.5F * total) return value.height;
   }
   return values.empty() ? 0.0F : values.back().height;
+}
+
+float finiteMedian(std::vector<float> values) {
+  if (values.empty()) return 0.0F;
+  const auto middle = values.begin() +
+      static_cast<std::ptrdiff_t>(values.size() / 2U);
+  std::nth_element(values.begin(), middle, values.end());
+  return *middle;
+}
+
+float finiteMad(const std::vector<float>& values, float median) {
+  std::vector<float> residuals;
+  residuals.reserve(values.size());
+  for (const float value : values) {
+    if (std::isfinite(value)) residuals.push_back(std::abs(value - median));
+  }
+  return finiteMedian(std::move(residuals));
 }
 
 }  // namespace
@@ -136,9 +157,10 @@ void CargoGeometryFusion::setConfig(
 
 void CargoGeometryFusion::reset() {
   result_ = CargoFrozenGeometry{};
-  pending_height_m_ = 0.0F;
-  pending_uncertainty_m_ = 1.0F;
-  pending_valid_ = false;
+  thickness_confirm_track_segment_id_ = 0U;
+  thickness_candidate_window_.clear();
+  thickness_confirmation_mode_initialized_ = false;
+  thickness_confirmation_formal_mode_ = false;
   last_stamp_sec_ = 0.0;
   shrink_confirm_count_ = 0;
   shrink_track_segment_id_ = 0U;
@@ -149,6 +171,8 @@ void CargoGeometryFusion::reset() {
   shape_confirm_count_ = 0;
   shape_confirm_track_segment_id_ = 0U;
   shape_quality_window_.clear();
+  initial_length_window_.clear();
+  initial_width_window_.clear();
   formal_promotion_confirm_count_ = 0;
   formal_promotion_track_segment_id_ = 0U;
 }
@@ -169,9 +193,11 @@ CargoFrozenGeometry CargoGeometryFusion::update(
       frame.stamp_sec - previous_stamp_sec >
           config_.maximum_observation_gap_sec) {
     result_.confirm_frames = 0;
-    pending_valid_ = false;
+    thickness_candidate_window_.clear();
     shape_confirm_count_ = 0;
     shape_quality_window_.clear();
+    initial_length_window_.clear();
+    initial_width_window_.clear();
   }
   if (frame.cargo_lifecycle_id == 0U) {
     result_.valid = false;
@@ -259,7 +285,9 @@ CargoFrozenGeometry CargoGeometryFusion::update(
       const bool promotion_consistent =
           frame.formal_track_locked &&
           frame.center_valid && frame.center.allFinite() &&
-          validDimensionEvidence(frame, config_) &&
+          validDimensionEvidence(
+              frame, config_,
+              config_.minimum_live_shape_confidence_for_shrink) &&
           (static_revealed_consistent || static_live_consistent);
       formal_promotion_confirm_count_ = promotion_consistent
           ? formal_promotion_confirm_count_ + 1 : 0;
@@ -342,7 +370,9 @@ CargoFrozenGeometry CargoGeometryFusion::update(
           result_.conservative_safety_margin_m;
     }
     const bool dimension_quality_valid =
-        validDimensionEvidence(frame, config_);
+        validDimensionEvidence(
+            frame, config_,
+            config_.minimum_live_shape_confidence_for_shrink);
     if (dimension_quality_valid) {
       const float length_floor = std::max(
           config_.minimum_physical_length_m,
@@ -443,16 +473,55 @@ CargoFrozenGeometry CargoGeometryFusion::update(
     shape_confirm_track_segment_id_ = frame.track_segment_id;
     shape_confirm_count_ = 0;
     shape_quality_window_.clear();
+    initial_length_window_.clear();
+    initial_width_window_.clear();
   }
-  shape_quality_window_.push_back(validDimensionEvidence(frame, config_));
+  if (thickness_confirm_track_segment_id_ != frame.track_segment_id) {
+    thickness_confirm_track_segment_id_ = frame.track_segment_id;
+    thickness_candidate_window_.clear();
+  }
+  thickness_candidate_window_.push_back(
+      std::numeric_limits<float>::quiet_NaN());
+  while (thickness_candidate_window_.size() >
+         static_cast<std::size_t>(
+             config_.shape_confirmation_window_frames)) {
+    thickness_candidate_window_.pop_front();
+  }
+  const bool initial_dimension_valid = validDimensionEvidence(
+      frame, config_, config_.minimum_initial_shape_confidence);
+  shape_quality_window_.push_back(initial_dimension_valid);
+  initial_length_window_.push_back(initial_dimension_valid
+      ? frame.length_m : std::numeric_limits<float>::quiet_NaN());
+  initial_width_window_.push_back(initial_dimension_valid
+      ? frame.width_m : std::numeric_limits<float>::quiet_NaN());
   while (shape_quality_window_.size() >
          static_cast<std::size_t>(
              config_.shape_confirmation_window_frames)) {
     shape_quality_window_.pop_front();
+    initial_length_window_.pop_front();
+    initial_width_window_.pop_front();
   }
   shape_confirm_count_ = static_cast<int>(std::count(
       shape_quality_window_.begin(), shape_quality_window_.end(), true));
   result_.shape_confirm_frames = shape_confirm_count_;
+  std::vector<float> initial_lengths;
+  std::vector<float> initial_widths;
+  initial_lengths.reserve(initial_length_window_.size());
+  initial_widths.reserve(initial_width_window_.size());
+  for (const float value : initial_length_window_) {
+    if (std::isfinite(value)) initial_lengths.push_back(value);
+  }
+  for (const float value : initial_width_window_) {
+    if (std::isfinite(value)) initial_widths.push_back(value);
+  }
+  const float robust_initial_length = finiteMedian(initial_lengths);
+  const float robust_initial_width = finiteMedian(initial_widths);
+  const bool initial_dimensions_stable =
+      !initial_lengths.empty() && !initial_widths.empty() &&
+      finiteMad(initial_lengths, robust_initial_length) <=
+          config_.maximum_initial_dimension_mad_m &&
+      finiteMad(initial_widths, robust_initial_width) <=
+          config_.maximum_initial_dimension_mad_m;
 
   if (!frame.center_valid || !frame.center.allFinite() ||
       !frame.footprint_valid || !std::isfinite(frame.length_m) ||
@@ -540,20 +609,39 @@ CargoFrozenGeometry CargoGeometryFusion::update(
       best_static->constraint ==
           CargoThicknessConstraint::FULL_MEASUREMENT && live_is_full &&
       mutually_consistent(best_static, live);
-  const bool has_formal_pair = static_revealed_formal || static_live_formal;
+  const bool has_formal_pair = frame.formal_track_locked &&
+      (static_revealed_formal || static_live_formal);
   const bool source_conflict = best_static && live &&
       live->height > best_static->height +
           config_.maximum_source_disagreement_m;
   const bool lower_bound_compatible = best_static && live &&
+      best_static->constraint ==
+          CargoThicknessConstraint::FULL_MEASUREMENT &&
       live->constraint == CargoThicknessConstraint::LOWER_BOUND &&
       live->height <= best_static->height +
           config_.maximum_source_disagreement_m;
-  const bool positive_only_candidate = frame.formal_track_locked && live &&
+  const bool full_measurement_compatible = best_static && live &&
+      best_static->constraint ==
+          CargoThicknessConstraint::FULL_MEASUREMENT &&
+      live->constraint == CargoThicknessConstraint::FULL_MEASUREMENT &&
+      std::abs(live->height - best_static->height) <=
+          config_.maximum_source_disagreement_m;
+  const bool positive_only_candidate = frame.warning_track_stable && live &&
       ((!best_static &&
         config_.allow_positive_only_without_static_baseline) ||
        (best_static && lower_bound_compatible) ||
+       full_measurement_compatible ||
        (source_conflict &&
         config_.allow_positive_only_on_source_conflict));
+
+  if (!thickness_confirmation_mode_initialized_ ||
+      thickness_confirmation_formal_mode_ != has_formal_pair) {
+    thickness_confirmation_mode_initialized_ = true;
+    thickness_confirmation_formal_mode_ = has_formal_pair;
+    thickness_candidate_window_.clear();
+    thickness_candidate_window_.push_back(
+        std::numeric_limits<float>::quiet_NaN());
+  }
 
   if (!has_formal_pair && !positive_only_candidate) {
     result_.valid = false;
@@ -562,7 +650,6 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         ? "thickness_full_measurement_confirmation_pending"
         : "independent_thickness_sources_insufficient";
     result_.confirm_frames = 0;
-    pending_valid_ = false;
     return result_;
   }
 
@@ -633,17 +720,41 @@ CargoFrozenGeometry CargoGeometryFusion::update(
     result_.valid = false;
     result_.reason = "fused_thickness_uncertainty_exceeded";
     result_.confirm_frames = 0;
-    pending_valid_ = false;
     return result_;
   }
-
-  const bool consistent = pending_valid_ &&
-      std::abs(fused - pending_height_m_) <=
-          0.5F * config_.maximum_source_disagreement_m;
-  result_.confirm_frames = consistent ? result_.confirm_frames + 1 : 1;
-  pending_height_m_ = fused;
-  pending_uncertainty_m_ = uncertainty;
-  pending_valid_ = true;
+  thickness_candidate_window_.back() = fused;
+  std::vector<float> finite_candidates;
+  finite_candidates.reserve(thickness_candidate_window_.size());
+  for (const float candidate : thickness_candidate_window_) {
+    if (std::isfinite(candidate)) finite_candidates.push_back(candidate);
+  }
+  const float robust_fused = finiteMedian(finite_candidates);
+  const float stability_tolerance =
+      0.5F * config_.maximum_source_disagreement_m;
+  const bool current_stable =
+      std::abs(fused - robust_fused) <= stability_tolerance;
+  result_.confirm_frames = current_stable
+      ? static_cast<int>(std::count_if(
+            finite_candidates.begin(), finite_candidates.end(),
+            [&](float candidate) {
+              return std::abs(candidate - robust_fused) <=
+                  stability_tolerance;
+            }))
+      : 0;
+  if (current_stable) {
+    fused = robust_fused;
+    if (has_formal_pair) {
+      lower_bound = std::max(
+          config_.minimum_height_m, fused - uncertainty);
+      upper_bound = std::min(
+          config_.maximum_height_m, fused + uncertainty);
+    } else {
+      lower_bound = fused;
+      upper_bound = std::min(
+          config_.maximum_height_m,
+          std::max(upper_bound, fused + uncertainty));
+    }
+  }
   result_.accepted_sources.clear();
   for (const auto& value : selected_values) {
     result_.accepted_sources.push_back(value.source);
@@ -666,7 +777,8 @@ CargoFrozenGeometry CargoGeometryFusion::update(
                     ? "positive_only_lower_bound_confirmation_pending"
                     : "positive_only_live_confirmation_pending"));
   if (result_.confirm_frames >= required_confirm_frames &&
-      shape_confirm_count_ >= required_confirm_frames) {
+      shape_confirm_count_ >= required_confirm_frames &&
+      initial_dimensions_stable) {
     result_.frozen = true;
     result_.valid = true;
     result_.formal_authorized = has_formal_pair;
@@ -676,12 +788,12 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         : CargoGeometryAuthorization::POSITIVE_ONLY;
     result_.center = frame.center;
     result_.length_m = std::max(
-        std::max(frame.length_m,
+        std::max(robust_initial_length,
                  config_.formal_transition_start_length_m),
         std::max(config_.minimum_physical_length_m,
                  frame.static_length_lower_bound_m));
     result_.width_m = std::max(
-        std::max(frame.width_m,
+        std::max(robust_initial_width,
                  config_.formal_transition_start_width_m),
         std::max(config_.minimum_physical_width_m,
                  frame.static_width_lower_bound_m));
@@ -718,9 +830,14 @@ CargoFrozenGeometry CargoGeometryFusion::update(
     shrink_track_segment_id_ = frame.track_segment_id;
     expand_track_segment_id_ = frame.track_segment_id;
   } else if (result_.confirm_frames >= required_confirm_frames) {
-    result_.reason = has_formal_pair
-        ? "formal_shape_confirmation_pending"
-        : "positive_only_shape_confirmation_pending";
+    if (shape_confirm_count_ >= required_confirm_frames &&
+        !initial_dimensions_stable) {
+      result_.reason = "initial_dimension_mad_exceeded";
+    } else {
+      result_.reason = has_formal_pair
+          ? "formal_shape_confirmation_pending"
+          : "positive_only_shape_confirmation_pending";
+    }
   }
   return result_;
 }

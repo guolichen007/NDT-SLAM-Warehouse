@@ -55,6 +55,31 @@ TEST(CargoPreloadBaselineTracker, DoesNotUseLoadedOrMovingFrames) {
   EXPECT_FALSE(tracker.update(value).valid);
 }
 
+TEST(CargoPreloadBaselineTracker,
+     MaturePreLifecycleMapComponentCanBuildWhileMoving) {
+  CargoPreloadBaselineTracker tracker;
+  CargoPreloadBaselineResult result;
+  for (int index = 0; index < 5; ++index) {
+    auto value = input(1.0 + 0.1 * index);
+    value.stationary = false;
+    value.independently_mature_static = true;
+    result = tracker.update(value);
+  }
+  EXPECT_TRUE(result.ready) << result.reason;
+  EXPECT_NEAR(result.thickness_m, 1.0F, 1.0e-6F);
+}
+
+TEST(CargoPreloadBaselineTracker,
+     UnverifiedMovingComponentCannotBuildBaseline) {
+  CargoPreloadBaselineTracker tracker;
+  auto value = input(1.0);
+  value.stationary = false;
+  value.independently_mature_static = false;
+  const CargoPreloadBaselineResult result = tracker.update(value);
+  EXPECT_FALSE(result.valid);
+  EXPECT_EQ(result.reason, "base_not_stationary_or_mature");
+}
+
 TEST(CargoPreloadBaselineTracker, GapAndRollbackCannotInheritReadiness) {
   CargoPreloadBaselineTracker tracker;
   for (int index = 0; index < 4; ++index) {

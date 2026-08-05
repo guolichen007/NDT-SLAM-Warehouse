@@ -122,10 +122,12 @@ relocalization:
   confirm_translation_m: 0.35
   confirm_yaw_deg: 5.0
   # A global candidate is only a seed. Existing-map startup and every
-  # recovery remain quarantined until 18 of a 20-frame window pass. At most
-  # two isolated failures are tolerated; temporal rollback/gaps still reset it.
-  health_required_frames: 20
-  health_minimum_qualified_frames: 18
+  # recovery remain quarantined until 6 of a recent 8-frame window pass. At
+  # most two isolated failures are tolerated; temporal rollback/gaps still
+  # reset admission. HEALTHY runtime transients use the multi-frame
+  # relocalization gate instead of revoking on one weak frame.
+  health_required_frames: 8
+  health_minimum_qualified_frames: 6
   health_maximum_consecutive_failures: 2
   health_max_fitness: 0.35
   health_max_innovation_m: 0.75
@@ -909,9 +911,12 @@ static_origin_component:
   minimum_candidate_overlap: 0.15
 
 # Independent EMPTY-state pickup baseline. It reads only authoritative
-# map-frame top/support layers while the crane is stationary and localization
-# is healthy. Odom Z is deliberately excluded from thickness estimation.
+# map-frame top/support layers while localization is healthy. A component that
+# is already mature and predates the cargo lifecycle may also be sampled while
+# moving; its identity/generation/geometry still must remain stable. Odom Z is
+# deliberately excluded from thickness estimation.
 cargo_preload_baseline:
+  allow_moving_mature_static: true
   minimum_confirm_frames: 5
   window_frames: 8
   maximum_observation_gap_sec: 0.5
@@ -952,6 +957,8 @@ cargo_geometry_fusion:
   # Five good dimension observations are required inside the latest eight;
   # a single partial scan no longer erases the whole same-track window.
   shape_confirmation_window_frames: 8
+  # Freeze the median footprint only when the recent dimensions are compact.
+  maximum_initial_dimension_mad_m: 0.30
   maximum_observation_gap_sec: 0.5
   maximum_source_disagreement_m: 0.25
   maximum_fused_uncertainty_m: 0.20
@@ -970,6 +977,9 @@ cargo_geometry_fusion:
   conservative_expand_confirm_frames: 8
   minimum_live_shape_confidence_for_expand: 0.85
   minimum_live_dimension_support: 30
+  # Initial positive-warning geometry is already protected by current cargo
+  # identity and 5/8 temporal consistency. Frozen shrink remains stricter.
+  minimum_initial_shape_confidence: 0.55
   minimum_live_shape_confidence_for_shrink: 0.75
   minimum_physical_length_m: 0.30
   minimum_physical_width_m: 0.20

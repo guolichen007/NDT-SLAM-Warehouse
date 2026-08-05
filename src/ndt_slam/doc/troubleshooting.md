@@ -33,7 +33,7 @@
 `supervisor_run_id`。旧代次请求会被明确忽略；systemd 当前停用。
 
 若持续 Code 31，查看 `/ndt_slam/localization_health`：`MAP_INVALID` 表示 manifest、
-地图 UUID、瓦片大小或 SHA-256 校验失败；`VERIFYING` 必须在 20 帧窗口内至少 18 帧
+地图 UUID、瓦片大小或 SHA-256 校验失败；`VERIFYING` 必须在最近 8 帧内至少 6 帧
 满足严格 fitness/EKF/可观测性门限，且不能连续失败超过 2 帧；`WAITING_STATIONARY`
 表示节点和健康流仍正常，系统在等待
 下一次运动到静止周期，不应人工循环重启。
@@ -58,7 +58,7 @@
 
 先区分三个状态，不要把旧日志中的 `pending_positive_warning_authorized` 当作几何冻结：
 
-- `PENDING`：检查 EMPTY 阶段是否静止、定位是否可靠、锚点到组件是否 ≤0.5m，以及
+- `PENDING`：检查定位是否可靠、锚点到组件是否 ≤0.5m、普通组件在 EMPTY 阶段是否静止；移动中组件还必须已独立成熟且早于当前生命周期，以及
   `cargo_preload_baseline_reason`；
 - `POSITIVE_ONLY`：说明可靠正向避障已经可用，但完整厚度尚未复核；无危险输出 33
   是预期行为；

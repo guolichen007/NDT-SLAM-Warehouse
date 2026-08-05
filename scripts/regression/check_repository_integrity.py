@@ -167,6 +167,8 @@ def pending_origin_contract_failures() -> list[str]:
 
     for token in (
             "CargoPreloadBaselineTracker",
+            "allow_moving_mature_static",
+            "independently_mature_static",
             "minimum_confirm_frames = 5",
             "window_frames = 8",
             "maximum_anchor_component_distance_m = 0.50F",
@@ -651,7 +653,9 @@ def static_evidence_contract_failures() -> list[str]:
         "static_map_immature_gap_retention_ratio: 0.50",
         "allow_positive_only_without_static_baseline",
         "geometry_frozen_positive_only_live_bound",
-        "frame.formal_track_locked",
+        "frame.warning_track_stable",
+        "pending_static_self_exclusion_authorized",
+        "pending_static_geometry_exclusion_authorized",
         "cargo_frozen_geometry_.formal_authorized &&",
         "StableLiveOnlyHeightFormsPositiveOnlyWithoutFormalAuthority",
         "fusion_pending_warning_promotion_policy: evidence_backed_only",
