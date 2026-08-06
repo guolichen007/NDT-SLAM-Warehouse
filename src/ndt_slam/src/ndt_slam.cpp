@@ -11104,6 +11104,8 @@ void NdtSlamNode::updateLocalizationHealth(
         if (transitioned) {
             publishRelocalizationStatus(
                 "IDLE", "strict_health_window_verification_complete");
+            // Replay buffered scans now that we have verified pose.
+            replayRecoveryScanBuffer(stamp);
         }
         writeLocalizationCheckpoint(stamp);
         publishLocalizationHealth(stamp);
@@ -11194,6 +11196,53 @@ void NdtSlamNode::updateLocalizationHealth(
         if (stationary_known) localization_previous_stationary_ = stationary;
     }
     publishLocalizationHealth(stamp);
+}
+
+void NdtSlamNode::replayRecoveryScanBuffer(const ros::Time& recovery_stamp) {
+    if (recovery_scan_buffer_.empty()) return;
+
+    const double recovery_sec = recovery_stamp.toSec();
+    std::size_t replayed = 0U;
+    std::size_t discarded = 0U;
+
+    // Only replay frames that are within the max age and have a trusted pose.
+    while (!recovery_scan_buffer_.empty()) {
+        const auto& entry = recovery_scan_buffer_.front();
+        const double age = recovery_sec - entry.stamp.toSec();
+        if (age > recovery_buffer_max_age_sec_) {
+            discarded++;
+            recovery_scan_buffer_.pop_front();
+            continue;
+        }
+
+        // Use current accepted pose to transform and add to local_map_.
+        // This is an approximation — the exact pose at scan time is unknown.
+        if (last_accepted_pose_.translation().allFinite() &&
+            last_accepted_pose_.so3().matrix().allFinite() &&
+            entry.cloud && !entry.cloud->empty()) {
+            pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::transformPointCloud(
+                *entry.cloud, *transformed,
+                last_accepted_pose_.matrix().cast<float>());
+            *local_map_ += *transformed;
+            ++local_map_version_;
+            replayed++;
+        }
+        recovery_scan_buffer_.pop_front();
+    }
+
+    recovery_buffer_replay_count_.fetch_add(
+        replayed, std::memory_order_relaxed);
+
+    if (replayed > 0 || discarded > 0) {
+        ROS_INFO("[RecoveryBuffer] replay: %zu frames added to local_map, "
+                 "%zu discarded, %zu remaining",
+                 replayed, discarded, recovery_scan_buffer_.size());
+    }
+
+    // Clear any remaining entries.
+    recovery_scan_buffer_.clear();
 }
 
 void NdtSlamNode::publishRelocalizationSafetyInvalid(

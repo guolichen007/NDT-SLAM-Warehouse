@@ -562,6 +562,9 @@ private:
     std::atomic<uint64_t> recovery_buffer_overflow_count_{0};
     std::atomic<uint64_t> recovery_buffer_replay_count_{0};
 
+    // 定位恢复后重放缓存的 scan。
+    void replayRecoveryScanBuffer(const ros::Time& recovery_stamp);
+
     // ========== 调试配置 ==========
     struct DebugConfig {
         bool publish_runtime_path = false;
