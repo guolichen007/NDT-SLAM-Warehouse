@@ -67,6 +67,20 @@ struct CraneMotionEKFConfig {
     bool reject_high_fitness = true;
     double ndt_fitness_reject_threshold = 0.30;
     double ndt_fitness_recover_threshold = 0.12;
+
+    // ========== 运行时 Yaw 锁存 ==========
+    // 固定轨道天车运行时车体 yaw 不应自由变化。
+    // HEALTHY 正常运行时 NDT 只更新 XY；Z/roll/pitch/yaw 使用 accepted pose。
+    bool runtime_yaw_latched = true;
+    double maximum_runtime_yaw_step_deg = 0.30;
+    double maximum_runtime_yaw_deviation_deg = 1.00;
+    int relocalization_yaw_required_frames = 6;
+
+    // ========== 连续退化门限 ==========
+    // 连续坏帧数超过此值后进入 RELOCALIZING 而非 TRANSIENT_DEGRADED。
+    int max_consecutive_degraded_frames = 3;
+    // maybeRecover 的协方差膨胀因子（替代 P 重置）。
+    double recovery_covariance_inflation = 4.0;
 };
 
 struct CraneMotionEKFStatus {
@@ -103,6 +117,14 @@ struct CraneMotionEKFStatus {
     int reject_innovation_frames = 0;
 
     std::string reject_reason = "NONE";
+
+    // ========== Yaw 锁存状态 ==========
+    bool yaw_latched = false;
+    double latched_yaw_rad = 0.0;
+    int yaw_confirm_frames = 0;
+
+    // ========== 连续退化跟踪 ==========
+    int consecutive_degraded_frames = 0;
 };
 
 class CraneMotionEKF {
@@ -155,6 +177,27 @@ public:
     // fix/588-runtime-localization-stable: 只清速度，不改位置
     void applyZeroVelocityConstraint();
 
+    // ========== Yaw 锁存 ==========
+    // 运行时检查 NDT yaw 是否在锁存范围内。返回 true 表示 yaw 可接受。
+    bool checkRuntimeYaw(double ndt_yaw_rad, double dt);
+
+    // 尝试锁存 yaw。需要连续多帧一致后才锁存。
+    bool tryLatchYaw(double ndt_yaw_rad);
+
+    // 解锁 yaw（进入 RELOCALIZING 时调用）。
+    void unlatchYaw();
+
+    // ========== 候选拒绝（替代裁剪提交） ==========
+    // 当 candidate 超过物理上限时，返回 bounded prediction 而非裁剪后的 candidate。
+    Sophus::SE3d rejectCandidate(
+        const Eigen::Vector4d& x_pred,
+        const Eigen::Matrix4d& P_pred,
+        const Eigen::Vector2d& innovation,
+        double raw_innov_norm,
+        const Sophus::SE3d& pose_template,
+        const ros::Time& stamp,
+        const std::string& reason);
+
 private:
     void predict(double dt, Eigen::Vector4d& x_pred, Eigen::Matrix4d& P_pred);
     void maybeRecover(const std::string& reason);
@@ -177,10 +220,21 @@ private:
     Eigen::Vector4d x_ = Eigen::Vector4d::Zero();   // [x, y, vx, vy]
     Eigen::Matrix4d P_ = Eigen::Matrix4d::Identity();
 
+    // 最后一个被完全接受的测量状态（output_limited=false, innovation_accepted）。
+    Eigen::Vector4d last_accepted_x_ = Eigen::Vector4d::Zero();
+    Eigen::Matrix4d last_accepted_P_ = Eigen::Matrix4d::Identity();
+    bool has_last_accepted_ = false;
+
     bool initialized_ = false;
     ros::Time last_stamp_;
 
     double last_good_fitness_ = 0.05;
+
+    // Yaw 锁存内部状态
+    double candidate_yaw_rad_ = 0.0;
+    int yaw_consistent_count_ = 0;
+    double last_accepted_yaw_rad_ = 0.0;
+    bool yaw_ever_latched_ = false;
 };
 
 }  // namespace ndt_slam

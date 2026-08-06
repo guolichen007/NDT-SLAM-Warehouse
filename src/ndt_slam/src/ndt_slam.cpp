@@ -6109,6 +6109,64 @@ void NdtSlamNode::processCloudThread() {
                         logSO3GuardPose(
                             "ekf_pose", processing_frame_index, ekf_pose);
 
+                        // ========== Yaw 锁存检查 ==========
+                        if (runtime_yaw_latched_ && crane_motion_ekf_enabled_ &&
+                            crane_motion_ekf_.initialized() && ndt_accepted) {
+                            double ndt_yaw = 0.0, ndt_roll = 0.0, ndt_pitch = 0.0;
+                            so3ToRpy(new_pose.so3(), ndt_roll, ndt_pitch, ndt_yaw);
+
+                            if (crane_motion_ekf_.status().yaw_latched) {
+                                // 已锁存：检查单帧 yaw 是否在允许范围内。
+                                if (!crane_motion_ekf_.checkRuntimeYaw(
+                                        ndt_yaw, last_sensor_dt_)) {
+                                    // Yaw 越界：拒绝此帧，使用 prediction。
+                                    ROS_WARN_THROTTLE(
+                                        1.0,
+                                        "[YawLatch] yaw deviated: ndt=%.3f deg latched=%.3f deg",
+                                        ndt_yaw * 180.0 / M_PI,
+                                        crane_motion_ekf_.status().latched_yaw_rad * 180.0 / M_PI);
+                                    yaw_candidate_reject_count_.fetch_add(
+                                        1, std::memory_order_relaxed);
+                                    ndt_accepted = false;
+                                    frame_ndt_accepted = false;
+                                    frame_prediction_only = true;
+                                    frame_registration_quality_valid = false;
+
+                                    if (crane_motion_ekf_enabled_ &&
+                                        crane_motion_ekf_.initialized()) {
+                                        new_pose = crane_motion_ekf_.predictWithoutMeasurement(
+                                            current_pose_, msg->header.stamp,
+                                            "YAW_DEVIATION");
+                                        diag_ekf_pose = new_pose;
+                                    }
+                                } else {
+                                    // Yaw 正常：更新锁存的 yaw（平滑跟踪）。
+                                    crane_motion_ekf_.tryLatchYaw(ndt_yaw);
+                                    accepted_yaw_rad_ = crane_motion_ekf_.status().latched_yaw_rad;
+                                    accepted_yaw_valid_ = true;
+                                }
+                            } else {
+                                // 未锁存：尝试锁存 yaw。
+                                if (crane_motion_ekf_.tryLatchYaw(ndt_yaw)) {
+                                    accepted_yaw_rad_ = crane_motion_ekf_.status().latched_yaw_rad;
+                                    accepted_yaw_valid_ = true;
+                                    ROS_INFO("[YawLatch] latched at %.3f deg",
+                                             accepted_yaw_rad_ * 180.0 / M_PI);
+                                }
+                            }
+                        }
+
+                        // ========== Accepted Pose Generation 更新 ==========
+                        if (ndt_accepted &&
+                            frame_fitness_decision.allow_measurement &&
+                            !frame_prediction_only &&
+                            frame_registration_quality_valid) {
+                            last_accepted_pose_ = new_pose;
+                            accepted_pose_generation_++;
+                            accepted_pose_advance_count_.fetch_add(
+                                1, std::memory_order_relaxed);
+                        }
+
                         // NDT 健康日志（每秒一次）
                         if (debug_cfg_.debug_ndt_health) {
                             Eigen::Vector3d raw_pos = new_pose.translation();
@@ -6260,6 +6318,43 @@ void NdtSlamNode::processCloudThread() {
                           runtimeMotionStateName(
                               stationary_motion_decision_.state),
                           stationary_motion_decision_.reason.c_str());
+
+                // ========== Recovery Scan Buffer ==========
+                // 拒绝帧不直接写 trusted local map，缓存原始扫描。
+                // 定位恢复后根据已验证的 pose history 重放，超时丢弃。
+                const bool quarantine_reject =
+                    !quarantine_alignment_ready ||
+                    !frame_ndt_accepted ||
+                    !frame_registration_quality_valid;
+                if (quarantine_reject &&
+                    registration_build_result.valid &&
+                    registration_cloud && !registration_cloud->empty()) {
+                    RecoveryScanEntry entry;
+                    entry.stamp = msg->header.stamp;
+                    entry.cloud.reset(new pcl::PointCloud<pcl::PointXYZ>(*registration_cloud));
+                    entry.reject_reason =
+                        crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()
+                            ? crane_motion_ekf_.status().reject_reason
+                            : "quarantine";
+                    recovery_scan_buffer_.push_back(std::move(entry));
+
+                    // 限制缓冲区大小。
+                    while (recovery_scan_buffer_.size() >
+                           recovery_buffer_max_frames_) {
+                        recovery_scan_buffer_.pop_front();
+                        recovery_buffer_overflow_count_.fetch_add(
+                            1, std::memory_order_relaxed);
+                    }
+
+                    // 清理超时条目（超过 max_age）。
+                    const double now_sec = msg->header.stamp.toSec();
+                    while (!recovery_scan_buffer_.empty() &&
+                           now_sec -
+                                   recovery_scan_buffer_.front().stamp.toSec() >
+                               recovery_buffer_max_age_sec_) {
+                        recovery_scan_buffer_.pop_front();
+                    }
+                }
             } else if (move_dist > 0.5 || move_rot > 0.08 ||
                        frames_since_last_update > 15) {
                 pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(
@@ -12698,7 +12793,7 @@ bool NdtSlamNode::publishPersistentDisplayMapFromTiles() {
     const MapPublicationSnapshot restored =
         captureMapPublicationSnapshot(0U, message.header.stamp);
     const auto publish_restored_layer = [this, &restored](
-        const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud,
         const ros::Publisher& publisher) {
         if (!cloud) return;
         sensor_msgs::PointCloud2 layer_message;

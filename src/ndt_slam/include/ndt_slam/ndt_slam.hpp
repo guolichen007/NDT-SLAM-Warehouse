@@ -531,6 +531,37 @@ private:
     int localization_recovery_attempts_ = 0;
     std::uint64_t localization_ekf_recovery_count_ = 0U;
 
+    // ========== Yaw 锁存 ==========
+    // 固定轨道天车运行时车体 yaw 不应自由变化。
+    // HEALTHY 正常运行时 NDT 只更新 XY，yaw 使用 accepted pose。
+    bool runtime_yaw_latched_ = true;
+    double accepted_yaw_rad_ = 0.0;
+    bool accepted_yaw_valid_ = false;
+
+    // ========== Accepted Pose Generation ==========
+    // 每次完全接受的测量位姿递增。所有地图层/odom/TF/marker 必须绑定同一 generation。
+    std::uint64_t accepted_pose_generation_ = 0U;
+    Sophus::SE3d last_accepted_pose_;
+
+    // ========== Recovery Scan Buffer ==========
+    // 拒绝帧不直接写 trusted local map，只缓存原始扫描。
+    // 定位恢复后，根据已验证的 pose history 重放或丢弃。
+    struct RecoveryScanEntry {
+        ros::Time stamp;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+        std::string reject_reason;
+    };
+    std::deque<RecoveryScanEntry> recovery_scan_buffer_;
+    double recovery_buffer_max_age_sec_ = 3.0;
+    std::size_t recovery_buffer_max_frames_ = 60;
+
+    // ========== 诊断计数器 ==========
+    std::atomic<uint64_t> nonphysical_rejected_count_{0};
+    std::atomic<uint64_t> yaw_candidate_reject_count_{0};
+    std::atomic<uint64_t> accepted_pose_advance_count_{0};
+    std::atomic<uint64_t> recovery_buffer_overflow_count_{0};
+    std::atomic<uint64_t> recovery_buffer_replay_count_{0};
+
     // ========== 调试配置 ==========
     struct DebugConfig {
         bool publish_runtime_path = false;

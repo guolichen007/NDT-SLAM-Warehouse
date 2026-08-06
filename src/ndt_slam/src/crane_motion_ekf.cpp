@@ -7,10 +7,17 @@ namespace ndt_slam {
 void CraneMotionEKF::reset() {
     x_.setZero();
     P_.setIdentity();
+    last_accepted_x_.setZero();
+    last_accepted_P_.setIdentity();
+    has_last_accepted_ = false;
     initialized_ = false;
     last_stamp_ = ros::Time();
     last_good_fitness_ = 0.05;
     status_ = CraneMotionEKFStatus{};
+    candidate_yaw_rad_ = 0.0;
+    yaw_consistent_count_ = 0;
+    last_accepted_yaw_rad_ = 0.0;
+    yaw_ever_latched_ = false;
 }
 
 void CraneMotionEKF::initialize(const Sophus::SE3d& first_pose,
@@ -26,6 +33,10 @@ void CraneMotionEKF::initialize(const Sophus::SE3d& first_pose,
     P_(2, 2) = 2.0;
     P_(3, 3) = 2.0;
 
+    last_accepted_x_ = x_;
+    last_accepted_P_ = P_;
+    has_last_accepted_ = true;
+
     initialized_ = true;
     last_stamp_ = stamp;
 
@@ -36,6 +47,11 @@ void CraneMotionEKF::initialize(const Sophus::SE3d& first_pose,
     status_.predicted_pos = x_.head<2>();
     status_.output_pos = x_.head<2>();
     status_.velocity = x_.tail<2>();
+
+    candidate_yaw_rad_ = 0.0;
+    yaw_consistent_count_ = 0;
+    last_accepted_yaw_rad_ = 0.0;
+    yaw_ever_latched_ = false;
 
     ROS_INFO("[CraneMotionEKF] initialized at xy=(%.3f, %.3f)",
              x_(0), x_(1));
@@ -231,6 +247,7 @@ Sophus::SE3d CraneMotionEKF::predictWithoutMeasurement(
     status_.prediction_only = true;
     status_.recovered = false;
     status_.frames_since_good_ndt++;
+    status_.consecutive_degraded_frames++;
     status_.predicted_pos = x_.head<2>();
     status_.output_pos = x_.head<2>();
     status_.velocity = x_.tail<2>();
@@ -358,27 +375,20 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
     const bool nis_outlier = status_.nis > cfg_.nis_reject_threshold;
     if ((gross_axis_innovation || nis_outlier) &&
         ndt_fitness > std::max(0.03, last_good_fitness_ * 1.5)) {
-        enforceOutputStep(previous_pos, dt, x_pred);
-        x_ = x_pred;
-        P_ = P_pred;
         status_.ndt_accepted = false;
         status_.prediction_only = true;
         status_.frames_since_good_ndt++;
         status_.reject_innovation_frames++;
+        status_.consecutive_degraded_frames++;
         status_.reject_reason = nis_outlier
             ? "NIS_INNOVATION_REJECT"
             : "AXIS_INNOVATION_REJECT";
 
         maybeRecover("innovation_reject");
 
-        last_stamp_ = stamp;
-        status_.output_pos = x_.head<2>();
-        status_.velocity = x_.tail<2>();
-        status_.innovation = innovation;
-        status_.innovation_norm = raw_innov_norm;
-        status_.p_trace = P_.trace();
-
-        return buildPoseFromState(x_, pose_template);
+        return rejectCandidate(
+            x_pred, P_pred, innovation, raw_innov_norm,
+            pose_template, stamp, status_.reject_reason);
     }
 
     status_.diagonal_mode = false;
@@ -451,6 +461,22 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
     const double unconstrained_output_step =
         (candidate.head<2>() - previous_pos).norm();
     const bool output_limited = enforceOutputStep(previous_pos, dt, candidate);
+
+    // ========== 关键修复 ==========
+    // 旧行为：output_limited 时裁剪 candidate 后仍写入 x_，形成台阶式漂移。
+    // 新行为：完全拒绝 candidate，使用有界 prediction，不修改 x_ 为裁剪值。
+    if (output_limited) {
+        ROS_WARN_THROTTLE(
+            1.0,
+            "[EKFGuard] output step REJECTED raw=%.3f max=%.3f dt=%.3f",
+            unconstrained_output_step,
+            status_.max_allowed_step, dt);
+        return rejectCandidate(
+            x_pred, P_pred, innovation, raw_innov_norm,
+            pose_template, stamp, "OUTPUT_STEP_LIMIT");
+    }
+
+    // 只有物理步长完全合格时才提交 candidate。
     x_ = candidate;
 
     // Joseph form keeps P symmetric positive semi-definite under finite
@@ -458,22 +484,16 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
     const Eigen::Matrix4d I_KH = Eigen::Matrix4d::Identity() - K * H;
     P_ = I_KH * P_pred * I_KH.transpose() + K * R * K.transpose();
 
-    status_.ndt_accepted = !output_limited;
+    // 记录最后被完全接受的状态。
+    last_accepted_x_ = x_;
+    last_accepted_P_ = P_;
+    has_last_accepted_ = true;
+
+    status_.ndt_accepted = true;
     status_.prediction_only = false;
-    if (output_limited) {
-        status_.frames_since_good_ndt++;
-        status_.reject_innovation_frames++;
-        status_.reject_reason = "OUTPUT_STEP_LIMIT";
-        ROS_WARN_THROTTLE(
-            1.0,
-            "[EKFGuard] output step limited raw=%.3f max=%.3f dt=%.3f",
-            unconstrained_output_step,
-            status_.max_allowed_step, dt);
-        maybeRecover("output_step_limit");
-    } else {
-        status_.frames_since_good_ndt = 0;
-        status_.reject_innovation_frames = 0;
-    }
+    status_.frames_since_good_ndt = 0;
+    status_.reject_innovation_frames = 0;
+    status_.consecutive_degraded_frames = 0;
 
     if (ndt_fitness > cfg_.high_fitness_threshold) {
         status_.high_fitness_frames++;
@@ -506,20 +526,26 @@ void CraneMotionEKF::maybeRecover(const std::string& reason) {
         return;
     }
 
-    // 恢复时保留状态，但重置不确定性，让后续好帧重新拉回
-    P_.setIdentity();
-    P_(0, 0) = 0.5;
-    P_(1, 1) = 0.5;
-    P_(2, 2) = 1.0;
-    P_(3, 3) = 1.0;
+    // ========== 修复 ==========
+    // 旧行为：P.setIdentity() 完全丢弃协方差历史，给下次坏帧打开大门。
+    // 新行为：协方差可控膨胀，保留可信 x 和速度，等待多帧恢复验证。
+    const double inflation = std::max(1.0, cfg_.recovery_covariance_inflation);
+    P_ *= inflation;
 
+    // 限制协方差上限，防止无限膨胀。
+    const double max_trace = 100.0;
+    if (P_.trace() > max_trace) {
+        P_ *= max_trace / P_.trace();
+    }
+
+    // 重置退化计数器，但不清空连续失败跟踪。
     status_.frames_since_good_ndt = 0;
     status_.reject_innovation_frames = 0;
     status_.high_fitness_frames = 0;
     status_.recovered = true;
 
-    ROS_WARN("[CraneMotionEKF] recovery: reason=%s, P reset",
-             reason.c_str());
+    ROS_WARN("[CraneMotionEKF] recovery: reason=%s, P inflated by %.1fx, trace=%.3f",
+             reason.c_str(), inflation, P_.trace());
 }
 
 Sophus::SE3d CraneMotionEKF::buildPoseFromState(
@@ -616,6 +642,118 @@ double CraneMotionEKF::computeSlowFrameExtraR(double ndt_time_ms) const {
 bool CraneMotionEKF::isNonPhysicalStep(double raw_step, double ndt_time_ms, double dt) const {
     (void)ndt_time_ms;
     return raw_step > computeMaxOutputStep(dt);
+}
+
+// ========== 候选拒绝：使用有界 prediction，不污染 x_ ==========
+Sophus::SE3d CraneMotionEKF::rejectCandidate(
+    const Eigen::Vector4d& x_pred,
+    const Eigen::Matrix4d& P_pred,
+    const Eigen::Vector2d& innovation,
+    double raw_innov_norm,
+    const Sophus::SE3d& pose_template,
+    const ros::Time& stamp,
+    const std::string& reason) {
+    // 使用纯 prediction（不含 NDT 修正），但仍然限制输出步长。
+    const Eigen::Vector2d previous_pos = x_.head<2>();
+    const double dt = sanitizeDt(stamp);
+
+    Eigen::Vector4d bounded_pred = x_pred;
+    const bool pred_limited = enforceOutputStep(previous_pos, dt, bounded_pred);
+
+    x_ = bounded_pred;
+    P_ = P_pred;
+    last_stamp_ = stamp;
+
+    status_.ndt_accepted = false;
+    status_.prediction_only = true;
+    status_.recovered = false;
+    status_.frames_since_good_ndt++;
+    status_.consecutive_degraded_frames++;
+    status_.predicted_pos = x_pred.head<2>();
+    status_.output_pos = x_.head<2>();
+    status_.velocity = x_.tail<2>();
+    status_.innovation = innovation;
+    status_.innovation_norm = raw_innov_norm;
+    status_.measurement_r = 0.0;
+    status_.measurement_covariance.setZero();
+    status_.observability_ratio = 0.0;
+    status_.weak_variance_inflation = 1.0;
+    status_.nis = 0.0;
+    status_.sensor_dt = dt;
+    status_.ndt_time_ms = 0.0;
+    status_.p_trace = P_.trace();
+    status_.reject_reason = pred_limited
+        ? reason + "_PRED_STEP_LIMIT" : reason;
+
+    return buildPoseFromState(x_, pose_template);
+}
+
+// ========== Yaw 锁存实现 ==========
+bool CraneMotionEKF::checkRuntimeYaw(double ndt_yaw_rad, double dt) {
+    if (!cfg_.runtime_yaw_latched || !status_.yaw_latched) {
+        return true;  // 未锁存时不检查
+    }
+    (void)dt;
+
+    const double yaw_diff = std::abs(ndt_yaw_rad - status_.latched_yaw_rad);
+    // 处理角度环绕
+    const double wrapped_diff = std::min(yaw_diff, 2.0 * M_PI - yaw_diff);
+    const double max_step_rad = cfg_.maximum_runtime_yaw_step_deg * M_PI / 180.0;
+
+    if (wrapped_diff > max_step_rad) {
+        return false;
+    }
+    return true;
+}
+
+bool CraneMotionEKF::tryLatchYaw(double ndt_yaw_rad) {
+    if (!cfg_.runtime_yaw_latched) {
+        status_.yaw_latched = false;
+        return false;
+    }
+
+    const double max_dev_rad =
+        cfg_.maximum_runtime_yaw_deviation_deg * M_PI / 180.0;
+
+    if (!yaw_ever_latched_) {
+        // 第一次锁存：需要多帧一致。
+        if (std::abs(ndt_yaw_rad - candidate_yaw_rad_) < max_dev_rad * 0.5) {
+            yaw_consistent_count_++;
+        } else {
+            candidate_yaw_rad_ = ndt_yaw_rad;
+            yaw_consistent_count_ = 1;
+        }
+
+        if (yaw_consistent_count_ >= cfg_.relocalization_yaw_required_frames) {
+            status_.yaw_latched = true;
+            status_.latched_yaw_rad = ndt_yaw_rad;
+            status_.yaw_confirm_frames = yaw_consistent_count_;
+            last_accepted_yaw_rad_ = ndt_yaw_rad;
+            yaw_ever_latched_ = true;
+            ROS_INFO("[CraneMotionEKF] yaw latched at %.3f deg after %d consistent frames",
+                     ndt_yaw_rad * 180.0 / M_PI, yaw_consistent_count_);
+            return true;
+        }
+        return false;
+    }
+
+    // 已锁存过，检查偏差。
+    const double yaw_diff = std::abs(ndt_yaw_rad - last_accepted_yaw_rad_);
+    const double wrapped_diff = std::min(yaw_diff, 2.0 * M_PI - yaw_diff);
+
+    if (wrapped_diff < max_dev_rad) {
+        last_accepted_yaw_rad_ = ndt_yaw_rad;
+        return true;
+    }
+    return false;
+}
+
+void CraneMotionEKF::unlatchYaw() {
+    status_.yaw_latched = false;
+    status_.yaw_confirm_frames = 0;
+    candidate_yaw_rad_ = 0.0;
+    yaw_consistent_count_ = 0;
+    ROS_INFO("[CraneMotionEKF] yaw unlatched");
 }
 
 }  // namespace ndt_slam
