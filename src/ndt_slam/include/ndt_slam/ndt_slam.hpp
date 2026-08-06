@@ -322,6 +322,7 @@ private:
     ros::Publisher ground_map_pub_;       // 地面点地图
     ros::Publisher objects_map_pub_;      // 非地面/货物地图（raw）
     ros::Publisher objects_clean_map_pub_; // 非地面/货物地图（clean，BEV过滤后）
+    ros::Publisher objects_clean_live_pub_;
     ros::Publisher current_cloud_pub_;
     ros::Publisher path_pub_;
     ros::Publisher runtime_path_pub_;
@@ -1684,7 +1685,7 @@ private:
             bool enabled = true;
 
             // 软对称模式
-            std::string anchor_symmetry_mode = "soft";  // strict / soft / off
+            std::string anchor_symmetry_mode = "strict";  // strict / soft / off
             float max_center_offset_m = 0.35f;
 
             // HAG 预过滤

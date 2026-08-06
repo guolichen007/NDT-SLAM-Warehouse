@@ -27,6 +27,7 @@
 | `/display_map_ground` | `sensor_msgs/PointCloud2` | 地面层 |
 | `/display_map_objects` | `sensor_msgs/PointCloud2` | 原始静态物体层 |
 | `/display_map_objects_clean` | `sensor_msgs/PointCloud2` | 清理后静态物体层 |
+| `/display_map_objects_clean_live` | `sensor_msgs/PointCloud2` | 当前帧清理后静态物体预览；`base_link` 坐标、不落盘、不参与 NDT，RViz 默认使用 |
 | `/mapping_current_cloud` | `sensor_msgs/PointCloud2` | 当前帧输入点云（经近场过滤后） |
 
 ### 吊物可视化

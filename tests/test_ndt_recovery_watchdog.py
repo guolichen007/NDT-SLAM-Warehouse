@@ -54,6 +54,29 @@ class NdtRecoveryWatchdogTest(unittest.TestCase):
         self.assertEqual(
             policy.observe(high_bad, 200.0).action, "none"
         )
+        self.assertEqual(
+            policy.observe(high_bad, 201.0).reason,
+            "recovery_episode_in_progress",
+        )
+
+    def test_ServiceDiscoveryPrefersPublishedConfiguredThenGlobal(self):
+        published = [
+            ("/relocalize", ["http://node"]),
+            ("/unrelated", ["http://other"]),
+        ]
+        self.assertEqual(
+            WATCHDOG.resolve_relocalize_service(
+                "/ndt_slam/relocalize", published
+            ),
+            "/relocalize",
+        )
+        self.assertEqual(
+            WATCHDOG.resolve_relocalize_service(
+                "custom_relocalize",
+                [("/custom_relocalize", ["http://node"])],
+            ),
+            "/custom_relocalize",
+        )
 
     def test_ProcessFaultUsesBoundedRestartBudget(self):
         config = WATCHDOG.WatchdogConfig(

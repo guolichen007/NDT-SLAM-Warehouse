@@ -59,7 +59,7 @@
           if="$(arg use_ndt_recovery_watchdog)">
         <param name="status_topic" value="/ndt_slam/relocalization_status"/>
         <param name="health_topic" value="/ndt_slam/localization_health"/>
-        <param name="relocalize_service" value="/ndt_slam/relocalize"/>
+        <param name="relocalize_service" value="/relocalize"/>
         <param name="startup_grace_sec" value="30.0"/>
         <param name="soft_relocalize_after_sec" value="8.0"/>
         <param name="hard_restart_after_sec" value="45.0"/>
@@ -69,6 +69,8 @@
         <param name="restart_window_sec" value="900.0"/>
         <param name="max_restarts_in_window" value="3"/>
         <param name="health_stale_sec" value="3.0"/>
+        <param name="service_retry_sec" value="10.0"/>
+        <param name="service_failure_threshold" value="3"/>
         <param name="event_log_max_bytes" value="5242880"/>
         <param name="event_log_backups" value="5"/>
     </node>

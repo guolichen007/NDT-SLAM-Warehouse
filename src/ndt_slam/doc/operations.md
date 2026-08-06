@@ -57,11 +57,14 @@ tail -f "$NDT_SLAM_DATA_ROOT/recovery_watchdog/events.jsonl"
 `/ndt_slam/localization_health`：
 
 - 启动后 30 秒为宽限期；
-- 连续退化 8 秒时调用 `/ndt_slam/relocalize`，优先使用进程内静态地图恢复；
+- 连续 `DEGRADED` 8 秒时调用一次实际发布的 `/relocalize`，优先使用进程内静态地图恢复；
+- `SEARCHING_LOCAL`、`SEARCHING_GLOBAL`、`CONFIRMING` 由节点内部恢复 episode
+  独占，看门狗不会重复调用服务或清零多帧确认；
 - 定位进程仍响应时，即使长时间 Code 31 也不盲目硬重启；60 秒未验证会进入
   `WAITING_STATIONARY`，每个新静止周期只搜索一次，运动状态未知时每 30 秒低频搜索；
-- 只有健康消息超过 3 秒中断或重定位服务无响应，才写入当前 supervisor 代次的
-  原子请求并以 75 退出；
+- 只有 health、兼容重定位状态和 odom 三路同时超过门限无更新，才写入当前
+  supervisor 代次的原子请求并以 75 退出；单路 health 延迟或一次重定位 RPC
+  失败只记录并按 10 秒退避重试，不关闭 SLAM；
 - 若兼容的 `/ndt_slam/relocalization_status` 或 `/odom` 处理流仍在更新、但新
   `/ndt_slam/localization_health` 从未出现，看门狗判定为源码与二进制不一致并提示重新
   编译，不会反复重启同一个旧二进制；

@@ -62,9 +62,11 @@ python -m unittest discover -s tests -p "test_*.py"
   且仍需相同 map generation、pose version 和两次一致确认。
 - 清空 ScanContext 提示并把初始位姿放在地图一角：全局候选必须覆盖地图不同区域，
   不能按嵌套循环只搜索一个角落。
-- 连续退化超过软恢复门限：看门狗只调用一次 `/ndt_slam/relocalize`；超过硬门限后
-  写入 JSONL/state 并由 systemd 完整重启。15 分钟第 4 次必须被抑制。
-- 启动 RViz：`display_map` 默认关闭，`objects_clean` 等必要轻量显示保持原配置；
+- 连续 `DEGRADED` 超过软恢复门限：看门狗只调用一次 `/relocalize`；进入
+  `SEARCHING_*`/`CONFIRMING` 后不得重复调用。只有 health/status/odom 三路同时
+  失活才写入 JSONL/state 并由前台 supervisor 完整重启，15 分钟第 4 次必须被抑制。
+- 启动 RViz：`display_map` 默认关闭，`objects_clean_live` 持续随 odom 更新，持久
+  `objects_clean` 在隔离期间不得写入；
   操作者可以手工开启全量显示层。
 
 ## 通过标准

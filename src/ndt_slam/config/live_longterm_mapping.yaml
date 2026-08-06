@@ -1361,7 +1361,9 @@ odom_anchored_cargo_box:
 
   tight_box:
     enabled: true
-    anchor_symmetry_mode: "soft"
+    # Cargo XY is the hook/odom anchor. LiDAR controls yaw and symmetric size,
+    # while its raw centre remains available for association/swing evidence.
+    anchor_symmetry_mode: "strict"
     max_center_offset_m: 0.35
     hag_filter_enabled: true
     hag_min_m: 0.15

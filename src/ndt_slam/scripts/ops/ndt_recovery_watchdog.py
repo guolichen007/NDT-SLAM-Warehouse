@@ -2,8 +2,9 @@
 """NDT recovery watchdog for strict health and a foreground supervisor.
 
 Responsive localization failures stay quarantined and recover in-process.
-Only a stale health stream or an unresponsive recovery service requests a
-bounded full-stack restart from the foreground supervisor.
+Only simultaneous loss of the health/status/odom control streams requests a
+bounded full-stack restart from the foreground supervisor. A failed recovery
+RPC remains diagnostic while the SLAM processing streams are alive.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 
 STATE_PATTERN = re.compile(r"(?:^|\s)state=([^\s]+)")
@@ -24,6 +25,14 @@ BAD_FRAMES_PATTERN = re.compile(r"(?:^|\s)bad_frames=(\d+)")
 HEALTHY_STATES = frozenset(("IDLE", "COOLDOWN"))
 DEGRADED_STATES = frozenset(
     ("DEGRADED", "SEARCHING_LOCAL", "SEARCHING_GLOBAL", "CONFIRMING")
+)
+RECOVERY_IN_PROGRESS_STATES = frozenset(
+    ("SEARCHING_LOCAL", "SEARCHING_GLOBAL", "CONFIRMING")
+)
+RELOCALIZE_SERVICE_CANDIDATES = (
+    "/relocalize",
+    "/ndt_slam/relocalize",
+    "/ndt_slam_node/relocalize",
 )
 
 
@@ -55,6 +64,8 @@ class WatchdogConfig:
     restart_window_sec: float = 900.0
     max_restarts_in_window: int = 3
     health_stale_sec: float = 3.0
+    service_retry_sec: float = 10.0
+    service_failure_threshold: int = 3
     event_log_max_bytes: int = 5 * 1024 * 1024
     event_log_backups: int = 5
 
@@ -99,6 +110,38 @@ def parse_localization_health(message: str) -> Optional[LocalizationHealth]:
         reason=str(payload.get("reason", "unknown")),
         raw=payload,
     )
+
+
+def normalize_ros_name(name: str) -> str:
+    normalized = str(name or "").strip()
+    if not normalized:
+        return ""
+    return normalized if normalized.startswith("/") else "/" + normalized
+
+
+def resolve_relocalize_service(
+    configured: str, published_services: Iterable[Any]
+) -> str:
+    """Resolve the global service advertised by the SLAM node.
+
+    rospy service listings can contain either names or ``(name, providers)``
+    pairs.  Prefer an explicitly configured live service, then the known
+    global/private variants.  Returning the configured name when discovery is
+    unavailable preserves compatibility while keeping the common
+    ``advertiseService(\"relocalize\")`` case correct.
+    """
+    available = set()
+    for item in published_services:
+        value = item[0] if isinstance(item, (tuple, list)) and item else item
+        normalized = normalize_ros_name(value)
+        if normalized:
+            available.add(normalized)
+    configured_name = normalize_ros_name(configured)
+    ordered = (configured_name,) + RELOCALIZE_SERVICE_CANDIDATES
+    for candidate in ordered:
+        if candidate and candidate in available:
+            return candidate
+    return configured_name or RELOCALIZE_SERVICE_CANDIDATES[0]
 
 
 def _finite_history(values: Iterable[Any], now: float,
@@ -154,6 +197,14 @@ class RecoveryWatchdogPolicy:
         if now - self.started_at < self.config.startup_grace_sec:
             return WatchdogDecision(
                 "none", degraded_duration, "startup_grace"
+            )
+
+        # SEARCHING/CONFIRMING are owned by the in-process recovery episode.
+        # Re-submitting the service here resets confirmation state and can
+        # prevent an otherwise good candidate from ever reaching HEALTHY.
+        if status.state in RECOVERY_IN_PROGRESS_STATES:
+            return WatchdogDecision(
+                "none", degraded_duration, "recovery_episode_in_progress"
             )
 
         if (not self.soft_requested and degraded_duration >=
@@ -286,6 +337,12 @@ class RosRecoveryWatchdog:
             health_stale_sec=float(
                 rospy.get_param("~health_stale_sec", 3.0)
             ),
+            service_retry_sec=float(
+                rospy.get_param("~service_retry_sec", 10.0)
+            ),
+            service_failure_threshold=max(
+                1, int(rospy.get_param("~service_failure_threshold", 3))
+            ),
             event_log_max_bytes=int(
                 rospy.get_param(
                     "~event_log_max_bytes", 5 * 1024 * 1024
@@ -320,16 +377,19 @@ class RosRecoveryWatchdog:
         )
         self.relocalize_service_name = str(
             rospy.get_param(
-                "~relocalize_service", "/ndt_slam/relocalize"
+                "~relocalize_service", "/relocalize"
             )
         )
+        self.empty_service_type = Empty
+        self.relocalize = None
+        self.consecutive_service_failures = 0
+        self.soft_retry_not_before = 0.0
+        self.last_service_error = ""
+        self.last_resolved_service = ""
         status_topic = str(
             rospy.get_param(
                 "~status_topic", "/ndt_slam/relocalization_status"
             )
-        )
-        self.relocalize = rospy.ServiceProxy(
-            self.relocalize_service_name, Empty
         )
         self.subscriber = rospy.Subscriber(
             status_topic, String, self._status_callback, queue_size=10
@@ -366,9 +426,57 @@ class RosRecoveryWatchdog:
     def _odom_callback(self, _message: Any) -> None:
         self.odom_received_at = time.time()
 
+    def _stream_is_fresh(self, received_at: Optional[float],
+                         now: float) -> bool:
+        return received_at is not None and (
+            now - received_at <=
+            max(3.0, self.policy.config.health_stale_sec)
+        )
+
+    def _all_control_streams_stale(self, now: float) -> bool:
+        return not any((
+            self._stream_is_fresh(
+                getattr(self, "health_received_at", None), now
+            ),
+            self._stream_is_fresh(
+                getattr(self, "status_received_at", None), now
+            ),
+            self._stream_is_fresh(
+                getattr(self, "odom_received_at", None), now
+            ),
+        ))
+
+    def _resolve_relocalize_service(self) -> str:
+        try:
+            published = self.rospy.get_published_services("/")
+        except Exception as error:
+            self.rospy.logwarn_throttle(
+                30.0,
+                "[NdtRecoveryWatchdog] service discovery unavailable: %s",
+                error,
+            )
+            published = ()
+        resolved = resolve_relocalize_service(
+            self.relocalize_service_name, published
+        )
+        self.last_resolved_service = resolved
+        return resolved
+
+    def _call_relocalize(self) -> Tuple[str, float]:
+        service_name = self._resolve_relocalize_service()
+        started_at = time.monotonic()
+        self.rospy.wait_for_service(service_name, timeout=2.0)
+        proxy = self.rospy.ServiceProxy(
+            service_name, self.empty_service_type
+        )
+        proxy()
+        return service_name, max(0.0, time.monotonic() - started_at)
+
     def _event(self, decision: WatchdogDecision,
-               status: RecoveryStatus, now: float) -> Dict[str, Any]:
-        return {
+               status: RecoveryStatus, now: float,
+               details: Optional[Mapping[str, Any]] = None
+               ) -> Dict[str, Any]:
+        event = {
             "action": decision.action,
             "bad_frames": status.bad_frames,
             "degraded_duration_sec": round(
@@ -393,6 +501,9 @@ class RosRecoveryWatchdog:
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)
             ),
         }
+        if details:
+            event["details"] = dict(details)
+        return event
 
     def _persist(self, event: Mapping[str, Any]) -> None:
         append_jsonl(
@@ -479,8 +590,16 @@ class RosRecoveryWatchdog:
                 now, "localization_control_streams_missing"
             )
         elif now - self.health_received_at > self.policy.config.health_stale_sec:
+            if not self._all_control_streams_stale(now):
+                self.rospy.logwarn_throttle(
+                    30.0,
+                    "[NdtRecoveryWatchdog] localization_health is stale "
+                    "while status/odom processing remains live; suppressing "
+                    "full-stack restart",
+                )
+                return
             decision = self.policy.process_fault(
-                now, "localization_health_stream_stale"
+                now, "localization_control_streams_stale"
             )
         elif self.health is not None and self.health.startup_state in {
             "MAP_INVALID", "WAITING_STATIONARY"
@@ -502,6 +621,8 @@ class RosRecoveryWatchdog:
         elif self.status is None:
             return
         else:
+            if now < self.soft_retry_not_before:
+                return
             decision = self.policy.observe(self.status, now)
         if decision.action == "none":
             return
@@ -521,36 +642,73 @@ class RosRecoveryWatchdog:
             )
         if decision.action == "soft_relocalize":
             try:
-                self.rospy.wait_for_service(
-                    self.relocalize_service_name, timeout=2.0
-                )
-                self.relocalize()
+                service_name, service_duration = self._call_relocalize()
+                self.consecutive_service_failures = 0
+                self.last_service_error = ""
                 self.rospy.logwarn(
                     "[NdtRecoveryWatchdog] requested global relocalization "
-                    "after %.1fs degraded",
+                    "after %.1fs degraded service=%s duration=%.3fs",
                     decision.degraded_duration_sec,
+                    service_name,
+                    service_duration,
                 )
             except Exception as error:
+                self.consecutive_service_failures += 1
+                self.last_service_error = str(error)
+                self.soft_retry_not_before = (
+                    now + self.policy.config.service_retry_sec
+                )
+                # A failed RPC is not proof that the SLAM process is frozen.
+                # Re-arm the soft request after a bounded delay and keep the
+                # stack alive while any control/data stream is still fresh.
+                self.policy.soft_requested = False
                 self.rospy.logerr(
-                    "[NdtRecoveryWatchdog] relocalize request failed: %s",
+                    "[NdtRecoveryWatchdog] relocalize request failed "
+                    "service=%s failures=%d/%d retry_in=%.1fs error=%s",
+                    self.last_resolved_service or
+                    normalize_ros_name(self.relocalize_service_name),
+                    self.consecutive_service_failures,
+                    self.policy.config.service_failure_threshold,
+                    self.policy.config.service_retry_sec,
                     error,
                 )
-                fault = self.policy.process_fault(
-                    now, "relocalization_service_unresponsive"
+                failure_event = self._event(
+                    WatchdogDecision(
+                        "soft_relocalize_failed",
+                        decision.degraded_duration_sec,
+                        "relocalization_service_call_failed",
+                    ),
+                    fallback_status,
+                    now,
+                    {
+                        "service": self.last_resolved_service or
+                            normalize_ros_name(
+                                self.relocalize_service_name
+                            ),
+                        "exception": str(error),
+                        "consecutive_failures":
+                            self.consecutive_service_failures,
+                    },
                 )
-                if fault.action == "hard_restart":
-                    self._request_hard_restart(
-                        fault, fallback_status, now
-                    )
-                elif fault.action == "restart_suppressed":
-                    suppressed = self._event(
-                        fault, fallback_status, now
-                    )
-                    self._persist(suppressed)
+                try:
+                    self._persist(failure_event)
+                except Exception as persist_error:
                     self.rospy.logerr(
-                        "[NdtRecoveryWatchdog] restart budget exhausted "
-                        "after recovery service failure"
+                        "[NdtRecoveryWatchdog] service failure evidence "
+                        "write failed: %s", persist_error
                     )
+                if (
+                    self.consecutive_service_failures >=
+                        self.policy.config.service_failure_threshold
+                    and self._all_control_streams_stale(now)
+                ):
+                    fault = self.policy.process_fault(
+                        now, "relocalization_control_plane_unresponsive"
+                    )
+                    if fault.action == "hard_restart":
+                        self._request_hard_restart(
+                            fault, fallback_status, now
+                        )
             return
         if decision.action == "restart_suppressed":
             self.rospy.logerr(
