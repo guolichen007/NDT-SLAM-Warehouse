@@ -65,9 +65,6 @@ TEST(HookLoadStateFilter, InhibitAndInvalidInputsAreFailSafe) {
     EXPECT_EQ(invalid.state, HookLoadState::UNKNOWN);
 }
 
-// ========== 修复 ==========
-// 短时 stale 保留最后稳定状态为 HELD_STALE，不清 lifecycle。
-// 超过长超时（stale_timeout + held_stale_timeout）后才进入 UNKNOWN。
 TEST(HookLoadStateFilter, ShortStaleBecomesHeldStale) {
     HookLoadStateFilter filter;
     filter.ingest(2.00, 0.0);
@@ -76,8 +73,9 @@ TEST(HookLoadStateFilter, ShortStaleBecomesHeldStale) {
     const auto held = filter.tick(2.61);
     EXPECT_TRUE(held.valid);
     EXPECT_FALSE(held.fresh);
-    EXPECT_EQ(held.state, HookLoadState::EMPTY_HELD_STALE);
-    EXPECT_EQ(held.reason, "held_stale");
+    EXPECT_TRUE(held.held_stale);
+    EXPECT_EQ(held.state, HookLoadState::EMPTY);
+    EXPECT_EQ(held.reason, "empty_held_stale");
 }
 
 TEST(HookLoadStateFilter, LongStaleBecomesUnknown) {
@@ -133,14 +131,18 @@ TEST(HookLoadStateFilter, OneHertzAndDuplicateSamplesUseIndependentEvidence) {
     EXPECT_EQ(filter.ingest(5.417, 101.0, 11.0).state,
               HookLoadState::LOADED);
 
-    const auto stale = filter.ingest(5.417, 101.0, 13.5);
-    EXPECT_FALSE(stale.valid);
-    EXPECT_EQ(stale.state, HookLoadState::UNKNOWN);
-    EXPECT_EQ(stale.reason, "signal_stale");
-    EXPECT_EQ(filter.ingest(5.417, 102.0, 14.0).state,
-              HookLoadState::UNKNOWN);
-    EXPECT_EQ(filter.ingest(5.417, 103.0, 15.0).state,
-              HookLoadState::LOADED);
+    const auto stale_duplicate = filter.ingest(5.417, 101.0, 13.5);
+    EXPECT_TRUE(stale_duplicate.valid);
+    EXPECT_FALSE(stale_duplicate.fresh);
+    EXPECT_TRUE(stale_duplicate.held_stale);
+    EXPECT_EQ(stale_duplicate.state, HookLoadState::LOADED);
+    EXPECT_EQ(stale_duplicate.reason, "loaded_held_stale");
+    const auto recovered = filter.ingest(5.417, 102.0, 14.0);
+    EXPECT_TRUE(recovered.valid);
+    EXPECT_TRUE(recovered.fresh);
+    EXPECT_FALSE(recovered.held_stale);
+    EXPECT_EQ(recovered.state, HookLoadState::LOADED);
+    EXPECT_EQ(recovered.reason, "recovered_from_held_stale");
 }
 
 TEST(HookLoadStateFilter, SourceRollbackStartsARecoverableEpoch) {
@@ -164,18 +166,30 @@ TEST(HookLoadStateFilter, StaleReplayCannotSeedASecondConfirmation) {
     ASSERT_EQ(filter.ingest(5.0, 11.0, 2.0).state,
               HookLoadState::LOADED);
     // 4.6s: stale_timeout(2.5s) exceeded, held_stale kicks in
-    ASSERT_EQ(filter.tick(4.6).reason, "held_stale");
+    const auto held = filter.tick(4.6);
+    ASSERT_EQ(held.reason, "loaded_held_stale");
+    ASSERT_TRUE(held.held_stale);
 
     const auto replay = filter.ingest(5.0, 11.0, 4.7);
-    // HELD_STALE 恢复：相同源时间戳从 held 恢复到 LOADED。
     EXPECT_TRUE(replay.valid);
-    EXPECT_TRUE(replay.fresh);
+    EXPECT_FALSE(replay.fresh);
+    EXPECT_TRUE(replay.held_stale);
     EXPECT_EQ(replay.state, HookLoadState::LOADED);
-    EXPECT_EQ(replay.reason, "recovered_from_held_stale");
+    EXPECT_EQ(replay.reason, "loaded_held_stale");
     const auto first_fresh = filter.ingest(5.0, 12.0, 5.0);
     EXPECT_TRUE(first_fresh.valid);
-    EXPECT_EQ(filter.ingest(5.0, 13.0, 6.0).state,
-              HookLoadState::LOADED);
+    EXPECT_TRUE(first_fresh.fresh);
+    EXPECT_FALSE(first_fresh.held_stale);
+    EXPECT_EQ(first_fresh.reason, "recovered_from_held_stale");
+}
+
+TEST(HookLoadStateFilter, InvalidHeldTimeoutFailsConfiguration) {
+    HookLoadStateConfig config;
+    config.held_stale_timeout_sec = 0.0;
+    HookLoadStateFilter filter(config);
+    const auto result = filter.ingest(5.0, 1.0, 1.0);
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(result.reason, "invalid_config");
 }
 
 }  // namespace

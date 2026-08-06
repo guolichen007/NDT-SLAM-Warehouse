@@ -79,6 +79,8 @@ private:
             hook_config_["minimum_transition_duration_sec"].as<double>(0.0);
         config.stale_timeout_sec =
             hook_config_["stale_timeout_sec"].as<double>(2.50);
+        config.held_stale_timeout_sec =
+            hook_config_["held_stale_timeout_sec"].as<double>(5.00);
         config.valid_voltage_min_v =
             hook_config_["valid_voltage_min_v"].as<double>(0.0);
         config.valid_voltage_max_v =
@@ -98,6 +100,8 @@ private:
             config.minimum_transition_duration_sec);
         pnh_.param("stale_timeout_sec", config.stale_timeout_sec,
                    config.stale_timeout_sec);
+        pnh_.param("held_stale_timeout_sec", config.held_stale_timeout_sec,
+                   config.held_stale_timeout_sec);
         pnh_.param("valid_voltage_min_v", config.valid_voltage_min_v,
                    config.valid_voltage_min_v);
         pnh_.param("valid_voltage_max_v", config.valid_voltage_max_v,

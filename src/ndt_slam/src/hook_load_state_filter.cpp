@@ -25,6 +25,8 @@ bool HookLoadStateFilter::configValid() const {
            config_.minimum_transition_duration_sec >= 0.0 &&
            std::isfinite(config_.stale_timeout_sec) &&
            config_.stale_timeout_sec > 0.0 &&
+           std::isfinite(config_.held_stale_timeout_sec) &&
+           config_.held_stale_timeout_sec > 0.0 &&
            std::isfinite(config_.valid_voltage_min_v) &&
            std::isfinite(config_.valid_voltage_max_v) &&
            config_.valid_voltage_min_v < config_.valid_voltage_max_v;
@@ -71,6 +73,7 @@ HookLoadStateResult HookLoadStateFilter::fail(
     stable_samples_ = 0;
     last_voltage_ = static_cast<float>(voltage);
     invalid_reason_ = reason;
+    held_stale_start_wall_sec_ = 0.0;
     return result(reason);
 }
 
@@ -78,7 +81,8 @@ HookLoadStateResult HookLoadStateFilter::result(
     const std::string& reason) const {
     HookLoadStateResult output;
     output.valid = stable_state_ != HookLoadState::UNKNOWN;
-    output.fresh = has_sample_ && output.valid;
+    output.held_stale = held_stale_start_wall_sec_ > 0.0 && output.valid;
+    output.fresh = has_sample_ && output.valid && !output.held_stale;
     output.state = stable_state_;
     output.voltage = last_voltage_;
     output.stable_samples = stable_samples_;
@@ -117,34 +121,32 @@ HookLoadStateResult HookLoadStateFilter::ingest(
     }
     if (has_seen_source_time_ &&
         std::abs(source_time_sec - last_seen_source_time_sec_) <= 1.0e-6) {
-        if (wall_time_sec - last_sample_wall_time_sec_ + 1.0e-6 >=
-            config_.stale_timeout_sec) {
-            // HELD_STALE 恢复：不清空状态，从 held 恢复到原始稳定状态。
-            if (held_stale_start_wall_sec_ > 0.0) {
-                held_stale_start_wall_sec_ = 0.0;
-                stable_state_ = held_stale_original_state_;
-                last_sample_wall_time_sec_ = wall_time_sec;
-                last_wall_time_sec_ = wall_time_sec;
-                has_sample_ = true;
-                return result("recovered_from_held_stale");
-            }
-            has_sample_ = false;
-            return fail("signal_stale", voltage);
+        // Re-delivery of the same source sample is never new evidence. It
+        // cannot refresh the wall-time age or recover HELD_STALE.
+        const double source_age = wall_time_sec - last_sample_wall_time_sec_;
+        HookLoadStateResult duplicate =
+            source_age + 1.0e-6 >= config_.stale_timeout_sec
+                ? tick(wall_time_sec)
+                : result("duplicate_sample_ignored");
+        duplicate.fresh = false;
+        if (duplicate.valid && !duplicate.held_stale) {
+            duplicate.reason = "duplicate_sample_ignored";
         }
-        return result(invalid_reason_.empty()
-            ? "duplicate_sample_ignored" : invalid_reason_);
+        return duplicate;
     }
-    last_wall_time_sec_ = wall_time_sec;
-    last_seen_source_time_sec_ = source_time_sec;
-    has_seen_source_time_ = true;
-    last_sample_wall_time_sec_ = wall_time_sec;
-    has_sample_ = true;
 
     if (!std::isfinite(voltage)) return fail("non_finite_voltage", voltage);
     if (voltage < config_.valid_voltage_min_v ||
         voltage > config_.valid_voltage_max_v) {
         return fail("voltage_out_of_range", voltage);
     }
+    const bool recovered_from_held = held_stale_start_wall_sec_ > 0.0;
+    held_stale_start_wall_sec_ = 0.0;
+    last_wall_time_sec_ = wall_time_sec;
+    last_seen_source_time_sec_ = source_time_sec;
+    has_seen_source_time_ = true;
+    last_sample_wall_time_sec_ = wall_time_sec;
+    has_sample_ = true;
     last_voltage_ = static_cast<float>(voltage);
     invalid_reason_.clear();
 
@@ -156,7 +158,8 @@ HookLoadStateResult HookLoadStateFilter::ingest(
         pending_since_source_time_sec_ = 0.0;
         stable_samples_ = std::min<std::uint32_t>(
             stable_samples_ + 1U, std::numeric_limits<std::uint32_t>::max());
-        return result("stable");
+        return result(recovered_from_held
+            ? "recovered_from_held_stale" : "stable");
     }
 
     if (candidate == pending_state_) {
@@ -204,24 +207,15 @@ HookLoadStateResult HookLoadStateFilter::tick(double wall_time_sec) {
 
     if (short_stale) {
         // 确定 HELD_STALE 状态。
-        const bool was_loaded =
-            stable_state_ == HookLoadState::LOADED ||
-            stable_state_ == HookLoadState::LOADED_HELD_STALE;
-        const bool was_empty =
-            stable_state_ == HookLoadState::EMPTY ||
-            stable_state_ == HookLoadState::EMPTY_HELD_STALE;
+        const bool was_loaded = stable_state_ == HookLoadState::LOADED;
+        const bool was_empty = stable_state_ == HookLoadState::EMPTY;
 
         if (was_loaded || was_empty) {
-            const HookLoadState held_state = was_loaded
-                ? HookLoadState::LOADED_HELD_STALE
-                : HookLoadState::EMPTY_HELD_STALE;
-
             // 从实际 stale 开始时间计算 held 持续时间。
             const double actual_stale_start =
                 last_sample_wall_time_sec_ + config_.stale_timeout_sec;
             if (held_stale_start_wall_sec_ <= 0.0) {
                 held_stale_start_wall_sec_ = actual_stale_start;
-                held_stale_original_state_ = stable_state_;
             }
 
             const double held_duration =
@@ -240,10 +234,12 @@ HookLoadStateResult HookLoadStateFilter::tick(double wall_time_sec) {
             HookLoadStateResult output;
             output.valid = true;
             output.fresh = false;
-            output.state = held_state;
+            output.held_stale = true;
+            output.state = stable_state_;
             output.voltage = last_voltage_;
             output.stable_samples = stable_samples_;
-            output.reason = "held_stale";
+            output.reason = was_loaded
+                ? "loaded_held_stale" : "empty_held_stale";
             return output;
         }
 
@@ -251,12 +247,6 @@ HookLoadStateResult HookLoadStateFilter::tick(double wall_time_sec) {
         has_sample_ = false;
         held_stale_start_wall_sec_ = 0.0;
         return fail("signal_stale", last_voltage_);
-    }
-
-    // 恢复正常采样：清除 HELD_STALE 状态。
-    if (held_stale_start_wall_sec_ > 0.0) {
-        held_stale_start_wall_sec_ = 0.0;
-        stable_state_ = held_stale_original_state_;
     }
 
     return result(invalid_reason_.empty() ? "fresh" : invalid_reason_);
@@ -277,7 +267,6 @@ void HookLoadStateFilter::reset(const std::string& reason) {
     last_voltage_ = std::numeric_limits<float>::quiet_NaN();
     invalid_reason_ = reason;
     held_stale_start_wall_sec_ = 0.0;
-    held_stale_original_state_ = HookLoadState::UNKNOWN;
 }
 
 }  // namespace ndt_slam

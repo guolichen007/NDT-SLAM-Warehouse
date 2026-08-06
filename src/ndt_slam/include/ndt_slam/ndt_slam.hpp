@@ -59,6 +59,7 @@
 #include <ndt_slam/static_height_component_extractor.hpp>
 #include <ndt_slam/static_evidence_authorization.hpp>
 #include <ndt_slam/cargo_avoidance_fusion.hpp>
+#include <ndt_slam/anomaly_review_episode_tracker.hpp>
 #include <ndt_slam/pending_static_hazard_tracker.hpp>
 #include <ndt_slam/cargo_presence_state_machine.hpp>
 #include <ndt_slam/cargo_physical_motion_estimator.hpp>
@@ -540,8 +541,23 @@ private:
 
     // ========== Accepted Pose Generation ==========
     // 每次完全接受的测量位姿递增。所有地图层/odom/TF/marker 必须绑定同一 generation。
+    struct AcceptedLocalizationSnapshot {
+        bool valid = false;
+        std::uint64_t pose_generation = 0U;
+        std::uint64_t continuity_generation = 0U;
+        std::uint64_t map_generation = 0U;
+        std::uint64_t lifecycle_epoch = 0U;
+        std::uint64_t pose_version = 0U;
+        ros::Time stamp;
+        Sophus::SE3d pose;
+        std::string map_uuid;
+    };
     std::uint64_t accepted_pose_generation_ = 0U;
+    // Changes only when the map-to-base continuity is broken. Unlike the
+    // per-frame accepted generation, this can safely key multi-frame tracks.
+    std::atomic<std::uint64_t> localization_continuity_generation_{1U};
     Sophus::SE3d last_accepted_pose_;
+    AcceptedLocalizationSnapshot accepted_localization_snapshot_;
 
     // ========== Recovery Scan Buffer ==========
     // 拒绝帧不直接写 trusted local map，只缓存原始扫描。
@@ -564,6 +580,7 @@ private:
 
     // 定位恢复后重放缓存的 scan。
     void replayRecoveryScanBuffer(const ros::Time& recovery_stamp);
+    void invalidateAcceptedLocalizationContinuity();
 
     // ========== 全局一致性看门狗 ==========
     // 独立于局部 NDT fitness 的全局位姿验证。
@@ -577,6 +594,8 @@ private:
         int yaw_reject_trigger_frames = 3;
         double local_global_translation_disagreement_m = 0.30;
         double local_global_yaw_disagreement_deg = 0.60;
+        double minimum_fitness_improvement = 0.05;
+        double maximum_result_age_sec = 12.0;
         int inconsistent_confirmations = 2;
         int consistent_confirmations = 2;
     } global_consistency_watchdog_config_;
@@ -590,13 +609,25 @@ private:
         int consecutive_consistent = 0;
         int yaw_reject_streak = 0;
         bool global_suspect = false;
+        bool validation_pending = false;
+        std::uint64_t validation_frame_index = 0U;
+        std::uint64_t validation_map_generation = 0U;
+        std::string validation_map_uuid;
+        std::uint64_t validation_pose_version = 0U;
+        double last_request_sec = 0.0;
         Sophus::SE3d last_verified_pose;
         double last_verified_sec = 0.0;
     } global_consistency_state_;
 
-    void updateGlobalConsistency(const ros::Time& stamp,
+    void updateGlobalConsistency(std::uint64_t frame_index,
+                                  const ros::Time& stamp,
                                   const Sophus::SE3d& current_pose,
+                                  const pcl::PointCloud<pcl::PointXYZ>::Ptr&
+                                      registration_cloud,
                                   bool yaw_rejected_this_frame);
+    void consumeGlobalConsistencyResult(
+        const RelocalizationResult& result, std::uint64_t frame_index,
+        const ros::Time& stamp);
 
     // ========== 调试配置 ==========
     struct DebugConfig {
@@ -792,6 +823,10 @@ private:
         std::uint64_t static_evidence_epoch = 0U;
         ros::Time stamp;
         Sophus::SE3d pose;
+        std::uint64_t accepted_pose_generation = 0U;
+        std::uint64_t localization_continuity_generation = 0U;
+        std::uint64_t localization_map_generation = 0U;
+        std::string localization_map_uuid;
         pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud;
         HookLoadSignalRole hook_role = HookLoadSignalRole::REQUIRED;
         bool hook_valid = false;
@@ -808,6 +843,7 @@ private:
     struct MapCommitCompletion {
         bool pending = false;
         std::uint64_t lifecycle_epoch = 0U;
+        std::uint64_t localization_continuity_generation = 0U;
         Sophus::SE3d pose;
         bool has_raw_ndt_pose = false;
         Sophus::SE3d raw_ndt_pose;
@@ -835,8 +871,7 @@ private:
 
     void enqueueMapCommitJob(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-        const Sophus::SE3d& pose,
-        const ros::Time& stamp);
+        const AcceptedLocalizationSnapshot& localization);
     void mapCommitThread();
     void consumeMapCommitCompletion();
 
@@ -860,6 +895,9 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr ground_map_;     // 地面点地图（粗体素）
     pcl::PointCloud<pcl::PointXYZ>::Ptr objects_map_;    // 非地面/货物/设备地图（细体素，保留轮廓）
     pcl::PointCloud<pcl::PointXYZ>::Ptr objects_clean_map_; // clean objects（BEV过滤后，更干净）
+    // Immutable registration reference for global consistency validation.
+    // Runtime mapping must never mutate or replace this evidence implicitly.
+    pcl::PointCloud<pcl::PointXYZ>::Ptr persistent_registration_snapshot_;
 
     // rebuild 用的中间数据（用于 save_map 输出调试/检测 PCD）
     pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_objects_filtered_;    // 过滤后的 objects
@@ -922,6 +960,10 @@ private:
         std::uint64_t generation = 0U;
         std::uint64_t objects_version = 0U;
         std::uint64_t lifecycle_epoch = 0U;
+        std::uint64_t accepted_pose_generation = 0U;
+        std::uint64_t localization_continuity_generation = 0U;
+        std::uint64_t localization_map_generation = 0U;
+        std::string localization_map_uuid;
         ros::Time source_stamp;
         pcl::PointCloud<pcl::PointXYZ>::ConstPtr registration;
         pcl::PointCloud<pcl::PointXYZ>::ConstPtr display;
@@ -934,6 +976,10 @@ private:
         std::uint64_t source_objects_version = 0U;
         std::uint64_t static_evidence_epoch = 0U;
         std::uint64_t static_clean_build_version = 0U;
+        std::uint64_t source_accepted_pose_generation = 0U;
+        std::uint64_t source_localization_continuity_generation = 0U;
+        std::uint64_t source_localization_map_generation = 0U;
+        std::string source_localization_map_uuid;
         double duration_ms = 0.0;
         CleanMapBuildResult build;
         StaticEvidenceCellGeometryMap static_clean_cells;
@@ -2264,6 +2310,7 @@ private:
     lidar_slam2_msgs::HoistMotionState cargo_hoist_state_message_;
     ros::Time cargo_hoist_state_received_stamp_;
     CargoObstacleTracker cargo_obstacle_tracker_;
+    AnomalyReviewEpisodeTracker anomaly_review_episode_tracker_;
     // Pending cargo uses an independent track namespace. Its only purpose is
     // to prove that an already-separated live cluster has a stable external
     // identity before a provisional 17/18 can become official.
@@ -2271,7 +2318,7 @@ private:
     // Low-clearance observations are tracked outside the 5 m warning shell:
     // directionally with authoritative motion, otherwise radially. They can
     // mature identity/provenance but cannot alter the 5 m/3 m thresholds.
-    float cargo_collision_tracking_acquisition_distance_m_ = 7.0F;
+    float cargo_collision_tracking_acquisition_distance_m_ = 8.0F;
     std::uint64_t pending_obstacle_context_lifecycle_id_ = 0U;
     std::uint64_t pending_obstacle_context_track_segment_id_ = 0U;
     PendingCargoEnvelopeSource pending_obstacle_context_envelope_source_ =
@@ -2401,6 +2448,8 @@ private:
 
     struct HookLoadSnapshot {
         bool valid = false;
+        bool fresh = false;
+        bool held_stale = false;
         std::uint8_t state = lidar_slam2_msgs::HookLoadState::STATE_UNKNOWN;
         float voltage = std::numeric_limits<float>::quiet_NaN();
         std::uint32_t stable_samples = 0;
@@ -2537,7 +2586,8 @@ private:
         bool evidence_initialized = true,
         bool provisional_positive_warning = false,
         bool formal_cargo_authorized = false,
-        bool formal_clear_authorized = false) const;
+        bool formal_clear_authorized = false,
+        bool apply_anomaly_review_episode = true);
     void publishHookOnlySafetyStatus(const HookLoadSnapshot& hook,
                                      const ros::Time& stamp,
                                      bool visual_conflict,

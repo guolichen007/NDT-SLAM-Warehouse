@@ -23,7 +23,7 @@ struct CargoMotionCorridorConfig {
   // Directional obstacle acquisition may need more distance than the
   // time-horizon projection at low crane speeds. This is tracking lookahead,
   // not a warning threshold.
-  float minimum_prediction_distance_m = 7.0F;
+  float minimum_prediction_distance_m = 8.0F;
   // The running path uses a 90-degree forward sector by default: 45 degrees
   // on either side of the authoritative motion vector.
   float forward_half_angle_deg = 45.0F;

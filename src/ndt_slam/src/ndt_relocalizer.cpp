@@ -158,9 +158,11 @@ RelocalizationResult NdtRelocalizer::run(const RelocalizationJob& job) const {
     RelocalizationResult best;
     best.frame_index = job.frame_index;
     best.map_generation = job.map_generation;
+    best.map_uuid = job.map_uuid;
     best.pose_version = job.pose_version;
     best.stamp_sec = job.stamp_sec;
     best.mode = job.mode;
+    best.purpose = job.purpose;
     best.reference_pose = job.reference_pose;
     best.map_source = job.map_source;
 
@@ -214,6 +216,7 @@ RelocalizationResult NdtRelocalizer::run(const RelocalizationJob& job) const {
             !std::isfinite(probability) || probability < config.min_probability) {
             continue;
         }
+
         const Eigen::Matrix3d candidate_rotation = candidate.so3().matrix();
         const double roll = std::atan2(candidate_rotation(2, 1),
                                        candidate_rotation(2, 2));
@@ -227,6 +230,15 @@ RelocalizationResult NdtRelocalizer::run(const RelocalizationJob& job) const {
             continue;
         }
 
+        ++best.accepted_candidates;
+
+        if (job.purpose == RelocalizationPurpose::GLOBAL_CONSISTENCY &&
+            seed.source == "shadow_current_pose") {
+            best.reference_candidate_valid = true;
+            best.reference_candidate_pose = candidate;
+            best.reference_candidate_fitness = fitness;
+        }
+
         if (job.mode == RelocalizationMode::LOCAL) {
             const double translation =
                 (candidate.translation().head<2>() -
@@ -238,6 +250,10 @@ RelocalizationResult NdtRelocalizer::run(const RelocalizationJob& job) const {
         }
 
         if (!best.valid || fitness < best.fitness) {
+            if (best.valid) {
+                best.second_best_fitness = std::min(
+                    best.second_best_fitness, best.fitness);
+            }
             best.valid = true;
             best.pose = candidate;
             best.fitness = fitness;
@@ -245,6 +261,9 @@ RelocalizationResult NdtRelocalizer::run(const RelocalizationJob& job) const {
             best.keyframe_id = seed.keyframe_id;
             best.seed_source = seed.source;
             best.reason = "accepted_candidate";
+        } else {
+            best.second_best_fitness = std::min(
+                best.second_best_fitness, fitness);
         }
     }
 

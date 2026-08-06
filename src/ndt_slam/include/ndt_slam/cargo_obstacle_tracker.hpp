@@ -27,7 +27,7 @@ struct CargoObstacleTrackerConfig {
   std::size_t minimum_points = 20U;
   float level1_warning_distance_m = 3.0F;
   float level2_warning_distance_m = 5.0F;
-  float acquisition_distance_m = 7.0F;
+  float acquisition_distance_m = 8.0F;
   // A level-1 warning must belong to a track that was first confirmed beyond
   // the 3 m shell. This prevents a newly segmented cargo/self cluster from
   // appearing directly as code 17.

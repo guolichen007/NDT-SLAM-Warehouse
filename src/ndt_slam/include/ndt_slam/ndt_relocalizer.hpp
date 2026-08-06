@@ -20,6 +20,11 @@ enum class RelocalizationMode : std::uint8_t {
     GLOBAL = 1
 };
 
+enum class RelocalizationPurpose : std::uint8_t {
+    RECOVERY = 0,
+    GLOBAL_CONSISTENCY = 1
+};
+
 struct RelocalizationConfig {
     bool enabled = true;
     int min_source_points = 800;
@@ -51,9 +56,11 @@ struct RelocalizationSeed {
 struct RelocalizationJob {
     std::uint64_t frame_index = 0;
     std::uint64_t map_generation = 0;
+    std::string map_uuid;
     std::uint64_t pose_version = 0;
     double stamp_sec = 0.0;
     RelocalizationMode mode = RelocalizationMode::LOCAL;
+    RelocalizationPurpose purpose = RelocalizationPurpose::RECOVERY;
     Sophus::SE3d reference_pose;
     pcl::PointCloud<pcl::PointXYZ>::Ptr source;
     pcl::PointCloud<pcl::PointXYZ>::Ptr map;
@@ -66,13 +73,22 @@ struct RelocalizationResult {
     bool valid = false;
     std::uint64_t frame_index = 0;
     std::uint64_t map_generation = 0;
+    std::string map_uuid;
     std::uint64_t pose_version = 0;
     double stamp_sec = 0.0;
     RelocalizationMode mode = RelocalizationMode::LOCAL;
+    RelocalizationPurpose purpose = RelocalizationPurpose::RECOVERY;
     Sophus::SE3d reference_pose;
     Sophus::SE3d pose;
     double fitness = std::numeric_limits<double>::infinity();
     double probability = -std::numeric_limits<double>::infinity();
+    bool reference_candidate_valid = false;
+    Sophus::SE3d reference_candidate_pose;
+    double reference_candidate_fitness =
+        std::numeric_limits<double>::infinity();
+    int accepted_candidates = 0;
+    double second_best_fitness =
+        std::numeric_limits<double>::infinity();
     double elapsed_ms = 0.0;
     int candidates_tested = 0;
     int keyframe_id = -1;

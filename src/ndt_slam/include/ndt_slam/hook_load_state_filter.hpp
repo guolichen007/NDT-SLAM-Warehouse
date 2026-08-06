@@ -10,13 +10,7 @@ enum class HookLoadState : std::uint8_t {
     UNKNOWN = 0,
     INHIBIT = 1,
     EMPTY = 2,
-    LOADED = 3,
-    // ========== 修复新增 ==========
-    // 短时丢包保留最后稳定状态，不清 lifecycle、不生成 29。
-    EMPTY_HELD_STALE = 4,
-    LOADED_HELD_STALE = 5,
-    // Gravity 与 LiDAR strong cargo 冲突时进入，不直接解释为 EMPTY。
-    SENSOR_DISAGREEMENT = 6
+    LOADED = 3
 };
 
 struct HookLoadStateConfig {
@@ -39,6 +33,9 @@ struct HookLoadStateConfig {
 struct HookLoadStateResult {
     bool valid = false;
     bool fresh = false;
+    // Internal freshness qualifier. The externally published state remains
+    // EMPTY/LOADED so schema-v1 consumers preserve the cargo lifecycle.
+    bool held_stale = false;
     HookLoadState state = HookLoadState::UNKNOWN;
     float voltage = std::numeric_limits<float>::quiet_NaN();
     std::uint32_t stable_samples = 0;
@@ -79,9 +76,8 @@ private:
     double last_sample_wall_time_sec_ = 0.0;
     float last_voltage_ = std::numeric_limits<float>::quiet_NaN();
     std::string invalid_reason_ = "startup_unknown";
-    // HELD_STALE 追踪
+    // HELD_STALE tracking. stable_state_ itself always remains schema-v1.
     double held_stale_start_wall_sec_ = 0.0;
-    HookLoadState held_stale_original_state_ = HookLoadState::UNKNOWN;
 };
 
 }  // namespace ndt_slam

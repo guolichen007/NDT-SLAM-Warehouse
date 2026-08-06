@@ -150,6 +150,22 @@ relocalization:
   max_local_seed_yaw_correction_deg: 20.0
   max_roll_pitch_deg: 3.0
   max_z_correction_m: 0.50
+  # Read-only global consistency validation. It shares the bounded
+  # relocalization worker but never mutates odom/EKF unless two independent
+  # checks prove that a materially better global solution disagrees.
+  global_consistency:
+    enabled: true
+    periodic_interval_sec: 30.0
+    periodic_distance_m: 8.0
+    periodic_keyframes: 20
+    minimum_request_interval_sec: 10.0
+    yaw_reject_trigger_frames: 3
+    translation_disagreement_m: 0.30
+    yaw_disagreement_deg: 0.60
+    minimum_fitness_improvement: 0.05
+    maximum_result_age_sec: 12.0
+    inconsistent_confirmations: 2
+    consistent_confirmations: 2
 
 # 动态点过滤
 dynamic_filter:
@@ -693,6 +709,9 @@ hook_load_signal:
   # Both this duration and confirm_samples must pass.
   minimum_transition_duration_sec: 0.50
   stale_timeout_sec: 2.50
+  # After stale_timeout, retain the last EMPTY/LOADED state as fresh=false.
+  # The total UNKNOWN transition is stale_timeout + this grace duration.
+  held_stale_timeout_sec: 5.00
   consumer_timeout_sec: 3.00
   valid_voltage_min_v: 0.0
   valid_voltage_max_v: 6.0
@@ -796,11 +815,17 @@ cargo_safety:
   # publish 17/18 but never CLEAR; legacy_any_pending must never be used.
   fusion_pending_warning_promotion_policy: evidence_backed_only
   fusion_pending_minimum_authority_confidence: 0.55
+  # Code 29 is a bounded operator-review episode, never a normal warning.
+  # Two distinct sensor frames are required; one episode lasts at most 1.5 s
+  # and the same evidence identity cannot immediately re-enter after timeout.
+  anomaly_review_enter_confirm_frames: 2
+  anomaly_review_maximum_episode_sec: 1.50
+  anomaly_review_same_episode_rearm_sec: 2.00
   # Track low-clearance obstacles before they enter the warning shell:
   # directionally when motion is authoritative, radially while stationary or
   # motion is unavailable. Acquisition never changes the 5 m/3 m thresholds
   # and cannot itself publish 17/18.
-  collision_tracking_acquisition_distance_m: 7.0
+  collision_tracking_acquisition_distance_m: 8.0
   # Compatibility kill switch only. true enables the typed policy above but
   # cannot bypass any of its evidence gates.
   fusion_provisional_warning_to_official_code: true
@@ -810,7 +835,7 @@ cargo_safety:
   # only when the NDT/EKF velocity is current and measurement-backed.
   motion_corridor_minimum_speed_mps: 0.03
   motion_corridor_prediction_horizon_sec: 3.0
-  motion_corridor_minimum_prediction_distance_m: 7.0
+  motion_corridor_minimum_prediction_distance_m: 8.0
   # Running-path sector: forward 90 degrees (45 degrees on each side).
   motion_corridor_forward_half_angle_deg: 45.0
   motion_corridor_lateral_margin_m: 0.30

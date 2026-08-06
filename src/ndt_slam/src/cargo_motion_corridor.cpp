@@ -125,19 +125,16 @@ CargoMotionCorridorDecision evaluateCargoMotionCorridor(
   }
 
   if (decision.speed_mps < config.minimum_motion_speed_mps) {
-    decision.mode = CargoSafetySpatialMode::STATIONARY_GUARD;
+    // With no authoritative forward vector, preserve radial observation and
+    // already-established obstacle identity. Direction is an acquisition and
+    // approach-history aid, not permission to hide a confirmed collision.
+    decision.mode = CargoSafetySpatialMode::RADIAL_FALLBACK;
     decision.corridor_half_width_m =
         config.immediate_near_field_m + input.horizontal_uncertainty_m;
-    if (input.acquisition_only) {
-      decision.eligible = true;
-      decision.reason = "stationary_radial_acquisition";
-      return decision;
-    }
-    decision.eligible = input.current_footprint_distance_m <=
-        config.immediate_near_field_m;
-    decision.reason = decision.eligible
-        ? "stationary_emergency_shell"
-        : "stationary_structure_outside_guard";
+    decision.eligible = true;
+    decision.reason = input.acquisition_only
+        ? "stationary_radial_acquisition"
+        : "stationary_confirmed_hazard_radial_fallback";
     return decision;
   }
 

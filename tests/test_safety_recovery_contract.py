@@ -118,7 +118,7 @@ class SafetyRecoveryContractTest(unittest.TestCase):
         )
         self.assertIn(
             "pending_warning_promotion_policy =\n"
-            "      PendingWarningPromotionPolicy::DISABLED",
+            "      PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY",
             FUSION_HEADER,
         )
 

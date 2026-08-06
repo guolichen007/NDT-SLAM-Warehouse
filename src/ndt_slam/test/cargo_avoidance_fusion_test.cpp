@@ -20,8 +20,12 @@ CargoAvoidanceFusionInput validInput() {
   input.live.available = true;
   input.live.reliable = true;
   input.live.coverage = 0.75F;
+  input.live.distance_m = 2.0F;
+  input.live.clearance_m = -0.10F;
   input.static_map.available = true;
   input.static_map.reliable = true;
+  input.static_map.distance_m = 2.0F;
+  input.static_map.clearance_m = -0.10F;
   return input;
 }
 
@@ -454,22 +458,30 @@ TEST(CargoAvoidanceFusion,
 
 // ========== 修复 ==========
 // anomaly_review (29) 现在在标准告警之后评估。
-// live.hazard=true + warning_code=17 意味着已有正式风险，
-// formal risk 优先于 anomaly review。
-// 29 只有在无标准 17/18 时才输出。
-TEST(CargoAvoidanceFusion, ImmediateContactReviewDoesNotOverrideFormalHazard) {
+// Live 0.30m contact evidence can be cargo-self segmentation, so it remains
+// Code 29 even when the live tracker has history. Independently mature static
+// evidence is handled by the separate priority test below.
+TEST(CargoAvoidanceFusion, ImmediateLiveContactRemainsReviewOnly) {
   CargoAvoidanceFusionInput input = validInput();
   input.live.hazard = true;
   input.live.warning_code = 17;
+  input.live.distance_m = 0.20F;
+  input.live.clearance_m = -0.10F;
+  input.live.obstacle_track_id = 91U;
   input.anomaly_review_candidate = true;
   input.anomaly_review_live = true;
   input.anomaly_review_reason = "review_immediate_contact_guard";
   input.anomaly_review_distance_m = 0.20F;
   input.anomaly_review_clearance_m = -0.10F;
   const auto result = fuseCargoAvoidanceRisk(input);
-  // 正式风险 17 优先于 29。
   EXPECT_TRUE(result.official_valid);
-  EXPECT_EQ(result.official_code, 17);
+  EXPECT_EQ(result.official_code, 29);
+  EXPECT_TRUE(result.anomaly_review);
+  ASSERT_TRUE(result.authoritative_hazard.valid);
+  EXPECT_EQ(result.authoritative_hazard.source,
+            CargoAvoidanceHazardSource::LIVE);
+  EXPECT_EQ(result.authoritative_hazard.obstacle_track_id, 91U);
+  EXPECT_FLOAT_EQ(result.distance_m, 0.20F);
 }
 
 TEST(CargoAvoidanceFusion, AnomalyReviewWhenNoStandardHazard) {
@@ -501,6 +513,86 @@ TEST(CargoAvoidanceFusion,
   EXPECT_EQ(result.official_code, 34);
   EXPECT_FALSE(result.risk_live);
   EXPECT_EQ(result.reason, "embedded_obstacle_origin_unresolved");
+}
+
+TEST(CargoAvoidanceFusion,
+     AuthoritativeHazardKeepsCodeDistanceAndClearanceFromOneSource) {
+  auto input = validInput();
+  input.live.hazard = true;
+  input.live.warning_code = 18;
+  input.live.distance_m = 3.4F;
+  input.live.clearance_m = -0.20F;
+  input.static_map.available = true;
+  input.static_map.reliable = true;
+  input.static_map.hazard = true;
+  input.static_map.warning_code = 17;
+  input.static_map.distance_m = 2.9F;
+  input.static_map.clearance_m = -0.05F;
+  input.static_map.cargo_lifecycle_id = 41U;
+  input.static_map.cargo_track_id = 42U;
+  input.static_map.obstacle_track_id = 43U;
+  input.static_map.pose_generation = 44U;
+  input.static_map.map_generation = 45U;
+  input.static_map.obstacle_top_z_map = 3.2F;
+  input.static_map.uncertainty_m = 0.08F;
+  input.static_map.confidence = 0.95F;
+  input.static_map.far_field_history_valid = true;
+  input.static_map.provenance_valid = true;
+  input.static_map.validated_streak = 7;
+  input.static_hazard_track_confirmed = true;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  ASSERT_TRUE(result.authoritative_hazard.valid);
+  EXPECT_EQ(result.warning_authority, CargoWarningAuthority::FORMAL);
+  EXPECT_EQ(result.authoritative_hazard.source,
+            CargoAvoidanceHazardSource::STATIC_MAP);
+  EXPECT_EQ(result.official_code, 17);
+  EXPECT_FLOAT_EQ(result.distance_m, 2.9F);
+  EXPECT_FLOAT_EQ(result.clearance_m, -0.05F);
+  EXPECT_EQ(result.authoritative_hazard.cargo_lifecycle_id, 41U);
+  EXPECT_EQ(result.authoritative_hazard.cargo_track_id, 42U);
+  EXPECT_EQ(result.authoritative_hazard.obstacle_track_id, 43U);
+  EXPECT_EQ(result.authoritative_hazard.pose_generation, 44U);
+  EXPECT_EQ(result.authoritative_hazard.map_generation, 45U);
+  EXPECT_FLOAT_EQ(result.authoritative_hazard.obstacle_top_z_map, 3.2F);
+  EXPECT_FLOAT_EQ(result.authoritative_hazard.uncertainty_m, 0.08F);
+  EXPECT_FLOAT_EQ(result.authoritative_hazard.confidence, 0.95F);
+  EXPECT_TRUE(result.authoritative_hazard.far_field_history_valid);
+  EXPECT_TRUE(result.authoritative_hazard.provenance_valid);
+  EXPECT_EQ(result.authoritative_hazard.validated_streak, 7);
+}
+
+TEST(CargoAvoidanceFusion,
+     SuddenLiveReviewCannotOverrideMatureStaticLevel1) {
+  auto input = validInput();
+  input.live.hazard = true;
+  input.live.warning_code = 17;
+  input.live.distance_m = 0.20F;
+  input.live_near_field_history_authorized = false;
+  input.static_map.hazard = true;
+  input.static_map.warning_code = 17;
+  input.static_map.distance_m = 2.80F;
+  input.static_map.clearance_m = -0.10F;
+  input.static_near_field_history_authorized = false;
+  input.static_hazard_track_confirmed = true;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  ASSERT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 17);
+  ASSERT_TRUE(result.authoritative_hazard.valid);
+  EXPECT_EQ(result.authoritative_hazard.source,
+            CargoAvoidanceHazardSource::STATIC_MAP);
+  EXPECT_FLOAT_EQ(result.distance_m, 2.80F);
+  EXPECT_FALSE(result.anomaly_review);
+}
+
+TEST(CargoAvoidanceFusion,
+     UnboundRawWarningCandidateCannotFallThroughToClear) {
+  auto input = validInput();
+  input.warning_candidate_present = true;
+  input.warning_candidate_code = 18;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  EXPECT_FALSE(result.official_valid);
+  EXPECT_EQ(result.official_code, 34);
+  EXPECT_EQ(result.reason, "warning_candidate_source_not_authorized");
 }
 
 }  // namespace

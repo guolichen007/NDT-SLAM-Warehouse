@@ -619,11 +619,10 @@ private:
             (last_fault_log_wall_sec_ <= 0.0 ||
              wall_now_sec - last_fault_log_wall_sec_ >=
                  pending_repeat_sec_);
-        const bool review_repeat_due = review_required &&
-            (last_warning_log_wall_sec_ <= 0.0 ||
-             wall_now_sec - last_warning_log_wall_sec_ >=
-                 warning_repeat_sec_);
-        if (!log_change && !warning_repeat_due && !review_repeat_due &&
+        // Code 29 is an episode edge, not a periodic warning. Repeating it
+        // caused duplicate screenshots and made one anomaly look like many.
+        const bool review_enter_due = review_required && log_change;
+        if (!log_change && !warning_repeat_due && !review_enter_due &&
             !fault_repeat_due) return;
         if (code == AlarmStateMachine::kClear) {
             ROS_INFO("[SAFETY] code=14 state=CLEAR "

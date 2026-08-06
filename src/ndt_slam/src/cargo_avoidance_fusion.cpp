@@ -34,6 +34,96 @@ void combineMetric(float value, float* output) {
   }
 }
 
+AuthoritativeCargoHazard selectHazard(
+    bool allow_live, const CargoAvoidanceSourceRisk& live,
+    bool allow_static, const CargoAvoidanceSourceRisk& static_map) {
+  AuthoritativeCargoHazard selected;
+  const auto consider = [&selected](
+      CargoAvoidanceHazardSource source,
+      const CargoAvoidanceSourceRisk& risk) {
+    if (!risk.hazard || !warningCode(risk.warning_code) ||
+        !std::isfinite(risk.distance_m) || risk.distance_m < 0.0F ||
+        !std::isfinite(risk.clearance_m)) {
+      return;
+    }
+    const bool more_severe =
+        risk.warning_code == kNear3m &&
+        selected.warning_code != kNear3m;
+    const bool same_severity_nearer =
+        risk.warning_code == selected.warning_code &&
+        risk.distance_m < selected.distance_m;
+    if (!selected.valid || more_severe || same_severity_nearer) {
+      selected.valid = true;
+      selected.source = source;
+      selected.warning_code = risk.warning_code;
+      selected.distance_m = risk.distance_m;
+      selected.clearance_m = risk.clearance_m;
+      selected.cargo_lifecycle_id = risk.cargo_lifecycle_id;
+      selected.cargo_track_id = risk.cargo_track_id;
+      selected.obstacle_track_id = risk.obstacle_track_id;
+      selected.pose_generation = risk.pose_generation;
+      selected.map_generation = risk.map_generation;
+      selected.obstacle_top_z_map = risk.obstacle_top_z_map;
+      selected.uncertainty_m = risk.uncertainty_m;
+      selected.confidence = risk.confidence;
+      selected.far_field_history_valid = risk.far_field_history_valid;
+      selected.provenance_valid = risk.provenance_valid;
+      selected.validated_streak = risk.validated_streak;
+    }
+  };
+  if (allow_live) consider(CargoAvoidanceHazardSource::LIVE, live);
+  if (allow_static) {
+    consider(CargoAvoidanceHazardSource::STATIC_MAP, static_map);
+  }
+  return selected;
+}
+
+AuthoritativeCargoHazard selectReviewHazard(
+    bool allow_live, const CargoAvoidanceSourceRisk& live,
+    bool allow_static, const CargoAvoidanceSourceRisk& static_map) {
+  AuthoritativeCargoHazard selected;
+  const auto consider = [&selected](
+      CargoAvoidanceHazardSource source,
+      const CargoAvoidanceSourceRisk& risk) {
+    if (!risk.hazard || !warningCode(risk.warning_code) ||
+        !std::isfinite(risk.distance_m) || risk.distance_m < 0.0F ||
+        !std::isfinite(risk.clearance_m)) {
+      return;
+    }
+    if (selected.valid && risk.distance_m >= selected.distance_m) return;
+    selected.valid = true;
+    selected.source = source;
+    selected.warning_code = kAnomalyReview;
+    selected.distance_m = risk.distance_m;
+    selected.clearance_m = risk.clearance_m;
+    selected.cargo_lifecycle_id = risk.cargo_lifecycle_id;
+    selected.cargo_track_id = risk.cargo_track_id;
+    selected.obstacle_track_id = risk.obstacle_track_id;
+    selected.pose_generation = risk.pose_generation;
+    selected.map_generation = risk.map_generation;
+    selected.obstacle_top_z_map = risk.obstacle_top_z_map;
+    selected.uncertainty_m = risk.uncertainty_m;
+    selected.confidence = risk.confidence;
+    selected.far_field_history_valid = risk.far_field_history_valid;
+    selected.provenance_valid = risk.provenance_valid;
+    selected.validated_streak = risk.validated_streak;
+  };
+  if (allow_live) consider(CargoAvoidanceHazardSource::LIVE, live);
+  if (allow_static) {
+    consider(CargoAvoidanceHazardSource::STATIC_MAP, static_map);
+  }
+  return selected;
+}
+
+void applySelectedHazard(const AuthoritativeCargoHazard& hazard,
+                         CargoAvoidanceFusionResult* result) {
+  result->authoritative_hazard = hazard;
+  if (!hazard.valid) return;
+  result->official_code = hazard.warning_code;
+  result->distance_m = hazard.distance_m;
+  result->clearance_m = hazard.clearance_m;
+}
+
 bool pendingSourceCanCarryIdentity(PendingCargoEnvelopeSource source) {
   return source == PendingCargoEnvelopeSource::CURRENT_CANDIDATE ||
       source == PendingCargoEnvelopeSource::ACTIVE_LOCKED_TRACK ||
@@ -317,13 +407,23 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
            ? (static_risk_contract && input.static_hazard_track_confirmed)
            : authorizePendingStaticWarning(
                  input, config, &independent_static_reason));
-  // A live obstacle that first appears inside 3 m remains abnormal (29).
-  // A mature, map-identity-bound static obstacle is different: its physical
-  // history predates this approach and is independent evidence, so requiring
-  // a newly observed far-field approach would suppress real fixed hazards.
-  if (live_level1_without_history ||
+  // Far-field/static history is a property of each source, not a global
+  // early-return gate. A sudden live cluster must not replace a separately
+  // authorized mature static hazard with Code 29.
+  // A live contact-shell candidate remains an operator-review event even if
+  // the live track has approach history: this shell is intentionally used to
+  // diagnose cargo-self segmentation mistakes. Independently mature static
+  // evidence still remains a standard 17 and wins below.
+  const bool live_standard_risk = result.risk_live &&
+      !live_level1_without_history && !input.anomaly_review_live;
+  const bool static_standard_risk = result.risk_static &&
+      (!static_level1_without_history ||
+       static_level1_independently_proven);
+  const bool unresolved_level1_review =
+      live_level1_without_history ||
       (static_level1_without_history &&
-       !static_level1_independently_proven)) {
+       !static_level1_independently_proven);
+  const auto apply_unresolved_level1_review = [&]() {
     result.official_valid = true;
     result.official_code = kAnomalyReview;
     result.anomaly_review = true;
@@ -334,8 +434,22 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     result.provisional_status = "REVIEW_REQUIRED";
     result.pending_authority_reason =
         "level1_without_approach_history";
-    return result;
-  }
+    applySelectedHazard(
+        selectReviewHazard(
+            live_level1_without_history, input.live,
+            static_level1_without_history &&
+                !static_level1_independently_proven,
+            input.static_map),
+        &result);
+    if (result.authoritative_hazard.valid) {
+      result.anomaly_review_live =
+          result.authoritative_hazard.source ==
+              CargoAvoidanceHazardSource::LIVE;
+      result.anomaly_review_static =
+          result.authoritative_hazard.source ==
+              CargoAvoidanceHazardSource::STATIC_MAP;
+    }
+  };
 
   if (!formal_cargo) {
     result.official_code = kCargoInvalid;
@@ -380,27 +494,41 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
           result.pending_authority_reason;
       return result;
     }
-    if (result.risk_live || result.risk_static) {
+    if (live_standard_risk || static_standard_risk) {
       const std::int32_t provisional = moreSevere(
-          result.risk_live ? input.live.warning_code : 0,
-          result.risk_static ? input.static_map.warning_code : 0);
+          live_standard_risk ? input.live.warning_code : 0,
+          static_standard_risk ? input.static_map.warning_code : 0);
       result.provisional_status = provisional == kNear3m
           ? "NEAR_3M" : "NEAR_5M";
       std::string live_reason = "live_hazard_not_present";
       std::string static_reason = "static_hazard_not_present";
-      result.pending_live_warning_authorized = result.risk_live &&
+      result.pending_live_warning_authorized = live_standard_risk &&
           authorizePendingWarning(input, config, &live_reason);
-      result.pending_static_warning_authorized = result.risk_static &&
+      result.pending_static_warning_authorized = static_standard_risk &&
           authorizePendingStaticWarning(input, config, &static_reason);
       result.pending_warning_authorized =
           result.pending_live_warning_authorized ||
           result.pending_static_warning_authorized;
       if (result.pending_warning_authorized) {
-        result.official_code = moreSevere(
-            result.pending_live_warning_authorized
-                ? input.live.warning_code : 0,
-            result.pending_static_warning_authorized
-                ? input.static_map.warning_code : 0);
+        applySelectedHazard(
+            selectHazard(
+                result.pending_live_warning_authorized, input.live,
+                result.pending_static_warning_authorized,
+                input.static_map),
+            &result);
+        if (!result.authoritative_hazard.valid) {
+          result.official_valid = false;
+          result.official_code = kObstacleInvalid;
+          result.pending_warning_authorized = false;
+          result.pending_live_warning_authorized = false;
+          result.pending_static_warning_authorized = false;
+          result.pending_authority_reason =
+              "authorized_hazard_metrics_invalid";
+          result.reason = "pending_hazard_not_authorized:" +
+              result.pending_authority_reason;
+          return result;
+        }
+        result.warning_authority = CargoWarningAuthority::POSITIVE_ONLY;
         result.official_valid = true;
         if (result.pending_live_warning_authorized &&
             result.pending_static_warning_authorized) {
@@ -415,15 +543,17 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
           result.reason = "pending_static_warning_authorized";
         }
       } else {
-        result.pending_authority_reason = result.risk_live
+        result.pending_authority_reason = live_standard_risk
             ? live_reason : static_reason;
-        if (result.risk_live && result.risk_static) {
+        if (live_standard_risk && static_standard_risk) {
           result.pending_authority_reason =
               "live=" + live_reason + ";static=" + static_reason;
         }
         result.reason = "pending_hazard_not_authorized:" +
             result.pending_authority_reason;
       }
+    } else if (unresolved_level1_review) {
+      apply_unresolved_level1_review();
     } else {
       // A pending envelope can never grant clear.
       result.provisional_status = "CLEAR_NOT_AUTHORIZED";
@@ -432,16 +562,29 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     return result;
   }
 
-  if (result.risk_live || result.risk_static) {
-    result.official_code = moreSevere(
-        result.risk_live ? input.live.warning_code : 0,
-        result.risk_static ? input.static_map.warning_code : 0);
+  if (live_standard_risk || static_standard_risk) {
+    applySelectedHazard(
+        selectHazard(live_standard_risk, input.live,
+                     static_standard_risk, input.static_map),
+        &result);
+    if (!result.authoritative_hazard.valid) {
+      result.official_code = kObstacleInvalid;
+      result.reason = "authorized_hazard_metrics_invalid";
+      return result;
+    }
+    result.warning_authority = CargoWarningAuthority::FORMAL;
     result.official_valid = true;
     result.reason = result.map_live_conflict
         ? "MAP_LIVE_CONFLICT_static_hazard_retained"
-        : (result.risk_live && result.risk_static
+        : (live_standard_risk && static_standard_risk
                ? "live_and_static_hazard"
-               : (result.risk_live ? "live_hazard" : "static_hazard"));
+               : (live_standard_risk
+                      ? "live_hazard" : "static_hazard"));
+    return result;
+  }
+
+  if (unresolved_level1_review) {
+    apply_unresolved_level1_review();
     return result;
   }
 
@@ -461,12 +604,32 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     result.pending_authority_reason = result.reason;
     result.distance_m = input.anomaly_review_distance_m;
     result.clearance_m = input.anomaly_review_clearance_m;
+    applySelectedHazard(
+        selectReviewHazard(
+            input.anomaly_review_live, input.live,
+            input.anomaly_review_static, input.static_map),
+        &result);
+    if (result.authoritative_hazard.valid) {
+      result.anomaly_review_live =
+          result.authoritative_hazard.source ==
+              CargoAvoidanceHazardSource::LIVE;
+      result.anomaly_review_static =
+          result.authoritative_hazard.source ==
+              CargoAvoidanceHazardSource::STATIC_MAP;
+    }
     return result;
   }
 
   if (unresolved_embedded_live_hazard) {
     result.official_code = kObstacleInvalid;
     result.reason = "embedded_obstacle_origin_unresolved";
+    return result;
+  }
+
+  if (input.warning_candidate_present &&
+      warningCode(input.warning_candidate_code)) {
+    result.official_code = kObstacleInvalid;
+    result.reason = "warning_candidate_source_not_authorized";
     return result;
   }
 

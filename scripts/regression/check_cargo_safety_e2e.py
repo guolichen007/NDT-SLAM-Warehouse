@@ -24,6 +24,10 @@ def main() -> int:
     failures: list[str] = []
     cmake = read("src/ndt_slam/CMakeLists.txt")
     node = read("src/ndt_slam/src/ndt_slam.cpp")
+    loop_result_consumer = node[
+        node.find("void NdtSlamNode::consumeLoopClosureResult"):
+        node.find("void NdtSlamNode::updatePoseFromLoopClosure")
+    ]
     header = read("src/ndt_slam/include/ndt_slam/ndt_slam.hpp")
     heartbeat = read("src/ndt_slam/src/cargo_alarm_heartbeat_node.cpp")
     hook_node = read("src/ndt_slam/src/hook_load_state_node.cpp")
@@ -65,6 +69,18 @@ def main() -> int:
     map_session = read("src/ndt_slam/src/map_session_snapshot.cpp")
     fitness_circuit = read(
         "src/ndt_slam/src/ndt_fitness_circuit_breaker.cpp")
+    hook_filter_header = read(
+        "src/ndt_slam/include/ndt_slam/hook_load_state_filter.hpp")
+    hook_filter = read("src/ndt_slam/src/hook_load_state_filter.cpp")
+    relocalizer_header = read(
+        "src/ndt_slam/include/ndt_slam/ndt_relocalizer.hpp")
+    relocalizer = read("src/ndt_slam/src/ndt_relocalizer.cpp")
+    anomaly_tracker = read(
+        "src/ndt_slam/src/anomaly_review_episode_tracker.cpp")
+    anomaly_tracker_test = read(
+        "src/ndt_slam/test/anomaly_review_episode_tracker_test.cpp")
+    avoidance_test = read(
+        "src/ndt_slam/test/cargo_avoidance_fusion_test.cpp")
 
     for source in ("src/cargo_bottom_fusion.cpp", "src/cargo_safety_evaluator.cpp"):
         require(source in cmake, f"CMake does not compile {source}", failures)
@@ -209,6 +225,16 @@ def main() -> int:
     require("duplicate_sample_ignored" in
             read("src/ndt_slam/src/hook_load_state_filter.cpp"),
             "duplicate Gravity samples can advance confirmation", failures)
+    require(all(token not in hook_filter_header for token in (
+                "EMPTY_HELD_STALE", "LOADED_HELD_STALE",
+                "SENSOR_DISAGREEMENT")) and
+            "bool held_stale" in hook_filter_header and
+            "loaded_held_stale" in hook_filter and
+            "empty_held_stale" in hook_filter and
+            "held_stale_timeout_sec" in hook_node + live_config and
+            "msg->fresh || held_stale" in node,
+            "Hook held-stale state is not schema-v1 compatible end-to-end",
+            failures)
     rotation_failure = crane_constraint.find(
         'result.reason = "rotation_validation_failed";')
     rotation_return = crane_constraint.find("return result;", rotation_failure)
@@ -792,6 +818,55 @@ def main() -> int:
 
     require("cargo_alarm_heartbeat_node" in launch,
             "production launch does not start heartbeat", failures)
+    require("src/anomaly_review_episode_tracker.cpp" in cmake and
+            "anomaly_review_episode_tracker_test" in cmake and
+            "maximum_active_sec" in anomaly_tracker and
+            "reentry_cooldown_sec" in anomaly_tracker and
+            "RequiresTwoAdvancingFramesToEnter" in anomaly_tracker_test and
+            "TimesOutAndSuppressesSameEpisodeReentry" in
+                anomaly_tracker_test and
+            "build_safety_message(raw_cargo_safety_result, false)" in node and
+            "build_safety_message(last_cargo_safety_result_, true)" in node and
+            "review_repeat_due" not in heartbeat,
+            "Code 29 is not a bounded final-output-only episode", failures)
+    require("collision_tracking_acquisition_distance_m: 8.0" in live_config and
+            "acquisition_distance_m = 8.0F" in
+                read("src/ndt_slam/include/ndt_slam/cargo_obstacle_tracker.hpp") and
+            "SuddenLiveReviewCannotOverrideMatureStaticLevel1" in
+                avoidance_test and
+            "AuthoritativeHazardKeepsCodeDistanceAndClearanceFromOneSource" in
+                avoidance_test and
+            "AuthoritativeCargoHazard" in cargo_avoidance and
+            "obstacle_track_id" in cargo_avoidance and
+            "pose_generation" in cargo_avoidance and
+            "map_generation" in cargo_avoidance and
+            "far_field_history_valid" in cargo_avoidance and
+            "validated_streak" in cargo_avoidance and
+            "selectHazard(" in cargo_avoidance and
+            "applySelectedHazard(" in cargo_avoidance,
+            "far-field acquisition or single authoritative hazard is missing",
+            failures)
+    require("RelocalizationPurpose::GLOBAL_CONSISTENCY" in
+                relocalizer + node and
+            "reference_candidate_fitness" in relocalizer_header + relocalizer and
+            "accepted_candidates < 2" in node and
+            "persistent_registration_snapshot_" in header + node and
+            "persistent_registration_shadow" in node and
+            "global_suspect" in node and
+            "localization_continuity_generation" in header + node and
+            "source_localization_continuity_generation" in header + node and
+            "result.map_uuid == localization_map_uuid_" in node,
+            "shadow global validation or cross-generation map isolation is incomplete",
+            failures)
+    require("loop_closure_requires_global_verification" in
+                loop_result_consumer and
+            "relocalization_force_global_ = true" in loop_result_consumer and
+            "applyOptimizedPoses" not in loop_result_consumer and
+            "updatePoseFromLoopClosure" not in loop_result_consumer and
+            "stationary_confirmed_hazard_radial_fallback" in
+                motion_corridor,
+            "loop closure bypasses verification or stationary hazards vanish",
+            failures)
     require("SAFETY_PENDING" in heartbeat and
             "SAFETY_PENDING_SUMMARY" in heartbeat and
             "SAFETY_FAULT_PERSISTENT" not in heartbeat and

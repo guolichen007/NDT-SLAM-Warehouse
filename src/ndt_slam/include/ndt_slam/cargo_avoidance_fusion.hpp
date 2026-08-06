@@ -26,7 +26,49 @@ struct CargoAvoidanceSourceRisk {
   float distance_m = std::numeric_limits<float>::infinity();
   float clearance_m = std::numeric_limits<float>::quiet_NaN();
   float coverage = 0.0F;
+  std::uint64_t cargo_lifecycle_id = 0U;
+  std::uint64_t cargo_track_id = 0U;
+  std::uint64_t obstacle_track_id = 0U;
+  std::uint64_t pose_generation = 0U;
+  std::uint64_t map_generation = 0U;
+  float obstacle_top_z_map = std::numeric_limits<float>::quiet_NaN();
+  float uncertainty_m = std::numeric_limits<float>::quiet_NaN();
+  float confidence = 0.0F;
+  bool far_field_history_valid = false;
+  bool provenance_valid = false;
+  int validated_streak = 0;
   std::string reason;
+};
+
+enum class CargoAvoidanceHazardSource : std::uint8_t {
+  NONE = 0,
+  LIVE = 1,
+  STATIC_MAP = 2,
+};
+
+enum class CargoWarningAuthority : std::uint8_t {
+  NONE = 0,
+  POSITIVE_ONLY = 1,
+  FORMAL = 2,
+};
+
+struct AuthoritativeCargoHazard {
+  bool valid = false;
+  CargoAvoidanceHazardSource source = CargoAvoidanceHazardSource::NONE;
+  std::int32_t warning_code = 0;
+  float distance_m = std::numeric_limits<float>::infinity();
+  float clearance_m = std::numeric_limits<float>::quiet_NaN();
+  std::uint64_t cargo_lifecycle_id = 0U;
+  std::uint64_t cargo_track_id = 0U;
+  std::uint64_t obstacle_track_id = 0U;
+  std::uint64_t pose_generation = 0U;
+  std::uint64_t map_generation = 0U;
+  float obstacle_top_z_map = std::numeric_limits<float>::quiet_NaN();
+  float uncertainty_m = std::numeric_limits<float>::quiet_NaN();
+  float confidence = 0.0F;
+  bool far_field_history_valid = false;
+  bool provenance_valid = false;
+  int validated_streak = 0;
 };
 
 struct CargoAvoidanceFusionConfig {
@@ -126,6 +168,11 @@ struct CargoAvoidanceFusionResult {
   bool pending_static_warning_authorized = false;
   std::string pending_authority_reason = "not_evaluated";
   std::string provisional_status = "UNKNOWN";
+  // Code, distance and clearance are selected as one indivisible record.
+  // Downstream status/marker code must use this source rather than mixing
+  // the minimum metric from one source with the code/track of another.
+  AuthoritativeCargoHazard authoritative_hazard;
+  CargoWarningAuthority warning_authority = CargoWarningAuthority::NONE;
 };
 
 CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(

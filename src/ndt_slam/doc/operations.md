@@ -114,6 +114,24 @@ LOCKED 后关注冻结尺寸/yaw、实时中心、中心 residual、position sou
 `pending_angle_rejected_clusters`。实时点簇与静态高度查询必须使用同一个前方 ±45° 门禁；
 侧方计数增长但 17/18 不增长是预期行为。0.30m 内的接触保护不受方向门禁限制，但只输出 Code 29；没有先出现 18 而突然出现的近场候选也输出 29。看到 29 时应保存 RViz/相机画面，并结合类型化消息中的 `reason`、距离、净空、Track 和来源进行人工复核。
 
+速度无效或车辆静止时不会复用旧方向，Live/Static 查询退回径向 Track 维护。只有已经具备
+远场历史或独立成熟静态身份的障碍能继续输出标准 17/18；普通实时 0.30m 接触候选仍只
+进入 29，防止货物自身分割错误变成主流避障信号。
+
+障碍查询范围为 8m：5-8m 只用于建立同一 Track 的远场接近历史，进入 `(3m,5m]` 才输出
+18，进入 `≤3m` 才输出 17。Code 29 需要连续 2 个新帧确认，单次事件最长 1.5 秒，
+同一事件冷却 2 秒；heartbeat 不会反复触发。若成熟静态障碍与实时异常候选同帧出现，
+应以静态来源的标准 17/18 为准，并核对 code、distance、clearance、track、source 均来自
+同一条权威记录。
+
+`runtime_status.json` 还应核对 `global_consistency_suspect` 与 shadow 请求状态。健康运行期
+影子搜索使用不可变持久 registration 快照；若连续两次发现 fitness 明显更优且位姿不一致
+的全局候选，应先进入 Code 31 再恢复，不能继续写图。MapCommit/clean 结果携带 map UUID
+和 pose continuity generation，重定位前发起的旧异步结果不得在重定位后应用。
+
+Hook 短时断流仍保持 schema v1 的 EMPTY/LOADED，但诊断应显示 `fresh=false` 和
+`held_stale=true`。重复时间戳不能让它恢复；只有严格前进的新样本才可恢复 fresh。
+
 `runtime_status.json` 中的 `average_ndt_time_ms` 应在首次有效配准后变为正数，
 `stationary_frame_count` 应在持续静止时递增。输入点云的非有限点和超出配置 Z 范围的点
 分别累计到 `pointcloud_nonfinite_rejected` 与 `pointcloud_z_outlier_rejected`；后者持续快速
