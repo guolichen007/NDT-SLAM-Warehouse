@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -78,6 +79,13 @@ struct CargoCandidateDescriptor {
 struct CargoCandidateIdentityContext {
   Eigen::Vector2f hook_center = Eigen::Vector2f::Zero();
   float hook_region_radius_m = 1.5F;
+  // New suspended-cargo identities can require the measured OBB to cover the
+  // hook projection. This prevents an adjacent pallet from being recentered
+  // onto odom and presented as cargo.
+  bool require_hook_containment = false;
+  float hook_containment_margin_m = 0.10F;
+  float maximum_hook_center_distance_m =
+      std::numeric_limits<float>::infinity();
   std::size_t strong_point_count = 80U;
   bool predicted_track_valid = false;
   Eigen::Vector3f predicted_center = Eigen::Vector3f::Zero();
@@ -206,6 +214,11 @@ struct CargoProvisionalLockSummary {
 float cargoOrientedOverlapRatio(
     const CargoCandidateDescriptor& lhs,
     const CargoCandidateDescriptor& rhs);
+
+bool cargoCandidateContainsHookAnchor(
+    const CargoCandidateDescriptor& candidate,
+    const Eigen::Vector2f& hook_center,
+    float margin_m);
 
 CargoCandidateIdentityScore scoreCargoCandidateIdentity(
     const CargoCandidateDescriptor& candidate,

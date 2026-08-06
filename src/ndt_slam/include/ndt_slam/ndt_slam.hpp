@@ -322,7 +322,6 @@ private:
     ros::Publisher ground_map_pub_;       // 地面点地图
     ros::Publisher objects_map_pub_;      // 非地面/货物地图（raw）
     ros::Publisher objects_clean_map_pub_; // 非地面/货物地图（clean，BEV过滤后）
-    ros::Publisher objects_clean_live_pub_;
     ros::Publisher current_cloud_pub_;
     ros::Publisher path_pub_;
     ros::Publisher runtime_path_pub_;
@@ -482,7 +481,7 @@ private:
     bool relocalization_enabled_ = true;
     int relocalization_trigger_frames_ = 5;
     int relocalization_global_trigger_frames_ = 15;
-    int relocalization_confirm_frames_ = 2;
+    int relocalization_confirm_frames_ = 3;
     int relocalization_request_interval_frames_ = 3;
     int relocalization_result_max_age_frames_ = 8;
     double relocalization_result_max_age_sec_ = 0.50;
@@ -532,6 +531,7 @@ private:
     bool localization_stationary_cycle_consumed_ = false;
     int localization_recovery_attempts_ = 0;
     std::uint64_t localization_ekf_recovery_count_ = 0U;
+    bool relocalization_reseeded_this_episode_ = false;
 
     // ========== Yaw 锁存 ==========
     // 固定轨道天车运行时车体 yaw 不应自由变化。
@@ -1704,12 +1704,16 @@ private:
             float ground_max_expected_height_delta_m = 0.30f;
             int empty_max_hag_candidate_points = 2;
 
-            // 分位数参数
+            // Vertical percentiles retain the validated 8/92 height chain.
+            // XY OBB percentiles are independent so footprint improvements
+            // cannot silently alter thickness or bottom authorization.
             float percentile_low = 0.08f;
             float percentile_high = 0.92f;
+            float xy_percentile_low = 0.03f;
+            float xy_percentile_high = 0.97f;
 
             // 框扩展 margin
-            float margin_xy_m = 0.05f;
+            float margin_xy_m = 0.10f;
             float margin_z_m = 0.03f;
 
             // LOCKED 后尺寸自适应
@@ -1848,6 +1852,8 @@ private:
     ros::Publisher cargo_candidate_components_pub_;
     ros::Publisher cargo_selected_candidate_pub_;
     ros::Publisher cargo_predicted_obb_pub_;
+    ros::Publisher cargo_live_obb_pub_;
+    CargoLiveObbFilter cargo_live_obb_filter_;
     ros::Publisher cargo_self_removed_pub_;
     ros::Publisher cargo_external_obstacle_pub_;
     ros::Publisher cargo_most_dangerous_cluster_pub_;

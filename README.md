@@ -1,9 +1,11 @@
 # NDT-SLAM Warehouse
 
-> 当前现场显示约定：`/display_map_objects_clean` 是通过定位身份门控的可信持久层；
-> RViz 默认使用 `/display_map_objects_clean_live`，它以 `base_link` 发布当前帧清理后
-> 静态物体，只用于显示，不参与 NDT、静态证据、地图提交或落盘。货物框 XY 中心
-> 默认严格固定在 hook/odom anchor，点云仅决定对称尺寸、朝向和原始摆动证据。
+> 当前现场显示约定：RViz 默认使用 map 坐标系、latched 的
+> `/display_map_objects_clean` 完整快照。它随异步 clean-map 重建结果更新，不发布
+> 当前帧预览。货物框 XY 中心严格固定在 hook/odom anchor；点云只决定稳健尺寸、
+> 吊物 OBB 朝向和摆动证据，小车定位 yaw 独立保持稳定。新吊物身份还必须同时
+> 具备有效重力 `LOADED`、实测 OBB 覆盖锚点及中心距离门禁，旁边货物不会被
+> 强行移动到 odom，而是继续作为外部障碍物参与避障。
 
 双雷达室内天车定位、长期建图、吊物跟踪与碰撞避障系统。
 

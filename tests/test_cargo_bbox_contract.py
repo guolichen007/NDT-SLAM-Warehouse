@@ -26,11 +26,18 @@ class CargoBoundingBoxContractTest(unittest.TestCase):
             "uint64_t NdtSlamNode::computeCloudHash(",
         )
         self.assertIn(
-            "float z05 = zs[static_cast<int>(n * p_low)];", body
+            "const float z_low = "
+            "odom_anchor_config_.tight_box.percentile_low;",
+            body,
         )
         self.assertIn(
-            "float z95 = zs[static_cast<int>(n * p_high)];", body
+            "const float z_high = "
+            "odom_anchor_config_.tight_box.percentile_high;",
+            body,
         )
+        self.assertIn("float z05 = zs[static_cast<int>(n * z_low)];", body)
+        self.assertIn("float z95 = zs[static_cast<int>(n * z_high)];", body)
+        self.assertIn("tight_box.xy_percentile_low", body)
         self.assertNotIn("float z05 = zs[0];", body)
         self.assertNotIn("float z95 = zs[n - 1];", body)
 

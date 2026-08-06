@@ -51,6 +51,12 @@ python -m unittest discover -s tests -p "test_*.py"
 - 静止 8 秒且 raw 漂移累计 0.7m：不得退出保持、不得写 local/persistent map。
 - 三帧同方向真实运动：进入 MOVING_CONFIRM、有限 CATCH_UP、下一帧恢复写图。
 - 横向吊物平移/起升：冻结尺寸/yaw，中心连续跟随。
+- 新货物 OBB：必须同时满足有效重力 `LOADED`、实测 OBB 覆盖锚点、实测中心距
+  锚点不超过配置上限和多帧稳定证据；将 odom 旁边货物强行重心化到锚点即失败。
+- 吊物自身 yaw 可随摆动变化，只能将实时长宽投影后保守扩大 XY 避障包络；不得
+  改变车辆定位 yaw，也不得替代独立的厚度/底面融合。
+- XY OBB 使用独立的 3/97 分位数；Z/可见高度继续使用已验证的 8/92 分位数。
+  修改横向贴合逻辑后，厚度约束、保守底面、FORMAL 授权与垂直净空必须保持不变。
 - LOST_HOLD：短窗扩张 OBB；超时 marker 保持但 code 33、剔除关闭。
 - 障碍距离/净空边界：严格验证 14/17/18。
 - 小件、弱反射、HAG 残余、聚类不足：UNKNOWN 不得变成空载 CLEAR。
@@ -65,8 +71,8 @@ python -m unittest discover -s tests -p "test_*.py"
 - 连续 `DEGRADED` 超过软恢复门限：看门狗只调用一次 `/relocalize`；进入
   `SEARCHING_*`/`CONFIRMING` 后不得重复调用。只有 health/status/odom 三路同时
   失活才写入 JSONL/state 并由前台 supervisor 完整重启，15 分钟第 4 次必须被抑制。
-- 启动 RViz：`display_map` 默认关闭，`objects_clean_live` 持续随 odom 更新，持久
-  `objects_clean` 在隔离期间不得写入；
+- 启动 RViz：`display_map` 默认关闭，`objects_clean` 使用 map 坐标系的完整、
+  同代 sealed snapshot，并随异步 clean-map 结果更新；不再发布当前帧预览。
   操作者可以手工开启全量显示层。
 
 ## 通过标准

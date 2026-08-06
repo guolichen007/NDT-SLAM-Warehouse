@@ -101,7 +101,7 @@ relocalization:
   enabled: true
   trigger_frames: 5
   global_trigger_frames: 15
-  confirm_frames: 2
+  confirm_frames: 3
   request_interval_frames: 3
   result_max_age_frames: 8
   result_max_age_sec: 0.50
@@ -526,6 +526,9 @@ crane_motion_ekf:
 
   innovation_gate_m: 0.35
   innovation_reject_m: 1.00
+  correction_nominal_limit_m: 0.35
+  correction_soft_limit_m: 1.00
+  correction_soft_r_gain: 4.0
   # Fitness depends on target density.  Inflate EKF R instead of using a
   # binary reject cliff; innovation/NIS and the output invariant remain active.
   reject_high_fitness: false
@@ -560,6 +563,9 @@ crane_motion_ekf:
     max_high_fitness_frames: 10
     max_reject_innovation_frames: 5
     high_fitness_threshold: 0.15
+    covariance_inflation: 4.0
+    maximum_covariance_trace: 25.0
+    rearm_nominal_frames: 5
 
   # V3: 慢帧保护
   ndt_runtime_guard:
@@ -573,7 +579,20 @@ crane_motion_ekf:
     max_speed_mps: 2.00
     max_step_safety_factor: 1.10
     max_step_min_m: 0.05
-    max_step_max_m: 0.25
+    max_step_max_m: 2.50
+    output_soft_limit_ratio: 1.50
+    absolute_output_step_limit_m: 2.50
+
+  yaw_soft_constraint:
+    enabled: true
+    acquire_tolerance_deg: 1.0
+    # Kept for configuration compatibility and diagnostics. Once acquired,
+    # rail-vehicle yaw is held until explicit relocalization; it is never an
+    # XY frame-rejection threshold and never follows cargo swing.
+    sigma_deg: 1.0
+    anomaly_threshold_deg: 3.0
+    anomaly_required_frames: 6
+    latch_required_frames: 6
 
 # ========== v8-stable-r3-final: SoftYawFilter ==========
 soft_yaw_filter:
@@ -1363,6 +1382,8 @@ odom_anchored_cargo_box:
     enabled: true
     # Cargo XY is the hook/odom anchor. LiDAR controls yaw and symmetric size,
     # while its raw centre remains available for association/swing evidence.
+    # A new identity requires valid gravity LOADED and a measured OBB covering
+    # the anchor; adjacent pallets remain external-obstacle evidence.
     anchor_symmetry_mode: "strict"
     max_center_offset_m: 0.35
     hag_filter_enabled: true
@@ -1387,9 +1408,13 @@ odom_anchored_cargo_box:
     # Only this many HAG residual points are treated as sensor noise. Any
     # larger unclustered residual keeps the cargo observation UNKNOWN.
     empty_max_hag_candidate_points: 2
+    # Keep Z/height on the field-validated percentile range. XY OBB uses a
+    # wider independent range and therefore cannot change thickness fusion.
     percentile_low: 0.08
     percentile_high: 0.92
-    margin_xy_m: 0.05
+    xy_percentile_low: 0.03
+    xy_percentile_high: 0.97
+    margin_xy_m: 0.10
     margin_z_m: 0.03
     size_update_mode: "adaptive"
     size_update_alpha: 0.30

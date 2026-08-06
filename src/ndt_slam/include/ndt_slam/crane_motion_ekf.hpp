@@ -36,10 +36,17 @@ struct CraneMotionEKFConfig {
     double slow_frame_extra_r = 0.30;
 
     // V3: 物理步长保护
-    double max_speed_mps = 0.50;
-    double max_step_safety_factor = 1.5;
+    double max_speed_mps = 2.0;
+    double max_step_safety_factor = 1.10;
     double max_step_min_m = 0.08;
-    double max_step_max_m = 0.25;
+    double max_step_max_m = 2.50;
+    double output_soft_limit_ratio = 1.50;
+    double absolute_output_step_limit_m = 2.50;
+
+    // NDT correction is relative to the initial guess, not frame motion.
+    double correction_nominal_limit_m = 0.35;
+    double correction_soft_limit_m = 1.00;
+    double correction_soft_r_gain = 4.0;
 
     double stationary_position_hold_variance = 0.0025;
     double stationary_velocity_hold_variance = 0.001;
@@ -72,8 +79,10 @@ struct CraneMotionEKFConfig {
     // 固定轨道天车运行时车体 yaw 不应自由变化。
     // HEALTHY 正常运行时 NDT 只更新 XY；Z/roll/pitch/yaw 使用 accepted pose。
     bool runtime_yaw_latched = true;
-    double maximum_runtime_yaw_step_deg = 0.30;
-    double maximum_runtime_yaw_deviation_deg = 1.00;
+    double yaw_acquire_tolerance_deg = 1.00;
+    double yaw_soft_constraint_sigma_deg = 1.00;
+    double yaw_anomaly_threshold_deg = 3.00;
+    int yaw_anomaly_required_frames = 6;
     int relocalization_yaw_required_frames = 6;
 
     // ========== 连续退化门限 ==========
@@ -81,6 +90,8 @@ struct CraneMotionEKFConfig {
     int max_consecutive_degraded_frames = 3;
     // maybeRecover 的协方差膨胀因子（替代 P 重置）。
     double recovery_covariance_inflation = 4.0;
+    double recovery_max_covariance_trace = 25.0;
+    int recovery_rearm_nominal_frames = 5;
 };
 
 struct CraneMotionEKFStatus {
@@ -90,6 +101,9 @@ struct CraneMotionEKFStatus {
     bool recovered = false;
     bool prediction_only = false;
     bool step_limited = false;
+    bool correction_soft = false;
+    bool output_step_soft = false;
+    bool map_commit_safe = false;
 
     Eigen::Vector2d predicted_pos = Eigen::Vector2d::Zero();
     Eigen::Vector2d ndt_pos = Eigen::Vector2d::Zero();
@@ -110,6 +124,7 @@ struct CraneMotionEKFStatus {
     double ndt_time_ms = 0.0;
     double nis = 0.0;
     double output_step = 0.0;
+    double nominal_allowed_step = 0.0;
     double max_allowed_step = 0.0;
 
     int frames_since_good_ndt = 0;
@@ -122,6 +137,8 @@ struct CraneMotionEKFStatus {
     bool yaw_latched = false;
     double latched_yaw_rad = 0.0;
     int yaw_confirm_frames = 0;
+    int yaw_anomaly_frames = 0;
+    double yaw_deviation_deg = 0.0;
 
     // ========== 连续退化跟踪 ==========
     int consecutive_degraded_frames = 0;
@@ -162,8 +179,6 @@ public:
     double computeSlowFrameExtraR(double ndt_time_ms) const;
 
     // V3: 物理步长保护 - 检查 NDT 结果是否非物理
-    bool isNonPhysicalStep(double raw_step, double ndt_time_ms, double dt) const;
-
     const CraneMotionEKFStatus& status() const { return status_; }
 
     const Eigen::Vector4d& state() const { return x_; }
@@ -177,15 +192,18 @@ public:
     // fix/588-runtime-localization-stable: 只清速度，不改位置
     void applyZeroVelocityConstraint();
 
-    // ========== Yaw 锁存 ==========
-    // 运行时检查 NDT yaw 是否在锁存范围内。返回 true 表示 yaw 可接受。
-    bool checkRuntimeYaw(double ndt_yaw_rad, double dt);
+    // Rail-crane yaw is acquired from six consistent frames and then held as
+    // a vehicle-heading prior. Runtime observations are diagnostic only and
+    // never reject the independent XY measurement.
+    // Returns true only on the transition from acquiring to latched.
+    bool observeRuntimeYaw(double ndt_yaw_rad);
 
-    // 尝试锁存 yaw。需要连续多帧一致后才锁存。
-    bool tryLatchYaw(double ndt_yaw_rad);
-
-    // 解锁 yaw（进入 RELOCALIZING 时调用）。
+    // Explicit relocalization may release the heading prior and reacquire it;
+    // cargo swing must never call this or reset the XY EKF.
     void unlatchYaw();
+
+    void reseedFromRelocalization(const Sophus::SE3d& pose,
+                                  const ros::Time& stamp);
 
     // ========== 候选拒绝（替代裁剪提交） ==========
     // 当 candidate 超过物理上限时，返回 bounded prediction 而非裁剪后的 candidate。
@@ -199,10 +217,13 @@ public:
         const std::string& reason);
 
 private:
+    bool runtimeYawWithinSoftBound(double ndt_yaw_rad) const;
+    bool tryLatchYaw(double ndt_yaw_rad);
     void predict(double dt, Eigen::Vector4d& x_pred, Eigen::Matrix4d& P_pred);
     void maybeRecover(const std::string& reason);
     double sanitizeDt(const ros::Time& stamp) const;
-    double computeMaxOutputStep(double dt) const;
+    double computeNominalOutputStep(double dt) const;
+    double computeHardOutputStep(double dt) const;
     bool enforceOutputStep(const Eigen::Vector2d& previous_pos,
                            double dt,
                            Eigen::Vector4d& state);
@@ -235,6 +256,9 @@ private:
     int yaw_consistent_count_ = 0;
     double last_accepted_yaw_rad_ = 0.0;
     bool yaw_ever_latched_ = false;
+    int yaw_anomaly_count_ = 0;
+    bool recovery_inflated_this_episode_ = false;
+    int nominal_accept_count_ = 0;
 };
 
 }  // namespace ndt_slam

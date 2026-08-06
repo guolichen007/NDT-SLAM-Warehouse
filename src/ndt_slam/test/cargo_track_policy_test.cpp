@@ -126,6 +126,44 @@ TEST(CargoTrackPolicy, WrongStableBackgroundClusterCannotFormalLock) {
   EXPECT_LT(score.overall_lock_confidence, 0.70F);
 }
 
+TEST(CargoTrackPolicy, AdjacentCandidateCannotBeRecenteredOntoHook) {
+  CargoCandidateIdentityContext context;
+  context.hook_center = Eigen::Vector2f::Zero();
+  context.hook_region_radius_m = 2.0F;
+  context.require_hook_containment = true;
+  context.hook_containment_margin_m = 0.10F;
+  const CargoCandidateIdentityScore score = scoreCargoCandidateIdentity(
+      candidate(5, 1.0F, 0.0F, 1.0F, 0.8F, 0.6F, 1.0F, 0.0F),
+      context);
+  EXPECT_FALSE(score.valid);
+  EXPECT_EQ(score.reason, "hook_anchor_outside_candidate_obb");
+}
+
+TEST(CargoTrackPolicy, CandidateCoveringHookRemainsEligible) {
+  CargoCandidateIdentityContext context;
+  context.hook_center = Eigen::Vector2f::Zero();
+  context.hook_region_radius_m = 2.0F;
+  context.require_hook_containment = true;
+  const CargoCandidateIdentityScore score = scoreCargoCandidateIdentity(
+      candidate(6, 0.20F, 0.0F, 1.0F, 1.2F, 0.8F, 1.0F, 0.0F),
+      context);
+  EXPECT_TRUE(score.valid) << score.reason;
+}
+
+TEST(CargoTrackPolicy, CandidateCenterMustRemainNearHook) {
+  CargoCandidateIdentityContext context;
+  context.hook_center = Eigen::Vector2f::Zero();
+  context.hook_region_radius_m = 2.0F;
+  context.require_hook_containment = true;
+  context.hook_containment_margin_m = 0.10F;
+  context.maximum_hook_center_distance_m = 0.35F;
+  const CargoCandidateIdentityScore score = scoreCargoCandidateIdentity(
+      candidate(7, 0.50F, 0.0F, 1.0F, 1.4F, 1.0F, 1.0F, 0.0F),
+      context);
+  EXPECT_FALSE(score.valid);
+  EXPECT_EQ(score.reason, "candidate_center_too_far_from_hook_anchor");
+}
+
 TEST(CargoTrackPolicy, AssociationUsesPredictedCenterAndDt) {
   CargoAssociationInput input;
   input.candidate = candidate(

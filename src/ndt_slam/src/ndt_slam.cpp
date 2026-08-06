@@ -318,8 +318,6 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 1, true);
     objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 1, true);
     objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 1, true);
-    objects_clean_live_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
-        "/display_map_objects_clean_live", 1, false);
     near_field_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/near_field_removed", 10);
     payload_channel_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_channel_cloud", 10);
     payload_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_candidate_cloud", 10);
@@ -336,6 +334,8 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
         "/cargo_avoidance/selected_candidate_cloud", 2);
     cargo_predicted_obb_pub_ = nh_.advertise<visualization_msgs::Marker>(
         "/cargo_avoidance/predicted_obb", 2);
+    cargo_live_obb_pub_ = nh_.advertise<visualization_msgs::Marker>(
+        "/cargo_avoidance/live_obb_marker", 2);
     cargo_self_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
         "/cargo_avoidance/self_removed_cloud", 2);
     cargo_external_obstacle_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
@@ -554,8 +554,6 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     ground_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_ground", 1, true);
     objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 1, true);
     objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 1, true);
-    objects_clean_live_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
-        "/display_map_objects_clean_live", 1, false);
     near_field_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/near_field_removed", 10);
     payload_channel_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_channel_cloud", 10);
     payload_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_candidate_cloud", 10);
@@ -572,6 +570,8 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         "/cargo_avoidance/selected_candidate_cloud", 2);
     cargo_predicted_obb_pub_ = nh_.advertise<visualization_msgs::Marker>(
         "/cargo_avoidance/predicted_obb", 2);
+    cargo_live_obb_pub_ = nh_.advertise<visualization_msgs::Marker>(
+        "/cargo_avoidance/live_obb_marker", 2);
     cargo_self_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
         "/cargo_avoidance/self_removed_cloud", 2);
     cargo_external_obstacle_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
@@ -1665,6 +1665,12 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
             crane_motion_ekf_cfg_.innovation_gate_m = n["innovation_gate_m"].as<double>(0.35);
             crane_motion_ekf_cfg_.innovation_reject_m = n["innovation_reject_m"].as<double>(1.00);
+            crane_motion_ekf_cfg_.correction_nominal_limit_m =
+                n["correction_nominal_limit_m"].as<double>(0.35);
+            crane_motion_ekf_cfg_.correction_soft_limit_m =
+                n["correction_soft_limit_m"].as<double>(1.00);
+            crane_motion_ekf_cfg_.correction_soft_r_gain =
+                n["correction_soft_r_gain"].as<double>(4.0);
 
             // 高 fitness 拒绝
             crane_motion_ekf_cfg_.reject_high_fitness = n["reject_high_fitness"].as<bool>(true);
@@ -1695,10 +1701,30 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             // V3: 物理步长保护配置
             if (n["crane_motion_limit"]) {
                 const auto m = n["crane_motion_limit"];
-                crane_motion_ekf_cfg_.max_speed_mps = m["max_speed_mps"].as<double>(0.50);
-                crane_motion_ekf_cfg_.max_step_safety_factor = m["max_step_safety_factor"].as<double>(1.5);
+                crane_motion_ekf_cfg_.max_speed_mps = m["max_speed_mps"].as<double>(2.00);
+                crane_motion_ekf_cfg_.max_step_safety_factor = m["max_step_safety_factor"].as<double>(1.10);
                 crane_motion_ekf_cfg_.max_step_min_m = m["max_step_min_m"].as<double>(0.08);
-                crane_motion_ekf_cfg_.max_step_max_m = m["max_step_max_m"].as<double>(0.25);
+                crane_motion_ekf_cfg_.max_step_max_m = m["max_step_max_m"].as<double>(2.50);
+                crane_motion_ekf_cfg_.output_soft_limit_ratio =
+                    m["output_soft_limit_ratio"].as<double>(1.50);
+                crane_motion_ekf_cfg_.absolute_output_step_limit_m =
+                    m["absolute_output_step_limit_m"].as<double>(2.50);
+            }
+
+            if (n["yaw_soft_constraint"]) {
+                const auto y = n["yaw_soft_constraint"];
+                crane_motion_ekf_cfg_.runtime_yaw_latched =
+                    y["enabled"].as<bool>(true);
+                crane_motion_ekf_cfg_.yaw_acquire_tolerance_deg =
+                    y["acquire_tolerance_deg"].as<double>(1.0);
+                crane_motion_ekf_cfg_.yaw_soft_constraint_sigma_deg =
+                    y["sigma_deg"].as<double>(1.0);
+                crane_motion_ekf_cfg_.yaw_anomaly_threshold_deg =
+                    y["anomaly_threshold_deg"].as<double>(3.0);
+                crane_motion_ekf_cfg_.yaw_anomaly_required_frames =
+                    y["anomaly_required_frames"].as<int>(6);
+                crane_motion_ekf_cfg_.relocalization_yaw_required_frames =
+                    y["latch_required_frames"].as<int>(6);
             }
 
             if (n["diagonal_mode"]) {
@@ -1723,6 +1749,12 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 crane_motion_ekf_cfg_.max_high_fitness_frames = r["max_high_fitness_frames"].as<int>(10);
                 crane_motion_ekf_cfg_.max_reject_innovation_frames = r["max_reject_innovation_frames"].as<int>(5);
                 crane_motion_ekf_cfg_.high_fitness_threshold = r["high_fitness_threshold"].as<double>(0.15);
+                crane_motion_ekf_cfg_.recovery_covariance_inflation =
+                    r["covariance_inflation"].as<double>(4.0);
+                crane_motion_ekf_cfg_.recovery_max_covariance_trace =
+                    r["maximum_covariance_trace"].as<double>(25.0);
+                crane_motion_ekf_cfg_.recovery_rearm_nominal_frames =
+                    r["rearm_nominal_frames"].as<int>(5);
             }
 
             crane_motion_ekf_.setConfig(crane_motion_ekf_cfg_);
@@ -2375,7 +2407,32 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                         0, 20);
                 odom_anchor_config_.tight_box.percentile_low = tb["percentile_low"].as<float>(0.08f);
                 odom_anchor_config_.tight_box.percentile_high = tb["percentile_high"].as<float>(0.92f);
-                odom_anchor_config_.tight_box.margin_xy_m = tb["margin_xy_m"].as<float>(0.05f);
+                odom_anchor_config_.tight_box.xy_percentile_low =
+                    tb["xy_percentile_low"].as<float>(0.03f);
+                odom_anchor_config_.tight_box.xy_percentile_high =
+                    tb["xy_percentile_high"].as<float>(0.97f);
+                const auto valid_percentile_range =
+                    [](float low, float high) {
+                        return std::isfinite(low) && std::isfinite(high) &&
+                            low >= 0.0F && high < 1.0F && low < high;
+                    };
+                if (!valid_percentile_range(
+                        odom_anchor_config_.tight_box.percentile_low,
+                        odom_anchor_config_.tight_box.percentile_high)) {
+                    ROS_WARN("[TightBoxConfig] invalid vertical percentile "
+                             "range; restoring validated 0.08/0.92");
+                    odom_anchor_config_.tight_box.percentile_low = 0.08F;
+                    odom_anchor_config_.tight_box.percentile_high = 0.92F;
+                }
+                if (!valid_percentile_range(
+                        odom_anchor_config_.tight_box.xy_percentile_low,
+                        odom_anchor_config_.tight_box.xy_percentile_high)) {
+                    ROS_WARN("[TightBoxConfig] invalid XY percentile range; "
+                             "restoring 0.03/0.97");
+                    odom_anchor_config_.tight_box.xy_percentile_low = 0.03F;
+                    odom_anchor_config_.tight_box.xy_percentile_high = 0.97F;
+                }
+                odom_anchor_config_.tight_box.margin_xy_m = tb["margin_xy_m"].as<float>(0.10f);
                 odom_anchor_config_.tight_box.margin_z_m = tb["margin_z_m"].as<float>(0.03f);
                 odom_anchor_config_.tight_box.size_update_mode = tb["size_update_mode"].as<std::string>("adaptive");
                 odom_anchor_config_.tight_box.size_update_alpha = tb["size_update_alpha"].as<float>(0.30f);
@@ -2434,12 +2491,17 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     std::clamp(tb["orientation_max_yaw_spread_deg"]
                         .as<float>(12.0F), 1.0F, 45.0F);
 
-                ROS_DEBUG("[TightBoxConfig] enabled=%d symmetry=%s hag_filter=%d percentile=[%.2f,%.2f] sub_cluster=%d oriented=%d",
+                ROS_DEBUG("[TightBoxConfig] enabled=%d symmetry=%s "
+                          "hag_filter=%d z_percentile=[%.2f,%.2f] "
+                          "xy_percentile=[%.2f,%.2f] sub_cluster=%d "
+                          "oriented=%d",
                          odom_anchor_config_.tight_box.enabled ? 1 : 0,
                          odom_anchor_config_.tight_box.anchor_symmetry_mode.c_str(),
                          odom_anchor_config_.tight_box.hag_filter_enabled ? 1 : 0,
                          odom_anchor_config_.tight_box.percentile_low,
                          odom_anchor_config_.tight_box.percentile_high,
+                         odom_anchor_config_.tight_box.xy_percentile_low,
+                         odom_anchor_config_.tight_box.xy_percentile_high,
                          odom_anchor_config_.tight_box.sub_cluster_enabled ? 1 : 0,
                          odom_anchor_config_.tight_box.orientation_enabled ? 1 : 0);
             }
@@ -2559,7 +2621,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 relocalization_trigger_frames_,
                 r["global_trigger_frames"].as<int>(15));
             relocalization_confirm_frames_ = std::clamp(
-                r["confirm_frames"].as<int>(2), 2, 5);
+                r["confirm_frames"].as<int>(3), 3, 5);
             relocalization_request_interval_frames_ = std::max(
                 1, r["request_interval_frames"].as<int>(3));
             relocalization_result_max_age_frames_ = std::max(
@@ -3905,6 +3967,7 @@ void NdtSlamNode::resetCargoForHookState(
     lidar_no_cargo_evidence_.reset("cargo_lifecycle_reset");
     cargo_state_ = CargoState{};
     hook_fixed_cargo_ = HookCargoDetection{};
+    cargo_live_obb_filter_.reset();
     hook_fixed_bottom_ = HookCargoBottomEstimate{};
     hook_observation_associated_current_ = false;
     cargo_bottom_fusion_.reset();
@@ -4164,26 +4227,6 @@ std::uint64_t NdtSlamNode::advanceStaticEvidenceEpoch() {
 }
 
 void NdtSlamNode::startCleanMapRebuildJob() {
-    const bool localization_authorized =
-        relocalization_pose_reliable_ &&
-        !global_consistency_state_.global_suspect &&
-        !tracking_lost_.load(std::memory_order_acquire) &&
-        accepted_localization_snapshot_.valid &&
-        accepted_localization_snapshot_.lifecycle_epoch ==
-            map_rebuild_generation_.load(std::memory_order_acquire) &&
-        accepted_localization_snapshot_.map_generation ==
-            localization_map_generation_ &&
-        accepted_localization_snapshot_.map_uuid == localization_map_uuid_ &&
-        (startup_localization_state_ ==
-             StartupLocalizationState::FRESH_MAPPING ||
-         startup_localization_state_ ==
-             StartupLocalizationState::HEALTHY);
-    if (!localization_authorized) {
-        clean_map_rebuild_pending_ = true;
-        ROS_DEBUG("[CleanMapWorker] deferred: localization identity is not "
-                  "authorized");
-        return;
-    }
     if (clean_map_rebuild_running_.load(std::memory_order_acquire)) {
         // The in-flight immutable snapshot remains publishable even if a newer
         // objects map exists. Remember the newer raw/deny/protect generation
@@ -4568,61 +4611,10 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
             }
         }
     };
-    // ========== 修复 ==========
-    // 新增：非 HEALTHY 状态期间使 clean rebuild 失效。
-    // STARTUP_QUARANTINE / GLOBAL_SUSPECT / RELOCALIZING / VERIFYING 期间
-    // 异步结果必须丢弃，防止不可信位姿写入 objects_clean。
-    const bool health_allows_commit =
-        relocalization_pose_reliable_ &&
-        !global_consistency_state_.global_suspect &&
-        (startup_localization_state_ ==
-             StartupLocalizationState::FRESH_MAPPING ||
-         startup_localization_state_ ==
-             StartupLocalizationState::HEALTHY) &&
-        !tracking_lost_.load(std::memory_order_acquire);
-    if (!health_allows_commit) {
-        static_clean_build_discarded_.fetch_add(
-            1U, std::memory_order_relaxed);
-        ROS_DEBUG("[CleanMapWorker] discarded: health state not HEALTHY "
-                  "(reliable=%d state=%d lost=%d)",
-                  static_cast<int>(relocalization_pose_reliable_),
-                  static_cast<int>(startup_localization_state_),
-                  static_cast<int>(tracking_lost_.load()));
-        restore_observations();
-        return;
-    }
-
-    const bool localization_identity_matches =
-        result.source_accepted_pose_generation != 0U &&
-        result.source_localization_continuity_generation != 0U &&
-        result.source_localization_continuity_generation ==
-            localization_continuity_generation_.load(
-                std::memory_order_acquire) &&
-        result.source_localization_map_generation ==
-            localization_map_generation_ &&
-        result.source_localization_map_uuid == localization_map_uuid_;
-    if (!localization_identity_matches) {
-        static_clean_build_discarded_.fetch_add(
-            1U, std::memory_order_relaxed);
-        ROS_DEBUG("[CleanMapWorker] discarded localization identity "
-                  "pose_generation=%llu current=%llu continuity=%llu/%llu "
-                  "map_generation=%llu/%llu",
-                  static_cast<unsigned long long>(
-                      result.source_accepted_pose_generation),
-                  static_cast<unsigned long long>(accepted_pose_generation_),
-                  static_cast<unsigned long long>(
-                      result.source_localization_continuity_generation),
-                  static_cast<unsigned long long>(
-                      localization_continuity_generation_.load(
-                          std::memory_order_acquire)),
-                  static_cast<unsigned long long>(
-                      result.source_localization_map_generation),
-                  static_cast<unsigned long long>(
-                      localization_map_generation_));
-        restore_observations();
-        return;
-    }
-
+    // Clean-map consumes only the immutable source bundle.  Upstream map
+    // commit already blocks untrusted poses, so the worker is validated by
+    // lifecycle, object version and static-evidence generation rather than a
+    // second HEALTHY gate that could freeze display output indefinitely.
     if (result.bundle.lifecycle_epoch !=
         map_rebuild_generation_.load(std::memory_order_acquire)) {
         static_clean_build_discarded_.fetch_add(
@@ -5234,11 +5226,20 @@ void NdtSlamNode::processCloudThread() {
         const bool held_loaded_presence =
             cargo_presence_result_.cargo_present ||
             cargo_previous_hook_loaded_;
-        const bool hook_allows_tracking =
-            hook_load_signal_role_ != HookLoadSignalRole::REQUIRED ||
-            (hook_load.valid && hook_load.state ==
-                lidar_slam2_msgs::HookLoadState::STATE_LOADED) ||
-            (!hook_load.valid && held_loaded_presence);
+        const bool gravity_loaded_now = hook_load.valid &&
+            hook_load.state ==
+                lidar_slam2_msgs::HookLoadState::STATE_LOADED;
+        const bool retained_loaded_track = !hook_load.valid &&
+            held_loaded_presence && cargoTrackRetained();
+        // Gravity owns suspended-cargo identity even when configured as an
+        // auxiliary signal. LiDAR may refine an established track through a
+        // brief signal gap, but it must not start an OBB from a neighbouring
+        // pallet while the hook is EMPTY/UNKNOWN.
+        const bool gravity_identity_required =
+            hook_load_signal_enabled_ &&
+            hook_load_signal_role_ != HookLoadSignalRole::DISABLED;
+        const bool hook_allows_tracking = !gravity_identity_required ||
+            gravity_loaded_now || retained_loaded_track;
         const bool localization_evidence_valid =
             relocalization_pose_reliable_ &&
             current_pose_.translation().allFinite() &&
@@ -5318,6 +5319,47 @@ void NdtSlamNode::processCloudThread() {
                     hook_fixed_cargo_.core_points_base,
                     cargo_selected_candidate_pub_);
 
+                const bool live_obb_observation_valid =
+                    (!gravity_identity_required || gravity_loaded_now) &&
+                    hook_fixed_cargo_.valid &&
+                    hook_fixed_cargo_.oriented_footprint_valid &&
+                    !hook_fixed_cargo_.oriented_footprint_clamped;
+                const CargoLiveObb live_obb = cargo_live_obb_filter_.update(
+                    live_obb_observation_valid,
+                    hook_fixed_cargo_.footprint_length_width,
+                    hook_fixed_cargo_.footprint_yaw_base_rad,
+                    hook_fixed_cargo_.center_base.z(),
+                    std::max(0.05F, hook_fixed_cargo_.size_visible.z()),
+                    msg->header.stamp.toSec());
+                visualization_msgs::Marker live_marker;
+                live_marker.header.stamp = msg->header.stamp;
+                live_marker.header.frame_id = "base_link";
+                live_marker.frame_locked = true;
+                live_marker.ns = "cargo_live_observed_obb";
+                live_marker.id = 1;
+                live_marker.type = visualization_msgs::Marker::CUBE;
+                live_marker.action = live_obb.valid
+                    ? visualization_msgs::Marker::ADD
+                    : visualization_msgs::Marker::DELETE;
+                live_marker.pose.orientation.w = 1.0;
+                if (live_obb.valid) {
+                    const Eigen::Vector2f anchor = getCargoAnchorXY();
+                    live_marker.pose.position.x = anchor.x();
+                    live_marker.pose.position.y = anchor.y();
+                    live_marker.pose.position.z = live_obb.center_z;
+                    const float half_yaw = 0.5F * live_obb.yaw_base_rad;
+                    live_marker.pose.orientation.z = std::sin(half_yaw);
+                    live_marker.pose.orientation.w = std::cos(half_yaw);
+                    live_marker.scale.x = live_obb.size_long_short.x();
+                    live_marker.scale.y = live_obb.size_long_short.y();
+                    live_marker.scale.z = live_obb.height_m;
+                    live_marker.color.r = live_obb.held ? 1.0F : 0.1F;
+                    live_marker.color.g = live_obb.held ? 0.6F : 1.0F;
+                    live_marker.color.b = 0.1F;
+                    live_marker.color.a = 0.55F;
+                }
+                cargo_live_obb_pub_.publish(live_marker);
+
                 visualization_msgs::Marker provisional_marker;
                 provisional_marker.header.stamp = msg->header.stamp;
                 provisional_marker.header.frame_id = "base_link";
@@ -5335,10 +5377,9 @@ void NdtSlamNode::processCloudThread() {
                 provisional_marker.pose.orientation.w = 1.0;
                 if (provisional_marker.action ==
                     visualization_msgs::Marker::ADD) {
-                    provisional_marker.pose.position.x =
-                        hook_fixed_cargo_.footprint_center_base.x();
-                    provisional_marker.pose.position.y =
-                        hook_fixed_cargo_.footprint_center_base.y();
+                    const Eigen::Vector2f anchor = getCargoAnchorXY();
+                    provisional_marker.pose.position.x = anchor.x();
+                    provisional_marker.pose.position.y = anchor.y();
                     provisional_marker.pose.position.z =
                         hook_fixed_cargo_.center_base.z();
                     const float half_yaw =
@@ -5419,6 +5460,7 @@ void NdtSlamNode::processCloudThread() {
                 hook_observation_association_stamp_ = msg->header.stamp;
             }
             if (!hook_allows_tracking) {
+                cargo_live_obb_filter_.reset();
                 visualization_msgs::Marker provisional_marker;
                 provisional_marker.header.stamp = msg->header.stamp;
                 provisional_marker.header.frame_id = "base_link";
@@ -5427,6 +5469,8 @@ void NdtSlamNode::processCloudThread() {
                 provisional_marker.action =
                     visualization_msgs::Marker::DELETE;
                 cargo_predicted_obb_pub_.publish(provisional_marker);
+                provisional_marker.ns = "cargo_live_observed_obb";
+                cargo_live_obb_pub_.publish(provisional_marker);
             }
             lidar_no_cargo_evidence_.update({
                 true, CargoObservationOutcome::UNKNOWN,
@@ -6202,20 +6246,6 @@ void NdtSlamNode::processCloudThread() {
                             !frame_fitness_decision.allow_measurement;
                         std::string reject_reason_slow = use_prediction
                             ? "NDT_FITNESS_CIRCUIT_OPEN" : "NONE";
-                        if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()) {
-                            // 物理步长保护
-                            if (crane_motion_ekf_.isNonPhysicalStep(
-                                    last_raw_step_, ndt_time_ms, last_sensor_dt_)) {
-                                use_prediction = true;
-                                if (frame_fitness_decision.allow_measurement) {
-                                    reject_reason_slow =
-                                        "NONPHYSICAL_NDT_CORRECTION";
-                                }
-                                ROS_WARN_THROTTLE(2.0, "[NDT-guard] nonphysical correction: raw_step=%.3f ndt_ms=%.1f dt=%.3f",
-                                                 last_raw_step_, ndt_time_ms, last_sensor_dt_);
-                            }
-                        }
-
                         const auto ekf_start = DiagClock::now();
                         if (crane_motion_ekf_enabled_) {
                             if (!crane_motion_ekf_.initialized()) {
@@ -6297,6 +6327,8 @@ void NdtSlamNode::processCloudThread() {
                         frame_registration_quality_valid =
                             ndt_accepted && std::isfinite(fitness_score) &&
                             fitness_score <= map_commit_max_fitness_ &&
+                            (!crane_motion_ekf_enabled_ ||
+                             crane_motion_ekf_.status().map_commit_safe) &&
                             registration_build_result.structure_quality_valid &&
                             (!ndt_observability_config_.enabled ||
                              frame_ndt_observability.valid);
@@ -6316,45 +6348,25 @@ void NdtSlamNode::processCloudThread() {
                             double ndt_yaw = 0.0, ndt_roll = 0.0, ndt_pitch = 0.0;
                             so3ToRpy(new_pose.so3(), ndt_roll, ndt_pitch, ndt_yaw);
 
+                            const bool yaw_latched_transition =
+                                crane_motion_ekf_.observeRuntimeYaw(ndt_yaw);
                             if (crane_motion_ekf_.status().yaw_latched) {
-                                // 已锁存：检查单帧 yaw 是否在允许范围内。
-                                if (!crane_motion_ekf_.checkRuntimeYaw(
-                                        ndt_yaw, last_sensor_dt_)) {
-                                    // Yaw 越界：拒绝此帧，使用 prediction。
-                                    ROS_WARN_THROTTLE(
-                                        1.0,
-                                        "[YawLatch] yaw deviated: ndt=%.3f deg latched=%.3f deg",
-                                        ndt_yaw * 180.0 / M_PI,
-                                        crane_motion_ekf_.status().latched_yaw_rad * 180.0 / M_PI);
-                                    yaw_candidate_reject_count_.fetch_add(
-                                        1, std::memory_order_relaxed);
-                                    ndt_accepted = false;
-                                    frame_ndt_accepted = false;
-                                    frame_prediction_only = true;
-                                    frame_registration_quality_valid = false;
-
-                                    if (crane_motion_ekf_enabled_ &&
-                                        crane_motion_ekf_.initialized()) {
-                                        new_pose = crane_motion_ekf_.predictWithoutMeasurement(
-                                            current_pose_, msg->header.stamp,
-                                            "YAW_DEVIATION");
-                                        diag_ekf_pose = new_pose;
-                                    }
-                                } else {
-                                    // Yaw 正常：更新锁存的 yaw（平滑跟踪）。
-                                    crane_motion_ekf_.tryLatchYaw(ndt_yaw);
-                                    accepted_yaw_rad_ = crane_motion_ekf_.status().latched_yaw_rad;
-                                    accepted_yaw_valid_ = true;
-                                }
-                            } else {
-                                // 未锁存：尝试锁存 yaw。
-                                if (crane_motion_ekf_.tryLatchYaw(ndt_yaw)) {
-                                    accepted_yaw_rad_ = crane_motion_ekf_.status().latched_yaw_rad;
-                                    accepted_yaw_valid_ = true;
-                                    ROS_INFO("[YawLatch] latched at %.3f deg",
-                                             accepted_yaw_rad_ * 180.0 / M_PI);
-                                }
+                                accepted_yaw_rad_ =
+                                    crane_motion_ekf_.status().latched_yaw_rad;
+                                accepted_yaw_valid_ = true;
                             }
+                            if (yaw_latched_transition) {
+                                ROS_INFO("[YawLatch] latched at %.3f deg",
+                                         accepted_yaw_rad_ * 180.0 / M_PI);
+                            } else if (
+                                crane_motion_ekf_.status().yaw_anomaly_frames > 0) {
+                                ROS_WARN_THROTTLE(
+                                    1.0,
+                                    "[YawLatch] soft anomaly deviation=%.3f deg frames=%d; XY measurement retained",
+                                    crane_motion_ekf_.status().yaw_deviation_deg,
+                                    crane_motion_ekf_.status().yaw_anomaly_frames);
+                            }
+
                         }
 
                         // ========== Accepted Pose Generation 更新 ==========
@@ -6389,12 +6401,10 @@ void NdtSlamNode::processCloudThread() {
                         }
 
                         // ========== 全局一致性看门狗 ==========
-                        const bool yaw_rejected_this_frame =
-                            runtime_yaw_latched_ &&
-                            crane_motion_ekf_.status().yaw_latched &&
-                            !frame_ndt_accepted &&
-                            crane_motion_ekf_.status().reject_reason ==
-                                "YAW_DEVIATION";
+                        // Yaw is a soft one-dimensional observation.  It
+                        // never makes an otherwise accepted XY frame fail
+                        // global-consistency validation.
+                        const bool yaw_rejected_this_frame = false;
                         updateGlobalConsistency(
                             processing_frame_index, msg->header.stamp,
                             new_pose, registration_cloud,
@@ -6562,6 +6572,7 @@ void NdtSlamNode::processCloudThread() {
                 catch_up_blocks_local_map ||
                 !quarantine_alignment_ready ||
                 !accepted_snapshot_is_current ||
+                !frame_ndt_accepted ||
                 !frame_registration_quality_valid) {
                 ROS_DEBUG("[LocalMap] blocked state=%s reason=%s",
                           runtimeMotionStateName(
@@ -6698,8 +6709,10 @@ void NdtSlamNode::processCloudThread() {
                 crane_motion_ekf_enabled_ && health_ekf.initialized
                     ? health_ekf.innovation_norm : 0.0;
             const bool health_nonphysical_correction =
-                crane_motion_ekf_.isNonPhysicalStep(
-                    last_raw_step_, last_ndt_time_ms_, last_sensor_dt_);
+                crane_motion_ekf_enabled_ && health_ekf.initialized &&
+                (health_ekf.correction_soft ||
+                 health_ekf.output_step_soft ||
+                 health_ekf.step_limited);
             updateLocalizationHealth(
                 msg->header.stamp, last_ndt_converged_,
                 frame_ndt_accepted, frame_prediction_only,
@@ -6828,18 +6841,6 @@ void NdtSlamNode::processCloudThread() {
                     elapsedMs(start_time) * 0.001,
                 relocalization_pose_reliable_);
 
-            // Keep RViz current while the authoritative clean-map transaction
-            // is quarantined. This current-frame layer is never consumed by
-            // NDT, static evidence, map commits or persistence. Publishing in
-            // base_link also prevents an old-session map snapshot from being
-            // visually mixed with current returns at a different pose.
-            sensor_msgs::PointCloud2 live_clean_message;
-            pcl::toROSMsg(
-                *registration_partition.static_objects,
-                live_clean_message);
-            live_clean_message.header.stamp = msg->header.stamp;
-            live_clean_message.header.frame_id = "base_link";
-            objects_clean_live_pub_.publish(live_clean_message);
             // The authorization is frame-scoped. Do not leave a quarantine
             // decision latched into callbacks that may run before the next
             // LiDAR frame.
@@ -9473,6 +9474,7 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     relocalization_good_frames_ = 0;
     relocalization_confirmation_count_ = 0;
     relocalization_confirmation_pose_ = Sophus::SE3d();
+    relocalization_reseeded_this_episode_ = false;
     relocalization_last_submit_frame_ = 0;
     relocalization_last_result_frame_ = 0;
     relocalization_cooldown_until_frame_ = 0;
@@ -9536,9 +9538,11 @@ bool NdtSlamNode::relocalizeService(std_srvs::Empty::Request& request, std_srvs:
     relocalization_confirmation_pose_ = Sophus::SE3d();
     relocalization_last_submit_frame_ = 0;
     relocalization_force_global_.store(true, std::memory_order_release);
+    relocalization_reseeded_this_episode_ = false;
     relocalization_pose_reliable_ = false;
     invalidateAcceptedLocalizationContinuity();
     crane_motion_ekf_.unlatchYaw();
+    accepted_yaw_valid_ = false;
     relocalization_state_ = RelocalizationState::DEGRADED;
     if (persistent_localization_map_present_) {
         startup_localization_state_ =
@@ -10794,6 +10798,14 @@ void NdtSlamNode::consumeRelocalizationResult(
 
     if (decision.outcome ==
         RelocalizationConfirmationOutcome::CONFIRMED) {
+        if (crane_motion_ekf_enabled_ &&
+            crane_motion_ekf_.initialized() &&
+            relocalization_reseeded_this_episode_) {
+            relocalization_confirmation_count_ = 0;
+            publishRelocalizationStatus(
+                "DEGRADED", "relocalization_reseed_already_applied");
+            return;
+        }
         // The worker result belongs to an earlier sensor frame. Preserve the
         // short-term motion observed since that job so a fast diagonal move
         // is not pulled backwards to a stale absolute pose.
@@ -10890,8 +10902,10 @@ void NdtSlamNode::updateRelocalization(
 
     if (relocalization_pose_reliable_) {
         relocalization_pose_reliable_ = false;
+        relocalization_reseeded_this_episode_ = false;
         invalidateAcceptedLocalizationContinuity();
         crane_motion_ekf_.unlatchYaw();
+        accepted_yaw_valid_ = false;
         startup_quarantine_started_sec_ = stamp.toSec();
         if (persistent_localization_map_present_) {
             startup_localization_state_ =
@@ -11093,6 +11107,12 @@ void NdtSlamNode::updateRelocalization(
 void NdtSlamNode::applyRelocalizedPose(
     const Sophus::SE3d& pose, const ros::Time& stamp,
     const RelocalizationResult& result) {
+    if (crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized() &&
+        relocalization_reseeded_this_episode_) {
+        publishRelocalizationStatus(
+            "DEGRADED", "relocalization_reseed_already_applied");
+        return;
+    }
     Sophus::SE3d recovered = crane_constraint_enabled_
         ? applyCraneMotionConstraint(pose, "relocalization") : pose;
     {
@@ -11102,7 +11122,12 @@ void NdtSlamNode::applyRelocalizedPose(
         tracking_lost_ = false;
     }
     if (crane_motion_ekf_enabled_) {
-        crane_motion_ekf_.initialize(recovered, stamp);
+        if (!crane_motion_ekf_.initialized()) {
+            crane_motion_ekf_.initialize(recovered, stamp);
+        } else if (!relocalization_reseeded_this_episode_) {
+            crane_motion_ekf_.reseedFromRelocalization(recovered, stamp);
+        }
+        relocalization_reseeded_this_episode_ = true;
     }
     ndt_fitness_circuit_breaker_.reset();
     const Eigen::Matrix3d rotation = recovered.so3().matrix();
@@ -14733,6 +14758,10 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         odom_anchor_config_.search_half_y);
     identity_context.strong_point_count = static_cast<std::size_t>(
         std::max(1, hook_lock_config_.lock_strong_min_points));
+    identity_context.require_hook_containment = true;
+    identity_context.hook_containment_margin_m = 0.10F;
+    identity_context.maximum_hook_center_distance_m =
+        odom_anchor_config_.tight_box.max_center_offset_m;
     identity_context.association_radius_m =
         hook_lock_config_.locked_update_max_center_dist;
     if (cargoTrackRetained() && hook_lock_.live_pose.valid &&
@@ -14812,9 +14841,9 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         static_cast<std::size_t>(std::max(
             3, odom_anchor_config_.tight_box.orientation_min_points));
     candidate_footprint_config.percentile_low =
-        odom_anchor_config_.tight_box.percentile_low;
+        odom_anchor_config_.tight_box.xy_percentile_low;
     candidate_footprint_config.percentile_high =
-        odom_anchor_config_.tight_box.percentile_high;
+        odom_anchor_config_.tight_box.xy_percentile_high;
     candidate_footprint_config.margin_m =
         odom_anchor_config_.tight_box.margin_xy_m;
     candidate_footprint_config.minimum_geometric_aspect_ratio =
@@ -15032,7 +15061,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             "[CargoCandidate] id=%d points=%zu center=(%.2f,%.2f,%.2f) "
             "size=(%.2f,%.2f,%.2f) yaw=%.1f hook=%.2f predicted=%.2f "
             "overlap=%.2f shape=%.2f motion=%.2f suspension=%.2f "
-            "identity=%.2f overall=%.2f",
+            "identity=%.2f overall=%.2f valid=%d reason=%s",
             descriptor.component_id, descriptor.point_count,
             descriptor.center.x(), descriptor.center.y(),
             descriptor.center.z(), descriptor.size.x(), descriptor.size.y(),
@@ -15042,7 +15071,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             identity.predicted_center_score, identity.overlap_score,
             identity.shape_confidence, identity.motion_confidence,
             identity.suspension_confidence, identity.identity_confidence,
-            identity.overall_lock_confidence);
+            identity.overall_lock_confidence, identity.valid ? 1 : 0,
+            identity.reason.c_str());
     }
     const CargoCandidateRanking candidate_ranking =
         rankCargoCandidateIdentityScores(component_scores);
@@ -15097,9 +15127,9 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         footprint_config.minimum_points = static_cast<std::size_t>(std::max(
             3, odom_anchor_config_.tight_box.orientation_min_points));
         footprint_config.percentile_low =
-            odom_anchor_config_.tight_box.percentile_low;
+            odom_anchor_config_.tight_box.xy_percentile_low;
         footprint_config.percentile_high =
-            odom_anchor_config_.tight_box.percentile_high;
+            odom_anchor_config_.tight_box.xy_percentile_high;
         footprint_config.margin_m =
             odom_anchor_config_.tight_box.margin_xy_m;
         footprint_config.minimum_geometric_aspect_ratio =
@@ -15198,14 +15228,16 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         return result;
     }
 
-    float p_low = odom_anchor_config_.tight_box.percentile_low;
-    float p_high = odom_anchor_config_.tight_box.percentile_high;
-    float x05 = xs[static_cast<int>(n * p_low)];
-    float x95 = xs[static_cast<int>(n * p_high)];
-    float y05 = ys[static_cast<int>(n * p_low)];
-    float y95 = ys[static_cast<int>(n * p_high)];
-    float z05 = zs[static_cast<int>(n * p_low)];
-    float z95 = zs[static_cast<int>(n * p_high)];
+    const float xy_low = odom_anchor_config_.tight_box.xy_percentile_low;
+    const float xy_high = odom_anchor_config_.tight_box.xy_percentile_high;
+    const float z_low = odom_anchor_config_.tight_box.percentile_low;
+    const float z_high = odom_anchor_config_.tight_box.percentile_high;
+    float x05 = xs[static_cast<int>(n * xy_low)];
+    float x95 = xs[static_cast<int>(n * xy_high)];
+    float y05 = ys[static_cast<int>(n * xy_low)];
+    float y95 = ys[static_cast<int>(n * xy_high)];
+    float z05 = zs[static_cast<int>(n * z_low)];
+    float z95 = zs[static_cast<int>(n * z_high)];
 
     // 根据 symmetry_mode 计算尺寸
     float sx, sy;
@@ -15280,28 +15312,36 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             // offset partial view cannot clip the cargo after recentering.
             center_x = cx;
             center_y = cy;
-            const float cosine = std::cos(result.footprint_yaw_base_rad);
-            const float sine = std::sin(result.footprint_yaw_base_rad);
-            float half_length = 0.0F;
-            float half_width = 0.0F;
+            std::vector<Eigen::Vector2f> core_xy;
+            core_xy.reserve(result.core_points_base->size());
             for (const pcl::PointXYZ& point :
                  result.core_points_base->points) {
                 if (!pcl::isFinite(point)) continue;
-                const float dx = point.x - cx;
-                const float dy = point.y - cy;
-                half_length = std::max(
-                    half_length, std::abs(cosine * dx + sine * dy));
-                half_width = std::max(
-                    half_width, std::abs(-sine * dx + cosine * dy));
+                core_xy.emplace_back(point.x, point.y);
             }
-            const float margin =
+            CargoAnchorGridFootprintConfig grid_config;
+            grid_config.cell_size_m = 0.05F;
+            grid_config.margin_m =
                 odom_anchor_config_.tight_box.margin_xy_m;
-            const float symmetric_length = 2.0F * (half_length + margin);
-            const float symmetric_width = 2.0F * (half_width + margin);
+            grid_config.maximum_growth_ratio = 1.20F;
+            grid_config.maximum_long_side_m =
+                odom_anchor_config_.max_size_x;
+            grid_config.maximum_short_side_m =
+                odom_anchor_config_.max_size_y;
+            const CargoAnchorGridFootprint refined =
+                refineCargoAnchorGridFootprint(
+                    core_xy, Eigen::Vector2f(cx, cy),
+                    result.footprint_yaw_base_rad,
+                    result.footprint_length_width, grid_config);
             result.oriented_footprint_clamped =
                 result.oriented_footprint_clamped ||
-                symmetric_length > odom_anchor_config_.max_size_x ||
-                symmetric_width > odom_anchor_config_.max_size_y;
+                !refined.valid || refined.clamped;
+            const float symmetric_length = refined.valid
+                ? refined.size_long_short.x()
+                : result.footprint_length_width.x();
+            const float symmetric_width = refined.valid
+                ? refined.size_long_short.y()
+                : result.footprint_length_width.y();
             sx = std::clamp(
                 symmetric_length, odom_anchor_config_.min_size_x,
                 odom_anchor_config_.max_size_x);
@@ -15776,6 +15816,15 @@ void NdtSlamNode::updateLiveCargoPose(
     // det.center_base already applies strict/soft/off anchor policy. Keep the
     // raw PCA centre only as association/swing evidence.
     Eigen::Vector3f measured = det.center_base;
+    // Every identity reaching this function is an odom-anchored cargo track;
+    // new identities were already gated by valid gravity LOADED (unless the
+    // operator explicitly disabled that sensor). Enforce the physical model
+    // here as a configuration-independent invariant. This function can be
+    // called while the gravity policy mutex is held, so it deliberately does
+    // not acquire another hook snapshot.
+    const Eigen::Vector2f anchor = getCargoAnchorXY();
+    measured.x() = anchor.x();
+    measured.y() = anchor.y();
     const double stamp_sec = stamp.toSec();
     if (hook_lock_.live_pose.valid &&
         stamp_sec <= hook_lock_.live_pose.evidence_stamp_sec + 1.0e-4) {
@@ -16285,6 +16334,21 @@ void NdtSlamNode::updateHookCargoLock(
                 ? HookLoadState::EMPTY
                 : (hook.state == lidar_slam2_msgs::HookLoadState::STATE_INHIBIT
                     ? HookLoadState::INHIBIT : HookLoadState::UNKNOWN));
+    const bool starting_new_identity =
+        hook_lock_.state == HookCargoLockState::EMPTY ||
+        hook_lock_.state == HookCargoLockState::CANDIDATE ||
+        hook_lock_.state == HookCargoLockState::GEOMETRY_CONFIRMING ||
+        hook_lock_.state == HookCargoLockState::LOADED_REACQUIRE;
+    const bool gravity_identity_required = hook_load_signal_enabled_ &&
+        hook_load_signal_role_ != HookLoadSignalRole::DISABLED;
+    if (starting_new_identity && gravity_identity_required &&
+        (!hook.valid || gravity_state != HookLoadState::LOADED)) {
+        if (hook_lock_.state != HookCargoLockState::EMPTY) clearHookLock();
+        ROS_DEBUG_THROTTLE(
+            1.0,
+            "[CargoLock] new identity blocked: valid gravity LOADED required");
+        return;
+    }
     // Once REQUIRED gravity has established cargo presence, loss of LiDAR
     // geometry (or a stale gravity stream) cannot erase the retained cargo.
     // Only a fresh authoritative EMPTY may retire the track.
@@ -22636,6 +22700,30 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     if (rigid_geometry.valid) {
         safety_input.footprint_base = toCargoObbFootprint(
             rigid_geometry, formal_use.horizontal_uncertainty_m);
+        const CargoLiveObb& live_obb = cargo_live_obb_filter_.result();
+        if (live_obb.valid) {
+            // A stable live observation may conservatively expand the safety
+            // footprint. Project it into the authorized OBB axes first so
+            // cargo swing/yaw cannot hide a corner. It can never shrink the
+            // authorized geometry or alter the independently fused height.
+            const float yaw_delta = normalizeCargoAxialYaw(
+                live_obb.yaw_base_rad -
+                safety_input.footprint_base.yaw_base_rad);
+            const float cosine = std::abs(std::cos(yaw_delta));
+            const float sine = std::abs(std::sin(yaw_delta));
+            const float projected_live_length =
+                cosine * live_obb.size_long_short.x() +
+                sine * live_obb.size_long_short.y();
+            const float projected_live_width =
+                sine * live_obb.size_long_short.x() +
+                cosine * live_obb.size_long_short.y();
+            safety_input.footprint_base.length_m = std::max(
+                safety_input.footprint_base.length_m,
+                projected_live_length);
+            safety_input.footprint_base.width_m = std::max(
+                safety_input.footprint_base.width_m,
+                projected_live_width);
+        }
     }
     Eigen::Vector2f cargo_center_map = Eigen::Vector2f::Zero();
     bool cargo_map_velocity_valid = false;
@@ -25146,8 +25234,12 @@ Sophus::SE3d NdtSlamNode::applyCraneOutputConstraint(
         return current_pose_;
     }
 
+    const double vehicle_yaw_observation =
+        runtime_yaw_latched_ && accepted_yaw_valid_
+            ? accepted_yaw_rad_
+            : input_rpy.yaw;
     const double filtered_yaw =
-        updateSoftYaw(input_rpy.yaw, speed_xy, is_stationary);
+        updateSoftYaw(vehicle_yaw_observation, speed_xy, is_stationary);
     ndt_slam::CranePoseConstraintConfig config;
     config.enabled = true;
     config.lock_z = true;

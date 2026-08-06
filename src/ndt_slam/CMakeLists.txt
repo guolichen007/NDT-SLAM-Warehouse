@@ -237,6 +237,13 @@ target_link_libraries(hook_load_state_node
 )
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(crane_motion_ekf_test
+    test/crane_motion_ekf_test.cpp)
+  if(TARGET crane_motion_ekf_test)
+    target_link_libraries(crane_motion_ekf_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
   catkin_add_gtest(cargo_bottom_fusion_test
     test/cargo_bottom_fusion_test.cpp)
   if(TARGET cargo_bottom_fusion_test)

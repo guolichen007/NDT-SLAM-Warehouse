@@ -29,21 +29,17 @@ class FieldRuntimeHotfixContractTest(unittest.TestCase):
         self.assertIn("result.footprint_length_width = Eigen::Vector2f(sx, sy);", NODE)
         self.assertIn("hook_lock_.live_pose_measured_base = raw_measured;", NODE)
 
-    def test_LiveCleanPreviewIsDisplayOnlyAndDoesNotRelaxPersistence(self):
-        self.assertIn("ros::Publisher objects_clean_live_pub_;", HEADER)
-        self.assertIn('"/display_map_objects_clean_live"', NODE)
-        self.assertIn('live_clean_message.header.frame_id = "base_link";', NODE)
-        self.assertIn(
-            "*registration_partition.static_objects,\n"
-            "                live_clean_message",
-            NODE,
-        )
-        self.assertIn(
-            "const bool localization_authorized =\n"
-            "        relocalization_pose_reliable_",
-            NODE,
-        )
-        self.assertIn("Topic: /display_map_objects_clean_live", RVIZ)
+    def test_CleanMapUsesOnlySealedMapFrameSnapshot(self):
+        self.assertNotIn("objects_clean_live", HEADER)
+        self.assertNotIn("objects_clean_live", NODE)
+        self.assertNotIn("objects_clean_live", RVIZ)
+        self.assertIn('"/display_map_objects_clean", 1, true', NODE)
+        self.assertIn("Topic: /display_map_objects_clean", RVIZ)
+        self.assertIn("latest_completed_map_bundle_ = result.bundle;", NODE)
+        self.assertNotIn("const bool localization_authorized", NODE)
+        self.assertNotIn("const bool health_allows_commit", NODE)
+        self.assertIn("result.bundle.lifecycle_epoch", NODE)
+        self.assertIn("result.source_objects_version", NODE)
 
     def test_WatchdogUsesActualGlobalServiceAndBoundedRetries(self):
         self.assertIn(

@@ -26,8 +26,7 @@
 | `/display_map` | `sensor_msgs/PointCloud2` | 全量显示层 |
 | `/display_map_ground` | `sensor_msgs/PointCloud2` | 地面层 |
 | `/display_map_objects` | `sensor_msgs/PointCloud2` | 原始静态物体层 |
-| `/display_map_objects_clean` | `sensor_msgs/PointCloud2` | 清理后静态物体层 |
-| `/display_map_objects_clean_live` | `sensor_msgs/PointCloud2` | 当前帧清理后静态物体预览；`base_link` 坐标、不落盘、不参与 NDT，RViz 默认使用 |
+| `/display_map_objects_clean` | `sensor_msgs/PointCloud2` | map 坐标系、latched 的同代 sealed clean-map 快照；随异步重建结果更新 |
 | `/mapping_current_cloud` | `sensor_msgs/PointCloud2` | 当前帧输入点云（经近场过滤后） |
 
 ### 吊物可视化
@@ -35,6 +34,7 @@
 | 话题 | 消息类型 | 说明 |
 |---|---|---|
 | `/cargo_core_bbox_marker` | `visualization_msgs/Marker` | 正式冻结形状、实时移动的吊物框 |
+| `/cargo_avoidance/live_obb_marker` | `visualization_msgs/Marker` | `base_link`、frame-locked 的稳健实时吊物 OBB；仅在有效重力 `LOADED` 且实测候选覆盖、靠近 Hook/Odom 锚点时建立新身份；3/5 建立，扩展 5/8、缩小 7/10 |
 | `/cargo_tight_box_marker` | `visualization_msgs/Marker` | 兼容框（使用相同刚体几何） |
 | `/cargo_warning_zone_marker` | `visualization_msgs/Marker` | 3m/5m 方向一致告警区域 |
 | `/cargo_warning_obstacle_marker` | `visualization_msgs/Marker` | 障碍物标记 |
