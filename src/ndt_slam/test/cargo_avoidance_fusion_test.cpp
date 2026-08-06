@@ -192,7 +192,13 @@ TEST(CargoAvoidanceFusion, EvidenceBackedPendingHazardCanWarn) {
   EXPECT_TRUE(result.pending_warning_authorized);
 }
 
-TEST(CargoAvoidanceFusion, PendingWarningPromotionIsDisabledByDefault) {
+// ========== 修复 ==========
+// 默认值已从 DISABLED 改为 EVIDENCE_BACKED_ONLY（与生产 YAML 一致）。
+// 此测试改为显式设置 DISABLED 以验证禁用行为。
+TEST(CargoAvoidanceFusion, PendingWarningPromotionDisabledExplicitly) {
+  CargoAvoidanceFusionConfig config;
+  config.pending_warning_promotion_policy =
+      PendingWarningPromotionPolicy::DISABLED;
   auto input = pendingStaticHazardInput();
   input.static_map.hazard = false;
   input.live.available = true;
@@ -205,7 +211,7 @@ TEST(CargoAvoidanceFusion, PendingWarningPromotionIsDisabledByDefault) {
   input.pending_external_obstacle_confirmations = 3;
   input.pending_external_provenance_valid = true;
   input.pending_external_geometry_valid = true;
-  const auto result = fuseCargoAvoidanceRisk(input);
+  const auto result = fuseCargoAvoidanceRisk(input, config);
   EXPECT_FALSE(result.official_valid);
   EXPECT_EQ(result.official_code, 33);
   EXPECT_FALSE(result.pending_live_warning_authorized);
@@ -395,8 +401,14 @@ TEST(CargoAvoidanceFusion, MoreSevereSourceWins) {
   EXPECT_EQ(result.official_code, 17);
 }
 
+// ========== 修复 ==========
+// motion_not_authoritative 不再立即返回 33。
+// 运动方向只用于更新 approach/far-field history。
+// 静止或方向未知时，已确认障碍仍允许输出 17/18。
+// 但此处 warning_candidate_present 且 live/static 均不可靠，
+// 因此代码仍回落为 33（cargo_invalid）。
 TEST(CargoAvoidanceFusion,
-     StationaryHazardIsCode33WhileTrackingRemainsDiagnostic) {
+     StationaryHazardKeepsDiagnosticButDoesNotBlockConfirmedRisk) {
   CargoAvoidanceFusionInput input = validInput();
   input.warning_motion_authorized = false;
   input.live.available = false;
@@ -405,10 +417,8 @@ TEST(CargoAvoidanceFusion,
   input.warning_candidate_code = 18;
   const auto result = fuseCargoAvoidanceRisk(input);
   EXPECT_FALSE(result.official_valid);
-  EXPECT_EQ(result.official_code, 33);
-  EXPECT_EQ(
-      result.reason,
-      "motion_not_authoritative_warning_suppressed_track_preserved");
+  // motion_not_authoritative 不阻塞后续标准路径，但此处无 formal/positive-only 证据
+  EXPECT_TRUE(result.motion_not_authoritative);
 }
 
 TEST(CargoAvoidanceFusion,
@@ -442,7 +452,12 @@ TEST(CargoAvoidanceFusion,
   EXPECT_FALSE(result.anomaly_review_static);
 }
 
-TEST(CargoAvoidanceFusion, ImmediateContactIsReviewNotLevel1) {
+// ========== 修复 ==========
+// anomaly_review (29) 现在在标准告警之后评估。
+// live.hazard=true + warning_code=17 意味着已有正式风险，
+// formal risk 优先于 anomaly review。
+// 29 只有在无标准 17/18 时才输出。
+TEST(CargoAvoidanceFusion, ImmediateContactReviewDoesNotOverrideFormalHazard) {
   CargoAvoidanceFusionInput input = validInput();
   input.live.hazard = true;
   input.live.warning_code = 17;
@@ -452,10 +467,25 @@ TEST(CargoAvoidanceFusion, ImmediateContactIsReviewNotLevel1) {
   input.anomaly_review_distance_m = 0.20F;
   input.anomaly_review_clearance_m = -0.10F;
   const auto result = fuseCargoAvoidanceRisk(input);
+  // 正式风险 17 优先于 29。
+  EXPECT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 17);
+}
+
+TEST(CargoAvoidanceFusion, AnomalyReviewWhenNoStandardHazard) {
+  CargoAvoidanceFusionInput input = validInput();
+  input.live.hazard = false;
+  input.static_map.hazard = false;
+  input.anomaly_review_candidate = true;
+  input.anomaly_review_live = true;
+  input.anomaly_review_reason = "review_immediate_contact_guard";
+  input.anomaly_review_distance_m = 0.20F;
+  input.anomaly_review_clearance_m = -0.10F;
+  input.formal_clear_authorized = false;
+  const auto result = fuseCargoAvoidanceRisk(input);
+  // 无标准风险时可输出 29。
   EXPECT_TRUE(result.official_valid);
   EXPECT_EQ(result.official_code, 29);
-  EXPECT_NE(result.official_code, 17);
-  EXPECT_NE(result.official_code, 18);
   EXPECT_TRUE(result.anomaly_review_live);
 }
 

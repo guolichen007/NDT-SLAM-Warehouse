@@ -31,8 +31,11 @@ struct CargoAvoidanceSourceRisk {
 
 struct CargoAvoidanceFusionConfig {
   float minimum_live_coverage_for_clear = 0.05F;
+  // ========== 修复 ==========
+  // 旧默认值 DISABLED: 配置遗漏/解析失败/单元测试默认构造时静默关闭 Positive Only 17/18。
+  // 新默认值 EVIDENCE_BACKED_ONLY: 与生产 YAML 一致。
   PendingWarningPromotionPolicy pending_warning_promotion_policy =
-      PendingWarningPromotionPolicy::DISABLED;
+      PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY;
   int pending_minimum_obstacle_confirmations = 3;
   float pending_minimum_authority_confidence = 0.55F;
   bool allow_static_only_pending_warning = true;
@@ -114,6 +117,7 @@ struct CargoAvoidanceFusionResult {
   bool risk_live = false;
   bool risk_static = false;
   bool map_live_conflict = false;
+  bool motion_not_authoritative = false;
   bool anomaly_review = false;
   bool anomaly_review_live = false;
   bool anomaly_review_static = false;

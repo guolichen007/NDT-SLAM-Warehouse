@@ -4422,6 +4422,26 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
             }
         }
     };
+    // ========== 修复 ==========
+    // 新增：非 HEALTHY 状态期间使 clean rebuild 失效。
+    // STARTUP_QUARANTINE / GLOBAL_SUSPECT / RELOCALIZING / VERIFYING 期间
+    // 异步结果必须丢弃，防止不可信位姿写入 objects_clean。
+    const bool health_allows_commit =
+        relocalization_pose_reliable_ &&
+        startup_localization_state_ == StartupLocalizationState::HEALTHY &&
+        !tracking_lost_.load(std::memory_order_acquire);
+    if (!health_allows_commit) {
+        static_clean_build_discarded_.fetch_add(
+            1U, std::memory_order_relaxed);
+        ROS_DEBUG("[CleanMapWorker] discarded: health state not HEALTHY "
+                  "(reliable=%d state=%d lost=%d)",
+                  static_cast<int>(relocalization_pose_reliable_),
+                  static_cast<int>(startup_localization_state_),
+                  static_cast<int>(tracking_lost_.load()));
+        restore_observations();
+        return;
+    }
+
     if (result.bundle.lifecycle_epoch !=
         map_rebuild_generation_.load(std::memory_order_acquire)) {
         static_clean_build_discarded_.fetch_add(
@@ -6166,6 +6186,17 @@ void NdtSlamNode::processCloudThread() {
                             accepted_pose_advance_count_.fetch_add(
                                 1, std::memory_order_relaxed);
                         }
+
+                        // ========== 全局一致性看门狗 ==========
+                        const bool yaw_rejected_this_frame =
+                            runtime_yaw_latched_ &&
+                            crane_motion_ekf_.status().yaw_latched &&
+                            !frame_ndt_accepted &&
+                            crane_motion_ekf_.status().reject_reason ==
+                                "YAW_DEVIATION";
+                        updateGlobalConsistency(
+                            msg->header.stamp, new_pose,
+                            yaw_rejected_this_frame);
 
                         // NDT 健康日志（每秒一次）
                         if (debug_cfg_.debug_ndt_health) {
@@ -11201,48 +11232,131 @@ void NdtSlamNode::updateLocalizationHealth(
 void NdtSlamNode::replayRecoveryScanBuffer(const ros::Time& recovery_stamp) {
     if (recovery_scan_buffer_.empty()) return;
 
-    const double recovery_sec = recovery_stamp.toSec();
-    std::size_t replayed = 0U;
-    std::size_t discarded = 0U;
+    // ========== 修复 ==========
+    // 旧行为：把所有缓存帧使用 last_accepted_pose_ 统一投影到 local_map_。
+    // 天车移动期间，多帧点云被压到同一个位姿上 → 重影、墙体加厚、方向失真。
+    //
+    // 新行为：recovery buffer 只用于全局重定位 source / ScanContext / 诊断 /
+    // anomaly snapshot。恢复成功后清空 buffer，从后续 accepted measurement
+    // frames 正常重建 trusted local map。
+    //
+    // 未来只有在具备精确时间对齐 pose history 时才允许重放。
 
-    // Only replay frames that are within the max age and have a trusted pose.
+    const double recovery_sec = recovery_stamp.toSec();
+    std::size_t discarded = 0U;
+    std::size_t retained = 0U;
+
     while (!recovery_scan_buffer_.empty()) {
         const auto& entry = recovery_scan_buffer_.front();
         const double age = recovery_sec - entry.stamp.toSec();
         if (age > recovery_buffer_max_age_sec_) {
             discarded++;
-            recovery_scan_buffer_.pop_front();
-            continue;
-        }
-
-        // Use current accepted pose to transform and add to local_map_.
-        // This is an approximation — the exact pose at scan time is unknown.
-        if (last_accepted_pose_.translation().allFinite() &&
-            last_accepted_pose_.so3().matrix().allFinite() &&
-            entry.cloud && !entry.cloud->empty()) {
-            pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(
-                new pcl::PointCloud<pcl::PointXYZ>);
-            pcl::transformPointCloud(
-                *entry.cloud, *transformed,
-                last_accepted_pose_.matrix().cast<float>());
-            *local_map_ += *transformed;
-            ++local_map_version_;
-            replayed++;
+        } else {
+            retained++;
         }
         recovery_scan_buffer_.pop_front();
     }
 
-    recovery_buffer_replay_count_.fetch_add(
-        replayed, std::memory_order_relaxed);
+    recovery_scan_buffer_.clear();
 
-    if (replayed > 0 || discarded > 0) {
-        ROS_INFO("[RecoveryBuffer] replay: %zu frames added to local_map, "
-                 "%zu discarded, %zu remaining",
-                 replayed, discarded, recovery_scan_buffer_.size());
+    if (discarded > 0 || retained > 0) {
+        ROS_DEBUG("[RecoveryBuffer] cleared: %zu expired, %zu discarded "
+                  "(map replay disabled for safety)",
+                  discarded, retained);
+    }
+}
+
+void NdtSlamNode::updateGlobalConsistency(
+    const ros::Time& stamp, const Sophus::SE3d& current_pose,
+    bool yaw_rejected_this_frame) {
+    auto& cfg = global_consistency_watchdog_config_;
+    auto& state = global_consistency_state_;
+
+    if (!cfg.enabled || !persistent_localization_map_present_) {
+        state.enabled = false;
+        return;
+    }
+    state.enabled = true;
+
+    // Yaw reject 累积。
+    if (yaw_rejected_this_frame) {
+        state.yaw_reject_streak++;
+    } else {
+        state.yaw_reject_streak = 0;
     }
 
-    // Clear any remaining entries.
-    recovery_scan_buffer_.clear();
+    // 检查触发条件：任一满足即触发验证。
+    const double now_sec = stamp.toSec();
+    const double elapsed = now_sec - state.last_check_sec;
+    const bool time_trigger =
+        elapsed >= cfg.periodic_interval_sec;
+    const bool distance_trigger =
+        state.last_verified_pose.translation().allFinite() &&
+        (current_pose.translation().head<2>() -
+         state.last_verified_pose.translation().head<2>()).norm() >=
+            cfg.periodic_distance_m;
+    const bool keyframe_trigger =
+        state.keyframes_since_last_check >= cfg.periodic_keyframes;
+    const bool yaw_trigger =
+        state.yaw_reject_streak >= cfg.yaw_reject_trigger_frames;
+
+    const bool should_check =
+        time_trigger || distance_trigger || keyframe_trigger || yaw_trigger;
+
+    if (!should_check) {
+        return;
+    }
+
+    // 检查距离上次请求的最小间隔。
+    if (now_sec - state.last_verified_sec <
+        cfg.minimum_request_interval_sec) {
+        return;
+    }
+
+    state.last_check_sec = now_sec;
+    state.keyframes_since_last_check = 0;
+    state.yaw_reject_streak = 0;
+
+    // 简化版全局一致性检查：
+    // 使用当前 pose 与地图的几何一致性（yaw 与轨道结构对齐）。
+    // 在没有 Shadow Validator 完整实现的阶段，至少追踪 yaw 偏离频次。
+    // 连续 yaw reject > trigger 意味着当前局部 pose 方向与锁存 yaw 持续冲突，
+    // 这是一种"低 fitness 但方向错误"的 proxy 检测。
+    if (yaw_trigger &&
+        crane_motion_ekf_.status().yaw_latched &&
+        relocalization_pose_reliable_) {
+        state.consecutive_inconsistent++;
+        state.consecutive_consistent = 0;
+
+        if (state.consecutive_inconsistent >=
+            cfg.inconsistent_confirmations) {
+            if (!state.global_suspect) {
+                state.global_suspect = true;
+                ROS_WARN("[GlobalConsistency] GLOBAL_SUSPECT: "
+                         "yaw_reject_streak=%d consecutive=%d",
+                         state.yaw_reject_streak,
+                         state.consecutive_inconsistent);
+                publishRelocalizationStatus(
+                    "GLOBAL_SUSPECT",
+                    "yaw_latch_consistency_violation");
+            }
+        }
+    } else if (!yaw_rejected_this_frame) {
+        state.consecutive_inconsistent = 0;
+        state.consecutive_consistent++;
+
+        if (state.global_suspect &&
+            state.consecutive_consistent >=
+                cfg.consistent_confirmations) {
+            state.global_suspect = false;
+            ROS_INFO("[GlobalConsistency] recovered: "
+                     "consecutive_consistent=%d",
+                     state.consecutive_consistent);
+        }
+    }
+
+    state.last_verified_pose = current_pose;
+    state.last_verified_sec = now_sec;
 }
 
 void NdtSlamNode::publishRelocalizationSafetyInvalid(

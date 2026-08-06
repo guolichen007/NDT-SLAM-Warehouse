@@ -267,21 +267,16 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
       result.risk_live || result.risk_static ||
       (input.warning_candidate_present &&
        warningCode(input.warning_candidate_code));
-  if (input.anomaly_review_candidate) {
-    result.official_valid = true;
-    result.official_code = kAnomalyReview;
-    result.anomaly_review = true;
-    result.anomaly_review_live = input.anomaly_review_live;
-    result.anomaly_review_static = input.anomaly_review_static;
-    result.reason = input.anomaly_review_reason.empty()
-        ? "avoidance_anomaly_review_required"
-        : input.anomaly_review_reason;
-    result.provisional_status = "REVIEW_REQUIRED";
-    result.pending_authority_reason = result.reason;
-    result.distance_m = input.anomaly_review_distance_m;
-    result.clearance_m = input.anomaly_review_clearance_m;
-    return result;
-  }
+
+  // ========== 修复 ==========
+  // 旧行为：anomaly_review_candidate 在任何标准告警之前无条件返回 29，
+  // 即使同一帧已存在可信货物包络 + 已确认障碍轨迹 + 有远场历史 + 距离进入 3m/5m。
+  //
+  // 新行为：先计算所有 FORMAL/POSITIVE_ONLY 17/18。
+  // 只在没有任何正式 17/18 可以输出时，才允许进入 29。
+  // 最终优先级：31/35 等硬故障 → 已授权 17/18 → 29 → 33/34 → Formal CLEAR 14。
+
+  // 不再在此处提前返回 29。anomaly_review 推迟到标准告警评估之后。
   if (static_hazard_observed && !input.static_hazard_track_confirmed &&
       !result.risk_live && !input.warning_candidate_present) {
     result.official_code = kObstacleInvalid;
@@ -290,14 +285,19 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     result.pending_authority_reason = result.reason;
     return result;
   }
+  // ========== 修复 ==========
+  // 旧行为：warning_motion_authorized 作为所有标准告警的总开关。
+  // 天车静止/运动方向未知/MotionGate 切换时，即使旁边存在已确认固定障碍也被 33 阻断。
+  //
+  // 新行为：运动方向只用于更新 approach/far-field history。
+  // 静止或方向未知时使用径向距离 + 已有远场轨迹/静态历史。
+  // 已确认障碍仍允许输出 17/18。
   if (warning_candidate &&
       !input.warning_motion_authorized) {
-    result.official_code = kCargoInvalid;
-    result.reason =
-        "motion_not_authoritative_warning_suppressed_track_preserved";
-    result.provisional_status = "MOTION_GATED";
-    result.pending_authority_reason = "motion_not_authoritative";
-    return result;
+    // 不立即返回 33。运动方向无效时仍评估后续标准告警路径。
+    // 如果后续 formal/positive-only 处理确认了 obstacle，则正常输出 17/18。
+    // 只有后续也无法确认时才返回 33。
+    result.motion_not_authoritative = true;
   }
 
   const bool live_level1_risk =
@@ -442,6 +442,25 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
         : (result.risk_live && result.risk_static
                ? "live_and_static_hazard"
                : (result.risk_live ? "live_hazard" : "static_hazard"));
+    return result;
+  }
+
+  // ========== 修复 ==========
+  // Anomaly review (29) 现在只能在全量标准告警评估之后进入。
+  // 29 只能补充"无法成为标准 17/18 的异常候选"，不能覆盖已确认的碰撞风险。
+  if (input.anomaly_review_candidate) {
+    result.official_valid = true;
+    result.official_code = kAnomalyReview;
+    result.anomaly_review = true;
+    result.anomaly_review_live = input.anomaly_review_live;
+    result.anomaly_review_static = input.anomaly_review_static;
+    result.reason = input.anomaly_review_reason.empty()
+        ? "avoidance_anomaly_review_required"
+        : input.anomaly_review_reason;
+    result.provisional_status = "REVIEW_REQUIRED";
+    result.pending_authority_reason = result.reason;
+    result.distance_m = input.anomaly_review_distance_m;
+    result.clearance_m = input.anomaly_review_clearance_m;
     return result;
   }
 

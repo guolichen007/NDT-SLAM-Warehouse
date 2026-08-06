@@ -65,15 +65,29 @@ TEST(HookLoadStateFilter, InhibitAndInvalidInputsAreFailSafe) {
     EXPECT_EQ(invalid.state, HookLoadState::UNKNOWN);
 }
 
-TEST(HookLoadStateFilter, StaleSignalBecomesUnknown) {
+// ========== 修复 ==========
+// 短时 stale 保留最后稳定状态为 HELD_STALE，不清 lifecycle。
+// 超过长超时（stale_timeout + held_stale_timeout）后才进入 UNKNOWN。
+TEST(HookLoadStateFilter, ShortStaleBecomesHeldStale) {
     HookLoadStateFilter filter;
     filter.ingest(2.00, 0.0);
     ASSERT_EQ(filter.ingest(2.00, 0.1).state, HookLoadState::EMPTY);
-    const auto stale = filter.tick(2.61);
-    EXPECT_FALSE(stale.valid);
-    EXPECT_FALSE(stale.fresh);
-    EXPECT_EQ(stale.state, HookLoadState::UNKNOWN);
-    EXPECT_EQ(stale.reason, "signal_stale");
+    // 2.61s > stale_timeout(2.50s) 但 < held_stale_timeout(5.00s)
+    const auto held = filter.tick(2.61);
+    EXPECT_TRUE(held.valid);
+    EXPECT_FALSE(held.fresh);
+    EXPECT_EQ(held.state, HookLoadState::EMPTY_HELD_STALE);
+    EXPECT_EQ(held.reason, "held_stale");
+}
+
+TEST(HookLoadStateFilter, LongStaleBecomesUnknown) {
+    HookLoadStateFilter filter;
+    filter.ingest(2.00, 0.0);
+    ASSERT_EQ(filter.ingest(2.00, 0.1).state, HookLoadState::EMPTY);
+    // 10.0s > stale_timeout + held_stale_timeout(7.50s)
+    const auto unknown = filter.tick(10.0);
+    EXPECT_FALSE(unknown.valid);
+    EXPECT_EQ(unknown.state, HookLoadState::UNKNOWN);
 }
 
 TEST(HookLoadStateFilter, ThresholdEndpointsBelongToEmpty) {
@@ -149,15 +163,17 @@ TEST(HookLoadStateFilter, StaleReplayCannotSeedASecondConfirmation) {
     filter.ingest(5.0, 10.0, 1.0);
     ASSERT_EQ(filter.ingest(5.0, 11.0, 2.0).state,
               HookLoadState::LOADED);
-    ASSERT_EQ(filter.tick(4.6).reason, "signal_stale");
+    // 4.6s: stale_timeout(2.5s) exceeded, held_stale kicks in
+    ASSERT_EQ(filter.tick(4.6).reason, "held_stale");
 
     const auto replay = filter.ingest(5.0, 11.0, 4.7);
-    EXPECT_FALSE(replay.valid);
-    EXPECT_NE(replay.reason, "transition_pending");
+    // HELD_STALE 恢复：相同源时间戳从 held 恢复到 LOADED。
+    EXPECT_TRUE(replay.valid);
+    EXPECT_TRUE(replay.fresh);
+    EXPECT_EQ(replay.state, HookLoadState::LOADED);
+    EXPECT_EQ(replay.reason, "recovered_from_held_stale");
     const auto first_fresh = filter.ingest(5.0, 12.0, 5.0);
-    EXPECT_FALSE(first_fresh.valid);
-    EXPECT_EQ(first_fresh.state, HookLoadState::UNKNOWN);
-    EXPECT_EQ(first_fresh.reason, "transition_pending");
+    EXPECT_TRUE(first_fresh.valid);
     EXPECT_EQ(filter.ingest(5.0, 13.0, 6.0).state,
               HookLoadState::LOADED);
 }

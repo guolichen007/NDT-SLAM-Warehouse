@@ -119,6 +119,15 @@ HookLoadStateResult HookLoadStateFilter::ingest(
         std::abs(source_time_sec - last_seen_source_time_sec_) <= 1.0e-6) {
         if (wall_time_sec - last_sample_wall_time_sec_ + 1.0e-6 >=
             config_.stale_timeout_sec) {
+            // HELD_STALE 恢复：不清空状态，从 held 恢复到原始稳定状态。
+            if (held_stale_start_wall_sec_ > 0.0) {
+                held_stale_start_wall_sec_ = 0.0;
+                stable_state_ = held_stale_original_state_;
+                last_sample_wall_time_sec_ = wall_time_sec;
+                last_wall_time_sec_ = wall_time_sec;
+                has_sample_ = true;
+                return result("recovered_from_held_stale");
+            }
             has_sample_ = false;
             return fail("signal_stale", voltage);
         }
@@ -185,11 +194,71 @@ HookLoadStateResult HookLoadStateFilter::tick(double wall_time_sec) {
     }
     last_wall_time_sec_ = wall_time_sec;
     if (!has_sample_) return result("no_sample");
-    if (wall_time_sec - last_sample_wall_time_sec_ + 1.0e-6 >=
-        config_.stale_timeout_sec) {
+
+    // ========== 修复 ==========
+    // 短时 stale：保留最后稳定状态为 HELD_STALE，不清 lifecycle、不生成 29。
+    const double sample_age =
+        wall_time_sec - last_sample_wall_time_sec_;
+    const bool short_stale =
+        sample_age + 1.0e-6 >= config_.stale_timeout_sec;
+
+    if (short_stale) {
+        // 确定 HELD_STALE 状态。
+        const bool was_loaded =
+            stable_state_ == HookLoadState::LOADED ||
+            stable_state_ == HookLoadState::LOADED_HELD_STALE;
+        const bool was_empty =
+            stable_state_ == HookLoadState::EMPTY ||
+            stable_state_ == HookLoadState::EMPTY_HELD_STALE;
+
+        if (was_loaded || was_empty) {
+            const HookLoadState held_state = was_loaded
+                ? HookLoadState::LOADED_HELD_STALE
+                : HookLoadState::EMPTY_HELD_STALE;
+
+            // 从实际 stale 开始时间计算 held 持续时间。
+            const double actual_stale_start =
+                last_sample_wall_time_sec_ + config_.stale_timeout_sec;
+            if (held_stale_start_wall_sec_ <= 0.0) {
+                held_stale_start_wall_sec_ = actual_stale_start;
+                held_stale_original_state_ = stable_state_;
+            }
+
+            const double held_duration =
+                wall_time_sec - held_stale_start_wall_sec_;
+
+            // 长超时 → UNKNOWN。
+            if (config_.held_stale_timeout_sec > 0.0 &&
+                held_duration + 1.0e-6 >= config_.held_stale_timeout_sec) {
+                has_sample_ = false;
+                held_stale_start_wall_sec_ = 0.0;
+                return fail(
+                    "stale_held_timeout_exceeded", last_voltage_);
+            }
+
+            // 仍处于 HELD_STALE 窗口内。
+            HookLoadStateResult output;
+            output.valid = true;
+            output.fresh = false;
+            output.state = held_state;
+            output.voltage = last_voltage_;
+            output.stable_samples = stable_samples_;
+            output.reason = "held_stale";
+            return output;
+        }
+
+        // 非 LOADED/EMPTY 的稳定状态直接进入 UNKNOWN。
         has_sample_ = false;
+        held_stale_start_wall_sec_ = 0.0;
         return fail("signal_stale", last_voltage_);
     }
+
+    // 恢复正常采样：清除 HELD_STALE 状态。
+    if (held_stale_start_wall_sec_ > 0.0) {
+        held_stale_start_wall_sec_ = 0.0;
+        stable_state_ = held_stale_original_state_;
+    }
+
     return result(invalid_reason_.empty() ? "fresh" : invalid_reason_);
 }
 
@@ -207,6 +276,8 @@ void HookLoadStateFilter::reset(const std::string& reason) {
     last_sample_wall_time_sec_ = 0.0;
     last_voltage_ = std::numeric_limits<float>::quiet_NaN();
     invalid_reason_ = reason;
+    held_stale_start_wall_sec_ = 0.0;
+    held_stale_original_state_ = HookLoadState::UNKNOWN;
 }
 
 }  // namespace ndt_slam

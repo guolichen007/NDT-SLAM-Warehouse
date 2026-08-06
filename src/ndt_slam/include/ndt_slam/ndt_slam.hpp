@@ -565,6 +565,39 @@ private:
     // 定位恢复后重放缓存的 scan。
     void replayRecoveryScanBuffer(const ros::Time& recovery_stamp);
 
+    // ========== 全局一致性看门狗 ==========
+    // 独立于局部 NDT fitness 的全局位姿验证。
+    // local ndt_healthy 只能表示局部收敛，不能表示全局方向正确。
+    struct GlobalConsistencyWatchdogConfig {
+        bool enabled = true;
+        double periodic_interval_sec = 30.0;
+        double periodic_distance_m = 8.0;
+        int periodic_keyframes = 20;
+        double minimum_request_interval_sec = 10.0;
+        int yaw_reject_trigger_frames = 3;
+        double local_global_translation_disagreement_m = 0.30;
+        double local_global_yaw_disagreement_deg = 0.60;
+        int inconsistent_confirmations = 2;
+        int consistent_confirmations = 2;
+    } global_consistency_watchdog_config_;
+
+    struct GlobalConsistencyState {
+        bool enabled = false;
+        double last_check_sec = 0.0;
+        double last_check_distance_traveled = 0.0;
+        int keyframes_since_last_check = 0;
+        int consecutive_inconsistent = 0;
+        int consecutive_consistent = 0;
+        int yaw_reject_streak = 0;
+        bool global_suspect = false;
+        Sophus::SE3d last_verified_pose;
+        double last_verified_sec = 0.0;
+    } global_consistency_state_;
+
+    void updateGlobalConsistency(const ros::Time& stamp,
+                                  const Sophus::SE3d& current_pose,
+                                  bool yaw_rejected_this_frame);
+
     // ========== 调试配置 ==========
     struct DebugConfig {
         bool publish_runtime_path = false;

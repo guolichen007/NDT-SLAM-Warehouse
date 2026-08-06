@@ -10,7 +10,13 @@ enum class HookLoadState : std::uint8_t {
     UNKNOWN = 0,
     INHIBIT = 1,
     EMPTY = 2,
-    LOADED = 3
+    LOADED = 3,
+    // ========== 修复新增 ==========
+    // 短时丢包保留最后稳定状态，不清 lifecycle、不生成 29。
+    EMPTY_HELD_STALE = 4,
+    LOADED_HELD_STALE = 5,
+    // Gravity 与 LiDAR strong cargo 冲突时进入，不直接解释为 EMPTY。
+    SENSOR_DISAGREEMENT = 6
 };
 
 struct HookLoadStateConfig {
@@ -22,6 +28,10 @@ struct HookLoadStateConfig {
     // the sample count and this continuous source-time duration.
     double minimum_transition_duration_sec = 0.0;
     double stale_timeout_sec = 2.50;
+    // ========== 修复新增 ==========
+    // 短时 stale 保留最后稳定状态 (HELD_STALE)，不清 lifecycle。
+    // 超过长超时后才进入 UNKNOWN。
+    double held_stale_timeout_sec = 5.00;
     double valid_voltage_min_v = 0.0;
     double valid_voltage_max_v = 6.0;
 };
@@ -69,6 +79,9 @@ private:
     double last_sample_wall_time_sec_ = 0.0;
     float last_voltage_ = std::numeric_limits<float>::quiet_NaN();
     std::string invalid_reason_ = "startup_unknown";
+    // HELD_STALE 追踪
+    double held_stale_start_wall_sec_ = 0.0;
+    HookLoadState held_stale_original_state_ = HookLoadState::UNKNOWN;
 };
 
 }  // namespace ndt_slam
