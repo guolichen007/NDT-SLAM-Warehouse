@@ -262,8 +262,9 @@ bool StaticObstacleEvidenceIndex::updateHeightEstimateLocked(
 
 void StaticObstacleEvidenceIndex::seedHeightHistoriesLocked() {
   height_histories_.clear();
-  const std::size_t seed_count = std::max<std::size_t>(
-      1U, config_.height_outlier_minimum_samples);
+  // 持久快照旧高度只作为一个 historical prior sample，不复制成
+  // height_outlier_minimum_samples 份确认样本。单一旧值不会阻挡真实新观测
+  // 快速建立 fresh support 并启用 MAD reject。
   for (const auto& item : working_cells_) {
     const StaticEvidenceCell& cell = item.second;
     if (!std::isfinite(cell.min_z) || !std::isfinite(cell.max_z) ||
@@ -271,10 +272,8 @@ void StaticObstacleEvidenceIndex::seedHeightHistoriesLocked() {
       continue;
     }
     HeightHistory& history = height_histories_[item.first];
-    for (std::size_t index = 0U; index < seed_count; ++index) {
-      history.min_z.push_back(cell.min_z);
-      history.max_z.push_back(cell.max_z);
-    }
+    history.min_z.push_back(cell.min_z);
+    history.max_z.push_back(cell.max_z);
   }
 }
 

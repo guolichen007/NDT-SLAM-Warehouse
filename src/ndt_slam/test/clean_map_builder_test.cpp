@@ -57,6 +57,40 @@ TEST(CleanMapBuilder, PreservesContinuousTallWallStructure) {
     EXPECT_EQ(result.vertical_outlier_points, 0);
 }
 
+TEST(CleanMapBuilder, PreservesMultipleRealVerticalLayersAndDropsSingleSpike) {
+    // 低层固定结构 (4 点) + 上层真实梁 (3 点) + 孤立尖峰 (1 点)
+    // 只有孤立尖峰应被删除，两层真实结构全部保留。
+    CleanMapBuildInput input;
+    // 低层：0.10 - 0.40
+    input.object_points.emplace_back(0.01F, 0.01F, 0.10F);
+    input.object_points.emplace_back(0.02F, 0.02F, 0.20F);
+    input.object_points.emplace_back(0.03F, 0.03F, 0.30F);
+    input.object_points.emplace_back(0.04F, 0.04F, 0.40F);
+    // 上层：1.50 - 1.70
+    input.object_points.emplace_back(0.05F, 0.05F, 1.50F);
+    input.object_points.emplace_back(0.06F, 0.06F, 1.60F);
+    input.object_points.emplace_back(0.07F, 0.07F, 1.70F);
+    // 孤立尖峰：6.0m
+    input.object_points.emplace_back(0.08F, 0.08F, 6.00F);
+    input.observation_counts[{0, 0}] = 2;
+
+    const auto result = buildCleanMapFromSnapshot(input);
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    // 8 点输入，1 点删除 → 7 点保留。
+    EXPECT_EQ(result.clean_points.size(), 7U);
+    EXPECT_EQ(result.vertical_outlier_points, 1);
+    // 低层所有点必须保留。
+    int lower_kept = 0;
+    int upper_kept = 0;
+    for (const auto& point : result.clean_points) {
+        if (point.z() >= 0.05F && point.z() <= 0.45F) ++lower_kept;
+        if (point.z() >= 1.45F && point.z() <= 1.75F) ++upper_kept;
+    }
+    EXPECT_EQ(lower_kept, 4);
+    EXPECT_EQ(upper_kept, 3);
+}
+
 TEST(CleanMapBuilder, RetainsExactPreviousCellUntilObservationThreshold) {
     auto input = observableCell();
     input.observation_counts[{0, 0}] = 1;

@@ -53,32 +53,131 @@ std::vector<std::size_t> rejectIsolatedVerticalOutliers(
         indices.size() < input.vertical_outlier_minimum_points) {
         return indices;
     }
-    std::vector<float> z_values;
-    z_values.reserve(indices.size());
+
+    // ========== 层感知过滤 ==========
+    // 按 Z 排序 → 按垂直 gap 分层 → 只有真正孤立的单点层可以删除。
+    // 这保护多层真实结构（如底层固定障碍 + 上层梁/货架）。
+
+    // 1. 收集并按 Z 排序。
+    struct IndexedZ {
+        std::size_t index;
+        float z;
+    };
+    std::vector<IndexedZ> sorted;
+    sorted.reserve(indices.size());
     for (const std::size_t index : indices) {
-        z_values.push_back(points[index].z());
+        sorted.push_back({index, points[index].z()});
     }
-    const float center = median(z_values);
-    std::vector<float> deviations;
-    deviations.reserve(z_values.size());
-    for (const float z : z_values) {
-        deviations.push_back(std::abs(z - center));
-    }
-    const float mad = median(std::move(deviations));
-    const double band = std::max(
-        static_cast<double>(input.vertical_outlier_minimum_band_m),
-        input.vertical_outlier_mad_multiplier * static_cast<double>(mad));
-    std::vector<std::size_t> accepted;
-    accepted.reserve(indices.size());
-    int local_rejected = 0;
-    for (const std::size_t index : indices) {
-        if (std::abs(static_cast<double>(points[index].z() - center)) <= band) {
-            accepted.push_back(index);
+    std::sort(sorted.begin(), sorted.end(),
+              [](const IndexedZ& a, const IndexedZ& b) { return a.z < b.z; });
+
+    // 2. 按垂直 gap 划分简单 layers。
+    const float layer_gap = std::max(
+        input.vertical_outlier_minimum_band_m,
+        static_cast<float>(input.vertical_outlier_mad_multiplier * 0.20));
+    struct Layer {
+        std::vector<std::size_t> index_list;
+        float z_min = 0.0F;
+        float z_max = 0.0F;
+    };
+    std::vector<Layer> layers;
+    for (const auto& item : sorted) {
+        if (layers.empty() ||
+            item.z > layers.back().z_max + layer_gap) {
+            Layer layer;
+            layer.z_min = item.z;
+            layer.z_max = item.z;
+            layer.index_list.push_back(item.index);
+            layers.push_back(std::move(layer));
         } else {
-            ++local_rejected;
+            layers.back().z_max = std::max(layers.back().z_max, item.z);
+            layers.back().index_list.push_back(item.index);
         }
     }
-    // A robust filter may remove isolated returns, never an entire structure.
+
+    // 只有一层时：不需要层感知逻辑，回退到经典 Median/MAD 方法。
+    if (layers.size() <= 1U) {
+        std::vector<float> z_values;
+        z_values.reserve(indices.size());
+        for (const std::size_t index : indices) {
+            z_values.push_back(points[index].z());
+        }
+        const float center = median(z_values);
+        std::vector<float> deviations;
+        deviations.reserve(z_values.size());
+        for (const float z : z_values) {
+            deviations.push_back(std::abs(z - center));
+        }
+        const float mad = median(std::move(deviations));
+        const double band = std::max(
+            static_cast<double>(input.vertical_outlier_minimum_band_m),
+            input.vertical_outlier_mad_multiplier *
+                static_cast<double>(mad));
+        std::vector<std::size_t> accepted;
+        accepted.reserve(indices.size());
+        int local_rejected = 0;
+        for (const std::size_t index : indices) {
+            if (std::abs(static_cast<double>(
+                    points[index].z() - center)) <= band) {
+                accepted.push_back(index);
+            } else {
+                ++local_rejected;
+            }
+        }
+        if (accepted.size() >= 3U) {
+            if (rejected_points) *rejected_points += local_rejected;
+            return accepted;
+        }
+        return indices;
+    }
+
+    // 3. 多层：>=3 点保留，2 点保守保留，1 点只在远离所有有效层时删除。
+    std::vector<std::size_t> accepted;
+    int local_rejected = 0;
+
+    // 先找所有多点层（>=2 点）用于孤立点判断。
+    std::vector<float> valid_layer_zs;
+    for (const auto& layer : layers) {
+        if (layer.index_list.size() >= 2U) {
+            valid_layer_zs.push_back(
+                0.5F * (layer.z_min + layer.z_max));
+        }
+    }
+
+    for (const auto& layer : layers) {
+        if (layer.index_list.size() >= 3U) {
+            // >=3 点的层：全部保留。
+            for (const std::size_t idx : layer.index_list) {
+                accepted.push_back(idx);
+            }
+        } else if (layer.index_list.size() == 2U) {
+            // 2 点的层：保守保留。
+            for (const std::size_t idx : layer.index_list) {
+                accepted.push_back(idx);
+            }
+        } else if (layer.index_list.size() == 1U) {
+            // 单点层：只有同时满足以下条件才删除：
+            //   a. 存在至少一个多点支持的 layer
+            //   b. 该单点与最近有效 layer 的垂直距离 > layer_gap
+            if (valid_layer_zs.empty()) {
+                // 没有有效层参照：保守保留。
+                accepted.push_back(layer.index_list[0]);
+                continue;
+            }
+            const float single_z = layer.z_min;
+            float min_dist = std::numeric_limits<float>::infinity();
+            for (const float vz : valid_layer_zs) {
+                min_dist = std::min(min_dist, std::abs(single_z - vz));
+            }
+            if (min_dist > layer_gap) {
+                ++local_rejected;
+            } else {
+                accepted.push_back(layer.index_list[0]);
+            }
+        }
+    }
+
+    // 过滤后少于 3 点或不确定：返回原始 indices。
     if (accepted.size() < 3U) return indices;
     if (rejected_points) *rejected_points += local_rejected;
     return accepted;

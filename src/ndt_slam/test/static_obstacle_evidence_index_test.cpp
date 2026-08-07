@@ -208,6 +208,69 @@ TEST(StaticObstacleEvidenceIndexTest,
 }
 
 TEST(StaticObstacleEvidenceIndexTest,
+     PersistedPollutedHeightCanRelearnFromFreshConsistentObservations) {
+  // 持久快照旧高度只作为 1 个 historical prior，不填满整个 MAD 窗口。
+  // 连续真实观测应能快速建立 fresh support 并让 max_z 向真实值收敛。
+  auto config = testConfig();
+  config.height_history_window = 9U;
+  config.height_outlier_minimum_samples = 3U;
+  config.height_outlier_mad_multiplier = 3.5;
+  config.height_outlier_minimum_band_m = 0.20F;
+  config.minimum_observations = 2U;
+  config.minimum_stable_duration_sec = 0.5;
+
+  // 1. 构造一个已被污染的持久 cell（旧 max_z = 6.2m）。
+  StaticObstacleEvidenceIndex source(config);
+  source.reset(60U);
+  StaticEvidenceCellGeometryMap polluted = {
+      {packStaticEvidenceCell(4, 8), {0.20F, 6.20F}}};
+  source.observeFilteredCells(polluted, 1.0, 60U, 1U);
+  source.observeFilteredCells(polluted, 2.0, 60U, 2U);
+  source.confirmCleanCells(polluted, {}, 2.0, 60U, 1U);
+  const auto polluted_snapshot = source.snapshot();
+  ASSERT_TRUE(polluted_snapshot);
+  ASSERT_NEAR(polluted_snapshot->cells.begin()->second.max_z, 6.20F, 1.0e-5F);
+
+  // 2. 保存并重新加载。
+  const std::string path = "static_evidence_polluted_relearn_test.csv";
+  std::remove(path.c_str());
+  std::remove((path + ".tmp").c_str());
+  std::string reason;
+  ASSERT_TRUE(source.saveSnapshot(polluted_snapshot, path, &reason)) << reason;
+
+  StaticObstacleEvidenceIndex loaded(config);
+  loaded.reset(61U);
+  ASSERT_TRUE(loaded.loadSnapshot(
+      path, 61U, polluted_snapshot->map_generation,
+      polluted_snapshot->revision, &reason)) << reason;
+  std::remove(path.c_str());
+
+  // 3. 加载后历史中只有 1 个旧样本（不再是 3 个），新观测可以进入。
+  const auto loaded_snapshot = loaded.snapshot();
+  ASSERT_TRUE(loaded_snapshot);
+  ASSERT_EQ(loaded_snapshot->cells.size(), 1U);
+
+  // 4. 连续输入真实稳定 max_z ≈ 1.20m 的新观测。
+  StaticEvidenceCellGeometryMap real = {
+      {packStaticEvidenceCell(4, 8), {0.20F, 1.20F}}};
+  loaded.observeFilteredCells(real, 3.0, 61U, 3U);
+  loaded.observeFilteredCells(real, 4.0, 61U, 4U);
+  loaded.observeFilteredCells(real, 5.0, 61U, 5U);
+  loaded.confirmCleanCells(real, {}, 5.0, 61U, 2U);
+
+  // 5. 2-3 个一致真实观测后 max_z 应向真实值收敛。
+  const auto final_snapshot = loaded.snapshot();
+  ASSERT_TRUE(final_snapshot);
+  const auto found = final_snapshot->cells.find(packStaticEvidenceCell(4, 8));
+  ASSERT_NE(found, final_snapshot->cells.end());
+  // 真实 max_z=1.20m，旧污染 6.20m 已被 fresh support 覆盖。
+  EXPECT_NEAR(found->second.max_z, 1.20F, 1.0e-5F);
+  // cell 不应因高度修复而丢失 lifecycle 授权。
+  EXPECT_TRUE(found->second.clean_map_confirmed);
+  EXPECT_EQ(found->second.map_generation, 61U);
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
      SparseCurrentObservationMatchesDenseStaticMap) {
   StaticObstacleEvidenceIndex index(testConfig());
   StaticEvidenceCellGeometryMap dense = twoCells();
