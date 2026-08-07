@@ -243,5 +243,62 @@ TEST_F(RosTimeFixture, OutputStepLimitRejectAlsoTriggersRecovery) {
     EXPECT_GT(filter.status().p_trace, p_trace_before * 1.5);
 }
 
+TEST_F(RosTimeFixture, SingleRejectCountsOnlyOneDegradedFrame) {
+    // 验证一次 NIS/axis reject 不会重复计数 degraded frames。
+    // rejectCandidate 是退化计数器的唯一 owner。
+    CraneMotionEKFConfig config;
+    config.reject_high_fitness = false;
+    config.correction_soft_limit_m = 1.0;
+    config.max_reject_innovation_frames = 5;   // >0 避免立即触发 recovery
+    CraneMotionEKF filter;
+    filter.setConfig(config);
+    filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
+
+    // 制造一个必定触发 hard correction reject 的测量。
+    filter.updateWithNDT(
+        poseAt(1.50, 0.0), 0.02, poseAt(1.50, 0.0),
+        ros::Time(1, 200000000));
+
+    EXPECT_FALSE(filter.status().ndt_accepted);
+    // 每个计数器只应 +1，不是 +2。
+    EXPECT_EQ(filter.status().frames_since_good_ndt, 1);
+    EXPECT_EQ(filter.status().consecutive_degraded_frames, 1);
+    EXPECT_EQ(filter.status().reject_innovation_frames, 1);
+}
+
+TEST_F(RosTimeFixture, PredictionOnlyFrameClearsBothRearmCounters) {
+    // predictWithoutMeasurement 必须同时清零 nominal 和 accepted rearm 计数，
+    // 防止预测帧中间断开健康序列却仍算作"连续健康"。
+    CraneMotionEKFConfig config;
+    config.reject_high_fitness = false;
+    config.max_reject_innovation_frames = 10;
+    CraneMotionEKF filter;
+    filter.setConfig(config);
+    filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
+
+    // 先产生几个 accepted frame 积累 rearm 计数。
+    filter.updateWithNDT(
+        poseAt(0.10, 0.0), 0.02, poseAt(0.10, 0.0),
+        ros::Time(1, 100000000));
+    filter.updateWithNDT(
+        poseAt(0.20, 0.0), 0.02, poseAt(0.20, 0.0),
+        ros::Time(1, 200000000));
+    EXPECT_TRUE(filter.status().ndt_accepted);
+
+    // 一个 prediction-only 帧必须断开 rearm 连续序列。
+    filter.predictWithoutMeasurement(
+        poseAt(0.20, 0.0), ros::Time(1, 300000000), "TEST_PRED_ONLY");
+
+    // 之后一个 accepted 帧不应立即完成 rearm。
+    filter.updateWithNDT(
+        poseAt(0.30, 0.0), 0.02, poseAt(0.30, 0.0),
+        ros::Time(1, 400000000));
+    EXPECT_TRUE(filter.status().ndt_accepted);
+
+    // 确认 prediction-only 后 rearm 序列已断开：不应触发 recovery
+    // 即使此时 reject_innovation_frames 超限（如果未清零就超了）。
+    EXPECT_FALSE(filter.status().recovered);
+}
+
 }  // namespace
 }  // namespace ndt_slam

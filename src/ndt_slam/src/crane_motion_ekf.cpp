@@ -279,6 +279,7 @@ Sophus::SE3d CraneMotionEKF::predictWithoutMeasurement(
     status_.correction_soft = false;
     status_.output_step_soft = false;
     status_.map_commit_safe = false;
+    nominal_accept_count_ = 0;
     accepted_rearm_count_ = 0;
     status_.frames_since_good_ndt++;
     status_.consecutive_degraded_frames++;
@@ -445,13 +446,11 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
         ndt_fitness > std::max(0.03, last_good_fitness_ * 1.5)) {
         status_.ndt_accepted = false;
         status_.prediction_only = true;
-        status_.frames_since_good_ndt++;
-        status_.consecutive_degraded_frames++;
         status_.reject_reason = nis_outlier
             ? "NIS_INNOVATION_REJECT"
             : "AXIS_INNOVATION_REJECT";
 
-        // reject_innovation_frames 和 maybeRecover 移至 rejectCandidate 内部。
+        // 所有 reject 计数器由 rejectCandidate 统一递增，避免重复计数。
         return rejectCandidate(
             x_pred, P_pred, innovation, raw_innov_norm,
             pose_template, stamp, status_.reject_reason);
