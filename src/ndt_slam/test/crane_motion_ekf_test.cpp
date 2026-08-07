@@ -7,6 +7,15 @@
 namespace ndt_slam {
 namespace {
 
+// ROS_WARN_THROTTLE and ROS_WARN internally call ros::Time::now().
+// Standalone gtest binaries must initialize ros::Time before any
+// EKF call that can reach a throttle or warning log statement.
+struct RosTimeFixture : ::testing::Test {
+    static void SetUpTestSuite() {
+        ros::Time::init();
+    }
+};
+
 Sophus::SE3d poseAt(double x, double y) {
     return Sophus::SE3d(
         Sophus::SO3d(), Eigen::Vector3d(x, y, 0.0));
@@ -30,7 +39,7 @@ CraneMotionEKF configuredFilter() {
     return filter;
 }
 
-TEST(CraneMotionEkfTest, CorrectionAtThirtyThreeCentimetersIsAccepted) {
+TEST_F(RosTimeFixture, CorrectionAtThirtyThreeCentimetersIsAccepted) {
     CraneMotionEKF filter = configuredFilter();
     filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
     filter.updateWithNDT(
@@ -40,7 +49,7 @@ TEST(CraneMotionEkfTest, CorrectionAtThirtyThreeCentimetersIsAccepted) {
     EXPECT_FALSE(filter.status().correction_soft);
 }
 
-TEST(CraneMotionEkfTest, ModerateCorrectionIsDownweightedNotRejected) {
+TEST_F(RosTimeFixture, ModerateCorrectionIsDownweightedNotRejected) {
     CraneMotionEKF filter = configuredFilter();
     filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
     filter.updateWithNDT(
@@ -51,7 +60,7 @@ TEST(CraneMotionEkfTest, ModerateCorrectionIsDownweightedNotRejected) {
     EXPECT_FALSE(filter.status().map_commit_safe);
 }
 
-TEST(CraneMotionEkfTest, DynamicOutputLimitSoftAcceptsTwentyEightCentimeters) {
+TEST_F(RosTimeFixture, DynamicOutputLimitSoftAcceptsTwentyEightCentimeters) {
     CraneMotionEKF filter = configuredFilter();
     filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
     filter.updateWithNDT(
@@ -62,7 +71,7 @@ TEST(CraneMotionEkfTest, DynamicOutputLimitSoftAcceptsTwentyEightCentimeters) {
     EXPECT_FALSE(filter.status().map_commit_safe);
 }
 
-TEST(CraneMotionEkfTest, CorrectionBeyondOneMeterIsRejected) {
+TEST_F(RosTimeFixture, CorrectionBeyondOneMeterIsRejected) {
     CraneMotionEKF filter = configuredFilter();
     filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
     filter.updateWithNDT(
@@ -73,7 +82,7 @@ TEST(CraneMotionEkfTest, CorrectionBeyondOneMeterIsRejected) {
               "NDT_CORRECTION_HARD_LIMIT");
 }
 
-TEST(CraneMotionEkfTest, VehicleYawNoiseNeverRejectsXyState) {
+TEST_F(RosTimeFixture, VehicleYawNoiseNeverRejectsXyState) {
     CraneMotionEKF filter = configuredFilter();
     filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
     constexpr double kDeg = 3.14159265358979323846 / 180.0;
@@ -91,7 +100,7 @@ TEST(CraneMotionEkfTest, VehicleYawNoiseNeverRejectsXyState) {
     EXPECT_TRUE(filter.status().ndt_accepted);
 }
 
-TEST(CraneMotionEkfTest, LatchedRailVehicleYawDoesNotFollowCargoSwingNoise) {
+TEST_F(RosTimeFixture, LatchedRailVehicleYawDoesNotFollowCargoSwingNoise) {
     CraneMotionEKF filter = configuredFilter();
     filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
     constexpr double kDeg = 3.14159265358979323846 / 180.0;
@@ -112,7 +121,7 @@ TEST(CraneMotionEkfTest, LatchedRailVehicleYawDoesNotFollowCargoSwingNoise) {
     EXPECT_NEAR(filter.status().latched_yaw_rad, fixed_yaw, 1.0e-12);
 }
 
-TEST(CraneMotionEkfTest, RuntimeReseedPreservesBoundedVelocity) {
+TEST_F(RosTimeFixture, RuntimeReseedPreservesBoundedVelocity) {
     CraneMotionEKF filter = configuredFilter();
     filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
     filter.updateWithNDT(
@@ -127,7 +136,7 @@ TEST(CraneMotionEkfTest, RuntimeReseedPreservesBoundedVelocity) {
     EXPECT_LE(filter.status().p_trace, 25.0 + 1.0e-9);
 }
 
-TEST(CraneMotionEkfTest, RejectedOversizedPredictionHoldsCommittedState) {
+TEST_F(RosTimeFixture, RejectedOversizedPredictionHoldsCommittedState) {
     CraneMotionEKF filter = configuredFilter();
     filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
     Eigen::Vector4d oversized_prediction;
@@ -143,7 +152,7 @@ TEST(CraneMotionEkfTest, RejectedOversizedPredictionHoldsCommittedState) {
               "TEST_REJECT_PRED_STEP_LIMIT");
 }
 
-TEST(CraneMotionEkfTest, RelocalizationReseedKeepsRecoveryAllowance) {
+TEST_F(RosTimeFixture, RelocalizationReseedKeepsRecoveryAllowance) {
     CraneMotionEKFConfig config;
     config.reject_high_fitness = false;
     config.correction_soft_limit_m = 1.0;
@@ -160,6 +169,78 @@ TEST(CraneMotionEkfTest, RelocalizationReseedKeepsRecoveryAllowance) {
     EXPECT_FALSE(filter.status().ndt_accepted);
     EXPECT_TRUE(filter.status().recovered);
     EXPECT_LE(filter.status().p_trace, 25.0 + 1.0e-9);
+}
+
+TEST_F(RosTimeFixture, RecoveryCovarianceInflationSurvivesReject) {
+    // 验证 maybeRecover 的协方差膨胀真正保留在 EKF 的最终 P_ 中，
+    // 不会被 rejectCandidate 内部的 P_ = P_pred 覆盖。
+    CraneMotionEKFConfig config;
+    config.reject_high_fitness = false;
+    config.correction_soft_limit_m = 1.0;
+    config.max_reject_innovation_frames = 0;
+    config.recovery_covariance_inflation = 4.0;
+    config.recovery_max_covariance_trace = 100.0;
+    CraneMotionEKF filter;
+    filter.setConfig(config);
+    filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
+
+    // 记录 reject 前的 P trace 作为基线。
+    const double p_trace_before = filter.status().p_trace;
+    EXPECT_GT(p_trace_before, 0.0);
+
+    // 制造一个必定触发 hard correction reject 的测量。
+    filter.updateWithNDT(
+        poseAt(5.0, 0.0), 0.02, poseAt(5.0, 0.0),
+        ros::Time(1, 200000000));
+
+    EXPECT_FALSE(filter.status().ndt_accepted);
+    EXPECT_TRUE(filter.status().recovered);
+
+    const double p_trace_after = filter.status().p_trace;
+    // 恢复后的 P trace 必须显著大于初始 trace（膨胀已生效）。
+    EXPECT_GT(p_trace_after, p_trace_before * 1.5);
+
+    // p_trace 必须与 EKF 内部实际 P_ 的 trace 一致。
+    EXPECT_NEAR(filter.status().p_trace, p_trace_after, 1.0e-9);
+
+    // 同一个 recovery episode 内再次 reject 不应重复膨胀。
+    filter.updateWithNDT(
+        poseAt(6.0, 0.0), 0.02, poseAt(6.0, 0.0),
+        ros::Time(1, 300000000));
+    EXPECT_FALSE(filter.status().ndt_accepted);
+    // recovered 在上次已设置且 recovery_inflated_this_episode_=true，
+    // 所以本次 maybeRecover 不应再次膨胀。
+    EXPECT_LE(filter.status().p_trace, p_trace_after * 1.2 + 1.0e-6);
+}
+
+TEST_F(RosTimeFixture, OutputStepLimitRejectAlsoTriggersRecovery) {
+    // OUTPUT_STEP_LIMIT 路径也必须统一走 maybeRecover，
+    // 不能只有 correction/innovation reject 才触发恢复。
+    CraneMotionEKFConfig config;
+    config.reject_high_fitness = false;
+    config.correction_soft_limit_m = 2.0;   // 放宽 correction 门限
+    config.max_reject_innovation_frames = 0;
+    config.max_speed_mps = 0.05;            // 极低速度使步长限制容易触发
+    config.max_step_safety_factor = 1.0;
+    config.absolute_output_step_limit_m = 0.10;
+    config.recovery_covariance_inflation = 3.0;
+    config.recovery_max_covariance_trace = 50.0;
+    CraneMotionEKF filter;
+    filter.setConfig(config);
+    filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
+
+    const double p_trace_before = filter.status().p_trace;
+
+    // 大位移在短 dt 内触发 OUTPUT_STEP_LIMIT。
+    filter.updateWithNDT(
+        poseAt(0.30, 0.0), 0.02, poseAt(0.30, 0.0),
+        ros::Time(1, 100000000));
+
+    EXPECT_FALSE(filter.status().ndt_accepted);
+    EXPECT_TRUE(filter.status().recovered);
+
+    // 恢复膨胀必须已生效。
+    EXPECT_GT(filter.status().p_trace, p_trace_before * 1.5);
 }
 
 }  // namespace

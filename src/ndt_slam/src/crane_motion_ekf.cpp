@@ -52,6 +52,7 @@ void CraneMotionEKF::initialize(const Sophus::SE3d& first_pose,
     status_.output_pos = x_.head<2>();
     status_.velocity = x_.tail<2>();
     status_.map_commit_safe = true;
+    status_.p_trace = P_.trace();
 
     candidate_yaw_rad_ = 0.0;
     yaw_consistent_count_ = 0;
@@ -293,10 +294,13 @@ Sophus::SE3d CraneMotionEKF::predictWithoutMeasurement(
     status_.nis = 0.0;
     status_.sensor_dt = dt;
     status_.ndt_time_ms = 0.0;
-    status_.p_trace = P_.trace();
     status_.reject_reason = limited ? reason + "_STEP_LIMIT" : reason;
 
     maybeRecover(reason);
+
+    // p_trace 必须在 maybeRecover 之后刷新，反映最终的协方差状态。
+    status_.p_trace = P_.trace();
+
     return buildPoseFromState(x_, pose_template);
 }
 
@@ -363,13 +367,13 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
 
     if (!std::isfinite(raw_innov_norm) ||
         raw_innov_norm > cfg_.correction_soft_limit_m) {
-        status_.reject_innovation_frames++;
         status_.reject_reason = "NDT_CORRECTION_HARD_LIMIT";
         ROS_WARN_THROTTLE(
             1.0,
             "[EKFGuard] correction hard reject=%.3f limit=%.3f",
             raw_innov_norm, cfg_.correction_soft_limit_m);
-        maybeRecover("correction_hard_limit");
+        // reject_innovation_frames 和 maybeRecover 移至 rejectCandidate 内部，
+        // 确保所有拒绝路径（包括 OUTPUT_STEP_LIMIT）统一处理。
         return rejectCandidate(
             x_pred, P_pred, innovation, raw_innov_norm,
             pose_template, stamp, status_.reject_reason);
@@ -442,14 +446,12 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
         status_.ndt_accepted = false;
         status_.prediction_only = true;
         status_.frames_since_good_ndt++;
-        status_.reject_innovation_frames++;
         status_.consecutive_degraded_frames++;
         status_.reject_reason = nis_outlier
             ? "NIS_INNOVATION_REJECT"
             : "AXIS_INNOVATION_REJECT";
 
-        maybeRecover("innovation_reject");
-
+        // reject_innovation_frames 和 maybeRecover 移至 rejectCandidate 内部。
         return rejectCandidate(
             x_pred, P_pred, innovation, raw_innov_norm,
             pose_template, stamp, status_.reject_reason);
@@ -740,7 +742,6 @@ Sophus::SE3d CraneMotionEKF::rejectCandidate(
     const Sophus::SE3d& pose_template,
     const ros::Time& stamp,
     const std::string& reason) {
-    const bool recovered_before_reject = status_.recovered;
     // 使用纯 prediction（不含 NDT 修正），但仍然限制输出步长。
     const Eigen::Vector2d previous_pos = x_.head<2>();
     const double dt = sanitizeDt(stamp);
@@ -756,6 +757,7 @@ Sophus::SE3d CraneMotionEKF::rejectCandidate(
         bounded_pred.tail<2>().setZero();
     }
 
+    // ========== 步骤 1：COMMIT_REJECTED_STATE ==========
     x_ = bounded_pred;
     P_ = P_pred;
     if (pred_limited) {
@@ -767,11 +769,13 @@ Sophus::SE3d CraneMotionEKF::rejectCandidate(
     }
     last_stamp_ = stamp;
 
+    // ========== 步骤 2：UPDATE_REJECT_COUNTERS ==========
     status_.ndt_accepted = false;
     status_.prediction_only = true;
     status_.map_commit_safe = false;
-    status_.recovered = recovered_before_reject;
+    status_.recovered = false;
     status_.frames_since_good_ndt++;
+    status_.reject_innovation_frames++;
     status_.consecutive_degraded_frames++;
     status_.predicted_pos = x_pred.head<2>();
     status_.output_pos = x_.head<2>();
@@ -785,11 +789,18 @@ Sophus::SE3d CraneMotionEKF::rejectCandidate(
     status_.nis = 0.0;
     status_.sensor_dt = dt;
     status_.ndt_time_ms = 0.0;
-    status_.p_trace = P_.trace();
     status_.reject_reason = pred_limited
         ? reason + "_PRED_STEP_LIMIT" : reason;
     nominal_accept_count_ = 0;
     accepted_rearm_count_ = 0;
+
+    // ========== 步骤 3：MAYBE_RECOVER ==========
+    // 必须在 P_ 已提交之后调用，这样 recovery inflation 才能保留在最终协方差中。
+    maybeRecover(reason);
+
+    // ========== 步骤 4：UPDATE_FINAL_DIAGNOSTICS ==========
+    // p_trace 必须在 maybeRecover 之后刷新，反映最终的协方差状态。
+    status_.p_trace = P_.trace();
 
     return buildPoseFromState(x_, pose_template);
 }
