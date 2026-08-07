@@ -161,7 +161,8 @@ StationaryMotionDecision StationaryMotionPolicy::baseDecision(
     decision.allow_local_map_update =
         state_ == RuntimeMotionState::MOVING && reliable;
     decision.allow_persistent_map_commit =
-        state_ == RuntimeMotionState::MOVING && reliable;
+        state_ == RuntimeMotionState::MOVING && reliable &&
+        input.persistent_map_quality_valid;
 
     if (state_ == RuntimeMotionState::STATIONARY_HOLD) {
         decision.apply_stationary_hold = true;

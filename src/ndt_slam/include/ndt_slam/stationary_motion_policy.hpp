@@ -44,6 +44,9 @@ struct StationaryMotionInput {
     bool ndt_accepted = false;
     bool prediction_only = false;
     bool registration_quality_valid = false;
+    // Persistent maps require the stricter EKF/map-commit gate.  Ephemeral
+    // local-map tracking may still use an accepted, finite soft correction.
+    bool persistent_map_quality_valid = false;
     bool severe_degeneracy = false;
 
     Eigen::Vector2d raw_position = Eigen::Vector2d::Zero();

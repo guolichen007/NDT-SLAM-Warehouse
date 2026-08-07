@@ -127,5 +127,40 @@ TEST(CraneMotionEkfTest, RuntimeReseedPreservesBoundedVelocity) {
     EXPECT_LE(filter.status().p_trace, 25.0 + 1.0e-9);
 }
 
+TEST(CraneMotionEkfTest, RejectedOversizedPredictionHoldsCommittedState) {
+    CraneMotionEKF filter = configuredFilter();
+    filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
+    Eigen::Vector4d oversized_prediction;
+    oversized_prediction << 1.0, 0.0, 2.0, 0.0;
+    const Sophus::SE3d output = filter.rejectCandidate(
+        oversized_prediction, Eigen::Matrix4d::Identity(),
+        Eigen::Vector2d(2.0, 0.0), 2.0, poseAt(2.0, 0.0),
+        ros::Time(1, 100000000), "TEST_REJECT");
+    EXPECT_NEAR(output.translation().x(), 0.0, 1.0e-9);
+    EXPECT_NEAR(filter.state().head<2>().norm(), 0.0, 1.0e-9);
+    EXPECT_NEAR(filter.state().tail<2>().norm(), 0.0, 1.0e-9);
+    EXPECT_EQ(filter.status().reject_reason,
+              "TEST_REJECT_PRED_STEP_LIMIT");
+}
+
+TEST(CraneMotionEkfTest, RelocalizationReseedKeepsRecoveryAllowance) {
+    CraneMotionEKFConfig config;
+    config.reject_high_fitness = false;
+    config.correction_soft_limit_m = 1.0;
+    config.max_reject_innovation_frames = 0;
+    config.recovery_covariance_inflation = 2.0;
+    config.recovery_max_covariance_trace = 25.0;
+    CraneMotionEKF filter;
+    filter.setConfig(config);
+    filter.initialize(poseAt(0.0, 0.0), ros::Time(1, 0));
+    filter.reseedFromRelocalization(poseAt(3.0, -2.0), ros::Time(2, 0));
+    filter.updateWithNDT(
+        poseAt(5.0, -2.0), 0.02, poseAt(5.0, -2.0),
+        ros::Time(2, 100000000));
+    EXPECT_FALSE(filter.status().ndt_accepted);
+    EXPECT_TRUE(filter.status().recovered);
+    EXPECT_LE(filter.status().p_trace, 25.0 + 1.0e-9);
+}
+
 }  // namespace
 }  // namespace ndt_slam

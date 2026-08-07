@@ -281,6 +281,21 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         )
         self.assertNotIn("static_map_max_observation_gap_sec: 30.0", CONFIG)
 
+    def test_static_vertical_history_rejects_isolated_spikes(self):
+        self.assertIn("height_history_window = 9U", STATIC_EVIDENCE_HEADER)
+        self.assertIn("height_outlier_mad_multiplier = 3.5", STATIC_EVIDENCE_HEADER)
+        self.assertIn("updateHeightEstimateLocked", STATIC_EVIDENCE_SOURCE)
+        self.assertIn("height_outliers_rejected", STATIC_EVIDENCE_SOURCE)
+        self.assertNotIn(
+            "cell.max_z = std::max(cell.max_z, geometry.max_z)",
+            STATIC_EVIDENCE_SOURCE,
+        )
+        self.assertIn(
+            "IsolatedVerticalSpikeDoesNotStretchMatureCell",
+            STATIC_EVIDENCE_TEST,
+        )
+        self.assertIn("static_map_height_history_window: 9", CONFIG)
+
     def test_new_unit_is_linked_to_the_real_library(self):
         self.assertIn("src/cargo_preload_baseline_tracker.cpp", CMAKE)
         self.assertIn("test/cargo_preload_baseline_tracker_test.cpp", CMAKE)

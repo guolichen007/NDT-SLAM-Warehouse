@@ -183,6 +183,31 @@ TEST(StaticObstacleEvidenceIndexTest,
 }
 
 TEST(StaticObstacleEvidenceIndexTest,
+     IsolatedVerticalSpikeDoesNotStretchMatureCell) {
+  auto config = testConfig();
+  config.height_history_window = 9U;
+  config.height_outlier_minimum_samples = 3U;
+  config.height_outlier_mad_multiplier = 3.5;
+  config.height_outlier_minimum_band_m = 0.20F;
+  StaticObstacleEvidenceIndex index(config);
+  index.reset(31U);
+  index.observeFilteredCells(twoCells(), 1.0, 31U, 1U);
+  index.observeFilteredCells(twoCells(), 2.0, 31U, 2U);
+  index.confirmCleanCells(twoCells(), {}, 2.0, 31U, 1U);
+
+  StaticEvidenceCellGeometryMap spiked = twoCells();
+  spiked[packStaticEvidenceCell(4, 8)].max_z = 6.20F;
+  index.observeFilteredCells(spiked, 3.0, 31U, 3U);
+
+  const auto snapshot = index.snapshot();
+  ASSERT_TRUE(snapshot);
+  const auto found = snapshot->cells.find(packStaticEvidenceCell(4, 8));
+  ASSERT_NE(found, snapshot->cells.end());
+  EXPECT_NEAR(found->second.max_z, 1.20F, 1.0e-5F);
+  EXPECT_GE(index.diagnostics().height_outliers_rejected, 1U);
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
      SparseCurrentObservationMatchesDenseStaticMap) {
   StaticObstacleEvidenceIndex index(testConfig());
   StaticEvidenceCellGeometryMap dense = twoCells();

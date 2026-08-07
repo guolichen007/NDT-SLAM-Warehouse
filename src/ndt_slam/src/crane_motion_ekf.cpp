@@ -21,6 +21,7 @@ void CraneMotionEKF::reset() {
     yaw_anomaly_count_ = 0;
     recovery_inflated_this_episode_ = false;
     nominal_accept_count_ = 0;
+    accepted_rearm_count_ = 0;
 }
 
 void CraneMotionEKF::initialize(const Sophus::SE3d& first_pose,
@@ -59,6 +60,7 @@ void CraneMotionEKF::initialize(const Sophus::SE3d& first_pose,
     yaw_anomaly_count_ = 0;
     recovery_inflated_this_episode_ = false;
     nominal_accept_count_ = 0;
+    accepted_rearm_count_ = 0;
 
     ROS_INFO("[CraneMotionEKF] initialized at xy=(%.3f, %.3f)",
              x_(0), x_(1));
@@ -254,6 +256,17 @@ Sophus::SE3d CraneMotionEKF::predictWithoutMeasurement(
     predict(dt, x_pred, P_pred);
     const bool limited = enforceOutputStep(previous_pos, dt, x_pred);
 
+    if (limited) {
+        // enforceOutputStep intentionally reports a hard violation instead
+        // of clipping a finite state.  A measurement-free path must not then
+        // commit that oversized prediction.  Hold position and remove the
+        // velocity that would reproduce the same violation on the next frame.
+        x_pred = x_;
+        x_pred.tail<2>().setZero();
+        P_pred.block<2, 2>(0, 2).setZero();
+        P_pred.block<2, 2>(2, 0).setZero();
+    }
+
     x_ = x_pred;
     P_ = P_pred;
     last_stamp_ = stamp;
@@ -265,6 +278,7 @@ Sophus::SE3d CraneMotionEKF::predictWithoutMeasurement(
     status_.correction_soft = false;
     status_.output_step_soft = false;
     status_.map_commit_safe = false;
+    accepted_rearm_count_ = 0;
     status_.frames_since_good_ndt++;
     status_.consecutive_degraded_frames++;
     status_.predicted_pos = x_.head<2>();
@@ -547,6 +561,8 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
     status_.map_commit_safe =
         !status_.correction_soft && !status_.output_step_soft;
 
+    ++accepted_rearm_count_;
+
     if (status_.map_commit_safe) {
         ++nominal_accept_count_;
         if (nominal_accept_count_ >=
@@ -558,6 +574,10 @@ Sophus::SE3d CraneMotionEKF::updateWithNDT(const Sophus::SE3d& ndt_pose,
         status_.reject_reason = status_.correction_soft
             ? "NDT_CORRECTION_SOFT"
             : "OUTPUT_STEP_SOFT";
+    }
+    if (accepted_rearm_count_ >=
+        std::max(1, cfg_.recovery_rearm_accepted_frames)) {
+        recovery_inflated_this_episode_ = false;
     }
 
     if (ndt_fitness > cfg_.high_fitness_threshold) {
@@ -615,6 +635,7 @@ void CraneMotionEKF::maybeRecover(const std::string& reason) {
     status_.recovered = true;
     recovery_inflated_this_episode_ = true;
     nominal_accept_count_ = 0;
+    accepted_rearm_count_ = 0;
 
     ROS_WARN("[CraneMotionEKF] recovery: reason=%s, P inflated by %.1fx, trace=%.3f",
              reason.c_str(), inflation, P_.trace());
@@ -732,10 +753,18 @@ Sophus::SE3d CraneMotionEKF::rejectCandidate(
         // Hold the last committed EKF state; do not write the oversized
         // prediction into x_ and start a prediction-only drift episode.
         bounded_pred = x_;
+        bounded_pred.tail<2>().setZero();
     }
 
     x_ = bounded_pred;
     P_ = P_pred;
+    if (pred_limited) {
+        // Once position is held, stale position/velocity correlation must not
+        // immediately accelerate the next prediction back outside the hard
+        // envelope.
+        P_.block<2, 2>(0, 2).setZero();
+        P_.block<2, 2>(2, 0).setZero();
+    }
     last_stamp_ = stamp;
 
     status_.ndt_accepted = false;
@@ -759,6 +788,8 @@ Sophus::SE3d CraneMotionEKF::rejectCandidate(
     status_.p_trace = P_.trace();
     status_.reject_reason = pred_limited
         ? reason + "_PRED_STEP_LIMIT" : reason;
+    nominal_accept_count_ = 0;
+    accepted_rearm_count_ = 0;
 
     return buildPoseFromState(x_, pose_template);
 }
@@ -902,8 +933,12 @@ void CraneMotionEKF::reseedFromRelocalization(
     status_.velocity = x_.tail<2>();
     status_.p_trace = P_.trace();
     status_.reject_reason = "RELOCALIZATION_RESEED_VERIFYING";
-    recovery_inflated_this_episode_ = true;
+    // Reseeding already performs one bounded covariance adjustment, but it is
+    // not the emergency recovery allowance.  Keep one emergency inflation
+    // available if verification genuinely degrades after this single reseed.
+    recovery_inflated_this_episode_ = false;
     nominal_accept_count_ = 0;
+    accepted_rearm_count_ = 0;
 }
 
 }  // namespace ndt_slam

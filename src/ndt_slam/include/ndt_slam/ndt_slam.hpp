@@ -582,6 +582,7 @@ private:
     // 定位恢复后重放缓存的 scan。
     void replayRecoveryScanBuffer(const ros::Time& recovery_stamp);
     void invalidateAcceptedLocalizationContinuity();
+    void releaseRuntimeYawPrior(const std::string& reason);
 
     // ========== 全局一致性看门狗 ==========
     // 独立于局部 NDT fitness 的全局位姿验证。
@@ -1687,6 +1688,7 @@ private:
             // 软对称模式
             std::string anchor_symmetry_mode = "strict";  // strict / soft / off
             float max_center_offset_m = 0.35f;
+            float maximum_hook_normalized_offset = 0.65F;
 
             // HAG 预过滤
             bool hag_filter_enabled = true;

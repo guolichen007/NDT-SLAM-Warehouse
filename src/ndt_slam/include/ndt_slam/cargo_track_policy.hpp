@@ -86,6 +86,11 @@ struct CargoCandidateIdentityContext {
   float hook_containment_margin_m = 0.10F;
   float maximum_hook_center_distance_m =
       std::numeric_limits<float>::infinity();
+  // Normalized distance of the hook from the candidate OBB centre. A value
+  // of 1.0 is the measured OBB edge; requiring a smaller value prevents an
+  // adjacent object which merely overlaps the hook from becoming cargo.
+  float maximum_hook_normalized_offset =
+      std::numeric_limits<float>::infinity();
   std::size_t strong_point_count = 80U;
   bool predicted_track_valid = false;
   Eigen::Vector3f predicted_center = Eigen::Vector3f::Zero();
@@ -98,6 +103,8 @@ struct CargoCandidateIdentityScore {
   bool valid = false;
   int component_id = -1;
   float hook_distance_score = 0.0F;
+  float hook_normalized_offset =
+      std::numeric_limits<float>::infinity();
   float predicted_center_score = 0.0F;
   float overlap_score = 0.0F;
   float shape_confidence = 0.0F;

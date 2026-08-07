@@ -566,6 +566,9 @@ crane_motion_ekf:
     covariance_inflation: 4.0
     maximum_covariance_trace: 25.0
     rearm_nominal_frames: 5
+    # Soft-but-accepted frames also re-arm recovery eventually; otherwise a
+    # long high-speed run could permanently consume the one-shot recovery.
+    rearm_accepted_frames: 15
 
   # V3: 慢帧保护
   ndt_runtime_guard:
@@ -822,6 +825,12 @@ cargo_safety:
   static_map_immature_max_observation_gap_sec: 300.0
   static_map_immature_gap_retention_ratio: 0.50
   static_map_max_sequence_gap: 1
+  # Robust per-cell vertical history prevents one bad registration or an
+  # isolated return from becoming a permanent objects_clean spike.
+  static_map_height_history_window: 9
+  static_map_height_outlier_minimum_samples: 3
+  static_map_height_outlier_mad_multiplier: 3.5
+  static_map_height_outlier_minimum_band_m: 0.20
   # Sparse 2.5D+ height field. Only mature/approved cells enter formal use.
   static_height_z_bin_m: 0.10
   static_height_max_layers_per_cell: 3
@@ -1386,6 +1395,9 @@ odom_anchored_cargo_box:
     # the anchor; adjacent pallets remain external-obstacle evidence.
     anchor_symmetry_mode: "strict"
     max_center_offset_m: 0.35
+    # The hook must lie in the central 65% of both measured OBB half-axes.
+    # A nearby pallet which only overlaps the anchor edge remains an obstacle.
+    maximum_hook_normalized_offset: 0.65
     hag_filter_enabled: true
     hag_min_m: 0.15
     hag_max_m: 2.50

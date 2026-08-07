@@ -43,6 +43,9 @@ class NdtFastMotionObbContractTest(unittest.TestCase):
         self.assertIn("status_.map_commit_safe", EKF)
         self.assertIn("crane_motion_ekf_.status().map_commit_safe", NODE)
         self.assertIn("absolute_output_step_limit_m: 2.50", CONFIG)
+        self.assertIn("persistent_map_quality_valid", NODE)
+        self.assertIn("frame_map_commit_quality_valid", NODE)
+        self.assertIn("ekf_soft_frame_persistent_guard", NODE)
 
     def test_vehicle_yaw_never_rejects_xy_and_only_releases_on_recovery(self):
         self.assertNotIn("checkRuntimeYaw", NODE)
@@ -53,6 +56,11 @@ class NdtFastMotionObbContractTest(unittest.TestCase):
         self.assertIn("Preserve the six-frame acquired heading exactly", EKF)
         self.assertIn("crane_motion_ekf_.unlatchYaw();", NODE)
         self.assertIn("accepted_yaw_valid_ = false;", NODE)
+        self.assertIn("releaseRuntimeYawPrior", NODE)
+        self.assertIn("confirmed_relocalization_candidate", NODE)
+        self.assertIn("lidar_source_time_rollback", NODE)
+        self.assertIn("recovery_rearm_accepted_frames", EKF_HEADER)
+        self.assertIn("accepted_rearm_count_", EKF)
 
     def test_runtime_relocalization_is_confirmed_and_reseeded_once(self):
         self.assertIn("confirm_frames: 3", CONFIG)
@@ -105,8 +113,12 @@ class NdtFastMotionObbContractTest(unittest.TestCase):
         self.assertIn("valid gravity LOADED required", NODE)
         self.assertIn("require_hook_containment = true", NODE)
         self.assertIn("maximum_hook_center_distance_m", NODE)
+        self.assertIn("maximum_hook_normalized_offset", NODE)
         self.assertIn("hook_anchor_outside_candidate_obb", TRACK_POLICY)
         self.assertIn("candidate_center_too_far_from_hook_anchor", TRACK_POLICY)
+        self.assertIn(
+            "hook_anchor_outside_candidate_central_region", TRACK_POLICY
+        )
         self.assertIn("configuration-independent invariant", NODE)
         self.assertIn("measured.x() = anchor.x();", NODE)
         self.assertIn("measured.y() = anchor.y();", NODE)
@@ -125,6 +137,16 @@ class NdtFastMotionObbContractTest(unittest.TestCase):
         self.assertNotIn("objects_clean_live", RVIZ)
         self.assertIn("Topic: /display_map_objects_clean", RVIZ)
         self.assertIn("latest_completed_map_bundle_ = result.bundle", NODE)
+
+    def test_timestamp_rollback_reenters_persistent_map_quarantine(self):
+        rollback_start = NODE.index(
+            "void NdtSlamNode::handleLidarTimeRollback("
+        )
+        rollback = NODE[rollback_start:]
+        self.assertIn("persistent_localization_map_present_", rollback)
+        self.assertIn("StartupLocalizationState::STARTUP_QUARANTINE", rollback)
+        self.assertIn("relocalization_pose_reliable_ = false", rollback)
+        self.assertIn("publishRelocalizationSafetyInvalid", rollback)
 
 
 if __name__ == "__main__":

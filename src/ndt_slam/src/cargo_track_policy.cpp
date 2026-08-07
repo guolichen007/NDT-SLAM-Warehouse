@@ -310,6 +310,27 @@ CargoCandidateIdentityScore scoreCargoCandidateIdentity(
     score.reason = "candidate_center_too_far_from_hook_anchor";
     return score;
   }
+  const Eigen::Vector2f hook_delta =
+      context.hook_center - candidate.center.head<2>();
+  const float candidate_cosine = std::cos(candidate.yaw_rad);
+  const float candidate_sine = std::sin(candidate.yaw_rad);
+  const float normalized_long = std::abs(
+      candidate_cosine * hook_delta.x() +
+      candidate_sine * hook_delta.y()) /
+      std::max(0.05F, 0.5F * candidate.size.x());
+  const float normalized_short = std::abs(
+      -candidate_sine * hook_delta.x() +
+      candidate_cosine * hook_delta.y()) /
+      std::max(0.05F, 0.5F * candidate.size.y());
+  score.hook_normalized_offset =
+      std::max(normalized_long, normalized_short);
+  if (std::isfinite(context.maximum_hook_normalized_offset) &&
+      (context.maximum_hook_normalized_offset <= 0.0F ||
+       score.hook_normalized_offset >
+           context.maximum_hook_normalized_offset)) {
+    score.reason = "hook_anchor_outside_candidate_central_region";
+    return score;
+  }
   score.hook_distance_score = unitScore(
       hook_center_distance,
       context.hook_region_radius_m);

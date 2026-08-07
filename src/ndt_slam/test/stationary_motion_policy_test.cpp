@@ -17,6 +17,7 @@ StationaryMotionInput reliableInput(double stamp,
     input.ndt_converged = true;
     input.ndt_accepted = true;
     input.registration_quality_valid = true;
+    input.persistent_map_quality_valid = true;
     input.raw_position = raw;
     input.filtered_position = filtered;
     input.filtered_velocity = Eigen::Vector2d(speed, 0.0);
@@ -45,6 +46,21 @@ TEST(StationaryMotionPolicyTest, DuplicateTimestampDoesNotEnterStationary) {
                                     Eigen::Vector2d::Zero(), 0.0));
     }
     EXPECT_EQ(policy.state(), RuntimeMotionState::MOVING);
+}
+
+TEST(StationaryMotionPolicyTest,
+     AcceptedSoftFrameUpdatesLocalButNotPersistentMap) {
+    StationaryMotionPolicy policy;
+    auto input = reliableInput(
+        1.0, Eigen::Vector2d(0.10, 0.0),
+        Eigen::Vector2d(0.08, 0.0), 0.10, 0.8);
+    input.persistent_map_quality_valid = false;
+
+    const auto decision = policy.update(input);
+
+    EXPECT_EQ(decision.state, RuntimeMotionState::MOVING);
+    EXPECT_TRUE(decision.allow_local_map_update);
+    EXPECT_FALSE(decision.allow_persistent_map_commit);
 }
 
 TEST(StationaryMotionPolicyTest, InconsistentDriftCannotExitHold) {

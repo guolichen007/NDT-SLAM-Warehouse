@@ -2,6 +2,7 @@
 
 #include <Eigen/Core>
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -33,6 +34,10 @@ struct CleanMapBuildInput {
     std::map<CleanMapCell, std::vector<CleanMapDenyRange>> deny_ranges;
     bool use_human_deny = false;
     bool use_3d_deny = false;
+    bool vertical_outlier_filter_enabled = true;
+    std::size_t vertical_outlier_minimum_points = 7U;
+    double vertical_outlier_mad_multiplier = 4.0;
+    float vertical_outlier_minimum_band_m = 0.60F;
 };
 
 struct CleanMapBuildResult {
@@ -48,6 +53,7 @@ struct CleanMapBuildResult {
     int human_denied_cells = 0;
     int retained_cells = 0;
     int retained_points = 0;
+    int vertical_outlier_points = 0;
 };
 
 enum class CleanMapBuildAction {

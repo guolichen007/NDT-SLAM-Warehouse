@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -48,6 +49,13 @@ struct StaticObstacleEvidenceConfig {
   // authorize a cell indefinitely.
   double immature_gap_retention_ratio = 0.50;
   std::uint64_t maximum_observation_sequence_gap = 2U;
+  // Per-cell vertical extents are robust estimates over completed clean-map
+  // observations. A single bad registration or isolated LiDAR return must not
+  // permanently stretch a mature obstacle to several metres.
+  std::size_t height_history_window = 9U;
+  std::size_t height_outlier_minimum_samples = 3U;
+  double height_outlier_mad_multiplier = 3.5;
+  float height_outlier_minimum_band_m = 0.20F;
 };
 
 struct StaticEvidenceCellGeometry {
@@ -108,6 +116,8 @@ struct StaticEvidenceDiagnostics {
   std::uint64_t invalidated_by_tombstone = 0U;
   std::uint64_t generation_mismatch = 0U;
   std::uint64_t height_invalid = 0U;
+  std::uint64_t height_samples_accepted = 0U;
+  std::uint64_t height_outliers_rejected = 0U;
   std::uint64_t not_in_view = 0U;
   std::uint64_t observed_free = 0U;
   std::uint64_t observed_occupied = 0U;
@@ -254,13 +264,25 @@ class StaticObstacleEvidenceIndex {
       std::uint64_t current_map_generation = 0U) noexcept;
 
  private:
+  struct HeightHistory {
+    std::deque<float> min_z;
+    std::deque<float> max_z;
+  };
+
   void publishSnapshotLocked(double stamp_sec,
                              bool increment_revision = true);
   bool isTemporallyMatureLocked(const StaticEvidenceCell& cell) const;
+  bool updateHeightEstimateLocked(
+      std::int64_t key,
+      const StaticEvidenceCellGeometry& geometry,
+      StaticEvidenceCell& cell,
+      bool reset_history);
+  void seedHeightHistoriesLocked();
 
   StaticObstacleEvidenceConfig config_;
   mutable std::mutex mutex_;
   std::map<std::int64_t, StaticEvidenceCell> working_cells_;
+  std::map<std::int64_t, HeightHistory> height_histories_;
   // Tombstones survive erasing a contaminated working cell. They prevent an
   // older asynchronous clean result from recreating/confirming that cell.
   std::map<std::int64_t, std::uint64_t> invalidated_versions_;

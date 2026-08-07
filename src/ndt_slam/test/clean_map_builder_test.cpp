@@ -21,6 +21,42 @@ TEST(CleanMapBuilder, KeepsObservableVerticalStructure) {
     EXPECT_EQ(result.passed_cells, 1);
 }
 
+TEST(CleanMapBuilder, RemovesSingleVerticalSpikeFromCleanSnapshot) {
+    CleanMapBuildInput input;
+    input.object_points = {
+        {0.01F, 0.01F, 0.0F}, {0.02F, 0.02F, 0.2F},
+        {0.03F, 0.03F, 0.4F}, {0.04F, 0.04F, 0.6F},
+        {0.05F, 0.05F, 0.8F}, {0.06F, 0.06F, 1.0F},
+        {0.07F, 0.07F, 6.0F}};
+    input.observation_counts[{0, 0}] = 2;
+
+    const auto result = buildCleanMapFromSnapshot(input);
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.clean_points.size(), 6U);
+    EXPECT_EQ(result.vertical_outlier_points, 1);
+    for (const auto& point : result.clean_points) {
+        EXPECT_LE(point.z(), 1.0F);
+    }
+}
+
+TEST(CleanMapBuilder, PreservesContinuousTallWallStructure) {
+    CleanMapBuildInput input;
+    for (int index = 0; index < 7; ++index) {
+        input.object_points.emplace_back(
+            0.01F + 0.01F * index,
+            0.01F + 0.01F * index,
+            static_cast<float>(index));
+    }
+    input.observation_counts[{0, 0}] = 2;
+
+    const auto result = buildCleanMapFromSnapshot(input);
+
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_EQ(result.clean_points.size(), 7U);
+    EXPECT_EQ(result.vertical_outlier_points, 0);
+}
+
 TEST(CleanMapBuilder, RetainsExactPreviousCellUntilObservationThreshold) {
     auto input = observableCell();
     input.observation_counts[{0, 0}] = 1;

@@ -92,6 +92,11 @@ struct CraneMotionEKFConfig {
     double recovery_covariance_inflation = 4.0;
     double recovery_max_covariance_trace = 25.0;
     int recovery_rearm_nominal_frames = 5;
+    // A long but physically accepted soft-correction run must eventually
+    // re-arm the single emergency covariance inflation.  This counter is
+    // deliberately longer than the nominal-frame path so that repeated soft
+    // frames cannot create an inflation loop.
+    int recovery_rearm_accepted_frames = 15;
 };
 
 struct CraneMotionEKFStatus {
@@ -259,6 +264,7 @@ private:
     int yaw_anomaly_count_ = 0;
     bool recovery_inflated_this_episode_ = false;
     int nominal_accept_count_ = 0;
+    int accepted_rearm_count_ = 0;
 };
 
 }  // namespace ndt_slam

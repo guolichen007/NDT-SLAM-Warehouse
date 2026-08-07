@@ -34,6 +34,56 @@ int minimumObservationsForDistance(float distance_m) {
     return distance_m < 10.0F ? 2 : 1;
 }
 
+float median(std::vector<float> values) {
+    const std::size_t middle = values.size() / 2U;
+    std::nth_element(values.begin(), values.begin() + middle, values.end());
+    const float upper = values[middle];
+    if ((values.size() & 1U) != 0U) return upper;
+    std::nth_element(
+        values.begin(), values.begin() + middle - 1U, values.end());
+    return 0.5F * (values[middle - 1U] + upper);
+}
+
+std::vector<std::size_t> rejectIsolatedVerticalOutliers(
+    const std::vector<Eigen::Vector3f>& points,
+    const std::vector<std::size_t>& indices,
+    const CleanMapBuildInput& input,
+    int* rejected_points) {
+    if (!input.vertical_outlier_filter_enabled ||
+        indices.size() < input.vertical_outlier_minimum_points) {
+        return indices;
+    }
+    std::vector<float> z_values;
+    z_values.reserve(indices.size());
+    for (const std::size_t index : indices) {
+        z_values.push_back(points[index].z());
+    }
+    const float center = median(z_values);
+    std::vector<float> deviations;
+    deviations.reserve(z_values.size());
+    for (const float z : z_values) {
+        deviations.push_back(std::abs(z - center));
+    }
+    const float mad = median(std::move(deviations));
+    const double band = std::max(
+        static_cast<double>(input.vertical_outlier_minimum_band_m),
+        input.vertical_outlier_mad_multiplier * static_cast<double>(mad));
+    std::vector<std::size_t> accepted;
+    accepted.reserve(indices.size());
+    int local_rejected = 0;
+    for (const std::size_t index : indices) {
+        if (std::abs(static_cast<double>(points[index].z() - center)) <= band) {
+            accepted.push_back(index);
+        } else {
+            ++local_rejected;
+        }
+    }
+    // A robust filter may remove isolated returns, never an entire structure.
+    if (accepted.size() < 3U) return indices;
+    if (rejected_points) *rejected_points += local_rejected;
+    return accepted;
+}
+
 }  // namespace
 
 CleanMapBuildAction evaluateCleanMapBuildAction(
@@ -75,7 +125,6 @@ CleanMapBuildResult buildCleanMapFromSnapshot(
     std::map<CleanMapCell, std::vector<std::size_t>> object_indices;
     std::map<CleanMapCell, std::vector<std::size_t>> previous_clean_indices;
     std::map<CleanMapCell, std::vector<std::size_t>> payload_indices;
-    std::map<CleanMapCell, float> maximum_height;
     std::map<CleanMapCell, double> distance_sum;
     std::map<CleanMapCell, int> finite_count;
     for (std::size_t index = 0U; index < input.object_points.size(); ++index) {
@@ -91,8 +140,6 @@ CleanMapBuildResult buildCleanMapFromSnapshot(
     for (const auto& item : object_indices) {
         for (const std::size_t index : item.second) {
             const Eigen::Vector3f& point = input.object_points[index];
-            maximum_height[item.first] = std::max(
-                maximum_height[item.first], point.z() - global_min_z);
             distance_sum[item.first] += std::hypot(point.x(), point.y());
             ++finite_count[item.first];
         }
@@ -114,9 +161,13 @@ CleanMapBuildResult buildCleanMapFromSnapshot(
     for (const auto& item : object_indices) {
         ++result.total_cells;
         const CleanMapCell& cell = item.first;
+        const std::vector<std::size_t> filtered_object_indices =
+            rejectIsolatedVerticalOutliers(
+                input.object_points, item.second, input,
+                &result.vertical_outlier_points);
         const auto protect = input.protect_cells.find(cell);
         if (protect != input.protect_cells.end()) {
-            for (const std::size_t index : item.second) {
+            for (const std::size_t index : filtered_object_indices) {
                 result.clean_points.push_back(input.object_points[index]);
             }
             const auto payload = payload_indices.find(cell);
@@ -129,7 +180,8 @@ CleanMapBuildResult buildCleanMapFromSnapshot(
                     static_cast<int>(payload->second.size());
             }
             ++result.protected_cells;
-            result.protected_points += static_cast<int>(item.second.size());
+            result.protected_points +=
+                static_cast<int>(filtered_object_indices.size());
             ++result.passed_cells;
             continue;
         }
@@ -158,8 +210,13 @@ CleanMapBuildResult buildCleanMapFromSnapshot(
             const auto previous = previous_clean_indices.find(cell);
             if (previous == previous_clean_indices.end()) continue;
 
+            const std::vector<std::size_t> filtered_previous_indices =
+                rejectIsolatedVerticalOutliers(
+                    input.previous_clean_points, previous->second, input,
+                    &result.vertical_outlier_points);
+
             const int retained_before = result.retained_points;
-            for (const std::size_t index : previous->second) {
+            for (const std::size_t index : filtered_previous_indices) {
                 const Eigen::Vector3f& point =
                     input.previous_clean_points[index];
                 if (input.use_3d_deny &&
@@ -177,12 +234,18 @@ CleanMapBuildResult buildCleanMapFromSnapshot(
             }
             continue;
         }
-        if (maximum_height[cell] < minimumHeightForDistance(distance) ||
-            count < 3) {
+        float robust_maximum_height = 0.0F;
+        for (const std::size_t index : filtered_object_indices) {
+            robust_maximum_height = std::max(
+                robust_maximum_height,
+                input.object_points[index].z() - global_min_z);
+        }
+        if (robust_maximum_height < minimumHeightForDistance(distance) ||
+            filtered_object_indices.size() < 3U) {
             continue;
         }
 
-        for (const std::size_t index : item.second) {
+        for (const std::size_t index : filtered_object_indices) {
             const Eigen::Vector3f& point = input.object_points[index];
             if (input.use_3d_deny && ranges != input.deny_ranges.end() &&
                 pointDeniedByRange(point, ranges->second)) {

@@ -40,7 +40,36 @@ bool validConfig(const StaticObstacleEvidenceConfig& config) {
       std::isfinite(config.immature_gap_retention_ratio) &&
       config.immature_gap_retention_ratio >= 0.0 &&
       config.immature_gap_retention_ratio < 1.0 &&
-      config.maximum_observation_sequence_gap > 0U;
+      config.maximum_observation_sequence_gap > 0U &&
+      config.height_history_window >= 3U &&
+      config.height_outlier_minimum_samples >= 3U &&
+      config.height_outlier_minimum_samples <=
+          config.height_history_window &&
+      std::isfinite(config.height_outlier_mad_multiplier) &&
+      config.height_outlier_mad_multiplier >= 1.0 &&
+      std::isfinite(config.height_outlier_minimum_band_m) &&
+      config.height_outlier_minimum_band_m > 0.0F;
+}
+
+float medianOf(std::vector<float> values) {
+  if (values.empty()) return 0.0F;
+  const std::size_t middle = values.size() / 2U;
+  std::nth_element(values.begin(), values.begin() + middle, values.end());
+  const float upper = values[middle];
+  if ((values.size() & 1U) != 0U) return upper;
+  std::nth_element(
+      values.begin(), values.begin() + middle - 1U, values.end());
+  return 0.5F * (values[middle - 1U] + upper);
+}
+
+float medianAbsoluteDeviation(
+    const std::deque<float>& samples, float median) {
+  std::vector<float> deviations;
+  deviations.reserve(samples.size());
+  for (const float sample : samples) {
+    deviations.push_back(std::abs(sample - median));
+  }
+  return medianOf(std::move(deviations));
 }
 
 float intervalOverlapRatio(float query_min, float query_max,
@@ -141,6 +170,7 @@ void StaticObstacleEvidenceIndex::setConfig(
   std::lock_guard<std::mutex> lock(mutex_);
   config_ = validConfig(config) ? config : StaticObstacleEvidenceConfig{};
   working_cells_.clear();
+  height_histories_.clear();
   invalidated_versions_.clear();
   observed_free_tombstones_.clear();
   working_generation_ = 0U;
@@ -159,6 +189,7 @@ void StaticObstacleEvidenceIndex::setConfig(
 void StaticObstacleEvidenceIndex::reset(std::uint64_t map_generation) {
   std::lock_guard<std::mutex> lock(mutex_);
   working_cells_.clear();
+  height_histories_.clear();
   invalidated_versions_.clear();
   observed_free_tombstones_.clear();
   working_generation_ = map_generation;
@@ -167,6 +198,84 @@ void StaticObstacleEvidenceIndex::reset(std::uint64_t map_generation) {
   authority_ = StaticEvidenceAuthority::RUNTIME_MATURE;
   diagnostics_totals_ = StaticEvidenceDiagnostics{};
   publishSnapshotLocked(0.0);
+}
+
+bool StaticObstacleEvidenceIndex::updateHeightEstimateLocked(
+    std::int64_t key,
+    const StaticEvidenceCellGeometry& geometry,
+    StaticEvidenceCell& cell,
+    bool reset_history) {
+  if (!std::isfinite(geometry.min_z) ||
+      !std::isfinite(geometry.max_z) ||
+      geometry.max_z < geometry.min_z) {
+    ++diagnostics_totals_.height_invalid;
+    return false;
+  }
+
+  HeightHistory& history = height_histories_[key];
+  if (reset_history) {
+    history.min_z.clear();
+    history.max_z.clear();
+  }
+
+  const auto sample_is_consistent = [this](
+      const std::deque<float>& samples, float sample) {
+    if (samples.size() < config_.height_outlier_minimum_samples) {
+      return true;
+    }
+    const std::vector<float> values(samples.begin(), samples.end());
+    const float median = medianOf(values);
+    const float mad = medianAbsoluteDeviation(samples, median);
+    const double band = std::max(
+        static_cast<double>(config_.height_outlier_minimum_band_m),
+        config_.height_outlier_mad_multiplier *
+            static_cast<double>(mad));
+    return std::abs(static_cast<double>(sample - median)) <= band;
+  };
+
+  if (!sample_is_consistent(history.min_z, geometry.min_z) ||
+      !sample_is_consistent(history.max_z, geometry.max_z)) {
+    ++diagnostics_totals_.height_outliers_rejected;
+    return false;
+  }
+
+  history.min_z.push_back(geometry.min_z);
+  history.max_z.push_back(geometry.max_z);
+  while (history.min_z.size() > config_.height_history_window) {
+    history.min_z.pop_front();
+  }
+  while (history.max_z.size() > config_.height_history_window) {
+    history.max_z.pop_front();
+  }
+  cell.min_z = medianOf(
+      std::vector<float>(history.min_z.begin(), history.min_z.end()));
+  cell.max_z = medianOf(
+      std::vector<float>(history.max_z.begin(), history.max_z.end()));
+  if (cell.max_z < cell.min_z) {
+    const float midpoint = 0.5F * (cell.min_z + cell.max_z);
+    cell.min_z = midpoint;
+    cell.max_z = midpoint;
+  }
+  ++diagnostics_totals_.height_samples_accepted;
+  return true;
+}
+
+void StaticObstacleEvidenceIndex::seedHeightHistoriesLocked() {
+  height_histories_.clear();
+  const std::size_t seed_count = std::max<std::size_t>(
+      1U, config_.height_outlier_minimum_samples);
+  for (const auto& item : working_cells_) {
+    const StaticEvidenceCell& cell = item.second;
+    if (!std::isfinite(cell.min_z) || !std::isfinite(cell.max_z) ||
+        cell.max_z < cell.min_z) {
+      continue;
+    }
+    HeightHistory& history = height_histories_[item.first];
+    for (std::size_t index = 0U; index < seed_count; ++index) {
+      history.min_z.push_back(cell.min_z);
+      history.max_z.push_back(cell.max_z);
+    }
+  }
 }
 
 bool StaticObstacleEvidenceIndex::observeFilteredCells(
@@ -224,6 +333,7 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
     ++diagnostics_totals_.observed_free;
     observed_free_tombstones_.insert(key);
     working_cells_.erase(working);
+    height_histories_.erase(key);
     snapshot_changed = true;
     ++diagnostics_totals_.invalidated_by_tombstone;
   }
@@ -250,9 +360,15 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
       cell.key = item.first;
       cell.first_seen_sec = stamp_sec;
       cell.first_observation_sequence = latest_observation_sequence_;
-      cell.min_z = geometry.min_z;
-      cell.max_z = geometry.max_z;
+      updateHeightEstimateLocked(
+          item.first, geometry, cell, true);
     } else {
+      if (!updateHeightEstimateLocked(
+              item.first, geometry, cell, false)) {
+        // A height outlier is not an independent stable observation. Keep the
+        // mature estimate and do not advance temporal authorization.
+        continue;
+      }
       const double delta = stamp_sec - cell.last_seen_sec;
       const std::uint64_t sequence_gap =
           latest_observation_sequence_ > cell.last_observation_sequence
@@ -278,8 +394,6 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
             config_.immature_gap_retention_ratio;
         cell.first_seen_sec = stamp_sec;
         cell.first_observation_sequence = latest_observation_sequence_;
-        cell.min_z = geometry.min_z;
-        cell.max_z = geometry.max_z;
         if (retained_count == 0U) {
           ++diagnostics_totals_.reset_by_time_gap;
         } else {
@@ -290,8 +404,6 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
         cell.consecutive_stable_duration_sec = 0.0;
         ++diagnostics_totals_.reset_by_sequence_gap;
       }
-      cell.min_z = std::min(cell.min_z, geometry.min_z);
-      cell.max_z = std::max(cell.max_z, geometry.max_z);
     }
     if (cell.consecutive_observation_count <
         std::numeric_limits<std::uint32_t>::max()) {
@@ -333,6 +445,7 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::invalidateCells(
     std::uint64_t& tombstone = invalidated_versions_[key];
     tombstone = std::max(tombstone, clean_build_version);
     result.invalidated_cells += working_cells_.erase(key);
+    height_histories_.erase(key);
     ++diagnostics_totals_.invalidated_by_tombstone;
   }
   if (!invalidated_cells.empty()) publishSnapshotLocked(stamp_sec);
@@ -362,9 +475,16 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
     std::uint64_t& tombstone = invalidated_versions_[key];
     tombstone = std::max(tombstone, clean_build_version);
     result.invalidated_cells += working_cells_.erase(key);
+    height_histories_.erase(key);
     ++diagnostics_totals_.invalidated_by_tombstone;
   }
   for (const auto& item : clean_cells) {
+    if (!std::isfinite(item.second.min_z) ||
+        !std::isfinite(item.second.max_z) ||
+        item.second.max_z < item.second.min_z) {
+      ++diagnostics_totals_.height_invalid;
+      continue;
+    }
     const auto tombstone = invalidated_versions_.find(item.first);
     if (observed_free_tombstones_.find(item.first) !=
             observed_free_tombstones_.end() ||
@@ -383,12 +503,15 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
       cell.last_seen_sec = stamp_sec;
       cell.first_observation_sequence = latest_observation_sequence_;
       cell.last_observation_sequence = latest_observation_sequence_;
-      cell.min_z = item.second.min_z;
-      cell.max_z = item.second.max_z;
+      updateHeightEstimateLocked(
+          item.first, item.second, cell, true);
       cell.map_generation = map_generation;
     } else {
-      cell.min_z = std::min(cell.min_z, item.second.min_z);
-      cell.max_z = std::max(cell.max_z, item.second.max_z);
+      // Confirmation may originate from the same asynchronous build as the
+      // observation. Robust history absorbs duplicates and rejects isolated
+      // vertical spikes without revoking a previously valid cell.
+      updateHeightEstimateLocked(
+          item.first, item.second, cell, false);
     }
     cell.clean_map_confirmed = true;
     cell.last_clean_confirmed_version = std::max(
@@ -914,6 +1037,7 @@ void StaticObstacleEvidenceIndex::installPreparedSnapshot(
   }
   std::lock_guard<std::mutex> lock(mutex_);
   working_cells_.swap(prepared.working_cells);
+  seedHeightHistoriesLocked();
   invalidated_versions_.clear();
   observed_free_tombstones_.clear();
   working_generation_ = prepared.map_generation;

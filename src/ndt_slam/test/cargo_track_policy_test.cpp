@@ -164,6 +164,37 @@ TEST(CargoTrackPolicy, CandidateCenterMustRemainNearHook) {
   EXPECT_EQ(score.reason, "candidate_center_too_far_from_hook_anchor");
 }
 
+TEST(CargoTrackPolicy, CandidateTouchingHookAtNarrowEdgeIsNotCargo) {
+  CargoCandidateIdentityContext context;
+  context.hook_center = Eigen::Vector2f::Zero();
+  context.hook_region_radius_m = 2.0F;
+  context.require_hook_containment = true;
+  context.hook_containment_margin_m = 0.10F;
+  context.maximum_hook_center_distance_m = 0.35F;
+  context.maximum_hook_normalized_offset = 0.65F;
+  const CargoCandidateIdentityScore score = scoreCargoCandidateIdentity(
+      candidate(8, 0.0F, 0.30F, 1.0F, 1.8F, 0.8F, 1.0F, 0.0F),
+      context);
+  EXPECT_FALSE(score.valid);
+  EXPECT_GT(score.hook_normalized_offset, 0.65F);
+  EXPECT_EQ(score.reason,
+            "hook_anchor_outside_candidate_central_region");
+}
+
+TEST(CargoTrackPolicy, CandidateCenteredOnHookPassesCentralRegionGate) {
+  CargoCandidateIdentityContext context;
+  context.hook_center = Eigen::Vector2f::Zero();
+  context.hook_region_radius_m = 2.0F;
+  context.require_hook_containment = true;
+  context.maximum_hook_center_distance_m = 0.35F;
+  context.maximum_hook_normalized_offset = 0.65F;
+  const CargoCandidateIdentityScore score = scoreCargoCandidateIdentity(
+      candidate(9, 0.20F, 0.08F, 1.0F, 1.8F, 0.8F, 1.0F, 0.0F),
+      context);
+  EXPECT_TRUE(score.valid) << score.reason;
+  EXPECT_LT(score.hook_normalized_offset, 0.65F);
+}
+
 TEST(CargoTrackPolicy, AssociationUsesPredictedCenterAndDt) {
   CargoAssociationInput input;
   input.candidate = candidate(

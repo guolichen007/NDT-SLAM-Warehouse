@@ -1755,6 +1755,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     r["maximum_covariance_trace"].as<double>(25.0);
                 crane_motion_ekf_cfg_.recovery_rearm_nominal_frames =
                     r["rearm_nominal_frames"].as<int>(5);
+                crane_motion_ekf_cfg_.recovery_rearm_accepted_frames =
+                    r["rearm_accepted_frames"].as<int>(15);
             }
 
             crane_motion_ekf_.setConfig(crane_motion_ekf_cfg_);
@@ -2378,6 +2380,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 odom_anchor_config_.tight_box.enabled = tb["enabled"].as<bool>(true);
                 odom_anchor_config_.tight_box.anchor_symmetry_mode = tb["anchor_symmetry_mode"].as<std::string>("strict");
                 odom_anchor_config_.tight_box.max_center_offset_m = tb["max_center_offset_m"].as<float>(0.35f);
+                odom_anchor_config_.tight_box.maximum_hook_normalized_offset =
+                    std::clamp(
+                        tb["maximum_hook_normalized_offset"].as<float>(0.65F),
+                        0.10F, 1.0F);
                 odom_anchor_config_.tight_box.hag_filter_enabled = tb["hag_filter_enabled"].as<bool>(true);
                 odom_anchor_config_.tight_box.hag_min_m = tb["hag_min_m"].as<float>(0.15f);
                 odom_anchor_config_.tight_box.hag_max_m = tb["hag_max_m"].as<float>(2.50f);
@@ -3489,17 +3495,42 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 static_cast<std::uint64_t>(std::max(
                     1, cargo_safety["static_map_max_sequence_gap"]
                            .as<int>(1)));
+            static_map_config.height_history_window =
+                static_cast<std::size_t>(std::clamp(
+                    cargo_safety["static_map_height_history_window"]
+                        .as<int>(9),
+                    3, 31));
+            static_map_config.height_outlier_minimum_samples =
+                static_cast<std::size_t>(std::clamp(
+                    cargo_safety[
+                        "static_map_height_outlier_minimum_samples"]
+                        .as<int>(3),
+                    3,
+                    static_cast<int>(
+                        static_map_config.height_history_window)));
+            static_map_config.height_outlier_mad_multiplier = std::clamp(
+                cargo_safety["static_map_height_outlier_mad_multiplier"]
+                    .as<double>(3.5),
+                1.0, 10.0);
+            static_map_config.height_outlier_minimum_band_m = std::clamp(
+                cargo_safety["static_map_height_outlier_minimum_band_m"]
+                    .as<float>(0.20F),
+                0.05F, 1.0F);
             static_obstacle_evidence_index_.setConfig(static_map_config);
             ROS_INFO(
                 "[StaticMapEvidence] maturity_config observations=%u "
                 "stable_sec=%.2f immature_gap_sec=%.2f "
-                "gap_retention=%.2f max_sequence_gap=%llu",
+                "gap_retention=%.2f max_sequence_gap=%llu "
+                "height_window=%zu height_mad=%.2f height_band=%.2f",
                 static_map_config.minimum_observations,
                 static_map_config.minimum_stable_duration_sec,
                 static_map_config.immature_max_observation_gap_sec,
                 static_map_config.immature_gap_retention_ratio,
                 static_cast<unsigned long long>(
-                    static_map_config.maximum_observation_sequence_gap));
+                    static_map_config.maximum_observation_sequence_gap),
+                static_map_config.height_history_window,
+                static_map_config.height_outlier_mad_multiplier,
+                static_map_config.height_outlier_minimum_band_m);
             static_height_field_config_.cell_size_m =
                 static_map_config.cell_size_m;
             static_height_field_config_.z_bin_m = std::max(
@@ -4762,6 +4793,10 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
                     << evidence_status.generation_mismatch
                     << ",\"height_invalid\":"
                     << evidence_status.height_invalid
+                    << ",\"height_samples_accepted\":"
+                    << evidence_status.height_samples_accepted
+                    << ",\"height_outliers_rejected\":"
+                    << evidence_status.height_outliers_rejected
                     << ",\"not_in_view\":"
                     << evidence_status.not_in_view
                     << ",\"observed_free\":"
@@ -4807,6 +4842,7 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
             ? stamp : result.bundle.source_stamp);
     ROS_DEBUG("[CleanMapWorker] source=%llu points=%zu cells=%d/%d "
               "denied=%d protected=%d retained_cells=%d retained_points=%d "
+              "vertical_outliers=%d "
               "installed_current=%d duration_ms=%.1f",
               static_cast<unsigned long long>(
                   result.source_objects_version),
@@ -4814,6 +4850,7 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
               result.build.total_cells, result.build.denied_cells,
               result.build.protected_cells, result.build.retained_cells,
               result.build.retained_points,
+              result.build.vertical_outlier_points,
               installed_as_current ? 1 : 0, result.duration_ms);
 }
 
@@ -5926,6 +5963,7 @@ void NdtSlamNode::processCloudThread() {
         bool frame_ndt_accepted = false;
         bool frame_prediction_only = true;
         bool frame_registration_quality_valid = false;
+        bool frame_map_commit_quality_valid = false;
         bool frame_severe_degeneracy =
             frame_ndt_observability.severely_degenerate;
         NdtFitnessCircuitDecision frame_fitness_decision;
@@ -6327,11 +6365,13 @@ void NdtSlamNode::processCloudThread() {
                         frame_registration_quality_valid =
                             ndt_accepted && std::isfinite(fitness_score) &&
                             fitness_score <= map_commit_max_fitness_ &&
-                            (!crane_motion_ekf_enabled_ ||
-                             crane_motion_ekf_.status().map_commit_safe) &&
                             registration_build_result.structure_quality_valid &&
                             (!ndt_observability_config_.enabled ||
                              frame_ndt_observability.valid);
+                        frame_map_commit_quality_valid =
+                            frame_registration_quality_valid &&
+                            (!crane_motion_ekf_enabled_ ||
+                             crane_motion_ekf_.status().map_commit_safe);
                         frame_raw_increment_m =
                             diag_raw_ndt_step_from_previous;
 
@@ -6495,6 +6535,8 @@ void NdtSlamNode::processCloudThread() {
         motion_input.prediction_only = frame_prediction_only;
         motion_input.registration_quality_valid =
             frame_registration_quality_valid;
+        motion_input.persistent_map_quality_valid =
+            frame_map_commit_quality_valid;
         motion_input.severe_degeneracy = frame_severe_degeneracy;
         motion_input.raw_position = frame_raw_ndt_pose.translation().head<2>();
         motion_input.filtered_position = new_pose.translation().head<2>();
@@ -6522,7 +6564,8 @@ void NdtSlamNode::processCloudThread() {
             stationary_motion_decision_.allow_local_map_update =
                 frame_ndt_accepted && frame_registration_quality_valid;
             stationary_motion_decision_.allow_persistent_map_commit =
-                stationary_motion_decision_.allow_local_map_update;
+                stationary_motion_decision_.allow_local_map_update &&
+                frame_map_commit_quality_valid;
             stationary_motion_decision_.constrained_position =
                 new_pose.translation().head<2>();
             stationary_motion_decision_.reason = motion_gate_enabled_
@@ -6969,7 +7012,8 @@ void NdtSlamNode::processCloudThread() {
             const bool allow_map_commit =
                 commit_accept_ok && commit_fitness_ok &&
                 motion_gate_allows_commit && relocalization_commit_ok &&
-                hook_commit_ok && accepted_snapshot_is_current;
+                hook_commit_ok && accepted_snapshot_is_current &&
+                frame_map_commit_quality_valid;
             diag_map_commit_allowed = allow_map_commit;
             diag_motion_gate_blocked =
                 commit_accept_ok && commit_fitness_ok &&
@@ -6986,6 +7030,8 @@ void NdtSlamNode::processCloudThread() {
                 diag_map_commit_reason = "hook_load_guard";
             } else if (!accepted_snapshot_is_current) {
                 diag_map_commit_reason = "accepted_pose_identity_guard";
+            } else if (!frame_map_commit_quality_valid) {
+                diag_map_commit_reason = "ekf_soft_frame_persistent_guard";
             } else {
                 diag_map_commit_reason = "motion_gate_blocked";
             }
@@ -9183,6 +9229,8 @@ void NdtSlamNode::consumeLoopClosureResult(const ros::Time& stamp) {
     // the strict localization-health window could inspect it. Treat every
     // accepted loop as an independent recovery hint and run the same bounded
     // global search + VERIFYING path used by all other discontinuities.
+    releaseRuntimeYawPrior("loop_closure_requires_verification");
+    relocalization_reseeded_this_episode_ = false;
     relocalization_pose_reliable_ = false;
     invalidateAcceptedLocalizationContinuity();
     relocalization_force_global_ = true;
@@ -9234,7 +9282,8 @@ void NdtSlamNode::updatePoseFromLoopClosure(
             ++local_map_version_;
         }
     }
-    filtered_yaw_initialized_ = false;
+    releaseRuntimeYawPrior("loop_closure_pose_jump");
+    relocalization_reseeded_this_episode_ = false;
     path_msg_.poses.clear();
     runtime_path_msg_.poses.clear();
     has_last_path_pose_ = false;
@@ -9412,8 +9461,8 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
 
     frame_count_ = 0;
     keyframe_count_ = 0;
+    releaseRuntimeYawPrior("reset_service");
     crane_motion_ekf_.reset();
-    filtered_yaw_initialized_ = false;
     path_msg_.poses.clear();
     runtime_path_msg_.poses.clear();
     has_last_path_pose_ = false;
@@ -9541,8 +9590,7 @@ bool NdtSlamNode::relocalizeService(std_srvs::Empty::Request& request, std_srvs:
     relocalization_reseeded_this_episode_ = false;
     relocalization_pose_reliable_ = false;
     invalidateAcceptedLocalizationContinuity();
-    crane_motion_ekf_.unlatchYaw();
-    accepted_yaw_valid_ = false;
+    releaseRuntimeYawPrior("manual_global_search");
     relocalization_state_ = RelocalizationState::DEGRADED;
     if (persistent_localization_map_present_) {
         startup_localization_state_ =
@@ -10904,8 +10952,7 @@ void NdtSlamNode::updateRelocalization(
         relocalization_pose_reliable_ = false;
         relocalization_reseeded_this_episode_ = false;
         invalidateAcceptedLocalizationContinuity();
-        crane_motion_ekf_.unlatchYaw();
-        accepted_yaw_valid_ = false;
+        releaseRuntimeYawPrior("runtime_relocalization_quarantine");
         startup_quarantine_started_sec_ = stamp.toSec();
         if (persistent_localization_map_present_) {
             startup_localization_state_ =
@@ -11113,6 +11160,9 @@ void NdtSlamNode::applyRelocalizedPose(
             "DEGRADED", "relocalization_reseed_already_applied");
         return;
     }
+    // A recovered heading starts a new six-frame rail-yaw acquisition. Never
+    // let a prior localization episode overwrite the confirmed candidate.
+    releaseRuntimeYawPrior("confirmed_relocalization_candidate");
     Sophus::SE3d recovered = crane_constraint_enabled_
         ? applyCraneMotionConstraint(pose, "relocalization") : pose;
     {
@@ -11258,6 +11308,17 @@ void NdtSlamNode::invalidateAcceptedLocalizationContinuity() {
     }
     accepted_localization_snapshot_.valid = false;
     anomaly_review_episode_tracker_.reset();
+}
+
+void NdtSlamNode::releaseRuntimeYawPrior(const std::string& reason) {
+    const bool had_prior = accepted_yaw_valid_ ||
+        crane_motion_ekf_.status().yaw_latched;
+    crane_motion_ekf_.unlatchYaw();
+    accepted_yaw_valid_ = false;
+    filtered_yaw_initialized_ = false;
+    if (had_prior) {
+        ROS_INFO("[YawPrior] released reason=%s", reason.c_str());
+    }
 }
 
 void NdtSlamNode::publishRelocalizationStatus(
@@ -11524,6 +11585,8 @@ void NdtSlamNode::updateLocalizationHealth(
     }
 
     if (relocalization_pose_reliable_) {
+        releaseRuntimeYawPrior("strict_health_verification_failed");
+        relocalization_reseeded_this_episode_ = false;
         relocalization_pose_reliable_ = false;
         invalidateAcceptedLocalizationContinuity();
         publishRelocalizationSafetyInvalid(
@@ -11858,6 +11921,8 @@ void NdtSlamNode::consumeGlobalConsistencyResult(
                 cfg.inconsistent_confirmations &&
             !state.global_suspect) {
             state.global_suspect = true;
+            releaseRuntimeYawPrior("global_consistency_disagreement");
+            relocalization_reseeded_this_episode_ = false;
             relocalization_pose_reliable_ = false;
             invalidateAcceptedLocalizationContinuity();
             relocalization_force_global_ = true;
@@ -12158,11 +12223,11 @@ void NdtSlamNode::handleLidarTimeRollback(
     last_anchor_marker_stamp_ = ros::Time();
     last_anchor_summary_stamp_ = ros::Time();
 
+    releaseRuntimeYawPrior("lidar_source_time_rollback");
     crane_motion_ekf_.reset();
     resetStationaryState("lidar_source_time_rollback");
     has_last_raw_ndt_pose_ = false;
     has_commit_gate_reference_ = false;
-    filtered_yaw_initialized_ = false;
     last_processed_stamp_ = -1.0;
     last_stamp_ = current_stamp;
     last_tf_stamp_ = ros::Time();
@@ -12177,10 +12242,30 @@ void NdtSlamNode::handleLidarTimeRollback(
     relocalization_last_submit_frame_ = 0;
     relocalization_last_result_frame_ = 0;
     relocalization_cooldown_until_frame_ = 0;
-    relocalization_force_global_.store(false, std::memory_order_release);
-    relocalization_state_ = RelocalizationState::IDLE;
-    relocalization_pose_reliable_ = true;
+    relocalization_reseeded_this_episode_ = false;
     relocalization_invalid_safety_published_ = false;
+    if (persistent_localization_map_present_) {
+        relocalization_force_global_.store(true, std::memory_order_release);
+        relocalization_bad_frames_ = relocalization_global_trigger_frames_;
+        relocalization_state_ = RelocalizationState::DEGRADED;
+        relocalization_pose_reliable_ = false;
+        startup_localization_state_ =
+            StartupLocalizationState::STARTUP_QUARANTINE;
+        startup_quarantine_started_sec_ = current_stamp.toSec();
+        localization_health_policy_.reset("lidar_source_time_rollback");
+        localization_health_decision_ =
+            localization_health_policy_.decision();
+        localization_health_reason_ = "lidar_source_time_rollback";
+        publishRelocalizationSafetyInvalid(
+            current_stamp, "lidar_source_time_rollback");
+        relocalization_invalid_safety_published_ = true;
+    } else {
+        relocalization_force_global_.store(false, std::memory_order_release);
+        relocalization_state_ = RelocalizationState::IDLE;
+        relocalization_pose_reliable_ = true;
+        startup_localization_state_ =
+            StartupLocalizationState::FRESH_MAPPING;
+    }
 
     ROS_WARN("[TIME_EPOCH_RESET] source=lidar previous=%.6f current=%.6f "
              "ekf=reset motion=reset cargo=reset diagnostics=reset",
@@ -13967,6 +14052,10 @@ void NdtSlamNode::writeRuntimeStatus() {
       << static_diagnostics.pending_observation_count << ",\n";
     f << "  \"static_evidence_pending_stable_duration\": "
       << static_diagnostics.pending_stable_duration << ",\n";
+    f << "  \"static_evidence_height_samples_accepted\": "
+      << static_diagnostics.height_samples_accepted << ",\n";
+    f << "  \"static_evidence_height_outliers_rejected\": "
+      << static_diagnostics.height_outliers_rejected << ",\n";
     f << "  \"static_height_field_cells\": "
       << (runtime_height_field ? runtime_height_field->cellCount() : 0U)
       << ",\n";
@@ -14762,6 +14851,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     identity_context.hook_containment_margin_m = 0.10F;
     identity_context.maximum_hook_center_distance_m =
         odom_anchor_config_.tight_box.max_center_offset_m;
+    identity_context.maximum_hook_normalized_offset =
+        odom_anchor_config_.tight_box.maximum_hook_normalized_offset;
     identity_context.association_radius_m =
         hook_lock_config_.locked_update_max_center_dist;
     if (cargoTrackRetained() && hook_lock_.live_pose.valid &&
@@ -15060,7 +15151,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             2.0,
             "[CargoCandidate] id=%d points=%zu center=(%.2f,%.2f,%.2f) "
             "size=(%.2f,%.2f,%.2f) yaw=%.1f hook=%.2f predicted=%.2f "
-            "overlap=%.2f shape=%.2f motion=%.2f suspension=%.2f "
+            "hook_normalized=%.2f overlap=%.2f shape=%.2f "
+            "motion=%.2f suspension=%.2f "
             "identity=%.2f overall=%.2f valid=%d reason=%s",
             descriptor.component_id, descriptor.point_count,
             descriptor.center.x(), descriptor.center.y(),
@@ -15068,7 +15160,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             descriptor.size.z(), descriptor.yaw_rad * 180.0F /
                 3.14159265358979323846F,
             identity.hook_distance_score,
-            identity.predicted_center_score, identity.overlap_score,
+            identity.predicted_center_score,
+            identity.hook_normalized_offset, identity.overlap_score,
             identity.shape_confidence, identity.motion_confidence,
             identity.suspension_confidence, identity.identity_confidence,
             identity.overall_lock_confidence, identity.valid ? 1 : 0,
