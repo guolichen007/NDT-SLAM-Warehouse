@@ -2219,6 +2219,17 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 hcl["velocity_model_uncertainty_mps"].as<float>(0.05F));
             hook_lock_config_.association_max_xy_gate_m = std::max(
                 0.10F, hcl["association_max_xy_gate_m"].as<float>(1.05F));
+            hook_lock_config_.cargo_to_hook_offset_max_m = std::clamp(
+                hcl["cargo_to_hook_offset_max_m"].as<float>(1.05F),
+                0.35F, hook_lock_config_.association_max_xy_gate_m);
+            hook_lock_config_.cargo_to_hook_offset_max_update_per_frame_m =
+                std::clamp(
+                    hcl["cargo_to_hook_offset_max_update_per_frame_m"]
+                        .as<float>(0.04F),
+                    0.005F, 0.10F);
+            hook_lock_config_.cargo_to_hook_offset_alpha = std::clamp(
+                hcl["cargo_to_hook_offset_alpha"].as<float>(0.15F),
+                0.01F, 0.50F);
             hook_lock_config_.reacquisition_max_xy_gate_m = std::clamp(
                 hcl["reacquisition_max_xy_gate_m"].as<float>(0.55F),
                 0.10F, hook_lock_config_.association_max_xy_gate_m);
@@ -14851,8 +14862,21 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     identity_context.hook_containment_margin_m = 0.10F;
     identity_context.maximum_hook_center_distance_m =
         odom_anchor_config_.tight_box.max_center_offset_m;
+    identity_context.size_aware_hook_gate = true;
+    identity_context.learned_cargo_to_hook_offset_valid =
+        hook_lock_.cargo_to_hook_offset_valid;
+    identity_context.learned_cargo_to_hook_offset =
+        hook_lock_.cargo_to_hook_offset;
+    identity_context.hook_xy_uncertainty_m = std::max(
+        hook_lock_.horizontal_tracking_residual_m,
+        hook_lock_.live_pose.valid
+            ? hook_lock_.live_pose.position_uncertainty_m : 0.0F);
+    identity_context.maximum_dynamic_hook_center_distance_m =
+        hook_lock_config_.cargo_to_hook_offset_max_m;
     identity_context.maximum_hook_normalized_offset =
-        odom_anchor_config_.tight_box.maximum_hook_normalized_offset;
+        cargoTrackRetained()
+            ? std::numeric_limits<float>::infinity()
+            : odom_anchor_config_.tight_box.maximum_hook_normalized_offset;
     identity_context.association_radius_m =
         hook_lock_config_.locked_update_max_center_dist;
     if (cargoTrackRetained() && hook_lock_.live_pose.valid &&

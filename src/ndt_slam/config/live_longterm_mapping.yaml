@@ -1267,6 +1267,11 @@ hook_cargo_lock:
   # using accumulated position uncertainty. OBB support and frozen-shape
   # checks remain mandatory, so the wider gate is not a nearest-cluster jump.
   association_max_xy_gate_m: 1.05
+  # Hook is an identity anchor, not the safety-box centre.  A stable eccentric
+  # offset may be learned only inside this hard association envelope.
+  cargo_to_hook_offset_max_m: 1.05
+  cargo_to_hook_offset_max_update_per_frame_m: 0.04
+  cargo_to_hook_offset_alpha: 0.15
   reacquisition_max_xy_gate_m: 0.55
   association_max_z_gate_m: 0.90
   reacquisition_max_z_gate_m: 0.65

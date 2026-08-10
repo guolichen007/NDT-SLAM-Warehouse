@@ -1946,6 +1946,9 @@ private:
         float direct_bottom_soft_stale_sec = 1.50F;
         float velocity_model_uncertainty_mps = 0.05F;
         float association_max_xy_gate_m = 1.05F;
+        float cargo_to_hook_offset_max_m = 1.05F;
+        float cargo_to_hook_offset_max_update_per_frame_m = 0.04F;
+        float cargo_to_hook_offset_alpha = 0.15F;
         float reacquisition_max_xy_gate_m = 0.55F;
         float association_max_z_gate_m = 0.90F;
         float reacquisition_max_z_gate_m = 0.65F;
@@ -2067,6 +2070,9 @@ private:
         float stable_height = 0.0f;
         float bottom_uncertainty = 0.30f;
         float horizontal_tracking_residual_m = 0.0F;
+        Eigen::Vector2f cargo_to_hook_offset = Eigen::Vector2f::Zero();
+        bool cargo_to_hook_offset_valid = false;
+        std::uint32_t cargo_to_hook_offset_updates = 0U;
         float vertical_tracking_residual_m = 0.0F;
         float vertical_pose_uncertainty_m = 0.30F;
 
