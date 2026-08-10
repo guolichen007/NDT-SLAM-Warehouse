@@ -319,6 +319,12 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 1, true);
     objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 1, true);
     near_field_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/near_field_removed", 10);
+    self_mask_raw_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+        "/ndt_slam/self_mask/raw_cloud", 2);
+    self_mask_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+        "/ndt_slam/self_mask/removed_cloud", 2);
+    self_mask_registration_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+        "/ndt_slam/self_mask/registration_cloud", 2);
     payload_channel_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_channel_cloud", 10);
     payload_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_candidate_cloud", 10);
     safe_objects_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/safe_objects_cloud", 10);
@@ -431,6 +437,9 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     load_map_session_srv_ = nh_.advertiseService(
         "load_map_session", &NdtSlamNode::loadMapSessionService, this);
     rebuild_map_srv_ = nh_.advertiseService("rebuild_map", &NdtSlamNode::rebuildMapService, this);
+    start_new_mapping_segment_srv_ = nh_.advertiseService(
+        "/start_new_mapping_segment",
+        &NdtSlamNode::startNewMappingSegmentService, this);
 
     current_pose_ = Sophus::SE3d();
     global_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
@@ -474,6 +483,7 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
              ndt_resolution_, ndt_step_size_, ndt_max_iterations_, ndt_num_threads_,
              ndt_neighbor_search_method_.c_str());
 
+    initializeStaticMapCollectionRuntime();
     std::string startup_localization_reason;
     if (persistent_map_enabled_) {
         restorePersistentLocalizationMap(&startup_localization_reason);
@@ -483,6 +493,17 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
         startup_localization_state_ =
             StartupLocalizationState::FRESH_MAPPING;
         startup_localization_reason = "persistent_map_disabled";
+    }
+    if (static_map_build_fail_closed_profile_ &&
+        mapping_runtime_decision_.state ==
+            MappingAuthorityState::FAIL_CLOSED) {
+        relocalization_pose_reliable_ = false;
+        relocalization_force_global_ = false;
+        relocalization_state_ = RelocalizationState::DEGRADED;
+        startup_localization_state_ =
+            StartupLocalizationState::WAITING_STATIONARY;
+        startup_localization_reason = "persistent_mapping_fail_closed:" +
+            mapping_runtime_decision_.reason;
     }
     if (!relocalization_pose_reliable_) {
         publishRelocalizationSafetyInvalid(
@@ -555,6 +576,12 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     objects_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects", 1, true);
     objects_clean_map_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/display_map_objects_clean", 1, true);
     near_field_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/near_field_removed", 10);
+    self_mask_raw_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+        "/ndt_slam/self_mask/raw_cloud", 2);
+    self_mask_removed_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+        "/ndt_slam/self_mask/removed_cloud", 2);
+    self_mask_registration_pub_ = nh_.advertise<sensor_msgs::PointCloud2>(
+        "/ndt_slam/self_mask/registration_cloud", 2);
     payload_channel_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_channel_cloud", 10);
     payload_candidate_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/payload_candidate_cloud", 10);
     safe_objects_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/safe_objects_cloud", 10);
@@ -667,6 +694,9 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     load_map_session_srv_ = nh_.advertiseService(
         "load_map_session", &NdtSlamNode::loadMapSessionService, this);
     rebuild_map_srv_ = nh_.advertiseService("rebuild_map", &NdtSlamNode::rebuildMapService, this);
+    start_new_mapping_segment_srv_ = nh_.advertiseService(
+        "/start_new_mapping_segment",
+        &NdtSlamNode::startNewMappingSegmentService, this);
 
     current_pose_ = Sophus::SE3d();
     global_map_.reset(new pcl::PointCloud<pcl::PointXYZ>);
@@ -735,6 +765,7 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
 
     // Start callbacks only after all publishers, maps, algorithms and
     // diagnostics are fully configured.
+    initializeStaticMapCollectionRuntime();
     std::string startup_localization_reason;
     if (persistent_map_enabled_) {
         restorePersistentLocalizationMap(&startup_localization_reason);
@@ -744,6 +775,17 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         startup_localization_state_ =
             StartupLocalizationState::FRESH_MAPPING;
         startup_localization_reason = "persistent_map_disabled";
+    }
+    if (static_map_build_fail_closed_profile_ &&
+        mapping_runtime_decision_.state ==
+            MappingAuthorityState::FAIL_CLOSED) {
+        relocalization_pose_reliable_ = false;
+        relocalization_force_global_ = false;
+        relocalization_state_ = RelocalizationState::DEGRADED;
+        startup_localization_state_ =
+            StartupLocalizationState::WAITING_STATIONARY;
+        startup_localization_reason = "persistent_mapping_fail_closed:" +
+            mapping_runtime_decision_.reason;
     }
     if (!relocalization_pose_reliable_) {
         publishRelocalizationSafetyInvalid(
@@ -775,6 +817,230 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     ROS_DEBUG("NdtSlamNode initialized with NDT_OMP");
     ROS_DEBUG("Config file: %s", config_file_path.c_str());
     ROS_DEBUG("Services: reset, set_pose, relocalize, save_map, load_map, rebuild_map");
+}
+
+void NdtSlamNode::initializeStaticMapCollectionRuntime() {
+    mapping_archive_queue_.start();
+    std::string segment_reason;
+    const bool segment_initialized =
+        mapping_segment_manager_.initialize(&segment_reason);
+    const MappingSegmentSnapshot segment = mapping_segment_manager_.snapshot();
+    const bool persistent_localization_latch =
+        segment.previous_crash_detected ||
+        segment.state == MappingSegmentState::FAILED_CLOSED ||
+        segment.state == MappingSegmentState::ABORTED_CRASH;
+    if (static_map_build_fail_closed_profile_ &&
+        persistent_localization_latch) {
+        const std::string latch_reason = segment.previous_crash_detected
+            ? "previous_segment_aborted_crash"
+            : "previous_segment_failed_closed";
+        mapping_runtime_decision_ =
+            mapping_runtime_policy_.latchFailClosed(
+                latch_reason);
+        mapping_writes_allowed_.store(false, std::memory_order_release);
+        advanceMappingAuthorityEpoch();
+        ROS_ERROR("[MappingSegment] persistent Code31/WAIT_OPERATOR latch "
+                  "restored state=%s segment=%s reason=%s",
+                  mappingSegmentStateName(segment.state),
+                  segment.segment_uuid.c_str(), latch_reason.c_str());
+    } else if (static_map_build_fail_closed_profile_ &&
+               !segment_initialized) {
+        mapping_writes_allowed_.store(false, std::memory_order_release);
+        ROS_ERROR("[MappingSegment] collection not ready: %s",
+                  segment_reason.c_str());
+    }
+}
+
+bool NdtSlamNode::trustedMappingWritesAllowed() const {
+    if (!mapping_writes_allowed_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    if (!static_map_build_fail_closed_profile_) return true;
+    if (segment_transition_in_progress_.load(std::memory_order_acquire) ||
+        !self_mask_mapping_ready_.load(std::memory_order_acquire) ||
+        !pointcloud_source_time_continuous_.load(std::memory_order_acquire) ||
+        !mapping_archive_queue_.healthyForCriticalArchive()) {
+        return false;
+    }
+    return mapping_segment_manager_.snapshot().writes_allowed;
+}
+
+bool NdtSlamNode::staticMapCollectionSystemReady() const {
+    if (!static_map_build_fail_closed_profile_) return true;
+    const MappingSegmentSnapshot segment = mapping_segment_manager_.snapshot();
+    return !segment_transition_in_progress_.load(std::memory_order_acquire) &&
+        self_mask_mapping_ready_.load(std::memory_order_acquire) &&
+        pointcloud_source_time_continuous_.load(std::memory_order_acquire) &&
+        mapping_archive_queue_.healthyForCriticalArchive() &&
+        segment.active && segment.writes_allowed;
+}
+
+void NdtSlamNode::archiveSegmentState(MappingArchivePriority priority) {
+    if (!mapping_archive_config_.enabled) return;
+    MappingArchiveJob state_job;
+    state_job.priority = priority;
+    state_job.payload_type = MappingArchivePayload::TEXT;
+    state_job.relative_path = mapping_segment_manager_.stateRelativePath();
+    state_job.text = mapping_segment_manager_.stateJson();
+    state_job.estimated_bytes =
+        static_cast<std::uint64_t>(state_job.text.size());
+    if (!mapping_archive_queue_.enqueue(std::move(state_job)) &&
+        priority == MappingArchivePriority::CERTIFICATION_CRITICAL) {
+        mapping_segment_manager_.markArchiveIncomplete(
+            "critical_segment_state_archive_refused");
+        mapping_writes_allowed_.store(false, std::memory_order_release);
+        advanceMappingAuthorityEpoch();
+    }
+}
+
+void NdtSlamNode::archiveCommittedKeyframe(const MapCommitJob& job) {
+    if (!static_map_build_fail_closed_profile_ ||
+        !mapping_archive_config_.enabled) {
+        return;
+    }
+    const MappingSegmentSnapshot segment = mapping_segment_manager_.snapshot();
+    if (!segment.active || segment.segment_uuid.empty()) return;
+    const std::string prefix = "segments/" + segment.segment_uuid +
+        "/keyframes/" + std::to_string(job.sequence);
+    MappingArchiveJob raw;
+    raw.priority = MappingArchivePriority::CERTIFICATION_CRITICAL;
+    raw.payload_type = MappingArchivePayload::PCD_BINARY;
+    raw.relative_path = prefix + "_raw.pcd";
+    raw.cloud = job.archive_raw_cloud;
+    raw.estimated_bytes = job.archive_raw_cloud
+        ? BoundedMappingArchiveQueue::estimateCloudBytes(
+              *job.archive_raw_cloud)
+        : 0U;
+
+    MappingArchiveJob registration = raw;
+    registration.relative_path = prefix + "_registration.pcd";
+    registration.cloud = job.registration_cloud;
+    registration.estimated_bytes = job.registration_cloud
+        ? BoundedMappingArchiveQueue::estimateCloudBytes(
+              *job.registration_cloud)
+        : 0U;
+
+    std::ostringstream pose_json;
+    const Eigen::Quaterniond quaternion(job.pose.unit_quaternion());
+    pose_json << std::fixed << std::setprecision(9)
+              << "{\"schema_version\":1,\"segment_uuid\":\""
+              << escapeJsonString(segment.segment_uuid)
+              << "\",\"survey_pass_id\":\""
+              << escapeJsonString(segment.survey_pass_id)
+              << "\",\"sequence\":" << job.sequence
+              << ",\"source_stamp\":" << job.stamp.toSec()
+              << ",\"accepted_pose_generation\":"
+              << job.accepted_pose_generation
+              << ",\"continuity_generation\":"
+              << job.localization_continuity_generation
+              << ",\"map_generation\":"
+              << job.localization_map_generation
+              << ",\"map_uuid\":\""
+              << escapeJsonString(job.localization_map_uuid)
+              << "\",\"translation\":[" << job.pose.translation().x()
+              << ',' << job.pose.translation().y() << ','
+              << job.pose.translation().z() << "]"
+              << ",\"quaternion_xyzw\":[" << quaternion.x() << ','
+              << quaternion.y() << ',' << quaternion.z() << ','
+              << quaternion.w() << "]}\n";
+    MappingArchiveJob pose;
+    pose.priority = MappingArchivePriority::CERTIFICATION_CRITICAL;
+    pose.payload_type = MappingArchivePayload::TEXT;
+    pose.relative_path = prefix + "_accepted_pose.json";
+    pose.text = pose_json.str();
+    pose.estimated_bytes = static_cast<std::uint64_t>(pose.text.size());
+
+    const bool raw_ok = raw.cloud &&
+        mapping_archive_queue_.enqueue(std::move(raw));
+    const bool registration_ok = registration.cloud &&
+        mapping_archive_queue_.enqueue(std::move(registration));
+    const bool pose_ok = mapping_archive_queue_.enqueue(std::move(pose));
+    if (!raw_ok || !registration_ok || !pose_ok) {
+        mapping_segment_manager_.markArchiveIncomplete(
+            "certification_critical_keyframe_archive_refused");
+        mapping_writes_allowed_.store(false, std::memory_order_release);
+        advanceMappingAuthorityEpoch();
+        ROS_ERROR("[MappingArchive] critical job refused; segment is "
+                  "ARCHIVE_INCOMPLETE and requires a new operator segment");
+    }
+}
+
+bool NdtSlamNode::startNewMappingSegmentService(
+    std_srvs::Trigger::Request& request,
+    std_srvs::Trigger::Response& response) {
+    (void)request;
+    if (!static_map_build_fail_closed_profile_) {
+        response.success = false;
+        response.message = "service_requires_STATIC_MAP_BUILD_FAIL_CLOSED";
+        return true;
+    }
+    segment_transition_in_progress_.store(true, std::memory_order_release);
+    mapping_archive_queue_.resetForNewSegment();
+    MappingSegmentStartPrerequisites prerequisites;
+    prerequisites.source_time_continuous =
+        pointcloud_source_time_continuous_.load(std::memory_order_acquire) &&
+        !pointcloud_stale_;
+    prerequisites.self_mask_commissioned =
+        self_mask_mapping_ready_.load(std::memory_order_acquire);
+    prerequisites.archive_healthy =
+        mapping_archive_queue_.healthyForCriticalArchive();
+    prerequisites.archive_idle = mapping_archive_queue_.idle();
+    std::string reason;
+    if (!mapping_segment_manager_.startNewSegment(
+            prerequisites, &reason)) {
+        segment_transition_in_progress_.store(false,
+                                              std::memory_order_release);
+        response.success = false;
+        response.message = reason;
+        return true;
+    }
+
+    std_srvs::Empty::Request reset_request;
+    std_srvs::Empty::Response reset_response;
+    resetService(reset_request, reset_response);
+    const MappingSegmentSnapshot new_segment =
+        mapping_segment_manager_.snapshot();
+    {
+        // resetService owns this mutex while clearing the old runtime. Take it
+        // again for the post-reset identity/policy handoff so the processing
+        // thread can observe either the old fail-closed segment or the fully
+        // initialized new one, never a half-updated combination.
+        std::lock_guard<std::mutex> runtime_lock(runtime_state_mutex_);
+        std::lock_guard<std::mutex> lifecycle_lock(
+            map_commit_lifecycle_mutex_);
+        // Fresh collection has no legacy/persistent map UUID. The explicit
+        // operator segment is the localization-map identity for all
+        // AcceptedPose and async-worker lineage captured in this segment.
+        localization_map_uuid_ = new_segment.segment_uuid;
+        ++localization_map_generation_;
+        if (localization_map_generation_ == 0U) {
+            localization_map_generation_ = 1U;
+        }
+        advanceMappingAuthorityEpoch();
+        mapping_runtime_policy_.resetForNewSegment();
+        mapping_runtime_decision_ = mapping_runtime_policy_.decision();
+        mapping_writes_allowed_.store(true, std::memory_order_release);
+    }
+    archiveSegmentState(MappingArchivePriority::CERTIFICATION_CRITICAL);
+    const MappingSegmentSnapshot archived_segment =
+        mapping_segment_manager_.snapshot();
+    if (archived_segment.state ==
+            MappingSegmentState::ARCHIVE_INCOMPLETE ||
+        !mapping_writes_allowed_.load(std::memory_order_acquire)) {
+        segment_transition_in_progress_.store(false,
+                                              std::memory_order_release);
+        response.success = false;
+        response.message = "segment_started_but_critical_state_archive_refused";
+        return true;
+    }
+    segment_transition_in_progress_.store(false, std::memory_order_release);
+    response.success = true;
+    response.message = "NEW_MAPPING_SEGMENT:" +
+        new_segment.segment_uuid +
+        ";mapping_waits_for_next_continuous_source_frame";
+    ROS_WARN("[MappingSegment] operator-authorized start success=%d reason=%s",
+             response.success ? 1 : 0, response.message.c_str());
+    return true;
 }
 
 NdtSlamNode::~NdtSlamNode() {
@@ -832,11 +1098,20 @@ NdtSlamNode::~NdtSlamNode() {
         std::lock_guard<std::mutex> lock(failed_tile_flush_mutex_);
         has_failed_tile_batch = !failed_tile_flush_batch_.empty();
     }
-    if (persistent_map_enabled_ &&
+    const bool shutdown_persistence_allowed =
+        !static_map_build_fail_closed_profile_ ||
+        trustedMappingWritesAllowed();
+    if (persistent_map_enabled_ && shutdown_persistence_allowed &&
         (!dirty_tiles_.empty() || has_failed_tile_batch ||
          static_evidence_persistence_dirty_.load(
              std::memory_order_acquire))) {
         flushDirtyTiles();
+    } else if (persistent_map_enabled_ && !shutdown_persistence_allowed &&
+               (!dirty_tiles_.empty() || has_failed_tile_batch ||
+                static_evidence_persistence_dirty_.load(
+                    std::memory_order_acquire))) {
+        ROS_ERROR("[Shutdown] fail-closed authority forbids final map write; "
+                  "dirty state remains intentionally uncommitted");
     }
     if (tile_flush_thread_.joinable()) {
         tile_flush_thread_.join();
@@ -849,6 +1124,14 @@ NdtSlamNode::~NdtSlamNode() {
                       dirty_tiles_.size(), failed_tile_flush_batch_.size());
         }
     }
+    if (static_map_build_fail_closed_profile_ &&
+        mapping_segment_manager_.snapshot().active) {
+        mapping_segment_manager_.close("graceful_ros_shutdown");
+        archiveSegmentState(MappingArchivePriority::CERTIFICATION_CRITICAL);
+    }
+    // Drain after the terminal segment state was queued. A clean shutdown can
+    // therefore be distinguished from an actual process crash on next start.
+    mapping_archive_queue_.stop(true);
     writeRuntimeStatus();
     if (diag_pending_ndt_record_valid_) {
         runtime_diag_.writeNdtFrame(diag_pending_ndt_record_);
@@ -859,7 +1142,9 @@ NdtSlamNode::~NdtSlamNode() {
 }
 
 void NdtSlamNode::enqueueMapCommitJob(
+    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& archive_raw_cloud,
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& registration_cloud,
     const AcceptedLocalizationSnapshot& localization) {
     if (!cloud || cloud->empty()) {
         map_commit_dropped_.fetch_add(1U, std::memory_order_relaxed);
@@ -877,6 +1162,8 @@ void NdtSlamNode::enqueueMapCommitJob(
         map_rebuild_generation_.load(std::memory_order_acquire);
     job.static_evidence_epoch =
         static_evidence_epoch_.load(std::memory_order_acquire);
+    job.mapping_authority_epoch =
+        mapping_authority_epoch_.load(std::memory_order_acquire);
     job.stamp = localization.stamp;
     job.pose = localization.pose;
     job.accepted_pose_generation = localization.pose_generation;
@@ -884,7 +1171,9 @@ void NdtSlamNode::enqueueMapCommitJob(
         localization.continuity_generation;
     job.localization_map_generation = localization.map_generation;
     job.localization_map_uuid = localization.map_uuid;
+    job.archive_raw_cloud = archive_raw_cloud;
     job.cloud = cloud;
+    job.registration_cloud = registration_cloud;
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
     job.hook_role = hook_load_signal_role_;
     job.hook_valid = hook.valid;
@@ -943,9 +1232,12 @@ void NdtSlamNode::mapCommitThread() {
 
         if (job.lifecycle_epoch !=
                 map_rebuild_generation_.load(std::memory_order_acquire) ||
+            job.mapping_authority_epoch !=
+                mapping_authority_epoch_.load(std::memory_order_acquire) ||
             job.localization_continuity_generation !=
                 localization_continuity_generation_.load(
-                    std::memory_order_acquire)) {
+                    std::memory_order_acquire) ||
+            !trustedMappingWritesAllowed()) {
             map_commit_stale_.fetch_add(1U, std::memory_order_relaxed);
             continue;
         }
@@ -958,15 +1250,21 @@ void NdtSlamNode::mapCommitThread() {
                 map_commit_lifecycle_mutex_);
             if (job.lifecycle_epoch ==
                     map_rebuild_generation_.load(std::memory_order_acquire) &&
+                job.mapping_authority_epoch ==
+                    mapping_authority_epoch_.load(
+                        std::memory_order_acquire) &&
                 job.localization_continuity_generation ==
                     localization_continuity_generation_.load(
-                        std::memory_order_acquire)) {
+                        std::memory_order_acquire) &&
+                trustedMappingWritesAllowed()) {
                 committed = commitKeyFrameWithDynamicFiltering(job);
             }
         }
         if (!committed) {
             continue;
         }
+
+        archiveCommittedKeyframe(job);
 
         map_commit_completed_.fetch_add(1U, std::memory_order_relaxed);
         {
@@ -1053,6 +1351,131 @@ void NdtSlamNode::timerCallback(const ros::TimerEvent&) {
 void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
     try {
         YAML::Node config = YAML::LoadFile(config_file_path);
+
+        const std::string runtime_profile =
+            config["runtime_profile"].as<std::string>("LEGACY_RUNTIME");
+        static_map_build_fail_closed_profile_ =
+            runtime_profile == "STATIC_MAP_BUILD_FAIL_CLOSED";
+        if (config["mapping_authority"]) {
+            const YAML::Node authority = config["mapping_authority"];
+            const int degraded_frame_window =
+                config["relocalization"]
+                    ? std::max(
+                          2, config["relocalization"]["trigger_frames"]
+                                 .as<int>(relocalization_trigger_frames_))
+                    : std::max(2, relocalization_trigger_frames_);
+            const bool inherit_degraded_frame_window =
+                authority["inherit_degraded_frame_window"].as<bool>(true);
+            mapping_runtime_policy_config_.confirmed_hard_failure_frames =
+                inherit_degraded_frame_window
+                    ? degraded_frame_window
+                    : std::max(
+                          2, authority["confirmed_hard_failure_frames"]
+                                 .as<int>(degraded_frame_window));
+            mapping_runtime_policy_config_
+                .confirmed_hard_failure_duration_sec = std::max(
+                    0.0,
+                    authority["confirmed_hard_failure_duration_sec"]
+                        .as<double>(0.4));
+        }
+        mapping_runtime_policy_.configure(mapping_runtime_policy_config_);
+        mapping_runtime_decision_ = mapping_runtime_policy_.decision();
+        mapping_writes_allowed_.store(
+            mapping_runtime_decision_.trusted_writes_allowed,
+            std::memory_order_release);
+
+        if (config["tracking_ephemeral_map"]) {
+            const YAML::Node ephemeral = config["tracking_ephemeral_map"];
+            tracking_ephemeral_config_.enabled =
+                ephemeral["enabled"].as<bool>(false);
+            tracking_ephemeral_config_.bind_to_ndt_target =
+                ephemeral["bind_to_ndt_target"].as<bool>(false);
+            tracking_ephemeral_config_.shadow_diagnostics_only =
+                ephemeral["shadow_diagnostics_only"].as<bool>(true);
+            tracking_ephemeral_config_.ttl_sec =
+                ephemeral["ttl_sec"].as<double>(2.0);
+        }
+        std::string ephemeral_reason;
+        if (!tracking_ephemeral_shadow_.configure(
+                tracking_ephemeral_config_, &ephemeral_reason)) {
+            ROS_ERROR("[TrackingEphemeral] rejected: %s",
+                      ephemeral_reason.c_str());
+        }
+
+        if (config["sensor_body_self_mask"]) {
+            const YAML::Node mask = config["sensor_body_self_mask"];
+            sensor_body_self_mask_config_.enabled =
+                mask["enabled"].as<bool>(true);
+            sensor_body_self_mask_config_.commissioned =
+                mask["commissioned"].as<bool>(false);
+            sensor_body_self_mask_config_.frame_id =
+                mask["frame_id"].as<std::string>("");
+            const std::vector<float> center =
+                mask["center_xyz_m"].as<std::vector<float>>(
+                    std::vector<float>{0.0F, 0.0F, 0.0F});
+            const std::vector<float> size =
+                mask["size_xyz_m"].as<std::vector<float>>(
+                    std::vector<float>{0.0F, 0.0F, 0.0F});
+            if (center.size() == 3U && size.size() == 3U) {
+                sensor_body_self_mask_config_.center =
+                    Eigen::Vector3f(center[0], center[1], center[2]);
+                sensor_body_self_mask_config_.half_extent = 0.5F *
+                    Eigen::Vector3f(size[0], size[1], size[2]);
+            } else {
+                sensor_body_self_mask_config_.commissioned = false;
+                ROS_ERROR("[SelfMask] center_xyz_m and size_xyz_m must each "
+                          "contain exactly three values");
+            }
+            sensor_body_self_mask_config_.yaw_rad =
+                static_cast<float>(
+                    mask["yaw_deg"].as<double>(0.0) * M_PI / 180.0);
+            sensor_body_self_mask_config_.maximum_removed_ratio =
+                mask["maximum_removed_ratio"].as<double>(0.35);
+        }
+        sensor_body_self_mask_.configure(sensor_body_self_mask_config_);
+        self_mask_mapping_ready_.store(
+            !static_map_build_fail_closed_profile_ ||
+                (sensor_body_self_mask_config_.enabled &&
+                 sensor_body_self_mask_config_.commissioned &&
+                 !sensor_body_self_mask_config_.frame_id.empty() &&
+                 sensor_body_self_mask_config_.half_extent.allFinite() &&
+                 sensor_body_self_mask_config_.half_extent.minCoeff() > 0.0F),
+            std::memory_order_release);
+
+        if (config["mapping_archive"]) {
+            const YAML::Node archive = config["mapping_archive"];
+            mapping_archive_config_.enabled =
+                archive["enabled"].as<bool>(false);
+            mapping_archive_config_.root_dir =
+                archive["root_dir"].as<std::string>("");
+            mapping_archive_config_.max_jobs =
+                static_cast<std::size_t>(std::max(
+                    1, archive["max_jobs"].as<int>(8)));
+            const double max_mib = std::max(
+                1.0, archive["max_queue_mib"].as<double>(256.0));
+            mapping_archive_config_.max_queue_bytes =
+                static_cast<std::uint64_t>(max_mib * 1024.0 * 1024.0);
+            mapping_archive_config_.max_oldest_job_age_sec =
+                archive["max_oldest_job_age_sec"].as<double>(10.0);
+            mapping_archive_config_.max_write_latency_ms =
+                archive["max_write_latency_ms"].as<double>(5000.0);
+            mapping_archive_config_.minimum_free_disk_gb =
+                archive["minimum_free_disk_gb"].as<double>(5.0);
+        }
+        if (config["mapping_campaign"]) {
+            const YAML::Node campaign = config["mapping_campaign"];
+            mapping_segment_config_.enabled =
+                static_map_build_fail_closed_profile_;
+            mapping_segment_config_.root_dir =
+                campaign["root_dir"].as<std::string>(
+                    mapping_archive_config_.root_dir);
+            mapping_segment_config_.campaign_uuid =
+                campaign["campaign_uuid"].as<std::string>("");
+            mapping_segment_config_.survey_pass_id =
+                campaign["survey_pass_id"].as<std::string>("");
+        }
+        mapping_archive_queue_.configure(mapping_archive_config_);
+        mapping_segment_manager_.configure(mapping_segment_config_);
 
         // 调试配置
         if (config["debug"]) {
@@ -2096,7 +2519,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.enabled = hcl["enabled"].as<bool>(true);
             hook_lock_config_.lock_confirm_frames = hcl["lock_confirm_frames"].as<int>(3);
             hook_lock_config_.geometry_confirm_frames = std::max(
-                3, hcl["geometry_confirm_frames"].as<int>(4));
+                3, hcl["geometry_confirm_frames"].as<int>(3));
             hook_lock_config_.size_init_window = hcl["size_init_window"].as<int>(5);
             hook_lock_config_.lost_hold_sec =
                 hcl["lost_hold_sec"].as<float>(5.0f);
@@ -2137,7 +2560,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 4, hcl["candidate_window_frames"].as<int>(12));
             hook_lock_config_.candidate_required_consistent_frames =
                 std::clamp(
-                    hcl["candidate_required_consistent_frames"].as<int>(7),
+                    hcl["candidate_required_consistent_frames"].as<int>(3),
                     3, hook_lock_config_.candidate_window_frames);
             hook_lock_config_.candidate_max_gap_frames = std::max(
                 0, hcl["candidate_max_gap_frames"].as<int>(4));
@@ -2219,6 +2642,22 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 hcl["velocity_model_uncertainty_mps"].as<float>(0.05F));
             hook_lock_config_.association_max_xy_gate_m = std::max(
                 0.10F, hcl["association_max_xy_gate_m"].as<float>(1.05F));
+            hook_lock_config_.cargo_to_hook_offset_max_m = std::clamp(
+                hcl["cargo_to_hook_offset_max_m"].as<float>(1.05F),
+                0.35F, hook_lock_config_.association_max_xy_gate_m);
+            hook_lock_config_.cargo_to_hook_offset_max_update_per_frame_m =
+                std::clamp(
+                    hcl["cargo_to_hook_offset_max_update_per_frame_m"]
+                        .as<float>(0.04F),
+                    0.001F, 0.20F);
+            hook_lock_config_.cargo_to_hook_offset_alpha = std::clamp(
+                hcl["cargo_to_hook_offset_alpha"].as<float>(0.15F),
+                0.01F, 0.50F);
+            hook_lock_config_.partial_observation_uncertainty_growth_m =
+                std::clamp(
+                    hcl["partial_observation_uncertainty_growth_m"]
+                        .as<float>(0.04F),
+                    0.0F, 0.20F);
             hook_lock_config_.reacquisition_max_xy_gate_m = std::clamp(
                 hcl["reacquisition_max_xy_gate_m"].as<float>(0.55F),
                 0.10F, hook_lock_config_.association_max_xy_gate_m);
@@ -2778,6 +3217,21 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             std::max(0.05F, hook_fixed_config_.bottom_xy_cell_size);
         cargo_bottom_fusion_.setConfig(bottom_fusion_config);
 
+        if (static_map_build_fail_closed_profile_) {
+            if (relocalization_enabled_) {
+                ROS_WARN("[Relocalization] forced disabled by "
+                         "STATIC_MAP_BUILD_FAIL_CLOSED profile");
+            }
+            relocalization_enabled_ = false;
+            relocalization_cfg_.enabled = false;
+            global_consistency_watchdog_config_.enabled = false;
+            if (loop_closure_enabled_) {
+                ROS_WARN("[LoopClosure] online pose-graph mutation forced "
+                         "disabled by STATIC_MAP_BUILD_FAIL_CLOSED profile");
+            }
+            loop_closure_enabled_ = false;
+        }
+
         if (config["static_origin_component"]) {
             const YAML::Node component = config["static_origin_component"];
             static_origin_component_config_
@@ -2895,7 +3349,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             cargo_geometry_fusion_config_.positive_only_confirm_frames =
                 std::max(
                     3,
-                    geometry["positive_only_confirm_frames"].as<int>(5));
+                    geometry["positive_only_confirm_frames"].as<int>(3));
             cargo_geometry_fusion_config_
                 .shape_confirmation_window_frames =
                     std::max(
@@ -2922,11 +3376,11 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             cargo_geometry_fusion_config_.configured_bottom_margin_m =
                 geometry["configured_bottom_margin_m"].as<float>(0.10F);
             cargo_geometry_fusion_config_.conservative_shrink_confirm_frames =
-                geometry["conservative_shrink_confirm_frames"].as<int>(8);
+                geometry["conservative_shrink_confirm_frames"].as<int>(5);
             cargo_geometry_fusion_config_.maximum_shrink_per_frame_m =
                 geometry["maximum_shrink_per_frame_m"].as<float>(0.03F);
             cargo_geometry_fusion_config_.immediate_expand_enabled =
-                geometry["immediate_expand_enabled"].as<bool>(false);
+                geometry["immediate_expand_enabled"].as<bool>(true);
             cargo_geometry_fusion_config_
                 .conservative_expand_confirm_frames =
                     std::max(
@@ -3388,9 +3842,19 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                         .as<float>(0.05F),
                     0.0F,
                     0.25F);
-            obstacle_tracker_config.require_far_field_history_for_level1 =
-                cargo_safety["require_far_field_history_for_level1"]
-                    .as<bool>(true);
+            obstacle_tracker_config.require_far_field_history_for_warnings =
+                cargo_safety["require_far_field_history_for_warnings"]
+                    .as<bool>(
+                        cargo_safety["require_far_field_history_for_level1"]
+                            .as<bool>(true));
+            obstacle_tracker_config.far_history_confirm_frames = std::max(
+                2, cargo_safety["far_history_confirm_frames"].as<int>(
+                       obstacle_tracker_config.confirm_frames));
+            obstacle_tracker_config.far_history_confirm_duration_sec =
+                std::max(
+                    0.0,
+                    cargo_safety["far_history_confirm_duration_sec"]
+                        .as<double>(0.2));
             obstacle_tracker_config.require_static_cargo_for_warning =
                 cargo_safety["require_static_cargo_for_warning"]
                     .as<bool>(true);
@@ -4248,6 +4712,7 @@ void NdtSlamNode::advanceObjectsMapContentVersionLocked() {
 }
 
 std::uint64_t NdtSlamNode::advanceStaticEvidenceEpoch() {
+    advanceMappingAuthorityEpoch();
     std::uint64_t next = static_evidence_epoch_.fetch_add(
         1U, std::memory_order_acq_rel) + 1U;
     if (next == 0U) {
@@ -4257,7 +4722,91 @@ std::uint64_t NdtSlamNode::advanceStaticEvidenceEpoch() {
     return next;
 }
 
+std::uint64_t NdtSlamNode::advanceMappingAuthorityEpoch() {
+    std::lock_guard<std::mutex> authority_lock(mapping_authority_mutex_);
+    std::uint64_t next = mapping_authority_epoch_.fetch_add(
+        1U, std::memory_order_acq_rel) + 1U;
+    if (next == 0U) {
+        mapping_authority_epoch_.store(1U, std::memory_order_release);
+        next = 1U;
+    }
+    return next;
+}
+
+void NdtSlamNode::invalidateStaticAuthorityImmediately(
+    const StaticEvidenceCellKeySet& cells,
+    double stamp_sec) {
+    if (cells.empty() || !std::isfinite(stamp_sec)) {
+        return;
+    }
+
+    std::uint64_t source_objects_version = 0U;
+    {
+        std::lock_guard<std::mutex> map_lock(map_mutex_);
+        source_objects_version = objects_map_content_version_;
+    }
+
+    StaticEvidenceMutationResult invalidation;
+    {
+        // Revocation is serialized with authority-epoch changes and is a
+        // formal static-index write. Negative evidence must be applied in the
+        // producer frame while localization is trusted, but a fail-closed or
+        // quality/IO-paused pose has zero mutation authority.
+        std::lock_guard<std::mutex> authority_lock(mapping_authority_mutex_);
+        if (static_map_build_fail_closed_profile_ &&
+            !trustedMappingWritesAllowed()) {
+            return;
+        }
+        std::uint64_t invalidation_sequence =
+            static_invalidation_sequence_.fetch_add(
+                1U, std::memory_order_acq_rel) + 1U;
+        if (invalidation_sequence == 0U) {
+            static_invalidation_sequence_.store(
+                1U, std::memory_order_release);
+            invalidation_sequence = 1U;
+        }
+        const StaticMutationVersion version{
+            mapping_authority_epoch_.load(std::memory_order_acquire),
+            source_objects_version,
+            invalidation_sequence};
+        invalidation = static_obstacle_evidence_index_.invalidateCells(
+            cells, version, stamp_sec,
+            static_evidence_epoch_.load(std::memory_order_acquire));
+    }
+
+    static_clean_invalidated_cells_.fetch_add(
+        invalidation.invalidated_cells, std::memory_order_relaxed);
+    static_clean_snapshot_cells_.store(
+        invalidation.snapshot_cells, std::memory_order_relaxed);
+    if (invalidation.invalidated_cells == 0U) {
+        return;
+    }
+    static_evidence_persistence_dirty_.store(
+        true, std::memory_order_release);
+    if (persistent_map_enabled_) {
+        flush_tiles_pending_.store(true, std::memory_order_release);
+        map_maintenance_pending_.store(true, std::memory_order_release);
+    }
+}
+
+void NdtSlamNode::invalidateCleanDenyCellsImmediately(
+    const std::set<std::pair<int, int>>& cells,
+    float clean_cell_size_m,
+    double stamp_sec) {
+    StaticEvidenceCellKeySet static_cells;
+    appendStaticEvidenceInvalidations(
+        cells, clean_cell_size_m,
+        static_obstacle_evidence_index_.config().cell_size_m,
+        &static_cells);
+    invalidateStaticAuthorityImmediately(static_cells, stamp_sec);
+}
+
 void NdtSlamNode::startCleanMapRebuildJob() {
+    if (static_map_build_fail_closed_profile_ &&
+        !trustedMappingWritesAllowed()) {
+        clean_map_rebuild_pending_ = true;
+        return;
+    }
     if (clean_map_rebuild_running_.load(std::memory_order_acquire)) {
         // The in-flight immutable snapshot remains publishable even if a newer
         // objects map exists. Remember the newer raw/deny/protect generation
@@ -4267,6 +4816,16 @@ void NdtSlamNode::startCleanMapRebuildJob() {
     }
     if (clean_map_rebuild_thread_.joinable()) {
         clean_map_rebuild_thread_.join();
+    }
+    if (!accepted_localization_snapshot_.valid ||
+        accepted_localization_snapshot_.pose_generation == 0U ||
+        accepted_localization_snapshot_.continuity_generation == 0U ||
+        accepted_localization_snapshot_.map_uuid.empty()) {
+        // Do not consume/swap pending cell observations until there is a
+        // lineage-bearing AcceptedPose.  A startup worker without identity
+        // would be discarded and could otherwise starve static evidence.
+        clean_map_rebuild_pending_ = true;
+        return;
     }
 
     constexpr float kCleanCellSize = 0.15F;
@@ -4284,6 +4843,10 @@ void NdtSlamNode::startCleanMapRebuildJob() {
         accepted_localization_snapshot_.map_uuid;
     const std::uint64_t source_static_evidence_epoch =
         static_evidence_epoch_.load(std::memory_order_acquire);
+    const std::uint64_t source_mapping_authority_epoch =
+        mapping_authority_epoch_.load(std::memory_order_acquire);
+    const std::uint64_t source_map_rebuild_epoch =
+        map_rebuild_generation_.load(std::memory_order_acquire);
     const auto source_static_evidence_snapshot =
         static_obstacle_evidence_index_.snapshot();
     const StaticEvidenceAuthority source_static_authority =
@@ -4312,8 +4875,7 @@ void NdtSlamNode::startCleanMapRebuildJob() {
         source_bundle.valid = true;
         source_bundle.generation = map_layer_generation_;
         source_bundle.objects_version = source_objects_version;
-        source_bundle.lifecycle_epoch =
-            map_rebuild_generation_.load(std::memory_order_acquire);
+        source_bundle.lifecycle_epoch = source_map_rebuild_epoch;
         source_bundle.accepted_pose_generation =
             source_accepted_pose_generation;
         source_bundle.localization_continuity_generation =
@@ -4442,10 +5004,67 @@ void NdtSlamNode::startCleanMapRebuildJob() {
     appendStaticEvidenceInvalidations(
         deny_range_cells, input.cell_size_m, static_cell_size,
         &source_invalidated_cells);
-    const StaticEvidenceMutationResult invalidation =
-        static_obstacle_evidence_index_.invalidateCells(
-            source_invalidated_cells, source_clean_build_version,
+    // Visible-free is negative evidence and must revoke authority now, not
+    // after the clean worker completes.
+    source_invalidated_cells.insert(
+        source_free_cells.begin(), source_free_cells.end());
+    StaticMutationVersion source_static_mutation_version;
+    StaticEvidenceMutationResult invalidation;
+    {
+        // The worker-start tombstone and authority transitions share one
+        // linearization point. If reset/fail-closed/segment switch already
+        // changed the epoch, restore the observations instead of consuming
+        // them in an authority domain that can never complete.
+        std::lock_guard<std::mutex> authority_lock(
+            mapping_authority_mutex_);
+        if (source_mapping_authority_epoch !=
+                mapping_authority_epoch_.load(
+                    std::memory_order_acquire) ||
+            (static_map_build_fail_closed_profile_ &&
+             !trustedMappingWritesAllowed())) {
+            std::lock_guard<std::mutex> observation_lock(
+                static_observation_mutex_);
+            for (const auto& item : source_observed_cells) {
+                auto inserted = pending_static_observed_cells_.emplace(
+                    item.first, item.second);
+                if (!inserted.second) {
+                    inserted.first->second.min_z = std::min(
+                        inserted.first->second.min_z,
+                        item.second.min_z);
+                    inserted.first->second.max_z = std::max(
+                        inserted.first->second.max_z,
+                        item.second.max_z);
+                }
+                pending_static_free_cells_.erase(item.first);
+            }
+            pending_static_observable_cells_.insert(
+                source_observable_cells.begin(),
+                source_observable_cells.end());
+            for (const std::int64_t key : source_free_cells) {
+                if (pending_static_observed_cells_.find(key) ==
+                        pending_static_observed_cells_.end()) {
+                    pending_static_free_cells_.insert(key);
+                }
+            }
+            clean_map_rebuild_pending_ = true;
+            return;
+        }
+        std::uint64_t source_invalidation_sequence =
+            static_invalidation_sequence_.fetch_add(
+                1U, std::memory_order_acq_rel) + 1U;
+        if (source_invalidation_sequence == 0U) {
+            static_invalidation_sequence_.store(
+                1U, std::memory_order_release);
+            source_invalidation_sequence = 1U;
+        }
+        source_static_mutation_version = StaticMutationVersion{
+            source_mapping_authority_epoch,
+            source_objects_version,
+            source_invalidation_sequence};
+        invalidation = static_obstacle_evidence_index_.invalidateCells(
+            source_invalidated_cells, source_static_mutation_version,
             current_time, source_static_evidence_epoch);
+    }
     static_clean_invalidated_cells_.fetch_add(
         invalidation.invalidated_cells, std::memory_order_relaxed);
     static_clean_snapshot_cells_.store(
@@ -4462,11 +5081,14 @@ void NdtSlamNode::startCleanMapRebuildJob() {
     clean_map_rebuild_running_.store(true, std::memory_order_release);
     clean_map_rebuild_thread_ = std::thread(
         [this, source_objects_version, source_accepted_pose_generation,
+         source_mapping_authority_epoch,
+         source_map_rebuild_epoch,
          source_localization_continuity_generation,
          source_localization_map_generation,
          source_localization_map_uuid,
          source_static_evidence_epoch,
          source_clean_build_version,
+         source_static_mutation_version,
          source_static_authority,
          source_static_evidence_snapshot,
          source_invalidated_cells = std::move(source_invalidated_cells),
@@ -4485,9 +5107,28 @@ void NdtSlamNode::startCleanMapRebuildJob() {
                 source_localization_map_generation;
             result.source_localization_map_uuid =
                 source_localization_map_uuid;
+            result.lineage.mapping_authority_epoch =
+                source_mapping_authority_epoch;
+            result.lineage.localization_continuity_generation =
+                source_localization_continuity_generation;
+            result.lineage.localization_map_generation =
+                source_localization_map_generation;
+            result.lineage.localization_map_uuid =
+                source_localization_map_uuid;
+            result.lineage.map_rebuild_epoch =
+                source_map_rebuild_epoch;
+            result.lineage.static_evidence_epoch =
+                source_static_evidence_epoch;
+            result.lineage.lifecycle_epoch = source_bundle.lifecycle_epoch;
+            result.lineage.source_accepted_pose_generation =
+                source_accepted_pose_generation;
+            result.lineage.source_objects_version =
+                source_objects_version;
             result.static_evidence_epoch = source_static_evidence_epoch;
             result.static_clean_build_version =
                 source_clean_build_version;
+            result.static_mutation_version =
+                source_static_mutation_version;
             result.static_invalidated_cells =
                 std::move(source_invalidated_cells);
             result.static_observed_cells =
@@ -4642,22 +5283,41 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
             }
         }
     };
-    // Clean-map consumes only the immutable source bundle.  Upstream map
-    // commit already blocks untrusted poses, so the worker is validated by
-    // lifecycle, object version and static-evidence generation rather than a
-    // second HEALTHY gate that could freeze display output indefinitely.
-    if (result.bundle.lifecycle_epoch !=
-        map_rebuild_generation_.load(std::memory_order_acquire)) {
-        static_clean_build_discarded_.fetch_add(
-            1U, std::memory_order_relaxed);
-        ROS_DEBUG("[CleanMapWorker] discarded previous lifecycle epoch");
-        restore_observations();
-        return;
-    }
     std::uint64_t current_objects_version = 0U;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
         current_objects_version = objects_map_content_version_;
+    }
+    CleanWorkerLineage current_lineage;
+    current_lineage.mapping_authority_epoch =
+        mapping_authority_epoch_.load(std::memory_order_acquire);
+    current_lineage.localization_continuity_generation =
+        localization_continuity_generation_.load(std::memory_order_acquire);
+    current_lineage.localization_map_generation =
+        localization_map_generation_;
+    current_lineage.localization_map_uuid = localization_map_uuid_;
+    current_lineage.map_rebuild_epoch =
+        map_rebuild_generation_.load(std::memory_order_acquire);
+    current_lineage.static_evidence_epoch =
+        static_evidence_epoch_.load(std::memory_order_acquire);
+    current_lineage.lifecycle_epoch = current_lineage.map_rebuild_epoch;
+    current_lineage.source_accepted_pose_generation =
+        accepted_localization_snapshot_.pose_generation;
+    current_lineage.source_objects_version = current_objects_version;
+    CleanWorkerLineageDecision lineage_decision =
+        evaluateCleanWorkerLineage(result.valid, result.lineage,
+                                   current_lineage);
+    if (lineage_decision.action == CleanWorkerLineageAction::DISCARD) {
+        static_clean_build_discarded_.fetch_add(
+            1U, std::memory_order_relaxed);
+        ROS_WARN_THROTTLE(
+            1.0, "[CleanMapWorker] discarded lineage=%s source_pose=%llu",
+            lineage_decision.reason.c_str(),
+            static_cast<unsigned long long>(
+                result.lineage.source_accepted_pose_generation));
+        // Epoch-invalid observations must never be restored into the new
+        // authority domain. They are historical audit data only.
+        return;
     }
     const CleanMapBuildAction initial_action = evaluateCleanMapBuildAction(
         result.valid,
@@ -4677,6 +5337,29 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
         CleanMapBuildAction::DISCARD_INVALID;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
+        std::lock_guard<std::mutex> authority_lock(
+            mapping_authority_mutex_);
+        current_lineage.source_objects_version =
+            objects_map_content_version_;
+        current_lineage.mapping_authority_epoch =
+            mapping_authority_epoch_.load(std::memory_order_acquire);
+        current_lineage.localization_continuity_generation =
+            localization_continuity_generation_.load(
+                std::memory_order_acquire);
+        current_lineage.localization_map_generation =
+            localization_map_generation_;
+        current_lineage.localization_map_uuid = localization_map_uuid_;
+        current_lineage.map_rebuild_epoch =
+            map_rebuild_generation_.load(std::memory_order_acquire);
+        current_lineage.lifecycle_epoch = current_lineage.map_rebuild_epoch;
+        current_lineage.static_evidence_epoch =
+            static_evidence_epoch_.load(std::memory_order_acquire);
+        lineage_decision = evaluateCleanWorkerLineage(
+            result.valid, result.lineage, current_lineage);
+        if (lineage_decision.action == CleanWorkerLineageAction::DISCARD ||
+            !trustedMappingWritesAllowed()) {
+            completed_action = CleanMapBuildAction::DISCARD_INVALID;
+        } else {
         const CleanMapBuildAction final_action = evaluateCleanMapBuildAction(
             result.valid, false, result.source_objects_version,
             objects_map_content_version_);
@@ -4703,6 +5386,13 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
         result.bundle.generation = map_layer_generation_;
         result.bundle.valid = true;
         latest_completed_map_bundle_ = result.bundle;
+        }
+    }
+
+    if (completed_action == CleanMapBuildAction::DISCARD_INVALID) {
+        static_clean_build_discarded_.fetch_add(
+            1U, std::memory_order_relaxed);
+        return;
     }
 
     last_commit_clean_map_ms_ = result.duration_ms;
@@ -4721,37 +5411,55 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
     }
     const double evidence_stamp = result.bundle.source_stamp.isZero()
         ? stamp.toSec() : result.bundle.source_stamp.toSec();
-    if (relocalization_pose_reliable_ &&
-        result.static_evidence_epoch ==
-        static_evidence_epoch_.load(std::memory_order_acquire)) {
-        static_obstacle_evidence_index_.observeCleanBuildCells(
-            result.static_observed_cells,
-            result.static_observable_cells,
-            result.static_free_cells,
-            evidence_stamp, result.static_evidence_epoch,
-            result.source_objects_version);
+    StaticEvidenceMutationResult mutation;
+    StaticEvidenceDiagnostics evidence_status;
+    std::shared_ptr<const StaticEvidenceSnapshot> evidence_snapshot;
+    std::uint64_t clean_observation_sequence = 0U;
+    bool static_evidence_applied = false;
+    if (lineage_decision.static_observation_authorized) {
         StaticEvidenceCellKeySet build_invalidated_cells =
             result.static_invalidated_cells;
         build_invalidated_cells.insert(
             result.static_free_cells.begin(),
             result.static_free_cells.end());
-        const StaticEvidenceMutationResult mutation =
-            static_obstacle_evidence_index_.confirmCleanCells(
+        std::lock_guard<std::mutex> authority_lock(
+            mapping_authority_mutex_);
+        const bool final_authority_valid =
+            result.lineage.mapping_authority_epoch ==
+                mapping_authority_epoch_.load(std::memory_order_acquire) &&
+            result.lineage.localization_continuity_generation ==
+                localization_continuity_generation_.load(
+                    std::memory_order_acquire) &&
+            relocalization_pose_reliable_ && trustedMappingWritesAllowed();
+        if (final_authority_valid) {
+            static_obstacle_evidence_index_.observeCleanBuildCells(
+                result.static_observed_cells,
+                result.static_observable_cells,
+                result.static_free_cells,
+                evidence_stamp, result.static_evidence_epoch,
+                result.static_mutation_version);
+            mutation = static_obstacle_evidence_index_.confirmCleanCells(
                 result.static_clean_cells,
                 build_invalidated_cells,
                 evidence_stamp,
                 result.static_evidence_epoch,
-                result.static_clean_build_version);
+                result.static_mutation_version);
+            evidence_status =
+                static_obstacle_evidence_index_.diagnostics();
+            evidence_snapshot =
+                static_obstacle_evidence_index_.snapshot();
+            clean_observation_sequence =
+                static_obstacle_evidence_index_.latestObservationSequence();
+            static_evidence_applied = true;
+        }
+    }
+    if (static_evidence_applied) {
         static_clean_confirmed_cells_.fetch_add(
             mutation.confirmed_cells, std::memory_order_relaxed);
         static_clean_invalidated_cells_.fetch_add(
             mutation.invalidated_cells, std::memory_order_relaxed);
         static_clean_snapshot_cells_.store(
             mutation.snapshot_cells, std::memory_order_relaxed);
-        const StaticEvidenceDiagnostics evidence_status =
-            static_obstacle_evidence_index_.diagnostics();
-        const auto evidence_snapshot =
-            static_obstacle_evidence_index_.snapshot();
         std_msgs::String status_message;
         std::ostringstream status_json;
         status_json << "{\"generation\":"
@@ -4764,8 +5472,7 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
                                : StaticEvidenceAuthority::
                                      UNVERIFIED_LOADED_CLEAN)
                     << "\",\"clean_observation_sequence\":"
-                    << static_obstacle_evidence_index_.
-                           latestObservationSequence()
+                    << clean_observation_sequence
                     << "}";
         status_message.data = status_json.str();
         static_evidence_status_pub_.publish(status_message);
@@ -5116,6 +5823,57 @@ void NdtSlamNode::processCloudThread() {
             continue;
         }
 
+        // Sensor/trolley self structure is removed in its explicitly
+        // commissioned rigid-body frame before any registration or mapping
+        // channel consumes the cloud. Raw and removed previews remain
+        // available for commissioning and are never treated as map evidence.
+        if (self_mask_raw_pub_.getNumSubscribers() > 0U) {
+            sensor_msgs::PointCloud2 raw_preview;
+            pcl::toROSMsg(*input_cloud, raw_preview);
+            raw_preview.header = msg->header;
+            self_mask_raw_pub_.publish(raw_preview);
+        }
+        last_sensor_body_self_mask_result_ = sensor_body_self_mask_.filter(
+            *input_cloud, msg->header.frame_id);
+        self_mask_input_points_.store(
+            last_sensor_body_self_mask_result_.input_points,
+            std::memory_order_release);
+        self_mask_removed_points_.store(
+            last_sensor_body_self_mask_result_.removed->size(),
+            std::memory_order_release);
+        self_mask_removed_ratio_.store(
+            last_sensor_body_self_mask_result_.removed_ratio,
+            std::memory_order_release);
+        const bool self_mask_was_ready = self_mask_mapping_ready_.exchange(
+            last_sensor_body_self_mask_result_.mapping_ready,
+            std::memory_order_acq_rel);
+        if (self_mask_was_ready &&
+            !last_sensor_body_self_mask_result_.mapping_ready) {
+            advanceMappingAuthorityEpoch();
+            ROS_ERROR("[SelfMask] mapping authority revoked: %s ratio=%.3f",
+                      last_sensor_body_self_mask_result_.reason.c_str(),
+                      last_sensor_body_self_mask_result_.removed_ratio);
+        }
+        if (self_mask_removed_pub_.getNumSubscribers() > 0U) {
+            sensor_msgs::PointCloud2 removed_preview;
+            pcl::toROSMsg(*last_sensor_body_self_mask_result_.removed,
+                          removed_preview);
+            removed_preview.header = msg->header;
+            self_mask_removed_pub_.publish(removed_preview);
+        }
+        input_cloud = last_sensor_body_self_mask_result_.kept;
+        if (input_cloud->empty()) {
+            ROS_ERROR_THROTTLE(
+                2.0, "[SelfMask] all points removed; mapping remains closed");
+            continue;
+        }
+        // Retain an immutable accepted-keyframe source before the normal
+        // near-field/range/voxel pipeline mutates or replaces input_cloud.
+        // The archive queue owns only a shared pointer; serialization remains
+        // off the LiDAR thread and byte-bounded.
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr archive_raw_cloud =
+            input_cloud;
+
         // ========== P0：重复帧检测（在所有处理之前拦截）==========
         // 使用 stamp + cloud_size + hash 作为帧签名
         uint64_t cloud_hash = 0;
@@ -5145,6 +5903,7 @@ void NdtSlamNode::processCloudThread() {
         // duplicate-frame signature.  All prediction/crop/gating in this
         // frame must use sensor time, not NDT wall-clock runtime.
         double sensor_dt = 0.10;
+        bool source_time_continuous = false;
         if (!last_processed_frame_stamp_.isZero()) {
             const bool lidar_time_rollback =
                 !msg->header.stamp.isZero() &&
@@ -5155,7 +5914,10 @@ void NdtSlamNode::processCloudThread() {
                     last_processed_frame_stamp_, msg->header.stamp);
             }
             sensor_dt = (msg->header.stamp - last_processed_frame_stamp_).toSec();
-            if (!std::isfinite(sensor_dt) || sensor_dt <= 0.0 || sensor_dt > 1.0) {
+            source_time_continuous = !lidar_time_rollback &&
+                std::isfinite(sensor_dt) && sensor_dt > 0.0 &&
+                sensor_dt <= 1.0;
+            if (!source_time_continuous) {
                 invalid_sensor_dt_count_.fetch_add(1, std::memory_order_relaxed);
                 ROS_WARN_THROTTLE(2.0,
                     "[SensorTime] invalid_dt=%.6f current=%.6f previous=%.6f fallback=0.100",
@@ -5165,6 +5927,8 @@ void NdtSlamNode::processCloudThread() {
                 sensor_dt = 0.10;
             }
         }
+        pointcloud_source_time_continuous_.store(
+            source_time_continuous, std::memory_order_release);
         last_sensor_dt_ = sensor_dt;
 
         // 更新帧签名
@@ -5172,6 +5936,29 @@ void NdtSlamNode::processCloudThread() {
         last_processed_frame_size_ = input_cloud->size();
         last_processed_frame_hash_ = cloud_hash;
         const uint64_t processing_frame_index = ++runtime_frame_index_;
+
+        if (static_map_build_fail_closed_profile_ &&
+            mapping_runtime_decision_.state ==
+                MappingAuthorityState::FAIL_CLOSED) {
+            // Keep the node, source-time monitor, commissioned self-mask
+            // preview and diagnostics alive, but freeze the trusted SLAM data
+            // path at the last accepted pose. Only the operator segment
+            // service can clear this latch after the crane is stopped.
+            ROS_WARN_THROTTLE(
+                5.0,
+                "[MappingFailClosed] raw preview alive; NDT, AcceptedPose, "
+                "formal avoidance and all mapping writes remain frozen");
+            // Refresh the latched localization-invalid status with each new
+            // physical source frame. The independent heartbeat can hold
+            // Code31 while input is alive; if the source itself stops, its
+            // stale policy intentionally falls back to Code30.
+            publishRelocalizationSafetyInvalid(
+                msg->header.stamp,
+                "mapping_fail_closed:" +
+                    mapping_runtime_decision_.reason);
+            publishLocalizationHealth(msg->header.stamp);
+            continue;
+        }
 
         // ========== 阶段 1.5：近场过滤（去除起重机抓臂、吊具等固定结构）==========
         const auto near_filter_start = DiagClock::now();
@@ -5638,7 +6425,6 @@ void NdtSlamNode::processCloudThread() {
             human_filter_.processFrame(human_filter_input, T_map_base, timestamp,
                                        human_safe_objects, human_candidates,
                                        human_dynamic, human_pending);
-
             // 发布调试话题（每 10 帧一次）
             static int hf_debug_count = 0;
             hf_debug_count++;
@@ -5735,6 +6521,17 @@ void NdtSlamNode::processCloudThread() {
             ROS_INFO_THROTTLE(debug_cfg_.summary_interval_sec,
                 "[HookCargoRemoval] enabled=0 reason=safety_gate_closed");
         }
+
+        if (self_mask_registration_pub_.getNumSubscribers() > 0U) {
+            sensor_msgs::PointCloud2 registration_preview;
+            pcl::toROSMsg(*registration_cloud, registration_preview);
+            registration_preview.header.stamp = msg->header.stamp;
+            registration_preview.header.frame_id = msg->header.frame_id;
+            self_mask_registration_pub_.publish(registration_preview);
+        }
+        tracking_ephemeral_shadow_.observe(
+            registration_cloud ? registration_cloud->size() : 0U,
+            msg->header.stamp.toSec());
 
         last_registration_build_result_ = registration_build_result;
         last_source_points_ =
@@ -6413,7 +7210,10 @@ void NdtSlamNode::processCloudThread() {
                         if (ndt_accepted &&
                             frame_fitness_decision.allow_measurement &&
                             !frame_prediction_only &&
-                            frame_registration_quality_valid) {
+                            frame_registration_quality_valid &&
+                            (!static_map_build_fail_closed_profile_ ||
+                             mapping_runtime_decision_.state !=
+                                 MappingAuthorityState::FAIL_CLOSED)) {
                             last_accepted_pose_ = new_pose;
                             accepted_pose_generation_++;
                             accepted_localization_snapshot_.valid = true;
@@ -6771,8 +7571,13 @@ void NdtSlamNode::processCloudThread() {
                 persistent_localization_map_present_
                     ? localization_health_decision_.frame_qualified
                     : frame_ndt_healthy;
-            updateRelocalization(processing_frame_index, msg->header.stamp,
-                                 registration_cloud, recovery_health);
+            if (!static_map_build_fail_closed_profile_ ||
+                mapping_runtime_decision_.state !=
+                    MappingAuthorityState::FAIL_CLOSED) {
+                updateRelocalization(
+                    processing_frame_index, msg->header.stamp,
+                    registration_cloud, recovery_health);
+            }
         } else if (persistent_localization_map_present_ &&
                    !relocalization_pose_reliable_) {
             // Startup global recovery must not depend on the regular NDT
@@ -6787,9 +7592,22 @@ void NdtSlamNode::processCloudThread() {
                 false, false, false,
                 std::numeric_limits<double>::infinity(), 0.0,
                 crane_motion_ekf_cfg_.max_step_max_m, 0.0);
-            updateRelocalization(
-                processing_frame_index, msg->header.stamp,
-                registration_cloud, false);
+            if (!static_map_build_fail_closed_profile_ ||
+                mapping_runtime_decision_.state !=
+                    MappingAuthorityState::FAIL_CLOSED) {
+                updateRelocalization(
+                    processing_frame_index, msg->header.stamp,
+                    registration_cloud, false);
+            }
+        }
+
+        // The frame that confirms failure is already outside the trusted
+        // data path. Do not expose its pose, recovery side effects or map
+        // commit; consumers retain the last previously published pose.
+        if (static_map_build_fail_closed_profile_ &&
+            mapping_runtime_decision_.state ==
+                MappingAuthorityState::FAIL_CLOSED) {
+            registration_success = false;
         }
 
         // ========== 阶段 7：发布结果（用完整点云建图）==========
@@ -7009,11 +7827,15 @@ void NdtSlamNode::processCloudThread() {
                 relocalization_state_ != RelocalizationState::SEARCHING_GLOBAL &&
                 relocalization_state_ != RelocalizationState::CONFIRMING;
             const bool hook_commit_ok = hookAllowsMapCommit();
+            const bool mapping_authority_commit_ok =
+                !static_map_build_fail_closed_profile_ ||
+                trustedMappingWritesAllowed();
             const bool allow_map_commit =
                 commit_accept_ok && commit_fitness_ok &&
                 motion_gate_allows_commit && relocalization_commit_ok &&
                 hook_commit_ok && accepted_snapshot_is_current &&
-                frame_map_commit_quality_valid;
+                frame_map_commit_quality_valid &&
+                mapping_authority_commit_ok;
             diag_map_commit_allowed = allow_map_commit;
             diag_motion_gate_blocked =
                 commit_accept_ok && commit_fitness_ok &&
@@ -7032,6 +7854,8 @@ void NdtSlamNode::processCloudThread() {
                 diag_map_commit_reason = "accepted_pose_identity_guard";
             } else if (!frame_map_commit_quality_valid) {
                 diag_map_commit_reason = "ekf_soft_frame_persistent_guard";
+            } else if (!mapping_authority_commit_ok) {
+                diag_map_commit_reason = "mapping_authority_paused";
             } else {
                 diag_map_commit_reason = "motion_gate_blocked";
             }
@@ -7039,7 +7863,8 @@ void NdtSlamNode::processCloudThread() {
             if (allow_map_commit) {
                 const auto map_commit_start = DiagClock::now();
                 enqueueMapCommitJob(
-                    filtered_cloud, accepted_localization_snapshot_);
+                    archive_raw_cloud, filtered_cloud, registration_cloud,
+                    accepted_localization_snapshot_);
                 diag_stage.map_commit_ms = elapsedMs(map_commit_start);
                 // Filtering and map writes now run on the bounded worker.
                 // Only a completed, current-epoch job advances the owner-side
@@ -8850,6 +9675,12 @@ void NdtSlamNode::addKeyFrameToLoopClosure(pcl::PointCloud<pcl::PointXYZ>::Ptr c
                 human_filter_.processFrame(kf_safe_objects, transform, timestamp,
                                            kf_human_safe_objects, kf_human_candidates,
                                            kf_human_dynamic, kf_human_pending);
+                if (dynamic_event_config_.enable_human_history_clean &&
+                    kf_human_dynamic && !kf_human_dynamic->empty()) {
+                    invalidateCleanDenyCellsImmediately(
+                        human_filter_.getDenyCellsSnapshot(0.15, timestamp),
+                        0.15F, timestamp);
+                }
 
                 // ========== DynamicEventManager：人体动态事件 ==========
                 if (dynamic_event_config_.enabled && !kf_human_dynamic->empty()) {
@@ -9224,6 +10055,18 @@ void NdtSlamNode::consumeLoopClosureResult(const ros::Time& stamp) {
         correction_rotation(1, 0), correction_rotation(0, 0))) *
         180.0 / M_PI;
 
+    if (static_map_build_fail_closed_profile_) {
+        // Online loop closure is observation-only during collection.  The
+        // immutable raw segments are optimized and reprojected by the offline
+        // rebuilder; a live loop candidate must not trigger relocalization,
+        // VERIFYING, EKF reseed, or a registration-target change.
+        ROS_INFO("[LoopWorker] candidate retained for offline rebuild only "
+                 "loop=%d<->%d translation=%.3f yaw_deg=%.3f",
+                 loop_pair.first, loop_pair.second,
+                 correction_translation_m, correction_yaw_deg);
+        return;
+    }
+
     // A loop worker is not an authority to change live odom or rebuild maps.
     // Applying its correction directly created a map/odom discontinuity before
     // the strict localization-health window could inspect it. Treat every
@@ -9365,6 +10208,7 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
         map_rebuild_generation_.fetch_add(1U, std::memory_order_acq_rel);
+        advanceMappingAuthorityEpoch();
         global_map_->clear();
         display_map_->clear();
         ground_map_->clear();
@@ -9469,6 +10313,8 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     last_processed_frame_stamp_ = ros::Time();
     last_processed_frame_size_ = 0U;
     last_processed_frame_hash_ = 0U;
+    pointcloud_source_time_continuous_.store(false,
+                                             std::memory_order_release);
     has_last_raw_ndt_pose_ = false;
     has_commit_gate_reference_ = false;
     resetStationaryState("reset_service");
@@ -9558,6 +10404,14 @@ bool NdtSlamNode::setPoseService(std_srvs::Empty::Request& request, std_srvs::Em
 bool NdtSlamNode::relocalizeService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
     (void)request;
     (void)response;
+    if (static_map_build_fail_closed_profile_) {
+        // Collection mode has no automatic recovery authority.  Code31 is a
+        // data-path latch that is cleared only by the operator creating a new
+        // segment; it must never enter SEARCHING/VERIFYING or reseed the EKF.
+        ROS_WARN("[Relocalization] manual request ignored: "
+                 "STATIC_MAP_BUILD_FAIL_CLOSED waits for operator segment");
+        return true;
+    }
     if (!relocalization_enabled_) {
         ROS_WARN("[Relocalization] manual request ignored: disabled");
         return true;
@@ -9610,6 +10464,15 @@ bool NdtSlamNode::relocalizeService(std_srvs::Empty::Request& request, std_srvs:
 
 bool NdtSlamNode::saveMapService(lidar_slam2_msgs::SaveMap::Request& request,
                               lidar_slam2_msgs::SaveMap::Response& response) {
+    if (static_map_build_fail_closed_profile_ &&
+        !trustedMappingWritesAllowed()) {
+        response.success = false;
+        response.message = "mapping_authority_closed";
+        response.num_points = 0;
+        response.saved_file_path.clear();
+        ROS_WARN("[SaveMap] rejected: mapping authority is not ACTIVE");
+        return true;
+    }
     std::size_t registration_points = 0U;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
@@ -9849,6 +10712,13 @@ NdtSlamNode::LoadedRuntimeMapCandidate NdtSlamNode::stageRuntimeMap(
 bool NdtSlamNode::loadMapService(
     lidar_slam2_msgs::LoadMap::Request& request,
     lidar_slam2_msgs::LoadMap::Response& response) {
+    if (static_map_build_fail_closed_profile_) {
+        response.success = false;
+        response.message =
+            "legacy_map_load_quarantined_in_static_collection_profile";
+        response.num_points = 0;
+        return true;
+    }
     LoadedRuntimeMapCandidate candidate =
         stageRuntimeMap(request.file_path, false);
     if (!candidate.valid) {
@@ -9901,6 +10771,7 @@ bool NdtSlamNode::installLoadedRuntimeMap(
             std::lock_guard<std::mutex> lock(map_mutex_);
             map_rebuild_generation_.fetch_add(
                 1U, std::memory_order_acq_rel);
+            advanceMappingAuthorityEpoch();
             persistent_registration_snapshot_.reset(
                 new pcl::PointCloud<pcl::PointXYZ>(
                     *candidate.registration));
@@ -10144,6 +11015,17 @@ bool NdtSlamNode::installLoadedRuntimeMap(
 bool NdtSlamNode::loadMapSessionService(
     lidar_slam2_msgs::LoadMapSession::Request& request,
     lidar_slam2_msgs::LoadMapSession::Response& response) {
+    if (static_map_build_fail_closed_profile_) {
+        response.success = false;
+        response.message =
+            "map_session_load_quarantined_in_static_collection_profile";
+        response.registration_points = 0U;
+        response.map_uuid.clear();
+        response.map_generation = 0U;
+        response.static_evidence_revision = 0U;
+        response.static_evidence_authority = "LEGACY_UNTRUSTED_QUARANTINED";
+        return true;
+    }
     LoadedRuntimeMapCandidate candidate =
         stageRuntimeMap(request.session_directory, true);
     if (!candidate.valid) {
@@ -10180,6 +11062,13 @@ bool NdtSlamNode::loadMapSessionService(
 }
 
 bool NdtSlamNode::rebuildMapService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
+    (void)request;
+    (void)response;
+    if (static_map_build_fail_closed_profile_) {
+        ROS_WARN("[RebuildMap] rejected in collection profile; use the "
+                 "offline static_map_rebuilder on closed segments");
+        return true;
+    }
     ROS_INFO("Rebuilding map from keyframes with edge-preserving fusion...");
     std::lock_guard<std::mutex> runtime_state_lock(runtime_state_mutex_);
     std::lock_guard<std::mutex> map_commit_lifecycle_lock(
@@ -10187,6 +11076,7 @@ bool NdtSlamNode::rebuildMapService(std_srvs::Empty::Request& request, std_srvs:
     keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
     loop_closure_result_ready_.store(false, std::memory_order_release);
     map_rebuild_generation_.fetch_add(1U, std::memory_order_acq_rel);
+    advanceMappingAuthorityEpoch();
     if (!suspendPersistentStaticEvidence("rebuild_map")) {
         ROS_ERROR("[StaticMapEvidence] rebuild suspend incomplete; persistent "
                   "provenance remains fail-safe blocked");
@@ -10667,7 +11557,8 @@ bool NdtSlamNode::saveMapSessionAtomic(const std::string& session_dir,
 }
 
 void NdtSlamNode::performRelocalization() {
-    if (!relocalization_enabled_) return;
+    if (static_map_build_fail_closed_profile_ ||
+        !relocalization_enabled_) return;
     relocalization_confirmation_count_ = 0;
     relocalization_confirmation_pose_ = Sophus::SE3d();
     relocalization_last_submit_frame_ = 0;
@@ -10895,6 +11786,14 @@ void NdtSlamNode::updateRelocalization(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& registration_cloud,
     bool ndt_healthy) {
     if (!relocalization_enabled_) return;
+    if (static_map_build_fail_closed_profile_ &&
+        mapping_runtime_decision_.state != MappingAuthorityState::ACTIVE) {
+        // In collection mode an algorithmic quality decision never starts a
+        // relocalize/reseed/VERIFYING loop. The node remains responsive and
+        // waits for an explicit operator-created segment after FAIL_CLOSED.
+        relocalization_force_global_ = false;
+        return;
+    }
     if (startup_localization_state_ ==
         StartupLocalizationState::MAP_INVALID) {
         relocalization_pose_reliable_ = false;
@@ -11307,6 +12206,10 @@ void NdtSlamNode::invalidateAcceptedLocalizationContinuity() {
             1U, std::memory_order_release);
     }
     accepted_localization_snapshot_.valid = false;
+    // Any asynchronous map observation captured before a continuity break is
+    // permanently outside the current write-authority epoch.  A later healthy
+    // pose may start new work, but can never revive that worker result.
+    advanceMappingAuthorityEpoch();
     anomaly_review_episode_tracker_.reset();
 }
 
@@ -11331,6 +12234,12 @@ void NdtSlamNode::publishRelocalizationStatus(
 }
 
 void NdtSlamNode::publishLocalizationHealth(const ros::Time& stamp) {
+    const BoundedMappingArchiveMetrics archive_metrics =
+        mapping_archive_queue_.metrics();
+    const MappingSegmentSnapshot segment =
+        mapping_segment_manager_.snapshot();
+    const TrackingEphemeralShadowStatus ephemeral =
+        tracking_ephemeral_shadow_.status(stamp.toSec());
     const double stamp_sec = stamp.isZero()
         ? ros::Time::now().toSec() : stamp.toSec();
     if (localization_last_health_publish_sec_ > 0.0 &&
@@ -11479,6 +12388,52 @@ void NdtSlamNode::publishLocalizationHealth(const ros::Time& stamp) {
          << ','
          << "\"recovery_attempts\":"
          << localization_recovery_attempts_ << ','
+         << "\"mapping_authority_state\":\""
+         << mappingAuthorityStateName(mapping_runtime_decision_.state)
+         << "\",\"mapping_authority_epoch\":"
+         << mapping_authority_epoch_.load(std::memory_order_acquire) << ','
+         << "\"mapping_writes_allowed\":"
+         << (trustedMappingWritesAllowed()
+                 ? "true" : "false") << ','
+         << "\"mapping_authority_reason\":\""
+         << escapeJsonString(mapping_runtime_decision_.reason) << "\","
+         << "\"segment_state\":\""
+         << mappingSegmentStateName(segment.state) << "\","
+         << "\"campaign_uuid\":\""
+         << escapeJsonString(segment.campaign_uuid) << "\","
+         << "\"survey_pass_id\":\""
+         << escapeJsonString(segment.survey_pass_id) << "\","
+         << "\"segment_uuid\":\""
+         << escapeJsonString(segment.segment_uuid) << "\","
+         << "\"self_mask_input_points\":"
+         << self_mask_input_points_.load(std::memory_order_acquire) << ','
+         << "\"self_mask_removed_points\":"
+         << self_mask_removed_points_.load(std::memory_order_acquire) << ','
+         << "\"self_mask_removed_ratio\":"
+         << json_number(
+                self_mask_removed_ratio_.load(std::memory_order_acquire))
+         << ','
+         << "\"self_mask_mapping_ready\":"
+         << (self_mask_mapping_ready_.load(std::memory_order_acquire)
+                 ? "true" : "false") << ','
+         << "\"archive_queue_jobs\":" << archive_metrics.queue_jobs << ','
+         << "\"archive_queue_bytes\":" << archive_metrics.queue_bytes << ','
+         << "\"archive_oldest_job_age_sec\":"
+         << json_number(archive_metrics.oldest_job_age_sec) << ','
+         << "\"archive_write_latency_ms\":"
+         << json_number(archive_metrics.write_latency_ms) << ','
+         << "\"archive_free_disk_gb\":"
+         << json_number(archive_metrics.free_disk_gb) << ','
+         << "\"archive_critical_refused_count\":"
+         << archive_metrics.critical_refused_count << ','
+         << "\"archive_diagnostic_drop_count\":"
+         << archive_metrics.diagnostic_drop_count << ','
+         << "\"archive_incomplete\":"
+         << (archive_metrics.archive_incomplete ? "true" : "false") << ','
+         << "\"tracking_ephemeral_enabled\":"
+         << (ephemeral.enabled ? "true" : "false") << ','
+         << "\"tracking_ephemeral_isolated_from_ndt_target\":"
+         << (ephemeral.isolated_from_ndt_target ? "true" : "false") << ','
          << "\"reason\":\""
          << escapeJsonString(localization_health_reason_) << "\""
          << "}";
@@ -11508,6 +12463,110 @@ void NdtSlamNode::updateLocalizationHealth(
         maximum_allowed_step_m;
     localization_health_evidence_.innovation_m = innovation_m;
     if (ekf_recovered) ++localization_ekf_recovery_count_;
+
+    if (static_map_build_fail_closed_profile_) {
+        MappingRuntimeEvidence mapping_evidence;
+        mapping_evidence.stamp_sec = stamp.toSec();
+        mapping_evidence.ndt_converged = ndt_converged;
+        mapping_evidence.high_fitness =
+            !std::isfinite(fitness) ||
+            fitness > localization_health_config_.maximum_fitness;
+        mapping_evidence.observability_invalid = !observability_valid;
+        mapping_evidence.hard_innovation_reject =
+            std::isfinite(innovation_m) &&
+            innovation_m > localization_health_config_.maximum_innovation_m;
+        mapping_evidence.geometry_invalid =
+            output_step_limited || ekf_recovered;
+        // A rejected/non-converged NDT sample commonly carries an infinite
+        // fitness or unavailable innovation. That remains a transient hard
+        // sample governed by the existing confirmation window. Immediate
+        // fail-close is reserved for a non-finite published pose or a sample
+        // that claims acceptance while its required measurements are not
+        // finite.
+        const bool accepted_measurement_nonfinite = ndt_accepted &&
+            (!std::isfinite(fitness) || !std::isfinite(raw_step_m) ||
+             !std::isfinite(innovation_m));
+        mapping_evidence.nonfinite = !pose_finite ||
+            accepted_measurement_nonfinite;
+        mapping_evidence.physical_impossibility =
+            nonphysical_correction &&
+            std::isfinite(raw_step_m) &&
+            std::isfinite(maximum_allowed_step_m) &&
+            maximum_allowed_step_m > 0.0 &&
+            raw_step_m > maximum_allowed_step_m;
+        mapping_evidence.identity_corruption =
+            accepted_localization_snapshot_.valid &&
+            (accepted_localization_snapshot_.map_generation !=
+                 localization_map_generation_ ||
+             accepted_localization_snapshot_.map_uuid !=
+                 localization_map_uuid_ ||
+             accepted_localization_snapshot_.continuity_generation !=
+                 localization_continuity_generation_.load(
+                     std::memory_order_acquire));
+        MappingSegmentSnapshot mapping_segment =
+            mapping_segment_manager_.snapshot();
+        const BoundedMappingArchiveMetrics archive_runtime_metrics =
+            mapping_archive_queue_.metrics();
+        if (archive_runtime_metrics.archive_incomplete &&
+            mapping_segment.active) {
+            mapping_segment_manager_.markArchiveIncomplete(
+                archive_runtime_metrics.reason);
+            mapping_segment = mapping_segment_manager_.snapshot();
+            mapping_writes_allowed_.store(false,
+                                           std::memory_order_release);
+            ROS_ERROR("[MappingArchive] segment marked ARCHIVE_INCOMPLETE: %s",
+                      archive_runtime_metrics.reason.c_str());
+        }
+        mapping_evidence.io_paused = mapping_archive_config_.enabled &&
+            (mapping_segment.active ||
+             mapping_segment.state ==
+                 MappingSegmentState::ARCHIVE_INCOMPLETE) &&
+            !mapping_archive_queue_.healthyForCriticalArchive();
+        mapping_runtime_decision_ =
+            mapping_runtime_policy_.update(mapping_evidence);
+        mapping_writes_allowed_.store(
+            mapping_runtime_decision_.trusted_writes_allowed,
+            std::memory_order_release);
+        if (mapping_runtime_decision_.transition) {
+            // The transition is the write-authority linearization point.
+            // An in-flight MapCommit finishes before it, or sees the new
+            // epoch/closed write bit afterwards; it cannot straddle Code31.
+            std::lock_guard<std::mutex> lifecycle_lock(
+                map_commit_lifecycle_mutex_);
+            advanceMappingAuthorityEpoch();
+            if (mapping_runtime_decision_.state ==
+                MappingAuthorityState::FAIL_CLOSED) {
+                mapping_segment_manager_.failClosed(
+                    mapping_runtime_decision_.reason);
+                archiveSegmentState(
+                    MappingArchivePriority::CERTIFICATION_CRITICAL);
+                invalidateAcceptedLocalizationContinuity();
+                relocalization_pose_reliable_ = false;
+                relocalization_force_global_ = false;
+                relocalization_state_ = RelocalizationState::DEGRADED;
+                startup_localization_state_ =
+                    StartupLocalizationState::WAITING_STATIONARY;
+                publishRelocalizationSafetyInvalid(
+                    stamp, "mapping_fail_closed:" +
+                        mapping_runtime_decision_.reason);
+                relocalization_invalid_safety_published_ = true;
+            }
+            ROS_WARN(
+                "[MAPPING_AUTHORITY] state=%s reason=%s hard_frames=%d "
+                "hard_duration=%.3f",
+                mappingAuthorityStateName(mapping_runtime_decision_.state),
+                mapping_runtime_decision_.reason.c_str(),
+                mapping_runtime_decision_.consecutive_hard_failure_frames,
+                mapping_runtime_decision_.hard_failure_duration_sec);
+        }
+        if (mapping_runtime_decision_.state ==
+            MappingAuthorityState::FAIL_CLOSED) {
+            localization_health_reason_ = "mapping_fail_closed:" +
+                mapping_runtime_decision_.reason;
+            publishLocalizationHealth(stamp);
+            return;
+        }
+    }
 
     if (!persistent_localization_map_present_) {
         localization_health_decision_.frame_qualified = ndt_accepted;
@@ -12215,6 +13274,10 @@ void NdtSlamNode::resetStationaryState(const std::string& reason) {
 void NdtSlamNode::handleLidarTimeRollback(
     const ros::Time& previous_stamp,
     const ros::Time& current_stamp) {
+    // Every source-time epoch change invalidates asynchronous map lineage,
+    // even when the rollback is too small to qualify as an immediate Code31.
+    // A severe rollback is additionally latched by MappingRuntimePolicy.
+    invalidateAcceptedLocalizationContinuity();
     resetCargoForHookState(false);
     cargo_marker_lifecycle_.reset();
     last_cargo_pipeline_stamp_ = ros::Time();
@@ -12640,6 +13703,10 @@ bool NdtSlamNode::loadPersistentStaticEvidence() {
 }
 
 bool NdtSlamNode::writePersistentStaticEvidence() {
+    if (static_map_build_fail_closed_profile_ &&
+        !trustedMappingWritesAllowed()) {
+        return false;
+    }
     std::lock_guard<std::mutex> persistence_lock(
         static_evidence_persistence_mutex_);
     const auto snapshot = static_obstacle_evidence_index_.snapshot();
@@ -13609,6 +14676,11 @@ bool NdtSlamNode::publishPersistentDisplayMapFromTiles() {
 
 void NdtSlamNode::flushDirtyTiles() {
     if (!persistent_map_enabled_) return;
+    if (static_map_build_fail_closed_profile_ &&
+        !trustedMappingWritesAllowed()) {
+        flush_tiles_pending_.store(true, std::memory_order_release);
+        return;
+    }
     std::lock_guard<std::mutex> control_lock(tile_flush_control_mutex_);
     const bool persist_static_evidence =
         static_evidence_persistence_dirty_.exchange(
@@ -14228,7 +15300,9 @@ bool NdtSlamNode::canCommit() {
         && !disk_guard_triggered_
         && !ndt_health_bad_
         && relocalization_pose_reliable_
-        && !tracking_lost_.load(std::memory_order_acquire);
+        && !tracking_lost_.load(std::memory_order_acquire)
+        && (!static_map_build_fail_closed_profile_ ||
+            trustedMappingWritesAllowed());
 }
 
 // ========== 内存保护实现 ==========
@@ -14851,6 +15925,17 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     identity_context.hook_containment_margin_m = 0.10F;
     identity_context.maximum_hook_center_distance_m =
         odom_anchor_config_.tight_box.max_center_offset_m;
+    identity_context.size_aware_hook_gate = true;
+    identity_context.learned_cargo_to_hook_offset_valid =
+        hook_lock_.cargo_to_hook_offset_valid;
+    identity_context.learned_cargo_to_hook_offset =
+        hook_lock_.cargo_to_hook_offset;
+    identity_context.hook_xy_uncertainty_m = std::max(
+        hook_lock_.horizontal_tracking_residual_m,
+        hook_lock_.live_pose.valid
+            ? hook_lock_.live_pose.position_uncertainty_m : 0.0F);
+    identity_context.maximum_dynamic_hook_center_distance_m =
+        hook_lock_config_.cargo_to_hook_offset_max_m;
     identity_context.maximum_hook_normalized_offset =
         odom_anchor_config_.tight_box.maximum_hook_normalized_offset;
     identity_context.association_radius_m =
@@ -15906,18 +16991,24 @@ void NdtSlamNode::updateLiveCargoPose(
         raw_measured.x() = det.footprint_center_base.x();
         raw_measured.y() = det.footprint_center_base.y();
     }
-    // det.center_base already applies strict/soft/off anchor policy. Keep the
-    // raw PCA centre only as association/swing evidence.
-    Eigen::Vector3f measured = det.center_base;
-    // Every identity reaching this function is an odom-anchored cargo track;
-    // new identities were already gated by valid gravity LOADED (unless the
-    // operator explicitly disabled that sensor). Enforce the physical model
-    // here as a configuration-independent invariant. This function can be
-    // called while the gravity policy mutex is held, so it deliberately does
-    // not acquire another hook snapshot.
+    const bool complete_xy_observation =
+        det.oriented_footprint_valid &&
+        !det.oriented_footprint_clamped &&
+        det.identity_confidence >=
+            hook_lock_config_.minimum_identity_confidence &&
+        det.overall_lock_confidence >=
+            hook_lock_config_.minimum_overall_lock_confidence &&
+        det.candidate_score_margin >=
+            hook_lock_config_.minimum_candidate_score_margin &&
+        det.core_points_base &&
+        det.core_points_base->size() >= static_cast<std::size_t>(
+            std::max(1, hook_lock_config_.locked_update_min_points));
+    // The hook is an identity/continuity anchor, never an unconditional
+    // safety-centre replacement.  Complete scans use the measured OBB centre;
+    // partial scans retain the last trusted offset or the bounded motion
+    // prediction and grow uncertainty below.
+    Eigen::Vector3f measured = raw_measured;
     const Eigen::Vector2f anchor = getCargoAnchorXY();
-    measured.x() = anchor.x();
-    measured.y() = anchor.y();
     const double stamp_sec = stamp.toSec();
     if (hook_lock_.live_pose.valid &&
         stamp_sec <= hook_lock_.live_pose.evidence_stamp_sec + 1.0e-4) {
@@ -15928,6 +17019,21 @@ void NdtSlamNode::updateLiveCargoPose(
         ? std::max(
               0.0, stamp_sec - hook_lock_.live_pose.evidence_stamp_sec)
         : 0.0;
+    if (!complete_xy_observation) {
+        if (hook_lock_.live_pose.valid) {
+            const Eigen::Vector2f predicted_xy =
+                hook_lock_.live_pose.center_base.head<2>() +
+                hook_lock_.live_pose_velocity_base.head<2>() *
+                    static_cast<float>(measurement_dt);
+            measured.x() = predicted_xy.x();
+            measured.y() = predicted_xy.y();
+        } else if (hook_lock_.cargo_to_hook_offset_valid) {
+            const Eigen::Vector2f held_xy =
+                anchor + hook_lock_.cargo_to_hook_offset;
+            measured.x() = held_xy.x();
+            measured.y() = held_xy.y();
+        }
+    }
     const float predicted_z = hook_lock_.live_pose.valid
         ? hook_lock_.live_pose.center_base.z() +
               std::clamp(
@@ -16077,9 +17183,7 @@ void NdtSlamNode::updateLiveCargoPose(
     }
     const bool current_frame_formal_vertical_measurement =
         vertical_source == CargoVerticalPoseSource::DIRECT_TOP ||
-        vertical_source == CargoVerticalPoseSource::DIRECT_BOTTOM ||
-        vertical_source ==
-            CargoVerticalPoseSource::LOCKED_OBB_POINT_SUPPORT;
+        vertical_source == CargoVerticalPoseSource::DIRECT_BOTTOM;
     const bool previous_provisional_median =
         hook_lock_.live_pose.vertical_source ==
             CargoVerticalPoseSource::PROVISIONAL_MEDIAN &&
@@ -16125,8 +17229,15 @@ void NdtSlamNode::updateLiveCargoPose(
         vertical_residual,
         hook_lock_config_.residual_uncertainty_decay *
             hook_lock_.vertical_tracking_residual_m);
-    hook_lock_.live_pose.position_uncertainty_m = std::max(
-        0.08F, hook_lock_.horizontal_tracking_residual_m);
+    hook_lock_.live_pose.position_uncertainty_m = complete_xy_observation
+        ? std::max(0.08F, hook_lock_.horizontal_tracking_residual_m)
+        : std::min(
+              hook_lock_config_.lost_position_uncertainty_max_m,
+              std::max(
+                  0.08F,
+                  hook_lock_.live_pose.position_uncertainty_m +
+                      hook_lock_config_
+                          .partial_observation_uncertainty_growth_m));
     const double direct_bottom_age =
         hook_lock_.direct_bottom_evidence_stamp.isZero()
             ? hook_lock_config_.direct_bottom_soft_stale_sec
@@ -16150,6 +17261,50 @@ void NdtSlamNode::updateLiveCargoPose(
     }
     hook_lock_.direct_bottom_support_valid = accepted_direct_bottom;
     hook_lock_.locked_center_base = hook_lock_.live_pose.center_base;
+    const HookLoadSnapshot current_hook = currentHookLoadSnapshot();
+    const bool offset_learning_authorized = complete_xy_observation &&
+        source == CargoPoseSource::CURRENT_ASSOCIATED_LIDAR &&
+        hook_lock_.state == HookCargoLockState::LOCKED &&
+        cargo_lifecycle_id_ != 0U &&
+        hook_lock_.locked_shape.valid &&
+        cargo_frozen_geometry_.formal_authorized &&
+        !cargo_frozen_geometry_.source_conflict &&
+        current_hook.valid &&
+        current_hook.state ==
+            lidar_slam2_msgs::HookLoadState::STATE_LOADED &&
+        last_cargo_safety_result_.warning_code !=
+            CargoSafetyEvaluator::kReviewCode &&
+        det.candidate_count > 0U &&
+        det.candidate_score_margin >=
+            hook_lock_config_.minimum_candidate_score_margin;
+    if (offset_learning_authorized) {
+        Eigen::Vector2f candidate_offset =
+            raw_measured.head<2>() - anchor;
+        const float candidate_norm = candidate_offset.norm();
+        if (candidate_offset.allFinite() &&
+            candidate_norm <=
+                hook_lock_config_.cargo_to_hook_offset_max_m) {
+            if (!hook_lock_.cargo_to_hook_offset_valid) {
+                hook_lock_.cargo_to_hook_offset = candidate_offset;
+                hook_lock_.cargo_to_hook_offset_valid = true;
+            } else {
+                Eigen::Vector2f update =
+                    candidate_offset - hook_lock_.cargo_to_hook_offset;
+                const float update_norm = update.norm();
+                if (update_norm >
+                        hook_lock_config_
+                            .cargo_to_hook_offset_max_update_per_frame_m &&
+                    update_norm > 1.0e-6F) {
+                    update *= hook_lock_config_
+                                  .cargo_to_hook_offset_max_update_per_frame_m /
+                        update_norm;
+                }
+                hook_lock_.cargo_to_hook_offset +=
+                    hook_lock_config_.cargo_to_hook_offset_alpha * update;
+            }
+            ++hook_lock_.cargo_to_hook_offset_updates;
+        }
+    }
 }
 
 void NdtSlamNode::rememberTrustedCargoPose(const ros::Time& stamp) {
@@ -16158,8 +17313,6 @@ void NdtSlamNode::rememberTrustedCargoPose(const ros::Time& stamp) {
     const bool physical_vertical_measurement =
         vertical_source == CargoVerticalPoseSource::DIRECT_TOP ||
         vertical_source == CargoVerticalPoseSource::DIRECT_BOTTOM ||
-        vertical_source ==
-            CargoVerticalPoseSource::LOCKED_OBB_POINT_SUPPORT ||
         vertical_source == CargoVerticalPoseSource::PROVISIONAL_MEDIAN;
     if (stamp.isZero() || cargo_lifecycle_id_ == 0U ||
         cargo_track_segment_id_ == 0U ||
@@ -18194,8 +19347,12 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
     bool apply_anomaly_review_episode) {
     using Status = lidar_slam2_msgs::CargoSafetyStatus;
 
+    const bool mapping_fail_closed = static_map_build_fail_closed_profile_ &&
+        mapping_runtime_decision_.state ==
+            MappingAuthorityState::FAIL_CLOSED;
     const bool system_ready = running_.load() &&
-        !status.header.stamp.isZero() && evidence_initialized;
+        !status.header.stamp.isZero() && evidence_initialized &&
+        (mapping_fail_closed || staticMapCollectionSystemReady());
     const bool localization_valid =
         !tracking_lost_.load() && relocalization_pose_reliable_ &&
         (relocalization_state_ == RelocalizationState::IDLE ||
@@ -18349,6 +19506,13 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
     decision_input.formal_cargo_valid =
         lidar_cargo_accepted && formal_cargo_authorized;
     decision_input.formal_clear_authorized = formal_clear_authorized;
+    const auto static_authority_snapshot =
+        static_obstacle_evidence_index_.snapshot();
+    decision_input.clear_authority_incomplete =
+        static_map_build_fail_closed_profile_ &&
+        (!static_authority_snapshot ||
+         static_authority_snapshot->authority !=
+             StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE);
     decision_input.obstacle_evidence_ready = warning_valid &&
         warning_code_valid &&
         (status.obstacle_valid || use_provisional_warning);
@@ -18474,7 +19638,8 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
     bool provisional_static_geometry_authorized,
     float provisional_confidence,
     float provisional_cargo_bottom_z_map,
-    float provisional_cargo_bottom_uncertainty_m) {
+    float provisional_cargo_bottom_uncertainty_m,
+    bool internal_contract_error) {
     const bool lidar_no_cargo =
         lidar_no_cargo_evidence_.result().confirmed && !visual_conflict;
     const bool safe_empty =
@@ -18550,7 +19715,9 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
         ? static_cast<std::uint16_t>(provisional_warning_code)
         : (safe_empty ? CargoSafetyEvaluator::kSafeCode : 0U);
     status = composeCargoSafetyStatus(
-        status, visual_conflict, CargoSafetyFault::NONE,
+        status, visual_conflict,
+        internal_contract_error ? CargoSafetyFault::INTERNAL_ERROR
+                                : CargoSafetyFault::NONE,
         decision_warning_code,
         safe_empty || has_provisional_warning_geometry,
         reason.empty() ? hook.reason : reason,
@@ -19650,8 +20817,6 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
             current_vertical_source == CargoVerticalPoseSource::DIRECT_TOP ||
             current_vertical_source ==
                 CargoVerticalPoseSource::DIRECT_BOTTOM ||
-            current_vertical_source ==
-                CargoVerticalPoseSource::LOCKED_OBB_POINT_SUPPORT ||
             current_vertical_source ==
                 CargoVerticalPoseSource::PROVISIONAL_MEDIAN;
         const double vertical_evidence_age_sec =
@@ -20768,6 +21933,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
                 evidence.footprint_distance_m;
             observation.conservative_clearance_m =
                 evidence.conservative_clearance_m;
+            observation.horizontal_uncertainty_m = std::max(
+                0.0F, envelope.horizontal_uncertainty_m);
             observation.point_count = evidence.point_count;
             observation.warning_code = warning_eligible
                 ? evidence.warning_code
@@ -20851,6 +22018,13 @@ void NdtSlamNode::runPendingCargoAvoidance(
                 if (static_decision.authorized) {
                     observation.provenance =
                         static_decision.provenance;
+                    const auto authority_snapshot =
+                        static_obstacle_evidence_index_.snapshot();
+                    observation.certified_static_provenance =
+                        authority_snapshot &&
+                        authority_snapshot->authority ==
+                            StaticEvidenceAuthority::
+                                OPERATOR_APPROVED_BASELINE;
                 }
             }
             if (!raw_warning_candidate && acquisition_pretrack) {
@@ -21222,6 +22396,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
         pending_obstacle_decision.selected_far_field_history_valid;
     fusion_input.live.provenance_valid =
         fusion_input.pending_external_provenance_valid;
+    fusion_input.live.certified_static_provenance =
+        pending_obstacle_decision.selected_certified_static_provenance;
     fusion_input.live.validated_streak =
         pending_obstacle_decision.selected_confirm_count;
     if (selected_pending_evidence != nullptr) {
@@ -21251,10 +22427,48 @@ void NdtSlamNode::runPendingCargoAvoidance(
         pending_static_decision.far_field_history_valid;
     fusion_input.static_map.provenance_valid =
         fusion_input.pending_static_provenance_valid;
+    fusion_input.static_map.certified_static_provenance =
+        static_result.strongest_authority ==
+            StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE;
     fusion_input.static_map.validated_streak =
         pending_static_decision.confirmations;
     CargoAvoidanceFusionResult fused = fuseCargoAvoidanceRisk(
         fusion_input, cargo_avoidance_fusion_config_);
+    CargoFrameDecision pending_frame_decision;
+    pending_frame_decision.stamp_sec = stamp.toSec();
+    pending_frame_decision.cargo_identity_confirmed_this_frame =
+        pending_cargo_self_evidence_.positive_warning_identity_authorized &&
+        hook_lock_.confirm_count ==
+            hook_lock_config_.candidate_required_consistent_frames;
+    pending_frame_decision.cargo_identity_authorized =
+        pending_identity_context_valid &&
+        pending_cargo_self_evidence_.positive_warning_identity_authorized;
+    pending_frame_decision.cargo_lifecycle_id = cargo_lifecycle_id_;
+    pending_frame_decision.cargo_track_id = pending_track_context_id;
+    pending_frame_decision.positive_warning_confirmed_this_frame =
+        fused.official_valid &&
+        (fused.official_code == CargoSafetyEvaluator::kLevel1Code ||
+         fused.official_code == CargoSafetyEvaluator::kLevel2Code);
+    pending_frame_decision.warning_code = fused.official_code;
+    pending_frame_decision.authoritative_hazard_valid =
+        fused.authoritative_hazard.valid;
+    pending_frame_decision.authoritative_warning_code =
+        fused.authoritative_hazard.warning_code;
+    pending_frame_decision.warning_cargo_lifecycle_id =
+        fused.authoritative_hazard.cargo_lifecycle_id;
+    pending_frame_decision.warning_cargo_track_id =
+        fused.authoritative_hazard.cargo_track_id;
+    pending_frame_decision.obstacle_track_id =
+        fused.authoritative_hazard.obstacle_track_id;
+    const CargoFrameCommitDecision pending_frame_commit =
+        commitCargoFrameDecision(pending_frame_decision);
+    if (!pending_frame_commit.authorized) {
+        fused.official_valid = false;
+        fused.official_code = CargoSafetyProtocol::kInternalError;
+        fused.reason = pending_frame_commit.reason;
+        fused.provisional_status = "CONTRACT_MISMATCH";
+        fused.authoritative_hazard = AuthoritativeCargoHazard{};
+    }
 
     std_msgs::String debug;
     std::ostringstream stream;
@@ -21733,7 +22947,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
         provisional_static_geometry_authorized,
         provisional_confidence,
         provisional_cargo_bottom_z_map,
-        envelope.vertical_uncertainty_m);
+        envelope.vertical_uncertainty_m,
+        !pending_frame_commit.authorized);
 
     visualization_msgs::Marker marker;
     marker.header.stamp = stamp;
@@ -22245,6 +23460,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     // known loaded cargo disappear during occlusion or a small-cluster frame.
     const bool active_track = cargoTrackRetained() &&
         cargo_state_.valid_geometry;
+    const bool identity_confirmed_this_frame =
+        active_track && !cargo_fusion_track_active_;
     CargoPresenceInput presence_input;
     presence_input.stamp_sec = stamp.toSec();
     presence_input.gravity_enabled = hook_load_signal_enabled_;
@@ -22661,7 +23878,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         // refreshed to the current tick.
         last_cargo_bottom_result_.stamp_sec = stamp.toSec();
         // Frozen thickness persists, but bottom position authority advances
-        // only with DIRECT_TOP/DIRECT_BOTTOM/LOCKED_OBB_POINT_SUPPORT.
+        // only with DIRECT_BOTTOM or supported-top-minus-frozen-height.
         last_cargo_bottom_result_.evidence_stamp_sec =
             formal_height.evidence_stamp_sec;
         last_cargo_bottom_result_.source = formal_height.source;
@@ -23693,6 +24910,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 evidence.footprint_distance_m;
             observation.conservative_clearance_m =
                 evidence.conservative_clearance_m;
+            observation.horizontal_uncertainty_m = std::max(
+                0.0F, formal_use.horizontal_uncertainty_m);
             observation.point_count = evidence.point_count;
             // The subscribed obstacle cloud is already voxelized, so an
             // honest raw-return count is unavailable. Keep raw-equivalent at
@@ -23807,6 +25026,12 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             }
             if (static_decision.authorized) {
                 observation.provenance = static_decision.provenance;
+                const auto authority_snapshot =
+                    static_obstacle_evidence_index_.snapshot();
+                observation.certified_static_provenance =
+                    authority_snapshot &&
+                    authority_snapshot->authority ==
+                        StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE;
             } else {
                 observation.provenance =
                     evidence.source_validated &&
@@ -24467,6 +25692,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     avoidance_input.live.provenance_valid =
         obstacle_track_decision.selected_provenance !=
             ExternalProvenance::NONE;
+    avoidance_input.live.certified_static_provenance =
+        obstacle_track_decision.selected_certified_static_provenance;
     avoidance_input.live.validated_streak =
         obstacle_track_decision.selected_confirm_count;
     if (selected_source_evidence != nullptr) {
@@ -24497,12 +25724,54 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         formal_static_hazard_decision.far_field_history_valid;
     avoidance_input.static_map.provenance_valid =
         avoidance_input.static_risk_contract_valid;
+    avoidance_input.static_map.certified_static_provenance =
+        static_height_result.strongest_authority ==
+            StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE;
     avoidance_input.static_map.validated_streak =
         formal_static_hazard_decision.confirmations;
 
     CargoAvoidanceFusionResult fused_avoidance =
         fuseCargoAvoidanceRisk(
             avoidance_input, cargo_avoidance_fusion_config_);
+    CargoFrameDecision cargo_frame_decision;
+    cargo_frame_decision.stamp_sec = stamp.toSec();
+    cargo_frame_decision.cargo_identity_confirmed_this_frame =
+        identity_confirmed_this_frame;
+    cargo_frame_decision.cargo_identity_authorized = active_track;
+    cargo_frame_decision.cargo_lifecycle_id = cargo_lifecycle_id_;
+    cargo_frame_decision.cargo_track_id = cargo_fusion_track_id_;
+    cargo_frame_decision.positive_warning_confirmed_this_frame =
+        fused_avoidance.official_valid &&
+        (fused_avoidance.official_code ==
+             CargoSafetyEvaluator::kLevel1Code ||
+         fused_avoidance.official_code ==
+             CargoSafetyEvaluator::kLevel2Code);
+    cargo_frame_decision.warning_code = fused_avoidance.official_code;
+    cargo_frame_decision.authoritative_hazard_valid =
+        fused_avoidance.authoritative_hazard.valid;
+    cargo_frame_decision.authoritative_warning_code =
+        fused_avoidance.authoritative_hazard.warning_code;
+    cargo_frame_decision.warning_cargo_lifecycle_id =
+        fused_avoidance.authoritative_hazard.cargo_lifecycle_id;
+    cargo_frame_decision.warning_cargo_track_id =
+        fused_avoidance.authoritative_hazard.cargo_track_id;
+    cargo_frame_decision.obstacle_track_id =
+        fused_avoidance.authoritative_hazard.obstacle_track_id;
+    const CargoFrameCommitDecision cargo_frame_commit =
+        commitCargoFrameDecision(cargo_frame_decision);
+    if (!cargo_frame_commit.authorized) {
+        // Fail closed at the message boundary. A half-updated
+        // AuthoritativeHazard is code 35, never 29/34 or a normal warning.
+        fused_avoidance.official_valid = false;
+        fused_avoidance.official_code = CargoSafetyProtocol::kInternalError;
+        fused_avoidance.reason = cargo_frame_commit.reason;
+        fused_avoidance.authoritative_hazard = AuthoritativeCargoHazard{};
+        last_cargo_safety_result_ = CargoSafetyResult{};
+        last_cargo_safety_result_.fault = CargoSafetyFault::INTERNAL_ERROR;
+        last_cargo_safety_result_.evidence_state =
+            CargoSafetyEvidenceState::HARD_FAULT;
+        last_cargo_safety_result_.reason = cargo_frame_commit.reason;
+    }
     if (fused_avoidance.official_valid &&
         fused_avoidance.official_code ==
             CargoSafetyEvaluator::kReviewCode) {
@@ -24641,7 +25910,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                (fused_avoidance.reason ==
                     "motion_not_authoritative_warning_suppressed_track_preserved" ||
                 fused_avoidance.reason ==
-                    "near_field_track_missing_far_history")) {
+                    "warning_track_missing_true_far_history")) {
         // These are deliberate code-33 gates, not obstacle-source failures:
         // keep the track alive while withholding 17/18 and CLEAR.
         last_cargo_safety_result_ = CargoSafetyResult{};
@@ -25102,9 +26371,11 @@ void NdtSlamNode::addCargoDenyCells(const Eigen::Vector3d& bbox_min, const Eigen
     int y_min = std::floor(bbox_min.y() / bev_res);
     int y_max = std::floor(bbox_max.y() / bev_res);
 
+    std::set<std::pair<int, int>> touched_cells;
     for (int x = x_min; x <= x_max; x++) {
         for (int y = y_min; y <= y_max; y++) {
             auto key = std::make_pair(x, y);
+            touched_cells.insert(key);
             auto it = cargo_deny_history_.find(key);
             if (it != cargo_deny_history_.end()) {
                 it->second.last_seen_time = current_time;
@@ -25118,6 +26389,11 @@ void NdtSlamNode::addCargoDenyCells(const Eigen::Vector3d& bbox_min, const Eigen
             }
         }
     }
+    // Cargo deny is negative safety evidence. Revoke the corresponding
+    // static authority in this frame even when an older clean worker is still
+    // running; its lineage/tombstone check prevents stale re-authorization.
+    invalidateCleanDenyCellsImmediately(
+        touched_cells, static_cast<float>(bev_res), current_time);
 }
 
 bool NdtSlamNode::isCargoDenied(double x, double y, double current_time) const {
@@ -26447,6 +27723,13 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
             objects_after_cargo_base, T_map_base, stamp.toSec(),
             objects_after_human_base, human_candidates_base,
             human_dynamic_base, human_pending_base);
+        if (dynamic_event_config_.enable_human_history_clean &&
+            human_dynamic_base && !human_dynamic_base->empty()) {
+            invalidateCleanDenyCellsImmediately(
+                human_filter_.getDenyCellsSnapshot(
+                    0.15, stamp.toSec()),
+                0.15F, stamp.toSec());
+        }
 
         rejected_as_human_count = objects_after_cargo_base->size() - objects_after_human_base->size();
 
@@ -26786,6 +28069,11 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                         inserted.first->second.max_z, item.second.max_z);
                 }
             }
+            // A visible support-surface return revokes old occupied
+            // authority in this accepted MapCommit frame. Do not wait for a
+            // clean worker slot.
+            invalidateStaticAuthorityImmediately(
+                observed_free_static_cells, stamp.toSec());
         }
 
         ROS_DEBUG("[BevObsUpdate] seq=%d object_points=%zu unique_cells=%zu total_obs_cells=%zu",
@@ -27175,9 +28463,11 @@ void NdtSlamNode::addCargoDenyVolume3D(const CargoBox& remove_box, double curren
     float z_min = remove_box.bbox_min.z() - 0.05;  // z_margin_down
     float z_max = remove_box.bbox_max.z() + 0.15;  // z_margin_up
 
+    std::set<std::pair<int, int>> touched_cells;
     for (int ix = x_min; ix <= x_max; ix++) {
         for (int iy = y_min; iy <= y_max; iy++) {
             auto key = std::make_pair(ix, iy);
+            touched_cells.insert(key);
 
             DynamicDenyVolume3D volume;
             volume.ix = ix;
@@ -27191,6 +28481,9 @@ void NdtSlamNode::addCargoDenyVolume3D(const CargoBox& remove_box, double curren
             dynamic_deny_volume_map_[key].push_back(volume);
         }
     }
+    invalidateCleanDenyCellsImmediately(
+        touched_cells, static_cast<float>(dynamic_deny_resolution_),
+        current_time);
 }
 
 void NdtSlamNode::cleanupExpiredCargoDenyVolumes3D(double current_time)

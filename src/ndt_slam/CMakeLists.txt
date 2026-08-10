@@ -132,11 +132,18 @@ set(LIBRARY_SOURCES
   src/ndt_relocalizer.cpp
   src/relocalization_confirmation_policy.cpp
   src/localization_health_policy.cpp
+  src/mapping_runtime_policy.cpp
+  src/mapping_segment_manager.cpp
+  src/bounded_mapping_archive_queue.cpp
+  src/sensor_body_self_mask.cpp
+  src/tracking_ephemeral_shadow.cpp
+  src/sha256.cpp
   # Runtime diagnostics (1.0x/1.5x acceptance testing)
   src/runtime_diagnostics.cpp
   # Formal cargo bottom and structured safety-status pipeline
   src/cargo_bottom_fusion.cpp
   src/clean_map_builder.cpp
+  src/clean_worker_lineage.cpp
   src/cargo_oriented_footprint.cpp
   src/cargo_track_policy.cpp
   src/cargo_component_fusion.cpp
@@ -153,6 +160,7 @@ set(LIBRARY_SOURCES
   src/cargo_preload_baseline_tracker.cpp
   src/cargo_geometry_fusion.cpp
   src/cargo_avoidance_fusion.cpp
+  src/cargo_frame_decision.cpp
   src/anomaly_review_episode_tracker.cpp
   src/pending_static_hazard_tracker.cpp
   src/cargo_presence_state_machine.cpp
@@ -234,6 +242,17 @@ target_link_libraries(hook_load_state_node
   ndt_slam_lib
   ${catkin_LIBRARIES}
   ${NDT_SLAM_YAML_CPP_TARGET}
+)
+
+# Offline only: this executable is never linked into the live LiDAR callback.
+add_executable(static_map_rebuilder src/static_map_rebuilder.cpp)
+add_dependencies(static_map_rebuilder ${catkin_EXPORTED_TARGETS})
+target_link_libraries(static_map_rebuilder
+  ndt_slam_lib
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${NDT_SLAM_YAML_CPP_TARGET}
+  g2o::core g2o::stuff g2o::types_slam3d g2o::solver_eigen
 )
 
 if(CATKIN_ENABLE_TESTING)
@@ -554,11 +573,53 @@ if(CATKIN_ENABLE_TESTING)
     target_link_libraries(runtime_diagnostics_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
+
+  catkin_add_gtest(clean_worker_lineage_test
+    test/clean_worker_lineage_test.cpp)
+  if(TARGET clean_worker_lineage_test)
+    target_link_libraries(clean_worker_lineage_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_frame_decision_test
+    test/cargo_frame_decision_test.cpp)
+  if(TARGET cargo_frame_decision_test)
+    target_link_libraries(cargo_frame_decision_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(mapping_runtime_policy_test
+    test/mapping_runtime_policy_test.cpp)
+  if(TARGET mapping_runtime_policy_test)
+    target_link_libraries(mapping_runtime_policy_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(sensor_body_self_mask_test
+    test/sensor_body_self_mask_test.cpp)
+  if(TARGET sensor_body_self_mask_test)
+    target_link_libraries(sensor_body_self_mask_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(bounded_mapping_archive_queue_test
+    test/bounded_mapping_archive_queue_test.cpp)
+  if(TARGET bounded_mapping_archive_queue_test)
+    target_link_libraries(bounded_mapping_archive_queue_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(mapping_segment_manager_test
+    test/mapping_segment_manager_test.cpp)
+  if(TARGET mapping_segment_manager_test)
+    target_link_libraries(mapping_segment_manager_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
 endif()
 
 install(TARGETS ndt_slam_lib ndt_slam_node pointcloud_merger cloud_diagnostics
                 cargo_forbidden_zone_node cargo_alarm_heartbeat_node
-                hook_load_state_node
+                hook_load_state_node static_map_rebuilder
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
@@ -581,6 +642,9 @@ catkin_install_python(PROGRAMS
   scripts/ops/ndt_recovery_watchdog.py
   scripts/ops/server_runtime_monitor.py
   scripts/ops/summarize_server_run.py
+  scripts/offline/offline_common.py
+  scripts/offline/static_map_certifier.py
+  scripts/offline/baseline_installer.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

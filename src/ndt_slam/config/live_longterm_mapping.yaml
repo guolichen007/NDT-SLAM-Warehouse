@@ -2,6 +2,62 @@
 # 用于 warehouse_live_longterm_mapping.launch
 
 # 调试选项
+# Fail-Closed applies to the SLAM/map data path only. It never emits a crane,
+# PLC, motor, Modbus or emergency-stop command.
+runtime_profile: "STATIC_MAP_BUILD_FAIL_CLOSED"
+mapping_authority:
+  # Reuse the existing degraded-frame window (relocalization.trigger_frames)
+  # instead of introducing a more sensitive independent production threshold.
+  inherit_degraded_frame_window: true
+  confirmed_hard_failure_duration_sec: 0.4
+
+tracking_ephemeral_map:
+  enabled: false
+  bind_to_ndt_target: false
+  shadow_diagnostics_only: true
+  ttl_sec: 2.0
+
+# Offline-only evidence grouping. A cell observed again after this gap starts
+# a new episode even within the same continuous localization segment.
+offline_certification:
+  episode_gap_sec: 10.0
+  # Offline-only robust vertical support. Extreme returns outside the
+  # per-cell histogram quantiles cannot create a certified Z spike.
+  robust_z_bin_size_m: 0.05
+  robust_z_lower_quantile: 0.01
+  robust_z_upper_quantile: 0.99
+  robust_z_margin_m: 0.05
+
+# Must be commissioned from RViz against the actual rigid sensor/trolley
+# frame before an operator can start a formal mapping segment. Preview topics
+# remain available while commissioned=false.
+sensor_body_self_mask:
+  enabled: true
+  commissioned: false
+  frame_id: "base_link"
+  center_xyz_m: [0.0, 0.0, 0.0]
+  size_xyz_m: [0.0, 0.0, 0.0]
+  yaw_deg: 0.0
+  maximum_removed_ratio: 0.35
+
+# Disk serialization is performed by a dedicated worker. Both limits apply;
+# max_jobs is intentionally 8, never the historical unsafe value 256.
+mapping_archive:
+  enabled: true
+  root_dir: "/home/ydkj/NDT-slam-ws/maps/static_campaign"
+  max_jobs: 8
+  max_queue_mib: 256
+  max_oldest_job_age_sec: 10.0
+  max_write_latency_ms: 5000.0
+  minimum_free_disk_gb: 20.0
+
+# Deployment must set both identities explicitly. Empty values deliberately
+# keep Code30/WAIT_OPERATOR and make Trusted/Persistent writes impossible.
+mapping_campaign:
+  root_dir: "/home/ydkj/NDT-slam-ws/maps/static_campaign"
+  campaign_uuid: ""
+  survey_pass_id: ""
+
 debug:
   publish_runtime_path: false  # runtime_path 只是显示辅助，不参与算法
   runtime_diagnostics:
@@ -98,7 +154,9 @@ ndt_omp:
 # latest-only worker searches; two independent results must agree before the
 # pose, EKF and Cargo state are switched.
 relocalization:
-  enabled: true
+  # Collection mode never relocalizes/reseeds or enters VERIFYING. Code31 is
+  # cleared only by the operator creating a new mapping segment.
+  enabled: false
   trigger_frames: 5
   global_trigger_frames: 15
   confirm_frames: 3
@@ -182,7 +240,9 @@ feature_extraction:
 
 # 闭环检测
 loop_closure:
-  enabled: true
+  # Online pose-graph mutation is disabled during immutable segment
+  # collection. ScanContext/ICP/g2o run in static_map_rebuilder offline.
+  enabled: false
   detection_interval: 20
 
 scan_context:
@@ -784,11 +844,15 @@ cargo_safety:
   # cargo self-points. It cannot warn until the same track was first observed
   # outside this band, unless authoritative static provenance proves it.
   embedded_obstacle_distance_threshold_m: 0.05
-  # Code 17 requires the same track to complete confirmation outside 3 m.
-  # At the configured operating speed the 7 m acquisition path establishes
-  # this history before the real 5 m/code-18 and 3 m/code-17 boundaries.
-  require_far_field_history_for_level1: true
-  require_static_cargo_for_warning: true
+  # Business contract: formal 17/18 requires the same track's true >5 m
+  # history inside the 8 m acquisition range (or an immutable
+  # certified-static identity). These two evidence
+  # strengths remain field-tunable; 6 frames / 0.5 s is a strict test case,
+  # not a permanent production constant.
+  require_far_field_history_for_warnings: true
+  far_history_confirm_frames: 3
+  far_history_confirm_duration_sec: 0.2
+  require_static_cargo_for_warning: false
   static_cargo_min_voxel_points: 80
   # Disabled until the upstream merged-cloud message carries an honest raw
   # return count; never synthesize a raw count from voxelized points.
@@ -1005,7 +1069,7 @@ cargo_geometry_fusion:
   allow_positive_only_without_static_baseline: true
   positive_only_uncertainty_floor_m: 0.25
   allow_positive_only_on_source_conflict: true
-  positive_only_confirm_frames: 5
+  positive_only_confirm_frames: 3
   minimum_confirm_frames: 5
   # Five good dimension observations are required inside the latest eight;
   # a single partial scan no longer erases the whole same-track window.
@@ -1021,12 +1085,12 @@ cargo_geometry_fusion:
   maximum_height_m: 2.00
   huber_delta_m: 0.20
   configured_bottom_margin_m: 0.10
-  conservative_shrink_confirm_frames: 8
+  conservative_shrink_confirm_frames: 5
   maximum_shrink_per_frame_m: 0.03
-  # Frozen cargo dimensions are lifecycle-stable. A larger observation must
-  # be high confidence and persist continuously; a single merged component
-  # can no longer inflate the formal safety envelope.
-  immediate_expand_enabled: false
+  # A complete, associated high-confidence observation expands the safety
+  # envelope immediately. Shrink remains bounded and requires 5 valid full
+  # observations in the latest 8-frame window.
+  immediate_expand_enabled: true
   conservative_expand_confirm_frames: 8
   minimum_live_shape_confidence_for_expand: 0.85
   minimum_live_dimension_support: 30
@@ -1180,7 +1244,7 @@ hook_cargo_lock:
   lock_confirm_frames: 3
   # Discovery is followed by an identity-aware provisional window. Formal
   # shape/yaw freezing cannot happen from orientation concentration alone.
-  geometry_confirm_frames: 4
+  geometry_confirm_frames: 3
   size_init_window: 5
   # Gravity-confirmed cargo persists through short rotating/occluded views.
   # Five seconds retains the locked identity while uncertainty grows.
@@ -1217,7 +1281,11 @@ hook_cargo_lock:
   # Short gaps stop progress but retain the already confirmed window.
   # candidate_progress_timeout_sec remains the sole stalled-window reset.
   candidate_window_frames: 12
-  candidate_required_consistent_frames: 7
+  candidate_required_consistent_frames: 3
+  cargo_to_hook_offset_max_m: 1.05
+  cargo_to_hook_offset_max_update_per_frame_m: 0.04
+  cargo_to_hook_offset_alpha: 0.15
+  partial_observation_uncertainty_growth_m: 0.04
   # At the 5 Hz detector rate this tolerates a sub-second visibility gap.
   # Gap frames never count as lock evidence.
   candidate_max_gap_frames: 4
@@ -1393,7 +1461,9 @@ odom_anchored_cargo_box:
     # while its raw centre remains available for association/swing evidence.
     # A new identity requires valid gravity LOADED and a measured OBB covering
     # the anchor; adjacent pallets remain external-obstacle evidence.
-    anchor_symmetry_mode: "strict"
+    # Association remains hook-gated, while safety/display use the measured
+    # cargo centre. Partial scans retain the last trusted offset/prediction.
+    anchor_symmetry_mode: "off"
     max_center_offset_m: 0.35
     # The hook must lie in the central 65% of both measured OBB half-axes.
     # A nearby pallet which only overlaps the anchor edge remains an obstacle.

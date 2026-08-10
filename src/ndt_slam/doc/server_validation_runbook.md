@@ -68,7 +68,7 @@ source devel/setup.bash
 export NDT_SLAM_DATA_ROOT="$WS/maps/live/current"
 roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
   use_sim_time:=false use_rviz:=false persistent_map:=true \
-  use_ndt_recovery_watchdog:=true
+  use_ndt_recovery_watchdog:=false
 ```
 
 现阶段 systemd 暂停使用，不安装或启动 unit。保持此终端运行；看门狗请求硬恢复时

@@ -234,7 +234,7 @@ with open(src, 'r') as f:
 if 'persistent_map' not in config:
     config['persistent_map'] = {}
 config['persistent_map']['root_dir'] = sandbox
-config['persistent_map']['enabled'] = True  # must match launch persistent_map:=true
+config['persistent_map']['enabled'] = True  # isolated persistence test override
 
 # Override runtime diagnostics output_dir
 if 'debug' not in config:
@@ -371,6 +371,7 @@ if [[ "$MODE" == "full-chain" ]]; then
     "use_sim_time:=true"
     "use_rviz:=false"
     "use_cargo_visualizer:=false"
+    "persistent_map:=true"
     "config_file:=$GENERATED_CONFIG"
   )
 

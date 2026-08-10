@@ -12,6 +12,7 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <std_srvs/Empty.h>
+#include <std_srvs/Trigger.h>
 #include <std_msgs/String.h>
 #include <std_msgs/Int32.h>
 #include <std_msgs/UInt8.h>
@@ -59,6 +60,7 @@
 #include <ndt_slam/static_height_component_extractor.hpp>
 #include <ndt_slam/static_evidence_authorization.hpp>
 #include <ndt_slam/cargo_avoidance_fusion.hpp>
+#include <ndt_slam/cargo_frame_decision.hpp>
 #include <ndt_slam/anomaly_review_episode_tracker.hpp>
 #include <ndt_slam/pending_static_hazard_tracker.hpp>
 #include <ndt_slam/cargo_presence_state_machine.hpp>
@@ -77,6 +79,11 @@
 #include <ndt_slam/cargo_component_fusion.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
 #include <ndt_slam/localization_health_policy.hpp>
+#include <ndt_slam/mapping_runtime_policy.hpp>
+#include <ndt_slam/bounded_mapping_archive_queue.hpp>
+#include <ndt_slam/mapping_segment_manager.hpp>
+#include <ndt_slam/sensor_body_self_mask.hpp>
+#include <ndt_slam/tracking_ephemeral_shadow.hpp>
 #include <set>
 
 // v8-stable-r3: CraneMotionEKF
@@ -84,6 +91,7 @@
 #include <ndt_slam/ndt_fitness_circuit_breaker.hpp>
 #include <ndt_slam/crane_pose_constraint.hpp>
 #include <ndt_slam/clean_map_builder.hpp>
+#include <ndt_slam/clean_worker_lineage.hpp>
 #include <ndt_slam/ndt_relocalizer.hpp>
 #include <ndt_slam/stationary_motion_policy.hpp>
 #include <ndt_slam/registration_cloud_builder.hpp>
@@ -267,6 +275,9 @@ private:
         lidar_slam2_msgs::LoadMapSession::Request& request,
         lidar_slam2_msgs::LoadMapSession::Response& response);
     bool rebuildMapService(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response);
+    bool startNewMappingSegmentService(
+        std_srvs::Trigger::Request& request,
+        std_srvs::Trigger::Response& response);
 
     void initializeParameters();
     void initializeParameters(const std::string& config_file_path);
@@ -344,6 +355,7 @@ private:
     ros::ServiceServer load_map_srv_;
     ros::ServiceServer load_map_session_srv_;
     ros::ServiceServer rebuild_map_srv_;
+    ros::ServiceServer start_new_mapping_segment_srv_;
 
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::Buffer> tf2_buffer_;
@@ -358,6 +370,31 @@ private:
     std::string base_frame_ = "base_link";
     std::string lidar_odom_frame_ = "odom_lidar";
     std::string map_frame_ = "map";
+
+    SensorBodySelfMaskConfig sensor_body_self_mask_config_;
+    SensorBodySelfMask sensor_body_self_mask_;
+    SensorBodySelfMaskResult last_sensor_body_self_mask_result_;
+    ros::Publisher self_mask_raw_pub_;
+    ros::Publisher self_mask_removed_pub_;
+    ros::Publisher self_mask_registration_pub_;
+    std::atomic<std::uint64_t> self_mask_input_points_{0U};
+    std::atomic<std::uint64_t> self_mask_removed_points_{0U};
+    std::atomic<double> self_mask_removed_ratio_{0.0};
+    std::atomic<bool> self_mask_mapping_ready_{false};
+
+    BoundedMappingArchiveConfig mapping_archive_config_;
+    BoundedMappingArchiveQueue mapping_archive_queue_;
+    MappingSegmentConfig mapping_segment_config_;
+    MappingSegmentManager mapping_segment_manager_;
+    TrackingEphemeralShadowConfig tracking_ephemeral_config_;
+    TrackingEphemeralShadow tracking_ephemeral_shadow_;
+    std::atomic<bool> segment_transition_in_progress_{false};
+    std::atomic<bool> pointcloud_source_time_continuous_{false};
+
+    void initializeStaticMapCollectionRuntime();
+    bool trustedMappingWritesAllowed() const;
+    bool staticMapCollectionSystemReady() const;
+    void archiveSegmentState(MappingArchivePriority priority);
 
     bool use_sim_time_ = false;
     bool publish_odom_tf_ = true;
@@ -517,6 +554,11 @@ private:
     LocalizationHealthDecision localization_health_decision_;
     LocalizationHealthEvidence localization_health_evidence_;
     std::string localization_health_reason_ = "startup_not_evaluated";
+    MappingRuntimePolicyConfig mapping_runtime_policy_config_;
+    MappingRuntimePolicy mapping_runtime_policy_;
+    MappingRuntimeDecision mapping_runtime_decision_;
+    std::atomic<bool> mapping_writes_allowed_{true};
+    bool static_map_build_fail_closed_profile_ = false;
     std::string localization_map_uuid_;
     std::uint64_t localization_map_generation_ = 0U;
     bool persistent_localization_map_present_ = false;
@@ -823,13 +865,19 @@ private:
         std::uint64_t sequence = 0U;
         std::uint64_t lifecycle_epoch = 0U;
         std::uint64_t static_evidence_epoch = 0U;
+        std::uint64_t mapping_authority_epoch = 0U;
         ros::Time stamp;
         Sophus::SE3d pose;
         std::uint64_t accepted_pose_generation = 0U;
         std::uint64_t localization_continuity_generation = 0U;
         std::uint64_t localization_map_generation = 0U;
         std::string localization_map_uuid;
+        // Sanitized, commissioned-self-mask output before near-field/range/
+        // voxel processing. It is immutable source evidence for offline
+        // reprocessing and is never used by the online NDT target.
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr archive_raw_cloud;
         pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr registration_cloud;
         HookLoadSignalRole hook_role = HookLoadSignalRole::REQUIRED;
         bool hook_valid = false;
         int hook_state = static_cast<int>(HookLoadState::UNKNOWN);
@@ -842,6 +890,7 @@ private:
         Sophus::SE3d refined_pose;
         Sophus::SE3d runtime_pose;
     };
+    void archiveCommittedKeyframe(const MapCommitJob& job);
     struct MapCommitCompletion {
         bool pending = false;
         std::uint64_t lifecycle_epoch = 0U;
@@ -872,7 +921,9 @@ private:
     MapCommitCompletion map_commit_completion_;
 
     void enqueueMapCommitJob(
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& archive_raw_cloud,
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& registration_cloud,
         const AcceptedLocalizationSnapshot& localization);
     void mapCommitThread();
     void consumeMapCommitCompletion();
@@ -982,6 +1033,8 @@ private:
         std::uint64_t source_localization_continuity_generation = 0U;
         std::uint64_t source_localization_map_generation = 0U;
         std::string source_localization_map_uuid;
+        CleanWorkerLineage lineage;
+        StaticMutationVersion static_mutation_version;
         double duration_ms = 0.0;
         CleanMapBuildResult build;
         StaticEvidenceCellGeometryMap static_clean_cells;
@@ -999,6 +1052,12 @@ private:
     StaticEvidenceCellKeySet pending_static_free_cells_;
     std::uint64_t objects_map_content_version_ = 1U;
     std::atomic<std::uint64_t> static_clean_build_version_{1U};
+    std::atomic<std::uint64_t> mapping_authority_epoch_{1U};
+    std::atomic<std::uint64_t> static_invalidation_sequence_{1U};
+    // Serializes epoch transitions with asynchronous clean/static writes.
+    // MapCommit transitions are additionally serialized by
+    // map_commit_lifecycle_mutex_.
+    mutable std::mutex mapping_authority_mutex_;
     std::atomic<std::uint64_t> static_clean_build_started_{0U};
     std::atomic<std::uint64_t> static_clean_build_applied_{0U};
     std::atomic<std::uint64_t> static_clean_build_snapshot_only_{0U};
@@ -1017,7 +1076,15 @@ private:
     void requestMapMaintenance();
     void startCleanMapRebuildJob();
     void consumeCleanMapRebuildResult(const ros::Time& stamp);
+    void invalidateStaticAuthorityImmediately(
+        const StaticEvidenceCellKeySet& cells,
+        double stamp_sec);
+    void invalidateCleanDenyCellsImmediately(
+        const std::set<std::pair<int, int>>& cells,
+        float clean_cell_size_m,
+        double stamp_sec);
     void advanceObjectsMapContentVersionLocked();
+    std::uint64_t advanceMappingAuthorityEpoch();
     void runMapMaintenanceIfIdle(bool force_timeslice);
 
     // Map serialization is request-driven and independent of the localization
@@ -1124,7 +1191,8 @@ private:
     std::mutex map_rebuild_execution_mutex_;
     std::atomic<bool> rebuild_pending_{false};
     std::atomic<bool> rebuild_running_{false};
-    std::atomic<std::uint64_t> map_rebuild_generation_{0U};
+    // Zero is reserved for an invalid/uninitialized worker lineage.
+    std::atomic<std::uint64_t> map_rebuild_generation_{1U};
     void asyncRebuildGlobalMap();
 
     // 动态点过滤参数
@@ -1880,7 +1948,7 @@ private:
     struct HookCargoLockConfig {
         bool enabled = true;
         int lock_confirm_frames = 3;
-        int geometry_confirm_frames = 4;
+        int geometry_confirm_frames = 3;
         int size_init_window = 5;
         float lost_hold_sec = 5.0f;
         float lost_clear_sec = 8.0f;
@@ -1889,7 +1957,7 @@ private:
         float candidate_hold_sec = 1.0f;
         int candidate_max_weak_frames = 10;
         int candidate_window_frames = 12;
-        int candidate_required_consistent_frames = 7;
+        int candidate_required_consistent_frames = 3;
         int candidate_max_gap_frames = 4;
         float candidate_progress_timeout_sec = 3.0F;
         float candidate_absolute_timeout_sec = 8.0F;
@@ -1946,6 +2014,10 @@ private:
         float direct_bottom_soft_stale_sec = 1.50F;
         float velocity_model_uncertainty_mps = 0.05F;
         float association_max_xy_gate_m = 1.05F;
+        float cargo_to_hook_offset_max_m = 1.05F;
+        float cargo_to_hook_offset_max_update_per_frame_m = 0.04F;
+        float cargo_to_hook_offset_alpha = 0.15F;
+        float partial_observation_uncertainty_growth_m = 0.04F;
         float reacquisition_max_xy_gate_m = 0.55F;
         float association_max_z_gate_m = 0.90F;
         float reacquisition_max_z_gate_m = 0.65F;
@@ -2067,6 +2139,9 @@ private:
         float stable_height = 0.0f;
         float bottom_uncertainty = 0.30f;
         float horizontal_tracking_residual_m = 0.0F;
+        Eigen::Vector2f cargo_to_hook_offset = Eigen::Vector2f::Zero();
+        bool cargo_to_hook_offset_valid = false;
+        std::uint32_t cargo_to_hook_offset_updates = 0U;
         float vertical_tracking_residual_m = 0.0F;
         float vertical_pose_uncertainty_m = 0.30F;
 
@@ -2623,7 +2698,8 @@ private:
                                      float provisional_cargo_bottom_z_map =
                                          std::numeric_limits<float>::quiet_NaN(),
                                      float provisional_cargo_bottom_uncertainty_m =
-                                         std::numeric_limits<float>::quiet_NaN());
+                                         std::numeric_limits<float>::quiet_NaN(),
+                                     bool internal_contract_error = false);
     void logCargoSafetyStatus(
         const lidar_slam2_msgs::CargoSafetyStatus& status);
     void resetCargoForHookState(bool preserve_origin_height,
