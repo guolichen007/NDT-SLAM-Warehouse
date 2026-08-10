@@ -68,6 +68,8 @@ AuthoritativeCargoHazard selectHazard(
       selected.confidence = risk.confidence;
       selected.far_field_history_valid = risk.far_field_history_valid;
       selected.provenance_valid = risk.provenance_valid;
+      selected.certified_static_provenance =
+          risk.certified_static_provenance;
       selected.validated_streak = risk.validated_streak;
     }
   };
@@ -106,6 +108,8 @@ AuthoritativeCargoHazard selectReviewHazard(
     selected.confidence = risk.confidence;
     selected.far_field_history_valid = risk.far_field_history_valid;
     selected.provenance_valid = risk.provenance_valid;
+    selected.certified_static_provenance =
+        risk.certified_static_provenance;
     selected.validated_streak = risk.validated_streak;
   };
   if (allow_live) consider(CargoAvoidanceHazardSource::LIVE, live);
@@ -390,19 +394,20 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     result.motion_not_authoritative = true;
   }
 
-  const bool live_level1_risk =
-      (result.risk_live && input.live.warning_code == kNear3m) ||
+  const bool live_formal_warning_risk =
+      (result.risk_live && warningCode(input.live.warning_code)) ||
       (input.warning_candidate_present &&
-       input.warning_candidate_code == kNear3m);
-  const bool static_level1_risk =
-      result.risk_static && input.static_map.warning_code == kNear3m;
-  const bool live_level1_without_history = live_level1_risk &&
+       warningCode(input.warning_candidate_code));
+  const bool static_formal_warning_risk =
+      result.risk_static && warningCode(input.static_map.warning_code);
+  const bool live_warning_without_history = live_formal_warning_risk &&
       !input.live_near_field_history_authorized;
-  const bool static_level1_without_history = static_level1_risk &&
+  const bool static_warning_without_history = static_formal_warning_risk &&
       !input.static_near_field_history_authorized;
   std::string independent_static_reason;
-  const bool static_level1_independently_proven =
-      static_level1_without_history && result.risk_static &&
+  const bool static_warning_independently_proven =
+      static_warning_without_history && result.risk_static &&
+      input.static_map.certified_static_provenance &&
       (formal_cargo
            ? (static_risk_contract && input.static_hazard_track_confirmed)
            : authorizePendingStaticWarning(
@@ -415,30 +420,30 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
   // diagnose cargo-self segmentation mistakes. Independently mature static
   // evidence still remains a standard 17 and wins below.
   const bool live_standard_risk = result.risk_live &&
-      !live_level1_without_history && !input.anomaly_review_live;
+      !live_warning_without_history && !input.anomaly_review_live;
   const bool static_standard_risk = result.risk_static &&
-      (!static_level1_without_history ||
-       static_level1_independently_proven);
-  const bool unresolved_level1_review =
-      live_level1_without_history ||
-      (static_level1_without_history &&
-       !static_level1_independently_proven);
-  const auto apply_unresolved_level1_review = [&]() {
+      (!static_warning_without_history ||
+       static_warning_independently_proven);
+  const bool unresolved_far_history_review =
+      live_warning_without_history ||
+      (static_warning_without_history &&
+       !static_warning_independently_proven);
+  const auto apply_unresolved_far_history_review = [&]() {
     result.official_valid = true;
     result.official_code = kAnomalyReview;
     result.anomaly_review = true;
-    result.anomaly_review_live = live_level1_without_history;
-    result.anomaly_review_static = static_level1_without_history &&
-        !static_level1_independently_proven;
-    result.reason = "review_level1_without_approach_history";
+    result.anomaly_review_live = live_warning_without_history;
+    result.anomaly_review_static = static_warning_without_history &&
+        !static_warning_independently_proven;
+    result.reason = "review_warning_without_true_far_history";
     result.provisional_status = "REVIEW_REQUIRED";
     result.pending_authority_reason =
-        "level1_without_approach_history";
+        "warning_without_true_far_history";
     applySelectedHazard(
         selectReviewHazard(
-            live_level1_without_history, input.live,
-            static_level1_without_history &&
-                !static_level1_independently_proven,
+            live_warning_without_history, input.live,
+            static_warning_without_history &&
+                !static_warning_independently_proven,
             input.static_map),
         &result);
     if (result.authoritative_hazard.valid) {
@@ -552,8 +557,8 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
         result.reason = "pending_hazard_not_authorized:" +
             result.pending_authority_reason;
       }
-    } else if (unresolved_level1_review) {
-      apply_unresolved_level1_review();
+    } else if (unresolved_far_history_review) {
+      apply_unresolved_far_history_review();
     } else {
       // A pending envelope can never grant clear.
       result.provisional_status = "CLEAR_NOT_AUTHORIZED";
@@ -583,8 +588,8 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     return result;
   }
 
-  if (unresolved_level1_review) {
-    apply_unresolved_level1_review();
+  if (unresolved_far_history_review) {
+    apply_unresolved_far_history_review();
     return result;
   }
 

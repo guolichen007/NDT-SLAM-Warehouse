@@ -192,6 +192,10 @@ CargoSafetyPhaseSelection deriveCargoSafetyDecisionPhase(
     } else if (input.safe_empty && input.obstacle_fault) {
         selection.phase = CargoSafetyDecisionPhase::INTERNAL_CONTRACT_ERROR;
         selection.reason = "safe_empty_conflicts_with_obstacle_fault";
+    } else if (input.clear_authority_incomplete) {
+        selection.phase = CargoSafetyDecisionPhase::
+            CARGO_FORMAL_OBSTACLE_NOT_READY;
+        selection.reason = "certified_static_clear_authority_unavailable";
     } else if (input.formal_cargo_valid) {
         const bool formal_clear = input.warning_valid &&
             input.warning_code == CargoSafetyProtocol::kClear &&

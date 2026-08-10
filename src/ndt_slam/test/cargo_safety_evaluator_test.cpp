@@ -294,6 +294,24 @@ TEST(CargoSafetyDecision, FormalClearRequiresAllAuthorities) {
               CargoSafetyProtocol::kClear);
 }
 
+TEST(CargoSafetyDecision,
+     MissingCertifiedReferenceBlocksClearButRetainsPositiveHazard) {
+    auto empty = strictEmptyDecision(HookLoadSignalRole::REQUIRED);
+    empty.clear_authority_incomplete = true;
+    EXPECT_EQ(composeCargoSafetyDecision(empty).requested_code,
+              CargoSafetyProtocol::kObstacleInvalid);
+
+    auto formal_clear = formalDecision(CargoSafetyProtocol::kClear);
+    formal_clear.clear_authority_incomplete = true;
+    EXPECT_EQ(composeCargoSafetyDecision(formal_clear).requested_code,
+              CargoSafetyProtocol::kObstacleInvalid);
+
+    auto positive = formalDecision(CargoSafetyProtocol::kLevel1Warning);
+    positive.clear_authority_incomplete = true;
+    EXPECT_EQ(composeCargoSafetyDecision(positive).requested_code,
+              CargoSafetyProtocol::kLevel1Warning);
+}
+
 TEST(CargoSafetyDecision, NormalLifecycleNeverProduces35) {
     std::vector<CargoSafetyDecisionInput> lifecycle;
     CargoSafetyDecisionInput startup;

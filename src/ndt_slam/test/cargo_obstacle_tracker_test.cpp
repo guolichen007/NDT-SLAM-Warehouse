@@ -45,7 +45,7 @@ CargoObstacleObservation directionalPretrack(
 CargoObstacleTrackerConfig ordinaryHazardConfig() {
   CargoObstacleTrackerConfig config;
   config.require_static_cargo_for_warning = false;
-  config.require_far_field_history_for_level1 = false;
+  config.require_far_field_history_for_warnings = false;
   return config;
 }
 
@@ -133,7 +133,7 @@ TEST(CargoObstacleTracker,
 TEST(CargoObstacleTracker,
      MaturePretrackDoesNotDelayAccurateLevel1AtThreeMeters) {
   CargoObstacleTrackerConfig config = ordinaryHazardConfig();
-  config.require_far_field_history_for_level1 = true;
+  config.require_far_field_history_for_warnings = true;
   CargoObstacleTracker tracker(config);
   tracker.update(1.0, {directionalPretrack(10U, 0.0F, 0.0F)});
   tracker.update(1.2, {directionalPretrack(10U, 0.02F, 0.0F)});
@@ -150,7 +150,7 @@ TEST(CargoObstacleTracker,
 TEST(CargoObstacleTracker,
      Level1FirstSeenInsideThreeMetersWaitsForFarFieldHistory) {
   CargoObstacleTrackerConfig config = ordinaryHazardConfig();
-  config.require_far_field_history_for_level1 = true;
+  config.require_far_field_history_for_warnings = true;
   CargoObstacleTracker tracker(config);
   CargoObstacleObservation near = hazard(0U, 0.0F, 0.0F, 17U);
   near.footprint_distance_m = 2.0F;
@@ -162,11 +162,12 @@ TEST(CargoObstacleTracker,
   EXPECT_TRUE(suppressed.selected_near_field);
   EXPECT_FALSE(suppressed.selected_near_field_authorized);
   EXPECT_FALSE(suppressed.selected_far_field_history_valid);
-  EXPECT_EQ(suppressed.reason, "near_field_track_missing_far_history");
+  EXPECT_EQ(suppressed.reason, "warning_track_missing_true_far_history");
 
   CargoObstacleObservation far = near;
-  far.footprint_distance_m = 4.0F;
-  far.warning_code = 18U;
+  far.footprint_distance_m = 6.0F;
+  far.warning_code = 14U;
+  far.warning_eligible = false;
   tracker.update(1.6, {far});
   tracker.update(1.8, {far});
   ASSERT_TRUE(tracker.update(2.0, {far}).confirmed_hazard);
@@ -176,6 +177,24 @@ TEST(CargoObstacleTracker,
   EXPECT_TRUE(authorized.selected_near_field_authorized);
   EXPECT_TRUE(authorized.selected_far_field_history_valid);
   EXPECT_EQ(authorized.warning_code, 17U);
+}
+
+TEST(CargoObstacleTracker,
+     StrictSixFrameHalfSecondFarHistoryRemainsAConfigurableTestCase) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  config.far_history_confirm_frames = 6;
+  config.far_history_confirm_duration_sec = 0.5;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleTrackerDecision decision;
+  for (int index = 0; index < 5; ++index) {
+    decision = tracker.update(
+        1.0 + 0.1 * index,
+        {directionalPretrack(10U, 0.01F * index, 0.0F)});
+    EXPECT_FALSE(decision.selected_far_field_history_valid);
+  }
+  decision = tracker.update(1.5, {directionalPretrack(10U, 0.05F, 0.0F)});
+  EXPECT_TRUE(decision.selected_far_field_history_valid);
 }
 
 TEST(CargoObstacleTracker,

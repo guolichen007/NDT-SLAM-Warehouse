@@ -158,6 +158,9 @@ struct CargoSafetyDecisionInput {
     bool pending_positive_warning = false;
     bool formal_cargo_valid = false;
     bool formal_clear_authorized = false;
+    // Collection mode may detect positive hazards without an immutable
+    // Certified Reference Map, but it must report code 34 instead of CLEAR.
+    bool clear_authority_incomplete = false;
     bool obstacle_evidence_ready = false;
     std::uint16_t warning_code = 0;
     std::string evidence_reason;
