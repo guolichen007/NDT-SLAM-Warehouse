@@ -76,7 +76,7 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         self.assertIn(
             "allow_positive_only_without_static_baseline: true", CONFIG
         )
-        self.assertIn("positive_only_confirm_frames: 5", CONFIG)
+        self.assertIn("positive_only_confirm_frames: 3", CONFIG)
         self.assertNotIn("allow_degraded_live_only_freeze:", CONFIG)
         self.assertNotIn("minimum_independent_sources:", CONFIG)
 
@@ -158,16 +158,20 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         self.assertIn("!evidence.entirely_above_cargo", SAFETY_SOURCE)
         self.assertIn("!observation.entirely_above_cargo", TRACKER_SOURCE)
 
-    def test_known_static_obstacles_supply_independent_17_history(self):
+    def test_only_certified_static_can_replace_true_far_history(self):
         self.assertIn("known_static_confirm_frames: 3", CONFIG)
         self.assertIn("static_cargo_confirm_frames: 5", CONFIG)
         self.assertIn("static_cargo_confirm_sec: 0.8", CONFIG)
-        self.assertIn("track.far_field_history_valid || track.provenance_valid", TRACKER_SOURCE)
+        self.assertIn("qualifiesForFarHistory", TRACKER_SOURCE)
+        self.assertIn("track.far_field_history_valid", TRACKER_SOURCE)
         self.assertIn("selected_far_field_history_valid", NODE)
         self.assertIn("pending_static_decision.far_field_history_valid", NODE)
-        self.assertIn("static_level1_independently_proven", (
+        fusion = (
             PACKAGE / "src/cargo_avoidance_fusion.cpp"
-        ).read_text(encoding="utf-8"))
+        ).read_text(encoding="utf-8")
+        self.assertIn("static_warning_independently_proven", fusion)
+        self.assertIn("certified_static_provenance", fusion)
+        self.assertIn("certified_static_provenance = false", NODE)
 
     def test_envelope_source_changes_do_not_reset_obstacle_identity(self):
         start = NODE.index("const bool pending_obstacle_context_changed =")

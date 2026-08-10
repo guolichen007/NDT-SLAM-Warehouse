@@ -153,6 +153,7 @@ set(LIBRARY_SOURCES
   src/cargo_preload_baseline_tracker.cpp
   src/cargo_geometry_fusion.cpp
   src/cargo_avoidance_fusion.cpp
+  src/cargo_frame_decision.cpp
   src/anomaly_review_episode_tracker.cpp
   src/pending_static_hazard_tracker.cpp
   src/cargo_presence_state_machine.cpp
@@ -363,6 +364,13 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_avoidance_fusion_test.cpp)
   if(TARGET cargo_avoidance_fusion_test)
     target_link_libraries(cargo_avoidance_fusion_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_frame_decision_test
+    test/cargo_frame_decision_test.cpp)
+  if(TARGET cargo_frame_decision_test)
+    target_link_libraries(cargo_frame_decision_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 

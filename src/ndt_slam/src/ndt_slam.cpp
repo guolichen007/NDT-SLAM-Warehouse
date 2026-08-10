@@ -21361,10 +21361,47 @@ void NdtSlamNode::runPendingCargoAvoidance(
         pending_static_decision.far_field_history_valid;
     fusion_input.static_map.provenance_valid =
         fusion_input.pending_static_provenance_valid;
+    fusion_input.static_map.certified_static_provenance = false;
     fusion_input.static_map.validated_streak =
         pending_static_decision.confirmations;
     CargoAvoidanceFusionResult fused = fuseCargoAvoidanceRisk(
         fusion_input, cargo_avoidance_fusion_config_);
+    CargoFrameDecision pending_frame_decision;
+    pending_frame_decision.stamp_sec = stamp.toSec();
+    pending_frame_decision.cargo_identity_confirmed_this_frame =
+        pending_cargo_self_evidence_.positive_warning_identity_authorized &&
+        hook_lock_.confirm_count ==
+            hook_lock_config_.candidate_required_consistent_frames;
+    pending_frame_decision.cargo_identity_authorized =
+        pending_identity_context_valid &&
+        pending_cargo_self_evidence_.positive_warning_identity_authorized;
+    pending_frame_decision.cargo_lifecycle_id = cargo_lifecycle_id_;
+    pending_frame_decision.cargo_track_id = pending_track_context_id;
+    pending_frame_decision.positive_warning_confirmed_this_frame =
+        fused.official_valid &&
+        (fused.official_code == CargoSafetyEvaluator::kLevel1Code ||
+         fused.official_code == CargoSafetyEvaluator::kLevel2Code ||
+         fused.official_code == CargoSafetyEvaluator::kReviewCode);
+    pending_frame_decision.warning_code = fused.official_code;
+    pending_frame_decision.authoritative_hazard_valid =
+        fused.authoritative_hazard.valid;
+    pending_frame_decision.authoritative_warning_code =
+        fused.authoritative_hazard.warning_code;
+    pending_frame_decision.warning_cargo_lifecycle_id =
+        fused.authoritative_hazard.cargo_lifecycle_id;
+    pending_frame_decision.warning_cargo_track_id =
+        fused.authoritative_hazard.cargo_track_id;
+    pending_frame_decision.obstacle_track_id =
+        fused.authoritative_hazard.obstacle_track_id;
+    const CargoFrameCommitDecision pending_frame_commit =
+        commitCargoFrameDecision(pending_frame_decision);
+    if (!pending_frame_commit.authorized) {
+        fused.official_valid = false;
+        fused.official_code = CargoSafetyProtocol::kInternalError;
+        fused.reason = pending_frame_commit.reason;
+        fused.provisional_status = "CONTRACT_MISMATCH";
+        fused.authoritative_hazard = AuthoritativeCargoHazard{};
+    }
 
     std_msgs::String debug;
     std::ostringstream stream;
@@ -22355,6 +22392,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     // known loaded cargo disappear during occlusion or a small-cluster frame.
     const bool active_track = cargoTrackRetained() &&
         cargo_state_.valid_geometry;
+    const bool identity_confirmed_this_frame =
+        active_track && !cargo_fusion_track_active_;
     CargoPresenceInput presence_input;
     presence_input.stamp_sec = stamp.toSec();
     presence_input.gravity_enabled = hook_load_signal_enabled_;
@@ -24609,12 +24648,54 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         formal_static_hazard_decision.far_field_history_valid;
     avoidance_input.static_map.provenance_valid =
         avoidance_input.static_risk_contract_valid;
+    avoidance_input.static_map.certified_static_provenance = false;
     avoidance_input.static_map.validated_streak =
         formal_static_hazard_decision.confirmations;
 
     CargoAvoidanceFusionResult fused_avoidance =
         fuseCargoAvoidanceRisk(
             avoidance_input, cargo_avoidance_fusion_config_);
+    CargoFrameDecision cargo_frame_decision;
+    cargo_frame_decision.stamp_sec = stamp.toSec();
+    cargo_frame_decision.cargo_identity_confirmed_this_frame =
+        identity_confirmed_this_frame;
+    cargo_frame_decision.cargo_identity_authorized = active_track;
+    cargo_frame_decision.cargo_lifecycle_id = cargo_lifecycle_id_;
+    cargo_frame_decision.cargo_track_id = cargo_fusion_track_id_;
+    cargo_frame_decision.positive_warning_confirmed_this_frame =
+        fused_avoidance.official_valid &&
+        (fused_avoidance.official_code ==
+             CargoSafetyEvaluator::kLevel1Code ||
+         fused_avoidance.official_code ==
+             CargoSafetyEvaluator::kLevel2Code ||
+         fused_avoidance.official_code ==
+             CargoSafetyEvaluator::kReviewCode);
+    cargo_frame_decision.warning_code = fused_avoidance.official_code;
+    cargo_frame_decision.authoritative_hazard_valid =
+        fused_avoidance.authoritative_hazard.valid;
+    cargo_frame_decision.authoritative_warning_code =
+        fused_avoidance.authoritative_hazard.warning_code;
+    cargo_frame_decision.warning_cargo_lifecycle_id =
+        fused_avoidance.authoritative_hazard.cargo_lifecycle_id;
+    cargo_frame_decision.warning_cargo_track_id =
+        fused_avoidance.authoritative_hazard.cargo_track_id;
+    cargo_frame_decision.obstacle_track_id =
+        fused_avoidance.authoritative_hazard.obstacle_track_id;
+    const CargoFrameCommitDecision cargo_frame_commit =
+        commitCargoFrameDecision(cargo_frame_decision);
+    if (!cargo_frame_commit.authorized) {
+        // A half-updated AuthoritativeHazard is code 35, never 29/34 or a
+        // normal warning.
+        fused_avoidance.official_valid = false;
+        fused_avoidance.official_code = CargoSafetyProtocol::kInternalError;
+        fused_avoidance.reason = cargo_frame_commit.reason;
+        fused_avoidance.authoritative_hazard = AuthoritativeCargoHazard{};
+        last_cargo_safety_result_ = CargoSafetyResult{};
+        last_cargo_safety_result_.fault = CargoSafetyFault::INTERNAL_ERROR;
+        last_cargo_safety_result_.evidence_state =
+            CargoSafetyEvidenceState::HARD_FAULT;
+        last_cargo_safety_result_.reason = cargo_frame_commit.reason;
+    }
     if (fused_avoidance.official_valid &&
         fused_avoidance.official_code ==
             CargoSafetyEvaluator::kReviewCode) {
@@ -24874,6 +24955,32 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 evidence.obstacle_uncertainty_m;
             message.conservative_vertical_clearance_m =
                 evidence.conservative_clearance_m;
+        }
+        // Code, metrics and track identity are copied from one immutable
+        // source record. This prevents a formal status from combining the
+        // nearest distance of one source with the code/identity of another.
+        const AuthoritativeCargoHazard& hazard =
+            fused_avoidance.authoritative_hazard;
+        if (hazard.valid && result.warning_valid &&
+            result.warning_code == hazard.warning_code) {
+            message.cargo_track_id = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(
+                    hazard.cargo_track_id,
+                    std::numeric_limits<std::uint32_t>::max()));
+            message.obstacle_track_id = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(
+                    hazard.obstacle_track_id,
+                    std::numeric_limits<std::uint32_t>::max()));
+            message.obstacle_validated_streak =
+                static_cast<std::uint32_t>(std::max(
+                    0, hazard.validated_streak));
+            message.obstacle_provenance_valid =
+                hazard.provenance_valid;
+            message.nearest_obstacle_distance_m = hazard.distance_m;
+            message.obstacle_top_z_map = hazard.obstacle_top_z_map;
+            message.obstacle_uncertainty_m = hazard.uncertainty_m;
+            message.conservative_vertical_clearance_m =
+                hazard.clearance_m;
         }
         message.confidence = last_cargo_bottom_result_.valid &&
                              result.input_valid

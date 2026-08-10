@@ -36,6 +36,7 @@ struct CargoAvoidanceSourceRisk {
   float confidence = 0.0F;
   bool far_field_history_valid = false;
   bool provenance_valid = false;
+  bool certified_static_provenance = false;
   int validated_streak = 0;
   std::string reason;
 };
@@ -68,8 +69,11 @@ struct AuthoritativeCargoHazard {
   float confidence = 0.0F;
   bool far_field_history_valid = false;
   bool provenance_valid = false;
+  bool certified_static_provenance = false;
   int validated_streak = 0;
 };
+
+using AuthoritativeHazard = AuthoritativeCargoHazard;
 
 struct CargoAvoidanceFusionConfig {
   float minimum_live_coverage_for_clear = 0.05F;
@@ -88,9 +92,9 @@ struct CargoAvoidanceFusionInput {
   // Warning authority is withheld while cargo motion/direction is not
   // authoritative. Tracking continues outside this fusion contract.
   bool warning_motion_authorized = true;
-  // Each code-17 source must belong to a track confirmed outside the 3 m
-  // shell. Keeping these independent prevents one source from authorizing a
-  // sudden near-field observation reported by the other source.
+  // Compatibility field names retained internally: for both code 17 and 18,
+  // these mean true >5 m same-track history (or separately certified static
+  // provenance), not merely an observation outside 3 m.
   bool live_near_field_history_authorized = true;
   bool static_near_field_history_authorized = true;
   bool static_hazard_track_confirmed = true;

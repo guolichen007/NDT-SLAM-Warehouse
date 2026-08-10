@@ -119,9 +119,12 @@ class NdtFastMotionObbContractTest(unittest.TestCase):
         self.assertIn(
             "hook_anchor_outside_candidate_central_region", TRACK_POLICY
         )
-        self.assertIn("configuration-independent invariant", NODE)
-        self.assertIn("measured.x() = anchor.x();", NODE)
-        self.assertIn("measured.y() = anchor.y();", NODE)
+        self.assertIn("size_aware_hook_gate = true", NODE)
+        self.assertIn("maximum_dynamic_hook_center_distance_m", NODE)
+        self.assertIn("raw_measured.x() = det.footprint_center_base.x();", NODE)
+        self.assertIn("raw_measured.y() = det.footprint_center_base.y();", NODE)
+        self.assertNotIn("measured.x() = anchor.x();", NODE)
+        self.assertNotIn("measured.y() = anchor.y();", NODE)
 
     def test_cargo_yaw_expands_xy_without_replacing_height_fusion(self):
         self.assertIn("projected_live_length", NODE)
