@@ -60,6 +60,7 @@
 #include <ndt_slam/static_evidence_authorization.hpp>
 #include <ndt_slam/cargo_avoidance_fusion.hpp>
 #include <ndt_slam/cargo_frame_decision.hpp>
+#include <ndt_slam/map_write_authority.hpp>
 #include <ndt_slam/anomaly_review_episode_tracker.hpp>
 #include <ndt_slam/pending_static_hazard_tracker.hpp>
 #include <ndt_slam/cargo_presence_state_machine.hpp>
@@ -842,6 +843,7 @@ private:
         Sophus::SE3d raw_ndt_pose;
         Sophus::SE3d refined_pose;
         Sophus::SE3d runtime_pose;
+        MapWriteAuthorityEvidence write_authority;
     };
     struct MapCommitCompletion {
         bool pending = false;
@@ -865,6 +867,7 @@ private:
     std::atomic<std::uint64_t> map_commit_coalesced_{0U};
     std::atomic<std::uint64_t> map_commit_stale_{0U};
     std::atomic<std::uint64_t> map_commit_dropped_{0U};
+    std::atomic<bool> localization_write_quarantined_{true};
     // Destructive reset/load/rebuild transitions take this mutex before
     // changing the lifecycle epoch.  The worker therefore cannot publish an
     // old-epoch keyframe after a new map has become authoritative.
@@ -874,7 +877,8 @@ private:
 
     void enqueueMapCommitJob(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-        const AcceptedLocalizationSnapshot& localization);
+        const AcceptedLocalizationSnapshot& localization,
+        const MapWriteAuthorityEvidence& write_authority);
     void mapCommitThread();
     void consumeMapCommitCompletion();
 

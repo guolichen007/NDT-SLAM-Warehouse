@@ -860,8 +860,15 @@ NdtSlamNode::~NdtSlamNode() {
 
 void NdtSlamNode::enqueueMapCommitJob(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-    const AcceptedLocalizationSnapshot& localization) {
+    const AcceptedLocalizationSnapshot& localization,
+    const MapWriteAuthorityEvidence& write_authority) {
     if (!cloud || cloud->empty()) {
+        map_commit_dropped_.fetch_add(1U, std::memory_order_relaxed);
+        return;
+    }
+    const MapWriteAuthorityDecision write_decision =
+        evaluateMapWriteAuthority(write_authority);
+    if (!write_decision.authorized) {
         map_commit_dropped_.fetch_add(1U, std::memory_order_relaxed);
         return;
     }
@@ -905,6 +912,7 @@ void NdtSlamNode::enqueueMapCommitJob(
     }
     job.refined_pose = localization.pose;
     job.runtime_pose = current_pose_;
+    job.write_authority = write_authority;
 
     {
         std::lock_guard<std::mutex> lock(map_commit_queue_mutex_);
@@ -956,12 +964,37 @@ void NdtSlamNode::mapCommitThread() {
             // epoch or any MapCommit-owned tracker/map state.
             std::lock_guard<std::mutex> lifecycle_lock(
                 map_commit_lifecycle_mutex_);
-            if (job.lifecycle_epoch ==
-                    map_rebuild_generation_.load(std::memory_order_acquire) &&
-                job.localization_continuity_generation ==
-                    localization_continuity_generation_.load(
-                        std::memory_order_acquire)) {
+            MapWriteAuthorityEvidence completion_authority =
+                job.write_authority;
+            completion_authority.phase =
+                MapWriteAuthorityPhase::ASYNC_COMPLETE;
+            completion_authority.localization_quarantined =
+                localization_write_quarantined_.load(
+                    std::memory_order_acquire);
+            // Completion intentionally does not read the owner-thread's
+            // latest AcceptedPose. A newer pose is not a lineage break.
+            completion_authority.latest_pose_generation =
+                job.write_authority.latest_pose_generation;
+            completion_authority.latest_stamp_sec =
+                job.write_authority.latest_stamp_sec;
+            completion_authority.current_continuity_generation =
+                localization_continuity_generation_.load(
+                    std::memory_order_acquire);
+            completion_authority.current_map_generation =
+                localization_map_generation_;
+            completion_authority.current_map_uuid =
+                localization_map_uuid_;
+            completion_authority.current_lifecycle_epoch =
+                map_rebuild_generation_.load(std::memory_order_acquire);
+            completion_authority.current_static_epoch =
+                static_evidence_epoch_.load(std::memory_order_acquire);
+            const MapWriteAuthorityDecision completion_decision =
+                evaluateMapWriteAuthority(completion_authority);
+            if (completion_decision.authorized) {
                 committed = commitKeyFrameWithDynamicFiltering(job);
+            } else {
+                map_commit_stale_.fetch_add(
+                    1U, std::memory_order_relaxed);
             }
         }
         if (!committed) {
@@ -7006,24 +7039,6 @@ void NdtSlamNode::processCloudThread() {
             const bool commit_accept_ok = ndt_accepted_for_commit;
             const bool commit_fitness_ok = std::isfinite(last_ndt_fitness_) &&
                 last_ndt_fitness_ <= map_commit_max_fitness_;
-            const bool accepted_snapshot_is_current =
-                accepted_localization_snapshot_.valid &&
-                accepted_localization_snapshot_.stamp == publish_time &&
-                accepted_localization_snapshot_.lifecycle_epoch ==
-                    map_rebuild_generation_.load(std::memory_order_acquire) &&
-                accepted_localization_snapshot_.pose_version ==
-                    keyframe_pose_version_.load(std::memory_order_acquire) &&
-                accepted_localization_snapshot_.map_generation ==
-                    localization_map_generation_ &&
-                accepted_localization_snapshot_.map_uuid ==
-                    localization_map_uuid_;
-            bool motion_gate_allows_commit = true;
-            if (commit_accept_ok && commit_fitness_ok &&
-                accepted_snapshot_is_current && motion_gate_enabled_) {
-                motion_gate_allows_commit =
-                    evaluateMotionGateForMapCommit(
-                        accepted_localization_snapshot_.pose, publish_time);
-            }
             const bool relocalization_commit_ok =
                 relocalization_pose_reliable_ &&
                 !global_consistency_state_.global_suspect &&
@@ -7031,24 +7046,75 @@ void NdtSlamNode::processCloudThread() {
                 relocalization_state_ != RelocalizationState::SEARCHING_LOCAL &&
                 relocalization_state_ != RelocalizationState::SEARCHING_GLOBAL &&
                 relocalization_state_ != RelocalizationState::CONFIRMING;
+            localization_write_quarantined_.store(
+                !relocalization_commit_ok, std::memory_order_release);
+            MapWriteAuthorityEvidence write_authority;
+            write_authority.accepted_pose_valid =
+                accepted_localization_snapshot_.valid;
+            write_authority.ndt_accepted = commit_accept_ok;
+            write_authority.prediction_only = frame_prediction_only;
+            write_authority.map_commit_quality_valid =
+                frame_map_commit_quality_valid;
+            write_authority.localization_quarantined =
+                !relocalization_commit_ok;
+            write_authority.pose_finite =
+                accepted_localization_snapshot_.pose.translation().allFinite() &&
+                accepted_localization_snapshot_.pose.so3().matrix().allFinite();
+            write_authority.source_pose_generation =
+                accepted_localization_snapshot_.pose_generation;
+            write_authority.latest_pose_generation =
+                accepted_pose_generation_;
+            write_authority.source_stamp_sec =
+                accepted_localization_snapshot_.stamp.toSec();
+            write_authority.latest_stamp_sec = publish_time.toSec();
+            write_authority.source_continuity_generation =
+                accepted_localization_snapshot_.continuity_generation;
+            write_authority.current_continuity_generation =
+                localization_continuity_generation_.load(
+                    std::memory_order_acquire);
+            write_authority.source_map_generation =
+                accepted_localization_snapshot_.map_generation;
+            write_authority.current_map_generation =
+                localization_map_generation_;
+            write_authority.source_map_uuid =
+                accepted_localization_snapshot_.map_uuid;
+            write_authority.current_map_uuid = localization_map_uuid_;
+            write_authority.source_lifecycle_epoch =
+                accepted_localization_snapshot_.lifecycle_epoch;
+            write_authority.current_lifecycle_epoch =
+                map_rebuild_generation_.load(std::memory_order_acquire);
+            write_authority.source_static_epoch =
+                static_evidence_epoch_.load(std::memory_order_acquire);
+            write_authority.current_static_epoch =
+                write_authority.source_static_epoch;
+            const MapWriteAuthorityDecision write_decision =
+                evaluateMapWriteAuthority(write_authority);
+            const bool accepted_snapshot_is_current =
+                write_decision.authorized &&
+                accepted_localization_snapshot_.pose_version ==
+                    keyframe_pose_version_.load(std::memory_order_acquire);
+            bool motion_gate_allows_commit = true;
+            if (commit_fitness_ok && accepted_snapshot_is_current &&
+                motion_gate_enabled_) {
+                motion_gate_allows_commit =
+                    evaluateMotionGateForMapCommit(
+                        accepted_localization_snapshot_.pose, publish_time);
+            }
             const bool hook_commit_ok = hookAllowsMapCommit();
             const bool allow_map_commit =
-                commit_accept_ok && commit_fitness_ok &&
-                motion_gate_allows_commit && relocalization_commit_ok &&
-                hook_commit_ok && accepted_snapshot_is_current &&
-                frame_map_commit_quality_valid;
+                write_decision.authorized && commit_fitness_ok &&
+                motion_gate_allows_commit && hook_commit_ok &&
+                accepted_snapshot_is_current;
             diag_map_commit_allowed = allow_map_commit;
             diag_motion_gate_blocked =
                 commit_accept_ok && commit_fitness_ok &&
                 !motion_gate_allows_commit;
             if (allow_map_commit) {
                 diag_map_commit_reason = "accepted";
-            } else if (!commit_accept_ok) {
-                diag_map_commit_reason = "ndt_rejected_or_prediction_only";
+            } else if (!write_decision.authorized) {
+                diag_map_commit_reason = write_decision.reason;
             } else if (!commit_fitness_ok) {
                 diag_map_commit_reason = "fitness_rejected";
-            } else if (!relocalization_commit_ok) {
-                diag_map_commit_reason = "relocalization_guard";
             } else if (!hook_commit_ok) {
                 diag_map_commit_reason = "hook_load_guard";
             } else if (!accepted_snapshot_is_current) {
@@ -7062,7 +7128,8 @@ void NdtSlamNode::processCloudThread() {
             if (allow_map_commit) {
                 const auto map_commit_start = DiagClock::now();
                 enqueueMapCommitJob(
-                    filtered_cloud, accepted_localization_snapshot_);
+                    filtered_cloud, accepted_localization_snapshot_,
+                    write_authority);
                 diag_stage.map_commit_ms = elapsedMs(map_commit_start);
                 // Filtering and map writes now run on the bounded worker.
                 // Only a completed, current-epoch job advances the owner-side

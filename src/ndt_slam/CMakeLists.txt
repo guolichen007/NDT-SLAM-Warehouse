@@ -154,6 +154,7 @@ set(LIBRARY_SOURCES
   src/cargo_geometry_fusion.cpp
   src/cargo_avoidance_fusion.cpp
   src/cargo_frame_decision.cpp
+  src/map_write_authority.cpp
   src/anomaly_review_episode_tracker.cpp
   src/pending_static_hazard_tracker.cpp
   src/cargo_presence_state_machine.cpp
@@ -371,6 +372,13 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_frame_decision_test.cpp)
   if(TARGET cargo_frame_decision_test)
     target_link_libraries(cargo_frame_decision_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(map_write_authority_test
+    test/map_write_authority_test.cpp)
+  if(TARGET map_write_authority_test)
+    target_link_libraries(map_write_authority_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
