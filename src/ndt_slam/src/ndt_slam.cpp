@@ -2134,10 +2134,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.candidate_hold_sec = hcl["candidate_hold_sec"].as<float>(1.0f);
             hook_lock_config_.candidate_max_weak_frames = hcl["candidate_max_weak_frames"].as<int>(10);
             hook_lock_config_.candidate_window_frames = std::max(
-                4, hcl["candidate_window_frames"].as<int>(12));
+                4, hcl["candidate_window_frames"].as<int>(8));
             hook_lock_config_.candidate_required_consistent_frames =
                 std::clamp(
-                    hcl["candidate_required_consistent_frames"].as<int>(7),
+                    hcl["candidate_required_consistent_frames"].as<int>(3),
                     3, hook_lock_config_.candidate_window_frames);
             hook_lock_config_.candidate_max_gap_frames = std::max(
                 0, hcl["candidate_max_gap_frames"].as<int>(4));
@@ -2230,6 +2230,11 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             hook_lock_config_.cargo_to_hook_offset_alpha = std::clamp(
                 hcl["cargo_to_hook_offset_alpha"].as<float>(0.15F),
                 0.01F, 0.50F);
+            hook_lock_config_.partial_observation_uncertainty_growth_m =
+                std::clamp(
+                    hcl["partial_observation_uncertainty_growth_m"]
+                        .as<float>(0.04F),
+                    0.005F, 0.20F);
             hook_lock_config_.reacquisition_max_xy_gate_m = std::clamp(
                 hcl["reacquisition_max_xy_gate_m"].as<float>(0.55F),
                 0.10F, hook_lock_config_.association_max_xy_gate_m);
@@ -2906,7 +2911,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             cargo_geometry_fusion_config_.positive_only_confirm_frames =
                 std::max(
                     3,
-                    geometry["positive_only_confirm_frames"].as<int>(5));
+                    geometry["positive_only_confirm_frames"].as<int>(3));
             cargo_geometry_fusion_config_
                 .shape_confirmation_window_frames =
                     std::max(
@@ -2933,11 +2938,11 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             cargo_geometry_fusion_config_.configured_bottom_margin_m =
                 geometry["configured_bottom_margin_m"].as<float>(0.10F);
             cargo_geometry_fusion_config_.conservative_shrink_confirm_frames =
-                geometry["conservative_shrink_confirm_frames"].as<int>(8);
+                geometry["conservative_shrink_confirm_frames"].as<int>(5);
             cargo_geometry_fusion_config_.maximum_shrink_per_frame_m =
                 geometry["maximum_shrink_per_frame_m"].as<float>(0.03F);
             cargo_geometry_fusion_config_.immediate_expand_enabled =
-                geometry["immediate_expand_enabled"].as<bool>(false);
+                geometry["immediate_expand_enabled"].as<bool>(true);
             cargo_geometry_fusion_config_
                 .conservative_expand_confirm_frames =
                     std::max(
@@ -15923,25 +15928,32 @@ void NdtSlamNode::updateLiveCargoPose(
     const HookCargoDetection& det,
     const HookCargoBottomEstimate& bottom,
     const ros::Time& stamp,
-    CargoPoseSource source) {
+    CargoPoseSource source,
+    bool gravity_loaded) {
     if (!det.valid || stamp.isZero()) return;
     Eigen::Vector3f raw_measured = det.center_base;
     if (det.oriented_footprint_valid) {
         raw_measured.x() = det.footprint_center_base.x();
         raw_measured.y() = det.footprint_center_base.y();
     }
-    // det.center_base already applies strict/soft/off anchor policy. Keep the
-    // raw PCA centre only as association/swing evidence.
-    Eigen::Vector3f measured = det.center_base;
-    // Every identity reaching this function is an odom-anchored cargo track;
-    // new identities were already gated by valid gravity LOADED (unless the
-    // operator explicitly disabled that sensor). Enforce the physical model
-    // here as a configuration-independent invariant. This function can be
-    // called while the gravity policy mutex is held, so it deliberately does
-    // not acquire another hook snapshot.
+    const bool complete_xy_observation =
+        det.oriented_footprint_valid &&
+        !det.oriented_footprint_clamped &&
+        det.identity_confidence >=
+            hook_lock_config_.minimum_identity_confidence &&
+        det.overall_lock_confidence >=
+            hook_lock_config_.minimum_overall_lock_confidence &&
+        det.candidate_score_margin >=
+            hook_lock_config_.minimum_candidate_score_margin &&
+        det.core_points_base &&
+        det.core_points_base->size() >= static_cast<std::size_t>(
+            std::max(1, hook_lock_config_.locked_update_min_points));
+    // The hook is an identity/continuity anchor, never an unconditional
+    // safety-centre replacement. Complete scans use the measured OBB centre;
+    // partial scans retain the bounded previous pose/offset and grow
+    // uncertainty.
+    Eigen::Vector3f measured = raw_measured;
     const Eigen::Vector2f anchor = getCargoAnchorXY();
-    measured.x() = anchor.x();
-    measured.y() = anchor.y();
     const double stamp_sec = stamp.toSec();
     if (hook_lock_.live_pose.valid &&
         stamp_sec <= hook_lock_.live_pose.evidence_stamp_sec + 1.0e-4) {
@@ -15952,6 +15964,21 @@ void NdtSlamNode::updateLiveCargoPose(
         ? std::max(
               0.0, stamp_sec - hook_lock_.live_pose.evidence_stamp_sec)
         : 0.0;
+    if (!complete_xy_observation) {
+        if (hook_lock_.live_pose.valid) {
+            const Eigen::Vector2f predicted_xy =
+                hook_lock_.live_pose.center_base.head<2>() +
+                hook_lock_.live_pose_velocity_base.head<2>() *
+                    static_cast<float>(measurement_dt);
+            measured.x() = predicted_xy.x();
+            measured.y() = predicted_xy.y();
+        } else if (hook_lock_.cargo_to_hook_offset_valid) {
+            const Eigen::Vector2f held_xy =
+                anchor + hook_lock_.cargo_to_hook_offset;
+            measured.x() = held_xy.x();
+            measured.y() = held_xy.y();
+        }
+    }
     const float predicted_z = hook_lock_.live_pose.valid
         ? hook_lock_.live_pose.center_base.z() +
               std::clamp(
@@ -16101,9 +16128,7 @@ void NdtSlamNode::updateLiveCargoPose(
     }
     const bool current_frame_formal_vertical_measurement =
         vertical_source == CargoVerticalPoseSource::DIRECT_TOP ||
-        vertical_source == CargoVerticalPoseSource::DIRECT_BOTTOM ||
-        vertical_source ==
-            CargoVerticalPoseSource::LOCKED_OBB_POINT_SUPPORT;
+        vertical_source == CargoVerticalPoseSource::DIRECT_BOTTOM;
     const bool previous_provisional_median =
         hook_lock_.live_pose.vertical_source ==
             CargoVerticalPoseSource::PROVISIONAL_MEDIAN &&
@@ -16149,8 +16174,15 @@ void NdtSlamNode::updateLiveCargoPose(
         vertical_residual,
         hook_lock_config_.residual_uncertainty_decay *
             hook_lock_.vertical_tracking_residual_m);
-    hook_lock_.live_pose.position_uncertainty_m = std::max(
-        0.08F, hook_lock_.horizontal_tracking_residual_m);
+    hook_lock_.live_pose.position_uncertainty_m = complete_xy_observation
+        ? std::max(0.08F, hook_lock_.horizontal_tracking_residual_m)
+        : std::min(
+              hook_lock_config_.lost_position_uncertainty_max_m,
+              std::max(
+                  0.08F,
+                  hook_lock_.live_pose.position_uncertainty_m +
+                      hook_lock_config_
+                          .partial_observation_uncertainty_growth_m));
     const double direct_bottom_age =
         hook_lock_.direct_bottom_evidence_stamp.isZero()
             ? hook_lock_config_.direct_bottom_soft_stale_sec
@@ -16174,6 +16206,45 @@ void NdtSlamNode::updateLiveCargoPose(
     }
     hook_lock_.direct_bottom_support_valid = accepted_direct_bottom;
     hook_lock_.locked_center_base = hook_lock_.live_pose.center_base;
+    const bool offset_learning_authorized = complete_xy_observation &&
+        source == CargoPoseSource::CURRENT_ASSOCIATED_LIDAR &&
+        hook_lock_.state == HookCargoLockState::LOCKED &&
+        cargo_lifecycle_id_ != 0U &&
+        hook_lock_.locked_shape.valid &&
+        cargo_frozen_geometry_.formal_authorized &&
+        !cargo_frozen_geometry_.source_conflict &&
+        gravity_loaded &&
+        last_cargo_safety_result_.warning_code !=
+            CargoSafetyEvaluator::kReviewCode &&
+        det.candidate_count > 0U &&
+        det.candidate_score_margin >=
+            hook_lock_config_.minimum_candidate_score_margin;
+    if (offset_learning_authorized) {
+        Eigen::Vector2f candidate_offset = raw_measured.head<2>() - anchor;
+        const float candidate_norm = candidate_offset.norm();
+        if (candidate_offset.allFinite() &&
+            candidate_norm <= hook_lock_config_.cargo_to_hook_offset_max_m) {
+            if (!hook_lock_.cargo_to_hook_offset_valid) {
+                hook_lock_.cargo_to_hook_offset = candidate_offset;
+                hook_lock_.cargo_to_hook_offset_valid = true;
+            } else {
+                Eigen::Vector2f update =
+                    candidate_offset - hook_lock_.cargo_to_hook_offset;
+                const float update_norm = update.norm();
+                if (update_norm >
+                        hook_lock_config_
+                            .cargo_to_hook_offset_max_update_per_frame_m &&
+                    update_norm > 1.0e-6F) {
+                    update *= hook_lock_config_
+                                  .cargo_to_hook_offset_max_update_per_frame_m /
+                        update_norm;
+                }
+                hook_lock_.cargo_to_hook_offset +=
+                    hook_lock_config_.cargo_to_hook_offset_alpha * update;
+            }
+            ++hook_lock_.cargo_to_hook_offset_updates;
+        }
+    }
 }
 
 void NdtSlamNode::rememberTrustedCargoPose(const ros::Time& stamp) {
@@ -16182,8 +16253,6 @@ void NdtSlamNode::rememberTrustedCargoPose(const ros::Time& stamp) {
     const bool physical_vertical_measurement =
         vertical_source == CargoVerticalPoseSource::DIRECT_TOP ||
         vertical_source == CargoVerticalPoseSource::DIRECT_BOTTOM ||
-        vertical_source ==
-            CargoVerticalPoseSource::LOCKED_OBB_POINT_SUPPORT ||
         vertical_source == CargoVerticalPoseSource::PROVISIONAL_MEDIAN;
     if (stamp.isZero() || cargo_lifecycle_id_ == 0U ||
         cargo_track_segment_id_ == 0U ||
@@ -17124,7 +17193,9 @@ void NdtSlamNode::updateHookCargoLock(
         lock_detection.z95 = lock_bottom.top_z_base;
         updateLiveCargoPose(
             lock_detection, lock_bottom, stamp,
-            CargoPoseSource::CURRENT_ASSOCIATED_LIDAR);
+            CargoPoseSource::CURRENT_ASSOCIATED_LIDAR,
+            hook.valid && hook.state ==
+                lidar_slam2_msgs::HookLoadState::STATE_LOADED);
         // The lock transition is itself backed by the robust multi-frame
         // provisional LiDAR window. Preserve that physical Z authority even
         // when the current single frame cannot expose a clean bottom or top
@@ -17187,7 +17258,9 @@ void NdtSlamNode::updateHookCargoLock(
                 updateLockedHeightAfterAssociation(bottom, stamp);
                 updateLiveCargoPose(
                     det, bottom, stamp,
-                    CargoPoseSource::CURRENT_ASSOCIATED_LIDAR);
+                    CargoPoseSource::CURRENT_ASSOCIATED_LIDAR,
+                    hook.valid && hook.state ==
+                        lidar_slam2_msgs::HookLoadState::STATE_LOADED);
                 rememberTrustedCargoPose(stamp);
                 if (!hook_lock_config_.freeze_geometry_after_lock && strong) {
                     maybeUpdateLockedSize(det, bottom);
@@ -17260,7 +17333,9 @@ void NdtSlamNode::updateHookCargoLock(
                 updateLockedHeightAfterAssociation(bottom, stamp);
                 updateLiveCargoPose(
                     det, bottom, stamp,
-                    CargoPoseSource::CURRENT_ASSOCIATED_LIDAR);
+                    CargoPoseSource::CURRENT_ASSOCIATED_LIDAR,
+                    hook.valid && hook.state ==
+                        lidar_slam2_msgs::HookLoadState::STATE_LOADED);
                 rememberTrustedCargoPose(stamp);
                 if (!hook_lock_config_.freeze_geometry_after_lock && strong) {
                     maybeUpdateLockedSize(det, bottom);
@@ -17530,7 +17605,9 @@ void NdtSlamNode::updateHookCargoLock(
         hook_lock_.state = HookCargoLockState::LOCKED;
         updateLiveCargoPose(
             det, bottom, stamp,
-            CargoPoseSource::CURRENT_ASSOCIATED_LIDAR);
+            CargoPoseSource::CURRENT_ASSOCIATED_LIDAR,
+            hook.valid && hook.state ==
+                lidar_slam2_msgs::HookLoadState::STATE_LOADED);
         rememberTrustedCargoPose(stamp);
         observation_associated = true;
         ROS_WARN(

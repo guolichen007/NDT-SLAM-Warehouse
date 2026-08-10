@@ -51,11 +51,11 @@ const char* cargoVerticalPoseSourceName(
         case CargoVerticalPoseSource::DIRECT_BOTTOM:
             return "DIRECT_BOTTOM";
         case CargoVerticalPoseSource::DIRECT_TOP:
-            return "DIRECT_TOP";
+            return "SUPPORTED_TOP_MINUS_FROZEN_HEIGHT";
         case CargoVerticalPoseSource::LOCKED_OBB_POINT_SUPPORT:
             return "LOCKED_OBB_POINT_SUPPORT";
         case CargoVerticalPoseSource::PROVISIONAL_MEDIAN:
-            return "PROVISIONAL_MEDIAN";
+            return "FRESH_HELD_FORMAL";
         case CargoVerticalPoseSource::PREDICTION:
             return "PREDICTION";
         case CargoVerticalPoseSource::DISPLAY_FROZEN:

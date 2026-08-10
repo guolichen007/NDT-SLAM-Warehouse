@@ -164,6 +164,9 @@ void CargoGeometryFusion::reset() {
   last_stamp_sec_ = 0.0;
   shrink_confirm_count_ = 0;
   shrink_track_segment_id_ = 0U;
+  shrink_quality_window_.clear();
+  shrink_length_window_.clear();
+  shrink_width_window_.clear();
   expand_confirm_count_ = 0;
   expand_track_segment_id_ = 0U;
   pending_expand_length_m_ = 0.0F;
@@ -327,6 +330,9 @@ CargoFrozenGeometry CargoGeometryFusion::update(
     if (frame.track_segment_id != shrink_track_segment_id_) {
       shrink_confirm_count_ = 0;
       shrink_track_segment_id_ = frame.track_segment_id;
+      shrink_quality_window_.clear();
+      shrink_length_window_.clear();
+      shrink_width_window_.clear();
     }
     if (frame.track_segment_id != expand_track_segment_id_ ||
         !observation_continuous) {
@@ -337,6 +343,9 @@ CargoFrozenGeometry CargoGeometryFusion::update(
     }
     if (!observation_continuous) {
       shrink_confirm_count_ = 0;
+      shrink_quality_window_.clear();
+      shrink_length_window_.clear();
+      shrink_width_window_.clear();
     }
     result_.track_segment_id = frame.track_segment_id;
     if (frame.center_valid && frame.center.allFinite()) {
@@ -386,6 +395,9 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         result_.length_m = std::max(result_.length_m, frame.length_m);
         result_.width_m = std::max(result_.width_m, frame.width_m);
         shrink_confirm_count_ = 0;
+        shrink_quality_window_.clear();
+        shrink_length_window_.clear();
+        shrink_width_window_.clear();
         expand_confirm_count_ = 0;
         pending_expand_length_m_ = 0.0F;
         pending_expand_width_m_ = 0.0F;
@@ -393,6 +405,9 @@ CargoFrozenGeometry CargoGeometryFusion::update(
                  frame.dimension_shape_confidence >=
                      config_.minimum_live_shape_confidence_for_expand) {
         shrink_confirm_count_ = 0;
+        shrink_quality_window_.clear();
+        shrink_length_window_.clear();
+        shrink_width_window_.clear();
         const float supported_length =
             std::max(result_.length_m, frame.length_m);
         const float supported_width =
@@ -423,6 +438,9 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         // A mixed larger/smaller weak observation cannot exploit the shrink
         // branch to alter either frozen dimension.
         shrink_confirm_count_ = 0;
+        shrink_quality_window_.clear();
+        shrink_length_window_.clear();
+        shrink_width_window_.clear();
         expand_confirm_count_ = 0;
         pending_expand_length_m_ = 0.0F;
         pending_expand_width_m_ = 0.0F;
@@ -431,22 +449,60 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         expand_confirm_count_ = 0;
         pending_expand_length_m_ = 0.0F;
         pending_expand_width_m_ = 0.0F;
-        ++shrink_confirm_count_;
+        shrink_quality_window_.push_back(true);
+        shrink_length_window_.push_back(frame.length_m);
+        shrink_width_window_.push_back(frame.width_m);
+        while (shrink_quality_window_.size() >
+               static_cast<std::size_t>(
+                   config_.shape_confirmation_window_frames)) {
+          shrink_quality_window_.pop_front();
+          shrink_length_window_.pop_front();
+          shrink_width_window_.pop_front();
+        }
+        shrink_confirm_count_ = static_cast<int>(std::count(
+            shrink_quality_window_.begin(),
+            shrink_quality_window_.end(), true));
         if (shrink_confirm_count_ >=
             config_.conservative_shrink_confirm_frames) {
-          result_.length_m = std::max(
-              length_floor,
-              std::max(frame.length_m,
-                       result_.length_m -
-                           config_.maximum_shrink_per_frame_m));
-          result_.width_m = std::max(
-              width_floor,
-              std::max(frame.width_m,
-                       result_.width_m -
-                           config_.maximum_shrink_per_frame_m));
+          std::vector<float> shrink_lengths;
+          std::vector<float> shrink_widths;
+          shrink_lengths.reserve(shrink_length_window_.size());
+          shrink_widths.reserve(shrink_width_window_.size());
+          for (const float value : shrink_length_window_) {
+            if (std::isfinite(value)) shrink_lengths.push_back(value);
+          }
+          for (const float value : shrink_width_window_) {
+            if (std::isfinite(value)) shrink_widths.push_back(value);
+          }
+          const float supported_length = finiteMedian(shrink_lengths);
+          const float supported_width = finiteMedian(shrink_widths);
+          const bool stable_window =
+              finiteMad(shrink_lengths, supported_length) <=
+                  config_.maximum_initial_dimension_mad_m &&
+              finiteMad(shrink_widths, supported_width) <=
+                  config_.maximum_initial_dimension_mad_m;
+          if (stable_window) {
+            result_.length_m = std::max(
+                length_floor,
+                std::max(supported_length,
+                         result_.length_m -
+                             config_.maximum_shrink_per_frame_m));
+            result_.width_m = std::max(
+                width_floor,
+                std::max(supported_width,
+                         result_.width_m -
+                             config_.maximum_shrink_per_frame_m));
+            shrink_quality_window_.clear();
+            shrink_length_window_.clear();
+            shrink_width_window_.clear();
+            shrink_confirm_count_ = 0;
+          }
         }
       } else {
         shrink_confirm_count_ = 0;
+        shrink_quality_window_.clear();
+        shrink_length_window_.clear();
+        shrink_width_window_.clear();
         expand_confirm_count_ = 0;
         pending_expand_length_m_ = 0.0F;
         pending_expand_width_m_ = 0.0F;
@@ -454,7 +510,21 @@ CargoFrozenGeometry CargoGeometryFusion::update(
     } else {
       // Partial sides, tiny clusters and weak identities may only retain the
       // conservative frozen dimensions; they never authorize shrinkage.
-      shrink_confirm_count_ = 0;
+      shrink_quality_window_.push_back(false);
+      shrink_length_window_.push_back(
+          std::numeric_limits<float>::quiet_NaN());
+      shrink_width_window_.push_back(
+          std::numeric_limits<float>::quiet_NaN());
+      while (shrink_quality_window_.size() >
+             static_cast<std::size_t>(
+                 config_.shape_confirmation_window_frames)) {
+        shrink_quality_window_.pop_front();
+        shrink_length_window_.pop_front();
+        shrink_width_window_.pop_front();
+      }
+      shrink_confirm_count_ = static_cast<int>(std::count(
+          shrink_quality_window_.begin(),
+          shrink_quality_window_.end(), true));
       expand_confirm_count_ = 0;
       pending_expand_length_m_ = 0.0F;
       pending_expand_width_m_ = 0.0F;

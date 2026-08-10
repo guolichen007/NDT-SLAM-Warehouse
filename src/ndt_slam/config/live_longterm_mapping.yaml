@@ -1005,7 +1005,7 @@ cargo_geometry_fusion:
   allow_positive_only_without_static_baseline: true
   positive_only_uncertainty_floor_m: 0.25
   allow_positive_only_on_source_conflict: true
-  positive_only_confirm_frames: 5
+  positive_only_confirm_frames: 3
   minimum_confirm_frames: 5
   # Five good dimension observations are required inside the latest eight;
   # a single partial scan no longer erases the whole same-track window.
@@ -1021,12 +1021,12 @@ cargo_geometry_fusion:
   maximum_height_m: 2.00
   huber_delta_m: 0.20
   configured_bottom_margin_m: 0.10
-  conservative_shrink_confirm_frames: 8
+  conservative_shrink_confirm_frames: 5
   maximum_shrink_per_frame_m: 0.03
   # Frozen cargo dimensions are lifecycle-stable. A larger observation must
   # be high confidence and persist continuously; a single merged component
   # can no longer inflate the formal safety envelope.
-  immediate_expand_enabled: false
+  immediate_expand_enabled: true
   conservative_expand_confirm_frames: 8
   minimum_live_shape_confidence_for_expand: 0.85
   minimum_live_dimension_support: 30
@@ -1216,8 +1216,8 @@ hook_cargo_lock:
   candidate_max_weak_frames: 10
   # Short gaps stop progress but retain the already confirmed window.
   # candidate_progress_timeout_sec remains the sole stalled-window reset.
-  candidate_window_frames: 12
-  candidate_required_consistent_frames: 7
+  candidate_window_frames: 8
+  candidate_required_consistent_frames: 3
   # At the 5 Hz detector rate this tolerates a sub-second visibility gap.
   # Gap frames never count as lock evidence.
   candidate_max_gap_frames: 4
@@ -1272,6 +1272,7 @@ hook_cargo_lock:
   cargo_to_hook_offset_max_m: 1.05
   cargo_to_hook_offset_max_update_per_frame_m: 0.04
   cargo_to_hook_offset_alpha: 0.15
+  partial_observation_uncertainty_growth_m: 0.04
   reacquisition_max_xy_gate_m: 0.55
   association_max_z_gate_m: 0.90
   reacquisition_max_z_gate_m: 0.65

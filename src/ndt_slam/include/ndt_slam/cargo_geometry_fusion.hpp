@@ -49,7 +49,7 @@ struct CargoGeometryFusionConfig {
   // positive avoidance. It may create a conservative POSITIVE_ONLY geometry;
   // CLEAR/removal/map-commit still require FORMAL authorization.
   bool allow_positive_only_on_source_conflict = true;
-  int positive_only_confirm_frames = 5;
+  int positive_only_confirm_frames = 3;
   int minimum_confirm_frames = 5;
   // Shape quality is evaluated in a bounded recent window. This preserves the
   // multi-frame requirement without allowing one partial/occluded scan to
@@ -67,12 +67,12 @@ struct CargoGeometryFusionConfig {
   float maximum_height_m = 2.00F;
   float huber_delta_m = 0.20F;
   float configured_bottom_margin_m = 0.10F;
-  int conservative_shrink_confirm_frames = 8;
+  int conservative_shrink_confirm_frames = 5;
   float maximum_shrink_per_frame_m = 0.03F;
-  // Frozen cargo does not physically grow during one lifting lifecycle.
-  // Expansion therefore needs a high-confidence continuous confirmation
-  // streak. The legacy immediate mode remains an explicit opt-in only.
-  bool immediate_expand_enabled = false;
+  // A complete, high-confidence associated observation may enlarge the
+  // safety envelope immediately. Shrinkage remains bounded and requires the
+  // configured number of valid observations in the recent shape window.
+  bool immediate_expand_enabled = true;
   int conservative_expand_confirm_frames = 8;
   float minimum_live_shape_confidence_for_expand = 0.85F;
   std::size_t minimum_live_dimension_support = 30U;
@@ -177,6 +177,9 @@ class CargoGeometryFusion {
   double last_stamp_sec_ = 0.0;
   int shrink_confirm_count_ = 0;
   std::uint64_t shrink_track_segment_id_ = 0U;
+  std::deque<bool> shrink_quality_window_;
+  std::deque<float> shrink_length_window_;
+  std::deque<float> shrink_width_window_;
   int expand_confirm_count_ = 0;
   std::uint64_t expand_track_segment_id_ = 0U;
   float pending_expand_length_m_ = 0.0F;

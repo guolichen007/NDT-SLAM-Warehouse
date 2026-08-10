@@ -1949,6 +1949,7 @@ private:
         float cargo_to_hook_offset_max_m = 1.05F;
         float cargo_to_hook_offset_max_update_per_frame_m = 0.04F;
         float cargo_to_hook_offset_alpha = 0.15F;
+        float partial_observation_uncertainty_growth_m = 0.04F;
         float reacquisition_max_xy_gate_m = 0.55F;
         float association_max_z_gate_m = 0.90F;
         float reacquisition_max_z_gate_m = 0.65F;
@@ -2506,7 +2507,8 @@ private:
     void updateLiveCargoPose(const HookCargoDetection& det,
                              const HookCargoBottomEstimate& bottom,
                              const ros::Time& stamp,
-                             CargoPoseSource source);
+                             CargoPoseSource source,
+                             bool gravity_loaded);
     void rememberTrustedCargoPose(const ros::Time& stamp);
     RigidCargoGeometry buildCurrentRigidCargoGeometryForPose(
         const Sophus::SE3d& pose_map_base,
