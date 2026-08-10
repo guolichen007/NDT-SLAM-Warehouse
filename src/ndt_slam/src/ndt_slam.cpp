@@ -3404,12 +3404,19 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                         .as<float>(0.05F),
                     0.0F,
                     0.25F);
-            obstacle_tracker_config.require_far_field_history_for_level1 =
-                cargo_safety["require_far_field_history_for_level1"]
+            obstacle_tracker_config.require_far_field_history_for_warnings =
+                cargo_safety["require_far_field_history_for_warnings"]
                     .as<bool>(true);
+            obstacle_tracker_config.far_history_confirm_frames = std::max(
+                2, cargo_safety["far_history_confirm_frames"].as<int>(3));
+            obstacle_tracker_config.far_history_confirm_duration_sec =
+                std::max(
+                    0.0,
+                    cargo_safety["far_history_confirm_duration_sec"]
+                        .as<double>(0.2));
             obstacle_tracker_config.require_static_cargo_for_warning =
                 cargo_safety["require_static_cargo_for_warning"]
-                    .as<bool>(true);
+                    .as<bool>(false);
             obstacle_tracker_config.static_cargo_min_voxel_points =
                 static_cast<std::size_t>(std::max(
                     static_cast<int>(obstacle_tracker_config.minimum_points),
@@ -20869,6 +20876,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
                 evidence.footprint_distance_m;
             observation.conservative_clearance_m =
                 evidence.conservative_clearance_m;
+            observation.horizontal_uncertainty_m =
+                envelope.horizontal_uncertainty_m;
             observation.point_count = evidence.point_count;
             observation.warning_code = warning_eligible
                 ? evidence.warning_code
@@ -23794,6 +23803,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 evidence.footprint_distance_m;
             observation.conservative_clearance_m =
                 evidence.conservative_clearance_m;
+            observation.horizontal_uncertainty_m =
+                formal_use.horizontal_uncertainty_m;
             observation.point_count = evidence.point_count;
             // The subscribed obstacle cloud is already voxelized, so an
             // honest raw-return count is unavailable. Keep raw-equivalent at

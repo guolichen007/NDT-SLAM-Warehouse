@@ -784,11 +784,14 @@ cargo_safety:
   # cargo self-points. It cannot warn until the same track was first observed
   # outside this band, unless authoritative static provenance proves it.
   embedded_obstacle_distance_threshold_m: 0.05
-  # Code 17 requires the same track to complete confirmation outside 3 m.
-  # At the configured operating speed the 7 m acquisition path establishes
-  # this history before the real 5 m/code-18 and 3 m/code-17 boundaries.
-  require_far_field_history_for_level1: true
-  require_static_cargo_for_warning: true
+  # Codes 17/18 require the same track to complete configurable evidence in
+  # the true 5-8 m acquisition shell before crossing the 5 m boundary.
+  require_far_field_history_for_warnings: true
+  far_history_confirm_frames: 3
+  far_history_confirm_duration_sec: 0.2
+  # Live far-history is the normal warning authority on this branch; runtime
+  # static maturity must not delay a correctly tracked approaching obstacle.
+  require_static_cargo_for_warning: false
   static_cargo_min_voxel_points: 80
   # Disabled until the upstream merged-cloud message carries an honest raw
   # return count; never synthesize a raw count from voxelized points.

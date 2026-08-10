@@ -45,7 +45,7 @@ CargoObstacleObservation directionalPretrack(
 CargoObstacleTrackerConfig ordinaryHazardConfig() {
   CargoObstacleTrackerConfig config;
   config.require_static_cargo_for_warning = false;
-  config.require_far_field_history_for_level1 = false;
+  config.require_far_field_history_for_warnings = false;
   return config;
 }
 
@@ -133,7 +133,7 @@ TEST(CargoObstacleTracker,
 TEST(CargoObstacleTracker,
      MaturePretrackDoesNotDelayAccurateLevel1AtThreeMeters) {
   CargoObstacleTrackerConfig config = ordinaryHazardConfig();
-  config.require_far_field_history_for_level1 = true;
+  config.require_far_field_history_for_warnings = true;
   CargoObstacleTracker tracker(config);
   tracker.update(1.0, {directionalPretrack(10U, 0.0F, 0.0F)});
   tracker.update(1.2, {directionalPretrack(10U, 0.02F, 0.0F)});
@@ -150,7 +150,7 @@ TEST(CargoObstacleTracker,
 TEST(CargoObstacleTracker,
      Level1FirstSeenInsideThreeMetersWaitsForFarFieldHistory) {
   CargoObstacleTrackerConfig config = ordinaryHazardConfig();
-  config.require_far_field_history_for_level1 = true;
+  config.require_far_field_history_for_warnings = true;
   CargoObstacleTracker tracker(config);
   CargoObstacleObservation near = hazard(0U, 0.0F, 0.0F, 17U);
   near.footprint_distance_m = 2.0F;
@@ -162,11 +162,12 @@ TEST(CargoObstacleTracker,
   EXPECT_TRUE(suppressed.selected_near_field);
   EXPECT_FALSE(suppressed.selected_near_field_authorized);
   EXPECT_FALSE(suppressed.selected_far_field_history_valid);
-  EXPECT_EQ(suppressed.reason, "near_field_track_missing_far_history");
+  EXPECT_EQ(suppressed.reason, "warning_track_missing_true_far_history");
 
   CargoObstacleObservation far = near;
-  far.footprint_distance_m = 4.0F;
-  far.warning_code = 18U;
+  far.footprint_distance_m = 6.0F;
+  far.warning_code = 14U;
+  far.warning_eligible = false;
   tracker.update(1.6, {far});
   tracker.update(1.8, {far});
   ASSERT_TRUE(tracker.update(2.0, {far}).confirmed_hazard);
@@ -176,6 +177,46 @@ TEST(CargoObstacleTracker,
   EXPECT_TRUE(authorized.selected_near_field_authorized);
   EXPECT_TRUE(authorized.selected_far_field_history_valid);
   EXPECT_EQ(authorized.warning_code, 17U);
+}
+
+TEST(CargoObstacleTracker,
+     StrictSixFrameHalfSecondFarHistoryRemainsAConfigurableTestCase) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  config.far_history_confirm_frames = 6;
+  config.far_history_confirm_duration_sec = 0.5;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleTrackerDecision decision;
+  for (int index = 0; index < 5; ++index) {
+    decision = tracker.update(
+        1.0 + 0.1 * index,
+        {directionalPretrack(10U, 0.01F * index, 0.0F)});
+    EXPECT_FALSE(decision.selected_far_field_history_valid);
+  }
+  decision = tracker.update(
+      1.5, {directionalPretrack(10U, 0.05F, 0.0F)});
+  EXPECT_TRUE(decision.selected_far_field_history_valid);
+}
+
+TEST(CargoObstacleTracker, FarHistoryUsesDistanceMinusUncertainty) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation uncertain = directionalPretrack(10U, 0.0F, 0.0F);
+  uncertain.footprint_distance_m = 5.2F;
+  uncertain.horizontal_uncertainty_m = 0.25F;
+  tracker.update(1.0, {uncertain});
+  tracker.update(1.2, {uncertain});
+  const auto rejected = tracker.update(1.4, {uncertain});
+  EXPECT_FALSE(rejected.selected_far_field_history_valid);
+
+  CargoObstacleObservation safe = uncertain;
+  safe.footprint_distance_m = 5.4F;
+  safe.horizontal_uncertainty_m = 0.20F;
+  tracker.update(1.6, {safe});
+  tracker.update(1.8, {safe});
+  const auto acquired = tracker.update(2.0, {safe});
+  EXPECT_TRUE(acquired.selected_far_field_history_valid);
 }
 
 TEST(CargoObstacleTracker,
@@ -322,7 +363,8 @@ TEST(CargoObstacleTracker, TwentyPointTrackCannotBecomeStaticCargo) {
   EXPECT_FALSE(tracker.tracks().front().static_obstacle);
 }
 
-TEST(CargoObstacleTracker, LargePersistentCargoStackCanWarn) {
+TEST(CargoObstacleTracker,
+     RuntimeStaticMaturityCannotReplaceLiveFarHistory) {
   CargoObstacleTrackerConfig config;
   config.static_cargo_min_raw_equivalent_points = 600U;
   CargoObstacleTracker tracker(config);
@@ -332,8 +374,9 @@ TEST(CargoObstacleTracker, LargePersistentCargoStackCanWarn) {
     observation.centroid_map.x() = 0.002F * static_cast<float>(i);
     decision = tracker.update(1.0 + 0.2 * i, {observation});
   }
-  EXPECT_TRUE(decision.confirmed_hazard) << decision.reason;
+  EXPECT_FALSE(decision.confirmed_hazard);
   EXPECT_TRUE(decision.selected_track_static);
+  EXPECT_FALSE(decision.selected_certified_static_provenance);
 }
 
 TEST(CargoObstacleTracker, StaticCargoRequiresIndependentProvenance) {
@@ -362,6 +405,7 @@ TEST(CargoObstacleTracker, KnownStaticNeedsOnlyThreeFreshConfirmations) {
   tracker.update(1.4, {observation});
 
   observation.provenance = ExternalProvenance::STATIC_MAP_MATCH;
+  observation.certified_static_provenance = true;
   EXPECT_FALSE(tracker.update(2.0, {observation}).confirmed_hazard);
   EXPECT_FALSE(tracker.update(2.2, {observation}).confirmed_hazard);
   EXPECT_TRUE(tracker.update(2.4, {observation}).confirmed_hazard);
@@ -372,6 +416,7 @@ TEST(CargoObstacleTracker,
   CargoObstacleTracker tracker;
   CargoObstacleObservation observation =
       staticCargo(0U, 0.0F, 0.0F, 17U);
+  observation.certified_static_provenance = true;
   observation.footprint_distance_m = 2.99F;
   EXPECT_FALSE(tracker.update(1.0, {observation}).confirmed_hazard);
   EXPECT_FALSE(tracker.update(1.2, {observation}).confirmed_hazard);
@@ -399,7 +444,8 @@ TEST(CargoObstacleTracker, OutsideCargoShellAloneIsNotIndependentProvenance) {
             ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY);
 }
 
-TEST(CargoObstacleTracker, CargoMovesAwayPersistenceAuthorizesStaticCargo) {
+TEST(CargoObstacleTracker,
+     CargoMovesAwayPersistenceDoesNotReplaceCertifiedAuthority) {
   CargoObstacleTrackerConfig config;
   config.static_cargo_confirm_frames = 3;
   config.static_cargo_confirm_sec = 0.4;
@@ -414,7 +460,7 @@ TEST(CargoObstacleTracker, CargoMovesAwayPersistenceAuthorizesStaticCargo) {
         Eigen::Vector2f(0.12F * static_cast<float>(i), 0.0F);
     decision = tracker.update(1.0 + 0.2 * i, {observation});
   }
-  EXPECT_TRUE(decision.confirmed_hazard) << decision.reason;
+  EXPECT_FALSE(decision.confirmed_hazard);
   EXPECT_EQ(decision.selected_provenance,
             ExternalProvenance::CARGO_MOVED_AWAY_PERSISTENCE);
 }

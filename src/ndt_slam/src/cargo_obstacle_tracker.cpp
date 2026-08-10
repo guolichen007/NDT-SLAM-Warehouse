@@ -107,6 +107,9 @@ float neighborCellOverlap(
 
 bool validConfig(const CargoObstacleTrackerConfig& config) {
   return config.confirm_frames >= 2 && config.minimum_points > 0U &&
+      config.far_history_confirm_frames >= 2 &&
+      std::isfinite(config.far_history_confirm_duration_sec) &&
+      config.far_history_confirm_duration_sec >= 0.0 &&
       std::isfinite(config.level1_warning_distance_m) &&
       config.level1_warning_distance_m > 0.0F &&
       std::isfinite(config.level2_warning_distance_m) &&
@@ -152,6 +155,21 @@ bool validConfig(const CargoObstacleTrackerConfig& config) {
       config.static_velocity_threshold_mps >= 0.0F;
 }
 
+bool qualifiesForFarHistory(
+    const CargoObstacleObservation& observation,
+    const CargoObstacleTrackerConfig& config) {
+  if (!observation.source_validated ||
+      !std::isfinite(observation.footprint_distance_m) ||
+      !std::isfinite(observation.horizontal_uncertainty_m) ||
+      observation.horizontal_uncertainty_m < 0.0F) {
+    return false;
+  }
+  const float safe_distance = observation.footprint_distance_m -
+      observation.horizontal_uncertainty_m;
+  return safe_distance > config.level2_warning_distance_m &&
+      observation.footprint_distance_m <= config.acquisition_distance_m;
+}
+
 bool validObservation(const CargoObstacleObservation& observation,
                       const CargoObstacleTrackerConfig& config) {
   const bool warning_distance_valid =
@@ -181,6 +199,8 @@ bool validObservation(const CargoObstacleObservation& observation,
       std::isfinite(observation.footprint_distance_m) &&
       observation.footprint_distance_m >= 0.0F &&
       std::isfinite(observation.conservative_clearance_m) &&
+      std::isfinite(observation.horizontal_uncertainty_m) &&
+      observation.horizontal_uncertainty_m >= 0.0F &&
       observation.point_count >= config.minimum_points &&
       decision_code_valid;
 }
@@ -409,6 +429,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.provenance = observation.provenance;
       track.provenance_valid =
           authorizesStaticObstacle(observation.provenance);
+      track.certified_static_provenance =
+          observation.certified_static_provenance;
       track.current_embedded =
           observation.footprint_distance_m <
           config_.embedded_distance_threshold_m;
@@ -419,10 +441,15 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
           observation.source_validated && !track.current_embedded ? 1 : 0;
       track.separated_obstacle_history_valid =
           track.separated_validated_observations >= config_.confirm_frames;
-      track.far_field_validated_observations =
-          observation.source_validated && !track.current_near_field ? 1 : 0;
+      const bool qualifies_far =
+          qualifiesForFarHistory(observation, config_);
+      track.far_field_validated_observations = qualifies_far ? 1 : 0;
+      track.far_field_first_stamp_sec = qualifies_far ? stamp_sec : 0.0;
+      track.far_field_duration_sec = 0.0;
       track.far_field_history_valid =
-          track.far_field_validated_observations >= config_.confirm_frames;
+          track.far_field_validated_observations >=
+              config_.far_history_confirm_frames &&
+          config_.far_history_confirm_duration_sec <= kStampEpsilonSec;
       track.occupied_map_cells = observation.occupied_map_cells;
       track.identity_anchor_map_cells = observation.occupied_map_cells;
       track.first_cargo_center_valid = observation.cargo_center_valid &&
@@ -542,6 +569,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.provenance = observation.provenance;
     }
     track.provenance_valid = authorizesStaticObstacle(track.provenance);
+    track.certified_static_provenance =
+        track.certified_static_provenance ||
+        observation.certified_static_provenance;
     track.current_embedded =
         observation.footprint_distance_m <
         config_.embedded_distance_threshold_m;
@@ -559,17 +589,29 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         observation.footprint_distance_m <=
         config_.level1_warning_distance_m;
     if (!track.far_field_history_valid) {
-      if (observation.source_validated && !track.current_near_field) {
-        track.far_field_validated_observations = consecutive
-            ? track.far_field_validated_observations + 1 : 1;
+      if (qualifiesForFarHistory(observation, config_)) {
+        if (!consecutive ||
+            track.far_field_validated_observations == 0) {
+          track.far_field_validated_observations = 1;
+          track.far_field_first_stamp_sec = stamp_sec;
+        } else {
+          ++track.far_field_validated_observations;
+        }
+        track.far_field_duration_sec = std::max(
+            0.0, stamp_sec - track.far_field_first_stamp_sec);
         if (track.far_field_validated_observations >=
-            config_.confirm_frames) {
+                config_.far_history_confirm_frames &&
+            track.far_field_duration_sec + kStampEpsilonSec >=
+                config_.far_history_confirm_duration_sec) {
           track.far_field_history_valid = true;
         }
       } else {
-        // Near-field or unvalidated frames break the required continuous
-        // approach history; they must not be accumulated across gaps.
+        // Entering <=5 m before both evidence gates complete remains an
+        // anomalous near-field appearance; one earlier sample cannot promote
+        // the track to normal warning authority.
         track.far_field_validated_observations = 0;
+        track.far_field_first_stamp_sec = 0.0;
+        track.far_field_duration_sec = 0.0;
       }
     }
     track.occupied_map_cells = observation.occupied_map_cells;
@@ -627,9 +669,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     }
     const bool warning_authorized = track.current_warning_eligible &&
         warningCode(track.warning_code) && track.confirmed &&
-        (!config_.require_far_field_history_for_level1 ||
-         track.warning_code != kLevel1 ||
-         track.far_field_history_valid || track.provenance_valid) &&
+        (!config_.require_far_field_history_for_warnings ||
+         track.far_field_history_valid ||
+         track.certified_static_provenance) &&
         (!config_.require_large_geometry_for_warning ||
          track.geometry_validated_consecutive_observations >=
              config_.confirm_frames) &&
@@ -670,11 +712,15 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.selected_near_field_authorized =
         !diagnostic->current_near_field ||
         diagnostic->far_field_history_valid ||
-        diagnostic->provenance_valid;
+        diagnostic->certified_static_provenance;
     decision.selected_far_field_history_valid =
         diagnostic->far_field_history_valid;
     decision.selected_far_field_observations =
         diagnostic->far_field_validated_observations;
+    decision.selected_far_field_duration_sec =
+        diagnostic->far_field_duration_sec;
+    decision.selected_certified_static_provenance =
+        diagnostic->certified_static_provenance;
     decision.selected_static_provenance_streak =
         diagnostic->static_provenance_consecutive_observations;
     decision.selected_static_age_sec =
@@ -705,12 +751,11 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
                !diagnostic->separated_obstacle_history_valid &&
                !diagnostic->provenance_valid) {
       decision.reason = "embedded_obstacle_origin_unresolved";
-    } else if (config_.require_far_field_history_for_level1 &&
-               diagnostic->warning_code == kLevel1 &&
-               diagnostic->current_near_field &&
+    } else if (config_.require_far_field_history_for_warnings &&
+               warningCode(diagnostic->warning_code) &&
                !diagnostic->far_field_history_valid &&
-               !diagnostic->provenance_valid) {
-      decision.reason = "near_field_track_missing_far_history";
+               !diagnostic->certified_static_provenance) {
+      decision.reason = "warning_track_missing_true_far_history";
     } else if (!config_.require_static_cargo_for_warning) {
       decision.reason = "persistent_obstacle_track_pending";
     } else if (config_.require_large_geometry_for_warning &&
