@@ -161,6 +161,20 @@ struct StaticEvidenceMutationResult {
   std::uint64_t revision = 0U;
 };
 
+// Version domains are explicit and never compared across fields.  This is
+// the only token accepted by the asynchronous reauthorization path.
+struct StaticMutationVersion {
+  std::uint64_t mapping_authority_epoch = 0U;
+  std::uint64_t source_objects_version = 0U;
+  std::uint64_t invalidation_sequence = 0U;
+};
+
+struct StaticCellTombstone {
+  std::uint64_t mapping_authority_epoch = 0U;
+  std::uint64_t source_objects_version = 0U;
+  std::uint64_t invalidation_sequence = 0U;
+};
+
 // Fully allocated, generation-adjusted state for a no-I/O lifecycle install.
 // Preparation may fail and must happen before the runtime map is mutated.
 struct PreparedStaticEvidenceInstall {
@@ -215,9 +229,21 @@ class StaticObstacleEvidenceIndex {
       double stamp_sec,
       std::uint64_t map_generation,
       std::uint64_t objects_version = 0U);
+  bool observeCleanBuildCells(
+      const StaticEvidenceCellGeometryMap& occupied_cells,
+      const StaticEvidenceCellKeySet& observable_cells,
+      const StaticEvidenceCellKeySet& observed_free_cells,
+      double stamp_sec,
+      std::uint64_t map_generation,
+      const StaticMutationVersion& version);
   StaticEvidenceMutationResult invalidateCells(
       const StaticEvidenceCellKeySet& invalidated_cells,
       std::uint64_t clean_build_version,
+      double stamp_sec,
+      std::uint64_t map_generation);
+  StaticEvidenceMutationResult invalidateCells(
+      const StaticEvidenceCellKeySet& invalidated_cells,
+      const StaticMutationVersion& version,
       double stamp_sec,
       std::uint64_t map_generation);
   StaticEvidenceMutationResult confirmCleanCells(
@@ -226,6 +252,12 @@ class StaticObstacleEvidenceIndex {
       double stamp_sec,
       std::uint64_t map_generation,
       std::uint64_t clean_build_version = 1U);
+  StaticEvidenceMutationResult confirmCleanCells(
+      const StaticEvidenceCellGeometryMap& clean_cells,
+      const StaticEvidenceCellKeySet& invalidated_cells,
+      double stamp_sec,
+      std::uint64_t map_generation,
+      const StaticMutationVersion& version);
 
   StaticProvenanceDecision query(
       const StaticProvenanceQuery& query) const;
@@ -285,7 +317,7 @@ class StaticObstacleEvidenceIndex {
   std::map<std::int64_t, HeightHistory> height_histories_;
   // Tombstones survive erasing a contaminated working cell. They prevent an
   // older asynchronous clean result from recreating/confirming that cell.
-  std::map<std::int64_t, std::uint64_t> invalidated_versions_;
+  std::map<std::int64_t, StaticCellTombstone> invalidated_versions_;
   StaticEvidenceCellKeySet observed_free_tombstones_;
   std::uint64_t working_generation_ = 0U;
   std::uint64_t latest_observation_sequence_ = 0U;

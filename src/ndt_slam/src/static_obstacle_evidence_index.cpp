@@ -295,7 +295,29 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
     double stamp_sec,
     std::uint64_t map_generation,
     std::uint64_t objects_version) {
+  const std::uint64_t normalized_version =
+      std::max<std::uint64_t>(1U, objects_version);
+  return observeCleanBuildCells(
+      occupied_cells, observable_cells, observed_free_cells,
+      stamp_sec, map_generation,
+      StaticMutationVersion{
+          std::max<std::uint64_t>(1U, map_generation),
+          normalized_version, normalized_version});
+}
+
+bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
+    const StaticEvidenceCellGeometryMap& occupied_cells,
+    const StaticEvidenceCellKeySet& observable_cells,
+    const StaticEvidenceCellKeySet& observed_free_cells,
+    double stamp_sec,
+    std::uint64_t map_generation,
+    const StaticMutationVersion& version) {
   if (!std::isfinite(stamp_sec) || stamp_sec <= 0.0) return false;
+  if (version.mapping_authority_epoch == 0U ||
+      version.source_objects_version == 0U ||
+      version.invalidation_sequence == 0U) {
+    return false;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
   if (working_generation_ != map_generation) {
     // Only an explicit lifecycle reset may change the active epoch. A delayed
@@ -330,6 +352,20 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
     const auto working = working_cells_.find(key);
     if (working == working_cells_.end()) continue;
     ++diagnostics_totals_.observed_free;
+    StaticCellTombstone& tombstone = invalidated_versions_[key];
+    if (version.mapping_authority_epoch >
+            tombstone.mapping_authority_epoch ||
+        (version.mapping_authority_epoch ==
+             tombstone.mapping_authority_epoch &&
+         version.invalidation_sequence >=
+             tombstone.invalidation_sequence)) {
+      tombstone.mapping_authority_epoch =
+          version.mapping_authority_epoch;
+      tombstone.source_objects_version =
+          version.source_objects_version;
+      tombstone.invalidation_sequence =
+          version.invalidation_sequence;
+    }
     observed_free_tombstones_.insert(key);
     working_cells_.erase(working);
     height_histories_.erase(key);
@@ -343,6 +379,17 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
       continue;
     }
     if (observed_free_cells.find(item.first) != observed_free_cells.end()) {
+      continue;
+    }
+    const auto tombstone = invalidated_versions_.find(item.first);
+    if (tombstone != invalidated_versions_.end() &&
+        tombstone->second.mapping_authority_epoch ==
+            version.mapping_authority_epoch &&
+        (tombstone->second.invalidation_sequence >=
+             version.invalidation_sequence ||
+         tombstone->second.source_objects_version >
+             version.source_objects_version)) {
+      ++diagnostics_totals_.invalidated_by_tombstone;
       continue;
     }
     const auto& geometry = item.second;
@@ -414,7 +461,8 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
     }
     cell.last_seen_sec = stamp_sec;
     cell.last_observation_sequence = latest_observation_sequence_;
-    cell.last_observed_objects_version = objects_version;
+    cell.last_observed_objects_version =
+        version.source_objects_version;
     cell.map_generation = map_generation;
     if (!cell.temporally_mature && isTemporallyMatureLocked(cell)) {
       cell.temporally_mature = true;
@@ -433,16 +481,44 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::invalidateCells(
     std::uint64_t clean_build_version,
     double stamp_sec,
     std::uint64_t map_generation) {
+  return invalidateCells(
+      invalidated_cells,
+      StaticMutationVersion{
+          map_generation, clean_build_version, clean_build_version},
+      stamp_sec, map_generation);
+}
+
+StaticEvidenceMutationResult StaticObstacleEvidenceIndex::invalidateCells(
+    const StaticEvidenceCellKeySet& invalidated_cells,
+    const StaticMutationVersion& version,
+    double stamp_sec,
+    std::uint64_t map_generation) {
   StaticEvidenceMutationResult result;
-  if (clean_build_version == 0U) return result;
+  if (version.mapping_authority_epoch == 0U ||
+      version.source_objects_version == 0U ||
+      version.invalidation_sequence == 0U) {
+    return result;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
   if (working_generation_ != map_generation) {
     ++diagnostics_totals_.generation_mismatch;
     return result;
   }
   for (const auto key : invalidated_cells) {
-    std::uint64_t& tombstone = invalidated_versions_[key];
-    tombstone = std::max(tombstone, clean_build_version);
+    StaticCellTombstone& tombstone = invalidated_versions_[key];
+    if (version.mapping_authority_epoch >
+            tombstone.mapping_authority_epoch ||
+        (version.mapping_authority_epoch ==
+             tombstone.mapping_authority_epoch &&
+         version.invalidation_sequence >=
+             tombstone.invalidation_sequence)) {
+      tombstone.mapping_authority_epoch =
+          version.mapping_authority_epoch;
+      tombstone.source_objects_version =
+          version.source_objects_version;
+      tombstone.invalidation_sequence =
+          version.invalidation_sequence;
+    }
     result.invalidated_cells += working_cells_.erase(key);
     height_histories_.erase(key);
     ++diagnostics_totals_.invalidated_by_tombstone;
@@ -461,8 +537,24 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
     double stamp_sec,
     std::uint64_t map_generation,
     std::uint64_t clean_build_version) {
+  return confirmCleanCells(
+      clean_cells, invalidated_cells, stamp_sec, map_generation,
+      StaticMutationVersion{
+          map_generation, clean_build_version, clean_build_version});
+}
+
+StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
+    const StaticEvidenceCellGeometryMap& clean_cells,
+    const StaticEvidenceCellKeySet& invalidated_cells,
+    double stamp_sec,
+    std::uint64_t map_generation,
+    const StaticMutationVersion& version) {
   StaticEvidenceMutationResult result;
-  if (clean_build_version == 0U) return result;
+  if (version.mapping_authority_epoch == 0U ||
+      version.source_objects_version == 0U ||
+      version.invalidation_sequence == 0U) {
+    return result;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
   if (working_generation_ != map_generation) {
     ++diagnostics_totals_.generation_mismatch;
@@ -471,8 +563,20 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
   // Invalidation is monotonic and always wins over clean evidence from the
   // same or any older asynchronous build.
   for (const auto key : invalidated_cells) {
-    std::uint64_t& tombstone = invalidated_versions_[key];
-    tombstone = std::max(tombstone, clean_build_version);
+    StaticCellTombstone& tombstone = invalidated_versions_[key];
+    if (version.mapping_authority_epoch >
+            tombstone.mapping_authority_epoch ||
+        (version.mapping_authority_epoch ==
+             tombstone.mapping_authority_epoch &&
+         version.invalidation_sequence >=
+             tombstone.invalidation_sequence)) {
+      tombstone.mapping_authority_epoch =
+          version.mapping_authority_epoch;
+      tombstone.source_objects_version =
+          version.source_objects_version;
+      tombstone.invalidation_sequence =
+          version.invalidation_sequence;
+    }
     result.invalidated_cells += working_cells_.erase(key);
     height_histories_.erase(key);
     ++diagnostics_totals_.invalidated_by_tombstone;
@@ -485,11 +589,20 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
       continue;
     }
     const auto tombstone = invalidated_versions_.find(item.first);
+    const bool stale_against_tombstone =
+        tombstone != invalidated_versions_.end() &&
+        (tombstone->second.mapping_authority_epoch >
+             version.mapping_authority_epoch ||
+         (tombstone->second.mapping_authority_epoch ==
+              version.mapping_authority_epoch &&
+          (tombstone->second.invalidation_sequence >=
+               version.invalidation_sequence ||
+           tombstone->second.source_objects_version >
+               version.source_objects_version)));
     if (observed_free_tombstones_.find(item.first) !=
             observed_free_tombstones_.end() ||
         invalidated_cells.find(item.first) != invalidated_cells.end() ||
-        (tombstone != invalidated_versions_.end() &&
-         tombstone->second >= clean_build_version)) {
+        stale_against_tombstone) {
       continue;
     }
     auto inserted = working_cells_.emplace(item.first, StaticEvidenceCell{});
@@ -514,9 +627,10 @@ StaticEvidenceMutationResult StaticObstacleEvidenceIndex::confirmCleanCells(
     }
     cell.clean_map_confirmed = true;
     cell.last_clean_confirmed_version = std::max(
-        cell.last_clean_confirmed_version, clean_build_version);
+        cell.last_clean_confirmed_version,
+        version.invalidation_sequence);
     cell.last_invalidated_version = tombstone == invalidated_versions_.end()
-        ? 0U : tombstone->second;
+        ? 0U : tombstone->second.invalidation_sequence;
     if (!cell.temporally_mature && isTemporallyMatureLocked(cell)) {
       cell.temporally_mature = true;
     }

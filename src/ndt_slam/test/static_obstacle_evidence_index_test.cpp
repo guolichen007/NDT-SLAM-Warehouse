@@ -67,6 +67,37 @@ TEST(StaticObstacleEvidenceIndexTest, PreCargoSequenceIsIndependentEvidence) {
   EXPECT_EQ(decision.provenance, ExternalProvenance::PRE_CARGO_OCCUPANCY);
 }
 
+TEST(StaticObstacleEvidenceIndexTest,
+     NewerSameDomainTombstoneBlocksStaleWorkerReauthorization) {
+  StaticObstacleEvidenceIndex index(testConfig());
+  constexpr std::uint64_t generation = 42U;
+  index.reset(generation);
+  const StaticEvidenceCellKeySet cells = {
+      packStaticEvidenceCell(4, 8), packStaticEvidenceCell(5, 8)};
+  const StaticMutationVersion initial{7U, 10U, 10U};
+  EXPECT_EQ(index.confirmCleanCells(
+                twoCells(), {}, 1.0, generation, initial).confirmed_cells,
+            2U);
+
+  const StaticMutationVersion invalidation{7U, 12U, 12U};
+  EXPECT_EQ(index.invalidateCells(
+                cells, invalidation, 1.1, generation).invalidated_cells,
+            2U);
+
+  const StaticMutationVersion stale_worker{7U, 11U, 11U};
+  EXPECT_EQ(index.confirmCleanCells(
+                twoCells(), {}, 1.2, generation,
+                stale_worker).confirmed_cells,
+            0U);
+  EXPECT_TRUE(index.snapshot()->cells.empty());
+
+  const StaticMutationVersion newer_worker{7U, 13U, 13U};
+  EXPECT_EQ(index.confirmCleanCells(
+                twoCells(), {}, 1.3, generation,
+                newer_worker).confirmed_cells,
+            2U);
+}
+
 TEST(StaticObstacleEvidenceIndexTest, ThinTopSurfacesUseBoundedHeightTolerance) {
   StaticObstacleEvidenceIndex index(testConfig());
   StaticEvidenceCellGeometryMap planar = {
