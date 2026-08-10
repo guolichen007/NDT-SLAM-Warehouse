@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NDT SLAM mainline non-regression control manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "experiment_name", "commit_sha", "bag_path",
+    "bag_sha256", "playback_rate", "config_sha256",
+    "canonical_ros_parameters_sha256", "sensor_topics",
+    "tf_extrinsic_sha256", "self_mask_config_sha256",
+    "registration_target_snapshot_sha256",
+    "persistent_map_initial_state_sha256", "runtime_profile",
+    "feature_flags", "input_paths"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "experiment_name": {"type": "string", "minLength": 1},
+    "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "bag_path": {"type": "string", "minLength": 1},
+    "bag_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "playback_rate": {"type": "number", "exclusiveMinimum": 0},
+    "config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "canonical_ros_parameters_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sensor_topics": {"type": "object", "minProperties": 1},
+    "tf_extrinsic_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "self_mask_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "registration_target_snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "persistent_map_initial_state_sha256": {
+      "oneOf": [{"const": "EMPTY"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]
+    },
+    "runtime_profile": {"type": "string", "minLength": 1},
+    "feature_flags": {"type": "object"},
+    "input_paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "config", "ros_parameters_json", "sensor_topics_json",
+        "feature_flags_json", "tf_extrinsic", "registration_target",
+        "persistent_map"
+      ],
+      "properties": {
+        "config": {"type": "string", "minLength": 1},
+        "ros_parameters_json": {"type": "string", "minLength": 1},
+        "sensor_topics_json": {"type": "string", "minLength": 1},
+        "feature_flags_json": {"type": "string", "minLength": 1},
+        "tf_extrinsic": {"type": "string", "minLength": 1},
+        "registration_target": {"type": "string", "minLength": 1},
+        "persistent_map": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
