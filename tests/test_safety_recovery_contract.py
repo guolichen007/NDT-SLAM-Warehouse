@@ -267,7 +267,11 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "user stop received; not restarting", SUPERVISOR
         )
         self.assertIn("restart budget exhausted (3/900s)", SUPERVISOR)
-        self.assertIn("use_ndt_recovery_watchdog:=true", SERVICE)
+        self.assertIn("use_ndt_recovery_watchdog:=false", SERVICE)
+        self.assertIn(
+            '<arg name="use_ndt_recovery_watchdog" default="false"/>',
+            LAUNCH,
+        )
         unit_section, service_section = SERVICE.split("[Service]", 1)
         self.assertIn("StartLimitIntervalSec=300", unit_section)
         self.assertIn("StartLimitBurst=5", unit_section)
@@ -314,7 +318,7 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "warehouse_live_longterm_mapping.launch", INSTALLER
         )
         self.assertIn(
-            "use_ndt_recovery_watchdog:=true", INSTALLER
+            "use_ndt_recovery_watchdog:=false", INSTALLER
         )
         self.assertIn(
             "contains obsolete Restart=on-failure", INSTALLER

@@ -113,15 +113,19 @@ class NdtFastMotionObbContractTest(unittest.TestCase):
         self.assertIn("valid gravity LOADED required", NODE)
         self.assertIn("require_hook_containment = true", NODE)
         self.assertIn("maximum_hook_center_distance_m", NODE)
+        self.assertIn("maximum_dynamic_hook_center_distance_m", NODE)
+        self.assertIn("size_aware_hook_gate = true", NODE)
         self.assertIn("maximum_hook_normalized_offset", NODE)
         self.assertIn("hook_anchor_outside_candidate_obb", TRACK_POLICY)
         self.assertIn("candidate_center_too_far_from_hook_anchor", TRACK_POLICY)
         self.assertIn(
             "hook_anchor_outside_candidate_central_region", TRACK_POLICY
         )
-        self.assertIn("configuration-independent invariant", NODE)
-        self.assertIn("measured.x() = anchor.x();", NODE)
-        self.assertIn("measured.y() = anchor.y();", NODE)
+        self.assertIn("identity_context.require_hook_containment = true", NODE)
+        self.assertIn("raw_measured.head<2>() - anchor", NODE)
+        self.assertIn("learned_cargo_to_hook_offset", NODE)
+        self.assertNotIn("measured.x() = anchor.x();", NODE)
+        self.assertNotIn("measured.y() = anchor.y();", NODE)
 
     def test_cargo_yaw_expands_xy_without_replacing_height_fusion(self):
         self.assertIn("projected_live_length", NODE)

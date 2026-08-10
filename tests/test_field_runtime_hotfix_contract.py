@@ -21,9 +21,11 @@ RVIZ = (ROOT / "src/ndt_slam/launch/rviz.rviz").read_text(
 
 
 class FieldRuntimeHotfixContractTest(unittest.TestCase):
-    def test_OrientedFootprintCannotBypassStrictOdomAnchor(self):
-        self.assertIn('anchor_symmetry_mode = "strict"', HEADER)
-        self.assertIn('anchor_symmetry_mode: "strict"', CONFIG)
+    def test_OrientedFootprintUsesDynamicBoundedHookAssociation(self):
+        self.assertIn('anchor_symmetry_mode: "off"', CONFIG)
+        self.assertIn("size_aware_hook_gate = true", NODE)
+        self.assertIn("maximum_dynamic_hook_center_distance_m", NODE)
+        self.assertIn("learned_cargo_to_hook_offset", NODE)
         self.assertIn("center_x = cx;", NODE)
         self.assertIn("center_y = cy;", NODE)
         self.assertIn("result.footprint_length_width = Eigen::Vector2f(sx, sy);", NODE)
@@ -38,7 +40,8 @@ class FieldRuntimeHotfixContractTest(unittest.TestCase):
         self.assertIn("latest_completed_map_bundle_ = result.bundle;", NODE)
         self.assertNotIn("const bool localization_authorized", NODE)
         self.assertNotIn("const bool health_allows_commit", NODE)
-        self.assertIn("result.bundle.lifecycle_epoch", NODE)
+        self.assertIn("result.lineage.lifecycle_epoch", NODE)
+        self.assertIn("source_bundle.lifecycle_epoch", NODE)
         self.assertIn("result.source_objects_version", NODE)
 
     def test_WatchdogUsesActualGlobalServiceAndBoundedRetries(self):

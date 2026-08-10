@@ -591,8 +591,9 @@ def asynchronous_map_commit_contract_failures() -> list[str]:
     required = (
         "struct MapCommitJob",
         "map_commit_queue_capacity_ = 2U",
-        "enqueueMapCommitJob(\n                    filtered_cloud, "
-        "accepted_localization_snapshot_)",
+        "enqueueMapCommitJob(\n                    archive_raw_cloud, "
+        "filtered_cloud, registration_cloud,\n"
+        "                    accepted_localization_snapshot_)",
         "std::thread(&NdtSlamNode::mapCommitThread, this)",
         "map_commit_lifecycle_mutex_",
         "job.lifecycle_epoch",
@@ -600,6 +601,7 @@ def asynchronous_map_commit_contract_failures() -> list[str]:
         "map_commit_queue_.back() = std::move(job)",
         "consumeMapCommitCompletion()",
         "job.formal_footprint",
+        "job.archive_raw_cloud = archive_raw_cloud",
     )
     for token in required:
         if token not in combined:
@@ -701,7 +703,7 @@ def static_evidence_contract_failures() -> list[str]:
         "StaticObstacleEvidenceIndex::publishSnapshotLocked", confirm_start)
     confirm_body = combined[confirm_start:confirm_end]
     if ("invalidated_cells.find(item.first)" not in confirm_body or
-            "tombstone->second >= clean_build_version" not in confirm_body):
+            "stale_against_tombstone" not in confirm_body):
         failures.append(
             "clean confirmation does not give same/newer invalidation priority")
     if "decision.matched_iou >= config_.minimum_iou" in combined:
@@ -765,7 +767,7 @@ def server_operations_contract_failures() -> list[str]:
         "tar.zst",
         "sha256sum",
         'if [[ "$status" -eq 124 ]]',
-        "use_sim_time:=false use_rviz:=false persistent_map:=true",
+        "use_sim_time:=false use_rviz:=false persistent_map:=false",
         "flock --no-fork --exclusive --nonblock",
         "catkin_install_python",
     )
