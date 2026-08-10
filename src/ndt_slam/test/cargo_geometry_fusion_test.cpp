@@ -391,6 +391,24 @@ TEST(CargoGeometryFusionTest,
   EXPECT_FLOAT_EQ(result.width_m, 2.0F);
 }
 
+TEST(CargoGeometryFusionTest,
+     TrustedCompleteMeasurementExpandsDefaultEnvelopeImmediately) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  CargoGeometryFusion fusion(config);
+  auto result = fusion.update(frame(1.0));
+  ASSERT_TRUE(result.frozen);
+  auto larger = frame(1.1);
+  larger.length_m = result.length_m + 0.40F;
+  larger.width_m = result.width_m + 0.20F;
+  larger.dimension_observation_complete = true;
+  larger.dimension_support_points = 100U;
+  larger.dimension_shape_confidence = 0.9F;
+  result = fusion.update(larger);
+  EXPECT_FLOAT_EQ(result.length_m, larger.length_m);
+  EXPECT_FLOAT_EQ(result.width_m, larger.width_m);
+}
+
 TEST(CargoGeometryFusionTest, TinyClusterCannotShrinkFrozenEnvelope) {
   CargoGeometryFusionConfig config;
   config.minimum_confirm_frames = 1;
@@ -408,7 +426,7 @@ TEST(CargoGeometryFusionTest, TinyClusterCannotShrinkFrozenEnvelope) {
   EXPECT_FLOAT_EQ(result.length_m, length);
 }
 
-TEST(CargoGeometryFusionTest, ShrinkRequiresConsecutiveQualityEvidence) {
+TEST(CargoGeometryFusionTest, ShrinkRequiresQualityEvidenceInRecentWindow) {
   CargoGeometryFusionConfig config;
   config.minimum_confirm_frames = 1;
   config.conservative_shrink_confirm_frames = 3;
@@ -426,7 +444,11 @@ TEST(CargoGeometryFusionTest, ShrinkRequiresConsecutiveQualityEvidence) {
   EXPECT_FLOAT_EQ(fusion.update(smaller).length_m, original);
   smaller.stamp_sec = 1.2;
   EXPECT_FLOAT_EQ(fusion.update(smaller).length_m, original);
-  smaller.stamp_sec = 1.3;
+  auto partial = smaller;
+  partial.stamp_sec = 1.3;
+  partial.dimension_observation_complete = false;
+  EXPECT_FLOAT_EQ(fusion.update(partial).length_m, original);
+  smaller.stamp_sec = 1.4;
   result = fusion.update(smaller);
   EXPECT_NEAR(result.length_m, original - 0.05F, 1.0e-6F);
 }

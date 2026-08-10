@@ -32,12 +32,15 @@ const char* cargoPoseSourceName(CargoPoseSource source) noexcept;
 
 enum class CargoVerticalPoseSource : std::uint8_t {
     DIRECT_BOTTOM = 0,
+    // Supported LiDAR top minus the lifecycle-frozen physical height.
     DIRECT_TOP = 1,
+    // Partial/raw support is display/tracking evidence only. It cannot
+    // refresh formal vertical authority.
     LOCKED_OBB_POINT_SUPPORT = 2,
     PREDICTION = 3,
     DISPLAY_FROZEN = 4,
-    // Robust center/height obtained from the multi-frame provisional LiDAR
-    // window at the formal lock transition.
+    // Fresh held formal evidence obtained at the lock transition. Its
+    // physical evidence timestamp is never refreshed by held/display frames.
     PROVISIONAL_MEDIAN = 5
 };
 
