@@ -155,6 +155,7 @@ set(LIBRARY_SOURCES
   src/cargo_avoidance_fusion.cpp
   src/cargo_frame_decision.cpp
   src/map_write_authority.cpp
+  src/clean_worker_lineage.cpp
   src/anomaly_review_episode_tracker.cpp
   src/pending_static_hazard_tracker.cpp
   src/cargo_presence_state_machine.cpp
@@ -379,6 +380,13 @@ if(CATKIN_ENABLE_TESTING)
     test/map_write_authority_test.cpp)
   if(TARGET map_write_authority_test)
     target_link_libraries(map_write_authority_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(clean_worker_lineage_test
+    test/clean_worker_lineage_test.cpp)
+  if(TARGET clean_worker_lineage_test)
+    target_link_libraries(clean_worker_lineage_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 

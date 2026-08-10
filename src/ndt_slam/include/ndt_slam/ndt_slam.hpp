@@ -61,6 +61,7 @@
 #include <ndt_slam/cargo_avoidance_fusion.hpp>
 #include <ndt_slam/cargo_frame_decision.hpp>
 #include <ndt_slam/map_write_authority.hpp>
+#include <ndt_slam/clean_worker_lineage.hpp>
 #include <ndt_slam/anomaly_review_episode_tracker.hpp>
 #include <ndt_slam/pending_static_hazard_tracker.hpp>
 #include <ndt_slam/cargo_presence_state_machine.hpp>
@@ -987,6 +988,7 @@ private:
         std::uint64_t source_localization_continuity_generation = 0U;
         std::uint64_t source_localization_map_generation = 0U;
         std::string source_localization_map_uuid;
+        CleanWorkerLineage lineage;
         double duration_ms = 0.0;
         CleanMapBuildResult build;
         StaticEvidenceCellGeometryMap static_clean_cells;

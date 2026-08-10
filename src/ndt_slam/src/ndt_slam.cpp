@@ -4541,6 +4541,18 @@ void NdtSlamNode::startCleanMapRebuildJob() {
                 source_localization_map_generation;
             result.source_localization_map_uuid =
                 source_localization_map_uuid;
+            result.lineage.localization_continuity_generation =
+                source_localization_continuity_generation;
+            result.lineage.localization_map_generation =
+                source_localization_map_generation;
+            result.lineage.localization_map_uuid =
+                source_localization_map_uuid;
+            result.lineage.static_evidence_epoch =
+                source_static_evidence_epoch;
+            result.lineage.source_accepted_pose_generation =
+                source_accepted_pose_generation;
+            result.lineage.source_objects_version =
+                source_objects_version;
             result.static_evidence_epoch = source_static_evidence_epoch;
             result.static_clean_build_version =
                 source_clean_build_version;
@@ -4552,6 +4564,8 @@ void NdtSlamNode::startCleanMapRebuildJob() {
                 std::move(source_observable_cells);
             result.static_free_cells = std::move(source_free_cells);
             result.bundle = std::move(source_bundle);
+            result.lineage.lifecycle_epoch =
+                result.bundle.lifecycle_epoch;
             const auto started = std::chrono::steady_clock::now();
             try {
                 result.build = buildCleanMapFromSnapshot(input);
@@ -4698,22 +4712,39 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
             }
         }
     };
-    // Clean-map consumes only the immutable source bundle.  Upstream map
-    // commit already blocks untrusted poses, so the worker is validated by
-    // lifecycle, object version and static-evidence generation rather than a
-    // second HEALTHY gate that could freeze display output indefinitely.
-    if (result.bundle.lifecycle_epoch !=
-        map_rebuild_generation_.load(std::memory_order_acquire)) {
-        static_clean_build_discarded_.fetch_add(
-            1U, std::memory_order_relaxed);
-        ROS_DEBUG("[CleanMapWorker] discarded previous lifecycle epoch");
-        restore_observations();
-        return;
-    }
     std::uint64_t current_objects_version = 0U;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
         current_objects_version = objects_map_content_version_;
+    }
+    CleanWorkerLineage current_lineage;
+    current_lineage.localization_continuity_generation =
+        localization_continuity_generation_.load(
+            std::memory_order_acquire);
+    current_lineage.localization_map_generation =
+        localization_map_generation_;
+    current_lineage.localization_map_uuid = localization_map_uuid_;
+    current_lineage.lifecycle_epoch =
+        map_rebuild_generation_.load(std::memory_order_acquire);
+    current_lineage.static_evidence_epoch =
+        static_evidence_epoch_.load(std::memory_order_acquire);
+    current_lineage.source_accepted_pose_generation =
+        accepted_localization_snapshot_.pose_generation;
+    current_lineage.source_objects_version = current_objects_version;
+    // Validate identity independently of worker success. Identity-invalid
+    // observations belong to an old map domain and must not be restored into
+    // the current pending buffers.
+    CleanWorkerLineageDecision lineage_decision =
+        evaluateCleanWorkerLineage(
+            true, result.lineage, current_lineage);
+    if (lineage_decision.action == CleanWorkerLineageAction::DISCARD) {
+        static_clean_build_discarded_.fetch_add(
+            1U, std::memory_order_relaxed);
+        ROS_DEBUG("[CleanMapWorker] discarded lineage=%s source_pose=%llu",
+                  lineage_decision.reason.c_str(),
+                  static_cast<unsigned long long>(
+                      result.lineage.source_accepted_pose_generation));
+        return;
     }
     const CleanMapBuildAction initial_action = evaluateCleanMapBuildAction(
         result.valid,
@@ -4729,14 +4760,39 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
     }
 
     bool installed_as_current = false;
+    bool publish_completed_snapshot = false;
     CleanMapBuildAction completed_action =
         CleanMapBuildAction::DISCARD_INVALID;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
+        current_lineage.localization_continuity_generation =
+            localization_continuity_generation_.load(
+                std::memory_order_acquire);
+        current_lineage.localization_map_generation =
+            localization_map_generation_;
+        current_lineage.localization_map_uuid = localization_map_uuid_;
+        current_lineage.lifecycle_epoch =
+            map_rebuild_generation_.load(std::memory_order_acquire);
+        current_lineage.static_evidence_epoch =
+            static_evidence_epoch_.load(std::memory_order_acquire);
+        current_lineage.source_objects_version =
+            objects_map_content_version_;
+        lineage_decision = evaluateCleanWorkerLineage(
+            result.valid, result.lineage, current_lineage);
         const CleanMapBuildAction final_action = evaluateCleanMapBuildAction(
             result.valid, false, result.source_objects_version,
             objects_map_content_version_);
-        if (final_action == CleanMapBuildAction::APPLY &&
+        const bool lineage_action_matches =
+            (lineage_decision.action ==
+                 CleanWorkerLineageAction::INSTALL_CURRENT &&
+             final_action == CleanMapBuildAction::APPLY) ||
+            (lineage_decision.action ==
+                 CleanWorkerLineageAction::PUBLISH_SNAPSHOT_ONLY &&
+             final_action ==
+                 CleanMapBuildAction::PUBLISH_SNAPSHOT_ONLY);
+        if (!lineage_action_matches) {
+            completed_action = CleanMapBuildAction::DISCARD_INVALID;
+        } else if (final_action == CleanMapBuildAction::APPLY &&
             result.bundle.objects_clean) {
             objects_clean_map_.reset(
                 new pcl::PointCloud<pcl::PointXYZ>(
@@ -4746,19 +4802,30 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
                 ++clean_map_content_version_;
             }
             installed_as_current = true;
+            publish_completed_snapshot = true;
+            completed_action = final_action;
         } else if (final_action ==
                    CleanMapBuildAction::PUBLISH_SNAPSHOT_ONLY) {
             clean_map_rebuild_pending_ = true;
             map_maintenance_pending_ = true;
+            publish_completed_snapshot = true;
+            completed_action = final_action;
         }
-        completed_action = final_action;
         // Publish the completed raw+clean snapshot even when the working map
         // advanced during the build. This removes clean-worker starvation
         // without ever installing stale clean content into the working map.
-        advanceMapLayerGenerationLocked();
-        result.bundle.generation = map_layer_generation_;
-        result.bundle.valid = true;
-        latest_completed_map_bundle_ = result.bundle;
+        if (publish_completed_snapshot) {
+            advanceMapLayerGenerationLocked();
+            result.bundle.generation = map_layer_generation_;
+            result.bundle.valid = true;
+            latest_completed_map_bundle_ = result.bundle;
+        }
+    }
+
+    if (!publish_completed_snapshot) {
+        static_clean_build_discarded_.fetch_add(
+            1U, std::memory_order_relaxed);
+        return;
     }
 
     last_commit_clean_map_ms_ = result.duration_ms;
@@ -4777,9 +4844,10 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
     }
     const double evidence_stamp = result.bundle.source_stamp.isZero()
         ? stamp.toSec() : result.bundle.source_stamp.toSec();
-    if (relocalization_pose_reliable_ &&
+    if (lineage_decision.static_observation_authorized &&
+        relocalization_pose_reliable_ &&
         result.static_evidence_epoch ==
-        static_evidence_epoch_.load(std::memory_order_acquire)) {
+            static_evidence_epoch_.load(std::memory_order_acquire)) {
         static_obstacle_evidence_index_.observeCleanBuildCells(
             result.static_observed_cells,
             result.static_observable_cells,
