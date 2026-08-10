@@ -304,9 +304,35 @@ CargoCandidateIdentityScore scoreCargoCandidateIdentity(
   }
   const float hook_center_distance =
       (candidate.center.head<2>() - context.hook_center).norm();
-  if (std::isfinite(context.maximum_hook_center_distance_m) &&
-      (context.maximum_hook_center_distance_m < 0.0F ||
-       hook_center_distance > context.maximum_hook_center_distance_m)) {
+  Eigen::Vector2f expected_center = context.hook_center;
+  if (context.learned_cargo_to_hook_offset_valid &&
+      context.learned_cargo_to_hook_offset.allFinite()) {
+    expected_center += context.learned_cargo_to_hook_offset;
+  }
+  score.hook_association_residual_m =
+      (candidate.center.head<2>() - expected_center).norm();
+  const float configured_base_gate =
+      std::isfinite(context.maximum_hook_center_distance_m)
+          ? std::max(0.0F, context.maximum_hook_center_distance_m)
+          : context.hook_region_radius_m;
+  const float size_allowance = context.size_aware_hook_gate
+      ? 0.35F * std::max(candidate.size.x(), candidate.size.y())
+      : 0.0F;
+  const float dynamic_gate = context.size_aware_hook_gate
+      ? std::min(
+            std::max(configured_base_gate,
+                     configured_base_gate + size_allowance +
+                         std::max(0.0F, context.hook_xy_uncertainty_m)),
+            std::max(configured_base_gate,
+                     context.maximum_dynamic_hook_center_distance_m))
+      : configured_base_gate;
+  score.hook_dynamic_gate_m = dynamic_gate;
+  const float gated_distance =
+      context.learned_cargo_to_hook_offset_valid
+          ? score.hook_association_residual_m
+          : hook_center_distance;
+  if (!std::isfinite(dynamic_gate) || dynamic_gate <= 0.0F ||
+      gated_distance > dynamic_gate) {
     score.reason = "candidate_center_too_far_from_hook_anchor";
     return score;
   }
@@ -332,8 +358,7 @@ CargoCandidateIdentityScore scoreCargoCandidateIdentity(
     return score;
   }
   score.hook_distance_score = unitScore(
-      hook_center_distance,
-      context.hook_region_radius_m);
+      gated_distance, std::max(dynamic_gate, 0.05F));
   score.point_support_confidence = std::clamp(
       static_cast<float>(candidate.point_count) /
           static_cast<float>(std::max<std::size_t>(1U,

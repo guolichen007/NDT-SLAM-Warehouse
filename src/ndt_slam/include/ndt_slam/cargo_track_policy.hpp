@@ -86,6 +86,14 @@ struct CargoCandidateIdentityContext {
   float hook_containment_margin_m = 0.10F;
   float maximum_hook_center_distance_m =
       std::numeric_limits<float>::infinity();
+  // Replace the fixed centre-to-hook cut-off with a bounded, size-aware gate.
+  // The hook remains an association anchor; it is not the safety-box centre.
+  bool size_aware_hook_gate = false;
+  bool learned_cargo_to_hook_offset_valid = false;
+  Eigen::Vector2f learned_cargo_to_hook_offset =
+      Eigen::Vector2f::Zero();
+  float hook_xy_uncertainty_m = 0.0F;
+  float maximum_dynamic_hook_center_distance_m = 1.05F;
   // Normalized distance of the hook from the candidate OBB centre. A value
   // of 1.0 is the measured OBB edge; requiring a smaller value prevents an
   // adjacent object which merely overlaps the hook from becoming cargo.
@@ -104,6 +112,10 @@ struct CargoCandidateIdentityScore {
   int component_id = -1;
   float hook_distance_score = 0.0F;
   float hook_normalized_offset =
+      std::numeric_limits<float>::infinity();
+  float hook_association_residual_m =
+      std::numeric_limits<float>::infinity();
+  float hook_dynamic_gate_m =
       std::numeric_limits<float>::infinity();
   float predicted_center_score = 0.0F;
   float overlap_score = 0.0F;
