@@ -105,7 +105,7 @@ require_unit_text "$slam_unit" '/usr/bin/flock --no-fork --exclusive --nonblock'
 require_unit_text "$slam_unit" "$data_root/.ndt-slam.lock"
 require_unit_text "$slam_unit" \
   'exec roslaunch ndt_slam warehouse_live_longterm_mapping.launch'
-require_unit_text "$slam_unit" 'use_ndt_recovery_watchdog:=true'
+require_unit_text "$slam_unit" 'use_ndt_recovery_watchdog:=false'
 if grep -Fq 'Restart=on-failure' "$slam_unit"; then
   fail_rendered_unit "ndt-slam.service contains obsolete Restart=on-failure"
 fi
@@ -177,7 +177,7 @@ require_effective_text ndt-slam.service ExecStart \
 require_effective_text ndt-slam.service ExecStart \
   'warehouse_live_longterm_mapping.launch'
 require_effective_text ndt-slam.service ExecStart \
-  'use_ndt_recovery_watchdog:=true'
+  'use_ndt_recovery_watchdog:=false'
 
 require_effective_exact ndt-slam-monitor.service Restart always
 require_effective_exact ndt-slam-monitor.service RestartUSec 10s

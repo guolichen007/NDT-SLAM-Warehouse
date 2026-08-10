@@ -68,11 +68,11 @@ source devel/setup.bash
 export NDT_SLAM_DATA_ROOT="$WS/maps/live/current"
 roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
   use_sim_time:=false use_rviz:=false persistent_map:=true \
-  use_ndt_recovery_watchdog:=true
+  use_ndt_recovery_watchdog:=false
 ```
 
-现阶段 systemd 暂停使用，不安装或启动 unit。保持此终端运行；看门狗请求硬恢复时
-会保存证据并安全退出，但没有外部 supervisor 自动重拉。
+Avoidance-first stable 模式禁用 recovery watchdog。定位拒绝帧不写可信地图，
+ROS 节点保持运行，并在后续点云上继续执行正常 local NDT。
 
 ## 7–8. 启动 SLAM 和 monitor
 

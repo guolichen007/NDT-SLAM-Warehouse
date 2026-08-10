@@ -94,11 +94,10 @@ ndt_omp:
   num_threads: 4              # V3: NDT_OMP 多线程加速
   neighbor_search_method: DIRECT7  # V3: DIRECT7 比 KDTREE 快，搜索相同相邻体素集合
 
-# Asynchronous local/global recovery. The live NDT/EKF path continues while a
-# latest-only worker searches; two independent results must agree before the
-# pose, EKF and Cargo state are switched.
+# Avoidance-first stable profile: keep the baseline recovery implementation
+# available in source, but do not start local/global relocalization workers.
 relocalization:
-  enabled: true
+  enabled: false
   trigger_frames: 5
   global_trigger_frames: 15
   confirm_frames: 3
@@ -150,11 +149,10 @@ relocalization:
   max_local_seed_yaw_correction_deg: 20.0
   max_roll_pitch_deg: 3.0
   max_z_correction_m: 0.50
-  # Read-only global consistency validation. It shares the bounded
-  # relocalization worker but never mutates odom/EKF unless two independent
-  # checks prove that a materially better global solution disagrees.
+  # The baseline validator remains available for later profiles. It is
+  # intentionally inactive in this avoidance-first profile.
   global_consistency:
-    enabled: true
+    enabled: false
     periodic_interval_sec: 30.0
     periodic_distance_m: 8.0
     periodic_keyframes: 20
@@ -182,7 +180,7 @@ feature_extraction:
 
 # 闭环检测
 loop_closure:
-  enabled: true
+  enabled: false
   detection_interval: 20
 
 scan_context:

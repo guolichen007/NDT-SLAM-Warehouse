@@ -16,7 +16,7 @@
     <arg name="hook_cargo_removal_enabled" default="true"/>
     <arg name="cargo_warning_enabled" default="true"/>
     <arg name="use_cargo_alarm_heartbeat" default="true"/>
-    <arg name="use_ndt_recovery_watchdog" default="true"/>
+    <arg name="use_ndt_recovery_watchdog" default="false"/>
     <!-- Optional override for all nodes that read live_longterm_mapping.yaml.
          Default keeps the original path; bag harness passes a sandbox copy. -->
     <arg name="config_file" default="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
@@ -47,10 +47,9 @@
                value="$(arg cargo_warning_enabled)"/>
     </node>
 
-    <!-- A required node is used deliberately. During the current systemd-off
-         deployment, run_ndt_slam_supervised.sh restarts this complete launch
-         only for process-level faults; responsive pose failures remain in
-         Code 31 quarantine and wait for strict/stationary recovery. -->
+    <!-- Compatibility-only recovery watchdog. The avoidance-first profile
+         keeps this disabled; local NDT continues on each new cloud and no
+         algorithm-driven relocalization or restart is requested. -->
     <node name="ndt_recovery_watchdog"
           pkg="ndt_slam"
           type="ndt_recovery_watchdog.py"

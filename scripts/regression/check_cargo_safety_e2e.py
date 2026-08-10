@@ -410,14 +410,18 @@ def main() -> int:
             "consecutive_observations" in obstacle_tracker and
             "validated_consecutive_observations" in obstacle_tracker and
             "static_provenance_first_stamp_sec" in obstacle_tracker and
-            "require_static_cargo_for_warning: true" in live_config and
+            "require_static_cargo_for_warning: false" in live_config and
+            "require_far_field_history_for_warnings: true" in live_config and
+            "far_history_confirm_frames: 3" in live_config and
+            "far_history_confirm_duration_sec: 0.2" in live_config and
+            "selected_far_field_history_valid" in obstacle_tracker and
             "static_cargo_min_voxel_points: 80" in live_config and
             "static_cargo_min_occupied_cells: 12" in live_config and
             "ExternalProvenance" in obstacle_tracker and
             "CARGO_MOVED_AWAY_PERSISTENCE" in obstacle_tracker and
             "cellOverlap" in obstacle_tracker and
             "centroid_map" in obstacle_tracker,
-            "hazards are not confirmed by persistent map-frame identity",
+            "hazards lack persistent identity or true far-history authority",
             failures)
     require("src/cargo_motion_corridor.cpp" in cmake and
             "evaluateCargoMotionCorridor" in node and

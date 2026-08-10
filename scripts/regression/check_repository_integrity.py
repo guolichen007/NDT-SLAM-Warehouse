@@ -592,7 +592,10 @@ def asynchronous_map_commit_contract_failures() -> list[str]:
         "struct MapCommitJob",
         "map_commit_queue_capacity_ = 2U",
         "enqueueMapCommitJob(\n                    filtered_cloud, "
-        "accepted_localization_snapshot_)",
+        "accepted_localization_snapshot_,\n"
+        "                    write_authority)",
+        "MapWriteAuthorityEvidence",
+        "evaluateMapWriteAuthority",
         "std::thread(&NdtSlamNode::mapCommitThread, this)",
         "map_commit_lifecycle_mutex_",
         "job.lifecycle_epoch",
