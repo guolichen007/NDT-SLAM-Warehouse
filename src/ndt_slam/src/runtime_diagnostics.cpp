@@ -151,7 +151,10 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
                << "locked_length_m,locked_width_m,locked_height_m,locked_yaw_deg,"
                << "raw_bottom_z,filtered_bottom_z,conservative_bottom_z,"
                << "top_z,height_m,bottom_valid,height_valid,filter_accepted,filter_reason,"
-               << "lost_frames,odom_x,odom_y,odom_z\n";
+               << "lost_frames,odom_x,odom_y,odom_z,"
+               << "far_history_valid,far_history_distinct_frames,"
+               << "far_history_duration_sec,far_history_max_safe_distance_m,"
+               << "authoritative_hazard_source,cargo_geometry_state\n";
 
     static_evidence_csv_.open(output_dir_ + "/static_evidence.csv");
     static_evidence_csv_
@@ -630,7 +633,13 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << (rec.bottom_valid ? 1 : 0) << "," << (rec.height_valid ? 1 : 0) << ","
                << (rec.filter_accepted ? 1 : 0) << "," << rec.filter_reason << ","
                << rec.lost_frames << "," << rec.odom_x << "," << rec.odom_y
-               << "," << rec.odom_z << "\n";
+               << "," << rec.odom_z
+               << "," << (rec.far_history_valid ? 1 : 0)
+               << "," << rec.far_history_distinct_frames
+               << "," << rec.far_history_duration_sec
+               << "," << rec.far_history_max_safe_distance_m
+               << ",\"" << rec.authoritative_hazard_source << "\""
+               << "," << rec.cargo_geometry_state << "\n";
   }
   if (static_evidence_csv_.is_open()) {
     static_evidence_csv_

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <vector>
 
 namespace ndt_slam {
 namespace {
@@ -117,35 +118,144 @@ NdtStageResult runStage(
 
 namespace {
 
-bool evaluateRecoveryObservability(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
-    const RelocalizationConfig& ndt_config) {
-  if (!source || source->empty()) return false;
-  // Evaluate translational structure: the source must span a meaningful
-  // XY extent and contain enough occupied cells to constrain NDT
-  // registration.  A degenerate line or point cluster produces low
-  // fitness but is not structurally observable for recovery.
+struct RecoveryStructureMetrics {
+  int point_count = 0;
+  int occupied_cells = 0;
+  double span_x_m = 0.0;
+  double span_y_m = 0.0;
+  double eigenvalue_ratio = 0.0;  // lambda_minor / lambda_major
+  bool valid = false;
+};
+
+RecoveryStructureMetrics evaluateStructure(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double cell_size_m) {
+  RecoveryStructureMetrics metrics;
+  if (!cloud || cloud->empty()) return metrics;
+
   double x_min = std::numeric_limits<double>::infinity();
   double x_max = -std::numeric_limits<double>::infinity();
   double y_min = std::numeric_limits<double>::infinity();
   double y_max = -std::numeric_limits<double>::infinity();
-  for (const auto& pt : source->points) {
+  double sum_x = 0.0, sum_y = 0.0;
+  int finite_count = 0;
+
+  for (const auto& pt : cloud->points) {
     if (!std::isfinite(pt.x) || !std::isfinite(pt.y)) continue;
-    x_min = std::min(x_min, static_cast<double>(pt.x));
-    x_max = std::max(x_max, static_cast<double>(pt.x));
-    y_min = std::min(y_min, static_cast<double>(pt.y));
-    y_max = std::max(y_max, static_cast<double>(pt.y));
+    ++finite_count;
+    const double cx = static_cast<double>(pt.x);
+    const double cy = static_cast<double>(pt.y);
+    x_min = std::min(x_min, cx);
+    x_max = std::max(x_max, cx);
+    y_min = std::min(y_min, cy);
+    y_max = std::max(y_max, cy);
+    sum_x += cx;
+    sum_y += cy;
   }
-  const double span_x = x_max - x_min;
-  const double span_y = y_max - y_min;
-  constexpr double kMinSpanM = 1.0;
-  const int total_points = static_cast<int>(source->size());
-  return std::isfinite(span_x) && std::isfinite(span_y) &&
-         span_x >= kMinSpanM && span_y >= kMinSpanM &&
-         total_points >= ndt_config.min_source_points;
+
+  metrics.point_count = finite_count;
+  metrics.span_x_m = x_max - x_min;
+  metrics.span_y_m = y_max - y_min;
+  if (finite_count < 4 || !std::isfinite(metrics.span_x_m) ||
+      !std::isfinite(metrics.span_y_m)) {
+    return metrics;
+  }
+
+  // Occupied XY cells via simple grid
+  const double inv_cell = 1.0 / std::max(0.10, cell_size_m);
+  const int grid_cols = std::max(1, static_cast<int>(
+      std::ceil(metrics.span_x_m * inv_cell) + 1));
+  const int grid_rows = std::max(1, static_cast<int>(
+      std::ceil(metrics.span_y_m * inv_cell) + 1));
+  std::vector<bool> occupancy(
+      static_cast<std::size_t>(grid_rows * grid_cols), false);
+
+  const double mean_x = sum_x / static_cast<double>(finite_count);
+  const double mean_y = sum_y / static_cast<double>(finite_count);
+  double cov_xx = 0.0, cov_yy = 0.0, cov_xy = 0.0;
+
+  for (const auto& pt : cloud->points) {
+    if (!std::isfinite(pt.x) || !std::isfinite(pt.y)) continue;
+    const double cx = static_cast<double>(pt.x);
+    const double cy = static_cast<double>(pt.y);
+    const double dx = cx - mean_x;
+    const double dy = cy - mean_y;
+    cov_xx += dx * dx;
+    cov_yy += dy * dy;
+    cov_xy += dx * dy;
+    const int col = std::clamp(
+        static_cast<int>((cx - x_min) * inv_cell), 0, grid_cols - 1);
+    const int row = std::clamp(
+        static_cast<int>((cy - y_min) * inv_cell), 0, grid_rows - 1);
+    occupancy[row * grid_cols + col] = true;
+  }
+
+  const double n = static_cast<double>(finite_count);
+  cov_xx /= n;
+  cov_yy /= n;
+  cov_xy /= n;
+
+  // Eigenvalues of 2×2 covariance: λ = (tr ± √(tr²-4·det))/2
+  const double trace = cov_xx + cov_yy;
+  const double det = cov_xx * cov_yy - cov_xy * cov_xy;
+  const double discriminant = trace * trace - 4.0 * det;
+  if (discriminant <= 0.0 || det <= 0.0) {
+    metrics.eigenvalue_ratio = 0.0;
+  } else {
+    const double sqrt_disc = std::sqrt(discriminant);
+    const double lambda_major = (trace + sqrt_disc) / 2.0;
+    const double lambda_minor = (trace - sqrt_disc) / 2.0;
+    metrics.eigenvalue_ratio =
+        lambda_major > 1.0e-12 ? lambda_minor / lambda_major : 0.0;
+  }
+
+  metrics.occupied_cells = 0;
+  for (bool occ : occupancy) {
+    if (occ) ++metrics.occupied_cells;
+  }
+
+  metrics.valid = true;
+  return metrics;
 }
 
 }  // namespace
+
+// Exported for unit testing only; never called outside tests or the
+// recovery backend implementations in this translation unit.
+namespace crane_startup_relocalizer_internal {
+
+bool evaluateRecoveryObservability(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
+    const RelocalizationConfig& ndt_config);
+
+bool evaluateRecoveryObservability(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
+    const RelocalizationConfig& ndt_config) {
+  if (!source || !target) return false;
+
+  constexpr double kCellSizeM = 0.50;
+  constexpr double kMinSpanM = 1.0;
+  constexpr double kMinEigenvalueRatio = 0.08;
+  constexpr int kMinOccupiedCells = 12;
+
+  const auto src = evaluateStructure(source, kCellSizeM);
+  const auto tgt = evaluateStructure(target, kCellSizeM);
+
+  if (!src.valid || !tgt.valid) return false;
+  if (src.point_count < ndt_config.min_source_points) return false;
+  if (tgt.point_count < ndt_config.min_target_points) return false;
+  if (src.span_x_m < kMinSpanM || src.span_y_m < kMinSpanM) return false;
+  if (tgt.span_x_m < kMinSpanM || tgt.span_y_m < kMinSpanM) return false;
+  if (src.eigenvalue_ratio < kMinEigenvalueRatio) return false;
+  if (tgt.eigenvalue_ratio < kMinEigenvalueRatio) return false;
+  if (src.occupied_cells < kMinOccupiedCells) return false;
+  if (tgt.occupied_cells < kMinOccupiedCells) return false;
+
+  return true;
+}
+
+}  // namespace crane_startup_relocalizer_internal
 
 CraneRegistrationCandidate CraneNdtRegistrationBackend::coarseCandidate(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
@@ -166,7 +276,8 @@ CraneRegistrationCandidate CraneNdtRegistrationBackend::coarseCandidate(
   result.pose = coarse.pose;
   result.fitness = coarse.fitness;
   result.observability_valid =
-      evaluateRecoveryObservability(source, config.coarse_ndt);
+      crane_startup_relocalizer_internal::evaluateRecoveryObservability(
+          source, target, config.coarse_ndt);
   result.reason = result.observability_valid
       ? "coarse_constrained_ndt" : "coarse_unobservable";
   return result;
@@ -189,7 +300,8 @@ CraneRegistrationCandidate CraneNdtRegistrationBackend::refineCandidate(
   result.pose = fine.pose;
   result.fitness = fine.fitness;
   result.observability_valid =
-      evaluateRecoveryObservability(source, config.fine_ndt);
+      crane_startup_relocalizer_internal::evaluateRecoveryObservability(
+          source, target, config.fine_ndt);
   result.reason = result.observability_valid
       ? "fine_constrained_ndt" : "fine_unobservable";
   return result;

@@ -88,24 +88,58 @@ TEST(CraneStartupRelocalizerTest, RefinesOnlyTopKAndRejectsAmbiguity) {
   EXPECT_EQ(result.reason, "ambiguous_top_candidates");
 }
 
+}  // namespace
+}  // namespace ndt_slam
+
+// evaluateRecoveryObservability is a standalone pure function exported
+// for direct unit testing. Its declaration is replicated here to avoid
+// exposing internals in the public header. It lives in the named internal
+// namespace at file scope inside ndt_slam.
+namespace ndt_slam {
+namespace crane_startup_relocalizer_internal {
+bool evaluateRecoveryObservability(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
+    const RelocalizationConfig& ndt_config);
+}  // namespace crane_startup_relocalizer_internal
+
+namespace {
+
 pcl::PointCloud<pcl::PointXYZ>::Ptr warehouseLikeCloud() {
   auto c = pcl::PointCloud<pcl::PointXYZ>::Ptr(
       new pcl::PointCloud<pcl::PointXYZ>);
-  // 2D warehouse structure with >1m XY span and >min_source_points
-  for (int i = 0; i < 50; ++i) {
-    c->push_back({-2.5F + static_cast<float>(i % 10) * 0.5F,
-                  -1.5F + static_cast<float>(i / 10) * 0.5F,
+  for (int i = 0; i < 80; ++i) {
+    c->push_back({-4.0F + static_cast<float>(i % 16) * 0.5F,
+                  -3.0F + static_cast<float>(i / 16) * 0.5F,
                   0.1F});
   }
   return c;
 }
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr degenerateLineCloud() {
+pcl::PointCloud<pcl::PointXYZ>::Ptr xAxisLineCloud() {
   auto c = pcl::PointCloud<pcl::PointXYZ>::Ptr(
       new pcl::PointCloud<pcl::PointXYZ>);
-  // Collinear structure: X varies but Y span < 1m
   for (int i = 0; i < 50; ++i) {
     c->push_back({-10.0F + static_cast<float>(i) * 0.4F, 0.0F, 0.1F});
+  }
+  return c;
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr yAxisLineCloud() {
+  auto c = pcl::PointCloud<pcl::PointXYZ>::Ptr(
+      new pcl::PointCloud<pcl::PointXYZ>);
+  for (int i = 0; i < 50; ++i) {
+    c->push_back({0.0F, -10.0F + static_cast<float>(i) * 0.4F, 0.1F});
+  }
+  return c;
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr diagonalLineCloud() {
+  auto c = pcl::PointCloud<pcl::PointXYZ>::Ptr(
+      new pcl::PointCloud<pcl::PointXYZ>);
+  for (int i = 0; i < 50; ++i) {
+    const float t = -5.0F + static_cast<float>(i) * 0.2F;
+    c->push_back({t, t, 0.1F});
   }
   return c;
 }
@@ -118,55 +152,46 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr tooFewPointsCloud() {
   return c;
 }
 
-TEST(CraneNdtRegistrationBackendTest, WarehouseStructureIsObservable) {
-  CraneNdtRegistrationBackend backend;
-  CraneStartupRelocalizerConfig config;
-  config.coarse_ndt.min_source_points = 30;
-  config.coarse_ndt.min_target_points = 30;
-  RelocalizationSeed seed;
-  seed.pose = Sophus::SE3d(Eigen::Matrix3d::Identity(),
-                           Eigen::Vector3d(0.0, 0.0, 0.0));
-  auto source = warehouseLikeCloud();
-  auto target = warehouseLikeCloud();
-  // coarseCandidate evaluates source structure observability
-  // (NDT itself may converge or not — we test the structure path)
-  const auto coarse = backend.coarseCandidate(source, target, seed, config);
-  if (coarse.valid) {
-    EXPECT_TRUE(coarse.observability_valid);
-  }
-  // For a structure with sufficient XY span, if NDT converges the
-  // result should NOT be marked unobservable due to geometry.
-  if (coarse.valid && coarse.reason == std::string("coarse_unobservable")) {
-    ADD_FAILURE() << "warehouse-like structure should not be unobservable";
-  }
+RelocalizationConfig testObservabilityConfig() {
+  RelocalizationConfig cfg;
+  cfg.min_source_points = 30;
+  cfg.min_target_points = 30;
+  return cfg;
 }
 
-TEST(CraneNdtRegistrationBackendTest, DegenerateLineIsNotObservable) {
-  CraneNdtRegistrationBackend backend;
-  CraneStartupRelocalizerConfig config;
-  config.coarse_ndt.min_source_points = 30;
-  config.coarse_ndt.min_target_points = 30;
-  RelocalizationSeed seed;
-  seed.pose = Sophus::SE3d(Eigen::Matrix3d::Identity(),
-                           Eigen::Vector3d(0.0, 0.0, 0.0));
-  const auto coarse = backend.coarseCandidate(
-      degenerateLineCloud(), degenerateLineCloud(), seed, config);
-  // A degenerate collinear structure must not be marked observable,
-  // even if NDT happens to converge with low fitness.
-  EXPECT_FALSE(coarse.observability_valid);
+TEST(RecoveryObservabilityTest, Warehouse2DIsObservable) {
+  EXPECT_TRUE(crane_startup_relocalizer_internal::evaluateRecoveryObservability(
+      warehouseLikeCloud(), warehouseLikeCloud(), testObservabilityConfig()));
 }
 
-TEST(CraneNdtRegistrationBackendTest, TooFewPointsIsNotObservable) {
-  CraneNdtRegistrationBackend backend;
-  CraneStartupRelocalizerConfig config;
-  config.coarse_ndt.min_source_points = 30;
-  config.coarse_ndt.min_target_points = 30;
-  RelocalizationSeed seed;
-  seed.pose = Sophus::SE3d(Eigen::Matrix3d::Identity(),
-                           Eigen::Vector3d(0.0, 0.0, 0.0));
-  const auto coarse = backend.coarseCandidate(
-      tooFewPointsCloud(), tooFewPointsCloud(), seed, config);
-  EXPECT_FALSE(coarse.observability_valid);
+TEST(RecoveryObservabilityTest, XAxisLineIsNotObservable) {
+  EXPECT_FALSE(crane_startup_relocalizer_internal::evaluateRecoveryObservability(
+      xAxisLineCloud(), xAxisLineCloud(), testObservabilityConfig()));
+}
+
+TEST(RecoveryObservabilityTest, YAxisLineIsNotObservable) {
+  EXPECT_FALSE(crane_startup_relocalizer_internal::evaluateRecoveryObservability(
+      yAxisLineCloud(), yAxisLineCloud(), testObservabilityConfig()));
+}
+
+TEST(RecoveryObservabilityTest, DiagonalLineIsNotObservable) {
+  EXPECT_FALSE(crane_startup_relocalizer_internal::evaluateRecoveryObservability(
+      diagonalLineCloud(), diagonalLineCloud(), testObservabilityConfig()));
+}
+
+TEST(RecoveryObservabilityTest, TooFewPointsIsNotObservable) {
+  EXPECT_FALSE(crane_startup_relocalizer_internal::evaluateRecoveryObservability(
+      tooFewPointsCloud(), tooFewPointsCloud(), testObservabilityConfig()));
+}
+
+TEST(RecoveryObservabilityTest, SourceDegenerateTargetNormalIsNotObservable) {
+  EXPECT_FALSE(crane_startup_relocalizer_internal::evaluateRecoveryObservability(
+      xAxisLineCloud(), warehouseLikeCloud(), testObservabilityConfig()));
+}
+
+TEST(RecoveryObservabilityTest, SourceNormalTargetDegenerateIsNotObservable) {
+  EXPECT_FALSE(crane_startup_relocalizer_internal::evaluateRecoveryObservability(
+      warehouseLikeCloud(), xAxisLineCloud(), testObservabilityConfig()));
 }
 
 }  // namespace

@@ -189,7 +189,10 @@ bool AcceptedKeyframeJournal::start(std::string* reason) {
     fs::create_directories(parent);
     // Durable journal creation: the parent directory entry must be
     // persisted before any record can claim durability.
-    fsyncFile(parent);
+    if (!fsyncFile(parent)) {
+      if (reason) *reason = "journal_parent_fsync_failed";
+      return false;
+    }
   } catch (const std::exception& error) {
     if (reason) *reason = error.what();
     return false;
@@ -312,11 +315,18 @@ AcceptedKeyframeJournal::loadLastVerified(
   }
   input.close();
   if (result.truncated_tail && truncate_partial_tail) {
-    std::error_code ignored;
-    fs::resize_file(path, verified_end, ignored);
+    std::error_code ec;
+    fs::resize_file(path, verified_end, ec);
+    if (ec) {
+      result.reason = "journal_truncate_failed";
+      return result;
+    }
     // The truncation itself must be durable before the repaired journal
     // can be trusted by crash recovery.
-    if (!ignored) fsyncFile(path);
+    if (!fsyncFile(path)) {
+      result.reason = "journal_repair_not_durable";
+      return result;
+    }
   }
   result.reason = result.valid ? "verified_recovery_reference"
                                : "no_matching_verified_record";

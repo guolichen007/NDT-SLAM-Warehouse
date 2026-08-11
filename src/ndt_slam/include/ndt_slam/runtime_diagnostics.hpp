@@ -394,6 +394,14 @@ struct CargoFrameRecord {
   std::string filter_reason;
   int lost_frames = 0;
   double odom_x = 0.0, odom_y = 0.0, odom_z = 0.0;
+  // Far-history diagnostics: added purely for bag observability.
+  // These fields never modify avoidance behaviour.
+  bool far_history_valid = false;
+  int far_history_distinct_frames = 0;
+  double far_history_duration_sec = 0.0;
+  double far_history_max_safe_distance_m = 0.0;
+  std::string authoritative_hazard_source = "none";
+  int cargo_geometry_state = 0;
 };
 
 class RuntimeDiagnostics {
