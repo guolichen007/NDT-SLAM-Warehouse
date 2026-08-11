@@ -17,6 +17,14 @@
 #include <system_error>
 #include <vector>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace ndt_slam {
 namespace {
 
@@ -165,6 +173,38 @@ bool writeTextFile(const fs::path& path, const std::string& text) {
   return output.good();
 }
 
+bool syncPath(const fs::path& path, bool directory, std::string* reason) {
+#ifdef _WIN32
+  if (directory) return true;
+  const int descriptor = _wopen(path.c_str(), _O_RDONLY | _O_BINARY);
+  if (descriptor < 0) {
+    if (reason) *reason = "fsync_open_failed:" + path.string();
+    return false;
+  }
+  const int result = _commit(descriptor);
+  _close(descriptor);
+#else
+  const int descriptor =
+      ::open(path.c_str(), O_RDONLY | (directory ? O_DIRECTORY : 0));
+  if (descriptor < 0) {
+    if (reason) *reason = "fsync_open_failed:" + path.string();
+    return false;
+  }
+  const int result = ::fsync(descriptor);
+  ::close(descriptor);
+#endif
+  if (result != 0) {
+    if (reason) *reason = "fsync_failed:" + path.string();
+    return false;
+  }
+  return true;
+}
+
+void requireSync(const fs::path& path, bool directory = false) {
+  std::string reason;
+  if (!syncPath(path, directory, &reason)) throw std::runtime_error(reason);
+}
+
 std::uint64_t yamlUInt64(const YAML::Node& node, const char* key) {
   return node[key] ? node[key].as<std::uint64_t>() : 0U;
 }
@@ -288,6 +328,12 @@ bool MapSessionSnapshot::saveAtomic(const MapSessionSaveRequest& request,
       }
     }
 
+    // Make every payload durable before publishing the manifest which claims
+    // the generation is complete. This includes caller-provided extras.
+    for (const auto& entry : fs::recursive_directory_iterator(temporary)) {
+      if (entry.is_regular_file()) requireSync(entry.path());
+    }
+
     YAML::Node extra_files;
     for (const auto& entry : fs::recursive_directory_iterator(temporary)) {
       if (!entry.is_regular_file()) continue;
@@ -344,6 +390,7 @@ bool MapSessionSnapshot::saveAtomic(const MapSessionSaveRequest& request,
         !writeTextFile(temporary / "manifest.yaml", emitter.c_str())) {
       throw std::runtime_error("manifest_write_failed");
     }
+    requireSync(temporary / "manifest.yaml");
 
     // Read the complete temporary transaction back through the same strict
     // verifier used at restart. A write that cannot be reloaded never becomes
@@ -362,7 +409,9 @@ bool MapSessionSnapshot::saveAtomic(const MapSessionSaveRequest& request,
       throw std::runtime_error("temporary_session_identity_mismatch");
     }
 
+    requireSync(temporary, true);
     fs::rename(temporary, target);
+    requireSync(target.parent_path(), true);
     if (reason) *reason = target.string();
     return true;
   } catch (const std::exception& error) {

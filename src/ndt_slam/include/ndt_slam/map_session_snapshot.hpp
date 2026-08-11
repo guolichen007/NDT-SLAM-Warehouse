@@ -66,9 +66,9 @@ class MapSessionSnapshot {
  public:
   static constexpr std::uint32_t kSchemaVersion = 1U;
 
-  // Atomic for reader visibility through a same-filesystem directory rename.
-  // This API does not fsync every file/directory and therefore does not claim
-  // crash durability across sudden power loss.
+  // Crash-durable on filesystems that honor fsync(2): all payload files and
+  // the manifest are synchronized before the temporary directory is renamed,
+  // then the parent directory is synchronized before success is returned.
   static bool saveAtomic(const MapSessionSaveRequest& request,
                          std::string* reason);
   static MapSessionLoadResult loadVerified(const std::string& directory);
