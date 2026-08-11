@@ -15,7 +15,7 @@
 
 Windows-side evidence already collected:
 
-- `python -m unittest discover -s tests -p "test_*.py"`: 128 tests PASS
+- `python -m unittest discover -s tests -p "test_*.py"`: 130 tests PASS
   before handoff.
 - `python scripts/regression/check_repository_integrity.py`: PASS.
 - `git diff --check`: PASS.
@@ -119,6 +119,23 @@ diagnostics, CPU and RSS for every run. The health JSON must expose:
 
 For every recovery case, the authorized counter must remain exactly zero until
 `ACTIVE`; `objects_clean` and static-evidence revisions must remain unchanged.
+
+Before running A-L, execute a merger sim-time smoke gate:
+
+1. Set `/use_sim_time=true` and launch the runtime before starting rosbag, so
+   ROS time initially remains zero.
+2. Play the approved bag with `--clock` and verify both lidar input topics have
+   messages and `/merged_points` starts without restarting the merger.
+3. Record `rostopic hz /merged_points` plus
+   `/pointcloud_merger/diagnostics`; require non-zero sustained output.
+4. Pause/resume once and replay from an earlier bag timestamp once. Verify the
+   wall-timer-driven merger resumes output and retains source sensor stamps.
+5. Run the configured two-lidar path and the single-lidar test launch. Require
+   `paired` or the bounded `single_timeout` fallback as appropriate; no queued
+   frame may remain stuck solely because `/clock` is zero, paused, or rewound.
+
+If this smoke gate fails, mark all downstream bag cases BLOCKED rather than
+claiming Cargo/recovery failures. Capture merger input/output counts and logs.
 
 ### A. Kill `ndt_slam_node`
 

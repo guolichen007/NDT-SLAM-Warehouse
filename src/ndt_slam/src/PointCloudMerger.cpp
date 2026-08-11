@@ -137,8 +137,14 @@ public:
 
         pub_merged_ = nh_.advertise<sensor_msgs::PointCloud2>(output_topic_, 10);
         pub_diagnostics_ = nh_.advertise<std_msgs::String>(diagnostics_topic_, 10);
-        timer_ = nh_.createTimer(ros::Duration(timer_period_sec_),
-                                 &PointCloudMerger::mergeAndPublish, this);
+        // Queue aging is deliberately based on SteadyClock, so the worker
+        // that consumes those queues must also be independent of ROS time.
+        // A ros::Timer can stop before /clock starts, while a bag is paused,
+        // or across a simulated-time rewind, leaving valid lidar frames
+        // queued forever and producing no /merged_points output.
+        timer_ = nh_.createWallTimer(
+            ros::WallDuration(timer_period_sec_),
+            &PointCloudMerger::mergeAndPublish, this);
         ROS_DEBUG("PointCloudMerger ready (%zu lidar%s)", lidar_names_.size(),
                  lidar_names_.size() == 1U ? "" : "s");
     }
@@ -332,7 +338,7 @@ private:
         return true;
     }
 
-    void mergeAndPublish(const ros::TimerEvent&) {
+    void mergeAndPublish(const ros::WallTimerEvent&) {
         PublishWork work;
         if (!selectPublishWork(work)) {
             return;
@@ -510,7 +516,7 @@ private:
     std::vector<std::string> lidar_names_;
     ros::Publisher pub_merged_;
     ros::Publisher pub_diagnostics_;
-    ros::Timer timer_;
+    ros::WallTimer timer_;
     std::mutex queue_mutex_;
 
     std::string output_topic_;
