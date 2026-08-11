@@ -559,6 +559,13 @@ if(CATKIN_ENABLE_TESTING)
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
+  catkin_add_gtest(local_map_update_policy_test
+    test/local_map_update_policy_test.cpp)
+  if(TARGET local_map_update_policy_test)
+    target_link_libraries(local_map_update_policy_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
   catkin_add_gtest(registration_cloud_builder_test
     test/registration_cloud_builder_test.cpp)
   if(TARGET registration_cloud_builder_test)

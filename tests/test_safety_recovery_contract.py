@@ -382,13 +382,13 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "publish_restored_layer(restored.objects_clean", NODE
         )
         self.assertIn(
-            "!frame_ndt_accepted", NODE
+            "evaluateLocalMapUpdate(local_map_input)", NODE
         )
         self.assertIn(
-            "!frame_registration_quality_valid", NODE
+            "motion_state_allows_update", NODE
         )
         self.assertIn(
-            "quarantine_alignment_ready", NODE
+            "local_map_input.relocalization_pose_reliable", NODE
         )
         self.assertIn(
             "localization_quarantine_publish_pose_", NODE
