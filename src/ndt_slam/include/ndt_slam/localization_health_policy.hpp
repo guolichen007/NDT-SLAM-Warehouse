@@ -25,6 +25,8 @@ struct LocalizationHealthEvidence {
     bool nonphysical_correction = false;
     bool output_step_limited = false;
     bool ekf_recovered = false;
+    bool fixed_yaw_contract = true;
+    bool candidate_basin_continuity = true;
     double fitness = 0.0;
     double raw_step_m = 0.0;
     double maximum_allowed_step_m = 0.0;

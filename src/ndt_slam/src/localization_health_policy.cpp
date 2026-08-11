@@ -74,6 +74,10 @@ LocalizationHealthDecision LocalizationHealthPolicy::update(
         rejection_reason = "observability_invalid";
     } else if (!evidence.pose_finite) {
         rejection_reason = "pose_nonfinite";
+    } else if (!evidence.fixed_yaw_contract) {
+        rejection_reason = "fixed_yaw_contract_failed";
+    } else if (!evidence.candidate_basin_continuity) {
+        rejection_reason = "candidate_basin_changed";
     } else if (evidence.nonphysical_correction) {
         rejection_reason = "nonphysical_correction";
     } else if (evidence.output_step_limited) {
