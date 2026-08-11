@@ -164,6 +164,13 @@ set(LIBRARY_SOURCES
   src/pending_cargo_self_evidence.cpp
   src/cargo_swing_monitor.cpp
   src/map_session_snapshot.cpp
+  src/durable_map_store.cpp
+  src/recovery_checkpoint.cpp
+  src/accepted_keyframe_journal.cpp
+  src/crane_place_descriptor.cpp
+  src/crane_startup_relocalizer.cpp
+  src/map_write_rearm_policy.cpp
+  src/startup_recovery_controller.cpp
   src/cargo_motion_corridor.cpp
   src/cargo_residual_classifier.cpp
   src/hook_load_state_filter.cpp
@@ -458,6 +465,55 @@ if(CATKIN_ENABLE_TESTING)
   if(TARGET map_session_snapshot_test)
     target_link_libraries(map_session_snapshot_test
       ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(durable_map_store_test
+    test/durable_map_store_test.cpp)
+  if(TARGET durable_map_store_test)
+    target_link_libraries(durable_map_store_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(recovery_checkpoint_test
+    test/recovery_checkpoint_test.cpp)
+  if(TARGET recovery_checkpoint_test)
+    target_link_libraries(recovery_checkpoint_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(accepted_keyframe_journal_test
+    test/accepted_keyframe_journal_test.cpp)
+  if(TARGET accepted_keyframe_journal_test)
+    target_link_libraries(accepted_keyframe_journal_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(crane_place_descriptor_test
+    test/crane_place_descriptor_test.cpp)
+  if(TARGET crane_place_descriptor_test)
+    target_link_libraries(crane_place_descriptor_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(crane_startup_relocalizer_test
+    test/crane_startup_relocalizer_test.cpp)
+  if(TARGET crane_startup_relocalizer_test)
+    target_link_libraries(crane_startup_relocalizer_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(map_write_rearm_policy_test
+    test/map_write_rearm_policy_test.cpp)
+  if(TARGET map_write_rearm_policy_test)
+    target_link_libraries(map_write_rearm_policy_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(startup_recovery_controller_test
+    test/startup_recovery_controller_test.cpp)
+  if(TARGET startup_recovery_controller_test)
+    target_link_libraries(startup_recovery_controller_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(cargo_motion_corridor_test

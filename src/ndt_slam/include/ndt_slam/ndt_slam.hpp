@@ -55,6 +55,13 @@
 #include <ndt_slam/cargo_obstacle_tracker.hpp>
 #include <ndt_slam/static_obstacle_evidence_index.hpp>
 #include <ndt_slam/map_session_snapshot.hpp>
+#include <ndt_slam/durable_map_store.hpp>
+#include <ndt_slam/recovery_checkpoint.hpp>
+#include <ndt_slam/accepted_keyframe_journal.hpp>
+#include <ndt_slam/crane_place_descriptor.hpp>
+#include <ndt_slam/crane_startup_relocalizer.hpp>
+#include <ndt_slam/startup_recovery_controller.hpp>
+#include <ndt_slam/map_write_rearm_policy.hpp>
 #include <ndt_slam/static_height_field.hpp>
 #include <ndt_slam/static_height_component_extractor.hpp>
 #include <ndt_slam/static_evidence_authorization.hpp>
@@ -473,9 +480,8 @@ private:
         STARTUP_QUARANTINE = 1,
         GLOBAL_SEARCH = 2,
         VERIFYING = 3,
-        WAITING_STATIONARY = 4,
-        HEALTHY = 5,
-        MAP_INVALID = 6
+        HEALTHY = 4,
+        MAP_INVALID = 5
     };
 
     NdtRelocalizer relocalizer_;
@@ -495,6 +501,7 @@ private:
     int relocalization_global_max_candidates_ = 48;
     int relocalization_global_hint_count_ = 4;
     double relocalization_global_min_similarity_ = 0.55;
+    double relocalization_min_score_margin_ = 0.10;
     double relocalization_local_xy_window_m_ = 1.5;
     double relocalization_local_xy_step_m_ = 1.5;
     double relocalization_local_yaw_window_deg_ = 12.0;
@@ -511,6 +518,9 @@ private:
     bool relocalization_pose_reliable_ = false;
     bool relocalization_invalid_safety_published_ = false;
     Sophus::SE3d relocalization_confirmation_pose_;
+    Sophus::SE3d startup_verification_candidate_pose_;
+    bool startup_verification_candidate_valid_ = false;
+    std::uint64_t startup_candidate_continuity_generation_ = 0U;
     Sophus::SE3d localization_quarantine_publish_pose_;
     bool localization_quarantine_publish_pose_valid_ = false;
     StartupLocalizationState startup_localization_state_ =
@@ -526,6 +536,17 @@ private:
     bool persistent_localization_map_valid_ = false;
     bool localization_checkpoint_valid_ = false;
     Sophus::SE3d localization_checkpoint_pose_;
+    RecoveryCheckpointData localization_checkpoint_data_;
+    CranePlaceDescriptor crane_place_descriptor_;
+    CraneStartupRelocalizer crane_startup_relocalizer_;
+    StartupRecoveryController startup_recovery_controller_;
+    StartupRecoveryDecision startup_recovery_decision_;
+    MapWriteRearmPolicy map_write_rearm_policy_;
+    std::atomic<bool> startup_recovery_verified_{false};
+    std::atomic<bool> map_write_rearmed_{false};
+    std::atomic<std::uint64_t> recovery_map_write_attempt_count_{0U};
+    std::atomic<std::uint64_t> recovery_map_write_authorized_count_{0U};
+    AcceptedKeyframeJournal accepted_keyframe_journal_;
     double startup_quarantine_started_sec_ = 0.0;
     double localization_last_health_publish_sec_ = 0.0;
     double localization_last_checkpoint_write_sec_ = 0.0;
