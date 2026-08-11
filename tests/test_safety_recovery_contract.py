@@ -272,8 +272,7 @@ class SafetyRecoveryContractTest(unittest.TestCase):
         self.assertIn("StartLimitIntervalSec=300", unit_section)
         self.assertIn("StartLimitBurst=5", unit_section)
         self.assertNotIn("StartLimitIntervalSec", service_section)
-        self.assertIn("Restart=always", service_section)
-        self.assertNotIn("Restart=on-failure", service_section)
+        self.assertIn("Restart=on-failure", service_section)
         self.assertEqual(service_section.count("Restart="), 1)
         self.assertIn('"@DATA_ROOT@/.ndt-slam.lock"', SERVICE)
 
@@ -317,7 +316,7 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "use_ndt_recovery_watchdog:=false", INSTALLER
         )
         self.assertIn(
-            "contains obsolete Restart=on-failure", INSTALLER
+            "must restart crashes only", INSTALLER
         )
         self.assertIn("systemctl show", INSTALLER)
         self.assertIn("EnvironmentFiles", INSTALLER)
