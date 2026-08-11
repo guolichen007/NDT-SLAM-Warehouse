@@ -89,6 +89,7 @@
 #include <ndt_slam/clean_map_builder.hpp>
 #include <ndt_slam/ndt_relocalizer.hpp>
 #include <ndt_slam/stationary_motion_policy.hpp>
+#include <ndt_slam/local_map_update_policy.hpp>
 #include <ndt_slam/registration_cloud_builder.hpp>
 
 // NDT_OMP
@@ -1326,8 +1327,27 @@ private:
         RuntimeMotionState::MOVING;
     bool allow_runtime_local_map_update_ = false;
     bool allow_persistent_map_commit_ = false;
+    std::atomic<uint64_t> local_map_update_attempted_count_{0};
+    std::atomic<bool> local_map_latest_update_attempted_{false};
     std::atomic<uint64_t> local_map_update_allowed_count_{0};
     std::atomic<uint64_t> local_map_update_blocked_count_{0};
+    std::atomic<uint64_t> local_map_update_committed_count_{0};
+    std::atomic<uint64_t> local_map_latest_version_{0};
+    std::atomic<int> local_map_last_block_reason_{
+        static_cast<int>(LocalMapUpdateBlockReason::NO_REGISTRATION)};
+    std::atomic<double> local_map_last_update_wall_sec_{0.0};
+    std::atomic<double> local_map_last_update_sensor_sec_{0.0};
+    std::atomic<bool> local_map_latest_accepted_snapshot_valid_{false};
+    std::atomic<uint64_t> local_map_latest_accepted_snapshot_sequence_{0};
+    std::atomic<double> local_map_latest_accepted_snapshot_age_sec_{0.0};
+    std::atomic<bool> local_map_latest_ndt_accepted_{false};
+    std::atomic<bool> local_map_latest_registration_quality_valid_{false};
+    std::atomic<bool> local_map_latest_fitness_allow_measurement_{true};
+    std::atomic<uint64_t> local_map_latest_target_points_{0};
+    std::atomic<uint64_t> local_map_latest_target_version_{0};
+    std::shared_ptr<const std::string> local_map_latest_target_source_{
+        std::make_shared<const std::string>("none")};
+    std::atomic<uint64_t> local_map_latest_recovery_buffer_size_{0};
     std::atomic<uint64_t> persistent_map_commit_allowed_count_{0};
     std::atomic<uint64_t> persistent_map_commit_blocked_count_{0};
 

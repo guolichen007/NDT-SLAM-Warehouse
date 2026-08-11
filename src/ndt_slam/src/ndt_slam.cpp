@@ -6144,6 +6144,8 @@ void NdtSlamNode::processCloudThread() {
                 // shrink cannot silently reopen this write bypass.
                 *local_map_ += *registration_cloud;
                 ++local_map_version_;
+                local_map_latest_version_.store(
+                    local_map_version_, std::memory_order_release);
                 ++bootstrap_local_map_frames_;
                 registration_success = true;
 
@@ -6153,6 +6155,12 @@ void NdtSlamNode::processCloudThread() {
                     bootstrap_local_map_complete_ = true;
                     localization_target_state_ =
                         LocalizationTargetState::BUILDING_TARGET;
+                    local_map_last_update_wall_sec_.store(
+                        ros::WallTime::now().toSec(),
+                        std::memory_order_release);
+                    local_map_last_update_sensor_sec_.store(
+                        msg->header.stamp.toSec(),
+                        std::memory_order_release);
                     ROS_DEBUG("Local map bootstrap complete: points=%lu frames=%d",
                               local_map_->size(), bootstrap_local_map_frames_);
                     last_local_map_pose = current_pose_;
@@ -6701,123 +6709,233 @@ void NdtSlamNode::processCloudThread() {
                 stationary_motion_decision_.allow_persistent_map_commit;
         }
 
-        // Runtime local-map writes are authorized independently from
-        // persistent MapCommit. STATIONARY_HOLD, MOVING_CONFIRM, CATCH_UP,
-        // prediction-only, and severe-degeneracy frames all stop here.
-        if (registration_success) {
-            ++frames_since_last_update;
-            const bool accepted_snapshot_is_current =
-                accepted_localization_snapshot_.valid &&
-                accepted_localization_snapshot_.stamp == msg->header.stamp &&
-                accepted_localization_snapshot_.lifecycle_epoch ==
-                    map_rebuild_generation_.load(std::memory_order_acquire) &&
-                accepted_localization_snapshot_.pose_version ==
-                    keyframe_pose_version_.load(std::memory_order_acquire) &&
-                accepted_localization_snapshot_.map_generation ==
-                    localization_map_generation_ &&
-                accepted_localization_snapshot_.map_uuid ==
-                    localization_map_uuid_;
-            const Sophus::SE3d& trusted_map_pose =
-                accepted_snapshot_is_current
-                    ? accepted_localization_snapshot_.pose
-                    : new_pose;
-            const Sophus::SE3d delta =
-                last_local_map_pose.inverse() * trusted_map_pose;
-            const double move_dist = delta.translation().norm();
-            const double move_rot = delta.so3().log().norm();
-            const bool catch_up_blocks_local_map =
-                stationary_motion_decision_.state ==
-                    RuntimeMotionState::CATCH_UP;
-            const bool quarantine_alignment_ready =
-                relocalization_pose_reliable_ &&
-                !global_consistency_state_.global_suspect &&
-                (startup_localization_state_ ==
-                     StartupLocalizationState::FRESH_MAPPING ||
-                 startup_localization_state_ ==
-                     StartupLocalizationState::HEALTHY);
-            if (!allow_runtime_local_map_update_ ||
-                catch_up_blocks_local_map ||
-                !quarantine_alignment_ready ||
-                !accepted_snapshot_is_current ||
-                !frame_ndt_accepted ||
-                !frame_registration_quality_valid) {
-                ROS_DEBUG("[LocalMap] blocked state=%s reason=%s",
-                          runtimeMotionStateName(
-                              stationary_motion_decision_.state),
-                          stationary_motion_decision_.reason.c_str());
+        // local_map_ is the short-lived NDT working target, not a durable or
+        // safety-authoritative map.  Its Level-1 lifecycle intentionally does
+        // not consume AcceptedLocalizationSnapshot, fitness measurement
+        // authority, registration-quality authority, MapWriteAuthority, or
+        // CleanWorkerLineage.  The current runtime pose/cloud ownership is the
+        // same as the field-proven master path.  Motion-state and explicit
+        // relocalization quarantine remain local lifecycle boundaries.
+        if (registration_success) ++frames_since_last_update;
+        const Sophus::SE3d local_map_delta =
+            last_local_map_pose.inverse() * new_pose;
+        LocalMapUpdateInput local_map_input;
+        local_map_input.registration_success = registration_success;
+        local_map_input.registration_cloud_valid =
+            registration_build_result.valid && registration_cloud &&
+            !registration_cloud->empty();
+        local_map_input.runtime_pose_finite =
+            new_pose.translation().allFinite() &&
+            new_pose.so3().matrix().allFinite();
+        local_map_input.motion_state_allows_update =
+            stationary_motion_decision_.state == RuntimeMotionState::MOVING;
+        local_map_input.relocalization_pose_reliable =
+            relocalization_pose_reliable_;
+        local_map_input.translation_since_update_m =
+            local_map_delta.translation().norm();
+        local_map_input.rotation_since_update_rad =
+            local_map_delta.so3().log().norm();
+        local_map_input.frames_since_update = frames_since_last_update;
+        const LocalMapUpdateDecision local_map_decision =
+            evaluateLocalMapUpdate(local_map_input);
 
-                // ========== Recovery Scan Buffer ==========
-                // 拒绝帧不直接写 trusted local map，缓存原始扫描。
-                // 定位恢复后根据已验证的 pose history 重放，超时丢弃。
-                const bool quarantine_reject =
-                    !quarantine_alignment_ready ||
-                    !accepted_snapshot_is_current ||
-                    !frame_registration_quality_valid;
-                if (quarantine_reject &&
-                    registration_build_result.valid &&
-                    registration_cloud && !registration_cloud->empty()) {
-                    RecoveryScanEntry entry;
-                    entry.stamp = msg->header.stamp;
-                    entry.cloud.reset(new pcl::PointCloud<pcl::PointXYZ>(*registration_cloud));
-                    entry.reject_reason =
-                        crane_motion_ekf_enabled_ && crane_motion_ekf_.initialized()
-                            ? crane_motion_ekf_.status().reject_reason
-                            : "quarantine";
-                    recovery_scan_buffer_.push_back(std::move(entry));
-
-                    // 限制缓冲区大小。
-                    while (recovery_scan_buffer_.size() >
-                           recovery_buffer_max_frames_) {
-                        recovery_scan_buffer_.pop_front();
-                        recovery_buffer_overflow_count_.fetch_add(
-                            1, std::memory_order_relaxed);
-                    }
-
-                    // 清理超时条目（超过 max_age）。
-                    const double now_sec = msg->header.stamp.toSec();
-                    while (!recovery_scan_buffer_.empty() &&
-                           now_sec -
-                                   recovery_scan_buffer_.front().stamp.toSec() >
-                               recovery_buffer_max_age_sec_) {
-                        recovery_scan_buffer_.pop_front();
-                    }
-                }
-            } else if (move_dist > 0.5 || move_rot > 0.08 ||
-                       frames_since_last_update > 15) {
-                pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(
-                    new pcl::PointCloud<pcl::PointXYZ>);
-                pcl::transformPointCloud(
-                    *registration_cloud, *transformed,
-                    trusted_map_pose.matrix().cast<float>());
-                *local_map_ += *transformed;
-
-                const Eigen::Vector3d current_pos =
-                    trusted_map_pose.translation();
-                pcl::PointCloud<pcl::PointXYZ>::Ptr cropped(
-                    new pcl::PointCloud<pcl::PointXYZ>);
-                for (const auto& p : local_map_->points) {
-                    const double dx = p.x - current_pos.x();
-                    const double dy = p.y - current_pos.y();
-                    const double dz = p.z - current_pos.z();
-                    if (dx * dx + dy * dy + dz * dz < 225.0) {
-                        cropped->push_back(p);
-                    }
-                }
-
-                if (cropped->size() > 8000) {
-                    pcl::VoxelGrid<pcl::PointXYZ> vf;
-                    vf.setInputCloud(cropped);
-                    vf.setLeafSize(0.3, 0.3, 0.3);
-                    pcl::PointCloud<pcl::PointXYZ> filtered_map;
-                    vf.filter(filtered_map);
-                    *local_map_ = filtered_map;
-                } else {
-                    *local_map_ = *cropped;
-                }
-                ++local_map_version_;
-                last_local_map_pose = trusted_map_pose;
-                frames_since_last_update = 0;
+        allow_runtime_local_map_update_ = local_map_decision.allowed;
+        local_map_latest_update_attempted_.store(
+            local_map_decision.attempted, std::memory_order_release);
+        local_map_last_block_reason_.store(
+            static_cast<int>(local_map_decision.block_reason),
+            std::memory_order_release);
+        if (local_map_decision.attempted) {
+            local_map_update_attempted_count_.fetch_add(
+                1U, std::memory_order_relaxed);
+            if (local_map_decision.allowed) {
+                local_map_update_allowed_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+            } else {
+                local_map_update_blocked_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
             }
+        }
+
+        if (!local_map_decision.allowed) {
+            ROS_DEBUG(
+                "[LocalMap] blocked state=%s policy=%s motion_reason=%s",
+                runtimeMotionStateName(stationary_motion_decision_.state),
+                localMapUpdateBlockReasonName(
+                    local_map_decision.block_reason),
+                stationary_motion_decision_.reason.c_str());
+
+            // Keep the existing bounded recovery buffer only for an explicit
+            // relocalization quarantine.  Fitness/AcceptedSnapshot quality is
+            // not a local-target block and cannot grow this buffer.
+            if (local_map_decision.block_reason ==
+                    LocalMapUpdateBlockReason::RELOCALIZATION_UNRELIABLE &&
+                registration_build_result.valid && registration_cloud &&
+                !registration_cloud->empty()) {
+                RecoveryScanEntry entry;
+                entry.stamp = msg->header.stamp;
+                entry.cloud.reset(
+                    new pcl::PointCloud<pcl::PointXYZ>(*registration_cloud));
+                entry.reject_reason = "relocalization_unreliable";
+                recovery_scan_buffer_.push_back(std::move(entry));
+                while (recovery_scan_buffer_.size() >
+                       recovery_buffer_max_frames_) {
+                    recovery_scan_buffer_.pop_front();
+                    recovery_buffer_overflow_count_.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
+                const double now_sec = msg->header.stamp.toSec();
+                while (!recovery_scan_buffer_.empty() &&
+                       now_sec -
+                               recovery_scan_buffer_.front().stamp.toSec() >
+                           recovery_buffer_max_age_sec_) {
+                    recovery_scan_buffer_.pop_front();
+                }
+            }
+        } else if (local_map_decision.should_update) {
+            pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            pcl::transformPointCloud(
+                *registration_cloud, *transformed,
+                new_pose.matrix().cast<float>());
+            *local_map_ += *transformed;
+
+            const Eigen::Vector3d current_pos = new_pose.translation();
+            pcl::PointCloud<pcl::PointXYZ>::Ptr cropped(
+                new pcl::PointCloud<pcl::PointXYZ>);
+            for (const auto& p : local_map_->points) {
+                const double dx = p.x - current_pos.x();
+                const double dy = p.y - current_pos.y();
+                const double dz = p.z - current_pos.z();
+                if (dx * dx + dy * dy + dz * dz < 225.0) {
+                    cropped->push_back(p);
+                }
+            }
+
+            if (cropped->size() > 8000) {
+                pcl::VoxelGrid<pcl::PointXYZ> vf;
+                vf.setInputCloud(cropped);
+                vf.setLeafSize(0.3, 0.3, 0.3);
+                pcl::PointCloud<pcl::PointXYZ> filtered_map;
+                vf.filter(filtered_map);
+                *local_map_ = filtered_map;
+            } else {
+                *local_map_ = *cropped;
+            }
+            ++local_map_version_;
+            local_map_latest_version_.store(
+                local_map_version_, std::memory_order_release);
+            last_local_map_pose = new_pose;
+            frames_since_last_update = 0;
+            local_map_update_committed_count_.fetch_add(
+                1U, std::memory_order_relaxed);
+            local_map_last_update_wall_sec_.store(
+                ros::WallTime::now().toSec(),
+                std::memory_order_release);
+            local_map_last_update_sensor_sec_.store(
+                msg->header.stamp.toSec(),
+                std::memory_order_release);
+        }
+
+        const double local_map_now_wall_sec = ros::WallTime::now().toSec();
+        const double local_map_last_update_wall_sec =
+            local_map_last_update_wall_sec_.load(std::memory_order_acquire);
+        const double local_map_update_age_sec =
+            local_map_last_update_wall_sec > 0.0
+                ? std::max(0.0, local_map_now_wall_sec -
+                                    local_map_last_update_wall_sec)
+                : std::numeric_limits<double>::infinity();
+        const bool accepted_snapshot_valid =
+            accepted_localization_snapshot_.valid;
+        const double accepted_snapshot_age_sec =
+            accepted_snapshot_valid &&
+                    !accepted_localization_snapshot_.stamp.isZero()
+                ? std::max(
+                      0.0,
+                      (msg->header.stamp -
+                       accepted_localization_snapshot_.stamp).toSec())
+                : std::numeric_limits<double>::infinity();
+        const std::size_t ndt_target_points =
+            last_bound_ndt_target_ ? last_bound_ndt_target_->size() : 0U;
+        local_map_latest_accepted_snapshot_valid_.store(
+            accepted_snapshot_valid, std::memory_order_release);
+        local_map_latest_accepted_snapshot_sequence_.store(
+            accepted_localization_snapshot_.pose_generation,
+            std::memory_order_release);
+        local_map_latest_accepted_snapshot_age_sec_.store(
+            accepted_snapshot_age_sec, std::memory_order_release);
+        local_map_latest_ndt_accepted_.store(
+            frame_ndt_accepted, std::memory_order_release);
+        local_map_latest_registration_quality_valid_.store(
+            frame_registration_quality_valid, std::memory_order_release);
+        local_map_latest_fitness_allow_measurement_.store(
+            frame_fitness_decision.allow_measurement,
+            std::memory_order_release);
+        local_map_latest_target_points_.store(
+            static_cast<uint64_t>(ndt_target_points),
+            std::memory_order_release);
+        local_map_latest_target_version_.store(
+            last_bound_ndt_target_version_, std::memory_order_release);
+        const auto latest_target_source = std::atomic_load_explicit(
+            &local_map_latest_target_source_, std::memory_order_acquire);
+        if (!latest_target_source ||
+            *latest_target_source != last_bound_ndt_target_source_) {
+            std::atomic_store_explicit(
+                &local_map_latest_target_source_,
+                std::make_shared<const std::string>(
+                    last_bound_ndt_target_source_),
+                std::memory_order_release);
+        }
+        local_map_latest_recovery_buffer_size_.store(
+            static_cast<uint64_t>(recovery_scan_buffer_.size()),
+            std::memory_order_release);
+        constexpr double kLocalMapStarvationWarningSec = 5.0;
+        if (bootstrap_local_map_complete_ &&
+            local_map_update_age_sec > kLocalMapStarvationWarningSec) {
+            std::size_t global_map_points = 0U;
+            std::size_t objects_clean_map_points = 0U;
+            bool map_counts_current = false;
+            {
+                // Diagnostics must never add blocking IO or a new lock-order
+                // dependency to the real-time owner thread.
+                std::unique_lock<std::mutex> map_lock(
+                    map_mutex_, std::try_to_lock);
+                if (map_lock.owns_lock()) {
+                    global_map_points =
+                        global_map_ ? global_map_->size() : 0U;
+                    objects_clean_map_points =
+                        objects_clean_map_ ? objects_clean_map_->size() : 0U;
+                    map_counts_current = true;
+                }
+            }
+            ROS_WARN_THROTTLE(
+                5.0,
+                "[LocalMapHealth] state=STARVED points=%zu version=%llu "
+                "age=%.3f attempted=%d allowed=%d block_reason=%s "
+                "target_source=%s target_points=%zu target_version=%llu "
+                "global_points=%zu objects_clean_points=%zu map_counts_current=%d "
+                "snapshot_valid=%d snapshot_sequence=%llu "
+                "snapshot_age=%.3f ndt_accepted=%d registration_quality=%d "
+                "fitness_allow_measurement=%d recovery_buffer=%zu",
+                local_map_ ? local_map_->size() : 0U,
+                static_cast<unsigned long long>(local_map_version_),
+                local_map_update_age_sec,
+                local_map_decision.attempted ? 1 : 0,
+                local_map_decision.allowed ? 1 : 0,
+                localMapUpdateBlockReasonName(
+                    local_map_decision.block_reason),
+                last_bound_ndt_target_source_.c_str(), ndt_target_points,
+                static_cast<unsigned long long>(
+                    last_bound_ndt_target_version_),
+                global_map_points, objects_clean_map_points,
+                map_counts_current ? 1 : 0,
+                accepted_snapshot_valid ? 1 : 0,
+                static_cast<unsigned long long>(
+                    accepted_localization_snapshot_.pose_generation),
+                accepted_snapshot_age_sec, frame_ndt_accepted ? 1 : 0,
+                frame_registration_quality_valid ? 1 : 0,
+                frame_fitness_decision.allow_measurement ? 1 : 0,
+                recovery_scan_buffer_.size());
         }
 
         // ========== 阶段 6：更新位姿 ==========
@@ -9438,6 +9556,12 @@ void NdtSlamNode::updatePoseFromLoopClosure(
                 local_correction.matrix().cast<float>());
             local_map_.swap(corrected_local);
             ++local_map_version_;
+            local_map_latest_version_.store(
+                local_map_version_, std::memory_order_release);
+            local_map_last_update_wall_sec_.store(
+                ros::WallTime::now().toSec(), std::memory_order_release);
+            local_map_last_update_sensor_sec_.store(
+                stamp.toSec(), std::memory_order_release);
         }
     }
     releaseRuntimeYawPrior("loop_closure_pose_jump");
@@ -9542,6 +9666,11 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         current_cloud_->clear();
         local_map_->clear();
         local_map_version_ = 0;
+        local_map_latest_version_.store(0U, std::memory_order_release);
+        local_map_last_update_wall_sec_.store(
+            0.0, std::memory_order_release);
+        local_map_last_update_sensor_sec_.store(
+            0.0, std::memory_order_release);
         bootstrap_local_map_complete_ = false;
         bootstrap_local_map_frames_ = 0;
     }
@@ -10102,6 +10231,11 @@ bool NdtSlamNode::installLoadedRuntimeMap(
                 std::move(candidate.empty_clouds[7]);
             rebuild_ground_raw_ = std::move(candidate.empty_clouds[8]);
             local_map_version_ = 0;
+            local_map_latest_version_.store(0U, std::memory_order_release);
+            local_map_last_update_wall_sec_.store(
+                ros::WallTime::now().toSec(), std::memory_order_release);
+            local_map_last_update_sensor_sec_.store(
+                ros::Time::now().toSec(), std::memory_order_release);
             // A loaded map starts in relocalization/target mode. It must not
             // seed a new local map through the startup bootstrap bypass.
             bootstrap_local_map_complete_ = true;
@@ -11367,6 +11501,13 @@ void NdtSlamNode::applyRelocalizedPose(
                 relocalization_cfg_.min_target_points) {
                 local_map_ = recentered;
                 ++local_map_version_;
+                local_map_latest_version_.store(
+                    local_map_version_, std::memory_order_release);
+                local_map_last_update_wall_sec_.store(
+                    ros::WallTime::now().toSec(),
+                    std::memory_order_release);
+                local_map_last_update_sensor_sec_.store(
+                    stamp.toSec(), std::memory_order_release);
             }
         }
     }
@@ -12310,13 +12451,6 @@ StationaryMotionDecision NdtSlamNode::updateStationaryMotionState(
         decision.allow_local_map_update && !catch_up_blocks_maps;
     allow_persistent_map_commit_ =
         decision.allow_persistent_map_commit && !catch_up_blocks_maps;
-    if (allow_runtime_local_map_update_) {
-        local_map_update_allowed_count_.fetch_add(
-            1, std::memory_order_relaxed);
-    } else {
-        local_map_update_blocked_count_.fetch_add(
-            1, std::memory_order_relaxed);
-    }
     if (allow_persistent_map_commit_) {
         persistent_map_commit_allowed_count_.fetch_add(
             1, std::memory_order_relaxed);
@@ -13411,6 +13545,12 @@ bool NdtSlamNode::restorePersistentLocalizationMap(std::string* reason) {
     // startup; map writes remain blocked throughout quarantine.
     local_map_ = registration;
     ++local_map_version_;
+    local_map_latest_version_.store(
+        local_map_version_, std::memory_order_release);
+    local_map_last_update_wall_sec_.store(
+        ros::WallTime::now().toSec(), std::memory_order_release);
+    local_map_last_update_sensor_sec_.store(
+        ros::Time::now().toSec(), std::memory_order_release);
     bootstrap_local_map_complete_ = true;
     sealCurrentMapLayerBundleLocked(ros::Time::now());
     persistent_localization_map_valid_ = true;
@@ -14090,6 +14230,84 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"local_map_points\": " << local_pts << ",\n";
     f << "  \"local_map_update_allowed\": "
       << (allow_runtime_local_map_update_ ? "true" : "false") << ",\n";
+    f << "  \"local_map_update_attempted\": "
+      << (local_map_latest_update_attempted_.load(
+              std::memory_order_relaxed) ? "true" : "false")
+      << ",\n";
+    const double local_map_last_update_wall =
+        local_map_last_update_wall_sec_.load(std::memory_order_acquire);
+    const double local_map_update_age = local_map_last_update_wall > 0.0
+        ? std::max(0.0, ros::WallTime::now().toSec() -
+                            local_map_last_update_wall)
+        : std::numeric_limits<double>::infinity();
+    const auto local_map_block_reason =
+        static_cast<LocalMapUpdateBlockReason>(
+            local_map_last_block_reason_.load(std::memory_order_acquire));
+    f << "  \"local_map_version\": "
+      << local_map_latest_version_.load(std::memory_order_acquire) << ",\n";
+    f << "  \"local_map_last_update_age_sec\": "
+      << (std::isfinite(local_map_update_age)
+              ? std::to_string(local_map_update_age)
+              : std::string("null"))
+      << ",\n";
+    f << "  \"local_map_update_attempted_count\": "
+      << local_map_update_attempted_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_update_allowed_count\": "
+      << local_map_update_allowed_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_update_blocked_count\": "
+      << local_map_update_blocked_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_update_committed_count\": "
+      << local_map_update_committed_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_block_reason\": \""
+      << localMapUpdateBlockReasonName(local_map_block_reason) << "\",\n";
+    const auto local_map_target_source = std::atomic_load_explicit(
+        &local_map_latest_target_source_, std::memory_order_acquire);
+    f << "  \"ndt_target_source\": \""
+      << (local_map_target_source ? *local_map_target_source
+                                  : std::string("none"))
+      << "\",\n";
+    f << "  \"ndt_target_point_count\": "
+      << local_map_latest_target_points_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"ndt_target_version\": "
+      << local_map_latest_target_version_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"accepted_snapshot_valid\": "
+      << (local_map_latest_accepted_snapshot_valid_.load(
+              std::memory_order_relaxed) ? "true" : "false")
+      << ",\n";
+    f << "  \"accepted_snapshot_sequence\": "
+      << local_map_latest_accepted_snapshot_sequence_.load(
+             std::memory_order_relaxed)
+      << ",\n";
+    const double accepted_snapshot_age =
+        local_map_latest_accepted_snapshot_age_sec_.load(
+            std::memory_order_relaxed);
+    f << "  \"accepted_snapshot_age_sec\": "
+      << (std::isfinite(accepted_snapshot_age)
+              ? std::to_string(accepted_snapshot_age)
+              : std::string("null"))
+      << ",\n";
+    f << "  \"frame_ndt_accepted\": "
+      << (local_map_latest_ndt_accepted_.load(std::memory_order_relaxed)
+              ? "true" : "false")
+      << ",\n";
+    f << "  \"frame_registration_quality_valid\": "
+      << (local_map_latest_registration_quality_valid_.load(
+              std::memory_order_relaxed) ? "true" : "false")
+      << ",\n";
+    f << "  \"fitness_allow_measurement\": "
+      << (local_map_latest_fitness_allow_measurement_.load(
+              std::memory_order_relaxed) ? "true" : "false")
+      << ",\n";
+    f << "  \"recovery_scan_buffer_size\": "
+      << local_map_latest_recovery_buffer_size_.load(
+             std::memory_order_relaxed)
+      << ",\n";
     f << "  \"persistent_map_commit_allowed\": "
       << (allow_persistent_map_commit_ ? "true" : "false") << ",\n";
     f << "  \"prediction_only_consecutive_frames\": "

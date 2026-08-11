@@ -124,6 +124,7 @@ set(LIBRARY_SOURCES
   src/crane_motion_ekf.cpp
   src/ndt_fitness_circuit_breaker.cpp
   src/stationary_motion_policy.cpp
+  src/local_map_update_policy.cpp
   src/registration_cloud_builder.cpp
   src/ndt_observability.cpp
   src/crane_pose_constraint.cpp
