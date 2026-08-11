@@ -210,9 +210,15 @@ DurableMapLoadResult DurableMapStore::loadBest() const {
   bool any_pointer = false;
   std::string failures;
   for (const char* pointer : pointers) {
-    const std::string generation = readPointer(root / pointer);
-    if (generation.empty()) continue;
+    const fs::path pointer_path = root / pointer;
+    const bool pointer_exists = fs::exists(pointer_path);
+    const std::string generation = readPointer(pointer_path);
+    if (!pointer_exists) continue;
     any_pointer = true;
+    if (generation.empty()) {
+      failures += std::string(pointer) + ":pointer_empty_or_unreadable;";
+      continue;
+    }
     if (!validGenerationName(generation)) {
       failures += std::string(pointer) + ":pointer_invalid;";
       continue;

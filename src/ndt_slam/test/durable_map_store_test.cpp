@@ -91,5 +91,16 @@ TEST_F(DurableMapStoreTest, IgnoresPartialStagingAndDistinguishesFirstBoot) {
             DurableMapLoadStatus::REFERENCE_CORRUPTED);
 }
 
+TEST_F(DurableMapStoreTest, ExistingEmptyCurrentIsCorruptionNotFirstBoot) {
+  DurableMapStore store(root_.string());
+  std::string reason;
+  ASSERT_TRUE(store.initialize(&reason)) << reason;
+  std::ofstream(root_ / "CURRENT").close();
+  const auto loaded = store.loadBest();
+  EXPECT_EQ(loaded.status, DurableMapLoadStatus::REFERENCE_CORRUPTED);
+  EXPECT_NE(loaded.reason.find("pointer_empty_or_unreadable"),
+            std::string::npos);
+}
+
 }  // namespace
 }  // namespace ndt_slam

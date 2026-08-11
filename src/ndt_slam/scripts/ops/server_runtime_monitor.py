@@ -946,6 +946,28 @@ def read_json(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def resolve_active_persistent_root(configured: Path) -> Path:
+    """Follow bounded, relative ACTIVE_ROOT isolation pointers."""
+    selected = configured.resolve()
+    for _ in range(8):
+        pointer = selected / "ACTIVE_ROOT"
+        if not pointer.is_file():
+            return selected
+        try:
+            relative = Path(pointer.read_text(encoding="utf-8").strip())
+        except OSError:
+            return selected
+        if (relative.is_absolute() or not relative.parts or
+                relative.parts[0] != "isolated" or
+                ".." in relative.parts):
+            return selected
+        candidate = selected / relative
+        if not candidate.is_dir():
+            return selected
+        selected = candidate
+    return selected
+
+
 def read_pcd_header(path: Path) -> Optional[Dict[str, Any]]:
     """Read PCD header fields without loading point data.
 
@@ -1215,8 +1237,11 @@ class RosRuntimeMonitor:
             1, int(config.get("max_throttle_keys", 2048)))
         self.aggregator_lock = threading.Lock()
         self._state_lock = threading.RLock()
-        self.runtime_path = Path(args.persistent_root).expanduser().resolve() / "runtime_status.json"
-        self.persistent_root = self.runtime_path.parent
+        self.configured_persistent_root = \
+            Path(args.persistent_root).expanduser().resolve()
+        self.persistent_root = resolve_active_persistent_root(
+            self.configured_persistent_root)
+        self.runtime_path = self.persistent_root / "runtime_status.json"
         self.last_odom_wall: Optional[float] = None
         self.odom_message_count: int = 0
         self.last_safety_wall: Optional[float] = None
@@ -2559,6 +2584,9 @@ class RosRuntimeMonitor:
             self.last_safety_repeat_wall = float(event.get("wall_time", time.time()))
 
     def _sample_runtime(self, now: float) -> Dict[str, Any]:
+        self.persistent_root = resolve_active_persistent_root(
+            self.configured_persistent_root)
+        self.runtime_path = self.persistent_root / "runtime_status.json"
         runtime = read_json(self.runtime_path)
         if runtime is not None:
             for key, label in (("memory_guard_triggered", "MEMORY_GUARD"),

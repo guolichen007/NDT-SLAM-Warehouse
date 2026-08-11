@@ -77,6 +77,8 @@ class StartupRecoveryV1ContractTest(unittest.TestCase):
         node = read(PKG / "src" / "ndt_slam.cpp")
         self.assertIn("This branch is startup recovery only", node)
         self.assertNotIn("StartupLocalizationState::WAITING_STATIONARY", node)
+        self.assertIn('"ACTIVE_ROOT"', node)
+        self.assertIn('"isolated/" + localization_map_uuid_', node)
 
     def test_service_restarts_crashes_only_and_watchdog_is_off(self):
         service = read(PKG / "scripts" / "ops" / "ndt-slam.service.in")

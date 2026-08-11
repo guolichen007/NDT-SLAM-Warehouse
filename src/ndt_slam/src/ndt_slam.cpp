@@ -97,6 +97,75 @@ using lidar_slam2::utils::GetTimestamps;
 
 namespace {
 
+bool activateIsolatedPersistentRoot(const std::string& configured_root,
+                                    const std::string& relative,
+                                    std::string* reason) {
+    const std::filesystem::path root =
+        std::filesystem::absolute(configured_root);
+    const std::filesystem::path relative_path(relative);
+    if (relative_path.is_absolute() || relative_path.empty() ||
+        relative_path.begin() == relative_path.end() ||
+        *relative_path.begin() != "isolated" ||
+        std::any_of(relative_path.begin(), relative_path.end(),
+                    [](const auto& part) { return part == ".."; })) {
+        if (reason) *reason = "isolated_root_relative_path_invalid";
+        return false;
+    }
+    try {
+        std::filesystem::create_directories(root / relative_path);
+        const std::filesystem::path pointer = root / "ACTIVE_ROOT";
+        const std::filesystem::path temporary = root /
+            ("ACTIVE_ROOT.tmp-" + MapSessionSnapshot::generateUuid());
+        std::ofstream output(temporary, std::ios::out | std::ios::trunc);
+        output << relative_path.generic_string() << '\n';
+        output.flush();
+        const bool written = output.good();
+        output.close();
+        if (!written || std::rename(temporary.string().c_str(),
+                                    pointer.string().c_str()) != 0) {
+            std::remove(temporary.string().c_str());
+            if (reason) *reason = "active_root_pointer_publish_failed";
+            return false;
+        }
+        if (reason) *reason = "active_root_pointer_published";
+        return true;
+    } catch (const std::exception& error) {
+        if (reason) *reason = error.what();
+        return false;
+    }
+}
+
+bool selectActivePersistentRoot(std::string* root, std::string* reason) {
+    if (!root || root->empty()) return false;
+    std::filesystem::path selected = std::filesystem::absolute(*root);
+    for (int depth = 0; depth < 8; ++depth) {
+        const std::filesystem::path pointer = selected / "ACTIVE_ROOT";
+        if (!std::filesystem::is_regular_file(pointer)) {
+            *root = selected.string();
+            return true;
+        }
+        std::ifstream input(pointer);
+        std::string relative;
+        std::getline(input, relative);
+        const std::filesystem::path relative_path(relative);
+        const bool safe = input.good() || input.eof();
+        const bool safe_relative = !relative.empty() &&
+            relative_path.is_relative() &&
+            relative_path.begin() != relative_path.end() &&
+            *relative_path.begin() == "isolated" &&
+            std::none_of(relative_path.begin(), relative_path.end(),
+                         [](const auto& part) { return part == ".."; });
+        if (!safe || !safe_relative ||
+            !std::filesystem::is_directory(selected / relative_path)) {
+            if (reason) *reason = "active_root_pointer_invalid";
+            return false;
+        }
+        selected /= relative_path;
+    }
+    if (reason) *reason = "active_root_pointer_depth_exceeded";
+    return false;
+}
+
 std::string escapeJsonString(const std::string& value) {
     std::ostringstream escaped;
     for (const unsigned char character : value) {
@@ -9773,6 +9842,7 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
     active_map_rebuild_dirty_.store(false, std::memory_order_release);
     last_active_map_rebuild_time_sec_.store(0.0, std::memory_order_release);
     loop_closure_detector_.clear();
+    crane_place_descriptor_.clear();
     {
         std::lock_guard<std::mutex> lock(processed_loops_mutex_);
         processed_loops_.clear();
@@ -10320,6 +10390,7 @@ bool NdtSlamNode::installLoadedRuntimeMap(
         keyframe_count_ = 0;
         loop_closure_detector_.installPreparedKeyFrameDatabase(
             std::move(candidate.keyframes));
+        crane_place_descriptor_.clear();
         if (session_mode) {
             keyframe_count_ = static_cast<int>(
                 loop_closure_detector_.getKeyFrameCount());
@@ -13352,6 +13423,16 @@ bool NdtSlamNode::writeLocalizationCheckpoint(const ros::Time& stamp) {
 }
 
 bool NdtSlamNode::restorePersistentLocalizationMap(std::string* reason) {
+    std::string active_root_reason;
+    if (!selectActivePersistentRoot(&persistent_map_root_dir_,
+                                    &active_root_reason)) {
+        persistent_localization_map_present_ = true;
+        persistent_localization_map_valid_ = false;
+        relocalization_pose_reliable_ = false;
+        startup_localization_state_ = StartupLocalizationState::MAP_INVALID;
+        if (reason) *reason = active_root_reason;
+        return false;
+    }
     persistent_localization_map_present_ = false;
     persistent_localization_map_valid_ = false;
     persistent_registration_snapshot_.reset();
@@ -13394,7 +13475,26 @@ bool NdtSlamNode::restorePersistentLocalizationMap(std::string* reason) {
         // Never mix corrupt old evidence with a new map. The old generations
         // remain untouched for forensic recovery; the new map gets a fresh
         // UUID and continuity/lifecycle epochs.
+        const std::string quarantined_root = persistent_map_root_dir_;
         localization_map_uuid_ = MapSessionSnapshot::generateUuid();
+        const std::string isolated_relative =
+            "isolated/" + localization_map_uuid_;
+        std::string isolation_reason;
+        if (!activateIsolatedPersistentRoot(
+                quarantined_root, isolated_relative, &isolation_reason)) {
+            persistent_localization_map_present_ = true;
+            persistent_localization_map_valid_ = false;
+            relocalization_pose_reliable_ = false;
+            startup_localization_state_ = StartupLocalizationState::MAP_INVALID;
+            if (reason) {
+                *reason = "reference_corrupted_isolation_failed:" +
+                    isolation_reason;
+            }
+            return false;
+        }
+        persistent_map_root_dir_ =
+            quarantined_root + "/" + isolated_relative;
+        boost::filesystem::create_directories(persistent_map_root_dir_);
         localization_map_generation_ = 0U;
         persistent_localization_map_present_ = false;
         persistent_localization_map_valid_ = false;

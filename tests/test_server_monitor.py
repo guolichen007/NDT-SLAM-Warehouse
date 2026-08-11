@@ -22,6 +22,7 @@ from server_runtime_monitor import (  # noqa: E402
     is_runtime_status_stale,
     normalize_timeout_status,
     prune_run_directories,
+    resolve_active_persistent_root,
     classify_cargo_geometry,
     cargo_monitor_ready,
     select_static_status,
@@ -42,6 +43,17 @@ def sample(code, reason="ok", track=0, **extra):
 
 
 class SafetyAggregatorTest(unittest.TestCase):
+    def test_active_root_pointer_is_bounded_and_relative(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            isolated = root / "isolated" / "map-a"
+            isolated.mkdir(parents=True)
+            (root / "ACTIVE_ROOT").write_text(
+                "isolated/map-a\n", encoding="utf-8")
+            self.assertEqual(resolve_active_persistent_root(root), isolated)
+            (root / "ACTIVE_ROOT").write_text("../escape\n", encoding="utf-8")
+            self.assertEqual(resolve_active_persistent_root(root), root)
+
     def test_code29_is_counted_as_review_not_warning_or_fault(self):
         aggregate = SafetyAggregator()
         aggregate.ingest(

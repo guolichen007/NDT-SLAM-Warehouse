@@ -156,6 +156,12 @@ load PREVIOUS. Restore the fixture from its clean copy after recording evidence.
 
 Repeat E for `manifest.yaml`; automatic PREVIOUS fallback is required.
 
+Also run an all-generations-broken case. It must publish a relative
+`ACTIVE_ROOT` pointer, preserve the damaged tree in place, create a fresh
+`isolated/<new-map-uuid>` storage root, and use that same isolated root after a
+second process restart. The runtime monitor must follow the bounded pointer;
+it must not read stale status or map evidence from the quarantined root.
+
 ### G. Valid checkpoint
 
 With matching map UUID/generation, verify local deterministic checkpoint search
