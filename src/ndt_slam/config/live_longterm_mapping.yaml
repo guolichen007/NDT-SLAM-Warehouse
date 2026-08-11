@@ -216,6 +216,9 @@ motion_gate:
 
 stationary_policy:
   enter_confirm_frames: 20
+  # Rejected/prediction-only frames pause entry evidence but never count as
+  # stationary. A longer gap or any raw motion evidence resets the window.
+  enter_max_consecutive_unreliable_frames: 2
   enter_max_raw_increment_m: 0.015
   enter_max_speed_mps: 0.03
   position_hold_variance: 0.0025

@@ -2,6 +2,7 @@
 
 #include <vector>
 
+#include "ndt_slam/local_map_update_policy.hpp"
 #include "ndt_slam/stationary_motion_policy.hpp"
 
 namespace ndt_slam {
@@ -26,6 +27,19 @@ StationaryMotionInput reliableInput(double stamp,
     return input;
 }
 
+StationaryMotionInput rejectedButGeometricInput(
+    double stamp, const Eigen::Vector2d& raw,
+    const Eigen::Vector2d& filtered, double raw_increment) {
+    StationaryMotionInput input = reliableInput(
+        stamp, raw, filtered, raw_increment, 0.0);
+    input.ndt_accepted = false;
+    input.prediction_only = true;
+    input.registration_quality_valid = false;
+    input.persistent_map_quality_valid = false;
+    input.raw_motion_observation_valid = true;
+    return input;
+}
+
 void enterStationary(StationaryMotionPolicy& policy,
                      double* stamp,
                      Eigen::Vector2d* raw) {
@@ -46,6 +60,98 @@ TEST(StationaryMotionPolicyTest, DuplicateTimestampDoesNotEnterStationary) {
                                     Eigen::Vector2d::Zero(), 0.0));
     }
     EXPECT_EQ(policy.state(), RuntimeMotionState::MOVING);
+}
+
+TEST(StationaryMotionPolicyTest,
+     BoundedUnreliableGapsDoNotEraseStationaryEvidence) {
+    StationaryMotionPolicy policy;
+    StationaryMotionPolicyConfig config;
+    config.enter_confirm_frames = 4;
+    config.enter_max_consecutive_unreliable_frames = 2;
+    policy.setConfig(config);
+
+    double stamp = 0.0;
+    Eigen::Vector2d raw = Eigen::Vector2d::Zero();
+    StationaryMotionDecision decision;
+    for (int i = 0; i < 3; ++i) {
+        stamp += 0.1;
+        raw.x() += 0.001;
+        decision = policy.update(
+            reliableInput(stamp, raw, Eigen::Vector2d::Zero(), 0.001));
+    }
+    EXPECT_EQ(3, decision.stationary_entry_confirm_count);
+
+    stamp += 0.1;
+    raw.x() += 0.001;
+    decision = policy.update(rejectedButGeometricInput(
+        stamp, raw, Eigen::Vector2d::Zero(), 0.001));
+    EXPECT_EQ(RuntimeMotionState::MOVING, decision.state);
+    EXPECT_EQ("STATIONARY_ENTRY_EVIDENCE_GAP", decision.reason);
+    EXPECT_EQ(3, decision.stationary_entry_confirm_count);
+    EXPECT_EQ(1, decision.stationary_entry_unreliable_count);
+
+    stamp += 0.1;
+    raw.x() += 0.001;
+    decision = policy.update(
+        reliableInput(stamp, raw, Eigen::Vector2d::Zero(), 0.001));
+    EXPECT_EQ(RuntimeMotionState::STATIONARY_HOLD, decision.state);
+    EXPECT_EQ("STATIONARY_CONFIRMED", decision.reason);
+}
+
+TEST(StationaryMotionPolicyTest,
+     ExcessiveUnreliableGapResetsStationaryEvidence) {
+    StationaryMotionPolicy policy;
+    StationaryMotionPolicyConfig config;
+    config.enter_confirm_frames = 4;
+    config.enter_max_consecutive_unreliable_frames = 2;
+    policy.setConfig(config);
+
+    double stamp = 0.0;
+    Eigen::Vector2d raw = Eigen::Vector2d::Zero();
+    for (int i = 0; i < 3; ++i) {
+        stamp += 0.1;
+        raw.x() += 0.001;
+        policy.update(
+            reliableInput(stamp, raw, Eigen::Vector2d::Zero(), 0.001));
+    }
+
+    StationaryMotionDecision decision;
+    for (int i = 0; i < 3; ++i) {
+        stamp += 0.1;
+        raw.x() += 0.001;
+        decision = policy.update(rejectedButGeometricInput(
+            stamp, raw, Eigen::Vector2d::Zero(), 0.001));
+    }
+    EXPECT_EQ(RuntimeMotionState::MOVING, decision.state);
+    EXPECT_EQ(0, decision.stationary_entry_confirm_count);
+    EXPECT_EQ(0, decision.stationary_entry_unreliable_count);
+}
+
+TEST(StationaryMotionPolicyTest,
+     RejectedButExplicitRawMotionResetsStationaryEvidence) {
+    StationaryMotionPolicy policy;
+    StationaryMotionPolicyConfig config;
+    config.enter_confirm_frames = 4;
+    config.enter_max_consecutive_unreliable_frames = 2;
+    policy.setConfig(config);
+
+    double stamp = 0.0;
+    Eigen::Vector2d raw = Eigen::Vector2d::Zero();
+    for (int i = 0; i < 3; ++i) {
+        stamp += 0.1;
+        raw.x() += 0.001;
+        policy.update(
+            reliableInput(stamp, raw, Eigen::Vector2d::Zero(), 0.001));
+    }
+
+    stamp += 0.1;
+    raw.x() += 0.05;
+    const auto decision = policy.update(rejectedButGeometricInput(
+        stamp, raw, Eigen::Vector2d::Zero(), 0.05));
+    EXPECT_EQ(RuntimeMotionState::MOVING, decision.state);
+    EXPECT_EQ("MOVING", decision.reason);
+    EXPECT_EQ(0, decision.stationary_entry_confirm_count);
+    EXPECT_EQ(0, decision.stationary_entry_unreliable_count);
 }
 
 TEST(StationaryMotionPolicyTest,
@@ -249,6 +355,75 @@ TEST(StationaryMotionPolicyTest, PredictionAndNonphysicalStepsNeverConfirmExit) 
         EXPECT_FALSE(decision.allow_local_map_update);
         EXPECT_FALSE(decision.allow_persistent_map_commit);
     }
+}
+
+TEST(StationaryMotionPolicyTest,
+     StopToMoveRejectedNdtGetsTargetOnlyEscapeAndThenRecovers) {
+    StationaryMotionPolicy motion_policy;
+    double stamp = 0.0;
+    Eigen::Vector2d raw = Eigen::Vector2d::Zero();
+    enterStationary(motion_policy, &stamp, &raw);
+
+    StationaryMotionDecision motion_decision;
+    LocalMapUpdateDecision local_map_decision;
+    for (int i = 0; i < 3; ++i) {
+        stamp += 0.1;
+        raw.x() += 0.05;
+        motion_decision = motion_policy.update(
+            rejectedButGeometricInput(
+                stamp, raw, Eigen::Vector2d::Zero(), 0.05));
+
+        LocalMapUpdateInput local_input;
+        local_input.registration_success = true;
+        local_input.registration_cloud_valid = true;
+        local_input.runtime_pose_finite = true;
+        local_input.normal_motion_update_allowed =
+            motion_decision.state == RuntimeMotionState::MOVING;
+        local_input.motion_escape_refresh_allowed =
+            motion_decision.allow_local_map_motion_escape_refresh;
+        local_input.relocalization_pose_reliable = true;
+        local_input.frames_since_update = 16;
+        local_map_decision = evaluateLocalMapUpdate(local_input);
+    }
+
+    EXPECT_EQ(RuntimeMotionState::STATIONARY_HOLD, motion_decision.state);
+    EXPECT_TRUE(
+        motion_decision.allow_local_map_motion_escape_refresh);
+    EXPECT_FALSE(motion_decision.allow_persistent_map_commit);
+    EXPECT_TRUE(local_map_decision.eligible);
+    EXPECT_TRUE(local_map_decision.due);
+    EXPECT_EQ(LocalMapUpdateMode::MOTION_ESCAPE_REFRESH,
+              local_map_decision.mode);
+
+    // Once accepted geometry returns, the original bounded confirmation and
+    // CATCH_UP path remains responsible for returning to MOVING.
+    for (int i = 0; i < 3; ++i) {
+        stamp += 0.1;
+        raw.x() += 0.05;
+        motion_decision = motion_policy.update(
+            reliableInput(
+                stamp, raw, Eigen::Vector2d::Zero(), 0.05, 0.5));
+    }
+    ASSERT_EQ(RuntimeMotionState::CATCH_UP, motion_decision.state);
+
+    Eigen::Vector2d filtered = motion_decision.constrained_position;
+    for (int i = 0;
+         i < 10 && motion_policy.state() != RuntimeMotionState::MOVING;
+         ++i) {
+        stamp += 0.1;
+        motion_decision = motion_policy.update(
+            reliableInput(stamp, raw, filtered, 0.0, 0.0));
+        filtered = motion_decision.constrained_position;
+    }
+    EXPECT_EQ(RuntimeMotionState::MOVING, motion_policy.state());
+    EXPECT_FALSE(
+        motion_decision.allow_local_map_motion_escape_refresh);
+
+    stamp += 0.1;
+    motion_decision = motion_policy.update(
+        reliableInput(stamp, raw, raw, 0.0, 0.0));
+    EXPECT_TRUE(motion_decision.allow_local_map_update);
+    EXPECT_TRUE(motion_decision.allow_persistent_map_commit);
 }
 
 }  // namespace

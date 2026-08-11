@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace ndt_slam {
 
@@ -23,6 +24,8 @@ void StationaryMotionPolicy::setConfig(
     const StationaryMotionPolicyConfig& config) {
     config_ = config;
     config_.enter_confirm_frames = std::max(1, config_.enter_confirm_frames);
+    config_.enter_max_consecutive_unreliable_frames =
+        std::max(0, config_.enter_max_consecutive_unreliable_frames);
     config_.exit_confirm_frames = std::max(1, config_.exit_confirm_frames);
     config_.catch_up_confirm_frames =
         std::max(1, config_.catch_up_confirm_frames);
@@ -65,8 +68,11 @@ void StationaryMotionPolicy::reset() {
     accumulated_motion_.setZero();
     confirmed_path_length_m_ = 0.0;
     motion_samples_.clear();
+    motion_escape_samples_.clear();
     movement_confirm_start_stamp_sec_ = 0.0;
+    motion_escape_confirmed_ = false;
     stationary_enter_count_ = 0;
+    stationary_enter_unreliable_count_ = 0;
     movement_confirm_count_ = 0;
     catch_up_complete_count_ = 0;
 }
@@ -100,6 +106,7 @@ void StationaryMotionPolicy::enterStationary(
     confirmed_path_length_m_ = 0.0;
     motion_samples_.clear();
     motion_samples_.push_back({input.stamp_sec, input.raw_position});
+    resetMotionEscapeEvidence(input.stamp_sec, input.raw_position);
     movement_confirm_start_stamp_sec_ = 0.0;
     movement_confirm_count_ = 0;
     catch_up_complete_count_ = 0;
@@ -125,6 +132,7 @@ void StationaryMotionPolicy::rejectMovementEvidence(
     if (input.raw_position.allFinite() && std::isfinite(input.stamp_sec)) {
         motion_samples_.push_back({input.stamp_sec, input.raw_position});
     }
+    resetMotionEscapeEvidence(input.stamp_sec, input.raw_position);
     movement_confirm_start_stamp_sec_ = 0.0;
     movement_confirm_count_ = 0;
     catch_up_complete_count_ = 0;
@@ -151,15 +159,95 @@ void StationaryMotionPolicy::pruneMotionSamples(double stamp_sec) {
     }
 }
 
+void StationaryMotionPolicy::resetMotionEscapeEvidence(
+    double stamp_sec, const Eigen::Vector2d& raw_position) {
+    motion_escape_samples_.clear();
+    motion_escape_confirmed_ = false;
+    if (std::isfinite(stamp_sec) && raw_position.allFinite()) {
+        motion_escape_samples_.push_back({stamp_sec, raw_position});
+    }
+}
+
+void StationaryMotionPolicy::updateMotionEscapeEvidence(
+    const StationaryMotionInput& input) {
+    if (state_ == RuntimeMotionState::MOVING) {
+        motion_escape_samples_.clear();
+        motion_escape_confirmed_ = false;
+        return;
+    }
+
+    const bool raw_geometry_plausible =
+        input.raw_motion_observation_valid &&
+        std::isfinite(input.stamp_sec) &&
+        input.raw_position.allFinite() &&
+        std::isfinite(input.raw_increment_m) &&
+        input.raw_increment_m >= 0.0 &&
+        std::isfinite(input.allowed_physical_step_m) &&
+        input.allowed_physical_step_m > 0.0 &&
+        input.raw_increment_m <=
+            input.allowed_physical_step_m + 1.0e-9;
+    if (raw_geometry_plausible) {
+        if (motion_escape_samples_.empty() ||
+            input.stamp_sec > motion_escape_samples_.back().stamp_sec +
+                                  config_.timestamp_epsilon_sec) {
+            motion_escape_samples_.push_back(
+                {input.stamp_sec, input.raw_position});
+        }
+    }
+
+    const double minimum_stamp =
+        input.stamp_sec - config_.exit_evidence_window_sec;
+    while (motion_escape_samples_.size() > 2U &&
+           motion_escape_samples_[1].stamp_sec < minimum_stamp) {
+        motion_escape_samples_.pop_front();
+    }
+
+    if (motion_escape_samples_.size() < 2U) {
+        motion_escape_confirmed_ = false;
+        return;
+    }
+    const Eigen::Vector2d net =
+        motion_escape_samples_.back().raw_position -
+        motion_escape_samples_.front().raw_position;
+    double path_length_m = 0.0;
+    for (std::size_t i = 1U; i < motion_escape_samples_.size(); ++i) {
+        path_length_m +=
+            (motion_escape_samples_[i].raw_position -
+             motion_escape_samples_[i - 1U].raw_position).norm();
+    }
+    const double duration_sec =
+        motion_escape_samples_.back().stamp_sec -
+        motion_escape_samples_.front().stamp_sec;
+    const double net_motion_m = net.norm();
+    const double direction_coherence = path_length_m > 1.0e-12
+        ? net_motion_m / path_length_m : 0.0;
+    const double window_speed_mps = duration_sec > 1.0e-6
+        ? net_motion_m / duration_sec : 0.0;
+    const int distinct_motion_steps =
+        static_cast<int>(motion_escape_samples_.size()) - 1;
+    motion_escape_confirmed_ = raw_geometry_plausible &&
+        distinct_motion_steps >= config_.exit_confirm_frames &&
+        net_motion_m + 1.0e-9 >= config_.exit_cumulative_motion_m &&
+        direction_coherence + 1.0e-9 >=
+            config_.exit_direction_cosine_min &&
+        window_speed_mps + 1.0e-9 >= config_.exit_min_speed_mps;
+}
+
 StationaryMotionDecision StationaryMotionPolicy::baseDecision(
     const StationaryMotionInput& input) const {
     StationaryMotionDecision decision;
     decision.state = state_;
     decision.constrained_position = input.filtered_position;
+    decision.stationary_entry_confirm_count = stationary_enter_count_;
+    decision.stationary_entry_unreliable_count =
+        stationary_enter_unreliable_count_;
 
     const bool reliable = isReliableMeasurement(input);
     decision.allow_local_map_update =
         state_ == RuntimeMotionState::MOVING && reliable;
+    decision.allow_local_map_motion_escape_refresh =
+        state_ != RuntimeMotionState::MOVING &&
+        motion_escape_confirmed_ && !reliable;
     decision.allow_persistent_map_commit =
         state_ == RuntimeMotionState::MOVING && reliable &&
         input.persistent_map_quality_valid;
@@ -195,6 +283,7 @@ StationaryMotionDecision StationaryMotionPolicy::update(
         has_last_raw_position_ = true;
         last_raw_position_ = input.raw_position;
     }
+    updateMotionEscapeEvidence(input);
 
     const Eigen::Vector2d raw_delta =
         reliable && had_previous_raw
@@ -208,9 +297,32 @@ StationaryMotionDecision StationaryMotionPolicy::update(
                 config_.enter_max_raw_increment_m + 1.0e-9 &&
             input.filtered_velocity.norm() <=
                 config_.enter_max_speed_mps + 1.0e-9;
-        stationary_enter_count_ = stationary_evidence
-            ? stationary_enter_count_ + 1
-            : 0;
+        const bool raw_motion_evidence =
+            input.raw_motion_observation_valid &&
+            input.raw_position.allFinite() &&
+            std::isfinite(input.raw_increment_m) &&
+            input.raw_increment_m >
+                config_.enter_max_raw_increment_m + 1.0e-9;
+        if (stationary_evidence) {
+            if (stationary_enter_count_ <
+                std::numeric_limits<int>::max()) {
+                ++stationary_enter_count_;
+            }
+            stationary_enter_unreliable_count_ = 0;
+        } else if (reliable || raw_motion_evidence) {
+            stationary_enter_count_ = 0;
+            stationary_enter_unreliable_count_ = 0;
+        } else {
+            if (stationary_enter_unreliable_count_ <
+                std::numeric_limits<int>::max()) {
+                ++stationary_enter_unreliable_count_;
+            }
+            if (stationary_enter_unreliable_count_ >
+                config_.enter_max_consecutive_unreliable_frames) {
+                stationary_enter_count_ = 0;
+                stationary_enter_unreliable_count_ = 0;
+            }
+        }
 
         if (stationary_enter_count_ >= config_.enter_confirm_frames) {
             enterStationary(input);
@@ -222,7 +334,11 @@ StationaryMotionDecision StationaryMotionPolicy::update(
         StationaryMotionDecision decision = baseDecision(input);
         decision.reason = stationary_evidence
             ? "STATIONARY_ENTRY_PENDING"
-            : (reliable ? "MOVING" : "UNRELIABLE_MEASUREMENT");
+            : (raw_motion_evidence || reliable
+                   ? "MOVING"
+                   : (stationary_enter_count_ > 0
+                          ? "STATIONARY_ENTRY_EVIDENCE_GAP"
+                          : "UNRELIABLE_MEASUREMENT"));
         return decision;
     }
 
@@ -256,7 +372,10 @@ StationaryMotionDecision StationaryMotionPolicy::update(
 
         if (catch_up_complete_count_ >= config_.catch_up_confirm_frames) {
             state_ = RuntimeMotionState::MOVING;
+            motion_escape_samples_.clear();
+            motion_escape_confirmed_ = false;
             stationary_enter_count_ = 0;
+            stationary_enter_unreliable_count_ = 0;
             movement_confirm_count_ = 0;
             accumulated_motion_.setZero();
             confirmed_path_length_m_ = 0.0;

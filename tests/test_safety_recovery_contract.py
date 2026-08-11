@@ -385,7 +385,7 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "evaluateLocalMapUpdate(local_map_input)", NODE
         )
         self.assertIn(
-            "motion_state_allows_update", NODE
+            "normal_motion_update_allowed", NODE
         )
         self.assertIn(
             "local_map_input.relocalization_pose_reliable", NODE

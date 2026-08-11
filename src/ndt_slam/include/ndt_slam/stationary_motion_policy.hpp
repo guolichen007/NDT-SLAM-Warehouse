@@ -18,6 +18,10 @@ const char* runtimeMotionStateName(RuntimeMotionState state);
 
 struct StationaryMotionPolicyConfig {
     int enter_confirm_frames = 20;
+    // A bounded gap prevents one rejected/prediction-only frame from erasing
+    // otherwise continuous stationary evidence. Gap frames never count as
+    // stationary evidence and cannot survive explicit raw-motion evidence.
+    int enter_max_consecutive_unreliable_frames = 2;
     double enter_max_raw_increment_m = 0.015;
     double enter_max_speed_mps = 0.03;
 
@@ -44,6 +48,10 @@ struct StationaryMotionInput {
     bool ndt_accepted = false;
     bool prediction_only = false;
     bool registration_quality_valid = false;
+    // A converged, finite raw NDT pose may be usable as bounded geometric
+    // motion evidence even when its localization measurement is not accepted.
+    // This flag never authorizes odometry, keyframes, or persistent maps.
+    bool raw_motion_observation_valid = false;
     // Persistent maps require the stricter EKF/map-commit gate.  Ephemeral
     // local-map tracking may still use an accepted, finite soft correction.
     bool persistent_map_quality_valid = false;
@@ -63,6 +71,7 @@ struct StationaryMotionDecision {
     bool apply_stationary_hold = false;
     bool apply_position_constraint = false;
     bool allow_local_map_update = false;
+    bool allow_local_map_motion_escape_refresh = false;
     bool allow_persistent_map_commit = false;
 
     bool movement_confirmed = false;
@@ -70,6 +79,8 @@ struct StationaryMotionDecision {
 
     Eigen::Vector2d constrained_position = Eigen::Vector2d::Zero();
     double catch_up_step_m = 0.0;
+    int stationary_entry_confirm_count = 0;
+    int stationary_entry_unreliable_count = 0;
     std::string reason = "RESET";
 };
 
@@ -95,6 +106,9 @@ private:
     void appendMotionSample(double stamp_sec,
                             const Eigen::Vector2d& raw_position);
     void pruneMotionSamples(double stamp_sec);
+    void resetMotionEscapeEvidence(double stamp_sec,
+                                   const Eigen::Vector2d& raw_position);
+    void updateMotionEscapeEvidence(const StationaryMotionInput& input);
     StationaryMotionDecision baseDecision(
         const StationaryMotionInput& input) const;
 
@@ -116,9 +130,12 @@ private:
     Eigen::Vector2d accumulated_motion_ = Eigen::Vector2d::Zero();
     double confirmed_path_length_m_ = 0.0;
     std::deque<MotionSample> motion_samples_;
+    std::deque<MotionSample> motion_escape_samples_;
     double movement_confirm_start_stamp_sec_ = 0.0;
+    bool motion_escape_confirmed_ = false;
 
     int stationary_enter_count_ = 0;
+    int stationary_enter_unreliable_count_ = 0;
     int movement_confirm_count_ = 0;
     int catch_up_complete_count_ = 0;
 };

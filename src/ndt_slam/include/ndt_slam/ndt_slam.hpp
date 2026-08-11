@@ -770,6 +770,15 @@ private:
     uint64_t local_map_version_ = 0;
     bool bootstrap_local_map_complete_ = false;
     int bootstrap_local_map_frames_ = 0;
+    // Process-thread updates and asynchronous reset/load/relocalization
+    // lifecycle callbacks share this small state bundle. Recursive locking is
+    // required because lazy initialization uses the same reset helper.
+    std::recursive_mutex local_map_update_state_mutex_;
+    Sophus::SE3d last_local_map_pose_;
+    int frames_since_last_local_map_update_ = 0;
+    bool local_map_update_state_initialized_ = false;
+    bool local_map_motion_update_expected_ = false;
+    double local_map_motion_expected_started_wall_sec_ = 0.0;
     std::string last_bound_ndt_target_source_ = "none";
     std::string last_actual_target_source_ = "bootstrap_local_map";
     std::string last_target_reason_ = "startup";
@@ -1327,12 +1336,19 @@ private:
         RuntimeMotionState::MOVING;
     bool allow_runtime_local_map_update_ = false;
     bool allow_persistent_map_commit_ = false;
-    std::atomic<uint64_t> local_map_update_attempted_count_{0};
-    std::atomic<bool> local_map_latest_update_attempted_{false};
-    std::atomic<uint64_t> local_map_update_allowed_count_{0};
+    std::atomic<uint64_t> local_map_update_eligible_count_{0};
+    std::atomic<uint64_t> local_map_update_due_count_{0};
     std::atomic<uint64_t> local_map_update_blocked_count_{0};
     std::atomic<uint64_t> local_map_update_committed_count_{0};
+    std::atomic<uint64_t> local_map_motion_escape_refresh_count_{0};
+    std::atomic<bool> local_map_latest_update_eligible_{false};
+    std::atomic<bool> local_map_latest_update_due_{false};
+    std::atomic<bool> local_map_latest_update_committed_{false};
     std::atomic<uint64_t> local_map_latest_version_{0};
+    std::atomic<int> local_map_latest_update_mode_{
+        static_cast<int>(LocalMapUpdateMode::NONE)};
+    std::atomic<int> local_map_latest_health_state_{
+        static_cast<int>(LocalMapHealthState::QUARANTINED)};
     std::atomic<int> local_map_last_block_reason_{
         static_cast<int>(LocalMapUpdateBlockReason::NO_REGISTRATION)};
     std::atomic<double> local_map_last_update_wall_sec_{0.0};
@@ -1348,6 +1364,18 @@ private:
     std::shared_ptr<const std::string> local_map_latest_target_source_{
         std::make_shared<const std::string>("none")};
     std::atomic<uint64_t> local_map_latest_recovery_buffer_size_{0};
+    LocalMapPoseAuthorityTracker local_map_pose_authority_tracker_;
+    std::atomic<int> local_map_latest_pose_authority_{
+        static_cast<int>(LocalMapPoseAuthority::INVALID)};
+    std::atomic<uint64_t> local_map_consecutive_prediction_only_frames_{0};
+    std::atomic<double> local_map_prediction_only_duration_sec_{0.0};
+    std::atomic<uint64_t> local_map_frames_since_last_trusted_ndt_{0};
+    std::atomic<double> local_map_time_since_last_trusted_ndt_sec_{0.0};
+    std::atomic<double> local_map_distance_since_last_trusted_ndt_m_{0.0};
+    std::atomic<double> local_map_yaw_since_last_trusted_ndt_rad_{0.0};
+    std::atomic<uint64_t> local_map_updates_from_measured_pose_{0};
+    std::atomic<uint64_t> local_map_updates_from_predicted_pose_{0};
+    bool relocalization_pose_applied_this_frame_ = false;
     std::atomic<uint64_t> persistent_map_commit_allowed_count_{0};
     std::atomic<uint64_t> persistent_map_commit_blocked_count_{0};
 
@@ -1372,6 +1400,9 @@ private:
                               const std::string& reason);
     void exitStationaryState(const std::string& reason);
     void resetStationaryState(const std::string& reason);
+    void resetLocalMapUpdateState(const Sophus::SE3d& pose,
+                                  const ros::Time& stamp,
+                                  const std::string& reason);
     void handleLidarTimeRollback(const ros::Time& previous_stamp,
                                  const ros::Time& current_stamp);
 

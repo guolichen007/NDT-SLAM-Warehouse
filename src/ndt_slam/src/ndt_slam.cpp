@@ -1455,6 +1455,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             const auto policy = config["stationary_policy"];
             stationary_motion_policy_config_.enter_confirm_frames =
                 policy["enter_confirm_frames"].as<int>(20);
+            stationary_motion_policy_config_
+                .enter_max_consecutive_unreliable_frames =
+                policy["enter_max_consecutive_unreliable_frames"].as<int>(2);
             stationary_motion_policy_config_.enter_max_raw_increment_m =
                 policy["enter_max_raw_increment_m"].as<double>(0.015);
             stationary_motion_policy_config_.enter_max_speed_mps =
@@ -6077,6 +6080,7 @@ void NdtSlamNode::processCloudThread() {
         // ========== 阶段 5：NDT_OMP 配准 ==========
         // Apply only a twice-confirmed asynchronous recovery result before the
         // current NDT prediction so this frame immediately refines it.
+        relocalization_pose_applied_this_frame_ = false;
         consumeRelocalizationResult(processing_frame_index, msg->header.stamp);
 
         Sophus::SE3d new_pose = current_pose_;
@@ -6086,6 +6090,7 @@ void NdtSlamNode::processCloudThread() {
         bool ndt_safe_pose_valid_this_frame = false;
         bool frame_ndt_accepted = false;
         bool frame_prediction_only = true;
+        bool frame_used_ekf_prediction = false;
         bool frame_registration_quality_valid = false;
         bool frame_map_commit_quality_valid = false;
         bool frame_severe_degeneracy =
@@ -6093,9 +6098,6 @@ void NdtSlamNode::processCloudThread() {
         NdtFitnessCircuitDecision frame_fitness_decision;
         Sophus::SE3d frame_raw_ndt_pose = current_pose_;
         double frame_raw_increment_m = 0.0;
-        static Sophus::SE3d last_local_map_pose = Sophus::SE3d();
-        static int frames_since_last_update = 0;
-
         try {
             const bool observability_unavailable =
                 ndt_observability_config_.enabled &&
@@ -6125,6 +6127,7 @@ void NdtSlamNode::processCloudThread() {
                         (observability_unavailable || bootstrap_quality_invalid)
                             ? "INSUFFICIENT_OBSERVABILITY"
                             : "INSUFFICIENT_STRUCTURE");
+                    frame_used_ekf_prediction = true;
                     registration_success = true;
                     ekf_reject_count_.fetch_add(
                         1, std::memory_order_relaxed);
@@ -6163,7 +6166,9 @@ void NdtSlamNode::processCloudThread() {
                         std::memory_order_release);
                     ROS_DEBUG("Local map bootstrap complete: points=%lu frames=%d",
                               local_map_->size(), bootstrap_local_map_frames_);
-                    last_local_map_pose = current_pose_;
+                    resetLocalMapUpdateState(
+                        current_pose_, msg->header.stamp,
+                        "bootstrap_complete");
                 }
             } else {
                 // 配准阶段（带时间预算）
@@ -6372,6 +6377,7 @@ void NdtSlamNode::processCloudThread() {
                                     crane_motion_ekf_.predictWithoutMeasurement(
                                         current_pose_, msg->header.stamp,
                                         "NDT_SAFE_SE3_REJECTED");
+                                frame_used_ekf_prediction = true;
                                 registration_success = true;
                                 ekf_reject_count_.fetch_add(
                                     1, std::memory_order_relaxed);
@@ -6433,6 +6439,7 @@ void NdtSlamNode::processCloudThread() {
                                 ekf_pose = crane_motion_ekf_.predictWithoutMeasurement(
                                     new_pose, msg->header.stamp,
                                     reject_reason_slow);
+                                frame_used_ekf_prediction = true;
                             } else {
                                 ekf_pose = crane_motion_ekf_.updateWithNDT(
                                     new_pose,
@@ -6621,6 +6628,7 @@ void NdtSlamNode::processCloudThread() {
                         new_pose = crane_motion_ekf_.predictWithoutMeasurement(
                             current_pose_, msg->header.stamp,
                             "NDT_INVALID_TRANSFORM");
+                        frame_used_ekf_prediction = true;
                         registration_success = true;
                         ekf_reject_count_.fetch_add(1, std::memory_order_relaxed);
                         diag_stage.ekf_ms += elapsedMs(ekf_start);
@@ -6641,6 +6649,7 @@ void NdtSlamNode::processCloudThread() {
                         new_pose = crane_motion_ekf_.predictWithoutMeasurement(
                             current_pose_, msg->header.stamp,
                             "NDT_NOT_CONVERGED");
+                        frame_used_ekf_prediction = true;
                         registration_success = true;
                         ekf_reject_count_.fetch_add(1, std::memory_order_relaxed);
                         diag_stage.ekf_ms += elapsedMs(ekf_start);
@@ -6667,6 +6676,12 @@ void NdtSlamNode::processCloudThread() {
         motion_input.prediction_only = frame_prediction_only;
         motion_input.registration_quality_valid =
             frame_registration_quality_valid;
+        motion_input.raw_motion_observation_valid =
+            ndt_attempted_this_frame && last_ndt_converged_ &&
+            diag_have_raw_ndt_pose &&
+            frame_raw_ndt_pose.translation().allFinite() &&
+            frame_raw_ndt_pose.so3().matrix().allFinite() &&
+            !frame_severe_degeneracy;
         motion_input.persistent_map_quality_valid =
             frame_map_commit_quality_valid;
         motion_input.severe_degeneracy = frame_severe_degeneracy;
@@ -6710,15 +6725,85 @@ void NdtSlamNode::processCloudThread() {
         }
 
         // local_map_ is the short-lived NDT working target, not a durable or
-        // safety-authoritative map.  Its Level-1 lifecycle intentionally does
-        // not consume AcceptedLocalizationSnapshot, fitness measurement
-        // authority, registration-quality authority, MapWriteAuthority, or
-        // CleanWorkerLineage.  The current runtime pose/cloud ownership is the
-        // same as the field-proven master path.  Motion-state and explicit
-        // relocalization quarantine remain local lifecycle boundaries.
-        if (registration_success) ++frames_since_last_update;
+        // safety-authoritative map. Its normal path follows MOVING. A separate
+        // motion-escape path may refresh only this target after coherent raw
+        // NDT geometry proves stop-to-move activity while localization quality
+        // is temporarily rejected. Neither path authorizes longer-lived maps.
+        LocalMapPoseAuthority local_map_pose_authority =
+            LocalMapPoseAuthority::INVALID;
+        LocalMapPoseAuthorityMetrics local_map_pose_metrics;
+        LocalMapUpdateDecision local_map_decision;
+        bool local_map_committed_this_frame = false;
+        std::unique_lock<std::recursive_mutex> local_map_state_lock(
+            local_map_update_state_mutex_);
+        if (!local_map_update_state_initialized_ &&
+            bootstrap_local_map_complete_) {
+            resetLocalMapUpdateState(
+                new_pose, msg->header.stamp, "lazy_runtime_initialize");
+        }
+        if (registration_success &&
+            frames_since_last_local_map_update_ <
+                std::numeric_limits<int>::max()) {
+            ++frames_since_last_local_map_update_;
+        }
+
+        if (relocalization_pose_applied_this_frame_) {
+            local_map_pose_authority = LocalMapPoseAuthority::RECOVERY;
+        } else if (frame_ndt_accepted &&
+                   frame_registration_quality_valid &&
+                   !frame_prediction_only &&
+                   !frame_used_ekf_prediction) {
+            local_map_pose_authority =
+                LocalMapPoseAuthority::NDT_MEASURED;
+        } else if (registration_success && frame_used_ekf_prediction) {
+            local_map_pose_authority =
+                LocalMapPoseAuthority::EKF_PREDICTED;
+        }
+        const Eigen::Matrix3d local_map_pose_rotation =
+            new_pose.so3().matrix();
+        LocalMapPoseSample local_map_pose_sample;
+        local_map_pose_sample.authority = local_map_pose_authority;
+        local_map_pose_sample.stamp_sec = msg->header.stamp.toSec();
+        local_map_pose_sample.x_m = new_pose.translation().x();
+        local_map_pose_sample.y_m = new_pose.translation().y();
+        local_map_pose_sample.yaw_rad = std::atan2(
+            local_map_pose_rotation(1, 0), local_map_pose_rotation(0, 0));
+        local_map_pose_metrics =
+            local_map_pose_authority_tracker_.observe(local_map_pose_sample);
+        const auto publish_local_map_pose_metrics =
+            [this](const LocalMapPoseAuthorityMetrics& metrics) {
+                local_map_latest_pose_authority_.store(
+                    static_cast<int>(metrics.authority),
+                    std::memory_order_release);
+                local_map_consecutive_prediction_only_frames_.store(
+                    metrics.consecutive_prediction_only_frames,
+                    std::memory_order_release);
+                local_map_prediction_only_duration_sec_.store(
+                    metrics.prediction_only_duration_sec,
+                    std::memory_order_release);
+                local_map_frames_since_last_trusted_ndt_.store(
+                    metrics.frames_since_last_trusted_ndt,
+                    std::memory_order_release);
+                local_map_time_since_last_trusted_ndt_sec_.store(
+                    metrics.time_since_last_trusted_ndt_sec,
+                    std::memory_order_release);
+                local_map_distance_since_last_trusted_ndt_m_.store(
+                    metrics.distance_since_last_trusted_ndt_m,
+                    std::memory_order_release);
+                local_map_yaw_since_last_trusted_ndt_rad_.store(
+                    metrics.yaw_since_last_trusted_ndt_rad,
+                    std::memory_order_release);
+                local_map_updates_from_measured_pose_.store(
+                    metrics.local_map_updates_from_measured_pose,
+                    std::memory_order_release);
+                local_map_updates_from_predicted_pose_.store(
+                    metrics.local_map_updates_from_predicted_pose,
+                    std::memory_order_release);
+            };
+        publish_local_map_pose_metrics(local_map_pose_metrics);
+
         const Sophus::SE3d local_map_delta =
-            last_local_map_pose.inverse() * new_pose;
+            last_local_map_pose_.inverse() * new_pose;
         LocalMapUpdateInput local_map_input;
         local_map_input.registration_success = registration_success;
         local_map_input.registration_cloud_valid =
@@ -6727,37 +6812,47 @@ void NdtSlamNode::processCloudThread() {
         local_map_input.runtime_pose_finite =
             new_pose.translation().allFinite() &&
             new_pose.so3().matrix().allFinite();
-        local_map_input.motion_state_allows_update =
+        local_map_input.normal_motion_update_allowed =
             stationary_motion_decision_.state == RuntimeMotionState::MOVING;
+        local_map_input.motion_escape_refresh_allowed =
+            stationary_motion_decision_
+                .allow_local_map_motion_escape_refresh;
         local_map_input.relocalization_pose_reliable =
             relocalization_pose_reliable_;
         local_map_input.translation_since_update_m =
             local_map_delta.translation().norm();
         local_map_input.rotation_since_update_rad =
             local_map_delta.so3().log().norm();
-        local_map_input.frames_since_update = frames_since_last_update;
-        const LocalMapUpdateDecision local_map_decision =
-            evaluateLocalMapUpdate(local_map_input);
+        local_map_input.frames_since_update =
+            frames_since_last_local_map_update_;
+        local_map_decision = evaluateLocalMapUpdate(local_map_input);
 
-        allow_runtime_local_map_update_ = local_map_decision.allowed;
-        local_map_latest_update_attempted_.store(
-            local_map_decision.attempted, std::memory_order_release);
+        allow_runtime_local_map_update_ = local_map_decision.eligible;
+        local_map_latest_update_eligible_.store(
+            local_map_decision.eligible, std::memory_order_release);
+        local_map_latest_update_due_.store(
+            local_map_decision.due, std::memory_order_release);
+        local_map_latest_update_committed_.store(
+            false, std::memory_order_release);
+        local_map_latest_update_mode_.store(
+            static_cast<int>(local_map_decision.mode),
+            std::memory_order_release);
         local_map_last_block_reason_.store(
             static_cast<int>(local_map_decision.block_reason),
             std::memory_order_release);
-        if (local_map_decision.attempted) {
-            local_map_update_attempted_count_.fetch_add(
+        if (local_map_decision.eligible) {
+            local_map_update_eligible_count_.fetch_add(
                 1U, std::memory_order_relaxed);
-            if (local_map_decision.allowed) {
-                local_map_update_allowed_count_.fetch_add(
-                    1U, std::memory_order_relaxed);
-            } else {
-                local_map_update_blocked_count_.fetch_add(
-                    1U, std::memory_order_relaxed);
-            }
+        } else if (registration_success) {
+            local_map_update_blocked_count_.fetch_add(
+                1U, std::memory_order_relaxed);
+        }
+        if (local_map_decision.due) {
+            local_map_update_due_count_.fetch_add(
+                1U, std::memory_order_relaxed);
         }
 
-        if (!local_map_decision.allowed) {
+        if (!local_map_decision.eligible) {
             ROS_DEBUG(
                 "[LocalMap] blocked state=%s policy=%s motion_reason=%s",
                 runtimeMotionStateName(stationary_motion_decision_.state),
@@ -6792,7 +6887,7 @@ void NdtSlamNode::processCloudThread() {
                     recovery_scan_buffer_.pop_front();
                 }
             }
-        } else if (local_map_decision.should_update) {
+        } else if (local_map_decision.due) {
             pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(
                 new pcl::PointCloud<pcl::PointXYZ>);
             pcl::transformPointCloud(
@@ -6825,10 +6920,22 @@ void NdtSlamNode::processCloudThread() {
             ++local_map_version_;
             local_map_latest_version_.store(
                 local_map_version_, std::memory_order_release);
-            last_local_map_pose = new_pose;
-            frames_since_last_update = 0;
+            last_local_map_pose_ = new_pose;
+            frames_since_last_local_map_update_ = 0;
+            local_map_committed_this_frame = true;
+            local_map_latest_update_committed_.store(
+                true, std::memory_order_release);
             local_map_update_committed_count_.fetch_add(
                 1U, std::memory_order_relaxed);
+            if (local_map_decision.mode ==
+                LocalMapUpdateMode::MOTION_ESCAPE_REFRESH) {
+                local_map_motion_escape_refresh_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
+            local_map_pose_metrics =
+                local_map_pose_authority_tracker_.recordLocalMapUpdate(
+                    local_map_pose_authority);
+            publish_local_map_pose_metrics(local_map_pose_metrics);
             local_map_last_update_wall_sec_.store(
                 ros::WallTime::now().toSec(),
                 std::memory_order_release);
@@ -6836,6 +6943,7 @@ void NdtSlamNode::processCloudThread() {
                 msg->header.stamp.toSec(),
                 std::memory_order_release);
         }
+        local_map_state_lock.unlock();
 
         const double local_map_now_wall_sec = ros::WallTime::now().toSec();
         const double local_map_last_update_wall_sec =
@@ -6845,6 +6953,68 @@ void NdtSlamNode::processCloudThread() {
                 ? std::max(0.0, local_map_now_wall_sec -
                                     local_map_last_update_wall_sec)
                 : std::numeric_limits<double>::infinity();
+        const bool local_map_motion_update_expected =
+            stationary_motion_decision_.state == RuntimeMotionState::MOVING ||
+            stationary_motion_decision_.state ==
+                RuntimeMotionState::MOVING_CONFIRM ||
+            stationary_motion_decision_.state == RuntimeMotionState::CATCH_UP ||
+            stationary_motion_decision_
+                .allow_local_map_motion_escape_refresh;
+        if (local_map_motion_update_expected &&
+            !local_map_motion_update_expected_) {
+            local_map_motion_expected_started_wall_sec_ =
+                local_map_now_wall_sec;
+        } else if (!local_map_motion_update_expected) {
+            local_map_motion_expected_started_wall_sec_ = 0.0;
+        }
+        local_map_motion_update_expected_ =
+            local_map_motion_update_expected;
+        double local_map_expected_update_age_sec = 0.0;
+        if (local_map_motion_update_expected) {
+            const double expected_age_origin = std::max(
+                local_map_last_update_wall_sec,
+                local_map_motion_expected_started_wall_sec_);
+            local_map_expected_update_age_sec =
+                expected_age_origin > 0.0
+                    ? std::max(
+                          0.0,
+                          local_map_now_wall_sec - expected_age_origin)
+                    : 0.0;
+        }
+        constexpr double kLocalMapStarvationWarningSec = 5.0;
+        LocalMapHealthInput local_map_health_input;
+        local_map_health_input.relocalization_pose_reliable =
+            relocalization_pose_reliable_;
+        local_map_health_input.stationary_idle =
+            stationary_motion_decision_.state ==
+                RuntimeMotionState::STATIONARY_HOLD &&
+            !stationary_motion_decision_
+                 .allow_local_map_motion_escape_refresh;
+        local_map_health_input.motion_update_expected =
+            local_map_motion_update_expected;
+        local_map_health_input.eligible = local_map_decision.eligible;
+        local_map_health_input.due = local_map_decision.due;
+        local_map_health_input.committed = local_map_committed_this_frame;
+        local_map_health_input.expected_update_age_sec =
+            local_map_expected_update_age_sec;
+        local_map_health_input.starvation_warning_sec =
+            kLocalMapStarvationWarningSec;
+        const LocalMapHealthState local_map_health_state =
+            classifyLocalMapHealth(local_map_health_input);
+        const int previous_local_map_health_state =
+            local_map_latest_health_state_.exchange(
+                static_cast<int>(local_map_health_state),
+                std::memory_order_acq_rel);
+        if (previous_local_map_health_state !=
+            static_cast<int>(local_map_health_state)) {
+            ROS_DEBUG(
+                "[LocalMapHealth] transition=%s state=%s mode=%s",
+                localMapHealthStateName(
+                    static_cast<LocalMapHealthState>(
+                        previous_local_map_health_state)),
+                localMapHealthStateName(local_map_health_state),
+                localMapUpdateModeName(local_map_decision.mode));
+        }
         const bool accepted_snapshot_valid =
             accepted_localization_snapshot_.valid;
         const double accepted_snapshot_age_sec =
@@ -6889,9 +7059,9 @@ void NdtSlamNode::processCloudThread() {
         local_map_latest_recovery_buffer_size_.store(
             static_cast<uint64_t>(recovery_scan_buffer_.size()),
             std::memory_order_release);
-        constexpr double kLocalMapStarvationWarningSec = 5.0;
         if (bootstrap_local_map_complete_ &&
-            local_map_update_age_sec > kLocalMapStarvationWarningSec) {
+            local_map_health_state ==
+                LocalMapHealthState::STARVED_MOVING) {
             std::size_t global_map_points = 0U;
             std::size_t objects_clean_map_points = 0U;
             bool map_counts_current = false;
@@ -6910,8 +7080,9 @@ void NdtSlamNode::processCloudThread() {
             }
             ROS_WARN_THROTTLE(
                 5.0,
-                "[LocalMapHealth] state=STARVED points=%zu version=%llu "
-                "age=%.3f attempted=%d allowed=%d block_reason=%s "
+                "[LocalMapHealth] state=STARVED_MOVING points=%zu version=%llu "
+                "age=%.3f expected_age=%.3f eligible=%d due=%d committed=%d "
+                "mode=%s pose_authority=%s block_reason=%s "
                 "target_source=%s target_points=%zu target_version=%llu "
                 "global_points=%zu objects_clean_points=%zu map_counts_current=%d "
                 "snapshot_valid=%d snapshot_sequence=%llu "
@@ -6920,8 +7091,12 @@ void NdtSlamNode::processCloudThread() {
                 local_map_ ? local_map_->size() : 0U,
                 static_cast<unsigned long long>(local_map_version_),
                 local_map_update_age_sec,
-                local_map_decision.attempted ? 1 : 0,
-                local_map_decision.allowed ? 1 : 0,
+                local_map_expected_update_age_sec,
+                local_map_decision.eligible ? 1 : 0,
+                local_map_decision.due ? 1 : 0,
+                local_map_committed_this_frame ? 1 : 0,
+                localMapUpdateModeName(local_map_decision.mode),
+                localMapPoseAuthorityName(local_map_pose_authority),
                 localMapUpdateBlockReasonName(
                     local_map_decision.block_reason),
                 last_bound_ndt_target_source_.c_str(), ndt_target_points,
@@ -7590,6 +7765,43 @@ void NdtSlamNode::processCloudThread() {
             ndt_rec.prediction_reason = diag_reject_reason;
             ndt_rec.map_commit_allowed = diag_map_commit_allowed;
             ndt_rec.map_commit_reason = diag_map_commit_reason;
+            ndt_rec.local_map_pose_authority =
+                localMapPoseAuthorityName(local_map_pose_authority);
+            ndt_rec.local_map_consecutive_prediction_only_frames =
+                local_map_pose_metrics.consecutive_prediction_only_frames;
+            ndt_rec.local_map_prediction_only_duration_sec =
+                local_map_pose_metrics.prediction_only_duration_sec;
+            ndt_rec.local_map_frames_since_last_trusted_ndt =
+                local_map_pose_metrics.frames_since_last_trusted_ndt;
+            ndt_rec.local_map_time_since_last_trusted_ndt_sec =
+                local_map_pose_metrics.time_since_last_trusted_ndt_sec;
+            ndt_rec.local_map_distance_since_last_trusted_ndt_m =
+                local_map_pose_metrics.distance_since_last_trusted_ndt_m;
+            ndt_rec.local_map_yaw_since_last_trusted_ndt_rad =
+                local_map_pose_metrics.yaw_since_last_trusted_ndt_rad;
+            ndt_rec.local_map_update_eligible = local_map_decision.eligible;
+            ndt_rec.local_map_update_due = local_map_decision.due;
+            ndt_rec.local_map_update_committed =
+                local_map_committed_this_frame;
+            ndt_rec.local_map_update_mode =
+                localMapUpdateModeName(local_map_decision.mode);
+            ndt_rec.local_map_health_state =
+                localMapHealthStateName(local_map_health_state);
+            ndt_rec.local_map_version = local_map_version_;
+            ndt_rec.local_map_point_count =
+                local_map_ ? local_map_->size() : 0U;
+            ndt_rec.local_map_updates_from_measured_pose =
+                local_map_pose_metrics.local_map_updates_from_measured_pose;
+            ndt_rec.local_map_updates_from_predicted_pose =
+                local_map_pose_metrics.local_map_updates_from_predicted_pose;
+            ndt_rec.local_map_motion_escape_refresh_count =
+                local_map_motion_escape_refresh_count_.load(
+                    std::memory_order_relaxed);
+            ndt_rec.stationary_entry_confirm_count =
+                stationary_motion_decision_.stationary_entry_confirm_count;
+            ndt_rec.stationary_entry_unreliable_count =
+                stationary_motion_decision_
+                    .stationary_entry_unreliable_count;
             auto fillPose = [this](const Sophus::SE3d& pose,
                                double* x, double* y, double* z,
                                double* yaw_deg) {
@@ -9564,6 +9776,8 @@ void NdtSlamNode::updatePoseFromLoopClosure(
                 stamp.toSec(), std::memory_order_release);
         }
     }
+    resetLocalMapUpdateState(
+        current_pose_, stamp, "loop_closure_pose_update");
     releaseRuntimeYawPrior("loop_closure_pose_jump");
     relocalization_reseeded_this_episode_ = false;
     path_msg_.poses.clear();
@@ -9674,6 +9888,8 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         bootstrap_local_map_complete_ = false;
         bootstrap_local_map_frames_ = 0;
     }
+    resetLocalMapUpdateState(
+        Sophus::SE3d(), ros::Time::now(), "reset_service");
     if (!suspendPersistentStaticEvidence("reset")) {
         ROS_ERROR("[StaticMapEvidence] reset suspend incomplete; persistent "
                   "provenance remains fail-safe blocked");
@@ -10240,6 +10456,8 @@ bool NdtSlamNode::installLoadedRuntimeMap(
             // seed a new local map through the startup bootstrap bypass.
             bootstrap_local_map_complete_ = true;
             bootstrap_local_map_frames_ = 0;
+            resetLocalMapUpdateState(
+                current_pose_, ros::Time::now(), "runtime_map_install");
         }
         const std::uint64_t loaded_evidence_epoch =
             advanceStaticEvidenceEpoch();
@@ -11471,6 +11689,7 @@ void NdtSlamNode::applyRelocalizedPose(
         }
         relocalization_reseeded_this_episode_ = true;
     }
+    relocalization_pose_applied_this_frame_ = true;
     ndt_fitness_circuit_breaker_.reset();
     const Eigen::Matrix3d rotation = recovered.so3().matrix();
     filtered_yaw_rad_ = std::atan2(rotation(1, 0), rotation(0, 0));
@@ -11511,6 +11730,8 @@ void NdtSlamNode::applyRelocalizedPose(
             }
         }
     }
+    resetLocalMapUpdateState(
+        recovered, stamp, "relocalization_success");
     {
         std::lock_guard<std::mutex> lock(localization_target_mutex_);
         cached_target_valid_ = false;
@@ -12504,6 +12725,56 @@ void NdtSlamNode::resetStationaryState(const std::string& reason) {
     ROS_INFO("[MotionState] reset reason=%s", reason.c_str());
 }
 
+void NdtSlamNode::resetLocalMapUpdateState(
+    const Sophus::SE3d& pose,
+    const ros::Time& stamp,
+    const std::string& reason) {
+    std::lock_guard<std::recursive_mutex> local_map_state_lock(
+        local_map_update_state_mutex_);
+    const bool pose_finite = pose.translation().allFinite() &&
+        pose.so3().matrix().allFinite();
+    last_local_map_pose_ = pose_finite ? pose : Sophus::SE3d();
+    frames_since_last_local_map_update_ = 0;
+    local_map_update_state_initialized_ = pose_finite;
+    local_map_motion_update_expected_ = false;
+    local_map_motion_expected_started_wall_sec_ = 0.0;
+    local_map_pose_authority_tracker_.reset();
+    local_map_latest_pose_authority_.store(
+        static_cast<int>(LocalMapPoseAuthority::INVALID),
+        std::memory_order_release);
+    local_map_consecutive_prediction_only_frames_.store(
+        0U, std::memory_order_release);
+    local_map_prediction_only_duration_sec_.store(
+        0.0, std::memory_order_release);
+    local_map_frames_since_last_trusted_ndt_.store(
+        0U, std::memory_order_release);
+    local_map_time_since_last_trusted_ndt_sec_.store(
+        0.0, std::memory_order_release);
+    local_map_distance_since_last_trusted_ndt_m_.store(
+        0.0, std::memory_order_release);
+    local_map_yaw_since_last_trusted_ndt_rad_.store(
+        0.0, std::memory_order_release);
+    local_map_updates_from_measured_pose_.store(
+        0U, std::memory_order_release);
+    local_map_updates_from_predicted_pose_.store(
+        0U, std::memory_order_release);
+    local_map_latest_update_eligible_.store(
+        false, std::memory_order_release);
+    local_map_latest_update_due_.store(
+        false, std::memory_order_release);
+    local_map_latest_update_committed_.store(
+        false, std::memory_order_release);
+    local_map_latest_update_mode_.store(
+        static_cast<int>(LocalMapUpdateMode::NONE),
+        std::memory_order_release);
+    local_map_latest_health_state_.store(
+        static_cast<int>(LocalMapHealthState::QUARANTINED),
+        std::memory_order_release);
+    ROS_DEBUG(
+        "[LocalMapLifecycle] reset reason=%s stamp=%.6f pose_finite=%d",
+        reason.c_str(), stamp.toSec(), pose_finite ? 1 : 0);
+}
+
 void NdtSlamNode::handleLidarTimeRollback(
     const ros::Time& previous_stamp,
     const ros::Time& current_stamp) {
@@ -12518,6 +12789,8 @@ void NdtSlamNode::handleLidarTimeRollback(
     releaseRuntimeYawPrior("lidar_source_time_rollback");
     crane_motion_ekf_.reset();
     resetStationaryState("lidar_source_time_rollback");
+    resetLocalMapUpdateState(
+        current_pose_, current_stamp, "lidar_source_time_rollback");
     has_last_raw_ndt_pose_ = false;
     has_commit_gate_reference_ = false;
     last_processed_stamp_ = -1.0;
@@ -13552,6 +13825,8 @@ bool NdtSlamNode::restorePersistentLocalizationMap(std::string* reason) {
     local_map_last_update_sensor_sec_.store(
         ros::Time::now().toSec(), std::memory_order_release);
     bootstrap_local_map_complete_ = true;
+    resetLocalMapUpdateState(
+        current_pose_, ros::Time::now(), "persistent_map_restore");
     sealCurrentMapLayerBundleLocked(ros::Time::now());
     persistent_localization_map_valid_ = true;
     relocalization_pose_reliable_ = false;
@@ -14203,6 +14478,17 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"active_keyframes\": " << active_keyframes_ << ",\n";
     f << "  \"is_stationary\": " << (is_stationary_ ? "true" : "false") << ",\n";
     f << "  \"stationary_frame_count\": " << stationary_frame_count_ << ",\n";
+    f << "  \"stationary_entry_confirm_count\": "
+      << stationary_motion_decision_.stationary_entry_confirm_count << ",\n";
+    f << "  \"stationary_entry_unreliable_count\": "
+      << stationary_motion_decision_.stationary_entry_unreliable_count
+      << ",\n";
+    f << "  \"stationary_entry_confirm_required\": "
+      << stationary_motion_policy_config_.enter_confirm_frames << ",\n";
+    f << "  \"stationary_entry_max_consecutive_unreliable\": "
+      << stationary_motion_policy_config_
+             .enter_max_consecutive_unreliable_frames
+      << ",\n";
     f << "  \"delta_translation_m\": " << delta_translation_ << ",\n";
     f << "  \"delta_yaw_deg\": " << delta_yaw_ << ",\n";
     f << "  \"global_map_points\": " << global_pts << ",\n";
@@ -14228,10 +14514,16 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"objects_map_points\": " << objects_pts << ",\n";
     f << "  \"objects_clean_map_points\": " << objects_clean_pts << ",\n";
     f << "  \"local_map_points\": " << local_pts << ",\n";
-    f << "  \"local_map_update_allowed\": "
-      << (allow_runtime_local_map_update_ ? "true" : "false") << ",\n";
-    f << "  \"local_map_update_attempted\": "
-      << (local_map_latest_update_attempted_.load(
+    f << "  \"local_map_update_eligible\": "
+      << (local_map_latest_update_eligible_.load(
+              std::memory_order_relaxed) ? "true" : "false")
+      << ",\n";
+    f << "  \"local_map_update_due\": "
+      << (local_map_latest_update_due_.load(
+              std::memory_order_relaxed) ? "true" : "false")
+      << ",\n";
+    f << "  \"local_map_update_committed\": "
+      << (local_map_latest_update_committed_.load(
               std::memory_order_relaxed) ? "true" : "false")
       << ",\n";
     const double local_map_last_update_wall =
@@ -14250,17 +14542,67 @@ void NdtSlamNode::writeRuntimeStatus() {
               ? std::to_string(local_map_update_age)
               : std::string("null"))
       << ",\n";
-    f << "  \"local_map_update_attempted_count\": "
-      << local_map_update_attempted_count_.load(std::memory_order_relaxed)
+    f << "  \"local_map_update_eligible_count\": "
+      << local_map_update_eligible_count_.load(std::memory_order_relaxed)
       << ",\n";
-    f << "  \"local_map_update_allowed_count\": "
-      << local_map_update_allowed_count_.load(std::memory_order_relaxed)
+    f << "  \"local_map_update_due_count\": "
+      << local_map_update_due_count_.load(std::memory_order_relaxed)
       << ",\n";
     f << "  \"local_map_update_blocked_count\": "
       << local_map_update_blocked_count_.load(std::memory_order_relaxed)
       << ",\n";
     f << "  \"local_map_update_committed_count\": "
       << local_map_update_committed_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_motion_escape_refresh_count\": "
+      << local_map_motion_escape_refresh_count_.load(
+             std::memory_order_relaxed)
+      << ",\n";
+    const auto local_map_update_mode = static_cast<LocalMapUpdateMode>(
+        local_map_latest_update_mode_.load(std::memory_order_acquire));
+    const auto local_map_health_state = static_cast<LocalMapHealthState>(
+        local_map_latest_health_state_.load(std::memory_order_acquire));
+    const auto local_map_pose_authority =
+        static_cast<LocalMapPoseAuthority>(
+            local_map_latest_pose_authority_.load(
+                std::memory_order_acquire));
+    f << "  \"local_map_update_mode\": \""
+      << localMapUpdateModeName(local_map_update_mode) << "\",\n";
+    f << "  \"local_map_health_state\": \""
+      << localMapHealthStateName(local_map_health_state) << "\",\n";
+    f << "  \"local_map_pose_authority\": \""
+      << localMapPoseAuthorityName(local_map_pose_authority) << "\",\n";
+    f << "  \"local_map_consecutive_prediction_only_frames\": "
+      << local_map_consecutive_prediction_only_frames_.load(
+             std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_prediction_only_duration_sec\": "
+      << local_map_prediction_only_duration_sec_.load(
+             std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_frames_since_last_trusted_ndt\": "
+      << local_map_frames_since_last_trusted_ndt_.load(
+             std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_time_since_last_trusted_ndt_sec\": "
+      << local_map_time_since_last_trusted_ndt_sec_.load(
+             std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_distance_since_last_trusted_ndt_m\": "
+      << local_map_distance_since_last_trusted_ndt_m_.load(
+             std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_yaw_since_last_trusted_ndt_rad\": "
+      << local_map_yaw_since_last_trusted_ndt_rad_.load(
+             std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_updates_from_measured_pose\": "
+      << local_map_updates_from_measured_pose_.load(
+             std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"local_map_updates_from_predicted_pose\": "
+      << local_map_updates_from_predicted_pose_.load(
+             std::memory_order_relaxed)
       << ",\n";
     f << "  \"local_map_block_reason\": \""
       << localMapUpdateBlockReasonName(local_map_block_reason) << "\",\n";
