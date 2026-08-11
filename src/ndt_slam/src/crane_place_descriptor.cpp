@@ -47,8 +47,9 @@ void CranePlaceDescriptor::configure(
 
 std::vector<float> CranePlaceDescriptor::describe(
     const pcl::PointCloud<pcl::PointXYZ>& cloud) const {
+  constexpr float kSentinel = -std::numeric_limits<float>::max();
   std::vector<float> descriptor(
-      static_cast<std::size_t>(config_.rings * config_.sectors), 0.0F);
+      static_cast<std::size_t>(config_.rings * config_.sectors), kSentinel);
   for (const auto& point : cloud.points) {
     if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
         !std::isfinite(point.z)) {
@@ -64,6 +65,12 @@ std::vector<float> CranePlaceDescriptor::describe(
         angle / (2.0 * M_PI) * config_.sectors));
     float& bin = descriptor[ring * config_.sectors + sector];
     bin = std::max(bin, point.z);
+  }
+  // Unoccupied bins revert to 0.0 so they do not contribute to
+  // similarity. Occupied bins retain their true max-Z magnitude,
+  // which may be negative for structure below the sensor origin.
+  for (auto& value : descriptor) {
+    if (value <= kSentinel * 0.5F) value = 0.0F;
   }
   return descriptor;
 }

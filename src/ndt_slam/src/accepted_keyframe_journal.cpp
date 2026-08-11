@@ -185,7 +185,11 @@ bool AcceptedKeyframeJournal::start(std::string* reason) {
     return false;
   }
   try {
-    fs::create_directories(fs::absolute(config_.path).parent_path());
+    const auto parent = fs::absolute(config_.path).parent_path();
+    fs::create_directories(parent);
+    // Durable journal creation: the parent directory entry must be
+    // persisted before any record can claim durability.
+    fsyncFile(parent);
   } catch (const std::exception& error) {
     if (reason) *reason = error.what();
     return false;
@@ -310,6 +314,9 @@ AcceptedKeyframeJournal::loadLastVerified(
   if (result.truncated_tail && truncate_partial_tail) {
     std::error_code ignored;
     fs::resize_file(path, verified_end, ignored);
+    // The truncation itself must be durable before the repaired journal
+    // can be trusted by crash recovery.
+    if (!ignored) fsyncFile(path);
   }
   result.reason = result.valid ? "verified_recovery_reference"
                                : "no_matching_verified_record";

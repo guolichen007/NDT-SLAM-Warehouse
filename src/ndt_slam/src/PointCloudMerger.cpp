@@ -494,9 +494,7 @@ private:
                           << " single_201=" << single_201
                           << " single_203=" << single_203
                           << " pair_ratio=" << std::fixed << std::setprecision(2) << pair_ratio
-                          << " pair_dt_ms_p50=" << std::setprecision(1) << (work.pair_dt_sec < 0 ? -1.0 : work.pair_dt_sec * 1000.0)
-                          << " pair_dt_ms_p95=" << (work.pair_dt_sec < 0 ? -1.0 : work.pair_dt_sec * 1000.0)
-                          << " pair_dt_ms_max=" << (work.pair_dt_sec < 0 ? -1.0 : work.pair_dt_sec * 1000.0)
+                          << " pair_dt_ms=" << std::setprecision(1) << (work.pair_dt_sec < 0 ? -1.0 : work.pair_dt_sec * 1000.0)
                           << " output_hz=" << std::setprecision(1) << output_hz
                           << " dropped=" << dropped
                           << " reused=" << reused

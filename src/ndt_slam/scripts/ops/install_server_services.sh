@@ -54,6 +54,7 @@ install -d -m 0755 "$env_dir" "$data_root" "$workspace/logs" "$workspace/server_
 cat > "$env_file" <<EOF
 NDT_SLAM_WORKSPACE=$workspace
 NDT_SLAM_DATA_ROOT=$data_root
+NDT_SLAM_USE_SIM_TIME=false
 ROS_LOG_DIR=$workspace/logs
 EOF
 chmod 0644 "$env_file"
@@ -97,8 +98,7 @@ for unit_file in "$slam_unit" "$monitor_unit"; do
   require_unit_line "$unit_file" "EnvironmentFile=$env_file"
 done
 
-require_unit_line "$slam_unit" 'StartLimitIntervalSec=300'
-require_unit_line "$slam_unit" 'StartLimitBurst=5'
+require_unit_line "$slam_unit" 'StartLimitIntervalSec=0'
 require_unit_line "$slam_unit" 'Restart=on-failure'
 require_unit_line "$slam_unit" 'RestartSec=5'
 require_unit_text "$slam_unit" '/usr/bin/flock --no-fork --exclusive --nonblock'
@@ -164,10 +164,9 @@ require_effective_text() {
       "$property does not contain '$expected' (check drop-ins)"
 }
 
-require_effective_exact ndt-slam.service Restart always
+require_effective_exact ndt-slam.service Restart on-failure
 require_effective_exact ndt-slam.service RestartUSec 5s
-require_effective_exact ndt-slam.service StartLimitIntervalUSec 5min
-require_effective_exact ndt-slam.service StartLimitBurst 5
+require_effective_exact ndt-slam.service StartLimitIntervalUSec 0
 require_effective_exact ndt-slam.service User "$service_user"
 require_effective_exact ndt-slam.service WorkingDirectory "$workspace"
 require_effective_text ndt-slam.service EnvironmentFiles "$env_file"
@@ -178,6 +177,8 @@ require_effective_text ndt-slam.service ExecStart \
   'warehouse_live_longterm_mapping.launch'
 require_effective_text ndt-slam.service ExecStart \
   'use_ndt_recovery_watchdog:=false'
+require_effective_text ndt-slam.service ExecStart \
+  'use_sim_time:='
 
 require_effective_exact ndt-slam-monitor.service Restart always
 require_effective_exact ndt-slam-monitor.service RestartUSec 10s

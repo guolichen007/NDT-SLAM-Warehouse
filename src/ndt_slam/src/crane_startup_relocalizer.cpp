@@ -115,6 +115,38 @@ NdtStageResult runStage(
 
 }  // namespace
 
+namespace {
+
+bool evaluateRecoveryObservability(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
+    const RelocalizationConfig& ndt_config) {
+  if (!source || source->empty()) return false;
+  // Evaluate translational structure: the source must span a meaningful
+  // XY extent and contain enough occupied cells to constrain NDT
+  // registration.  A degenerate line or point cluster produces low
+  // fitness but is not structurally observable for recovery.
+  double x_min = std::numeric_limits<double>::infinity();
+  double x_max = -std::numeric_limits<double>::infinity();
+  double y_min = std::numeric_limits<double>::infinity();
+  double y_max = -std::numeric_limits<double>::infinity();
+  for (const auto& pt : source->points) {
+    if (!std::isfinite(pt.x) || !std::isfinite(pt.y)) continue;
+    x_min = std::min(x_min, static_cast<double>(pt.x));
+    x_max = std::max(x_max, static_cast<double>(pt.x));
+    y_min = std::min(y_min, static_cast<double>(pt.y));
+    y_max = std::max(y_max, static_cast<double>(pt.y));
+  }
+  const double span_x = x_max - x_min;
+  const double span_y = y_max - y_min;
+  constexpr double kMinSpanM = 1.0;
+  const int total_points = static_cast<int>(source->size());
+  return std::isfinite(span_x) && std::isfinite(span_y) &&
+         span_x >= kMinSpanM && span_y >= kMinSpanM &&
+         total_points >= ndt_config.min_source_points;
+}
+
+}  // namespace
+
 CraneRegistrationCandidate CraneNdtRegistrationBackend::coarseCandidate(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& source,
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& target,
@@ -133,8 +165,10 @@ CraneRegistrationCandidate CraneNdtRegistrationBackend::coarseCandidate(
   result.valid = true;
   result.pose = coarse.pose;
   result.fitness = coarse.fitness;
-  result.observability_valid = true;
-  result.reason = "coarse_constrained_ndt";
+  result.observability_valid =
+      evaluateRecoveryObservability(source, config.coarse_ndt);
+  result.reason = result.observability_valid
+      ? "coarse_constrained_ndt" : "coarse_unobservable";
   return result;
 }
 
@@ -154,8 +188,10 @@ CraneRegistrationCandidate CraneNdtRegistrationBackend::refineCandidate(
   result.valid = true;
   result.pose = fine.pose;
   result.fitness = fine.fitness;
-  result.observability_valid = true;
-  result.reason = "fine_constrained_ndt";
+  result.observability_valid =
+      evaluateRecoveryObservability(source, config.fine_ndt);
+  result.reason = result.observability_valid
+      ? "fine_constrained_ndt" : "fine_unobservable";
   return result;
 }
 
