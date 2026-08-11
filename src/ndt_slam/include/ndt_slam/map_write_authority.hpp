@@ -22,6 +22,10 @@ struct MapWriteAuthorityEvidence {
   bool map_commit_quality_valid = false;
   bool localization_quarantined = true;
   bool pose_finite = false;
+  // Healthy legacy runtime defaults to armed. Startup recovery callers hold
+  // both gates false from BOOT through read-only stabilization.
+  bool startup_recovery_verified = true;
+  bool map_write_rearmed = true;
   std::uint64_t source_pose_generation = 0U;
   std::uint64_t latest_pose_generation = 0U;
   double source_stamp_sec = 0.0;
@@ -41,6 +45,11 @@ struct MapWriteAuthorityEvidence {
 struct MapWriteAuthorityDecision {
   bool authorized = false;
   std::string reason = "not_evaluated";
+};
+
+struct RecoveryMapWriteCounters {
+  std::uint64_t recovery_map_write_attempt_count = 0U;
+  std::uint64_t recovery_map_write_authorized_count = 0U;
 };
 
 MapWriteAuthorityDecision evaluateMapWriteAuthority(

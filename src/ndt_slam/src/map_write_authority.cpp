@@ -23,6 +23,14 @@ MapWriteAuthorityDecision evaluateMapWriteAuthority(
     result.reason = "localization_quarantined";
     return result;
   }
+  if (!evidence.startup_recovery_verified) {
+    result.reason = "startup_recovery_not_verified";
+    return result;
+  }
+  if (!evidence.map_write_rearmed) {
+    result.reason = "map_write_not_rearmed";
+    return result;
+  }
   if (!evidence.pose_finite ||
       !std::isfinite(evidence.source_stamp_sec) ||
       evidence.source_stamp_sec <= 0.0 ||

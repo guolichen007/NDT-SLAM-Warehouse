@@ -34,6 +34,17 @@ TEST(MapWriteAuthorityTest, CurrentAcceptedPoseCanSubmit) {
   EXPECT_TRUE(evaluateMapWriteAuthority(validEvidence()).authorized);
 }
 
+TEST(MapWriteAuthorityTest, StartupRecoveryAndRearmAreSingleAuthorityGates) {
+  auto evidence = validEvidence();
+  evidence.startup_recovery_verified = false;
+  EXPECT_FALSE(evaluateMapWriteAuthority(evidence).authorized);
+  evidence.startup_recovery_verified = true;
+  evidence.map_write_rearmed = false;
+  EXPECT_FALSE(evaluateMapWriteAuthority(evidence).authorized);
+  evidence.map_write_rearmed = true;
+  EXPECT_TRUE(evaluateMapWriteAuthority(evidence).authorized);
+}
+
 TEST(MapWriteAuthorityTest, PredictionAndRejectNeverWrite) {
   auto evidence = validEvidence();
   evidence.prediction_only = true;
