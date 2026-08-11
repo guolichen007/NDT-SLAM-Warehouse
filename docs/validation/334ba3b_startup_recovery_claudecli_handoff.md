@@ -15,7 +15,8 @@
 
 Windows-side evidence already collected:
 
-- `python -m unittest discover -s tests -p "test_*.py"`: PASS before handoff.
+- `python -m unittest discover -s tests -p "test_*.py"`: 128 tests PASS
+  before handoff.
 - `python scripts/regression/check_repository_integrity.py`: PASS.
 - `git diff --check`: PASS.
 - Ubuntu build, gtest, ROS bag, systemd and fault injection: **NOT RUN**.
@@ -168,11 +169,23 @@ With matching map UUID/generation, verify local deterministic checkpoint search
 is attempted before global retrieval and succeeds without direct checkpoint-to-
 AcceptedPose promotion.
 
+Also force the local search to exceed its global threshold once. Verify the
+controller reports local failure and transitions `LOCAL_RECOVERY ->
+GLOBAL_RECOVERY`; the global job must not be silently mixed into the local
+stage.
+
 ### H. Wrong checkpoint identity
 
 Change checkpoint map UUID or generation in the isolated fixture. It must be
 discarded, local recovery must not accept it, and global place retrieval must
 recover against the verified map.
+
+For G/H, create a durable snapshot, then append one authorized journal
+keyframe outside the snapshot's spatial coverage. After restart, verify the
+identity-matched/checksum-verified record extends only the read-only recovery
+reference (`durable_plus_verified_journal`). It must not mutate the durable
+generation, `objects_clean`, or static evidence. A wrong-identity or partial
+journal tail must be ignored/truncated and must not enter the reference.
 
 ### I. Ambiguous global candidates
 

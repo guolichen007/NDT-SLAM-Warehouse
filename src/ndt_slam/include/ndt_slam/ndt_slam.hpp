@@ -312,6 +312,7 @@ private:
         double maximum_allowed_step_m, double innovation_m);
     void publishLocalizationHealth(const ros::Time& stamp);
     bool restorePersistentLocalizationMap(std::string* reason);
+    bool loadRecoveryJournalReference(std::string* reason);
     bool loadLocalizationCheckpoint(std::string* reason);
     bool writeLocalizationCheckpoint(const ros::Time& stamp);
 
@@ -927,6 +928,9 @@ private:
     // Immutable registration reference for global consistency validation.
     // Runtime mapping must never mutate or replace this evidence implicitly.
     pcl::PointCloud<pcl::PointXYZ>::Ptr persistent_registration_snapshot_;
+    // Startup-only, read-only union of the durable registration snapshot and
+    // the last identity-matched, checksum-verified journal keyframe.
+    pcl::PointCloud<pcl::PointXYZ>::Ptr recovery_reference_snapshot_;
 
     // rebuild 用的中间数据（用于 save_map 输出调试/检测 PCD）
     pcl::PointCloud<pcl::PointXYZ>::Ptr rebuild_objects_filtered_;    // 过滤后的 objects

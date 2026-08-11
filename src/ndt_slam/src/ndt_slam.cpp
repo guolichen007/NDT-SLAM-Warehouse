@@ -9720,6 +9720,7 @@ bool NdtSlamNode::resetService(std_srvs::Empty::Request& request, std_srvs::Empt
         objects_map_->clear();
         objects_clean_map_->clear();
         persistent_registration_snapshot_.reset();
+        recovery_reference_snapshot_.reset();
         advanceMapLayerGenerationLocked();
         advanceObjectsMapContentVersionLocked();
         sealCurrentMapLayerBundleLocked(ros::Time::now());
@@ -10254,6 +10255,7 @@ bool NdtSlamNode::installLoadedRuntimeMap(
             persistent_registration_snapshot_.reset(
                 new pcl::PointCloud<pcl::PointXYZ>(
                     *candidate.registration));
+            recovery_reference_snapshot_.reset();
             global_map_ = std::move(candidate.registration);
             display_map_ = std::move(candidate.display);
             ground_map_ = std::move(candidate.ground);
@@ -11377,6 +11379,14 @@ void NdtSlamNode::updateRelocalization(
 
     const bool global = relocalization_force_global_ ||
         relocalization_bad_frames_ >= relocalization_global_trigger_frames_;
+    if (global && startup_recovery_decision_.state ==
+                      StartupRecoveryState::LOCAL_RECOVERY) {
+        StartupRecoveryInput local_failed;
+        local_failed.local_recovery_finished = true;
+        local_failed.local_recovery_succeeded = false;
+        startup_recovery_decision_ =
+            startup_recovery_controller_.update(local_failed);
+    }
     RelocalizationJob job;
     job.frame_index = frame_index;
     job.map_generation =
@@ -11395,7 +11405,14 @@ void NdtSlamNode::updateRelocalization(
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
         pcl::PointCloud<pcl::PointXYZ>::Ptr selected_map;
-        if (global && objects_clean_map_ &&
+        const bool use_recovery_reference =
+            !startup_recovery_verified_.load(std::memory_order_acquire) &&
+            recovery_reference_snapshot_ &&
+            !recovery_reference_snapshot_->empty();
+        if (use_recovery_reference) {
+            selected_map = recovery_reference_snapshot_;
+            job.map_source = "durable_plus_verified_journal";
+        } else if (global && objects_clean_map_ &&
             static_cast<int>(objects_clean_map_->size()) >=
                 relocalization_cfg_.min_target_points) {
             selected_map = objects_clean_map_;
@@ -11416,9 +11433,14 @@ void NdtSlamNode::updateRelocalization(
         job.map.reset(new pcl::PointCloud<pcl::PointXYZ>(*selected_map));
     }
 
+    const Sophus::SE3d& local_seed_pose =
+        !global && localization_checkpoint_valid_ &&
+                !startup_recovery_verified_.load(std::memory_order_acquire)
+            ? localization_checkpoint_pose_
+            : current_pose_;
     job.seeds = global
         ? buildGlobalRelocalizationSeeds(job.source)
-        : buildLocalRelocalizationSeeds(current_pose_);
+        : buildLocalRelocalizationSeeds(local_seed_pose);
 
     // CranePlaceDescriptor hints are evaluated first. A globally distributed coarse
     // grid then fills the remaining budget, so a missing or misleading hint
@@ -13422,6 +13444,71 @@ bool NdtSlamNode::writeLocalizationCheckpoint(const ros::Time& stamp) {
     return false;
 }
 
+bool NdtSlamNode::loadRecoveryJournalReference(std::string* reason) {
+    const auto loaded = AcceptedKeyframeJournal::loadLastVerified(
+        persistent_map_root_dir_ + "/accepted_keyframes.journal",
+        localization_map_uuid_, localization_map_generation_, true);
+    if (!loaded.valid || !loaded.record.registration_cloud ||
+        loaded.record.registration_cloud->empty()) {
+        if (reason) *reason = loaded.reason;
+        return false;
+    }
+
+    const Sophus::SE3d journal_pose(
+        Eigen::AngleAxisd(loaded.record.yaw, Eigen::Vector3d::UnitZ())
+            .toRotationMatrix(),
+        Eigen::Vector3d(loaded.record.x, loaded.record.y, loaded.record.z));
+    if (!journal_pose.matrix().allFinite()) {
+        if (reason) *reason = "journal_pose_nonfinite";
+        return false;
+    }
+    pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::transformPointCloud(*loaded.record.registration_cloud, *transformed,
+                             journal_pose.matrix().cast<float>());
+    if (transformed->empty()) {
+        if (reason) *reason = "journal_reference_empty";
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr base_reference =
+            persistent_registration_snapshot_
+                ? persistent_registration_snapshot_
+                : global_map_;
+        if (!base_reference || base_reference->empty()) {
+            if (reason) *reason = "journal_base_reference_empty";
+            return false;
+        }
+        recovery_reference_snapshot_.reset(
+            new pcl::PointCloud<pcl::PointXYZ>(*base_reference));
+        *recovery_reference_snapshot_ += *transformed;
+        // local_map_ is only a registration target here. The durable/static
+        // layers stay untouched until normal MapWriteAuthority is rearmed.
+        local_map_ = recovery_reference_snapshot_;
+        ++local_map_version_;
+    }
+    if (crane_place_descriptor_.size() == 0U) {
+        for (const auto& keyframe :
+             loop_closure_detector_.getKeyFramesSnapshot()) {
+            if (keyframe.cloud_) {
+                crane_place_descriptor_.addPlace(
+                    keyframe.id_, keyframe.pose_, *keyframe.cloud_);
+            }
+        }
+    }
+    crane_place_descriptor_.addPlace(
+        loaded.record.sequence, journal_pose,
+        *loaded.record.registration_cloud);
+    if (reason) {
+        *reason = loaded.reason + ":records=" +
+            std::to_string(loaded.verified_records) + ":points=" +
+            std::to_string(transformed->size());
+    }
+    return true;
+}
+
 bool NdtSlamNode::restorePersistentLocalizationMap(std::string* reason) {
     std::string active_root_reason;
     if (!selectActivePersistentRoot(&persistent_map_root_dir_,
@@ -13436,6 +13523,7 @@ bool NdtSlamNode::restorePersistentLocalizationMap(std::string* reason) {
     persistent_localization_map_present_ = false;
     persistent_localization_map_valid_ = false;
     persistent_registration_snapshot_.reset();
+    recovery_reference_snapshot_.reset();
     invalidateAcceptedLocalizationContinuity();
     global_consistency_state_ = {};
 
@@ -13463,11 +13551,14 @@ bool NdtSlamNode::restorePersistentLocalizationMap(std::string* reason) {
             if (reason) *reason = "durable_install_failed:" + response.message;
             return false;
         }
+        std::string journal_reference_reason;
+        loadRecoveryJournalReference(&journal_reference_reason);
         std::string checkpoint_reason;
         loadLocalizationCheckpoint(&checkpoint_reason);
         if (reason) {
             *reason = "durable_" + durable.pointer + ":" +
-                durable.generation + ":" + checkpoint_reason;
+                durable.generation + ":" + journal_reference_reason + ":" +
+                checkpoint_reason;
         }
         return true;
     }
@@ -13735,6 +13826,8 @@ bool NdtSlamNode::restorePersistentLocalizationMap(std::string* reason) {
     local_map_ = registration;
     ++local_map_version_;
     bootstrap_local_map_complete_ = true;
+    std::string journal_reference_reason;
+    loadRecoveryJournalReference(&journal_reference_reason);
     sealCurrentMapLayerBundleLocked(ros::Time::now());
     persistent_localization_map_valid_ = true;
     relocalization_pose_reliable_ = false;
@@ -13745,13 +13838,22 @@ bool NdtSlamNode::restorePersistentLocalizationMap(std::string* reason) {
         StartupLocalizationState::STARTUP_QUARANTINE;
     startup_quarantine_started_sec_ = ros::Time::now().toSec();
     localization_health_policy_.reset("startup_quarantine");
-    localization_health_reason_ = "persistent_map_requires_global_search";
     std::string checkpoint_reason;
     loadLocalizationCheckpoint(&checkpoint_reason);
+    if (localization_checkpoint_valid_) {
+        relocalization_force_global_ = false;
+        relocalization_bad_frames_ = relocalization_trigger_frames_;
+        localization_health_reason_ =
+            "persistent_map_requires_checkpoint_local_search";
+    } else {
+        localization_health_reason_ =
+            "persistent_map_requires_global_search";
+    }
     if (reason) {
         *reason = "persistent_map_restored:registration=" +
             std::to_string(registration->size()) + ":objects_clean=" +
             std::to_string(objects_clean->size()) + ":" +
+            journal_reference_reason + ":" +
             checkpoint_reason;
     }
     return true;

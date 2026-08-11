@@ -80,13 +80,29 @@ class StartupRecoveryV1ContractTest(unittest.TestCase):
         self.assertIn('"ACTIVE_ROOT"', node)
         self.assertIn('"isolated/" + localization_map_uuid_', node)
 
+    def test_checkpoint_recovery_is_local_before_global_fallback(self):
+        node = read(PKG / "src" / "ndt_slam.cpp")
+        self.assertIn(
+            '"persistent_map_requires_checkpoint_local_search"', node
+        )
+        self.assertIn("local_seed_pose", node)
+        self.assertIn("localization_checkpoint_pose_", node)
+        self.assertIn("local_failed.local_recovery_succeeded = false", node)
+
+    def test_verified_journal_extends_readonly_recovery_reference(self):
+        node = read(PKG / "src" / "ndt_slam.cpp")
+        header = read(PKG / "include" / "ndt_slam" / "ndt_slam.hpp")
+        self.assertIn("loadRecoveryJournalReference", node)
+        self.assertIn("AcceptedKeyframeJournal::loadLastVerified", node)
+        self.assertIn('"durable_plus_verified_journal"', node)
+        self.assertIn("recovery_reference_snapshot_", header)
+
     def test_service_restarts_crashes_only_and_watchdog_is_off(self):
         service = read(PKG / "scripts" / "ops" / "ndt-slam.service.in")
         self.assertIn("Restart=on-failure", service)
         self.assertIn("RestartSec=5", service)
         self.assertIn("use_ndt_recovery_watchdog:=false", service)
         self.assertNotIn("Restart=always", service)
-
 
 if __name__ == "__main__":
     unittest.main()
