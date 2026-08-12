@@ -672,5 +672,38 @@ TEST(CargoObstacleTracker,
   }
 }
 
+TEST(PhysicalObstacleTrackStore,
+     PendingToFormalChangesAuthorityWithoutDuplicatingHistory) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  config.far_history_confirm_frames = 3;
+  config.far_history_confirm_duration_sec = 0.2;
+  PhysicalObstacleTrackStore store(config);
+  CargoObstacleAuthorityPolicy pending_policy;
+  pending_policy.require_static_cargo_for_warning = false;
+  pending_policy.require_large_geometry_for_warning = true;
+  CargoObstacleAuthorityPolicy formal_policy;
+  formal_policy.require_static_cargo_for_warning = false;
+  formal_policy.require_large_geometry_for_warning = false;
+
+  CargoObstacleObservation far = directionalPretrack(10U, 0.0F, 0.0F);
+  store.update(1.0, {far}, pending_policy);
+  far.source_index = 11U;
+  store.update(1.1, {far}, pending_policy);
+  far.source_index = 12U;
+  const auto acquired = store.update(1.2, {far}, pending_policy);
+  ASSERT_TRUE(acquired.selected_far_field_history_valid);
+  ASSERT_EQ(store.tracks().size(), 1U);
+  const std::uint64_t physical_id = acquired.selected_track_id;
+  const int far_count = acquired.selected_far_field_observations;
+
+  CargoObstacleObservation near = hazard(13U, 0.02F, 0.0F, 18U);
+  const auto formal = store.update(1.3, {near}, formal_policy);
+  EXPECT_TRUE(formal.confirmed_hazard) << formal.reason;
+  EXPECT_EQ(formal.selected_track_id, physical_id);
+  EXPECT_EQ(formal.selected_far_field_observations, far_count);
+  EXPECT_EQ(store.tracks().size(), 1U);
+}
+
 }  // namespace
 }  // namespace ndt_slam

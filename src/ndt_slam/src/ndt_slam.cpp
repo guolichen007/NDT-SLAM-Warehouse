@@ -3693,24 +3693,11 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 cargo_collision_tracking_acquisition_distance_m_;
         }
         const CargoConfigValidationResult tracker_validation =
-            cargo_obstacle_tracker_.setConfig(obstacle_tracker_config);
+            physical_obstacle_track_store_.setConfig(
+                obstacle_tracker_config);
         if (!tracker_validation.valid) {
             reject_cargo_config(
                 "cargo_safety.tracker.", tracker_validation.summary());
-        }
-        CargoObstacleTrackerConfig pending_obstacle_tracker_config =
-            obstacle_tracker_config;
-        pending_obstacle_tracker_config.require_static_cargo_for_warning =
-            false;
-        pending_obstacle_tracker_config.require_large_geometry_for_warning =
-            true;
-        const CargoConfigValidationResult pending_tracker_validation =
-            pending_cargo_obstacle_tracker_.setConfig(
-                pending_obstacle_tracker_config);
-        if (!pending_tracker_validation.valid) {
-            reject_cargo_config(
-                "cargo_safety.pending_tracker.",
-                pending_tracker_validation.summary());
         }
         PendingStaticHazardTrackerConfig pending_static_tracker_config;
         pending_static_tracker_config.minimum_confirmations =
@@ -4082,8 +4069,7 @@ void NdtSlamNode::resetCargoForHookState(
     last_cargo_safety_result_ = CargoSafetyResult{};
     confirmed_cargo_safety_result_ = CargoSafetyResult{};
     cargo_safety_temporal_filter_.reset();
-    cargo_obstacle_tracker_.reset();
-    pending_cargo_obstacle_tracker_.reset();
+    physical_obstacle_track_store_.reset();
     pending_static_hazard_tracker_.reset();
     pending_obstacle_context_lifecycle_id_ = 0U;
     pending_obstacle_context_track_segment_id_ = 0U;
@@ -11800,8 +11786,7 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
         last_cargo_safety_result_ = CargoSafetyResult{};
         confirmed_cargo_safety_result_ = CargoSafetyResult{};
         cargo_safety_temporal_filter_.reset();
-        cargo_obstacle_tracker_.reset();
-        pending_cargo_obstacle_tracker_.reset();
+        physical_obstacle_track_store_.reset();
         pending_static_hazard_tracker_.reset();
         pending_obstacle_context_lifecycle_id_ = 0U;
         pending_obstacle_context_track_segment_id_ = 0U;
@@ -19528,7 +19513,7 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         trusted_cargo_pose_stamp_ = ros::Time();
         trusted_cargo_pose_lifecycle_id_ = 0U;
         trusted_cargo_pose_track_segment_id_ = 0U;
-        pending_cargo_obstacle_tracker_.reset();
+        physical_obstacle_track_store_.reset();
         pending_static_hazard_tracker_.reset();
         pending_obstacle_context_lifecycle_id_ = 0U;
         pending_obstacle_context_track_segment_id_ = 0U;
@@ -21304,12 +21289,18 @@ void NdtSlamNode::runPendingCargoAvoidance(
         track_segment_pose_discontinuity ||
         actual_geometry_discontinuity;
     if (pending_obstacle_context_changed) {
-        pending_cargo_obstacle_tracker_.reset();
         pending_static_hazard_tracker_.reset();
-        // Only a lifecycle/identity break invalidates physical obstacle
-        // history. Pose, shape and envelope source changes are diagnostic
-        // transitions and must not churn a stable map-cell track.
-        cargo_obstacle_tracker_.reset();
+    }
+    // Only a lifecycle/identity break invalidates physical obstacle history.
+    // Pose, shape and phase changes are projections of the same physical
+    // store and cannot churn its IDs or erase far-history.
+    const bool pending_physical_identity_changed =
+        pending_obstacle_context_lifecycle_id_ != cargo_lifecycle_id_ ||
+        pending_identity_discontinuous;
+    if (pending_physical_identity_changed) {
+        physical_obstacle_track_store_.reset();
+    }
+    if (pending_obstacle_context_changed) {
         pending_obstacle_context_lifecycle_id_ =
             pending_identity_discontinuous ? 0U : cargo_lifecycle_id_;
     }
@@ -21747,14 +21738,11 @@ void NdtSlamNode::runPendingCargoAvoidance(
     }
     CargoObstacleTrackerDecision pending_obstacle_decision;
     if (pending_tracking_query_allowed) {
-        pending_obstacle_decision = pending_cargo_obstacle_tracker_.update(
-            stamp.toSec(), pending_observations);
-        // Preserve independently validated obstacle history across the
-        // Pending -> LOCKED cargo transition. This tracker has the stricter
-        // formal static-provenance policy; its decision is deliberately not
-        // published while cargo geometry remains pending.
-        cargo_obstacle_tracker_.update(
-            stamp.toSec(), pending_observations);
+        CargoObstacleAuthorityPolicy pending_policy;
+        pending_policy.require_static_cargo_for_warning = false;
+        pending_policy.require_large_geometry_for_warning = true;
+        pending_obstacle_decision = physical_obstacle_track_store_.update(
+            stamp.toSec(), pending_observations, pending_policy);
     } else {
         pending_obstacle_decision.reason =
             warning_state_reason;
@@ -22038,7 +22026,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
     const bool pending_live_review_evidence_ready =
         selected_pending_evidence != nullptr &&
         pending_obstacle_decision.selected_confirm_count >=
-            pending_cargo_obstacle_tracker_.config().confirm_frames;
+            physical_obstacle_track_store_.config().confirm_frames;
     const bool pending_live_immediate_review =
         pending_live_review_evidence_ready &&
         selected_pending_evidence->footprint_distance_m <=
@@ -23204,7 +23192,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             pending_cargo_self_evidence_ = PendingCargoSelfEvidence{};
             pending_cargo_shape_continuity_ =
                 PendingCargoShapeContinuity{};
-            pending_cargo_obstacle_tracker_.reset();
+            physical_obstacle_track_store_.reset();
             pending_static_hazard_tracker_.reset();
             pending_obstacle_context_lifecycle_id_ = 0U;
             pending_obstacle_context_track_segment_id_ = 0U;
@@ -24317,13 +24305,13 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             const CargoObstacleTrack* prior_track = nullptr;
             float prior_distance = std::numeric_limits<float>::infinity();
             for (const CargoObstacleTrack& track :
-                 cargo_obstacle_tracker_.tracks()) {
+                 physical_obstacle_track_store_.tracks()) {
                 if (!track.confirmed) continue;
                 const float distance =
                     (track.centroid_map -
                      centroid_map_3d.cast<float>()).norm();
                 if (distance < prior_distance &&
-                    distance <= cargo_obstacle_tracker_.config()
+                    distance <= physical_obstacle_track_store_.config()
                         .association_max_centroid_distance_m) {
                     prior_distance = distance;
                     prior_track = &track;
@@ -24791,7 +24779,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         }
     }
     const CargoObstacleTrackerDecision obstacle_track_decision =
-        cargo_obstacle_tracker_.update(
+        physical_obstacle_track_store_.update(
             stamp.toSec(), obstacle_track_observations);
     cargo_obstacle_track_id_ = obstacle_track_decision.selected_track_id;
     cargo_obstacle_track_age_sec_ =
@@ -24940,19 +24928,19 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                << (selected_observation
                        ? selected_observation->occupied_cells : 0U)
                << " required_point_count="
-               << cargo_obstacle_tracker_.config().
+               << physical_obstacle_track_store_.config().
                       static_cargo_min_voxel_points
                << " required_xy_area_m2="
-               << cargo_obstacle_tracker_.config().
+               << physical_obstacle_track_store_.config().
                       static_cargo_min_xy_area_m2
                << " required_long_side_m="
-               << cargo_obstacle_tracker_.config().
+               << physical_obstacle_track_store_.config().
                       static_cargo_min_long_side_m
                << " required_height_span_m="
-               << cargo_obstacle_tracker_.config().
+               << physical_obstacle_track_store_.config().
                       static_cargo_min_height_span_m
                << " required_occupied_cells="
-               << cargo_obstacle_tracker_.config().
+               << physical_obstacle_track_store_.config().
                       static_cargo_min_occupied_cells
                << " obstacle_track_id="
                << obstacle_track_decision.selected_track_id
@@ -25371,7 +25359,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const bool formal_live_review_evidence_ready =
         selected_source_evidence != nullptr &&
         obstacle_track_decision.selected_confirm_count >=
-            cargo_obstacle_tracker_.config().confirm_frames;
+            physical_obstacle_track_store_.config().confirm_frames;
     const bool formal_live_immediate_review =
         formal_live_review_evidence_ready &&
         selected_source_evidence->footprint_distance_m <=
@@ -28991,15 +28979,20 @@ void NdtSlamNode::logCargoHealthPeriodic() {
     rec.obstacle_height_span_m = cargo_diagnostic_observation_valid_
         ? cargo_diagnostic_observation_.height_span_m : 0.0;
     rec.obstacle_required_point_count =
-        cargo_obstacle_tracker_.config().static_cargo_min_voxel_points;
+        physical_obstacle_track_store_.config()
+            .static_cargo_min_voxel_points;
     rec.obstacle_required_xy_area_m2 =
-        cargo_obstacle_tracker_.config().static_cargo_min_xy_area_m2;
+        physical_obstacle_track_store_.config()
+            .static_cargo_min_xy_area_m2;
     rec.obstacle_required_long_side_m =
-        cargo_obstacle_tracker_.config().static_cargo_min_long_side_m;
+        physical_obstacle_track_store_.config()
+            .static_cargo_min_long_side_m;
     rec.obstacle_required_height_span_m =
-        cargo_obstacle_tracker_.config().static_cargo_min_height_span_m;
+        physical_obstacle_track_store_.config()
+            .static_cargo_min_height_span_m;
     rec.obstacle_required_occupied_cells =
-        cargo_obstacle_tracker_.config().static_cargo_min_occupied_cells;
+        physical_obstacle_track_store_.config()
+            .static_cargo_min_occupied_cells;
     rec.obstacle_track_created_count = cargo_obstacle_track_created_count_;
     rec.obstacle_track_reset_count = cargo_obstacle_track_reset_count_;
     rec.static_clean_build_started = static_clean_build_started_.load();

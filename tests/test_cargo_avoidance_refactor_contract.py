@@ -46,8 +46,8 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         body = node[start:end]
         self.assertIn("pending_tracking_query_allowed", body)
         self.assertIn("cargo_pending_external_shell_pub_", body)
-        self.assertIn("pending_cargo_obstacle_tracker_.update", body)
-        self.assertIn("cargo_obstacle_tracker_.update", body)
+        self.assertIn("physical_obstacle_track_store_.update", body)
+        self.assertNotIn("pending_cargo_obstacle_tracker_", node)
 
     def test_physical_perception_is_separate_from_vertical_authority(self):
         evaluator = read(
@@ -148,6 +148,22 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         self.assertIn(
             "FormalPendingTransportLabelsCannotChangeCanonicalPerception",
             evaluator_test,
+        )
+
+    def test_physical_history_has_one_stateful_owner(self):
+        header = read("src/ndt_slam/include/ndt_slam/ndt_slam.hpp")
+        tracker = read(
+            "src/ndt_slam/include/ndt_slam/cargo_obstacle_tracker.hpp"
+        )
+        tracker_test = read(
+            "src/ndt_slam/test/cargo_obstacle_tracker_test.cpp"
+        )
+        self.assertEqual(header.count("PhysicalObstacleTrackStore "), 1)
+        self.assertNotIn("pending_cargo_obstacle_tracker_", header)
+        self.assertIn("CargoObstacleAuthorityPolicy", tracker)
+        self.assertIn(
+            "PendingToFormalChangesAuthorityWithoutDuplicatingHistory",
+            tracker_test,
         )
 
 

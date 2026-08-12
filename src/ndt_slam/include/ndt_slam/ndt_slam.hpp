@@ -2386,12 +2386,11 @@ private:
     ros::Time cargo_swing_hook_anchor_received_stamp_;
     lidar_slam2_msgs::HoistMotionState cargo_hoist_state_message_;
     ros::Time cargo_hoist_state_received_stamp_;
-    CargoObstacleTracker cargo_obstacle_tracker_;
+    PhysicalObstacleTrackStore physical_obstacle_track_store_;
     AnomalyReviewEpisodeTracker anomaly_review_episode_tracker_;
     // Pending cargo uses an independent track namespace. Its only purpose is
     // to prove that an already-separated live cluster has a stable external
     // identity before a provisional 17/18 can become official.
-    CargoObstacleTracker pending_cargo_obstacle_tracker_;
     // Low-clearance observations are tracked outside the 5 m warning shell:
     // directionally with authoritative motion, otherwise radially. They can
     // mature identity/provenance but cannot alter the 5 m/3 m thresholds.

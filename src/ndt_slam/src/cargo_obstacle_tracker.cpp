@@ -362,6 +362,18 @@ void CargoObstacleTracker::reset() {
 CargoObstacleTrackerDecision CargoObstacleTracker::update(
     double stamp_sec,
     const std::vector<CargoObstacleObservation>& observations) {
+  CargoObstacleAuthorityPolicy authority_policy;
+  authority_policy.require_static_cargo_for_warning =
+      config_.require_static_cargo_for_warning;
+  authority_policy.require_large_geometry_for_warning =
+      config_.require_large_geometry_for_warning;
+  return update(stamp_sec, observations, authority_policy);
+}
+
+CargoObstacleTrackerDecision CargoObstacleTracker::update(
+    double stamp_sec,
+    const std::vector<CargoObstacleObservation>& observations,
+    const CargoObstacleAuthorityPolicy& authority_policy) {
   CargoObstacleTrackerDecision decision;
   decision.created_track_count = created_track_count_;
   decision.association_reset_count = association_reset_count_;
@@ -845,14 +857,15 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         (!config_.require_far_field_history_for_warnings ||
          track.far_field_history_valid ||
          track.certified_static_provenance) &&
-        (!config_.require_large_geometry_for_warning ||
+        (!authority_policy.require_large_geometry_for_warning ||
          track.geometry_validated_consecutive_observations >=
              config_.confirm_frames) &&
         track.current_source_validated &&
         (!track.current_embedded ||
          track.separated_obstacle_history_valid ||
          track.provenance_valid) &&
-        (!config_.require_static_cargo_for_warning || track.static_obstacle);
+        (!authority_policy.require_static_cargo_for_warning ||
+         track.static_obstacle);
     if (warning_authorized &&
         (selected == nullptr || moreDangerous(track, *selected))) {
       selected = &track;
@@ -933,9 +946,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
                !diagnostic->far_field_history_valid &&
                !diagnostic->certified_static_provenance) {
       decision.reason = "warning_track_missing_true_far_history";
-    } else if (!config_.require_static_cargo_for_warning) {
+    } else if (!authority_policy.require_static_cargo_for_warning) {
       decision.reason = "persistent_obstacle_track_pending";
-    } else if (config_.require_large_geometry_for_warning &&
+    } else if (authority_policy.require_large_geometry_for_warning &&
                (!diagnostic->large_cluster_geometry_valid ||
                 diagnostic->geometry_validated_consecutive_observations <
                     config_.confirm_frames)) {

@@ -202,6 +202,13 @@ struct CargoObstacleTrackerDecision {
   std::string reason = "not_evaluated";
 };
 
+// Physical identity/history is stateful and unique. Formal/Pending only
+// supply an immutable policy for the current decision projection.
+struct CargoObstacleAuthorityPolicy {
+  bool require_static_cargo_for_warning = true;
+  bool require_large_geometry_for_warning = false;
+};
+
 // Associates warning clusters and directional/radial 5-7 m acquisition
 // clusters in map coordinates. Confirmation is owned by each physical track,
 // so a different per-frame "most dangerous" winner cannot advance or reset
@@ -223,6 +230,10 @@ class CargoObstacleTracker {
   CargoObstacleTrackerDecision update(
       double stamp_sec,
       const std::vector<CargoObstacleObservation>& observations);
+  CargoObstacleTrackerDecision update(
+      double stamp_sec,
+      const std::vector<CargoObstacleObservation>& observations,
+      const CargoObstacleAuthorityPolicy& authority_policy);
   const std::vector<CargoObstacleTrack>& tracks() const noexcept {
     return tracks_;
   }
@@ -239,6 +250,8 @@ class CargoObstacleTracker {
   std::uint64_t association_reset_count_ = 0U;
   std::uint64_t ambiguous_association_count_ = 0U;
 };
+
+using PhysicalObstacleTrackStore = CargoObstacleTracker;
 
 CargoConfigValidationResult validateCargoObstacleTrackerConfig(
     const CargoObstacleTrackerConfig& config);
