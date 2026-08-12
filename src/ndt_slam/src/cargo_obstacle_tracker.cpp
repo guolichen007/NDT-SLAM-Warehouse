@@ -182,7 +182,11 @@ bool validObservation(const CargoObstacleObservation& observation,
                 config.level1_warning_distance_m &&
             observation.footprint_distance_m <=
                 config.level2_warning_distance_m;
-  const bool decision_code_valid = observation.warning_eligible
+  const bool decision_code_valid = !observation.hazard_geometry_valid
+      ? !observation.warning_eligible && observation.warning_code == kClear &&
+            observation.footprint_distance_m <=
+                config.acquisition_distance_m
+      : observation.warning_eligible
       ? warningCode(observation.warning_code) && warning_distance_valid
       : observation.warning_code == kClear &&
             observation.footprint_distance_m >
@@ -199,7 +203,8 @@ bool validObservation(const CargoObstacleObservation& observation,
       (!observation.warning_eligible || !observation.entirely_above_cargo) &&
       std::isfinite(observation.footprint_distance_m) &&
       observation.footprint_distance_m >= 0.0F &&
-      std::isfinite(observation.conservative_clearance_m) &&
+      (!observation.hazard_geometry_valid ||
+       std::isfinite(observation.conservative_clearance_m)) &&
       std::isfinite(observation.horizontal_uncertainty_m) &&
       observation.horizontal_uncertainty_m >= 0.0F &&
       observation.point_count >= config.minimum_points &&
@@ -236,8 +241,16 @@ bool moreDangerous(const CargoObstacleTrack& candidate,
   if (candidate_priority != current_priority) {
     return candidate_priority > current_priority;
   }
-  if (candidate.conservative_clearance_m !=
-      current.conservative_clearance_m) {
+  const bool candidate_clearance_valid =
+      std::isfinite(candidate.conservative_clearance_m);
+  const bool current_clearance_valid =
+      std::isfinite(current.conservative_clearance_m);
+  if (candidate_clearance_valid != current_clearance_valid) {
+    return candidate_clearance_valid;
+  }
+  if (candidate_clearance_valid &&
+      candidate.conservative_clearance_m !=
+          current.conservative_clearance_m) {
     return candidate.conservative_clearance_m <
         current.conservative_clearance_m;
   }
@@ -250,15 +263,23 @@ bool moreDangerous(const CargoObstacleTrack& candidate,
 bool canonicalObservationLess(
     const CargoObstacleObservation& left,
     const CargoObstacleObservation& right) {
+  const float left_clearance =
+      std::isfinite(left.conservative_clearance_m)
+          ? left.conservative_clearance_m
+          : std::numeric_limits<float>::infinity();
+  const float right_clearance =
+      std::isfinite(right.conservative_clearance_m)
+          ? right.conservative_clearance_m
+          : std::numeric_limits<float>::infinity();
   const auto left_key = std::make_tuple(
       left.centroid_map.x(), left.centroid_map.y(), left.centroid_map.z(),
       left.top_z95_map, left.bottom_z05_map, left.footprint_distance_m,
-      left.conservative_clearance_m, left.source_index,
+      left_clearance, left.hazard_geometry_valid, left.source_index,
       left.occupied_map_cells);
   const auto right_key = std::make_tuple(
       right.centroid_map.x(), right.centroid_map.y(), right.centroid_map.z(),
       right.top_z95_map, right.bottom_z05_map, right.footprint_distance_m,
-      right.conservative_clearance_m, right.source_index,
+      right_clearance, right.hazard_geometry_valid, right.source_index,
       right.occupied_map_cells);
   return left_key < right_key;
 }
@@ -484,6 +505,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.footprint_distance_m = observation.footprint_distance_m;
       track.conservative_clearance_m =
           observation.conservative_clearance_m;
+      track.current_hazard_geometry_valid =
+          observation.hazard_geometry_valid;
       track.point_count = observation.point_count;
       track.warning_code = observation.warning_code;
       track.total_consecutive_observations = 1;
@@ -550,6 +573,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.current_source_index = observation.source_index;
       track.current_source_validated = observation.source_validated;
       track.current_warning_eligible =
+          observation.hazard_geometry_valid &&
           observation.warning_eligible &&
           warningCode(observation.warning_code);
       tracks_.push_back(track);
@@ -585,6 +609,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.entirely_above_cargo = observation.entirely_above_cargo;
     track.footprint_distance_m = observation.footprint_distance_m;
     track.conservative_clearance_m = observation.conservative_clearance_m;
+    track.current_hazard_geometry_valid =
+        observation.hazard_geometry_valid;
     track.point_count = observation.point_count;
     track.warning_code = observation.warning_code;
     track.large_cluster_geometry_valid =
@@ -724,6 +750,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.current_source_index = observation.source_index;
     track.current_source_validated = observation.source_validated;
     track.current_warning_eligible =
+        observation.hazard_geometry_valid &&
         observation.warning_eligible &&
         warningCode(observation.warning_code);
   }

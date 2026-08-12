@@ -78,6 +78,10 @@ struct CargoObstacleObservation {
   float footprint_distance_m = std::numeric_limits<float>::infinity();
   float conservative_clearance_m =
       std::numeric_limits<float>::quiet_NaN();
+  // False means that physical XY/Z cluster facts are usable for identity and
+  // far-field acquisition, but Cargo bottom authority is unavailable. Such
+  // an observation can never advance warning, clearance or CLEAR authority.
+  bool hazard_geometry_valid = true;
   // Combined cargo, obstacle and localization XY uncertainty. A far sample
   // is authoritative only when footprint_distance - uncertainty remains >5m.
   float horizontal_uncertainty_m = 0.0F;
@@ -113,6 +117,7 @@ struct CargoObstacleTrack {
   float footprint_distance_m = std::numeric_limits<float>::infinity();
   float conservative_clearance_m =
       std::numeric_limits<float>::quiet_NaN();
+  bool current_hazard_geometry_valid = false;
   std::size_t point_count = 0U;
   std::uint16_t warning_code = 0U;
   int total_consecutive_observations = 0;

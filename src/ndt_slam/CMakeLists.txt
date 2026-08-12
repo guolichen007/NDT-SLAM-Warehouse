@@ -143,6 +143,7 @@ set(LIBRARY_SOURCES
   src/cargo_component_fusion.cpp
   src/cargo_rigid_geometry.cpp
   src/cargo_marker_lifecycle.cpp
+  src/obstacle_perception.cpp
   src/cargo_safety_evaluator.cpp
   src/cargo_safety_temporal_filter.cpp
   src/cargo_obstacle_tracker.cpp

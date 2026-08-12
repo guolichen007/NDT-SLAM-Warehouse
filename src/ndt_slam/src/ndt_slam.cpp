@@ -21209,8 +21209,11 @@ void NdtSlamNode::runPendingCargoAvoidance(
         envelope.cargo_lifecycle_id == cargo_lifecycle_id_ &&
         pending_track_context_id != 0U &&
         pending_pose_physically_plausible;
+    // Physical perception/tracking is an identity + horizontal-envelope
+    // capability. Warning authority is deliberately evaluated below and must
+    // not suppress observation of the same external object.
     const bool pending_tracking_query_allowed =
-        recognition_allows_warning && pending_tracking_context_valid;
+        pending_tracking_context_valid;
     const bool pending_warning_query_allowed =
         recognition_allows_warning &&
         pending_pose_physically_plausible &&
@@ -21332,12 +21335,6 @@ void NdtSlamNode::runPendingCargoAvoidance(
                 classifyPendingCargoPoint(
                     xyz, envelope, pending_cargo_self_evidence_,
                     acquisition_shell_m);
-            const bool inside_warning_shell =
-                classification.envelope_distance_m <= shell_m;
-            if (!pending_warning_query_allowed &&
-                inside_warning_shell) {
-                continue;
-            }
             switch (classification.classification) {
                 case PendingPointClass::IDENTITY_SELF:
                     pending_self_removed->push_back(point);
@@ -21380,7 +21377,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
                    (stamp - obstacle_cloud_stamp).toSec());
     live_input.obstacle_cloud_age_sec = cloud_age_sec;
     live_input.obstacle_observation_valid =
-        pending_warning_query_allowed && obstacle_cloud_base &&
+        pending_tracking_query_allowed && obstacle_cloud_base &&
         std::isfinite(cloud_age_sec) && cloud_age_sec >= 0.0 &&
         cloud_age_sec <=
             cargo_safety_evaluator_.config().maximum_obstacle_cloud_age_sec;
@@ -21391,8 +21388,10 @@ void NdtSlamNode::runPendingCargoAvoidance(
                 1U, cargo_safety_evaluator_.config()
                         .minimum_roi_finite_points)),
         0.0F, 1.0F);
+    const ObstaclePerceptionResult live_perception =
+        cargo_safety_evaluator_.perceive(live_input);
     const CargoSafetyResult live_result =
-        cargo_safety_evaluator_.evaluate(live_input);
+        cargo_safety_evaluator_.evaluate(live_input, live_perception);
     fusion_input.live.available = live_input.obstacle_observation_valid;
     fusion_input.live.reliable = live_result.input_valid &&
         live_result.warning_valid &&
@@ -21430,8 +21429,11 @@ void NdtSlamNode::runPendingCargoAvoidance(
                 1U, cargo_safety_evaluator_.config()
                         .minimum_roi_finite_points)),
         0.0F, 1.0F);
+    const ObstaclePerceptionResult external_live_perception =
+        cargo_safety_evaluator_.perceive(external_live_input);
     const CargoSafetyResult external_live_result =
-        cargo_safety_evaluator_.evaluate(external_live_input);
+        cargo_safety_evaluator_.evaluate(
+            external_live_input, external_live_perception);
     std::vector<CargoObstacleObservation> pending_observations;
     std::size_t pending_directional_pretrack_clusters = 0U;
     std::size_t pending_radial_pretrack_clusters = 0U;
@@ -21668,6 +21670,49 @@ void NdtSlamNode::runPendingCargoAvoidance(
                     ++pending_radial_pretrack_clusters;
                 }
             }
+            pending_observations.push_back(std::move(observation));
+        }
+    } else if (external_live_perception.valid) {
+        // Preserve physical identity and true 5-8 m acquisition while the
+        // vertical Cargo authority is unavailable. These observations carry
+        // no clearance and are structurally incapable of authorizing 17/18.
+        pending_observations.reserve(external_live_perception.clusters.size());
+        const Eigen::Vector3d cargo_center_map_3d =
+            pose_map_base * envelope.center_base.cast<double>();
+        for (const ObstaclePerceptionCluster& cluster :
+             external_live_perception.clusters) {
+            if (cluster.footprint_distance_m > acquisition_shell_m) continue;
+            CargoObstacleObservation observation;
+            observation.source_index = cluster.cluster_index;
+            observation.centroid_map = (pose_map_base *
+                cluster.centroid_base.getVector3fMap().cast<double>())
+                    .cast<float>();
+            observation.top_z95_map = static_cast<float>((pose_map_base *
+                Eigen::Vector3d(cluster.centroid_base.x,
+                                cluster.centroid_base.y,
+                                cluster.top_z95_m)).z());
+            observation.bottom_z05_map = static_cast<float>((pose_map_base *
+                Eigen::Vector3d(cluster.centroid_base.x,
+                                cluster.centroid_base.y,
+                                cluster.bottom_z05_m)).z());
+            observation.vertical_continuity_ratio =
+                cluster.vertical_continuity_ratio;
+            observation.footprint_distance_m =
+                cluster.footprint_distance_m;
+            observation.hazard_geometry_valid = false;
+            observation.horizontal_uncertainty_m =
+                envelope.horizontal_uncertainty_m;
+            observation.point_count = cluster.point_count;
+            observation.warning_code = CargoSafetyEvaluator::kSafeCode;
+            observation.warning_eligible = false;
+            observation.source_validated = true;
+            observation.validation_shell_m = shell_m;
+            observation.provenance =
+                ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY;
+            observation.cargo_center_map =
+                cargo_center_map_3d.head<2>().cast<float>();
+            observation.cargo_center_valid =
+                cargo_center_map_3d.allFinite();
             pending_observations.push_back(std::move(observation));
         }
     }
@@ -23563,7 +23608,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     bottom_msg.source_detail = last_cargo_bottom_result_.source_name;
     bottom_msg.invalid_reason = last_cargo_bottom_result_.valid
         ? std::string() : last_cargo_bottom_result_.reason;
-    if (last_cargo_bottom_result_.geometry_valid) {
+    if (rigid_geometry.valid && safety_input.footprint_base.valid) {
         const auto& geometry = last_cargo_bottom_result_.geometry;
         bottom_msg.bottom_z_base = geometry.bottom_z_base;
         bottom_msg.top_z_base = geometry.top_z_base;
@@ -24008,7 +24053,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     safety_input.obstacle_observation_valid =
         static_cast<bool>(obstacle_cloud_base) &&
         static_cast<bool>(observation_cloud_base) &&
-        last_cargo_bottom_result_.geometry_valid;
+        rigid_geometry.valid;
     const double stamp_delta =
         (stamp - obstacle_cloud_stamp).toSec();
     const double sensor_age =
@@ -24028,8 +24073,11 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     }
     safety_input.obstacle_roi_finite_points = roi_finite_points;
     safety_input.obstacle_roi_coverage_ratio = coverage_ratio;
+    const ObstaclePerceptionResult formal_obstacle_perception =
+        cargo_safety_evaluator_.perceive(safety_input);
     const CargoSafetyResult radial_safety_result =
-        cargo_safety_evaluator_.evaluate(safety_input);
+        cargo_safety_evaluator_.evaluate(
+            safety_input, formal_obstacle_perception);
     CargoSafetyResult raw_cargo_safety_result = radial_safety_result;
     cargo_corridor_eligible_clusters_ = 0U;
     cargo_corridor_rejected_clusters_ = 0U;
@@ -24666,6 +24714,48 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                         : ExternalProvenance::NONE;
             }
             obstacle_track_observations.push_back(observation);
+        }
+    } else if (formal_obstacle_perception.valid) {
+        // Height invalidity revokes hazard authority, not physical tracking.
+        obstacle_track_observations.reserve(
+            formal_obstacle_perception.clusters.size());
+        const float acquisition_distance =
+            cargo_collision_tracking_acquisition_distance_m_;
+        for (const ObstaclePerceptionCluster& cluster :
+             formal_obstacle_perception.clusters) {
+            if (cluster.footprint_distance_m > acquisition_distance) continue;
+            CargoObstacleObservation observation;
+            observation.source_index = cluster.cluster_index;
+            observation.centroid_map = (pose_map_base *
+                cluster.centroid_base.getVector3fMap().cast<double>())
+                    .cast<float>();
+            observation.top_z95_map = static_cast<float>((pose_map_base *
+                Eigen::Vector3d(cluster.centroid_base.x,
+                                cluster.centroid_base.y,
+                                cluster.top_z95_m)).z());
+            observation.bottom_z05_map = static_cast<float>((pose_map_base *
+                Eigen::Vector3d(cluster.centroid_base.x,
+                                cluster.centroid_base.y,
+                                cluster.bottom_z05_m)).z());
+            observation.vertical_continuity_ratio =
+                cluster.vertical_continuity_ratio;
+            observation.footprint_distance_m =
+                cluster.footprint_distance_m;
+            observation.hazard_geometry_valid = false;
+            observation.horizontal_uncertainty_m =
+                formal_use.horizontal_uncertainty_m;
+            observation.point_count = cluster.point_count;
+            observation.warning_code = CargoSafetyEvaluator::kSafeCode;
+            observation.warning_eligible = false;
+            observation.source_validated = true;
+            observation.validation_shell_m =
+                cargo_residual_classifier_config_.validation_shell_m;
+            observation.provenance =
+                ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY;
+            observation.cargo_center_map = cargo_center_map;
+            observation.cargo_center_valid =
+                rigid_geometry.valid && cargo_center_map.allFinite();
+            obstacle_track_observations.push_back(std::move(observation));
         }
     }
     const CargoObstacleTrackerDecision obstacle_track_decision =

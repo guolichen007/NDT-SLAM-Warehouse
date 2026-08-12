@@ -49,6 +49,24 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         self.assertIn("pending_cargo_obstacle_tracker_.update", body)
         self.assertIn("cargo_obstacle_tracker_.update", body)
 
+    def test_physical_perception_is_separate_from_vertical_authority(self):
+        evaluator = read(
+            "src/ndt_slam/src/cargo_safety_evaluator.cpp"
+        )
+        tracker = read(
+            "src/ndt_slam/include/ndt_slam/cargo_obstacle_tracker.hpp"
+        )
+        node = read("src/ndt_slam/src/ndt_slam.cpp")
+        self.assertIn("CargoSafetyEvaluator::perceive", evaluator)
+        self.assertIn("hazard_geometry_valid", tracker)
+        self.assertIn("formal_obstacle_perception", node)
+        self.assertIn("external_live_perception", node)
+        self.assertNotIn(
+            "static_cast<bool>(observation_cloud_base) &&\n"
+            "        last_cargo_bottom_result_.geometry_valid",
+            node,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

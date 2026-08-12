@@ -3,12 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <set>
-#include <vector>
-
-#include <Eigen/Core>
-#include <pcl/search/kdtree.h>
-#include <pcl/segmentation/extract_clusters.h>
 
 namespace ndt_slam {
 namespace {
@@ -68,26 +62,6 @@ bool isValidFootprint(const CargoBaseFootprint& footprint) {
            isFinite(footprint.yaw_base_rad) &&
            isFinite(footprint.min_z) && isFinite(footprint.max_z) &&
            footprint.min_z < footprint.max_z;
-}
-
-bool isFinitePoint(const pcl::PointXYZ& point) {
-    return isFinite(point.x) && isFinite(point.y) && isFinite(point.z);
-}
-
-float pointToFootprintDistance(const pcl::PointXYZ& point,
-                               const CargoBaseFootprint& footprint) {
-    return pointToCargoObbDistance2D(
-        Eigen::Vector2f(point.x, point.y), footprint);
-}
-
-float nearestRankPercentile(std::vector<float>* values, float percentile) {
-    const std::size_t size = values->size();
-    std::size_t rank = static_cast<std::size_t>(
-        std::ceil(static_cast<double>(percentile) * static_cast<double>(size)));
-    rank = std::max<std::size_t>(1, std::min(rank, size));
-    const std::size_t index = rank - 1;
-    std::nth_element(values->begin(), values->begin() + index, values->end());
-    return (*values)[index];
 }
 
 int warningPriority(std::uint16_t warning_code) {
@@ -323,6 +297,12 @@ CargoSafetyDecision composeCargoSafetyDecision(
 }
 
 CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) const {
+    return evaluate(input, perceive(input));
+}
+
+CargoSafetyResult CargoSafetyEvaluator::evaluate(
+    const CargoSafetyInput& input,
+    const ObstaclePerceptionResult& perception) const {
     CargoSafetyResult result;
 
     if (!isValidConfig(config_)) {
@@ -362,38 +342,26 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         return result;
     }
 
-    if (!input.obstacle_observation_valid ||
-        !isFinite(input.obstacle_cloud_age_sec) ||
-        input.obstacle_cloud_age_sec < -config_.future_stamp_tolerance_sec ||
-        input.obstacle_cloud_age_sec > config_.maximum_obstacle_cloud_age_sec ||
-        input.obstacle_roi_finite_points < config_.minimum_roi_finite_points ||
-        !isFinite(input.obstacle_roi_coverage_ratio) ||
-        input.obstacle_roi_coverage_ratio < config_.minimum_roi_coverage_ratio) {
-        result.fault = CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
-        result.evidence_state = CargoSafetyEvidenceState::SPARSE_PENDING;
-        result.reason = "obstacle_observation_insufficient";
-        return result;
-    }
     if (!isValidFootprint(input.footprint_base)) {
         result.fault = CargoSafetyFault::INTERNAL_ERROR;
         result.reason = "invalid_input";
         return result;
     }
 
-    result.input_valid = true;
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr obstacle_candidates(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    obstacle_candidates->reserve(input.obstacle_cloud_base->size());
-    for (const pcl::PointXYZ& point : input.obstacle_cloud_base->points) {
-        if (!isFinitePoint(point)) {
-            continue;
-        }
-        ++result.finite_input_points;
-        obstacle_candidates->push_back(point);
+    result.finite_input_points = perception.finite_input_points;
+    if (!perception.valid) {
+        result.fault = perception.reason.rfind("invalid_config:", 0U) == 0U ||
+                perception.reason == "clustering_failed" ||
+                perception.reason == "non_finite_cluster_result" ||
+                perception.reason == "invalid_horizontal_query"
+            ? CargoSafetyFault::INTERNAL_ERROR
+            : CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
+        result.evidence_state = CargoSafetyEvidenceState::SPARSE_PENDING;
+        result.reason = perception.reason;
+        return result;
     }
-
-    if (obstacle_candidates->empty()) {
+    result.input_valid = true;
+    if (perception.clusters.empty()) {
         result.warning_valid = true;
         result.warning_code = kSafeCode;
         result.fault = CargoSafetyFault::NONE;
@@ -401,114 +369,32 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         result.reason = "clear_no_external_obstacle";
         return result;
     }
-    if (obstacle_candidates->size() < config_.obstacle_min_cluster_points) {
-        result.input_valid = false;
-        result.fault = CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
-        result.evidence_state = CargoSafetyEvidenceState::SPARSE_PENDING;
-        result.reason = "sparse_obstacle_returns";
-        return result;
-    }
-
-    std::vector<pcl::PointIndices> cluster_indices;
-    try {
-        pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(
-            new pcl::search::KdTree<pcl::PointXYZ>);
-        tree->setInputCloud(obstacle_candidates);
-
-        pcl::EuclideanClusterExtraction<pcl::PointXYZ> extraction;
-        extraction.setClusterTolerance(config_.obstacle_cluster_tolerance_m);
-        extraction.setMinClusterSize(
-            static_cast<int>(config_.obstacle_min_cluster_points));
-        // The ROI is already bounded. Never discard a wall or a large cargo
-        // stack merely because it exceeds a tuning-oriented cluster limit.
-        extraction.setMaxClusterSize(std::numeric_limits<int>::max());
-        extraction.setSearchMethod(tree);
-        extraction.setInputCloud(obstacle_candidates);
-        extraction.extract(cluster_indices);
-    } catch (const std::exception&) {
-        result.input_valid = false;
-        result.fault = CargoSafetyFault::INTERNAL_ERROR;
-        result.reason = "clustering_failed";
-        return result;
-    }
-
     const float conservative_bottom =
         input.height.bottom_z - input.height.bottom_uncertainty_m -
         config_.cargo_bottom_extra_margin_m;
 
-    for (std::size_t cluster_index = 0; cluster_index < cluster_indices.size();
-         ++cluster_index) {
-        const pcl::PointIndices& indices = cluster_indices[cluster_index];
-        if (indices.indices.empty()) {
-            continue;
-        }
-
+    for (const ObstaclePerceptionCluster& perceived : perception.clusters) {
         CargoSafetyClusterEvidence evidence;
         evidence.valid = true;
-        evidence.cluster_index = cluster_index;
-        evidence.point_count = indices.indices.size();
-        evidence.point_indices = indices.indices;
-
-        std::vector<float> z_values;
-        z_values.reserve(indices.indices.size());
-        Eigen::Vector3f centroid_sum = Eigen::Vector3f::Zero();
-        for (int point_index : indices.indices) {
-            const pcl::PointXYZ& point = obstacle_candidates->points[
-                static_cast<std::size_t>(point_index)];
-            z_values.push_back(point.z);
-            centroid_sum += point.getVector3fMap();
-
-            const float distance = pointToFootprintDistance(point, input.footprint_base);
-            if (distance < evidence.footprint_distance_m) {
-                evidence.footprint_distance_m = distance;
-                evidence.nearest_point_base = point;
-            }
-        }
-        const Eigen::Vector3f centroid = centroid_sum /
-            static_cast<float>(indices.indices.size());
-        evidence.centroid_base.x = centroid.x();
-        evidence.centroid_base.y = centroid.y();
-        evidence.centroid_base.z = centroid.z();
-
-        evidence.obstacle_max_z_m =
-            *std::max_element(z_values.begin(), z_values.end());
-        evidence.obstacle_min_z_m =
-            *std::min_element(z_values.begin(), z_values.end());
-        evidence.obstacle_top_z95_m =
-            nearestRankPercentile(&z_values, config_.obstacle_top_percentile);
-        evidence.obstacle_bottom_z05_m =
-            nearestRankPercentile(&z_values, config_.obstacle_bottom_percentile);
-        evidence.obstacle_vertical_span_m = std::max(
-            0.0F, evidence.obstacle_top_z95_m -
-                evidence.obstacle_bottom_z05_m);
-        std::set<int> occupied_vertical_bins;
-        for (const float z : z_values) {
-            if (z < evidence.obstacle_bottom_z05_m ||
-                z > evidence.obstacle_top_z95_m) {
-                continue;
-            }
-            occupied_vertical_bins.insert(static_cast<int>(std::floor(
-                (z - evidence.obstacle_bottom_z05_m) /
-                config_.obstacle_vertical_bin_size_m)));
-        }
-        const int expected_vertical_bins = std::max(
-            1, static_cast<int>(std::floor(
-                evidence.obstacle_vertical_span_m /
-                config_.obstacle_vertical_bin_size_m)) + 1);
-        evidence.vertical_continuity_ratio = std::clamp(
-            static_cast<float>(occupied_vertical_bins.size()) /
-                static_cast<float>(expected_vertical_bins),
-            0.0F, 1.0F);
+        evidence.cluster_index = perceived.cluster_index;
+        evidence.point_count = perceived.point_count;
+        evidence.point_indices = perceived.point_indices;
+        evidence.footprint_distance_m = perceived.footprint_distance_m;
+        evidence.nearest_point_base = perceived.nearest_point_base;
+        evidence.centroid_base = perceived.centroid_base;
+        evidence.obstacle_max_z_m = perceived.maximum_z_m;
+        evidence.obstacle_min_z_m = perceived.minimum_z_m;
+        evidence.obstacle_top_z95_m = perceived.top_z95_m;
+        evidence.obstacle_bottom_z05_m = perceived.bottom_z05_m;
+        evidence.obstacle_vertical_span_m = perceived.vertical_span_m;
+        evidence.vertical_continuity_ratio =
+            perceived.vertical_continuity_ratio;
         evidence.entirely_above_cargo =
             evidence.obstacle_bottom_z05_m >
             input.footprint_base.max_z +
                 config_.overhead_separation_margin_m;
-        evidence.obstacle_tail_spread_m =
-            std::max(0.0f, evidence.obstacle_max_z_m - evidence.obstacle_top_z95_m);
-        evidence.obstacle_uncertainty_m = std::clamp(
-            config_.obstacle_uncertainty_floor_m + evidence.obstacle_tail_spread_m,
-            config_.obstacle_uncertainty_floor_m,
-            config_.obstacle_uncertainty_max_m);
+        evidence.obstacle_tail_spread_m = perceived.tail_spread_m;
+        evidence.obstacle_uncertainty_m = perceived.obstacle_uncertainty_m;
         evidence.uncertainty_reason =
             "clamp(floor + max(0,z_max-z95), floor, max)";
         evidence.conservative_clearance_m =
@@ -576,6 +462,30 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(const CargoSafetyInput& input) 
         result.reason = "clear";
     }
     return result;
+}
+
+ObstaclePerceptionResult CargoSafetyEvaluator::perceive(
+    const CargoSafetyInput& input) const {
+    ObstaclePerceptionConfig config;
+    config.future_stamp_tolerance_sec = config_.future_stamp_tolerance_sec;
+    config.maximum_cloud_age_sec = config_.maximum_obstacle_cloud_age_sec;
+    config.minimum_roi_finite_points = config_.minimum_roi_finite_points;
+    config.minimum_roi_coverage_ratio = config_.minimum_roi_coverage_ratio;
+    config.cluster_tolerance_m = config_.obstacle_cluster_tolerance_m;
+    config.minimum_cluster_points = config_.obstacle_min_cluster_points;
+    config.top_percentile = config_.obstacle_top_percentile;
+    config.bottom_percentile = config_.obstacle_bottom_percentile;
+    config.vertical_bin_size_m = config_.obstacle_vertical_bin_size_m;
+    config.uncertainty_floor_m = config_.obstacle_uncertainty_floor_m;
+    config.uncertainty_max_m = config_.obstacle_uncertainty_max_m;
+    ObstaclePerceptionInput perception_input;
+    perception_input.query_footprint = input.footprint_base;
+    perception_input.cloud_base = input.obstacle_cloud_base;
+    perception_input.observation_valid = input.obstacle_observation_valid;
+    perception_input.cloud_age_sec = input.obstacle_cloud_age_sec;
+    perception_input.roi_finite_points = input.obstacle_roi_finite_points;
+    perception_input.roi_coverage_ratio = input.obstacle_roi_coverage_ratio;
+    return perceiveObstacles(config, perception_input);
 }
 
 }  // namespace ndt_slam

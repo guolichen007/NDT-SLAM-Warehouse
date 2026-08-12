@@ -120,8 +120,10 @@ def main() -> int:
             "raw cargo safety diagnostics are not advertised", failures)
     require("cargo_bottom_fusion_.update(observation)" in node,
             "CargoBottomFusion is not invoked by the runtime", failures)
-    require("cargo_safety_evaluator_.evaluate(safety_input)" in node,
-            "CargoSafetyEvaluator is not invoked by the runtime", failures)
+    require("cargo_safety_evaluator_.perceive(safety_input)" in node and
+            "safety_input, formal_obstacle_perception" in node,
+            "canonical physical perception/evaluation is not invoked by the runtime",
+            failures)
     require("composeCargoSafetyStatus(" in node and
             len(re.findall(
                 r"status\.requested_alarm_code\s*=(?!=)", node)) == 1,
@@ -650,11 +652,13 @@ def main() -> int:
             "raw_warning_candidate || acquisition_candidate" in pending_body and
             "query.directional_filter_enabled" in pending_body and
             "pending_angle_rejected_clusters" in pending_body and
-            "cargo_safety_evaluator_.evaluate(live_input)" in pending_body and
-            "cargo_safety_evaluator_.evaluate(external_live_input)" in pending_body and
+            "cargo_safety_evaluator_.perceive(live_input)" in pending_body and
+            "cargo_safety_evaluator_.perceive(external_live_input)" in pending_body and
+            "live_input, live_perception" in pending_body and
+            "external_live_input, external_live_perception" in pending_body and
             "pending_cargo_obstacle_tracker_.update(" in pending_body and
             "formal_cargo_removal_authorized_ = true" not in pending_body and
-            "kSafeCode" not in pending_body,
+            "hazard_geometry_valid = false" in pending_body,
             "Pending envelope can clear/remove cargo or skips live/static fusion",
             failures)
     require("PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY" in

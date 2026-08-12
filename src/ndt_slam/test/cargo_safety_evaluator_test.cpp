@@ -375,6 +375,44 @@ TEST(CargoSafetyEvaluator, InvalidHeightNeverBecomesLevel2Warning) {
     EXPECT_EQ(stale_result.fault, CargoSafetyFault::CARGO_HEIGHT_INVALID);
 }
 
+TEST(CargoSafetyEvaluator,
+     InvalidHeightPreservesCanonicalPhysicalPerception) {
+    CargoSafetyInput input = baseInput();
+    addCluster(&input, 4.0F, 1.75F);
+    input.height.valid = false;
+    const CargoSafetyEvaluator evaluator;
+    const ObstaclePerceptionResult perception = evaluator.perceive(input);
+    ASSERT_TRUE(perception.executed);
+    ASSERT_TRUE(perception.valid) << perception.reason;
+    ASSERT_EQ(perception.clusters.size(), 1U);
+    EXPECT_NEAR(perception.clusters.front().footprint_distance_m,
+                4.0F, 0.05F);
+
+    const CargoSafetyResult hazard = evaluator.evaluate(input, perception);
+    EXPECT_FALSE(hazard.warning_valid);
+    EXPECT_EQ(hazard.warning_code, 0U);
+    EXPECT_EQ(hazard.fault, CargoSafetyFault::CARGO_HEIGHT_INVALID);
+    EXPECT_EQ(hazard.reason, "height_invalid");
+}
+
+TEST(ObstaclePerception, ClusterIndicesRemainInSourceCloudDomain) {
+    CargoSafetyInput input = baseInput();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = mutableObstacleCloud(&input);
+    cloud->push_back(pcl::PointXYZ(
+        std::numeric_limits<float>::quiet_NaN(), 0.0F, 1.0F));
+    for (int i = 0; i < 8; ++i) {
+        cloud->push_back(pcl::PointXYZ(
+            4.5F + 0.005F * static_cast<float>(i),
+            0.004F * static_cast<float>(i % 3), 1.5F));
+    }
+    const ObstaclePerceptionResult perception =
+        CargoSafetyEvaluator().perceive(input);
+    ASSERT_TRUE(perception.valid) << perception.reason;
+    ASSERT_EQ(perception.clusters.size(), 1U);
+    ASSERT_FALSE(perception.clusters.front().point_indices.empty());
+    EXPECT_EQ(perception.clusters.front().point_indices.front(), 1);
+}
+
 TEST(CargoSafetyEvaluator, InvalidObstacleEvidenceNeverBecomesLevel2Warning) {
     CargoSafetyEvaluator evaluator;
 

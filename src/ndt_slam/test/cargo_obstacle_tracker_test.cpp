@@ -557,5 +557,34 @@ TEST(CargoObstacleTracker, TrackCreationAndAssociationResetAreCounted) {
   EXPECT_EQ(jumped.association_reset_count, 1U);
 }
 
+TEST(CargoObstacleTracker,
+     HeightInvalidObservationBuildsIdentityButNeverWarningAuthority) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  config.far_history_confirm_frames = 3;
+  config.far_history_confirm_duration_sec = 0.2;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation physical = directionalPretrack(7U, 0.0F, 0.0F);
+  physical.hazard_geometry_valid = false;
+  physical.conservative_clearance_m =
+      std::numeric_limits<float>::quiet_NaN();
+
+  EXPECT_FALSE(tracker.update(1.0, {physical}).hazard_observed);
+  EXPECT_FALSE(tracker.update(1.1, {physical}).confirmed_hazard);
+  const CargoObstacleTrackerDecision acquired =
+      tracker.update(1.2, {physical});
+  EXPECT_FALSE(acquired.hazard_observed);
+  EXPECT_FALSE(acquired.confirmed_hazard);
+  EXPECT_TRUE(acquired.selected_far_field_history_valid);
+  ASSERT_EQ(tracker.tracks().size(), 1U);
+  EXPECT_FALSE(tracker.tracks().front().current_hazard_geometry_valid);
+
+  CargoObstacleObservation near = hazard(8U, 0.02F, 0.0F, 18U);
+  const CargoObstacleTrackerDecision promoted =
+      tracker.update(1.3, {near});
+  EXPECT_TRUE(promoted.confirmed_hazard) << promoted.reason;
+  EXPECT_EQ(promoted.selected_track_id, acquired.selected_track_id);
+}
+
 }  // namespace
 }  // namespace ndt_slam

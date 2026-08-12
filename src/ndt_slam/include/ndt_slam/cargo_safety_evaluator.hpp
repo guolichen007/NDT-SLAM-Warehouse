@@ -11,6 +11,7 @@
 
 #include "ndt_slam/hook_load_evidence_policy.hpp"
 #include "ndt_slam/cargo_rigid_geometry.hpp"
+#include "ndt_slam/obstacle_perception.hpp"
 
 namespace ndt_slam {
 
@@ -227,6 +228,18 @@ public:
     const CargoSafetyConfig& config() const;
 
     CargoSafetyResult evaluate(const CargoSafetyInput& input) const;
+
+    // Reuses a canonical physical-perception result. This prevents Formal and
+    // Pending authority projections from clustering the same physical frame
+    // more than once.
+    CargoSafetyResult evaluate(
+        const CargoSafetyInput& input,
+        const ObstaclePerceptionResult& perception) const;
+
+    // Physical external-cluster perception deliberately does not require a
+    // Cargo bottom. Callers may keep obstacle identity/far-history alive while
+    // evaluate() remains fail-closed for 14/17/18.
+    ObstaclePerceptionResult perceive(const CargoSafetyInput& input) const;
 
 private:
     CargoSafetyConfig config_;
