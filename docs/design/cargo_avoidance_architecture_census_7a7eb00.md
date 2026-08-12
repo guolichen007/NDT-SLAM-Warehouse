@@ -81,4 +81,3 @@ identity/geometry, then calls `updateAndPublishCargoSafetyPipeline`.
 
 Public topic names, message schemas, callback scheduling and process count are
 frozen throughout the refactor.
-
