@@ -3021,6 +3021,19 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             odom_anchor_config_.cargo_warning.cargo_bottom_extra_margin_m;
         safety_config.obstacle_top_percentile =
             odom_anchor_config_.cargo_warning.obstacle_top_percentile;
+        safety_config.obstacle_bottom_percentile = cargo_safety
+            ? cargo_safety["obstacle_bottom_percentile"].as<float>(0.05F)
+            : 0.05F;
+        safety_config.obstacle_vertical_bin_size_m = cargo_safety
+            ? cargo_safety["obstacle_vertical_bin_size_m"].as<float>(0.10F)
+            : 0.10F;
+        safety_config.obstacle_min_vertical_continuity_ratio = cargo_safety
+            ? cargo_safety["obstacle_min_vertical_continuity_ratio"]
+                  .as<float>(0.45F)
+            : 0.45F;
+        safety_config.overhead_separation_margin_m = cargo_safety
+            ? cargo_safety["overhead_separation_margin_m"].as<float>(0.10F)
+            : 0.10F;
         safety_config.obstacle_cluster_tolerance_m =
             odom_anchor_config_.cargo_warning.obstacle_cluster_tolerance_m;
         safety_config.obstacle_min_cluster_points =
@@ -18477,6 +18490,15 @@ void NdtSlamNode::runPendingCargoAvoidance(
                     evidence.centroid_base.x, evidence.centroid_base.y,
                     evidence.obstacle_top_z95_m);
             observation.top_z95_map = static_cast<float>(top_map.z());
+            const Eigen::Vector3d bottom_map =
+                pose_map_base * Eigen::Vector3d(
+                    evidence.centroid_base.x, evidence.centroid_base.y,
+                    evidence.obstacle_bottom_z05_m);
+            observation.bottom_z05_map = static_cast<float>(bottom_map.z());
+            observation.vertical_continuity_ratio =
+                evidence.vertical_continuity_ratio;
+            observation.entirely_above_cargo =
+                evidence.entirely_above_cargo;
             observation.footprint_distance_m =
                 evidence.footprint_distance_m;
             observation.conservative_clearance_m =
@@ -21174,6 +21196,14 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             observation.source_index = tracking.source_index;
             observation.centroid_map = centroid_map.cast<float>();
             observation.top_z95_map = static_cast<float>(top_map.z());
+            const Eigen::Vector3d bottom_map = pose_map_base * Eigen::Vector3d(
+                evidence.centroid_base.x, evidence.centroid_base.y,
+                evidence.obstacle_bottom_z05_m);
+            observation.bottom_z05_map = static_cast<float>(bottom_map.z());
+            observation.vertical_continuity_ratio =
+                evidence.vertical_continuity_ratio;
+            observation.entirely_above_cargo =
+                evidence.entirely_above_cargo;
             observation.footprint_distance_m =
                 evidence.footprint_distance_m;
             observation.conservative_clearance_m =

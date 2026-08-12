@@ -171,6 +171,12 @@ bool validObservation(const CargoObstacleObservation& observation,
                 config.acquisition_distance_m;
   return observation.centroid_map.allFinite() &&
       std::isfinite(observation.top_z95_map) &&
+      std::isfinite(observation.bottom_z05_map) &&
+      observation.top_z95_map >= observation.bottom_z05_map &&
+      std::isfinite(observation.vertical_continuity_ratio) &&
+      observation.vertical_continuity_ratio >= 0.0F &&
+      observation.vertical_continuity_ratio <= 1.0F &&
+      (!observation.warning_eligible || !observation.entirely_above_cargo) &&
       std::isfinite(observation.footprint_distance_m) &&
       observation.footprint_distance_m >= 0.0F &&
       std::isfinite(observation.conservative_clearance_m) &&
@@ -379,6 +385,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       if (next_track_id_ == 0U) next_track_id_ = 1U;
       track.centroid_map = observation.centroid_map;
       track.top_z95_map = observation.top_z95_map;
+      track.bottom_z05_map = observation.bottom_z05_map;
+      track.vertical_continuity_ratio =
+          observation.vertical_continuity_ratio;
+      track.entirely_above_cargo = observation.entirely_above_cargo;
       track.footprint_distance_m = observation.footprint_distance_m;
       track.conservative_clearance_m =
           observation.conservative_clearance_m;
@@ -471,6 +481,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     }
     track.centroid_map = observation.centroid_map;
     track.top_z95_map = observation.top_z95_map;
+    track.bottom_z05_map = observation.bottom_z05_map;
+    track.vertical_continuity_ratio =
+        observation.vertical_continuity_ratio;
+    track.entirely_above_cargo = observation.entirely_above_cargo;
     track.footprint_distance_m = observation.footprint_distance_m;
     track.conservative_clearance_m = observation.conservative_clearance_m;
     track.point_count = observation.point_count;

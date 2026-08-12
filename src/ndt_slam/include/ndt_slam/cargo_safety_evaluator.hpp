@@ -37,6 +37,10 @@ struct CargoSafetyConfig {
     float minimum_roi_coverage_ratio = 0.05F;
 
     float obstacle_top_percentile = 0.95f;
+    float obstacle_bottom_percentile = 0.05f;
+    float obstacle_vertical_bin_size_m = 0.10f;
+    float obstacle_min_vertical_continuity_ratio = 0.45f;
+    float overhead_separation_margin_m = 0.10f;
     float obstacle_uncertainty_floor_m = 0.05f;
     float obstacle_uncertainty_max_m = 0.30f;
     float obstacle_cluster_tolerance_m = 0.25f;
@@ -65,7 +69,12 @@ struct CargoSafetyClusterEvidence {
 
     float footprint_distance_m = std::numeric_limits<float>::infinity();
     float obstacle_top_z95_m = std::numeric_limits<float>::quiet_NaN();
+    float obstacle_bottom_z05_m = std::numeric_limits<float>::quiet_NaN();
+    float obstacle_min_z_m = std::numeric_limits<float>::quiet_NaN();
     float obstacle_max_z_m = std::numeric_limits<float>::quiet_NaN();
+    float obstacle_vertical_span_m = std::numeric_limits<float>::quiet_NaN();
+    float vertical_continuity_ratio = 0.0F;
+    bool entirely_above_cargo = false;
     float obstacle_tail_spread_m = std::numeric_limits<float>::quiet_NaN();
     float obstacle_uncertainty_m = std::numeric_limits<float>::quiet_NaN();
     float conservative_clearance_m = std::numeric_limits<float>::quiet_NaN();
