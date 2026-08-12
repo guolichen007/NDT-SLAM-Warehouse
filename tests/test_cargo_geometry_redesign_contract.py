@@ -183,10 +183,13 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         )
 
     def test_obstacle_vertical_interval_rejects_overhead_clusters(self):
-        self.assertIn("obstacle_bottom_z05_m", SAFETY_SOURCE)
+        hazard_source = (
+            PACKAGE / "src/hazard_evaluator.cpp"
+        ).read_text(encoding="utf-8")
+        self.assertIn("bottom_z05_m", hazard_source)
         self.assertIn("vertical_continuity_ratio", SAFETY_SOURCE)
         self.assertIn("evidence.entirely_above_cargo", SAFETY_SOURCE)
-        self.assertIn("!evidence.entirely_above_cargo", SAFETY_SOURCE)
+        self.assertIn("!result.entirely_above_cargo", hazard_source)
         self.assertIn("!observation.entirely_above_cargo", TRACKER_SOURCE)
 
     def test_only_certified_static_can_replace_true_far_history(self):

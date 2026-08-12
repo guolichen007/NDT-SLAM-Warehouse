@@ -19160,7 +19160,7 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
                 ? std::string("gravity_lidar_conflict:") + evidence_reason
                 : evidence_reason)));
     CargoSafetyDecision decision =
-        composeCargoSafetyDecision(decision_input);
+        avoidance_decision_owner_.decide(decision_input);
 
     bool anomaly_review_suppressed = false;
     if (apply_anomaly_review_episode) {

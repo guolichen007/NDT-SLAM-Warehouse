@@ -55,6 +55,7 @@
 #include <ndt_slam/cargo_capability.hpp>
 #include <ndt_slam/cargo_domain_contracts.hpp>
 #include <ndt_slam/cargo_subsystem.hpp>
+#include <ndt_slam/avoidance_decision.hpp>
 #include <ndt_slam/cargo_obstacle_tracker.hpp>
 #include <ndt_slam/static_obstacle_evidence_index.hpp>
 #include <ndt_slam/map_session_snapshot.hpp>
@@ -2438,6 +2439,7 @@ private:
     CargoSafetyTemporalFilter cargo_safety_temporal_filter_;
     CargoBottomResult last_cargo_bottom_result_;
     CargoSubsystem cargo_subsystem_;
+    AvoidanceDecisionOwner avoidance_decision_owner_;
     CargoSafetyResult last_cargo_safety_result_;
     CargoSafetyResult confirmed_cargo_safety_result_;
     std::size_t cargo_self_removed_points_ = 0U;

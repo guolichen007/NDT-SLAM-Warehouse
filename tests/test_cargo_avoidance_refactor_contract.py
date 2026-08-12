@@ -166,6 +166,17 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
             tracker_test,
         )
 
+    def test_hazard_and_final_protocol_have_explicit_single_owners(self):
+        evaluator = read("src/ndt_slam/src/cargo_safety_evaluator.cpp")
+        hazard = read("src/ndt_slam/src/hazard_evaluator.cpp")
+        decision = read("src/ndt_slam/src/avoidance_decision.cpp")
+        node = read("src/ndt_slam/src/ndt_slam.cpp")
+        self.assertIn("HazardEvaluator", evaluator)
+        self.assertIn("conservative_clearance_m", hazard)
+        self.assertNotIn("composeCargoSafetyDecision", evaluator)
+        self.assertEqual(decision.count("composeCargoSafetyDecision("), 1)
+        self.assertIn("avoidance_decision_owner_.decide", node)
+
 
 if __name__ == "__main__":
     unittest.main()
