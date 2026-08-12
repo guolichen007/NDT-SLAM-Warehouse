@@ -157,6 +157,7 @@ struct CargoObstacleTrack {
   float last_neighbor_cell_overlap = 0.0F;
   float last_anchor_cell_overlap = 0.0F;
   float last_association_cost = 0.0F;
+  bool association_ambiguous = false;
   std::string association_reset_reason;
   bool current_source_validated = false;
   bool current_warning_eligible = false;
@@ -192,9 +193,11 @@ struct CargoObstacleTrackerDecision {
   float selected_track_iou = 0.0F;
   float selected_track_neighbor_cell_overlap = 0.0F;
   float selected_association_cost = 0.0F;
+  bool selected_association_ambiguous = false;
   std::string selected_association_reset_reason;
   std::uint64_t created_track_count = 0U;
   std::uint64_t association_reset_count = 0U;
+  std::uint64_t ambiguous_association_count = 0U;
   Eigen::Vector3f selected_track_velocity = Eigen::Vector3f::Zero();
   std::string reason = "not_evaluated";
 };
@@ -234,6 +237,7 @@ class CargoObstacleTracker {
   double last_stamp_sec_ = 0.0;
   std::uint64_t created_track_count_ = 0U;
   std::uint64_t association_reset_count_ = 0U;
+  std::uint64_t ambiguous_association_count_ = 0U;
 };
 
 CargoConfigValidationResult validateCargoObstacleTrackerConfig(

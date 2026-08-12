@@ -14,6 +14,7 @@ constexpr std::uint16_t kLevel1 = 17U;
 constexpr std::uint16_t kLevel2 = 18U;
 constexpr std::uint16_t kClear = 14U;
 constexpr double kStampEpsilonSec = 1.0e-4;
+constexpr float kAssociationCostEpsilon = 1.0e-5F;
 
 bool warningCode(std::uint16_t code) {
   return code == kLevel1 || code == kLevel2;
@@ -364,6 +365,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
   CargoObstacleTrackerDecision decision;
   decision.created_track_count = created_track_count_;
   decision.association_reset_count = association_reset_count_;
+  decision.ambiguous_association_count = ambiguous_association_count_;
   if (!config_validation_.valid || !std::isfinite(stamp_sec) ||
       stamp_sec <= 0.0) {
     decision.reason = config_validation_.valid
@@ -491,6 +493,28 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
               }
               return left.observation_index < right.observation_index;
             });
+  std::vector<float> observation_best_cost(
+      valid_observations.size(), std::numeric_limits<float>::infinity());
+  std::vector<int> observation_best_count(valid_observations.size(), 0);
+  std::vector<float> track_best_cost(
+      existing_track_count, std::numeric_limits<float>::infinity());
+  std::vector<int> track_best_count(existing_track_count, 0);
+  for (const AssociationPair& pair : legal_pairs) {
+    const auto accumulate_best = [](float cost, float* best, int* count) {
+      if (cost + kAssociationCostEpsilon < *best) {
+        *best = cost;
+        *count = 1;
+      } else if (std::abs(cost - *best) <= kAssociationCostEpsilon) {
+        ++*count;
+      }
+    };
+    accumulate_best(
+        pair.cost, &observation_best_cost[pair.observation_index],
+        &observation_best_count[pair.observation_index]);
+    accumulate_best(
+        pair.cost, &track_best_cost[pair.track_index],
+        &track_best_count[pair.track_index]);
+  }
   const std::size_t no_track = existing_track_count;
   std::vector<std::size_t> assigned_track(
       valid_observations.size(), no_track);
@@ -520,6 +544,14 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     const float best_iou = match ? match->iou : 0.0F;
     const float best_neighbor_overlap =
         match ? match->neighbor_overlap : 0.0F;
+    const bool reciprocal_unique_match = match != nullptr &&
+        observation_best_count[observation_index] == 1 &&
+        track_best_count[best_index] == 1 &&
+        std::abs(match->cost -
+                 observation_best_cost[observation_index]) <=
+            kAssociationCostEpsilon &&
+        std::abs(match->cost - track_best_cost[best_index]) <=
+            kAssociationCostEpsilon;
 
     if (best_index == no_track) {
       CargoObstacleTrack track;
@@ -615,16 +647,6 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     const bool consecutive =
         track.last_observation_cycle + 1U == cycle_ &&
         dt_sec <= config_.maximum_observation_gap_sec + kStampEpsilonSec;
-    track.total_consecutive_observations = consecutive
-        ? track.total_consecutive_observations + 1 : 1;
-    track.consecutive_observations =
-        track.total_consecutive_observations;
-    track.validated_consecutive_observations =
-        observation.source_validated
-            ? (consecutive
-                   ? track.validated_consecutive_observations + 1
-                   : 1)
-            : 0;
     if (dt_sec > kStampEpsilonSec) {
       track.velocity_map =
           (observation.centroid_map - previous_centroid) /
@@ -644,13 +666,6 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.warning_code = observation.warning_code;
     track.large_cluster_geometry_valid =
         hasLargeStaticCargoGeometry(observation, config_);
-    track.geometry_validated_consecutive_observations =
-        observation.source_validated &&
-                track.large_cluster_geometry_valid
-            ? (consecutive
-                   ? track.geometry_validated_consecutive_observations + 1
-                   : 1)
-            : 0;
     track.last_cell_overlap = best_overlap;
     track.last_cell_iou = best_iou;
     track.last_neighbor_cell_overlap = best_neighbor_overlap;
@@ -659,6 +674,39 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         track.identity_anchor_map_cells);
     track.last_association_cost = best_cost;
     track.association_reset_reason.clear();
+    track.association_ambiguous = !reciprocal_unique_match;
+    if (!reciprocal_unique_match) {
+      // Keep the physical prediction attached deterministically, but freeze
+      // every field that can transfer safety authority between identities.
+      ++ambiguous_association_count_;
+      decision.ambiguous_association_count = ambiguous_association_count_;
+      track.association_reset_reason =
+          "ambiguous_non_reciprocal_authority_frozen";
+      track.last_stamp_sec = stamp_sec;
+      track.last_observation_cycle = cycle_;
+      track.observed_this_cycle = true;
+      track.current_source_index = observation.source_index;
+      track.current_source_validated = false;
+      track.current_warning_eligible = false;
+      continue;
+    }
+    track.total_consecutive_observations = consecutive
+        ? track.total_consecutive_observations + 1 : 1;
+    track.consecutive_observations =
+        track.total_consecutive_observations;
+    track.validated_consecutive_observations =
+        observation.source_validated
+            ? (consecutive
+                   ? track.validated_consecutive_observations + 1
+                   : 1)
+            : 0;
+    track.geometry_validated_consecutive_observations =
+        observation.source_validated &&
+                track.large_cluster_geometry_valid
+            ? (consecutive
+                   ? track.geometry_validated_consecutive_observations + 1
+                   : 1)
+            : 0;
     if (observation.cargo_center_valid &&
         observation.cargo_center_map.allFinite()) {
       if (!track.first_cargo_center_valid) {
@@ -859,6 +907,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.selected_track_neighbor_cell_overlap =
         diagnostic->last_neighbor_cell_overlap;
     decision.selected_association_cost = diagnostic->last_association_cost;
+    decision.selected_association_ambiguous =
+        diagnostic->association_ambiguous;
     decision.selected_association_reset_reason =
         diagnostic->association_reset_reason;
     decision.selected_track_velocity = diagnostic->velocity_map;
@@ -870,6 +920,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
   } else if (decision.hazard_observed) {
     if (diagnostic == nullptr) {
       decision.reason = "static_track_association_reset";
+    } else if (diagnostic->association_ambiguous) {
+      decision.reason = "ambiguous_obstacle_association_authority_frozen";
     } else if (!diagnostic->current_source_validated) {
       decision.reason = "current_source_unvalidated";
     } else if (diagnostic->current_embedded &&

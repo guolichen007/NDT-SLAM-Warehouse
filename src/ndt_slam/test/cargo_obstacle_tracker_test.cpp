@@ -612,5 +612,65 @@ TEST(CargoObstacleTracker,
             std::string::npos);
 }
 
+TEST(CargoObstacleTracker,
+     TwoByTwoEqualCostAssociationFreezesAllAuthorityMaturity) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  tracker.update(1.0, {
+      hazard(10U, -0.50F, 0.0F), hazard(20U, 0.50F, 0.0F)});
+  tracker.update(1.2, {
+      hazard(11U, -0.48F, 0.0F), hazard(21U, 0.48F, 0.0F)});
+  ASSERT_EQ(tracker.tracks().size(), 2U);
+  EXPECT_EQ(tracker.tracks()[0].validated_consecutive_observations, 2);
+  EXPECT_EQ(tracker.tracks()[1].validated_consecutive_observations, 2);
+
+  // Both observations are equidistant from both existing tracks. Canonical
+  // global pairing may retain a deterministic physical projection, but must
+  // not transfer confirmation/provenance/far-history authority.
+  CargoObstacleObservation ambiguous_a = hazard(30U, 0.0F, 0.0F);
+  CargoObstacleObservation ambiguous_b = hazard(31U, 0.0F, 0.0F);
+  const CargoObstacleTrackerDecision ambiguous =
+      tracker.update(1.4, {ambiguous_a, ambiguous_b});
+  EXPECT_FALSE(ambiguous.confirmed_hazard);
+  EXPECT_EQ(ambiguous.reason,
+            "ambiguous_obstacle_association_authority_frozen");
+  EXPECT_EQ(ambiguous.ambiguous_association_count, 2U);
+  ASSERT_EQ(tracker.tracks().size(), 2U);
+  for (const CargoObstacleTrack& track : tracker.tracks()) {
+    EXPECT_TRUE(track.association_ambiguous);
+    EXPECT_FALSE(track.current_source_validated);
+    EXPECT_FALSE(track.current_warning_eligible);
+    EXPECT_EQ(track.validated_consecutive_observations, 2);
+    EXPECT_EQ(track.geometry_validated_consecutive_observations, 0);
+  }
+}
+
+TEST(CargoObstacleTracker,
+     AmbiguousFarSamplesCannotTransferOrAdvanceFarHistory) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  config.far_history_confirm_frames = 3;
+  config.far_history_confirm_duration_sec = 0.2;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation left = directionalPretrack(1U, -0.5F, 0.0F);
+  CargoObstacleObservation right = directionalPretrack(2U, 0.5F, 0.0F);
+  tracker.update(1.0, {left, right});
+  left.source_index = 3U;
+  right.source_index = 4U;
+  tracker.update(1.1, {left, right});
+  ASSERT_EQ(tracker.tracks().size(), 2U);
+  for (const CargoObstacleTrack& track : tracker.tracks()) {
+    EXPECT_EQ(track.far_field_validated_observations, 2);
+    EXPECT_FALSE(track.far_field_history_valid);
+  }
+
+  CargoObstacleObservation a = directionalPretrack(5U, 0.0F, 0.0F);
+  CargoObstacleObservation b = directionalPretrack(6U, 0.0F, 0.0F);
+  tracker.update(1.2, {a, b});
+  for (const CargoObstacleTrack& track : tracker.tracks()) {
+    EXPECT_EQ(track.far_field_validated_observations, 2);
+    EXPECT_FALSE(track.far_field_history_valid);
+  }
+}
+
 }  // namespace
 }  // namespace ndt_slam

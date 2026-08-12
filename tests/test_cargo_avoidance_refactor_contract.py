@@ -84,6 +84,22 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         self.assertNotIn("restoring 3.0/5.0/0.80", node)
         self.assertIn("cargo_safety_config_error_detail_", node)
 
+    def test_ambiguous_association_cannot_transfer_authority(self):
+        tracker = read("src/ndt_slam/src/cargo_obstacle_tracker.cpp")
+        tracker_test = read("src/ndt_slam/test/cargo_obstacle_tracker_test.cpp")
+        self.assertIn("reciprocal_unique_match", tracker)
+        self.assertIn("ambiguous_non_reciprocal_authority_frozen", tracker)
+        self.assertIn("current_source_validated = false", tracker)
+        self.assertIn("current_warning_eligible = false", tracker)
+        self.assertIn(
+            "TwoByTwoEqualCostAssociationFreezesAllAuthorityMaturity",
+            tracker_test,
+        )
+        self.assertIn(
+            "AmbiguousFarSamplesCannotTransferOrAdvanceFarHistory",
+            tracker_test,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
