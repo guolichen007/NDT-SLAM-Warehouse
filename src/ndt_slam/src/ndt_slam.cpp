@@ -18959,6 +18959,8 @@ void NdtSlamNode::publishOperationalStatus(
     const lidar_slam2_msgs::CargoSafetyStatus& raw,
     const ros::Time& stamp) {
     if (cargo_operational_status_pub_.getNumSubscribers() == 0U) return;
+    const AvoidanceDiagnosticsSnapshot diagnostics =
+        avoidance_diagnostics_.snapshot();
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(6) << std::boolalpha
            << "{\"raw_code\":" << raw.requested_alarm_code
@@ -18970,7 +18972,42 @@ void NdtSlamNode::publishOperationalStatus(
            << ",\"map_session_verified\":"
            << verified_map_session_loaded_
            << ",\"reason\":\"" << escapeJsonString(raw.reason) << "\""
-           << ",\"source_stamp\":" << stamp.toSec() << "}";
+           << ",\"source_stamp\":" << stamp.toSec()
+           << ",\"perception_phase\":\""
+           << escapeJsonString(diagnostics.perception_phase) << "\""
+           << ",\"perception_executed\":"
+           << diagnostics.perception_executed
+           << ",\"query_geometry_valid\":"
+           << diagnostics.query_geometry_valid
+           << ",\"query_geometry_source\":\""
+           << escapeJsonString(diagnostics.query_geometry_source) << "\""
+           << ",\"query_geometry_age_sec\":"
+           << diagnostics.query_geometry_age_sec
+           << ",\"query_horizontal_valid\":"
+           << diagnostics.query_horizontal_valid
+           << ",\"query_vertical_valid\":"
+           << diagnostics.query_vertical_valid
+           << ",\"roi_attempted\":" << diagnostics.roi_attempted
+           << ",\"roi_point_count\":" << diagnostics.roi_point_count
+           << ",\"external_extraction_executed\":"
+           << diagnostics.external_extraction_executed
+           << ",\"external_point_count\":"
+           << diagnostics.external_point_count
+           << ",\"clustering_executed\":"
+           << diagnostics.clustering_executed
+           << ",\"cluster_count\":" << diagnostics.cluster_count
+           << ",\"tracking_attempted\":"
+           << diagnostics.tracking_attempted
+           << ",\"observation_count\":"
+           << diagnostics.observation_count
+           << ",\"track_created_count\":"
+           << diagnostics.track_created_count
+           << ",\"warning_evaluation_attempted\":"
+           << diagnostics.warning_evaluation_attempted
+           << ",\"warning_authority_valid\":"
+           << diagnostics.warning_authority_valid
+           << ",\"block_reason\":\""
+           << escapeJsonString(diagnostics.block_reason) << "\"}";
     std_msgs::String message;
     message.data = stream.str();
     cargo_operational_status_pub_.publish(message);
@@ -22487,6 +22524,53 @@ void NdtSlamNode::runPendingCargoAvoidance(
     debug.data = stream.str();
     cargo_pending_avoidance_pub_.publish(debug);
 
+    AvoidanceDiagnosticsSnapshot pending_diagnostics;
+    pending_diagnostics.source_stamp_sec = obstacle_cloud_stamp.toSec();
+    pending_diagnostics.perception_phase = "PENDING";
+    pending_diagnostics.perception_executed =
+        external_live_perception.executed;
+    pending_diagnostics.query_geometry_valid =
+        cargo_snapshot.envelope.horizontal_valid &&
+        cargo_snapshot.envelope.vertical_valid;
+    pending_diagnostics.query_geometry_source =
+        pendingCargoEnvelopeSourceName(envelope.source);
+    pending_diagnostics.query_geometry_age_sec = envelope.age_sec;
+    pending_diagnostics.query_horizontal_valid =
+        cargo_snapshot.envelope.horizontal_valid;
+    pending_diagnostics.query_vertical_valid =
+        cargo_snapshot.envelope.vertical_valid;
+    pending_diagnostics.roi_attempted =
+        static_cast<bool>(obstacle_cloud_base) &&
+        pending_tracking_query_allowed;
+    pending_diagnostics.roi_point_count = obstacle_cloud_base
+        ? obstacle_cloud_base->size() : 0U;
+    pending_diagnostics.external_extraction_executed =
+        pending_diagnostics.roi_attempted;
+    pending_diagnostics.external_point_count =
+        pending_external_shell->size();
+    pending_diagnostics.clustering_executed =
+        external_live_perception.executed;
+    pending_diagnostics.cluster_count =
+        external_live_perception.cluster_count;
+    pending_diagnostics.tracking_attempted =
+        pending_tracking_query_allowed;
+    pending_diagnostics.observation_count = pending_observations.size();
+    pending_diagnostics.track_created_count =
+        pending_obstacle_decision.created_track_count;
+    pending_diagnostics.warning_evaluation_attempted =
+        pending_warning_query_allowed;
+    pending_diagnostics.warning_authority_valid =
+        fused.official_valid;
+    pending_diagnostics.block_reason = !pending_tracking_query_allowed
+        ? "PENDING_PERCEPTION_NOT_RUN"
+        : (!external_live_perception.valid
+               ? "PENDING_PERCEPTION_RUN_ZERO_POINTS"
+               : (!pending_obstacle_decision.valid
+                      ? "TRACKING_BLOCKED"
+                      : (!fused.official_valid
+                             ? "WARNING_AUTHORITY_BLOCKED" : "NONE")));
+    avoidance_diagnostics_.replace(std::move(pending_diagnostics));
+
     const std::int32_t provisional_code = fused.official_valid &&
         (fused.official_code == CargoSafetyEvaluator::kLevel1Code ||
          fused.official_code == CargoSafetyEvaluator::kLevel2Code ||
@@ -25828,6 +25912,50 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     logCargoSafetyStatus(safety_msg);
     publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_, stamp);
     publishCargoGeometryDebug(last_cargo_bottom_result_, stamp);
+    AvoidanceDiagnosticsSnapshot formal_diagnostics;
+    formal_diagnostics.source_stamp_sec = obstacle_cloud_stamp.toSec();
+    formal_diagnostics.perception_phase = "FORMAL";
+    formal_diagnostics.perception_executed =
+        formal_obstacle_perception.executed;
+    formal_diagnostics.query_geometry_valid = rigid_geometry.valid;
+    formal_diagnostics.query_geometry_source =
+        effectiveCargoEnvelopeSourceName(effective_cargo_envelope_.source);
+    formal_diagnostics.query_geometry_age_sec =
+        std::max(formal_use.pose_age_sec, formal_use.height_age_sec);
+    formal_diagnostics.query_horizontal_valid =
+        safety_input.footprint_base.valid;
+    formal_diagnostics.query_vertical_valid =
+        last_cargo_bottom_result_.valid;
+    formal_diagnostics.roi_attempted =
+        static_cast<bool>(obstacle_cloud_base);
+    formal_diagnostics.roi_point_count = obstacle_roi->size();
+    formal_diagnostics.external_extraction_executed =
+        static_cast<bool>(obstacle_cloud_base);
+    formal_diagnostics.external_point_count =
+        external_obstacle_cloud->size();
+    formal_diagnostics.clustering_executed =
+        formal_obstacle_perception.executed;
+    formal_diagnostics.cluster_count =
+        formal_obstacle_perception.cluster_count;
+    formal_diagnostics.tracking_attempted =
+        formal_obstacle_perception.valid;
+    formal_diagnostics.observation_count =
+        obstacle_track_observations.size();
+    formal_diagnostics.track_created_count =
+        obstacle_track_decision.created_track_count;
+    formal_diagnostics.warning_evaluation_attempted =
+        last_cargo_bottom_result_.valid &&
+        formal_obstacle_perception.valid;
+    formal_diagnostics.warning_authority_valid = safety_msg.valid;
+    formal_diagnostics.block_reason = !formal_diagnostics.roi_attempted
+        ? "FORMAL_PERCEPTION_NOT_RUN"
+        : (!formal_obstacle_perception.valid
+               ? "FORMAL_PERCEPTION_RUN_ZERO_POINTS"
+               : (!obstacle_track_decision.valid
+                      ? "TRACKING_BLOCKED"
+                      : (!safety_msg.valid
+                             ? "WARNING_AUTHORITY_BLOCKED" : "NONE")));
+    avoidance_diagnostics_.replace(std::move(formal_diagnostics));
     publishOperationalStatus(safety_msg, stamp);
 }
 

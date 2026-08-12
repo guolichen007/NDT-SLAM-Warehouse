@@ -177,6 +177,28 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         self.assertEqual(decision.count("composeCargoSafetyDecision("), 1)
         self.assertIn("avoidance_decision_owner_.decide", node)
 
+    def test_operational_diagnostics_are_read_only_post_decision_snapshots(self):
+        diagnostics = read(
+            "src/ndt_slam/include/ndt_slam/avoidance_diagnostics.hpp"
+        )
+        node = read("src/ndt_slam/src/ndt_slam.cpp")
+        for field in (
+            "perception_phase",
+            "perception_executed",
+            "query_horizontal_valid",
+            "query_vertical_valid",
+            "external_point_count",
+            "cluster_count",
+            "observation_count",
+            "warning_authority_valid",
+            "block_reason",
+        ):
+            self.assertIn(field, diagnostics)
+            self.assertIn(f'\\"{field}\\"', node)
+        self.assertIn("avoidance_diagnostics_.replace", node)
+        self.assertNotIn("requested_code", diagnostics)
+        self.assertNotIn("warning_code", diagnostics)
+
 
 if __name__ == "__main__":
     unittest.main()
