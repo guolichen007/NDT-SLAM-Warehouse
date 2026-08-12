@@ -3157,9 +3157,18 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                         .as<float>(0.05F),
                     0.0F,
                     0.25F);
-            obstacle_tracker_config.require_far_field_history_for_level1 =
-                cargo_safety["require_far_field_history_for_level1"]
+            obstacle_tracker_config.require_far_field_history_for_warnings =
+                cargo_safety["require_far_field_history_for_warnings"]
                     .as<bool>(true);
+            obstacle_tracker_config.far_history_confirm_frames =
+                cargo_safety
+                    ? cargo_safety["far_history_confirm_frames"].as<int>(3)
+                    : 3;
+            obstacle_tracker_config.far_history_confirm_duration_sec =
+                cargo_safety
+                    ? cargo_safety["far_history_confirm_duration_sec"]
+                          .as<double>(0.2)
+                    : 0.2;
             obstacle_tracker_config.require_static_cargo_for_warning =
                 cargo_safety["require_static_cargo_for_warning"]
                     .as<bool>(true);

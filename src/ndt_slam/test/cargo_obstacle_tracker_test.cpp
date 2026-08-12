@@ -45,7 +45,7 @@ CargoObstacleObservation directionalPretrack(
 CargoObstacleTrackerConfig ordinaryHazardConfig() {
   CargoObstacleTrackerConfig config;
   config.require_static_cargo_for_warning = false;
-  config.require_far_field_history_for_level1 = false;
+  config.require_far_field_history_for_warnings = false;
   return config;
 }
 
@@ -133,7 +133,7 @@ TEST(CargoObstacleTracker,
 TEST(CargoObstacleTracker,
      MaturePretrackDoesNotDelayAccurateLevel1AtThreeMeters) {
   CargoObstacleTrackerConfig config = ordinaryHazardConfig();
-  config.require_far_field_history_for_level1 = true;
+  config.require_far_field_history_for_warnings = true;
   CargoObstacleTracker tracker(config);
   tracker.update(1.0, {directionalPretrack(10U, 0.0F, 0.0F)});
   tracker.update(1.2, {directionalPretrack(10U, 0.02F, 0.0F)});
@@ -150,7 +150,7 @@ TEST(CargoObstacleTracker,
 TEST(CargoObstacleTracker,
      Level1FirstSeenInsideThreeMetersWaitsForFarFieldHistory) {
   CargoObstacleTrackerConfig config = ordinaryHazardConfig();
-  config.require_far_field_history_for_level1 = true;
+  config.require_far_field_history_for_warnings = true;
   CargoObstacleTracker tracker(config);
   CargoObstacleObservation near = hazard(0U, 0.0F, 0.0F, 17U);
   near.footprint_distance_m = 2.0F;
@@ -161,7 +161,7 @@ TEST(CargoObstacleTracker,
   EXPECT_FALSE(suppressed.confirmed_hazard);
   EXPECT_TRUE(suppressed.selected_near_field);
   EXPECT_FALSE(suppressed.selected_near_field_authorized);
-  EXPECT_EQ(suppressed.reason, "near_field_track_missing_far_history");
+  EXPECT_EQ(suppressed.reason, "warning_track_missing_true_far_history");
 
   CargoObstacleObservation far = near;
   far.footprint_distance_m = 4.0F;
@@ -377,7 +377,7 @@ TEST(CargoObstacleTracker, OutsideCargoShellAloneIsNotIndependentProvenance) {
     decision = tracker.update(1.0 + 0.2 * i, {observation});
   }
   EXPECT_FALSE(decision.confirmed_hazard);
-  EXPECT_EQ(decision.reason, "static_provenance_unavailable");
+  EXPECT_EQ(decision.reason, "warning_track_missing_true_far_history");
   EXPECT_EQ(decision.selected_provenance,
             ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY);
 }

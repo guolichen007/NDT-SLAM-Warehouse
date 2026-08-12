@@ -27,11 +27,13 @@ struct CargoObstacleTrackerConfig {
   std::size_t minimum_points = 20U;
   float level1_warning_distance_m = 3.0F;
   float level2_warning_distance_m = 5.0F;
-  float acquisition_distance_m = 7.0F;
-  // A level-1 warning must belong to a track that was first confirmed beyond
-  // the 3 m shell. This prevents a newly segmented cargo/self cluster from
-  // appearing directly as code 17.
-  bool require_far_field_history_for_level1 = true;
+  float acquisition_distance_m = 8.0F;
+  // Formal 17/18 warnings require the same physical track to be confirmed in
+  // the true 5-8 m acquisition shell. Frame/duration thresholds are tunable
+  // evidence strength, not fixed business constants.
+  bool require_far_field_history_for_warnings = true;
+  int far_history_confirm_frames = 3;
+  double far_history_confirm_duration_sec = 0.2;
   // A newly created cluster already embedded in the cargo footprint is
   // ambiguous: it is commonly residual cargo self-points. It may issue a
   // warning only after this same track was independently observed outside
@@ -75,6 +77,9 @@ struct CargoObstacleObservation {
   float footprint_distance_m = std::numeric_limits<float>::infinity();
   float conservative_clearance_m =
       std::numeric_limits<float>::quiet_NaN();
+  // Combined cargo, obstacle and localization XY uncertainty. A far sample
+  // is authoritative only when footprint_distance - uncertainty remains >5m.
+  float horizontal_uncertainty_m = 0.0F;
   std::size_t point_count = 0U;
   std::size_t raw_equivalent_point_count = 0U;
   float xy_area_m2 = 0.0F;
@@ -85,12 +90,15 @@ struct CargoObstacleObservation {
   Eigen::Vector2f cargo_center_map = Eigen::Vector2f::Zero();
   bool cargo_center_valid = false;
   std::uint16_t warning_code = 0U;
-  // False for a 5-7 m acquisition observation. Such a frame may build
+  // False for a 5-8 m acquisition observation. Such a frame may build
   // identity/provenance history but can never publish 17/18.
   bool warning_eligible = true;
   bool source_validated = true;
   float validation_shell_m = 0.0F;
   ExternalProvenance provenance = ExternalProvenance::NONE;
+  // Reserved interface: this branch provides no baseline producer, therefore
+  // runtime observations leave this false and 17/18 use live far history.
+  bool certified_static_provenance = false;
 };
 
 struct CargoObstacleTrack {
@@ -126,7 +134,10 @@ struct CargoObstacleTrack {
   bool separated_obstacle_history_valid = false;
   bool current_embedded = false;
   int far_field_validated_observations = 0;
+  double far_field_first_stamp_sec = 0.0;
+  double far_field_duration_sec = 0.0;
   bool far_field_history_valid = false;
+  bool certified_static_provenance = false;
   bool current_near_field = false;
   std::vector<std::int64_t> occupied_map_cells;
   std::vector<std::int64_t> identity_anchor_map_cells;
@@ -164,6 +175,9 @@ struct CargoObstacleTrackerDecision {
   bool selected_near_field = false;
   bool selected_near_field_authorized = false;
   int selected_far_field_observations = 0;
+  double selected_far_field_duration_sec = 0.0;
+  bool selected_far_field_history_valid = false;
+  bool selected_certified_static_provenance = false;
   int selected_static_provenance_streak = 0;
   double selected_static_age_sec = 0.0;
   float selected_track_cell_overlap = 0.0F;
