@@ -91,7 +91,8 @@ TEST(CargoObstacleTracker,
   EXPECT_GT(associated.selected_track_neighbor_cell_overlap, 0.0F);
 
   CargoObstacleObservation implausibly_far = hazard(0U, 3.0F, 0.0F);
-  implausibly_far.occupied_map_cells = {102};
+  implausibly_far.occupied_map_cells = {500};
+  implausibly_far.footprint_distance_m = 2.0F;
   const CargoObstacleTrackerDecision reset =
       tracker.update(1.4, {implausibly_far});
   EXPECT_NE(reset.selected_track_id, initial.selected_track_id);
@@ -164,13 +165,19 @@ TEST(CargoObstacleTracker,
   EXPECT_EQ(suppressed.warning_code, 29U);
   EXPECT_EQ(suppressed.reason, "anomalous_proximity_without_far_authority");
 
+  // Far-field acquisition frames (5-8 m): warning_eligible=false, code=14.
+  // They silently accumulate far history without producing 17/18/29.
   CargoObstacleObservation far = near;
   far.footprint_distance_m = 6.0F;
-  far.warning_code = 18U;
+  far.warning_code = 14U;
+  far.warning_eligible = false;
   far.horizontal_uncertainty_m = 0.0F;
   tracker.update(1.6, {far});
   tracker.update(1.8, {far});
-  ASSERT_TRUE(tracker.update(2.0, {far}).confirmed_hazard);
+  // Third acquisition frame completes far_history (3 frames + 0.4s ≥ 0.2s)
+  // but produces no hazard because these are acquisition-only observations.
+  tracker.update(2.0, {far});
+  // Now a near-field observation with established far history → Code 17.
   const CargoObstacleTrackerDecision authorized =
       tracker.update(2.2, {near});
   EXPECT_TRUE(authorized.confirmed_hazard) << authorized.reason;
