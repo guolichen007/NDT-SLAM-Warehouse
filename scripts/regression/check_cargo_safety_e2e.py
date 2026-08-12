@@ -135,6 +135,12 @@ def main() -> int:
             "forceFailSafe" not in heartbeat,
             "physical warnings remain coupled to fail-safe semantics",
             failures)
+    require("CargoConfigValidationResult" in safety_header and
+            "restoring 3.0/5.0/0.80" not in node and
+            "cargo_safety_config_error_detail_" in node and
+            "refusing Cargo/avoidance authority with Code35" in node,
+            "invalid Cargo policy can still silently restore runtime defaults",
+            failures)
     require('result.reason = "clear_no_external_obstacle"' in
             safety_evaluator and
             "result.warning_code = kSafeCode" in safety_evaluator,

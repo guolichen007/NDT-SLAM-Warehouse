@@ -2509,6 +2509,7 @@ private:
     RigidCargoGeometry previous_self_mask_geometry_;
     RigidCargoGeometry accepted_self_mask_geometry_;
     bool cargo_safety_config_error_ = false;
+    std::string cargo_safety_config_error_detail_;
     std::uint64_t cargo_fusion_track_id_ = 0;
     bool cargo_fusion_track_active_ = false;
     bool formal_cargo_removal_authorized_ = false;

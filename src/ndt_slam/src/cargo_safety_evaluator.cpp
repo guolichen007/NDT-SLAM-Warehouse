@@ -16,43 +16,7 @@ bool isFinite(double value) {
 }
 
 bool isValidConfig(const CargoSafetyConfig& config) {
-    return isFinite(config.level1_distance_m) && config.level1_distance_m >= 0.0f &&
-           isFinite(config.level2_distance_m) &&
-           config.level2_distance_m >= config.level1_distance_m &&
-           isFinite(config.minimum_vertical_clearance_m) &&
-           isFinite(config.cargo_bottom_extra_margin_m) &&
-           config.cargo_bottom_extra_margin_m >= 0.0f &&
-           isFinite(config.future_stamp_tolerance_sec) &&
-           config.future_stamp_tolerance_sec >= 0.0 &&
-           isFinite(config.maximum_obstacle_cloud_age_sec) &&
-           config.maximum_obstacle_cloud_age_sec >= 0.0 &&
-           config.minimum_roi_finite_points > 0U &&
-           isFinite(config.minimum_roi_coverage_ratio) &&
-           config.minimum_roi_coverage_ratio >= 0.0F &&
-           config.minimum_roi_coverage_ratio <= 1.0F &&
-           isFinite(config.obstacle_top_percentile) &&
-           config.obstacle_top_percentile >= 0.0f &&
-           config.obstacle_top_percentile <= 1.0f &&
-           isFinite(config.obstacle_bottom_percentile) &&
-           config.obstacle_bottom_percentile >= 0.0F &&
-           config.obstacle_bottom_percentile < config.obstacle_top_percentile &&
-           isFinite(config.obstacle_vertical_bin_size_m) &&
-           config.obstacle_vertical_bin_size_m > 0.0F &&
-           isFinite(config.obstacle_min_vertical_continuity_ratio) &&
-           config.obstacle_min_vertical_continuity_ratio >= 0.0F &&
-           config.obstacle_min_vertical_continuity_ratio <= 1.0F &&
-           isFinite(config.overhead_separation_margin_m) &&
-           config.overhead_separation_margin_m >= 0.0F &&
-           isFinite(config.obstacle_uncertainty_floor_m) &&
-           config.obstacle_uncertainty_floor_m >= 0.0f &&
-           isFinite(config.obstacle_uncertainty_max_m) &&
-           config.obstacle_uncertainty_max_m >= config.obstacle_uncertainty_floor_m &&
-           isFinite(config.obstacle_cluster_tolerance_m) &&
-           config.obstacle_cluster_tolerance_m > 0.0f &&
-           config.obstacle_min_cluster_points > 0 &&
-           config.obstacle_max_cluster_points >= config.obstacle_min_cluster_points &&
-           config.obstacle_max_cluster_points <=
-               static_cast<std::size_t>(std::numeric_limits<int>::max());
+    return validateCargoSafetyConfig(config).valid;
 }
 
 bool isValidFootprint(const CargoBaseFootprint& footprint) {
@@ -92,11 +56,83 @@ bool isMoreDangerous(const CargoSafetyClusterEvidence& candidate,
 
 }  // namespace
 
-CargoSafetyEvaluator::CargoSafetyEvaluator(const CargoSafetyConfig& config)
-    : config_(config) {}
+CargoConfigValidationResult validateCargoSafetyConfig(
+    const CargoSafetyConfig& config) {
+    CargoConfigValidationResult result;
+    const auto finite_nonnegative = [&result](
+        const char* field, double value) {
+        if (!std::isfinite(value)) result.reject(field, "non_finite");
+        else if (value < 0.0) result.reject(field, "must_be_nonnegative");
+    };
+    finite_nonnegative("level1_distance_m", config.level1_distance_m);
+    finite_nonnegative("level2_distance_m", config.level2_distance_m);
+    if (std::isfinite(config.level1_distance_m) &&
+        std::isfinite(config.level2_distance_m) &&
+        config.level2_distance_m < config.level1_distance_m) {
+        result.reject("level2_distance_m", "must_be_at_least_level1");
+    }
+    if (!std::isfinite(config.minimum_vertical_clearance_m))
+        result.reject("minimum_vertical_clearance_m", "non_finite");
+    finite_nonnegative("cargo_bottom_extra_margin_m",
+                       config.cargo_bottom_extra_margin_m);
+    finite_nonnegative("future_stamp_tolerance_sec",
+                       config.future_stamp_tolerance_sec);
+    finite_nonnegative("maximum_obstacle_cloud_age_sec",
+                       config.maximum_obstacle_cloud_age_sec);
+    if (config.minimum_roi_finite_points == 0U)
+        result.reject("minimum_roi_finite_points", "must_be_positive");
+    const auto ratio = [&result](const char* field, double value) {
+        if (!std::isfinite(value)) result.reject(field, "non_finite");
+        else if (value < 0.0 || value > 1.0)
+            result.reject(field, "outside_0_1");
+    };
+    ratio("minimum_roi_coverage_ratio", config.minimum_roi_coverage_ratio);
+    ratio("obstacle_top_percentile", config.obstacle_top_percentile);
+    ratio("obstacle_bottom_percentile", config.obstacle_bottom_percentile);
+    if (std::isfinite(config.obstacle_top_percentile) &&
+        std::isfinite(config.obstacle_bottom_percentile) &&
+        config.obstacle_bottom_percentile >= config.obstacle_top_percentile) {
+        result.reject("obstacle_bottom_percentile", "must_be_below_top");
+    }
+    if (!std::isfinite(config.obstacle_vertical_bin_size_m) ||
+        config.obstacle_vertical_bin_size_m <= 0.0F)
+        result.reject("obstacle_vertical_bin_size_m", "must_be_positive");
+    ratio("obstacle_min_vertical_continuity_ratio",
+          config.obstacle_min_vertical_continuity_ratio);
+    finite_nonnegative("overhead_separation_margin_m",
+                       config.overhead_separation_margin_m);
+    finite_nonnegative("obstacle_uncertainty_floor_m",
+                       config.obstacle_uncertainty_floor_m);
+    finite_nonnegative("obstacle_uncertainty_max_m",
+                       config.obstacle_uncertainty_max_m);
+    if (std::isfinite(config.obstacle_uncertainty_floor_m) &&
+        std::isfinite(config.obstacle_uncertainty_max_m) &&
+        config.obstacle_uncertainty_max_m <
+            config.obstacle_uncertainty_floor_m)
+        result.reject("obstacle_uncertainty_max_m", "below_floor");
+    if (!std::isfinite(config.obstacle_cluster_tolerance_m) ||
+        config.obstacle_cluster_tolerance_m <= 0.0F)
+        result.reject("obstacle_cluster_tolerance_m", "must_be_positive");
+    if (config.obstacle_min_cluster_points == 0U)
+        result.reject("obstacle_min_cluster_points", "must_be_positive");
+    if (config.obstacle_max_cluster_points <
+        config.obstacle_min_cluster_points)
+        result.reject("obstacle_max_cluster_points", "below_minimum");
+    if (config.obstacle_max_cluster_points >
+        static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        result.reject("obstacle_max_cluster_points", "exceeds_int_range");
+    return result;
+}
 
-void CargoSafetyEvaluator::setConfig(const CargoSafetyConfig& config) {
+CargoSafetyEvaluator::CargoSafetyEvaluator(const CargoSafetyConfig& config) {
+    setConfig(config);
+}
+
+CargoConfigValidationResult CargoSafetyEvaluator::setConfig(
+    const CargoSafetyConfig& config) {
     config_ = config;
+    config_validation_ = validateCargoSafetyConfig(config_);
+    return config_validation_;
 }
 
 const CargoSafetyConfig& CargoSafetyEvaluator::config() const {

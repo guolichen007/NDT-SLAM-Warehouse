@@ -586,5 +586,31 @@ TEST(CargoObstacleTracker,
   EXPECT_EQ(promoted.selected_track_id, acquired.selected_track_id);
 }
 
+TEST(CargoObstacleTracker,
+     InvalidConfigIsRetainedAndCannotSilentlyUseDefaults) {
+  CargoObstacleTrackerConfig config;
+  config.confirm_frames = 1;
+  config.association_neighbor_cell_radius = 4;
+  config.far_history_confirm_duration_sec = -0.1;
+  config.acquisition_distance_m = 4.0F;
+  CargoObstacleTracker tracker;
+  const CargoConfigValidationResult validation = tracker.setConfig(config);
+  EXPECT_FALSE(validation.valid);
+  EXPECT_NE(validation.summary().find("confirm_frames"), std::string::npos);
+  EXPECT_NE(validation.summary().find("association_neighbor_cell_radius"),
+            std::string::npos);
+  EXPECT_NE(validation.summary().find("far_history_confirm_duration_sec"),
+            std::string::npos);
+  EXPECT_NE(validation.summary().find("acquisition_distance_m"),
+            std::string::npos);
+  EXPECT_EQ(tracker.config().confirm_frames, 1);
+  EXPECT_EQ(tracker.config().association_neighbor_cell_radius, 4);
+  const CargoObstacleTrackerDecision decision =
+      tracker.update(1.0, {hazard(0U, 0.0F, 0.0F)});
+  EXPECT_FALSE(decision.valid);
+  EXPECT_NE(decision.reason.find("invalid_obstacle_tracker_config"),
+            std::string::npos);
+}
+
 }  // namespace
 }  // namespace ndt_slam

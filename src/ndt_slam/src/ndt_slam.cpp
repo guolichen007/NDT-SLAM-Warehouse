@@ -2579,12 +2579,11 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 odom_anchor_config_.cargo_warning.obstacle_min_points = cw["obstacle_min_points"].as<int>(5);
                 odom_anchor_config_.cargo_warning.obstacle_cluster_tolerance_m = cw["obstacle_cluster_tolerance_m"].as<float>(0.25f);
                 odom_anchor_config_.cargo_warning.maximum_obstacle_cloud_age_sec =
-                    std::max(0.05f, cw["maximum_obstacle_cloud_age_sec"].as<float>(0.50f));
+                    cw["maximum_obstacle_cloud_age_sec"].as<float>(0.50f);
                 odom_anchor_config_.cargo_warning.minimum_roi_finite_points =
-                    std::max(1, cw["minimum_roi_finite_points"].as<int>(20));
+                    cw["minimum_roi_finite_points"].as<int>(20);
                 odom_anchor_config_.cargo_warning.minimum_roi_coverage_ratio =
-                    std::clamp(cw["minimum_roi_coverage_ratio"].as<float>(0.05F),
-                               0.0f, 1.0f);
+                    cw["minimum_roi_coverage_ratio"].as<float>(0.05F);
                 odom_anchor_config_.cargo_warning.exclude_ground = cw["exclude_ground"].as<bool>(true);
                 odom_anchor_config_.cargo_warning.ground_hag_min_m = cw["ground_hag_min_m"].as<float>(0.20f);
                 odom_anchor_config_.cargo_warning.exclude_self_cargo = cw["exclude_self_cargo"].as<bool>(true);
@@ -2601,14 +2600,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                         lidar_slam2_msgs::CargoSafetyStatus::CODE_LEVEL1_WARNING ||
                     odom_anchor_config_.cargo_warning.level2_alarm_code !=
                         lidar_slam2_msgs::CargoSafetyStatus::CODE_LEVEL2_WARNING) {
-                    ROS_ERROR("[CargoWarningConfig] invalid status codes; forcing 14/17/18 contract");
+                    ROS_ERROR("[CargoWarningConfig] invalid status codes; compiled 14/17/18 protocol remains authoritative and Cargo safety is disabled");
                     cargo_safety_config_error_ = true;
-                    odom_anchor_config_.cargo_warning.clear_alarm_code =
-                        lidar_slam2_msgs::CargoSafetyStatus::CODE_CLEAR;
-                    odom_anchor_config_.cargo_warning.level1_alarm_code =
-                        lidar_slam2_msgs::CargoSafetyStatus::CODE_LEVEL1_WARNING;
-                    odom_anchor_config_.cargo_warning.level2_alarm_code =
-                        lidar_slam2_msgs::CargoSafetyStatus::CODE_LEVEL2_WARNING;
+                    cargo_safety_config_error_detail_ =
+                        "odom_anchored_cargo_box.cargo_warning.status_codes:protocol_mismatch";
                 }
 
                 ROS_DEBUG("[CargoWarningConfig] enabled=%d publish_alarm=%d debug_marker=%d level1_dist=%.1f level2_dist=%.1f clearance=%.2f",
@@ -3292,6 +3287,13 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
         CargoSafetyConfig safety_config;
         const YAML::Node cargo_safety = config["cargo_safety"];
+        const auto reject_cargo_config = [this](
+            const std::string& field, const std::string& reason) {
+            cargo_safety_config_error_ = true;
+            if (!cargo_safety_config_error_detail_.empty())
+                cargo_safety_config_error_detail_ += ';';
+            cargo_safety_config_error_detail_ += field + ':' + reason;
+        };
         safety_config.level1_distance_m = cargo_safety
             ? cargo_safety["level1_distance_m"].as<float>(3.0F) : 3.0F;
         safety_config.level2_distance_m = cargo_safety
@@ -3318,9 +3320,16 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             : 0.10F;
         safety_config.obstacle_cluster_tolerance_m =
             odom_anchor_config_.cargo_warning.obstacle_cluster_tolerance_m;
-        safety_config.obstacle_min_cluster_points =
-            static_cast<std::size_t>(std::max(
-                1, odom_anchor_config_.cargo_warning.obstacle_min_points));
+        if (odom_anchor_config_.cargo_warning.obstacle_min_points <= 0) {
+            reject_cargo_config(
+                "cargo_safety.obstacle_min_cluster_points",
+                "must_be_positive");
+            safety_config.obstacle_min_cluster_points = 0U;
+        } else {
+            safety_config.obstacle_min_cluster_points =
+                static_cast<std::size_t>(
+                    odom_anchor_config_.cargo_warning.obstacle_min_points);
+        }
         safety_config.maximum_obstacle_cloud_age_sec = cargo_safety
             ? cargo_safety["maximum_obstacle_cloud_age_sec"].as<double>(0.50)
             : 0.50;
@@ -3360,40 +3369,44 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         }
 
         if (!contract_valid) {
-            ROS_ERROR("[CargoSafetyConfig] invalid safety/status contract; "
-                      "restoring 3.0/5.0/0.80 and status codes 14/17/18/29/30-35");
-            cargo_safety_config_error_ = true;
-            safety_config.level1_distance_m = 3.0F;
-            safety_config.level2_distance_m = 5.0F;
-            safety_config.minimum_vertical_clearance_m = 0.80F;
-            safety_config.minimum_roi_coverage_ratio = 0.05F;
-            safety_config.maximum_obstacle_cloud_age_sec = 0.50;
+            ROS_ERROR("[CargoSafetyConfig] invalid safety/status contract; refusing Cargo/avoidance authority with Code35");
+            reject_cargo_config(
+                "cargo_safety.protocol_contract",
+                "expected_3m_5m_0.8m_and_codes_14_17_18_29_30_35");
         }
-        cargo_safety_evaluator_.setConfig(safety_config);
+        const CargoConfigValidationResult safety_validation =
+            cargo_safety_evaluator_.setConfig(safety_config);
+        if (!safety_validation.valid) {
+            reject_cargo_config(
+                "cargo_safety.", safety_validation.summary());
+        }
         CargoSafetyTemporalConfig temporal_config;
         if (cargo_safety) {
-            temporal_config.hazard_confirm_frames = std::max(
-                2, cargo_safety["hazard_confirm_frames"].as<int>(3));
-            temporal_config.clear_confirm_frames = std::max(
-                2, cargo_safety["clear_confirm_frames"].as<int>(2));
+            temporal_config.hazard_confirm_frames =
+                cargo_safety["hazard_confirm_frames"].as<int>(3);
+            temporal_config.clear_confirm_frames =
+                cargo_safety["clear_confirm_frames"].as<int>(2);
+            const int minimum_hazard_cluster_points =
+                cargo_safety["minimum_hazard_cluster_points"].as<int>(20);
             temporal_config.minimum_hazard_cluster_points =
-                static_cast<std::size_t>(std::max(
-                    1, cargo_safety["minimum_hazard_cluster_points"]
-                           .as<int>(20)));
-            temporal_config.maximum_evidence_gap_sec = std::max(
-                0.10, cargo_safety["maximum_evidence_gap_sec"]
-                          .as<double>(0.60));
-            temporal_config.maximum_centroid_step_m = std::max(
-                0.05F, cargo_safety["maximum_centroid_step_m"]
-                           .as<float>(0.75F));
-            temporal_config.maximum_distance_step_m = std::max(
-                0.05F, cargo_safety["maximum_distance_step_m"]
-                           .as<float>(0.75F));
-            temporal_config.maximum_clearance_step_m = std::max(
-                0.05F, cargo_safety["maximum_clearance_step_m"]
-                           .as<float>(0.75F));
+                minimum_hazard_cluster_points > 0
+                    ? static_cast<std::size_t>(minimum_hazard_cluster_points)
+                    : 0U;
+            temporal_config.maximum_evidence_gap_sec =
+                cargo_safety["maximum_evidence_gap_sec"].as<double>(0.60);
+            temporal_config.maximum_centroid_step_m =
+                cargo_safety["maximum_centroid_step_m"].as<float>(0.75F);
+            temporal_config.maximum_distance_step_m =
+                cargo_safety["maximum_distance_step_m"].as<float>(0.75F);
+            temporal_config.maximum_clearance_step_m =
+                cargo_safety["maximum_clearance_step_m"].as<float>(0.75F);
         }
-        cargo_safety_temporal_filter_.setConfig(temporal_config);
+        const CargoConfigValidationResult temporal_validation =
+            cargo_safety_temporal_filter_.setConfig(temporal_config);
+        if (!temporal_validation.valid) {
+            reject_cargo_config(
+                "cargo_safety.temporal.", temporal_validation.summary());
+        }
         CargoObstacleTrackerConfig obstacle_tracker_config;
         obstacle_tracker_config.confirm_frames =
             temporal_config.hazard_confirm_frames;
@@ -3403,92 +3416,78 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             temporal_config.maximum_evidence_gap_sec;
         if (cargo_safety) {
             obstacle_tracker_config.association_max_centroid_distance_m =
-                std::max(0.05F,
-                    cargo_safety["obstacle_track_association_distance_m"]
-                        .as<float>(0.75F));
+                cargo_safety["obstacle_track_association_distance_m"]
+                    .as<float>(0.75F);
             obstacle_tracker_config.association_max_top_step_m =
-                std::max(0.05F,
-                    cargo_safety["obstacle_track_association_top_step_m"]
-                        .as<float>(0.75F));
+                cargo_safety["obstacle_track_association_top_step_m"]
+                    .as<float>(0.75F);
             obstacle_tracker_config.association_neighbor_cell_radius =
-                std::clamp(
-                    cargo_safety[
-                        "obstacle_track_association_neighbor_cell_radius"]
-                        .as<int>(1),
-                    0,
-                    2);
+                cargo_safety[
+                    "obstacle_track_association_neighbor_cell_radius"]
+                    .as<int>(1);
             obstacle_tracker_config.static_track_cell_overlap_min =
-                std::clamp(
-                    cargo_safety["static_track_cell_overlap_min"]
-                        .as<float>(0.20F),
-                    0.01F, 1.0F);
-            obstacle_tracker_config.static_track_iou_min = std::clamp(
-                cargo_safety["static_track_iou_min"].as<float>(0.10F),
-                0.01F, 1.0F);
+                cargo_safety["static_track_cell_overlap_min"]
+                    .as<float>(0.20F);
+            obstacle_tracker_config.static_track_iou_min =
+                cargo_safety["static_track_iou_min"].as<float>(0.10F);
             obstacle_tracker_config.static_provenance_min_cargo_motion_m =
-                std::max(
-                    0.0F,
-                    cargo_safety[
-                        "static_provenance_min_cargo_motion_m"]
-                        .as<float>(0.30F));
-            obstacle_tracker_config.stale_track_sec = std::max(
-                obstacle_tracker_config.maximum_observation_gap_sec,
-                cargo_safety["obstacle_track_stale_sec"].as<double>(1.00));
+                cargo_safety[
+                    "static_provenance_min_cargo_motion_m"]
+                    .as<float>(0.30F);
+            obstacle_tracker_config.stale_track_sec =
+                cargo_safety["obstacle_track_stale_sec"].as<double>(1.00);
             obstacle_tracker_config.embedded_distance_threshold_m =
-                std::clamp(
-                    cargo_safety["embedded_obstacle_distance_threshold_m"]
-                        .as<float>(0.05F),
-                    0.0F,
-                    0.25F);
+                cargo_safety["embedded_obstacle_distance_threshold_m"]
+                    .as<float>(0.05F);
             obstacle_tracker_config.require_far_field_history_for_warnings =
                 cargo_safety["require_far_field_history_for_warnings"]
                     .as<bool>(true);
-            obstacle_tracker_config.far_history_confirm_frames = std::max(
-                2, cargo_safety["far_history_confirm_frames"].as<int>(3));
+            obstacle_tracker_config.far_history_confirm_frames =
+                cargo_safety["far_history_confirm_frames"].as<int>(3);
             obstacle_tracker_config.far_history_confirm_duration_sec =
-                std::max(
-                    0.0,
-                    cargo_safety["far_history_confirm_duration_sec"]
-                        .as<double>(0.2));
+                cargo_safety["far_history_confirm_duration_sec"]
+                    .as<double>(0.2);
             obstacle_tracker_config.require_static_cargo_for_warning =
                 cargo_safety["require_static_cargo_for_warning"]
                     .as<bool>(false);
+            const int static_min_voxel_points =
+                cargo_safety["static_cargo_min_voxel_points"].as<int>(80);
             obstacle_tracker_config.static_cargo_min_voxel_points =
-                static_cast<std::size_t>(std::max(
-                    static_cast<int>(obstacle_tracker_config.minimum_points),
-                    cargo_safety["static_cargo_min_voxel_points"]
-                        .as<int>(80)));
+                static_min_voxel_points > 0
+                    ? static_cast<std::size_t>(static_min_voxel_points) : 0U;
+            const int static_min_raw_points = cargo_safety[
+                "static_cargo_min_raw_equivalent_points"].as<int>(0);
+            if (static_min_raw_points < 0) {
+                reject_cargo_config(
+                    "cargo_safety.static_cargo_min_raw_equivalent_points",
+                    "must_be_nonnegative");
+            }
             obstacle_tracker_config.static_cargo_min_raw_equivalent_points =
-                static_cast<std::size_t>(std::max(
-                    0, cargo_safety[
-                           "static_cargo_min_raw_equivalent_points"]
-                           .as<int>(0)));
-            obstacle_tracker_config.static_cargo_min_xy_area_m2 = std::max(
-                0.01F, cargo_safety["static_cargo_min_xy_area_m2"]
-                           .as<float>(0.50F));
-            obstacle_tracker_config.static_cargo_min_long_side_m = std::max(
-                0.10F, cargo_safety["static_cargo_min_long_side_m"]
-                           .as<float>(0.80F));
-            obstacle_tracker_config.static_cargo_min_height_span_m = std::max(
-                0.10F, cargo_safety["static_cargo_min_height_span_m"]
-                           .as<float>(0.40F));
+                static_min_raw_points >= 0
+                    ? static_cast<std::size_t>(static_min_raw_points) : 0U;
+            obstacle_tracker_config.static_cargo_min_xy_area_m2 =
+                cargo_safety["static_cargo_min_xy_area_m2"]
+                    .as<float>(0.50F);
+            obstacle_tracker_config.static_cargo_min_long_side_m =
+                cargo_safety["static_cargo_min_long_side_m"]
+                    .as<float>(0.80F);
+            obstacle_tracker_config.static_cargo_min_height_span_m =
+                cargo_safety["static_cargo_min_height_span_m"]
+                    .as<float>(0.40F);
+            const int static_min_cells =
+                cargo_safety["static_cargo_min_occupied_cells"].as<int>(12);
             obstacle_tracker_config.static_cargo_min_occupied_cells =
-                static_cast<std::size_t>(std::max(
-                    1, cargo_safety["static_cargo_min_occupied_cells"]
-                           .as<int>(12)));
-            obstacle_tracker_config.known_static_confirm_frames = std::max(
-                obstacle_tracker_config.confirm_frames,
-                cargo_safety["known_static_confirm_frames"].as<int>(3));
-            obstacle_tracker_config.static_cargo_confirm_frames = std::max(
-                obstacle_tracker_config.confirm_frames,
-                cargo_safety["static_cargo_confirm_frames"].as<int>(5));
-            obstacle_tracker_config.static_cargo_confirm_sec = std::max(
-                0.0, cargo_safety["static_cargo_confirm_sec"]
-                         .as<double>(0.8));
+                static_min_cells > 0
+                    ? static_cast<std::size_t>(static_min_cells) : 0U;
+            obstacle_tracker_config.known_static_confirm_frames =
+                cargo_safety["known_static_confirm_frames"].as<int>(3);
+            obstacle_tracker_config.static_cargo_confirm_frames =
+                cargo_safety["static_cargo_confirm_frames"].as<int>(5);
+            obstacle_tracker_config.static_cargo_confirm_sec =
+                cargo_safety["static_cargo_confirm_sec"].as<double>(0.8);
             obstacle_tracker_config.static_velocity_threshold_mps =
-                std::max(0.0F,
-                    cargo_safety["obstacle_track_static_velocity_mps"]
-                        .as<float>(0.08F));
+                cargo_safety["obstacle_track_static_velocity_mps"]
+                    .as<float>(0.08F);
 
             StaticObstacleEvidenceConfig static_map_config;
             static_map_config.cell_size_m = std::max(
@@ -3685,11 +3684,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 cargo_safety["collision_tracking_acquisition_distance_m"]
                     .as<float>(8.0F);
             cargo_collision_tracking_acquisition_distance_m_ =
-                std::isfinite(configured_acquisition_distance_m)
-                ? std::clamp(
-                      configured_acquisition_distance_m,
-                      safety_config.level2_distance_m + 0.50F, 12.0F)
-                : 8.0F;
+                configured_acquisition_distance_m;
             obstacle_tracker_config.level1_warning_distance_m =
                 safety_config.level1_distance_m;
             obstacle_tracker_config.level2_warning_distance_m =
@@ -3697,15 +3692,26 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             obstacle_tracker_config.acquisition_distance_m =
                 cargo_collision_tracking_acquisition_distance_m_;
         }
-        cargo_obstacle_tracker_.setConfig(obstacle_tracker_config);
+        const CargoConfigValidationResult tracker_validation =
+            cargo_obstacle_tracker_.setConfig(obstacle_tracker_config);
+        if (!tracker_validation.valid) {
+            reject_cargo_config(
+                "cargo_safety.tracker.", tracker_validation.summary());
+        }
         CargoObstacleTrackerConfig pending_obstacle_tracker_config =
             obstacle_tracker_config;
         pending_obstacle_tracker_config.require_static_cargo_for_warning =
             false;
         pending_obstacle_tracker_config.require_large_geometry_for_warning =
             true;
-        pending_cargo_obstacle_tracker_.setConfig(
-            pending_obstacle_tracker_config);
+        const CargoConfigValidationResult pending_tracker_validation =
+            pending_cargo_obstacle_tracker_.setConfig(
+                pending_obstacle_tracker_config);
+        if (!pending_tracker_validation.valid) {
+            reject_cargo_config(
+                "cargo_safety.pending_tracker.",
+                pending_tracker_validation.summary());
+        }
         PendingStaticHazardTrackerConfig pending_static_tracker_config;
         pending_static_tracker_config.minimum_confirmations =
             obstacle_tracker_config.confirm_frames;
@@ -3857,6 +3863,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
     } catch (const YAML::Exception& e) {
         ROS_ERROR("YAML parse error: %s", e.what());
         cargo_safety_config_error_ = true;
+        cargo_safety_config_error_detail_ =
+            std::string("yaml_parse_error:") + e.what();
     }
 }
 
@@ -19157,7 +19165,10 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
         (status.obstacle_valid || use_provisional_warning);
     decision_input.warning_code = warning_code;
     decision_input.evidence_reason = cargo_safety_config_error_
-        ? "cargo_safety_config_invalid" :
+        ? "cargo_safety_config_invalid:" +
+              (cargo_safety_config_error_detail_.empty()
+                   ? std::string("unspecified")
+                   : cargo_safety_config_error_detail_) :
           (warning_contract_error ? "warning_contract_invalid" :
            (finite_contract_error ? "non_finite_safety_status" :
             (hook_evidence.gravity_conflict

@@ -511,6 +511,30 @@ TEST(CargoSafetyEvaluator, InvalidConfigAndInputAreInternalErrors) {
     EXPECT_EQ(input_result.fault, CargoSafetyFault::INTERNAL_ERROR);
 }
 
+TEST(CargoSafetyConfig, ReportsEveryInvalidFieldWithoutReplacingPolicy) {
+    CargoSafetyConfig config;
+    config.level1_distance_m = -1.0F;
+    config.level2_distance_m = std::numeric_limits<float>::quiet_NaN();
+    config.minimum_roi_coverage_ratio = 1.2F;
+    config.obstacle_bottom_percentile = config.obstacle_top_percentile;
+    config.obstacle_min_cluster_points = 0U;
+    CargoSafetyEvaluator evaluator;
+    const CargoConfigValidationResult validation = evaluator.setConfig(config);
+    EXPECT_FALSE(validation.valid);
+    EXPECT_NE(validation.summary().find("level1_distance_m"),
+              std::string::npos);
+    EXPECT_NE(validation.summary().find("level2_distance_m"),
+              std::string::npos);
+    EXPECT_NE(validation.summary().find("minimum_roi_coverage_ratio"),
+              std::string::npos);
+    EXPECT_NE(validation.summary().find("obstacle_bottom_percentile"),
+              std::string::npos);
+    EXPECT_NE(validation.summary().find("obstacle_min_cluster_points"),
+              std::string::npos);
+    EXPECT_FLOAT_EQ(evaluator.config().level1_distance_m, -1.0F);
+    EXPECT_TRUE(std::isnan(evaluator.config().level2_distance_m));
+}
+
 TEST(CargoSafetyEvaluator, Level1HasPriorityAcrossClusters) {
     CargoSafetyInput mixed = baseInput();
     addCluster(&mixed, 4.0F, 1.20F, 0.0F);

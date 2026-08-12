@@ -10,6 +10,7 @@
 #include <pcl/point_types.h>
 
 #include "ndt_slam/hook_load_evidence_policy.hpp"
+#include "ndt_slam/cargo_config_validation.hpp"
 #include "ndt_slam/cargo_rigid_geometry.hpp"
 #include "ndt_slam/obstacle_perception.hpp"
 
@@ -224,8 +225,11 @@ public:
 
     explicit CargoSafetyEvaluator(const CargoSafetyConfig& config = CargoSafetyConfig());
 
-    void setConfig(const CargoSafetyConfig& config);
+    CargoConfigValidationResult setConfig(const CargoSafetyConfig& config);
     const CargoSafetyConfig& config() const;
+    const CargoConfigValidationResult& configValidation() const noexcept {
+        return config_validation_;
+    }
 
     CargoSafetyResult evaluate(const CargoSafetyInput& input) const;
 
@@ -243,6 +247,10 @@ public:
 
 private:
     CargoSafetyConfig config_;
+    CargoConfigValidationResult config_validation_;
 };
+
+CargoConfigValidationResult validateCargoSafetyConfig(
+    const CargoSafetyConfig& config);
 
 }  // namespace ndt_slam

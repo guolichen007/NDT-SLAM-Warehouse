@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "ndt_slam/cargo_config_validation.hpp"
+
 namespace ndt_slam {
 
 enum class ExternalProvenance : std::uint8_t {
@@ -208,7 +210,11 @@ class CargoObstacleTracker {
       const CargoObstacleTrackerConfig& config =
           CargoObstacleTrackerConfig());
 
-  void setConfig(const CargoObstacleTrackerConfig& config);
+  CargoConfigValidationResult setConfig(
+      const CargoObstacleTrackerConfig& config);
+  const CargoConfigValidationResult& configValidation() const noexcept {
+    return config_validation_;
+  }
   const CargoObstacleTrackerConfig& config() const noexcept { return config_; }
   void reset();
   CargoObstacleTrackerDecision update(
@@ -220,6 +226,7 @@ class CargoObstacleTracker {
 
  private:
   CargoObstacleTrackerConfig config_;
+  CargoConfigValidationResult config_validation_;
   std::vector<CargoObstacleTrack> tracks_;
   std::uint64_t next_track_id_ = 1U;
   std::uint64_t cycle_ = 0U;
@@ -228,5 +235,8 @@ class CargoObstacleTracker {
   std::uint64_t created_track_count_ = 0U;
   std::uint64_t association_reset_count_ = 0U;
 };
+
+CargoConfigValidationResult validateCargoObstacleTrackerConfig(
+    const CargoObstacleTrackerConfig& config);
 
 }  // namespace ndt_slam

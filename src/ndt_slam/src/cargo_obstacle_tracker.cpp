@@ -106,56 +106,6 @@ float neighborCellOverlap(
       directionalNeighborCellOverlap(right, left, radius));
 }
 
-bool validConfig(const CargoObstacleTrackerConfig& config) {
-  return config.confirm_frames >= 2 && config.minimum_points > 0U &&
-      config.far_history_confirm_frames >= 2 &&
-      std::isfinite(config.far_history_confirm_duration_sec) &&
-      config.far_history_confirm_duration_sec >= 0.0 &&
-      std::isfinite(config.level1_warning_distance_m) &&
-      config.level1_warning_distance_m > 0.0F &&
-      std::isfinite(config.level2_warning_distance_m) &&
-      config.level2_warning_distance_m >
-          config.level1_warning_distance_m &&
-      std::isfinite(config.acquisition_distance_m) &&
-      config.acquisition_distance_m > config.level2_warning_distance_m &&
-      std::isfinite(config.embedded_distance_threshold_m) &&
-      config.embedded_distance_threshold_m >= 0.0F &&
-      config.embedded_distance_threshold_m <
-          config.level1_warning_distance_m &&
-      std::isfinite(config.maximum_observation_gap_sec) &&
-      config.maximum_observation_gap_sec > 0.0 &&
-      std::isfinite(config.stale_track_sec) &&
-      config.stale_track_sec >= config.maximum_observation_gap_sec &&
-      std::isfinite(config.association_max_centroid_distance_m) &&
-      config.association_max_centroid_distance_m > 0.0F &&
-      std::isfinite(config.association_max_top_step_m) &&
-      config.association_max_top_step_m > 0.0F &&
-      config.association_neighbor_cell_radius >= 0 &&
-      config.association_neighbor_cell_radius <= 2 &&
-      std::isfinite(config.static_track_cell_overlap_min) &&
-      config.static_track_cell_overlap_min > 0.0F &&
-      config.static_track_cell_overlap_min <= 1.0F &&
-      std::isfinite(config.static_track_iou_min) &&
-      config.static_track_iou_min > 0.0F &&
-      config.static_track_iou_min <= 1.0F &&
-      std::isfinite(config.static_provenance_min_cargo_motion_m) &&
-      config.static_provenance_min_cargo_motion_m >= 0.0F &&
-      config.static_cargo_min_voxel_points >= config.minimum_points &&
-      std::isfinite(config.static_cargo_min_xy_area_m2) &&
-      config.static_cargo_min_xy_area_m2 > 0.0F &&
-      std::isfinite(config.static_cargo_min_long_side_m) &&
-      config.static_cargo_min_long_side_m > 0.0F &&
-      std::isfinite(config.static_cargo_min_height_span_m) &&
-      config.static_cargo_min_height_span_m > 0.0F &&
-      config.static_cargo_min_occupied_cells > 0U &&
-      config.known_static_confirm_frames >= config.confirm_frames &&
-      config.static_cargo_confirm_frames >= config.confirm_frames &&
-      std::isfinite(config.static_cargo_confirm_sec) &&
-      config.static_cargo_confirm_sec >= 0.0 &&
-      std::isfinite(config.static_velocity_threshold_mps) &&
-      config.static_velocity_threshold_mps >= 0.0F;
-}
-
 bool qualifiesForFarHistory(
     const CargoObstacleObservation& observation,
     const CargoObstacleTrackerConfig& config) {
@@ -317,10 +267,87 @@ CargoObstacleTracker::CargoObstacleTracker(
   setConfig(config);
 }
 
-void CargoObstacleTracker::setConfig(
+CargoConfigValidationResult validateCargoObstacleTrackerConfig(
     const CargoObstacleTrackerConfig& config) {
-  config_ = validConfig(config) ? config : CargoObstacleTrackerConfig{};
+  CargoConfigValidationResult result;
+  const auto positive = [&result](const char* field, double value) {
+    if (!std::isfinite(value)) result.reject(field, "non_finite");
+    else if (value <= 0.0) result.reject(field, "must_be_positive");
+  };
+  const auto nonnegative = [&result](const char* field, double value) {
+    if (!std::isfinite(value)) result.reject(field, "non_finite");
+    else if (value < 0.0) result.reject(field, "must_be_nonnegative");
+  };
+  const auto unit = [&result](const char* field, double value) {
+    if (!std::isfinite(value)) result.reject(field, "non_finite");
+    else if (value <= 0.0 || value > 1.0)
+      result.reject(field, "outside_0_exclusive_1_inclusive");
+  };
+  if (config.confirm_frames < 2)
+    result.reject("confirm_frames", "must_be_at_least_2");
+  if (config.minimum_points == 0U)
+    result.reject("minimum_points", "must_be_positive");
+  if (config.far_history_confirm_frames < 2)
+    result.reject("far_history_confirm_frames", "must_be_at_least_2");
+  nonnegative("far_history_confirm_duration_sec",
+              config.far_history_confirm_duration_sec);
+  positive("level1_warning_distance_m", config.level1_warning_distance_m);
+  positive("level2_warning_distance_m", config.level2_warning_distance_m);
+  if (std::isfinite(config.level1_warning_distance_m) &&
+      std::isfinite(config.level2_warning_distance_m) &&
+      config.level2_warning_distance_m <= config.level1_warning_distance_m)
+    result.reject("level2_warning_distance_m", "must_exceed_level1");
+  positive("acquisition_distance_m", config.acquisition_distance_m);
+  if (std::isfinite(config.acquisition_distance_m) &&
+      std::isfinite(config.level2_warning_distance_m) &&
+      config.acquisition_distance_m <= config.level2_warning_distance_m)
+    result.reject("acquisition_distance_m", "must_exceed_level2");
+  nonnegative("embedded_distance_threshold_m",
+              config.embedded_distance_threshold_m);
+  if (std::isfinite(config.embedded_distance_threshold_m) &&
+      std::isfinite(config.level1_warning_distance_m) &&
+      config.embedded_distance_threshold_m >= config.level1_warning_distance_m)
+    result.reject("embedded_distance_threshold_m", "must_be_below_level1");
+  positive("maximum_observation_gap_sec", config.maximum_observation_gap_sec);
+  positive("stale_track_sec", config.stale_track_sec);
+  if (std::isfinite(config.stale_track_sec) &&
+      std::isfinite(config.maximum_observation_gap_sec) &&
+      config.stale_track_sec < config.maximum_observation_gap_sec)
+    result.reject("stale_track_sec", "below_observation_gap");
+  positive("association_max_centroid_distance_m",
+           config.association_max_centroid_distance_m);
+  positive("association_max_top_step_m", config.association_max_top_step_m);
+  if (config.association_neighbor_cell_radius < 0 ||
+      config.association_neighbor_cell_radius > 2)
+    result.reject("association_neighbor_cell_radius", "outside_0_2");
+  unit("static_track_cell_overlap_min", config.static_track_cell_overlap_min);
+  unit("static_track_iou_min", config.static_track_iou_min);
+  nonnegative("static_provenance_min_cargo_motion_m",
+              config.static_provenance_min_cargo_motion_m);
+  if (config.static_cargo_min_voxel_points < config.minimum_points)
+    result.reject("static_cargo_min_voxel_points", "below_minimum_points");
+  positive("static_cargo_min_xy_area_m2", config.static_cargo_min_xy_area_m2);
+  positive("static_cargo_min_long_side_m", config.static_cargo_min_long_side_m);
+  positive("static_cargo_min_height_span_m",
+           config.static_cargo_min_height_span_m);
+  if (config.static_cargo_min_occupied_cells == 0U)
+    result.reject("static_cargo_min_occupied_cells", "must_be_positive");
+  if (config.known_static_confirm_frames < config.confirm_frames)
+    result.reject("known_static_confirm_frames", "below_confirm_frames");
+  if (config.static_cargo_confirm_frames < config.confirm_frames)
+    result.reject("static_cargo_confirm_frames", "below_confirm_frames");
+  nonnegative("static_cargo_confirm_sec", config.static_cargo_confirm_sec);
+  nonnegative("static_velocity_threshold_mps",
+              config.static_velocity_threshold_mps);
+  return result;
+}
+
+CargoConfigValidationResult CargoObstacleTracker::setConfig(
+    const CargoObstacleTrackerConfig& config) {
+  config_ = config;
+  config_validation_ = validateCargoObstacleTrackerConfig(config_);
   reset();
+  return config_validation_;
 }
 
 void CargoObstacleTracker::reset() {
@@ -337,9 +364,11 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
   CargoObstacleTrackerDecision decision;
   decision.created_track_count = created_track_count_;
   decision.association_reset_count = association_reset_count_;
-  if (!validConfig(config_) || !std::isfinite(stamp_sec) ||
+  if (!config_validation_.valid || !std::isfinite(stamp_sec) ||
       stamp_sec <= 0.0) {
-    decision.reason = "invalid_obstacle_track_input";
+    decision.reason = config_validation_.valid
+        ? "invalid_obstacle_track_input"
+        : "invalid_obstacle_tracker_config:" + config_validation_.summary();
     return decision;
   }
   if (has_stamp_ && stamp_sec + kStampEpsilonSec < last_stamp_sec_) {

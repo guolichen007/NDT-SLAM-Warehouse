@@ -15,20 +15,6 @@ bool isProtocolCode(std::uint16_t code) {
   return code == kClear || code == kLevel1 || code == kLevel2;
 }
 
-bool validConfig(const CargoSafetyTemporalConfig& config) {
-  return config.hazard_confirm_frames >= 2 &&
-      config.clear_confirm_frames >= 2 &&
-      config.minimum_hazard_cluster_points > 0U &&
-      std::isfinite(config.maximum_evidence_gap_sec) &&
-      config.maximum_evidence_gap_sec > 0.0 &&
-      std::isfinite(config.maximum_centroid_step_m) &&
-      config.maximum_centroid_step_m > 0.0F &&
-      std::isfinite(config.maximum_distance_step_m) &&
-      config.maximum_distance_step_m > 0.0F &&
-      std::isfinite(config.maximum_clearance_step_m) &&
-      config.maximum_clearance_step_m > 0.0F;
-}
-
 }  // namespace
 
 CargoSafetyTemporalFilter::CargoSafetyTemporalFilter(
@@ -36,10 +22,32 @@ CargoSafetyTemporalFilter::CargoSafetyTemporalFilter(
   setConfig(config);
 }
 
-void CargoSafetyTemporalFilter::setConfig(
+CargoConfigValidationResult validateCargoSafetyTemporalConfig(
     const CargoSafetyTemporalConfig& config) {
-  config_ = validConfig(config) ? config : CargoSafetyTemporalConfig{};
+  CargoConfigValidationResult result;
+  if (config.hazard_confirm_frames < 2)
+    result.reject("hazard_confirm_frames", "must_be_at_least_2");
+  if (config.clear_confirm_frames < 2)
+    result.reject("clear_confirm_frames", "must_be_at_least_2");
+  if (config.minimum_hazard_cluster_points == 0U)
+    result.reject("minimum_hazard_cluster_points", "must_be_positive");
+  const auto positive = [&result](const char* field, double value) {
+    if (!std::isfinite(value)) result.reject(field, "non_finite");
+    else if (value <= 0.0) result.reject(field, "must_be_positive");
+  };
+  positive("maximum_evidence_gap_sec", config.maximum_evidence_gap_sec);
+  positive("maximum_centroid_step_m", config.maximum_centroid_step_m);
+  positive("maximum_distance_step_m", config.maximum_distance_step_m);
+  positive("maximum_clearance_step_m", config.maximum_clearance_step_m);
+  return result;
+}
+
+CargoConfigValidationResult CargoSafetyTemporalFilter::setConfig(
+    const CargoSafetyTemporalConfig& config) {
+  config_ = config;
+  config_validation_ = validateCargoSafetyTemporalConfig(config_);
   reset();
+  return config_validation_;
 }
 
 void CargoSafetyTemporalFilter::reset() {
@@ -84,7 +92,7 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::pendingDecision(
 
 CargoSafetyTemporalDecision CargoSafetyTemporalFilter::update(
     const CargoSafetyTemporalInput& input) {
-  if (!validConfig(config_) || !input.raw_valid ||
+  if (!config_validation_.valid || !input.raw_valid ||
       !std::isfinite(input.stamp_sec) || input.stamp_sec <= 0.0 ||
       !isProtocolCode(input.raw_code)) {
     candidate_valid_ = false;

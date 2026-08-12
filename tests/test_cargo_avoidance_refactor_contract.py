@@ -67,6 +67,23 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
             node,
         )
 
+    def test_invalid_policy_is_fail_closed_without_silent_defaults(self):
+        tracker = read("src/ndt_slam/src/cargo_obstacle_tracker.cpp")
+        temporal = read("src/ndt_slam/src/cargo_safety_temporal_filter.cpp")
+        node = read("src/ndt_slam/src/ndt_slam.cpp")
+        self.assertNotIn(
+            "validConfig(config) ? config : CargoObstacleTrackerConfig{}",
+            tracker,
+        )
+        self.assertNotIn(
+            "validConfig(config) ? config : CargoSafetyTemporalConfig{}",
+            temporal,
+        )
+        self.assertIn("CargoConfigValidationResult", tracker)
+        self.assertIn("refusing Cargo/avoidance authority with Code35", node)
+        self.assertNotIn("restoring 3.0/5.0/0.80", node)
+        self.assertIn("cargo_safety_config_error_detail_", node)
+
 
 if __name__ == "__main__":
     unittest.main()
