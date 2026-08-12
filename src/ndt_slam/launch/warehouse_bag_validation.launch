@@ -1,0 +1,95 @@
+<launch>
+    <!-- Bag validation mode: deterministic avoidance-only replay. -->
+    <!-- NEVER reads or writes production maps/live/current.           -->
+    <!-- For crash-restart recovery tests use explicit                 -->
+    <!-- persistent_map_root_override + allow_sim_time_persistent_map. -->
+
+    <!-- Default: safe, stateless, sim-time bag replay -->
+    <arg name="use_sim_time" default="true"/>
+    <arg name="use_rviz" default="false"/>
+    <arg name="persistent_map" default="false"/>
+    <arg name="use_ndt_recovery_watchdog" default="false"/>
+    <arg name="use_cargo_visualizer" default="false"/>
+    <arg name="ndt_publish_cargo_markers" default="false"/>
+    <arg name="publish_rslidar_tf" default="true"/>
+    <arg name="odom_anchored_cargo_box_enabled" default="true"/>
+    <arg name="hook_cargo_removal_enabled" default="true"/>
+    <arg name="cargo_warning_enabled" default="true"/>
+    <arg name="use_cargo_alarm_heartbeat" default="true"/>
+
+    <!-- Optional persistent map root override for isolated recovery
+         fixture tests. Empty = use YAML root (will be rejected by
+         sim_time guard unless allow_sim_time_persistent_map is set). -->
+    <arg name="persistent_map_root_override" default=""/>
+    <arg name="allow_sim_time_persistent_map" default="false"/>
+
+    <!-- Config file: default uses the same configuration as production
+         for apples-to-apples avoidance comparison. Override for sandbox. -->
+    <arg name="config_file" default="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
+
+    <!-- System clock mode -->
+    <param name="/use_sim_time" value="$(arg use_sim_time)"/>
+
+    <!-- Debounce and classify the hook load-cell voltage. -->
+    <node name="hook_load_state"
+          pkg="ndt_slam"
+          type="hook_load_state_node"
+          output="screen">
+        <param name="config_file" value="$(arg config_file)"/>
+    </node>
+
+    <!-- SLAM node -->
+    <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen">
+        <param name="config_file" value="$(arg config_file)"/>
+        <param name="ndt_publish_cargo_markers" value="$(arg ndt_publish_cargo_markers)"/>
+        <param name="persistent_map_enabled" value="$(arg persistent_map)"/>
+        <param name="persistent_map_root_override" value="$(arg persistent_map_root_override)"/>
+        <param name="allow_sim_time_persistent_map" value="$(arg allow_sim_time_persistent_map)"/>
+        <param name="odom_anchored_cargo_box_enabled"
+               value="$(arg odom_anchored_cargo_box_enabled)"/>
+        <param name="hook_cargo_removal_enabled"
+               value="$(arg hook_cargo_removal_enabled)"/>
+        <param name="cargo_warning_enabled"
+               value="$(arg cargo_warning_enabled)"/>
+    </node>
+
+    <!-- Cargo alarm heartbeat for safety status. -->
+    <node name="cargo_alarm_heartbeat"
+          pkg="ndt_slam"
+          type="cargo_alarm_heartbeat_node"
+          output="screen"
+          if="$(arg use_cargo_alarm_heartbeat)">
+        <param name="status_topic" value="/cargo_avoidance/safety_status"/>
+        <param name="status_queue_size" value="1"/>
+        <param name="status_code_topic" value="/cargo_avoidance/status_code"/>
+        <param name="publish_legacy_alarm_topic" value="false"/>
+        <param name="legacy_alarm_topic" value="/cargo_avoidance/alarm_code"/>
+        <param name="heartbeat_hz" value="5.0"/>
+        <param name="stale_timeout_sec" value="0.8"/>
+        <param name="pending_error_sec" value="5.0"/>
+        <param name="pending_repeat_sec" value="10.0"/>
+        <param name="warning_repeat_sec" value="5.0"/>
+        <param name="level1_distance_m" value="3.0"/>
+        <param name="level2_distance_m" value="5.0"/>
+        <param name="minimum_vertical_clearance_m" value="0.80"/>
+    </node>
+
+    <!-- Point-cloud merge and sensor frame. -->
+    <node name="pointcloud_merger" pkg="ndt_slam" type="pointcloud_merger" output="screen">
+        <rosparam command="load" file="$(find ndt_slam)/config/merger_params.yaml"/>
+    </node>
+
+    <node if="$(arg publish_rslidar_tf)"
+          name="ndt_slam_rslidar_tf"
+          pkg="tf"
+          type="static_transform_publisher"
+          args="0 0 0 0 0 0 base_link rslidar 100"/>
+
+    <group if="$(arg use_rviz)">
+        <node name="rviz" pkg="rviz" type="rviz"
+              args="-d $(find ndt_slam)/launch/rviz.rviz"/>
+    </group>
+
+    <param name="mode" value="bag_validation"/>
+    <param name="config_file" value="$(arg config_file)"/>
+</launch>

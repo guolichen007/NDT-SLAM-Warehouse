@@ -552,10 +552,20 @@ void StaticObstacleEvidenceIndex::publishSnapshotLocked(
   next->source_stamp_sec = stamp_sec;
   next->cell_size_m = config_.cell_size_m;
   next->authority = authority_;
+  // Clean-confirmed cells enter the authoritative snapshot only when
+  // independent LiDAR observations have established the minimum temporal
+  // history. A clean confirmation without any observation count (e.g. a
+  // fresh confirmCleanCells insertion) must not fabricate persistence
+  // evidence — the cell remains in working state until the first
+  // observeCleanBuildCells observation advances the count to at least 1.
   for (const auto& item : working_cells_) {
-    if (item.second.clean_map_confirmed) {
-      next->cells.emplace(item.first, item.second);
-    }
+    const StaticEvidenceCell& cell = item.second;
+    if (!cell.clean_map_confirmed) continue;
+    if (cell.consecutive_observation_count == 0U) continue;
+    if (cell.total_observation_count == 0U) continue;
+    std::string ignored;
+    if (!validateCellForPersistence(cell, config_, &ignored)) continue;
+    next->cells.emplace(item.first, cell);
   }
   std::atomic_store_explicit(
       &snapshot_, std::shared_ptr<const StaticEvidenceSnapshot>(next),
@@ -787,12 +797,77 @@ StaticProvenanceDecision StaticObstacleEvidenceIndex::query(
   return decision;
 }
 
+bool StaticObstacleEvidenceIndex::validateCellForPersistence(
+    const StaticEvidenceCell& cell,
+    const StaticObstacleEvidenceConfig& config,
+    std::string* reason) {
+  if (!std::isfinite(cell.first_seen_sec)) {
+    if (reason) *reason = "first_seen_sec_nonfinite";
+    return false;
+  }
+  if (!std::isfinite(cell.last_seen_sec)) {
+    if (reason) *reason = "last_seen_sec_nonfinite";
+    return false;
+  }
+  if (cell.last_seen_sec < cell.first_seen_sec - kStampEpsilonSec) {
+    if (reason) *reason = "last_seen_before_first_seen";
+    return false;
+  }
+  if (!std::isfinite(cell.consecutive_stable_duration_sec) ||
+      cell.consecutive_stable_duration_sec < 0.0) {
+    if (reason) *reason = "stable_duration_nonfinite_or_negative";
+    return false;
+  }
+  if (!std::isfinite(cell.min_z) || !std::isfinite(cell.max_z)) {
+    if (reason) *reason = "min_z_or_max_z_nonfinite";
+    return false;
+  }
+  if (cell.max_z < cell.min_z) {
+    if (reason) *reason = "max_z_less_than_min_z";
+    return false;
+  }
+  if (cell.consecutive_observation_count == 0U) {
+    if (reason) *reason = "consecutive_observation_count_zero";
+    return false;
+  }
+  if (cell.total_observation_count < cell.consecutive_observation_count) {
+    if (reason) *reason = "total_less_than_consecutive_count";
+    return false;
+  }
+  if (cell.last_observation_sequence < cell.first_observation_sequence) {
+    if (reason) *reason = "last_sequence_before_first_sequence";
+    return false;
+  }
+  if (cell.temporally_mature &&
+      (cell.consecutive_observation_count < config.minimum_observations ||
+       cell.consecutive_stable_duration_sec + kStampEpsilonSec <
+           config.minimum_stable_duration_sec)) {
+    if (reason) *reason = "temporally_mature_but_insufficient_evidence";
+    return false;
+  }
+  return true;
+}
+
 bool StaticObstacleEvidenceIndex::saveSnapshot(
     const std::shared_ptr<const StaticEvidenceSnapshot>& current,
     const std::string& path, std::string* reason) const {
   if (!current) {
     if (reason) *reason = "snapshot_unavailable";
     return false;
+  }
+  // Pre-validate all cells before writing any data. This gate uses the same
+  // contract as the loader so a save/load round-trip cannot silently accept
+  // cells that the loader would later reject.
+  for (const auto& item : current->cells) {
+    std::string cell_reason;
+    if (!validateCellForPersistence(
+            item.second, config_, &cell_reason)) {
+      if (reason) {
+        *reason = "invalid_snapshot_cell:" +
+            std::to_string(item.second.key) + ":" + cell_reason;
+      }
+      return false;
+    }
   }
   const std::string temporary = path + ".tmp";
   std::ofstream output(temporary, std::ios::out | std::ios::trunc);
@@ -927,23 +1002,14 @@ bool StaticObstacleEvidenceIndex::loadSnapshotCandidate(
       cell.temporally_mature = mature_value == 1UL;
       cell.clean_map_confirmed = true;
       cell.map_generation = source_generation;
-      if (!std::isfinite(cell.first_seen_sec) ||
-          !std::isfinite(cell.last_seen_sec) ||
-          !std::isfinite(cell.consecutive_stable_duration_sec) ||
-          !std::isfinite(cell.min_z) || !std::isfinite(cell.max_z) ||
-          cell.consecutive_stable_duration_sec < 0.0 ||
-          cell.max_z < cell.min_z ||
-          cell.consecutive_observation_count == 0U ||
-          cell.total_observation_count <
-              cell.consecutive_observation_count ||
-          cell.last_observation_sequence <
-              cell.first_observation_sequence ||
-          (cell.temporally_mature &&
-           (cell.consecutive_observation_count <
-                config_.minimum_observations ||
-            cell.consecutive_stable_duration_sec + kStampEpsilonSec <
-                config_.minimum_stable_duration_sec))) {
-        if (reason) *reason = "index_cell_nonfinite";
+
+      // Validate using the same contract as saveSnapshot. This prevents
+      // drift between the persistence writer and reader gates.
+      std::string cell_reason;
+      if (!validateCellForPersistence(cell, config_, &cell_reason)) {
+        std::string full_reason = "index_cell_";
+        full_reason += cell_reason;
+        if (reason) *reason = full_reason;
         return false;
       }
       if (!loaded.emplace(cell.key, cell).second) {

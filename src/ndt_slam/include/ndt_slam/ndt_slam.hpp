@@ -316,6 +316,14 @@ private:
     bool loadLocalizationCheckpoint(std::string* reason);
     bool writeLocalizationCheckpoint(const ros::Time& stamp);
 
+    // Synchronize recovery metadata (localization_map_generation_, checkpoint)
+    // after a durable generation is successfully committed. Uses the captured
+    // committed_generation from the snapshot request rather than the current
+    // map_layer_generation_ which may have advanced during disk I/O.
+    void synchronizeRecoveryMetadataAfterDurableSave(
+        std::uint64_t committed_generation,
+        std::uint64_t journal_cut_sequence);
+
     // 动态点过滤（统计离群点去除）
     pcl::PointCloud<pcl::PointXYZ>::Ptr filterDynamicPoints(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
 
@@ -1405,6 +1413,8 @@ private:
     // 磁盘 tile 写入
     bool persistent_map_enabled_ = false;
     std::string persistent_map_root_dir_;
+    std::string persistent_map_root_override_;
+    bool allow_sim_time_persistent_map_ = false;
     double tile_size_m_ = 20.0;
     int flush_interval_sec_ = 60;
     int max_dirty_tiles_ = 20;

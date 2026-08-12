@@ -501,6 +501,9 @@ TEST(StaticObstacleEvidenceIndexTest,
      OperatorApprovedBaselineDoesNotPretendToBeRuntimeMature) {
   StaticObstacleEvidenceIndex index(testConfig());
   index.reset(26U);
+  // Independent LiDAR observation must precede clean confirmation so the
+  // cell has a valid observation history before entering the snapshot.
+  index.observeFilteredCells(twoCells(), 1.0, 26U, 1U);
   index.confirmCleanCells(twoCells(), {}, 1.0, 26U, 1U);
   ASSERT_EQ(index.matureCellCount(), 0U);
   EXPECT_FALSE(index.query(queryFor(26U)).authorized);
@@ -569,6 +572,70 @@ TEST(StaticObstacleEvidenceIndexTest,
   EXPECT_EQ(installed->latest_observation_sequence, 12U);
   EXPECT_EQ(installed->authority,
             StaticEvidenceAuthority::OPERATOR_APPROVED_BASELINE);
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
+     CleanConfirmationWithoutObservationIsNotPersisted) {
+  // A clean-confirmed cell with zero observation history must not enter the
+  // authoritative snapshot. confirmCleanCells alone cannot fabricate temporal
+  // evidence; only an independent LiDAR observation (observeFilteredCells or
+  // observeCleanBuildCells) can advance the count past zero and make the cell
+  // eligible for persistence.
+  StaticObstacleEvidenceIndex index(testConfig());
+  index.reset(100U);
+  const auto cells = twoCells();
+  // confirmCleanCells without any prior independent observation
+  index.confirmCleanCells(cells, {}, 1.0, 100U);
+  const auto snapshot = index.snapshot();
+  ASSERT_TRUE(snapshot);
+  EXPECT_EQ(snapshot->cells.size(), 0U);
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
+     FirstIndependentObservationMakesCellPersistable) {
+  // After confirmCleanCells establishes the clean contract, the first real
+  // LiDAR observation (observeFilteredCells) advances the observation count
+  // to at least 1, making the cell eligible for the persistent snapshot.
+  StaticObstacleEvidenceIndex index(testConfig());
+  index.reset(200U);
+  const auto cells = twoCells();
+  index.confirmCleanCells(cells, {}, 1.0, 200U);
+  EXPECT_EQ(index.snapshot()->cells.size(), 0U);
+  // First independent observation
+  index.observeFilteredCells(cells, 2.0, 200U);
+  const auto snapshot = index.snapshot();
+  ASSERT_TRUE(snapshot);
+  EXPECT_GT(snapshot->cells.size(), 0U);
+  for (const auto& item : snapshot->cells) {
+    EXPECT_GT(item.second.consecutive_observation_count, 0U);
+    EXPECT_GT(item.second.total_observation_count, 0U);
+  }
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
+     CleanConfirmationCannotFabricateTemporalMaturity) {
+  // A single clean confirmation cannot make a cell temporally mature. Maturity
+  // requires independent LiDAR observations reaching the configured minimum
+  // count and stable duration.
+  auto config = testConfig();
+  config.minimum_observations = 3U;
+  config.minimum_stable_duration_sec = 1.0;
+  StaticObstacleEvidenceIndex index(config);
+  index.reset(300U);
+  const auto cells = twoCells();
+  index.confirmCleanCells(cells, {}, 1.0, 300U);
+  // Cell must not be mature from confirmation alone
+  const auto snapshot = index.snapshot();
+  ASSERT_TRUE(snapshot);
+  for (const auto& item : snapshot->cells) {
+    EXPECT_FALSE(item.second.temporally_mature);
+  }
+  // Even a single observation should not grant maturity
+  index.observeFilteredCells(cells, 2.0, 300U);
+  const auto after = index.snapshot();
+  for (const auto& item : after->cells) {
+    EXPECT_FALSE(item.second.temporally_mature);
+  }
 }
 
 }  // namespace

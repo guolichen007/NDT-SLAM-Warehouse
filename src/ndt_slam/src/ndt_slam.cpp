@@ -4003,6 +4003,50 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             "cargo_warning_enabled",
             odom_anchor_config_.cargo_warning.enabled);
 
+        // --- persistent map root override (test isolation) ---
+        std::string root_override;
+        if (private_nh.getParam("persistent_map_root_override", root_override) &&
+            !root_override.empty()) {
+            persistent_map_root_dir_ = root_override;
+            ROS_INFO("[Config] persistent_map_root_override applied: %s",
+                     persistent_map_root_dir_.c_str());
+        }
+
+        // --- sim-time persistent map guard ---
+        bool sim_time_active = false;
+        ros::param::param<bool>("/use_sim_time", sim_time_active, false);
+        if (sim_time_active) use_sim_time_ = true;
+        private_nh.getParam("allow_sim_time_persistent_map",
+                            allow_sim_time_persistent_map_);
+
+        if (sim_time_active && persistent_map_enabled_ &&
+            !allow_sim_time_persistent_map_) {
+            ROS_FATAL(
+                "[CONFIG_ERROR] sim_time_persistent_production_root_forbidden: "
+                "sim_time=true persistent_map=true "
+                "allow_sim_time_persistent_map=false. "
+                "Refusing to start. Use warehouse_bag_validation.launch for "
+                "bag tests, or set allow_sim_time_persistent_map=true with "
+                "persistent_map_root_override pointing to an isolated sandbox "
+                "for recovery fixture tests.");
+            ros::shutdown();
+            return;
+        }
+
+        // --- startup recovery enabled ---
+        const bool startup_recovery_active =
+            persistent_map_enabled_ && !persistent_map_root_dir_.empty();
+
+        // --- RUNTIME_MODE log (once at startup) ---
+        ROS_INFO(
+            "[RUNTIME_MODE] use_sim_time=%d persistent_map=%d persistent_root=%s"
+            " allow_sim_time_persistent_map=%d startup_recovery=%d",
+            sim_time_active ? 1 : 0,
+            persistent_map_enabled_ ? 1 : 0,
+            persistent_map_root_dir_.c_str(),
+            allow_sim_time_persistent_map_ ? 1 : 0,
+            startup_recovery_active ? 1 : 0);
+
         static_obstacle_evidence_index_.reset(
             static_evidence_epoch_.load(std::memory_order_acquire));
         if (persistent_map_enabled_) {
@@ -11038,6 +11082,11 @@ bool NdtSlamNode::saveMapSessionAtomic(const std::string& session_dir,
         return false;
     }
     if (persistent_map_enabled_) {
+        // Capture the immutable committed generation from the snapshot request
+        // BEFORE the durable save. map_layer_generation_ may advance during
+        // disk I/O and must not be used for recovery metadata identity.
+        const std::uint64_t committed_generation =
+            request.metadata.map_generation;
         DurableMapStore store(persistent_map_root_dir_ + "/maps");
         std::string durable_reason;
         if (!store.save(request, &durable_reason)) {
@@ -11055,6 +11104,16 @@ bool NdtSlamNode::saveMapSessionAtomic(const std::string& session_dir,
                 }
                 return false;
             }
+            // Generation already exists: treat as idempotent success.
+            // Recovery metadata may already be synchronized; skip.
+        } else {
+            // Durable generation promoted successfully. Synchronize recovery
+            // metadata so that checkpoint, journal and CURRENT share the same
+            // generation identity.
+            const std::uint64_t journal_cut_sequence =
+                accepted_keyframe_journal_.writtenRecords();
+            synchronizeRecoveryMetadataAfterDurableSave(
+                committed_generation, journal_cut_sequence);
         }
     }
     if (reason) *reason = session_reason;
@@ -11978,8 +12037,17 @@ void NdtSlamNode::updateLocalizationHealth(
         StartupRecoveryInput warmup;
         warmup.sensors_warm = true;
         warmup.checkpoint_available = localization_checkpoint_valid_;
+        ROS_INFO("[SENSOR_WARMUP] checkpoint_available=%d "
+                 "checkpoint_valid=%d map_valid=%d map_present=%d",
+                 warmup.checkpoint_available ? 1 : 0,
+                 localization_checkpoint_valid_ ? 1 : 0,
+                 persistent_localization_map_valid_ ? 1 : 0,
+                 persistent_localization_map_present_ ? 1 : 0);
         startup_recovery_decision_ =
             startup_recovery_controller_.update(warmup);
+        ROS_INFO("[SENSOR_WARMUP] transitioned to %s reason=%s",
+                 startupRecoveryStateName(startup_recovery_decision_.state),
+                 startup_recovery_decision_.reason.c_str());
     }
 
     // Strict evidence is a one-way admission gate after a recovery candidate.
@@ -13372,17 +13440,26 @@ bool NdtSlamNode::loadPersistentTileLayer(
 }
 
 bool NdtSlamNode::loadLocalizationCheckpoint(std::string* reason) {
+    ROS_INFO("[CheckpointLoad] called: persistent_root=%s map_uuid=%s map_gen=%lu",
+             persistent_map_root_dir_.c_str(),
+             localization_map_uuid_.c_str(),
+             static_cast<unsigned long>(localization_map_generation_));
     localization_checkpoint_valid_ = false;
     const std::string path =
         persistent_map_root_dir_ + "/recovery_checkpoint.yaml";
     if (!boost::filesystem::is_regular_file(path)) {
         if (reason) *reason = "checkpoint_missing";
+        ROS_INFO("[CheckpointLoad] FAIL: file missing path=%s", path.c_str());
         return false;
     }
     const auto loaded = RecoveryCheckpoint::loadVerified(
         path, localization_map_uuid_, localization_map_generation_);
     if (!loaded.valid) {
         if (reason) *reason = loaded.reason;
+        ROS_INFO("[CheckpointLoad] FAIL: reason=%s expected_uuid=%s expected_gen=%lu",
+                 loaded.reason.c_str(),
+                 localization_map_uuid_.c_str(),
+                 static_cast<unsigned long>(localization_map_generation_));
         return false;
     }
     localization_checkpoint_data_ = loaded.checkpoint;
@@ -13393,6 +13470,10 @@ bool NdtSlamNode::loadLocalizationCheckpoint(std::string* reason) {
                         loaded.checkpoint.z));
     localization_checkpoint_valid_ = true;
     if (reason) *reason = "checkpoint_verified_seed_only";
+    ROS_INFO("[CheckpointLoad] SUCCESS: uuid=%s gen=%lu pose_gen=%lu",
+             loaded.checkpoint.map_uuid.c_str(),
+             static_cast<unsigned long>(loaded.checkpoint.map_generation),
+             static_cast<unsigned long>(loaded.checkpoint.pose_generation));
     return true;
 }
 
@@ -13442,6 +13523,79 @@ bool NdtSlamNode::writeLocalizationCheckpoint(const ros::Time& stamp) {
     ROS_WARN_THROTTLE(30.0, "[RecoveryCheckpoint] save failed: %s",
                       checkpoint_reason.c_str());
     return false;
+}
+
+void NdtSlamNode::synchronizeRecoveryMetadataAfterDurableSave(
+    std::uint64_t committed_generation,
+    std::uint64_t journal_cut_sequence) {
+    if (committed_generation == 0U) {
+        ROS_ERROR("[RecoveryMetadata] committed_generation is zero; "
+                  "skipping recovery metadata sync");
+        return;
+    }
+    const std::uint64_t previous_generation = localization_map_generation_;
+
+    // Update the recovery generation identity to match the committed durable
+    // generation. This must use the IMMUTABLE committed_generation captured
+    // from the snapshot request, not the current map_layer_generation_ which
+    // may have advanced during disk I/O.
+    localization_map_generation_ = committed_generation;
+
+    // Write a new checkpoint using the latest accepted pose and the new
+    // generation identity. This ensures the checkpoint map_generation matches
+    // CURRENT after the durable promotion, preventing the "checkpoint_missing"
+    // fallback-to-global-search on next startup.
+    const ros::Time now = ros::Time::now();
+    const AcceptedLocalizationSnapshot accepted =
+        accepted_localization_snapshot_;
+    if (accepted.valid && accepted.pose_generation > 0U &&
+        accepted.continuity_generation > 0U &&
+        accepted.pose.translation().allFinite() &&
+        accepted.pose.so3().matrix().allFinite()) {
+        const Eigen::Matrix3d rotation = accepted.pose.so3().matrix();
+        const std::string path =
+            persistent_map_root_dir_ + "/recovery_checkpoint.yaml";
+        RecoveryCheckpointData checkpoint;
+        checkpoint.map_uuid = localization_map_uuid_;
+        checkpoint.map_generation = committed_generation;
+        checkpoint.pose_generation = accepted.pose_generation;
+        checkpoint.continuity_generation = accepted.continuity_generation;
+        checkpoint.source_stamp_sec = now.toSec();
+        checkpoint.x = accepted.pose.translation().x();
+        checkpoint.y = accepted.pose.translation().y();
+        checkpoint.z = accepted.pose.translation().z();
+        checkpoint.yaw = std::atan2(rotation(1, 0), rotation(0, 0));
+        checkpoint.source_git_sha = build_info::kGitSha;
+        std::string checkpoint_reason;
+        if (RecoveryCheckpoint::saveAtomic(path, checkpoint,
+                                           &checkpoint_reason)) {
+            localization_last_checkpoint_write_sec_ = now.toSec();
+            localization_checkpoint_data_ = checkpoint;
+            localization_checkpoint_pose_ = accepted.pose;
+            localization_checkpoint_valid_ = true;
+            ROS_INFO(
+                "[RecoveryMetadata] durable generation %lu promoted; "
+                "checkpoint written generation=%lu pose=%lu; "
+                "journal_cut=%lu previous_generation=%lu",
+                static_cast<unsigned long>(committed_generation),
+                static_cast<unsigned long>(committed_generation),
+                static_cast<unsigned long>(accepted.pose_generation),
+                static_cast<unsigned long>(journal_cut_sequence),
+                static_cast<unsigned long>(previous_generation));
+        } else {
+            ROS_ERROR("[RecoveryMetadata] checkpoint write after durable "
+                      "promotion failed: %s; generation coherence may be "
+                      "broken on next startup",
+                      checkpoint_reason.c_str());
+        }
+    } else {
+        ROS_WARN("[RecoveryMetadata] durable generation %lu promoted but "
+                 "accepted pose not valid; checkpoint NOT written. "
+                 "journal_cut=%lu previous_generation=%lu",
+                 static_cast<unsigned long>(committed_generation),
+                 static_cast<unsigned long>(journal_cut_sequence),
+                 static_cast<unsigned long>(previous_generation));
+    }
 }
 
 bool NdtSlamNode::loadRecoveryJournalReference(std::string* reason) {

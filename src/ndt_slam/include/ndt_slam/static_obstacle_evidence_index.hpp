@@ -239,6 +239,14 @@ class StaticObstacleEvidenceIndex {
       const std::shared_ptr<const StaticEvidenceSnapshot>& snapshot,
       const std::string& path,
       std::string* reason) const;
+
+  // Validate a single cell for persistence. Must match the loader contract
+  // exactly; save and load use the same rules to prevent drift.
+  static bool validateCellForPersistence(
+      const StaticEvidenceCell& cell,
+      const StaticObstacleEvidenceConfig& config,
+      std::string* reason);
+
   bool loadSnapshot(const std::string& path,
                     std::uint64_t current_map_generation,
                     std::uint64_t expected_source_generation,

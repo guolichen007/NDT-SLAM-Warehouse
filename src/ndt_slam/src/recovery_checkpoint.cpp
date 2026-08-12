@@ -4,6 +4,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -100,6 +101,17 @@ bool RecoveryCheckpoint::saveAtomic(
     RecoveryCheckpointData stored = checkpoint;
     stored.schema_version = kSchemaVersion;
     stored.checksum = checksum(canonical(stored));
+
+    // Serialize double fields with fixed high precision so the round-trip
+    // through YAML preserves the exact canonical checksum.  YAML-cpp's
+    // default double formatting may truncate fractional digits and silently
+    // break the integrity contract.
+    auto doubleStr = [](double v) -> std::string {
+      std::ostringstream out;
+      out << std::setprecision(17) << v;
+      return out.str();
+    };
+
     YAML::Node document;
     document["schema"] = "ndt_slam_recovery_checkpoint";
     document["schema_version"] = stored.schema_version;
@@ -107,11 +119,11 @@ bool RecoveryCheckpoint::saveAtomic(
     document["map_generation"] = stored.map_generation;
     document["pose_generation"] = stored.pose_generation;
     document["continuity_generation"] = stored.continuity_generation;
-    document["source_stamp_sec"] = stored.source_stamp_sec;
-    document["pose"]["x"] = stored.x;
-    document["pose"]["y"] = stored.y;
-    document["pose"]["z"] = stored.z;
-    document["pose"]["yaw"] = stored.yaw;
+    document["source_stamp_sec"] = doubleStr(stored.source_stamp_sec);
+    document["pose"]["x"] = doubleStr(stored.x);
+    document["pose"]["y"] = doubleStr(stored.y);
+    document["pose"]["z"] = doubleStr(stored.z);
+    document["pose"]["yaw"] = doubleStr(stored.yaw);
     document["source_git_sha"] = stored.source_git_sha;
     document["checksum"] = stored.checksum;
     YAML::Emitter emitter;
@@ -142,11 +154,69 @@ RecoveryCheckpointLoadResult RecoveryCheckpoint::loadVerified(
   RecoveryCheckpointLoadResult result;
   try {
     const YAML::Node document = YAML::LoadFile(path);
+
+    // --- strict schema validation ---
+    // The canonical checksum covers the payload fields, but YAML-cpp may
+    // silently tolerate duplicate keys, extra keys, or missing keys in some
+    // versions. Enforce an exact key set so tampered files cannot bypass
+    // integrity checks through parser leniency.
+    if (!document.IsDefined() || !document.IsMap()) {
+      result.reason = "checkpoint_schema_invalid:not_a_map";
+      return result;
+    }
+    const std::array<const char*, 10> kTopLevelKeys = {
+        "schema", "schema_version", "map_uuid", "map_generation",
+        "pose_generation", "continuity_generation", "source_stamp_sec",
+        "pose", "source_git_sha", "checksum"};
+    if (document.size() != kTopLevelKeys.size()) {
+      result.reason = "checkpoint_schema_invalid:top_level_key_count";
+      return result;
+    }
+    for (const char* key : kTopLevelKeys) {
+      if (!document[key]) {
+        result.reason = std::string("checkpoint_schema_invalid:missing_key:") +
+            key;
+        return result;
+      }
+    }
+    const YAML::Node pose_node = document["pose"];
+    if (!pose_node.IsDefined() || !pose_node.IsMap()) {
+      result.reason = "checkpoint_schema_invalid:pose_not_a_map";
+      return result;
+    }
+    const std::array<const char*, 4> kPoseKeys = {"x", "y", "z", "yaw"};
+    if (pose_node.size() != kPoseKeys.size()) {
+      result.reason = "checkpoint_schema_invalid:pose_key_count";
+      return result;
+    }
+    for (const char* key : kPoseKeys) {
+      if (!pose_node[key]) {
+        result.reason = std::string("checkpoint_schema_invalid:missing_pose_key:")
+            + key;
+        return result;
+      }
+    }
+
     if (document["schema"].as<std::string>("") !=
         "ndt_slam_recovery_checkpoint") {
       result.reason = "checkpoint_schema_invalid";
       return result;
     }
+    // YAML node → double; tolerates both native numeric nodes and the
+    // high-precision string encoding that the save path uses to preserve
+    // the canonical checksum contract.
+    auto asDouble = [](const YAML::Node& node, double fallback) -> double {
+      if (!node.IsDefined()) return fallback;
+      if (node.Type() == YAML::NodeType::Scalar) {
+        try {
+          return std::stod(node.as<std::string>());
+        } catch (...) {
+          return node.as<double>(fallback);
+        }
+      }
+      return node.as<double>(fallback);
+    };
+
     auto& value = result.checkpoint;
     value.schema_version = document["schema_version"].as<std::uint32_t>(0U);
     value.map_uuid = document["map_uuid"].as<std::string>("");
@@ -154,11 +224,11 @@ RecoveryCheckpointLoadResult RecoveryCheckpoint::loadVerified(
     value.pose_generation = document["pose_generation"].as<std::uint64_t>(0U);
     value.continuity_generation =
         document["continuity_generation"].as<std::uint64_t>(0U);
-    value.source_stamp_sec = document["source_stamp_sec"].as<double>(0.0);
-    value.x = document["pose"]["x"].as<double>(NAN);
-    value.y = document["pose"]["y"].as<double>(NAN);
-    value.z = document["pose"]["z"].as<double>(NAN);
-    value.yaw = document["pose"]["yaw"].as<double>(NAN);
+    value.source_stamp_sec = asDouble(document["source_stamp_sec"], 0.0);
+    value.x = asDouble(pose_node["x"], NAN);
+    value.y = asDouble(pose_node["y"], NAN);
+    value.z = asDouble(pose_node["z"], NAN);
+    value.yaw = asDouble(pose_node["yaw"], NAN);
     value.source_git_sha = document["source_git_sha"].as<std::string>("");
     value.checksum = document["checksum"].as<std::string>("");
     if (!valid(value) || value.checksum != checksum(canonical(value))) {
