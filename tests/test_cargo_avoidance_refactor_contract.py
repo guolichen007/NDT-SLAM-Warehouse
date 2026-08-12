@@ -224,6 +224,22 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         self.assertIn("compatibility mirror", node)
         self.assertIn("only effective Cargo/avoidance policy", config)
 
+    def test_explicit_out_of_range_policy_fails_before_defensive_bounds(self):
+        node = read("src/ndt_slam/src/ndt_slam.cpp")
+        validation = node.index("Validate every explicitly supplied scalar")
+        first_clamp = node.index(
+            "static_map_config.minimum_cell_overlap = std::clamp"
+        )
+        self.assertLess(validation, first_clamp)
+        for key in (
+            "static_map_minimum_cell_overlap",
+            "fusion_pending_minimum_authority_confidence",
+            "motion_corridor_forward_half_angle_deg",
+            "residual_minimum_motion_match_score",
+        ):
+            self.assertIn(f'validate_range("{key}"', node)
+        self.assertIn("cargo_safety_config_error_detail_", node)
+
 
 if __name__ == "__main__":
     unittest.main()

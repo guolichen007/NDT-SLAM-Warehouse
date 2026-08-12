@@ -3294,6 +3294,88 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 cargo_safety_config_error_detail_ += ';';
             cargo_safety_config_error_detail_ += field + ':' + reason;
         };
+        // Validate every explicitly supplied scalar before defensive parsing
+        // below applies bounds. The bounds protect process integrity only;
+        // they can never turn an invalid policy into active authority.
+        const auto validate_range = [&](const char* key,
+                                        double minimum,
+                                        double maximum) {
+            if (!cargo_safety || !cargo_safety[key]) return;
+            const double value = cargo_safety[key].as<double>();
+            if (!std::isfinite(value)) {
+                reject_cargo_config(
+                    std::string("cargo_safety.") + key, "non_finite");
+            } else if (value < minimum || value > maximum) {
+                std::ostringstream reason;
+                reason << "outside_[" << minimum << ',' << maximum << ']';
+                reject_cargo_config(
+                    std::string("cargo_safety.") + key, reason.str());
+            }
+        };
+        const auto validate_integer_range = [&](const char* key,
+                                                int minimum,
+                                                int maximum) {
+            if (!cargo_safety || !cargo_safety[key]) return;
+            const int value = cargo_safety[key].as<int>();
+            if (value < minimum || value > maximum) {
+                std::ostringstream reason;
+                reason << "outside_[" << minimum << ',' << maximum << ']';
+                reject_cargo_config(
+                    std::string("cargo_safety.") + key, reason.str());
+            }
+        };
+        validate_range("static_map_cell_size_m", 0.05, 10.0);
+        validate_integer_range("static_map_minimum_observations", 1, 1000000);
+        validate_range("static_map_minimum_stable_duration_sec", 0.0, 86400.0);
+        validate_range("static_map_minimum_cell_overlap", 0.01, 1.0);
+        validate_range("static_map_minimum_iou", 0.01, 1.0);
+        validate_range("static_map_minimum_height_overlap", 0.01, 1.0);
+        validate_range("static_map_height_tolerance_m", 0.0, 0.50);
+        validate_integer_range("static_map_minimum_matched_cells", 1, 65536);
+        validate_integer_range("static_map_maximum_query_area_cells", 1, 65536);
+        validate_integer_range("static_map_pre_cargo_sequence_gap", 0,
+                               std::numeric_limits<int>::max());
+        validate_range("static_map_immature_max_observation_gap_sec", 1.0,
+                       604800.0);
+        validate_range("static_map_immature_gap_retention_ratio", 0.0, 0.95);
+        validate_integer_range("static_map_max_sequence_gap", 1, 1000000);
+        validate_integer_range("static_map_height_history_window", 3, 31);
+        validate_integer_range("static_map_height_outlier_minimum_samples", 3,
+                               31);
+        validate_range("static_map_height_outlier_mad_multiplier", 1.0, 10.0);
+        validate_range("static_map_height_outlier_minimum_band_m", 0.05, 1.0);
+        validate_range("static_height_z_bin_m", 0.02, 5.0);
+        validate_integer_range("static_height_max_layers_per_cell", 1, 8);
+        validate_integer_range("static_height_min_points_per_layer", 1,
+                               1000000);
+        validate_range("static_height_maximum_merge_gap_m", 0.02, 5.0);
+        validate_range("fusion_minimum_live_coverage_for_clear", 0.0, 1.0);
+        validate_range("fusion_pending_minimum_authority_confidence", 0.0,
+                       1.0);
+        validate_integer_range("anomaly_review_enter_confirm_frames", 1,
+                               1000000);
+        validate_range("anomaly_review_maximum_episode_sec", 0.10, 3600.0);
+        validate_range("anomaly_review_same_episode_rearm_sec", 0.0, 3600.0);
+        validate_range("motion_corridor_immediate_near_field_m", 0.0, 5.0);
+        validate_range("motion_corridor_minimum_speed_mps", 0.0, 10.0);
+        validate_range("motion_corridor_prediction_horizon_sec", 0.5, 60.0);
+        validate_range("motion_corridor_minimum_prediction_distance_m", 5.0,
+                       12.0);
+        validate_range("motion_corridor_forward_half_angle_deg", 1.0, 90.0);
+        validate_range("motion_corridor_lateral_margin_m", 0.0, 10.0);
+        validate_range("motion_corridor_rear_margin_m", 0.0, 10.0);
+        validate_range("motion_corridor_velocity_alpha", 0.0, 1.0);
+        validate_range("motion_corridor_maximum_velocity_sample_gap_sec", 0.10,
+                       60.0);
+        validate_range("residual_validation_shell_min_m", 0.0, 10.0);
+        validate_range("residual_minimum_inside_xy_ratio", 0.0, 1.0);
+        validate_range("residual_minimum_identity_match_ratio", 0.0, 1.0);
+        validate_range("residual_minimum_surface_band_ratio", 0.0, 1.0);
+        validate_range("residual_minimum_motion_match_score", 0.0, 1.0);
+        validate_range("residual_surface_band_below_m", 0.0, 10.0);
+        validate_range("residual_surface_band_above_m", 0.0, 10.0);
+        validate_range("safety_console_period_sec", 0.5, 3600.0);
+        validate_range("safety_pending_error_sec", 0.5, 3600.0);
         safety_config.level1_distance_m = cargo_safety
             ? cargo_safety["level1_distance_m"].as<float>(3.0F) : 3.0F;
         safety_config.level2_distance_m = cargo_safety
@@ -3677,6 +3759,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                     "[CargoAvoidance] unknown pending warning promotion "
                     "policy='" << pending_promotion_policy
                     << "'; fail-safe disabled pending 17/18 promotion");
+                reject_cargo_config(
+                    "cargo_safety.fusion_pending_warning_promotion_policy",
+                    "unknown_enum_value:" + pending_promotion_policy);
             }
             // The legacy bool remains a one-way compatibility kill switch.
             // A historical 'true' never re-enables unsafe any-pending
