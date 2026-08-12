@@ -52,6 +52,8 @@
 #include <ndt_slam/cargo_oriented_footprint.hpp>
 #include <ndt_slam/cargo_rigid_geometry.hpp>
 #include <ndt_slam/cargo_safety_evaluator.hpp>
+#include <ndt_slam/cargo_capability.hpp>
+#include <ndt_slam/cargo_domain_contracts.hpp>
 #include <ndt_slam/cargo_obstacle_tracker.hpp>
 #include <ndt_slam/static_obstacle_evidence_index.hpp>
 #include <ndt_slam/map_session_snapshot.hpp>

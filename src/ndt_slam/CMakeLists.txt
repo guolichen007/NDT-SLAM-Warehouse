@@ -143,6 +143,7 @@ set(LIBRARY_SOURCES
   src/cargo_component_fusion.cpp
   src/cargo_rigid_geometry.cpp
   src/cargo_marker_lifecycle.cpp
+  src/cargo_capability.cpp
   src/obstacle_perception.cpp
   src/cargo_safety_evaluator.cpp
   src/cargo_safety_temporal_filter.cpp
@@ -306,6 +307,13 @@ if(CATKIN_ENABLE_TESTING)
   if(TARGET cargo_safety_evaluator_test)
     target_link_libraries(cargo_safety_evaluator_test
       ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_capability_test
+    test/cargo_capability_test.cpp)
+  if(TARGET cargo_capability_test)
+    target_link_libraries(cargo_capability_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(cargo_safety_temporal_filter_test

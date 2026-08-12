@@ -100,6 +100,39 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
             tracker_test,
         )
 
+    def test_time_sensitive_domain_contracts_are_explicit(self):
+        contracts = read(
+            "src/ndt_slam/include/ndt_slam/cargo_domain_contracts.hpp"
+        )
+        for contract in (
+            "CargoTrackSnapshot",
+            "CargoGeometryEstimate",
+            "CargoSafetyEnvelope",
+            "ObstacleObservation",
+            "ObstacleTrackSnapshot",
+            "HazardAssessment",
+            "AvoidanceDecision",
+        ):
+            self.assertIn(f"struct {contract}", contracts)
+        for field in (
+            "source_stamp_sec",
+            "frame_id",
+            "cargo_lifecycle_id",
+            "uncertainty",
+            "source",
+            "valid",
+            "fresh",
+        ):
+            self.assertIn(field, contracts)
+
+    def test_capability_is_pure_and_positive_only_cannot_clear(self):
+        capability = read("src/ndt_slam/src/cargo_capability.cpp")
+        capability_test = read("src/ndt_slam/test/cargo_capability_test.cpp")
+        self.assertIn("deriveCargoCapability", capability)
+        self.assertNotIn("ros::", capability)
+        self.assertIn("VerticalInvalidPreservesPhysicalTrackingOnly", capability_test)
+        self.assertIn("PositiveOnlyCanWarnButCannotClearRemoveOrMap", capability_test)
+
 
 if __name__ == "__main__":
     unittest.main()
