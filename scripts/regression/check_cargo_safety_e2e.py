@@ -394,6 +394,10 @@ def main() -> int:
         "src/ndt_slam/src/cargo_safety_temporal_filter.cpp")
     obstacle_tracker = read(
         "src/ndt_slam/src/cargo_obstacle_tracker.cpp")
+    obstacle_tracker_header = read(
+        "src/ndt_slam/include/ndt_slam/cargo_obstacle_tracker.hpp")
+    cargo_capability = read(
+        "src/ndt_slam/src/cargo_capability.cpp")
     motion_corridor = read(
         "src/ndt_slam/src/cargo_motion_corridor.cpp")
     residual_classifier = read(
@@ -412,7 +416,9 @@ def main() -> int:
             "17/18 do not require fresh spatially continuous cluster evidence",
             failures)
     require("src/cargo_obstacle_tracker.cpp" in cmake and
-            "cargo_obstacle_tracker_.update" in node and
+            "physical_obstacle_track_store_.update" in node and
+            "using PhysicalObstacleTrackStore" in obstacle_tracker_header and
+            "CargoObstacleAuthorityPolicy" in obstacle_tracker_header and
             "cluster_evidence.push_back" in safety_evaluator and
             "current_source_index" in obstacle_tracker and
             "consecutive_observations" in obstacle_tracker and
@@ -658,11 +664,16 @@ def main() -> int:
             "raw_warning_candidate || acquisition_candidate" in pending_body and
             "query.directional_filter_enabled" in pending_body and
             "pending_angle_rejected_clusters" in pending_body and
-            "cargo_safety_evaluator_.perceive(live_input)" in pending_body and
-            "cargo_safety_evaluator_.perceive(external_live_input)" in pending_body and
-            "live_input, live_perception" in pending_body and
-            "external_live_input, external_live_perception" in pending_body and
-            "pending_cargo_obstacle_tracker_.update(" in pending_body and
+            pending_body.count(
+                "cargo_safety_evaluator_.perceive(live_input)") == 1 and
+            "live_input, canonical_perception" in pending_body and
+            "physical_obstacle_track_store_.update(" in pending_body and
+            "positive_warning = input.positive_identity_authorized" in
+                cargo_capability and
+            "output.clear = input.formal_geometry_valid" in
+                cargo_capability and
+            "output.cargo_removal = input.formal_geometry_valid" in
+                cargo_capability and
             "formal_cargo_removal_authorized_ = true" not in pending_body and
             "hazard_geometry_valid = false" in pending_body,
             "Pending envelope can clear/remove cargo or skips live/static fusion",
