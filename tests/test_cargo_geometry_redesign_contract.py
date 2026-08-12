@@ -26,6 +26,12 @@ SAFETY_HEADER = (
 TRACKER_SOURCE = (
     PACKAGE / "src/cargo_obstacle_tracker.cpp"
 ).read_text(encoding="utf-8")
+GEOMETRY_TEST = (
+    PACKAGE / "test/cargo_geometry_fusion_test.cpp"
+).read_text(encoding="utf-8")
+TRACKER_TEST = (
+    PACKAGE / "test/cargo_obstacle_tracker_test.cpp"
+).read_text(encoding="utf-8")
 MARKER_SOURCE = (
     PACKAGE / "src/cargo_marker_lifecycle.cpp"
 ).read_text(encoding="utf-8")
@@ -102,6 +108,31 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         )
         self.assertIn(
             "hook_lock_.provisional_track_id", NODE
+        )
+
+    def test_frozen_box_and_formal_height_paths_are_stable(self):
+        self.assertIn("immediate_expand_enabled: false", CONFIG)
+        self.assertIn(
+            "expands &&\n          expansion_quality_valid", FUSION_SOURCE
+        )
+        self.assertIn("fuseFormalThicknessPair", FUSION_SOURCE)
+        self.assertIn(
+            "FormalThicknessIsInvariantToPositiveOnlyPromotionPath",
+            GEOMETRY_TEST,
+        )
+
+    def test_obstacle_association_is_global_deterministic_and_2d(self):
+        self.assertIn("std::vector<AssociationPair> legal_pairs", TRACKER_SOURCE)
+        self.assertIn("std::sort(legal_pairs.begin()", TRACKER_SOURCE)
+        self.assertIn("centroid_map.head<2>()", TRACKER_SOURCE)
+        self.assertIn("association_max_top_step_m", TRACKER_SOURCE)
+        self.assertIn(
+            "GlobalAssociationIsInvariantToObservationInputOrder",
+            TRACKER_TEST,
+        )
+        self.assertIn(
+            "CentroidZShiftDoesNotDuplicateIndependentTopGate",
+            TRACKER_TEST,
         )
 
     def test_pending_static_warning_has_safe_geometry_self_exclusion(self):
@@ -184,7 +215,7 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         self.assertNotIn("pending_obstacle_context_pose_source_ !=", reset_expression)
         self.assertNotIn("pending_obstacle_context_shape_source_ !=", reset_expression)
 
-    def test_forward_ninety_degree_sector_gates_all_warning_sources(self):
+    def test_forward_sector_gates_acquisition_not_final_live_collision(self):
         self.assertIn(
             "motion_corridor_forward_half_angle_deg: 45.0", CONFIG
         )
@@ -210,14 +241,29 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
             "raw_warning_candidate || acquisition_candidate", pending
         )
         self.assertIn(
-            "raw_warning_candidate &&\n"
+            "warning_eligible = raw_warning_candidate;", pending
+        )
+        self.assertIn(
+            "acquisition_candidate &&\n"
             "                    corridor_decision.eligible",
             pending,
         )
-        self.assertIn("query.directional_filter_enabled", pending)
+        self.assertIn("query.directional_filter_enabled = false;", pending)
         self.assertIn("pending_angle_rejected_clusters", pending)
         self.assertIn("static_hazard_observation.authority_valid", pending)
         self.assertIn("pending_warning_motion_authorized;", pending)
+
+        formal_start = NODE.index(
+            "void NdtSlamNode::updateAndPublishCargoSafetyPipeline("
+        )
+        formal = NODE[formal_start:]
+        self.assertIn(
+            "Retain real <=5 m low-clearance geometry", formal
+        )
+        self.assertIn(
+            "raw_cargo_safety_result.cluster_evidence.push_back(evidence);",
+            formal,
+        )
 
         self.assertIn("directional_filter_enabled", STATIC_HEIGHT_HEADER)
         self.assertIn("forward_half_angle_deg", STATIC_HEIGHT_HEADER)
@@ -230,9 +276,7 @@ class CargoGeometryRedesignContractTest(unittest.TestCase):
         )
         formal = NODE[formal_start:]
         self.assertIn(
-            "static_query.directional_filter_enabled =\n"
-            "            motion_corridor_authoritative",
-            formal,
+            "static_query.directional_filter_enabled = false;", formal
         )
         self.assertIn(
             "cargo_static_directional_rejected_cells_", formal

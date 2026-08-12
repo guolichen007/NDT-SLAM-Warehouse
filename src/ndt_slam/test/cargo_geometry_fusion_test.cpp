@@ -246,6 +246,42 @@ TEST(CargoGeometryFusionTest,
 }
 
 TEST(CargoGeometryFusionTest,
+     FormalThicknessIsInvariantToPositiveOnlyPromotionPath) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 2;
+  config.shape_confirmation_window_frames = 4;
+  config.positive_only_confirm_frames = 2;
+
+  CargoGeometryFusion direct(config);
+  auto authoritative = frame(1.0, 1.10F, 1.00F);
+  authoritative.thickness[0].uncertainty_m = 0.15F;
+  authoritative.thickness[0].confidence = 0.80F;
+  authoritative.thickness[1].uncertainty_m = 0.12F;
+  authoritative.thickness[1].confidence = 0.90F;
+  EXPECT_FALSE(direct.update(authoritative).frozen);
+  authoritative.stamp_sec = 1.1;
+  const CargoFrozenGeometry direct_result = direct.update(authoritative);
+  ASSERT_TRUE(direct_result.formal_authorized) << direct_result.reason;
+
+  CargoGeometryFusion promoted(config);
+  auto live_only = frame(1.0, 1.10F, 1.00F);
+  live_only.thickness = {authoritative.thickness[1]};
+  EXPECT_FALSE(promoted.update(live_only).frozen);
+  live_only.stamp_sec = 1.1;
+  ASSERT_TRUE(promoted.update(live_only).degraded_live_only);
+  authoritative.stamp_sec = 1.2;
+  EXPECT_FALSE(promoted.update(authoritative).formal_authorized);
+  authoritative.stamp_sec = 1.3;
+  const CargoFrozenGeometry promoted_result = promoted.update(authoritative);
+  ASSERT_TRUE(promoted_result.formal_authorized) << promoted_result.reason;
+
+  EXPECT_NEAR(promoted_result.height_m, direct_result.height_m, 1.0e-6F);
+  EXPECT_NEAR(promoted_result.height_uncertainty_m,
+              direct_result.height_uncertainty_m, 1.0e-6F);
+  EXPECT_NEAR(promoted_result.bottom_m, direct_result.bottom_m, 1.0e-6F);
+}
+
+TEST(CargoGeometryFusionTest,
      PositiveOnlyFramesCannotCountTowardInitialFormalFreeze) {
   CargoGeometryFusionConfig config;
   config.minimum_confirm_frames = 3;
@@ -395,6 +431,7 @@ TEST(CargoGeometryFusionTest,
      TrustedCompleteMeasurementExpandsDefaultEnvelopeImmediately) {
   CargoGeometryFusionConfig config;
   config.minimum_confirm_frames = 1;
+  config.immediate_expand_enabled = true;
   CargoGeometryFusion fusion(config);
   auto result = fusion.update(frame(1.0));
   ASSERT_TRUE(result.frozen);
@@ -407,6 +444,27 @@ TEST(CargoGeometryFusionTest,
   result = fusion.update(larger);
   EXPECT_FLOAT_EQ(result.length_m, larger.length_m);
   EXPECT_FLOAT_EQ(result.width_m, larger.width_m);
+}
+
+TEST(CargoGeometryFusionTest,
+     ImmediateExpansionStillRequiresExpansionConfidence) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 1;
+  config.immediate_expand_enabled = true;
+  CargoGeometryFusion fusion(config);
+  auto result = fusion.update(frame(1.0));
+  ASSERT_TRUE(result.frozen);
+  const float frozen_length = result.length_m;
+  const float frozen_width = result.width_m;
+
+  auto weak_larger = frame(1.1);
+  weak_larger.length_m += 0.40F;
+  weak_larger.width_m += 0.20F;
+  weak_larger.dimension_shape_confidence = 0.76F;
+  result = fusion.update(weak_larger);
+
+  EXPECT_FLOAT_EQ(result.length_m, frozen_length);
+  EXPECT_FLOAT_EQ(result.width_m, frozen_width);
 }
 
 TEST(CargoGeometryFusionTest, TinyClusterCannotShrinkFrozenEnvelope) {

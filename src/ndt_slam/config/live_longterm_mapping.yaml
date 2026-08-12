@@ -1030,7 +1030,7 @@ cargo_geometry_fusion:
   # Frozen cargo dimensions are lifecycle-stable. A larger observation must
   # be high confidence and persist continuously; a single merged component
   # can no longer inflate the formal safety envelope.
-  immediate_expand_enabled: true
+  immediate_expand_enabled: false
   conservative_expand_confirm_frames: 8
   minimum_live_shape_confidence_for_expand: 0.85
   minimum_live_dimension_support: 30

@@ -72,7 +72,9 @@ struct CargoGeometryFusionConfig {
   // A complete, high-confidence associated observation may enlarge the
   // safety envelope immediately. Shrinkage remains bounded and requires the
   // configured number of valid observations in the recent shape window.
-  bool immediate_expand_enabled = true;
+  // Disabled in production by default: a suspended rigid cargo cannot grow
+  // physically within one lifecycle, while a single merged cluster can.
+  bool immediate_expand_enabled = false;
   int conservative_expand_confirm_frames = 8;
   float minimum_live_shape_confidence_for_expand = 0.85F;
   std::size_t minimum_live_dimension_support = 30U;

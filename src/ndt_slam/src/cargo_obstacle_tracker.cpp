@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -246,6 +247,22 @@ bool moreDangerous(const CargoObstacleTrack& candidate,
   return candidate.track_id < current.track_id;
 }
 
+bool canonicalObservationLess(
+    const CargoObstacleObservation& left,
+    const CargoObstacleObservation& right) {
+  const auto left_key = std::make_tuple(
+      left.centroid_map.x(), left.centroid_map.y(), left.centroid_map.z(),
+      left.top_z95_map, left.bottom_z05_map, left.footprint_distance_m,
+      left.conservative_clearance_m, left.source_index,
+      left.occupied_map_cells);
+  const auto right_key = std::make_tuple(
+      right.centroid_map.x(), right.centroid_map.y(), right.centroid_map.z(),
+      right.top_z95_map, right.bottom_z05_map, right.footprint_distance_m,
+      right.conservative_clearance_m, right.source_index,
+      right.occupied_map_cells);
+  return left_key < right_key;
+}
+
 }  // namespace
 
 const char* externalProvenanceName(
@@ -329,7 +346,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.observed_this_cycle = false;
   }
 
-  std::vector<bool> track_assigned(tracks_.size(), false);
+  std::vector<CargoObstacleObservation> valid_observations;
+  valid_observations.reserve(observations.size());
   for (CargoObstacleObservation observation : observations) {
     if (!validObservation(observation, config_)) continue;
     std::sort(observation.occupied_map_cells.begin(),
@@ -342,15 +360,29 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         decision.hazard_observed ||
         (observation.warning_eligible &&
          warningCode(observation.warning_code));
+    valid_observations.push_back(std::move(observation));
+  }
+  std::sort(valid_observations.begin(), valid_observations.end(),
+            canonicalObservationLess);
 
-    std::size_t best_index = tracks_.size();
-    float best_cost = std::numeric_limits<float>::infinity();
-    float best_overlap = 0.0F;
-    float best_iou = 0.0F;
-    float best_neighbor_overlap = 0.0F;
-    for (std::size_t index = 0; index < tracks_.size(); ++index) {
-      if (track_assigned[index]) continue;
-      const CargoObstacleTrack& track = tracks_[index];
+  struct AssociationPair {
+    std::size_t observation_index = 0U;
+    std::size_t track_index = 0U;
+    float cost = std::numeric_limits<float>::infinity();
+    float overlap = 0.0F;
+    float iou = 0.0F;
+    float neighbor_overlap = 0.0F;
+  };
+  const std::size_t existing_track_count = tracks_.size();
+  std::vector<AssociationPair> legal_pairs;
+  for (std::size_t observation_index = 0U;
+       observation_index < valid_observations.size();
+       ++observation_index) {
+    const CargoObstacleObservation& observation =
+        valid_observations[observation_index];
+    for (std::size_t track_index = 0U;
+         track_index < existing_track_count; ++track_index) {
+      const CargoObstacleTrack& track = tracks_[track_index];
       const double gap_sec = stamp_sec - track.last_stamp_sec;
       if (gap_sec < -kStampEpsilonSec ||
           gap_sec > config_.maximum_observation_gap_sec +
@@ -359,8 +391,11 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       }
       const Eigen::Vector3f predicted_centroid = track.centroid_map +
           track.velocity_map * static_cast<float>(std::max(0.0, gap_sec));
+      // XY determines spatial identity in the 2.5D obstacle model. Height
+      // identity remains independently protected by the top-Z step gate.
       const float centroid_distance =
-          (observation.centroid_map - predicted_centroid).norm();
+          (observation.centroid_map.head<2>() -
+           predicted_centroid.head<2>()).norm();
       const float overlap = cellOverlap(
           observation.occupied_map_cells, track.occupied_map_cells);
       const float iou = cellIou(
@@ -375,8 +410,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       const bool spatial_match = centroid_distance <=
               config_.association_max_centroid_distance_m ||
           overlap >= config_.static_track_cell_overlap_min ||
-          iou >= config_.static_track_iou_min ||
-          neighboring_fragment_match;
+          iou >= config_.static_track_iou_min || neighboring_fragment_match;
       if (!spatial_match ||
           std::abs(observation.top_z95_map - track.top_z95_map) >
               config_.association_max_top_step_m) {
@@ -389,18 +423,55 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
                    track.occupied_map_cells.empty()
                ? 1.0F
                : 1.0F - std::max(
-                     std::max(overlap, iou),
-                     0.80F * neighbor_overlap));
-      if (cost < best_cost) {
-        best_cost = cost;
-        best_overlap = overlap;
-        best_iou = iou;
-        best_neighbor_overlap = neighbor_overlap;
-        best_index = index;
-      }
+                     std::max(overlap, iou), 0.80F * neighbor_overlap));
+      legal_pairs.push_back(AssociationPair{
+          observation_index, track_index, cost, overlap, iou,
+          neighbor_overlap});
     }
+  }
+  std::sort(legal_pairs.begin(), legal_pairs.end(),
+            [&](const AssociationPair& left, const AssociationPair& right) {
+              if (left.cost != right.cost) return left.cost < right.cost;
+              const std::uint64_t left_track_id =
+                  tracks_[left.track_index].track_id;
+              const std::uint64_t right_track_id =
+                  tracks_[right.track_index].track_id;
+              if (left_track_id != right_track_id) {
+                return left_track_id < right_track_id;
+              }
+              return left.observation_index < right.observation_index;
+            });
+  const std::size_t no_track = existing_track_count;
+  std::vector<std::size_t> assigned_track(
+      valid_observations.size(), no_track);
+  std::vector<const AssociationPair*> assigned_pair(
+      valid_observations.size(), nullptr);
+  std::vector<bool> track_assigned(existing_track_count, false);
+  for (const AssociationPair& pair : legal_pairs) {
+    if (assigned_track[pair.observation_index] != no_track ||
+        track_assigned[pair.track_index]) {
+      continue;
+    }
+    assigned_track[pair.observation_index] = pair.track_index;
+    assigned_pair[pair.observation_index] = &pair;
+    track_assigned[pair.track_index] = true;
+  }
 
-    if (best_index == tracks_.size()) {
+  for (std::size_t observation_index = 0U;
+       observation_index < valid_observations.size();
+       ++observation_index) {
+    const CargoObstacleObservation& observation =
+        valid_observations[observation_index];
+    const std::size_t best_index = assigned_track[observation_index];
+    const AssociationPair* match = assigned_pair[observation_index];
+    const float best_cost = match
+        ? match->cost : std::numeric_limits<float>::infinity();
+    const float best_overlap = match ? match->overlap : 0.0F;
+    const float best_iou = match ? match->iou : 0.0F;
+    const float best_neighbor_overlap =
+        match ? match->neighbor_overlap : 0.0F;
+
+    if (best_index == no_track) {
       CargoObstacleTrack track;
       track.track_id = next_track_id_++;
       if (next_track_id_ == 0U) next_track_id_ = 1U;
@@ -482,7 +553,6 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
           observation.warning_eligible &&
           warningCode(observation.warning_code);
       tracks_.push_back(track);
-      track_assigned.push_back(true);
       continue;
     }
 
@@ -656,7 +726,6 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.current_warning_eligible =
         observation.warning_eligible &&
         warningCode(observation.warning_code);
-    track_assigned[best_index] = true;
   }
 
   decision.valid = true;

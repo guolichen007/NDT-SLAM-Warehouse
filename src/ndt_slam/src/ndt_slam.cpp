@@ -2978,7 +2978,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             cargo_geometry_fusion_config_.maximum_shrink_per_frame_m =
                 geometry["maximum_shrink_per_frame_m"].as<float>(0.03F);
             cargo_geometry_fusion_config_.immediate_expand_enabled =
-                geometry["immediate_expand_enabled"].as<bool>(true);
+                geometry["immediate_expand_enabled"].as<bool>(false);
             cargo_geometry_fusion_config_
                 .conservative_expand_confirm_frames =
                     std::max(
@@ -21530,8 +21530,10 @@ void NdtSlamNode::runPendingCargoAvoidance(
                     evaluateCargoMotionCorridor(
                         cargo_motion_corridor_config_,
                         corridor_input);
-                warning_eligible = raw_warning_candidate &&
-                    corridor_decision.eligible;
+                // Direction controls 5-8 m acquisition, not whether a real
+                // <=5 m low-clearance geometry reaches same-track history and
+                // the final 17/18/29 decision.
+                warning_eligible = raw_warning_candidate;
                 acquisition_pretrack = acquisition_candidate &&
                     corridor_decision.eligible;
                 acquisition_mode = corridor_decision.mode;
@@ -21775,8 +21777,9 @@ void NdtSlamNode::runPendingCargoAvoidance(
         query.yaw_map_rad = baseYawToMap(
             envelope.yaw_base_rad, base_pose_yaw_map);
         query.shell_m = shell_m;
-        query.directional_filter_enabled =
-            pending_warning_motion_authorized;
+        // This query covers the <=5 m collision shell. Direction already
+        // governs 5-8 m acquisition and must not hide final static geometry.
+        query.directional_filter_enabled = false;
         query.forward_direction_map = pending_velocity_map;
         query.forward_half_angle_deg =
             cargo_motion_corridor_config_.forward_half_angle_deg;
@@ -24118,9 +24121,12 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                     "obstacle_outside_forward_sector") {
                     ++cargo_corridor_angle_rejected_clusters_;
                 }
-                continue;
+                // Retain real <=5 m low-clearance geometry for obstacle-track
+                // and far-history authorization. Direction only decides which
+                // 5-8 m objects are acquired before entering the warning shell.
+            } else {
+                ++cargo_corridor_eligible_clusters_;
             }
-            ++cargo_corridor_eligible_clusters_;
             raw_cargo_safety_result.cluster_evidence.push_back(evidence);
             ++raw_cargo_safety_result.evaluated_cluster_count;
             if (!raw_cargo_safety_result.has_cluster_evidence ||
@@ -24137,9 +24143,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             raw_cargo_safety_result.evidence_state =
                 CargoSafetyEvidenceState::HAZARD_CANDIDATE;
             raw_cargo_safety_result.reason =
-                cargo_safety_spatial_mode_ == "MOTION_CORRIDOR"
-                    ? "hazard_inside_motion_corridor"
-                    : "hazard_radial_fallback";
+                "hazard_geometry_candidate_direction_used_for_acquisition";
         } else {
             raw_cargo_safety_result.warning_code =
                 CargoSafetyEvaluator::kSafeCode;
@@ -25076,8 +25080,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             rigid_geometry.shape.yaw_base_rad, base_pose_yaw_map);
         static_query.shell_m =
             cargo_safety_evaluator_.config().level2_distance_m;
-        static_query.directional_filter_enabled =
-            motion_corridor_authoritative;
+        // Certified/static geometry inside the warning shell is a final
+        // collision source, not an acquisition candidate.
+        static_query.directional_filter_enabled = false;
         static_query.forward_direction_map = cargo_velocity_map_;
         static_query.forward_half_angle_deg =
             cargo_motion_corridor_config_.forward_half_angle_deg;

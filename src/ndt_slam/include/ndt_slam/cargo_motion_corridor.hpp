@@ -75,9 +75,9 @@ bool cargoPointInForwardSector(
     float* absolute_angle_deg) noexcept;
 
 // Near-contact hazards are always retained. Beyond the near field, a valid
-// velocity creates a future swept corridor. Acquisition-only calls fall back
-// to radial tracking when direction is unavailable or stationary; ordinary
-// warning calls preserve the stationary emergency-shell policy.
+// velocity creates a future swept acquisition corridor. Acquisition-only
+// calls fall back to radial tracking when direction is unavailable or
+// stationary. Final warning authority is decided after obstacle tracking.
 CargoMotionCorridorDecision evaluateCargoMotionCorridor(
     const CargoMotionCorridorConfig& config,
     const CargoMotionCorridorInput& input);

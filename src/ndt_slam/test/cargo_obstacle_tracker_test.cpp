@@ -64,6 +64,71 @@ TEST(CargoObstacleTracker, DifferentWinnerOrderKeepsIndependentIdentity) {
   EXPECT_EQ(decision.selected_confirm_count, 3);
 }
 
+TEST(CargoObstacleTracker,
+     GlobalAssociationIsInvariantToObservationInputOrder) {
+  CargoObstacleTracker forward(ordinaryHazardConfig());
+  CargoObstacleTracker reversed(ordinaryHazardConfig());
+  const std::vector<CargoObstacleObservation> initial = {
+      hazard(10U, 0.0F, 0.0F), hazard(20U, 1.0F, 0.0F)};
+  forward.update(1.0, initial);
+  reversed.update(1.0, initial);
+
+  // "flexible" can match either track; "left_only" can match only track 1.
+  // Per-observation greedy creates an extra identity when flexible is first.
+  const CargoObstacleObservation flexible = hazard(21U, 0.40F, 0.0F);
+  const CargoObstacleObservation left_only = hazard(11U, -0.30F, 0.0F);
+  forward.update(1.2, {flexible, left_only});
+  reversed.update(1.2, {left_only, flexible});
+
+  ASSERT_EQ(forward.tracks().size(), reversed.tracks().size());
+  ASSERT_EQ(forward.tracks().size(), 2U);
+  for (std::size_t index = 0U; index < forward.tracks().size(); ++index) {
+    const CargoObstacleTrack& first = forward.tracks()[index];
+    const CargoObstacleTrack& second = reversed.tracks()[index];
+    EXPECT_EQ(first.track_id, second.track_id);
+    EXPECT_EQ(first.current_source_index, second.current_source_index);
+    EXPECT_FLOAT_EQ(first.centroid_map.x(), second.centroid_map.x());
+    EXPECT_FLOAT_EQ(first.centroid_map.y(), second.centroid_map.y());
+  }
+}
+
+TEST(CargoObstacleTracker,
+     CentroidZShiftDoesNotDuplicateIndependentTopGate) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  CargoObstacleObservation lower_visible = hazard(10U, 0.0F, 0.0F);
+  lower_visible.centroid_map.z() = 0.20F;
+  const auto initial = tracker.update(1.0, {lower_visible});
+  ASSERT_NE(initial.selected_track_id, 0U);
+
+  CargoObstacleObservation upper_visible = hazard(11U, 0.0F, 0.0F);
+  upper_visible.centroid_map.z() = 1.80F;
+  const auto associated = tracker.update(1.2, {upper_visible});
+  EXPECT_EQ(associated.selected_track_id, initial.selected_track_id);
+  EXPECT_EQ(associated.selected_confirm_count, 2);
+}
+
+TEST(CargoObstacleTracker,
+     ConfirmedFarHistoryTrackRetainsSideCollisionAuthority) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation far = directionalPretrack(10U, 0.0F, 2.0F);
+  tracker.update(1.0, {far});
+  far.centroid_map.x() = 0.02F;
+  tracker.update(1.1, {far});
+  far.centroid_map.x() = 0.04F;
+  ASSERT_TRUE(tracker.update(1.2, {far})
+                  .selected_far_field_history_valid);
+
+  CargoObstacleObservation side_hazard = hazard(11U, 0.06F, 2.0F, 18U);
+  side_hazard.footprint_distance_m = 4.0F;
+  const CargoObstacleTrackerDecision warning =
+      tracker.update(1.3, {side_hazard});
+  EXPECT_TRUE(warning.confirmed_hazard) << warning.reason;
+  EXPECT_TRUE(warning.selected_far_field_history_valid);
+  EXPECT_EQ(warning.warning_code, 18U);
+}
+
 TEST(CargoObstacleTracker, JumpingClustersCannotShareConfirmationCount) {
   CargoObstacleTracker tracker(ordinaryHazardConfig());
   tracker.update(1.0, {hazard(0U, 0.0F, 0.0F)});

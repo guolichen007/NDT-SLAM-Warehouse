@@ -68,6 +68,14 @@ struct WeightedHeight {
   float weight;
 };
 
+struct FormalThicknessFusion {
+  bool valid = false;
+  float height = 0.0F;
+  float uncertainty = 0.0F;
+  float lower_bound = 0.0F;
+  float upper_bound = 0.0F;
+};
+
 float weightedMedian(std::vector<WeightedHeight> values) {
   std::sort(values.begin(), values.end(),
             [](const auto& lhs, const auto& rhs) {
@@ -81,6 +89,52 @@ float weightedMedian(std::vector<WeightedHeight> values) {
     if (cumulative >= 0.5F * total) return value.height;
   }
   return values.empty() ? 0.0F : values.back().height;
+}
+
+FormalThicknessFusion fuseFormalThicknessPair(
+    const std::vector<WeightedHeight>& values,
+    const CargoGeometryFusionConfig& config) {
+  FormalThicknessFusion result;
+  if (values.size() != 2U) return result;
+
+  const float median = weightedMedian(values);
+  float weighted_sum = 0.0F;
+  float robust_weight_sum = 0.0F;
+  for (const auto& value : values) {
+    const float residual = std::abs(value.height - median);
+    const float huber = residual <= config.huber_delta_m
+        ? 1.0F : config.huber_delta_m / residual;
+    const float robust_weight = value.weight * huber;
+    weighted_sum += robust_weight * value.height;
+    robust_weight_sum += robust_weight;
+  }
+  result.height = weighted_sum / std::max(robust_weight_sum, 1.0e-6F);
+
+  float residual_variance = 0.0F;
+  for (const auto& value : values) {
+    const float residual = value.height - result.height;
+    residual_variance += value.weight * residual * residual;
+  }
+  residual_variance /= std::max(robust_weight_sum, 1.0e-6F);
+  result.uncertainty = std::sqrt(
+      1.0F / std::max(robust_weight_sum, 1.0e-6F) + residual_variance);
+  result.lower_bound = std::max(
+      config.minimum_height_m, result.height - result.uncertainty);
+  result.upper_bound = std::min(
+      config.maximum_height_m, result.height + result.uncertainty);
+  result.valid = std::isfinite(result.height) &&
+      std::isfinite(result.uncertainty) &&
+      result.uncertainty <= config.maximum_fused_uncertainty_m;
+  return result;
+}
+
+WeightedHeight weightedHeight(
+    const CargoThicknessObservation& observation) {
+  return WeightedHeight{
+      observation.source, observation.constraint, observation.height_m,
+      observation.uncertainty_m,
+      observation.confidence /
+          (observation.uncertainty_m * observation.uncertainty_m)};
 }
 
 float finiteMedian(std::vector<float> values) {
@@ -285,13 +339,24 @@ CargoFrozenGeometry CargoGeometryFusion::update(
               CargoThicknessConstraint::FULL_MEASUREMENT &&
           std::abs(best_static->height_m - best_live->height_m) <=
               config_.maximum_source_disagreement_m;
+      std::vector<WeightedHeight> promotion_pair;
+      if (static_revealed_consistent) {
+        promotion_pair = {
+            weightedHeight(*static_origin),
+            weightedHeight(*revealed_support)};
+      } else if (static_live_consistent) {
+        promotion_pair = {
+            weightedHeight(*best_static), weightedHeight(*best_live)};
+      }
+      const FormalThicknessFusion promoted_thickness =
+          fuseFormalThicknessPair(promotion_pair, config_);
       const bool promotion_consistent =
           frame.formal_track_locked &&
           frame.center_valid && frame.center.allFinite() &&
           validDimensionEvidence(
               frame, config_,
               config_.minimum_live_shape_confidence_for_shrink) &&
-          (static_revealed_consistent || static_live_consistent);
+          promoted_thickness.valid;
       formal_promotion_confirm_count_ = promotion_consistent
           ? formal_promotion_confirm_count_ + 1 : 0;
       if (formal_promotion_confirm_count_ >=
@@ -305,26 +370,15 @@ CargoFrozenGeometry CargoGeometryFusion::update(
           result_.accepted_sources = {
               CargoThicknessSource::STATIC_ORIGIN_TOP_SUPPORT,
               CargoThicknessSource::MAP_DIFF_REVEALED_SUPPORT};
-          result_.height_m = std::max(
-              static_origin->height_m, revealed_support->height_m);
-          result_.height_uncertainty_m = std::max(
-              static_origin->uncertainty_m,
-              revealed_support->uncertainty_m);
         } else {
           result_.accepted_sources = {
               best_static->source,
               CargoThicknessSource::LIVE_VISIBLE_EXTENT};
-          result_.height_m = std::max(
-              best_static->height_m, best_live->height_m);
-          result_.height_uncertainty_m = std::max(
-              best_static->uncertainty_m, best_live->uncertainty_m);
         }
-        result_.thickness_lower_bound_m = std::max(
-            config_.minimum_height_m,
-            result_.height_m - result_.height_uncertainty_m);
-        result_.thickness_upper_bound_m = std::min(
-            config_.maximum_height_m,
-            result_.height_m + result_.height_uncertainty_m);
+        result_.height_m = promoted_thickness.height;
+        result_.height_uncertainty_m = promoted_thickness.uncertainty;
+        result_.thickness_lower_bound_m = promoted_thickness.lower_bound;
+        result_.thickness_upper_bound_m = promoted_thickness.upper_bound;
       }
     }
     if (frame.track_segment_id != shrink_track_segment_id_) {
@@ -391,7 +445,11 @@ CargoFrozenGeometry CargoGeometryFusion::update(
           std::max(0.0F, frame.static_width_lower_bound_m));
       const bool expands = frame.length_m > result_.length_m ||
           frame.width_m > result_.width_m;
-      if (config_.immediate_expand_enabled && expands) {
+      const bool expansion_quality_valid = validDimensionEvidence(
+          frame, config_,
+          config_.minimum_live_shape_confidence_for_expand);
+      if (config_.immediate_expand_enabled && expands &&
+          expansion_quality_valid) {
         result_.length_m = std::max(result_.length_m, frame.length_m);
         result_.width_m = std::max(result_.width_m, frame.width_m);
         shrink_confirm_count_ = 0;
@@ -401,9 +459,7 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         expand_confirm_count_ = 0;
         pending_expand_length_m_ = 0.0F;
         pending_expand_width_m_ = 0.0F;
-      } else if (expands &&
-                 frame.dimension_shape_confidence >=
-                     config_.minimum_live_shape_confidence_for_expand) {
+      } else if (expands && expansion_quality_valid) {
         shrink_confirm_count_ = 0;
         shrink_quality_window_.clear();
         shrink_length_window_.clear();
@@ -613,11 +669,7 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         observation.confidence <= 0.0F) {
       continue;
     }
-    const float weight = observation.confidence /
-        (observation.uncertainty_m * observation.uncertainty_m);
-    const WeightedHeight candidate{
-        observation.source, observation.constraint, observation.height_m,
-        observation.uncertainty_m, weight};
+    const WeightedHeight candidate = weightedHeight(observation);
     const auto found = best_by_source.find(observation.source);
     if (found == best_by_source.end() ||
         candidate.weight > found->second.weight) {
@@ -759,30 +811,12 @@ CargoFrozenGeometry CargoGeometryFusion::update(
         config_.maximum_height_m,
         std::max(upper_bound, fused + uncertainty));
   } else {
-    const float median = weightedMedian(selected_values);
-    float weighted_sum = 0.0F;
-    float weight_sum = 0.0F;
-    for (const auto& value : selected_values) {
-      const float residual = std::abs(value.height - median);
-      const float huber = residual <= config_.huber_delta_m
-          ? 1.0F : config_.huber_delta_m / residual;
-      const float robust_weight = value.weight * huber;
-      weighted_sum += robust_weight * value.height;
-      weight_sum += robust_weight;
-    }
-    fused = weighted_sum / std::max(weight_sum, 1.0e-6F);
-    float residual_variance = 0.0F;
-    for (const auto& value : selected_values) {
-      const float residual = value.height - fused;
-      residual_variance += value.weight * residual * residual;
-    }
-    residual_variance /= std::max(weight_sum, 1.0e-6F);
-    uncertainty = std::sqrt(
-        1.0F / std::max(weight_sum, 1.0e-6F) + residual_variance);
-    lower_bound = std::max(
-        config_.minimum_height_m, fused - uncertainty);
-    upper_bound = std::min(
-        config_.maximum_height_m, fused + uncertainty);
+    const FormalThicknessFusion formal =
+        fuseFormalThicknessPair(selected_values, config_);
+    fused = formal.height;
+    uncertainty = formal.uncertainty;
+    lower_bound = formal.lower_bound;
+    upper_bound = formal.upper_bound;
   }
   if (!std::isfinite(fused) || !std::isfinite(uncertainty) ||
       (has_formal_pair &&
