@@ -101,7 +101,7 @@ include_directories(
 )
 
 # ========== 源文件 ==========
-set(LIBRARY_SOURCES
+set(NDT_SLAM_FACADE_SOURCES
   # 主节点
   src/ndt_slam.cpp
   # 关键帧管理
@@ -120,7 +120,11 @@ set(LIBRARY_SOURCES
   src/dynamic_event_manager.cpp
   # P0.5: 货物框估计器
   src/cargo_box_estimator.cpp
-  # v8-stable-r3: CraneMotionEKF
+)
+
+set(NDT_LOCALIZATION_CORE_SOURCES
+  # v8-stable-r3: CraneMotionEKF. The stability-first contract freezes the
+  # numerical behavior of every source in this target.
   src/crane_motion_ekf.cpp
   src/ndt_fitness_circuit_breaker.cpp
   src/stationary_motion_policy.cpp
@@ -133,11 +137,23 @@ set(LIBRARY_SOURCES
   src/ndt_relocalizer.cpp
   src/relocalization_confirmation_policy.cpp
   src/localization_health_policy.cpp
+)
+
+set(NDT_RUNTIME_SUPPORT_SOURCES
   # Runtime diagnostics (1.0x/1.5x acceptance testing)
   src/runtime_diagnostics.cpp
+  src/clean_map_builder.cpp
+  src/static_obstacle_evidence_index.cpp
+  src/static_height_field.cpp
+  src/static_height_component_extractor.cpp
+  src/map_write_authority.cpp
+  src/clean_worker_lineage.cpp
+  src/map_session_snapshot.cpp
+)
+
+set(NDT_CARGO_CORE_SOURCES
   # Formal cargo bottom and structured safety-status pipeline
   src/cargo_bottom_fusion.cpp
-  src/clean_map_builder.cpp
   src/cargo_oriented_footprint.cpp
   src/cargo_track_policy.cpp
   src/cargo_component_fusion.cpp
@@ -145,40 +161,55 @@ set(LIBRARY_SOURCES
   src/cargo_marker_lifecycle.cpp
   src/cargo_capability.cpp
   src/cargo_subsystem.cpp
-  src/obstacle_perception.cpp
-  src/hazard_evaluator.cpp
-  src/avoidance_decision.cpp
-  src/cargo_safety_evaluator.cpp
-  src/cargo_safety_temporal_filter.cpp
-  src/cargo_obstacle_tracker.cpp
-  src/static_obstacle_evidence_index.cpp
-  src/static_height_field.cpp
-  src/static_height_component_extractor.cpp
   src/cargo_lift_origin_binder.cpp
   src/revealed_support_observer.cpp
   src/cargo_preload_baseline_tracker.cpp
   src/cargo_geometry_fusion.cpp
-  src/cargo_avoidance_fusion.cpp
-  src/cargo_frame_decision.cpp
-  src/map_write_authority.cpp
-  src/clean_worker_lineage.cpp
-  src/anomaly_review_episode_tracker.cpp
-  src/pending_static_hazard_tracker.cpp
   src/cargo_presence_state_machine.cpp
   src/cargo_physical_motion_estimator.cpp
   src/pending_cargo_envelope.cpp
   src/pending_cargo_self_evidence.cpp
   src/cargo_swing_monitor.cpp
-  src/map_session_snapshot.cpp
-  src/cargo_motion_corridor.cpp
   src/cargo_residual_classifier.cpp
   src/hook_load_state_filter.cpp
   src/hook_load_evidence_policy.cpp
   src/pending_origin_binding_policy.cpp
 )
 
+set(NDT_AVOIDANCE_CORE_SOURCES
+  src/obstacle_perception.cpp
+  src/hazard_evaluator.cpp
+  src/avoidance_decision.cpp
+  src/cargo_safety_evaluator.cpp
+  src/cargo_safety_temporal_filter.cpp
+  src/cargo_obstacle_tracker.cpp
+  src/cargo_avoidance_fusion.cpp
+  src/cargo_frame_decision.cpp
+  src/anomaly_review_episode_tracker.cpp
+  src/pending_static_hazard_tracker.cpp
+  src/cargo_motion_corridor.cpp
+)
+
+# Coarse-grained in-process compilation boundaries. OBJECT libraries avoid
+# adding ROS processes or changing the public ndt_slam_lib ABI/facade.
+add_library(ndt_localization_core OBJECT ${NDT_LOCALIZATION_CORE_SOURCES})
+add_library(ndt_cargo_core OBJECT ${NDT_CARGO_CORE_SOURCES})
+add_library(ndt_avoidance_core OBJECT ${NDT_AVOIDANCE_CORE_SOURCES})
+add_library(ndt_runtime_support OBJECT ${NDT_RUNTIME_SUPPORT_SOURCES})
+foreach(core_target IN ITEMS
+    ndt_localization_core ndt_cargo_core ndt_avoidance_core
+    ndt_runtime_support)
+  set_target_properties(${core_target} PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
+  add_dependencies(${core_target} ${catkin_EXPORTED_TARGETS})
+endforeach()
+
 add_library(ndt_slam_lib SHARED
-  ${LIBRARY_SOURCES}
+  ${NDT_SLAM_FACADE_SOURCES}
+  $<TARGET_OBJECTS:ndt_localization_core>
+  $<TARGET_OBJECTS:ndt_cargo_core>
+  $<TARGET_OBJECTS:ndt_avoidance_core>
+  $<TARGET_OBJECTS:ndt_runtime_support>
 )
 add_dependencies(ndt_slam_lib ${catkin_EXPORTED_TARGETS})
 

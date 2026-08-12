@@ -199,6 +199,19 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         self.assertNotIn("requested_code", diagnostics)
         self.assertNotIn("warning_code", diagnostics)
 
+    def test_build_has_four_in_process_core_boundaries_and_one_ros_node(self):
+        cmake = read("src/ndt_slam/CMakeLists.txt")
+        for target in (
+            "ndt_localization_core",
+            "ndt_cargo_core",
+            "ndt_avoidance_core",
+            "ndt_runtime_support",
+        ):
+            self.assertIn(f"add_library({target} OBJECT", cmake)
+            self.assertIn(f"$<TARGET_OBJECTS:{target}>", cmake)
+        self.assertEqual(cmake.count("add_executable(ndt_slam_node"), 1)
+        self.assertIn("add_library(ndt_slam_lib SHARED", cmake)
+
 
 if __name__ == "__main__":
     unittest.main()
