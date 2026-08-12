@@ -98,6 +98,9 @@ ObstaclePerceptionResult perceiveObstacles(
     const ObstaclePerceptionConfig& config,
     const ObstaclePerceptionInput& input) {
   ObstaclePerceptionResult result;
+  result.source_stamp_sec = input.source_stamp_sec;
+  result.source_sequence = input.source_sequence;
+  result.frame_id = input.frame_id;
   result.executed = true;
   std::string invalid_field;
   if (!validateObstaclePerceptionConfig(config, &invalid_field)) {

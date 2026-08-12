@@ -413,6 +413,42 @@ TEST(ObstaclePerception, ClusterIndicesRemainInSourceCloudDomain) {
     EXPECT_EQ(perception.clusters.front().point_indices.front(), 1);
 }
 
+TEST(ObstaclePerception,
+     FormalPendingTransportLabelsCannotChangeCanonicalPerception) {
+    CargoSafetyInput canonical = baseInput();
+    canonical.source_stamp_sec = 9.75;
+    canonical.source_sequence = 975U;
+    canonical.frame_id = "base_link";
+    addCluster(&canonical, 4.0F, 1.75F);
+    const CargoSafetyEvaluator evaluator;
+
+    // Formal/Pending are deliberately absent from CargoSafetyInput. Both
+    // transport projections consume this one phase-neutral result.
+    const ObstaclePerceptionResult formal_projection =
+        evaluator.perceive(canonical);
+    const ObstaclePerceptionResult pending_projection =
+        evaluator.perceive(canonical);
+    ASSERT_TRUE(formal_projection.valid);
+    ASSERT_TRUE(pending_projection.valid);
+    ASSERT_EQ(formal_projection.source_sequence,
+              pending_projection.source_sequence);
+    ASSERT_EQ(formal_projection.cluster_count,
+              pending_projection.cluster_count);
+    ASSERT_EQ(formal_projection.clusters.size(),
+              pending_projection.clusters.size());
+    for (std::size_t index = 0U;
+         index < formal_projection.clusters.size(); ++index) {
+        const auto& formal = formal_projection.clusters[index];
+        const auto& pending = pending_projection.clusters[index];
+        EXPECT_EQ(formal.point_indices, pending.point_indices);
+        EXPECT_EQ(formal.point_count, pending.point_count);
+        EXPECT_FLOAT_EQ(formal.footprint_distance_m,
+                        pending.footprint_distance_m);
+        EXPECT_FLOAT_EQ(formal.top_z95_m, pending.top_z95_m);
+        EXPECT_FLOAT_EQ(formal.bottom_z05_m, pending.bottom_z05_m);
+    }
+}
+
 TEST(CargoSafetyEvaluator, InvalidObstacleEvidenceNeverBecomesLevel2Warning) {
     CargoSafetyEvaluator evaluator;
 

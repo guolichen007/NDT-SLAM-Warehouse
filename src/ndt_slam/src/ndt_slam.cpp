@@ -21225,8 +21225,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
         pending_horizontal_envelope_valid &&
         envelope.cargo_lifecycle_id != 0U &&
         envelope.cargo_lifecycle_id == cargo_lifecycle_id_ &&
-        pending_track_context_id != 0U &&
-        pending_pose_physically_plausible;
+        pending_track_context_id != 0U;
     const double cloud_age_sec = obstacle_cloud_stamp.isZero()
         ? std::numeric_limits<double>::infinity()
         : std::max(processing_age_sec,
@@ -21350,6 +21349,9 @@ void NdtSlamNode::runPendingCargoAvoidance(
             : warning_state_reason;
 
     CargoSafetyInput live_input;
+    live_input.source_stamp_sec = obstacle_cloud_stamp.toSec();
+    live_input.source_sequence = static_cast<std::uint64_t>(
+        std::max(0.0, obstacle_cloud_stamp.toSec()) * 1000000.0);
     live_input.evaluation_time_sec = stamp.toSec();
     live_input.height.valid = envelope.valid &&
         std::isfinite(envelope.bottom_z_base);
@@ -21359,8 +21361,10 @@ void NdtSlamNode::runPendingCargoAvoidance(
         envelope.vertical_uncertainty_m;
     live_input.footprint_base = toCargoObbFootprint(
         envelope, envelope.horizontal_uncertainty_m, 0.0F);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr live_shell(
-        new pcl::PointCloud<pcl::PointXYZ>);
+    // PendingCargoEnvelope::valid includes vertical authority. Canonical
+    // perception only needs its independently validated horizontal OBB.
+    live_input.footprint_base.valid =
+        cargo_snapshot.envelope.horizontal_valid;
     pcl::PointCloud<pcl::PointXYZ>::Ptr pending_self_removed(
         new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointXYZ>::Ptr pending_unresolved_inside(
@@ -21372,7 +21376,6 @@ void NdtSlamNode::runPendingCargoAvoidance(
     const float acquisition_shell_m = std::max(
         shell_m, cargo_collision_tracking_acquisition_distance_m_);
     if (obstacle_cloud_base && pending_tracking_query_allowed) {
-        live_shell->reserve(obstacle_cloud_base->size());
         pending_self_removed->reserve(obstacle_cloud_base->size());
         pending_unresolved_inside->reserve(obstacle_cloud_base->size());
         pending_external_shell->reserve(obstacle_cloud_base->size());
@@ -21390,11 +21393,9 @@ void NdtSlamNode::runPendingCargoAvoidance(
                     break;
                 case PendingPointClass::EXTERNAL_SHELL:
                     pending_external_shell->push_back(point);
-                    live_shell->push_back(point);
                     break;
                 case PendingPointClass::UNRESOLVED_INSIDE_PENDING:
                     pending_unresolved_inside->push_back(point);
-                    live_shell->push_back(point);
                     break;
                 case PendingPointClass::OUTSIDE_QUERY:
                     break;
@@ -21419,66 +21420,49 @@ void NdtSlamNode::runPendingCargoAvoidance(
     cargo_pending_unresolved_inside_points_ =
         pending_unresolved_inside->size();
     cargo_pending_external_shell_points_ = pending_external_shell->size();
-    live_input.obstacle_cloud_base = live_shell;
+    live_input.obstacle_cloud_base = pending_external_shell;
     live_input.obstacle_cloud_age_sec = cloud_age_sec;
     live_input.obstacle_observation_valid =
         pending_tracking_query_allowed && obstacle_cloud_base &&
         std::isfinite(cloud_age_sec) && cloud_age_sec >= 0.0 &&
         cloud_age_sec <=
             cargo_safety_evaluator_.config().maximum_obstacle_cloud_age_sec;
-    live_input.obstacle_roi_finite_points = live_shell->size();
+    live_input.obstacle_roi_finite_points = pending_external_shell->size();
     live_input.obstacle_roi_coverage_ratio = std::clamp(
-        static_cast<float>(live_shell->size()) /
-            static_cast<float>(std::max<std::size_t>(
-                1U, cargo_safety_evaluator_.config()
-                        .minimum_roi_finite_points)),
-        0.0F, 1.0F);
-    const ObstaclePerceptionResult live_perception =
-        cargo_safety_evaluator_.perceive(live_input);
-    const CargoSafetyResult live_result =
-        cargo_safety_evaluator_.evaluate(live_input, live_perception);
-    fusion_input.live.available = live_input.obstacle_observation_valid;
-    fusion_input.live.reliable = live_result.input_valid &&
-        live_result.warning_valid &&
-        live_result.fault == CargoSafetyFault::NONE;
-    fusion_input.live.hazard = fusion_input.live.reliable &&
-        (live_result.warning_code == CargoSafetyEvaluator::kLevel1Code ||
-         live_result.warning_code == CargoSafetyEvaluator::kLevel2Code);
-    fusion_input.live.warning_code = live_result.warning_code;
-    fusion_input.live.coverage = live_input.obstacle_roi_coverage_ratio;
-    fusion_input.live.reason = live_result.reason;
-    if (live_result.has_cluster_evidence) {
-        fusion_input.live.distance_m = live_result.most_dangerous_cluster
-            .footprint_distance_m;
-        fusion_input.live.clearance_m = live_result.most_dangerous_cluster
-            .conservative_clearance_m;
-    }
-
-    // Evaluate the positively classified external cloud independently. The
-    // full shell above intentionally retains unresolved points for diagnostic
-    // sensitivity, but unresolved points must never authorize an official
-    // pending warning.
-    CargoSafetyInput external_live_input = live_input;
-    external_live_input.obstacle_cloud_base = pending_external_shell;
-    external_live_input.obstacle_observation_valid =
-        pending_tracking_query_allowed && obstacle_cloud_base &&
-        std::isfinite(cloud_age_sec) && cloud_age_sec >= 0.0 &&
-        cloud_age_sec <=
-            cargo_safety_evaluator_.config()
-                .maximum_obstacle_cloud_age_sec;
-    external_live_input.obstacle_roi_finite_points =
-        pending_external_shell->size();
-    external_live_input.obstacle_roi_coverage_ratio = std::clamp(
         static_cast<float>(pending_external_shell->size()) /
             static_cast<float>(std::max<std::size_t>(
                 1U, cargo_safety_evaluator_.config()
                         .minimum_roi_finite_points)),
         0.0F, 1.0F);
+    // The positively classified external cloud is the only canonical
+    // perception input. Unresolved points remain published for diagnostics,
+    // but are never clustered a second time or allowed to create authority.
+    CargoSafetyInput external_live_input = live_input;
     const ObstaclePerceptionResult external_live_perception =
         cargo_safety_evaluator_.perceive(external_live_input);
     const CargoSafetyResult external_live_result =
         cargo_safety_evaluator_.evaluate(
             external_live_input, external_live_perception);
+    fusion_input.live.available =
+        external_live_input.obstacle_observation_valid;
+    fusion_input.live.reliable = external_live_result.input_valid &&
+        external_live_result.warning_valid &&
+        external_live_result.fault == CargoSafetyFault::NONE;
+    fusion_input.live.hazard = fusion_input.live.reliable &&
+        (external_live_result.warning_code ==
+             CargoSafetyEvaluator::kLevel1Code ||
+         external_live_result.warning_code ==
+             CargoSafetyEvaluator::kLevel2Code);
+    fusion_input.live.warning_code = external_live_result.warning_code;
+    fusion_input.live.coverage =
+        external_live_input.obstacle_roi_coverage_ratio;
+    fusion_input.live.reason = external_live_result.reason;
+    if (external_live_result.has_cluster_evidence) {
+        fusion_input.live.distance_m = external_live_result
+            .most_dangerous_cluster.footprint_distance_m;
+        fusion_input.live.clearance_m = external_live_result
+            .most_dangerous_cluster.conservative_clearance_m;
+    }
     std::vector<CargoObstacleObservation> pending_observations;
     std::size_t pending_directional_pretrack_clusters = 0U;
     std::size_t pending_radial_pretrack_clusters = 0U;
@@ -23718,6 +23702,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     cargo_predicted_obb_pub_.publish(predicted_obb_marker);
 
     CargoSafetyInput safety_input;
+    safety_input.source_stamp_sec = obstacle_cloud_stamp.toSec();
+    safety_input.source_sequence = static_cast<std::uint64_t>(
+        std::max(0.0, obstacle_cloud_stamp.toSec()) * 1000000.0);
     safety_input.evaluation_time_sec = stamp.toSec();
     safety_input.height.valid = last_cargo_bottom_result_.valid;
     safety_input.height.stale = false;

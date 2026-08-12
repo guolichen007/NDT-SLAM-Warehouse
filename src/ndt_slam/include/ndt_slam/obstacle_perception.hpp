@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <string>
 #include <vector>
@@ -27,6 +28,11 @@ struct ObstaclePerceptionConfig {
 };
 
 struct ObstaclePerceptionInput {
+  // Canonical physical-frame identity. Formal/Pending are transport phases,
+  // not perception inputs, and therefore cannot alter clustering.
+  double source_stamp_sec = 0.0;
+  std::uint64_t source_sequence = 0U;
+  std::string frame_id = "base_link";
   CargoObbFootprint query_footprint;
   pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud_base;
   bool observation_valid = false;
@@ -53,6 +59,9 @@ struct ObstaclePerceptionCluster {
 };
 
 struct ObstaclePerceptionResult {
+  double source_stamp_sec = 0.0;
+  std::uint64_t source_sequence = 0U;
+  std::string frame_id = "base_link";
   bool executed = false;
   bool valid = false;
   bool query_horizontal_valid = false;
@@ -71,4 +80,3 @@ ObstaclePerceptionResult perceiveObstacles(
     const ObstaclePerceptionInput& input);
 
 }  // namespace ndt_slam
-

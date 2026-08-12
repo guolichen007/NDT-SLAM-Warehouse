@@ -52,6 +52,9 @@ struct CargoSafetyConfig {
 };
 
 struct CargoSafetyInput {
+    double source_stamp_sec = 0.0;
+    std::uint64_t source_sequence = 0U;
+    std::string frame_id = "base_link";
     CargoHeightState height;
     CargoBaseFootprint footprint_base;
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr obstacle_cloud_base;

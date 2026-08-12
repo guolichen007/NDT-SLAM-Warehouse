@@ -133,6 +133,23 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         self.assertIn("VerticalInvalidPreservesPhysicalTrackingOnly", capability_test)
         self.assertIn("PositiveOnlyCanWarnButCannotClearRemoveOrMap", capability_test)
 
+    def test_formal_pending_share_phase_neutral_canonical_perception(self):
+        perception = read(
+            "src/ndt_slam/include/ndt_slam/obstacle_perception.hpp"
+        )
+        node = read("src/ndt_slam/src/ndt_slam.cpp")
+        evaluator_test = read(
+            "src/ndt_slam/test/cargo_safety_evaluator_test.cpp"
+        )
+        self.assertNotIn("perception_phase", perception)
+        self.assertNotIn("formal_phase", perception)
+        self.assertNotIn("pending_phase", perception)
+        self.assertEqual(node.count("external_live_perception ="), 1)
+        self.assertIn(
+            "FormalPendingTransportLabelsCannotChangeCanonicalPerception",
+            evaluator_test,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

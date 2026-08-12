@@ -515,6 +515,9 @@ ObstaclePerceptionResult CargoSafetyEvaluator::perceive(
     config.uncertainty_floor_m = config_.obstacle_uncertainty_floor_m;
     config.uncertainty_max_m = config_.obstacle_uncertainty_max_m;
     ObstaclePerceptionInput perception_input;
+    perception_input.source_stamp_sec = input.source_stamp_sec;
+    perception_input.source_sequence = input.source_sequence;
+    perception_input.frame_id = input.frame_id;
     perception_input.query_footprint = input.footprint_base;
     perception_input.cloud_base = input.obstacle_cloud_base;
     perception_input.observation_valid = input.obstacle_observation_valid;
