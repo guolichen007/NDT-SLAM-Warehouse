@@ -66,6 +66,7 @@ public:
     static constexpr int kClear = 14;
     static constexpr int kLevel1Warning = 17;
     static constexpr int kLevel2Warning = 18;
+    static constexpr int kAnomalyReview = 29;
     static constexpr int kSystemNotReady = 30;
     static constexpr int kLocalizationInvalid = 31;
     static constexpr int kGravityInvalid = 32;
@@ -161,7 +162,7 @@ public:
 
     static bool isAllowedCode(int code) {
         return code == kClear || code == kLevel1Warning ||
-               code == kLevel2Warning ||
+               code == kLevel2Warning || code == kAnomalyReview ||
                (code >= kSystemNotReady && code <= kInternalError);
     }
 
@@ -224,7 +225,8 @@ StatusContractResult validateStatusContract(
     const bool warning_code_valid = input.warning_code == 0 ||
         input.warning_code == State::kClear ||
         input.warning_code == State::kLevel1Warning ||
-        input.warning_code == State::kLevel2Warning;
+        input.warning_code == State::kLevel2Warning ||
+        input.warning_code == State::kAnomalyReview;
     const bool fault_code_valid = input.fault_code == 0 ||
         (input.fault_code >= State::kSystemNotReady &&
          input.fault_code <= State::kInternalError);
@@ -335,7 +337,9 @@ StatusContractResult validateStatusContract(
         (provisional_positive_loaded && !provisional_track_contract) ||
         !cluster_geometry_valid ||
         (input.warning_code == State::kLevel1Warning && !level1_geometry) ||
-        (input.warning_code == State::kLevel2Warning && !level2_geometry)) {
+        (input.warning_code == State::kLevel2Warning && !level2_geometry) ||
+        (input.warning_code == State::kAnomalyReview &&
+         !cluster_geometry_valid)) {
         return {State::kInternalError, false, false,
                 "warning_geometry_mismatch"};
     }
@@ -585,7 +589,8 @@ private:
         pending_error_reported_ = false;
         const bool urgent_warning =
             code == AlarmStateMachine::kLevel1Warning ||
-            code == AlarmStateMachine::kLevel2Warning;
+            code == AlarmStateMachine::kLevel2Warning ||
+            code == AlarmStateMachine::kAnomalyReview;
         const bool warning_repeat_due = urgent_warning &&
             (last_warning_log_wall_sec_ <= 0.0 ||
                  wall_now_sec - last_warning_log_wall_sec_ >=
@@ -607,12 +612,15 @@ private:
                      has_last_status_ && last_status_.cargo_valid,
                      has_last_status_ && last_status_.obstacle_valid);
         } else if (code == AlarmStateMachine::kLevel1Warning ||
-                   code == AlarmStateMachine::kLevel2Warning) {
+                   code == AlarmStateMachine::kLevel2Warning ||
+                   code == AlarmStateMachine::kAnomalyReview) {
+            const int level = code == AlarmStateMachine::kAnomalyReview ? 0
+                : (code == AlarmStateMachine::kLevel1Warning ? 1 : 2);
             ROS_WARN("[SAFETY_WARN] code=%d level=%d distance=%.2f "
                      "clearance=%.2f cargo_bottom=%.2f obstacle_top=%.2f "
                      "cargo_track=%u obstacle_track=%u confidence=%.2f "
                      "reason=%s",
-                     code, code == AlarmStateMachine::kLevel1Warning ? 1 : 2,
+                     code, level,
                      last_status_.nearest_obstacle_distance_m,
                      last_status_.conservative_vertical_clearance_m,
                      last_status_.cargo_bottom_z_map,

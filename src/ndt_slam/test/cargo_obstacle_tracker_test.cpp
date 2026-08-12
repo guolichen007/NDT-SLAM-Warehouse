@@ -158,14 +158,16 @@ TEST(CargoObstacleTracker,
   tracker.update(1.2, {near});
   const CargoObstacleTrackerDecision suppressed =
       tracker.update(1.4, {near});
-  EXPECT_FALSE(suppressed.confirmed_hazard);
-  EXPECT_TRUE(suppressed.selected_near_field);
-  EXPECT_FALSE(suppressed.selected_near_field_authorized);
-  EXPECT_EQ(suppressed.reason, "warning_track_missing_true_far_history");
+  // Without far-field approach history the near-field observation produces
+  // code 29 (ANOMALY_REVIEW) rather than a normal 17/18.
+  EXPECT_TRUE(suppressed.confirmed_hazard);
+  EXPECT_EQ(suppressed.warning_code, 29U);
+  EXPECT_EQ(suppressed.reason, "anomalous_proximity_without_far_authority");
 
   CargoObstacleObservation far = near;
-  far.footprint_distance_m = 4.0F;
+  far.footprint_distance_m = 6.0F;
   far.warning_code = 18U;
+  far.horizontal_uncertainty_m = 0.0F;
   tracker.update(1.6, {far});
   tracker.update(1.8, {far});
   ASSERT_TRUE(tracker.update(2.0, {far}).confirmed_hazard);

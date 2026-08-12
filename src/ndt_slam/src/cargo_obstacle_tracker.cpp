@@ -11,11 +11,12 @@ namespace {
 
 constexpr std::uint16_t kLevel1 = 17U;
 constexpr std::uint16_t kLevel2 = 18U;
+constexpr std::uint16_t kAnomaly = 29U;
 constexpr std::uint16_t kClear = 14U;
 constexpr double kStampEpsilonSec = 1.0e-4;
 
 bool warningCode(std::uint16_t code) {
-  return code == kLevel1 || code == kLevel2;
+  return code == kLevel1 || code == kLevel2 || code == kAnomaly;
 }
 
 std::size_t cellIntersectionCount(
@@ -660,11 +661,12 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     if (candidate == nullptr || moreDangerous(track, *candidate)) {
       candidate = &track;
     }
+    const bool has_far_authority = track.far_field_history_valid ||
+        track.certified_static_provenance;
     const bool warning_authorized = track.current_warning_eligible &&
         warningCode(track.warning_code) && track.confirmed &&
         (!config_.require_far_field_history_for_warnings ||
-         track.far_field_history_valid ||
-         track.certified_static_provenance) &&
+         has_far_authority) &&
         (!config_.require_large_geometry_for_warning ||
          track.geometry_validated_consecutive_observations >=
              config_.confirm_frames) &&
@@ -735,6 +737,19 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.confirmed_hazard = true;
     decision.warning_code = selected->warning_code;
     decision.reason = "persistent_obstacle_track_confirmed";
+  } else if (decision.hazard_observed && diagnostic != nullptr &&
+             diagnostic->current_warning_eligible &&
+             warningCode(diagnostic->warning_code) &&
+             diagnostic->confirmed &&
+             config_.require_far_field_history_for_warnings &&
+             !diagnostic->far_field_history_valid &&
+             !diagnostic->certified_static_provenance) {
+    // Anomalous proximity: obstacle is within 5 m with low clearance but
+    // lacks the required 5-8 m far-field approach history. This is not a
+    // normal 17/18; it is code 29 (ANOMALY_REVIEW).
+    decision.confirmed_hazard = true;
+    decision.warning_code = kAnomaly;
+    decision.reason = "anomalous_proximity_without_far_authority";
   } else if (decision.hazard_observed) {
     if (diagnostic == nullptr) {
       decision.reason = "static_track_association_reset";
