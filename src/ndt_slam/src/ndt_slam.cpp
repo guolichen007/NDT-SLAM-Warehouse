@@ -21205,7 +21205,13 @@ void NdtSlamNode::runPendingCargoAvoidance(
     const bool pending_pose_physically_plausible =
         !retained_pose_requires_validation ||
         pending_retired_pose_plausible_;
-    const bool pending_identity_context_valid = envelope.valid &&
+    const bool pending_horizontal_envelope_valid =
+        envelope.center_base.allFinite() &&
+        std::isfinite(envelope.length_m) && envelope.length_m > 0.0F &&
+        std::isfinite(envelope.width_m) && envelope.width_m > 0.0F &&
+        std::isfinite(envelope.yaw_base_rad);
+    const bool pending_identity_context_valid =
+        pending_horizontal_envelope_valid &&
         envelope.cargo_lifecycle_id != 0U &&
         envelope.cargo_lifecycle_id == cargo_lifecycle_id_ &&
         pending_track_context_id != 0U &&
@@ -21215,22 +21221,54 @@ void NdtSlamNode::runPendingCargoAvoidance(
         pending_cargo_self_evidence_.track_segment_id ==
             pending_track_context_id &&
         pending_cargo_self_evidence_.source == envelope.source;
-    const bool pending_tracking_context_valid = envelope.valid &&
+    const bool pending_tracking_context_valid =
+        pending_horizontal_envelope_valid &&
         envelope.cargo_lifecycle_id != 0U &&
         envelope.cargo_lifecycle_id == cargo_lifecycle_id_ &&
         pending_track_context_id != 0U &&
         pending_pose_physically_plausible;
-    // Physical perception/tracking is an identity + horizontal-envelope
-    // capability. Warning authority is deliberately evaluated below and must
-    // not suppress observation of the same external object.
-    const bool pending_tracking_query_allowed =
-        pending_tracking_context_valid;
-    const bool pending_warning_query_allowed =
-        recognition_allows_warning &&
-        pending_pose_physically_plausible &&
-        pending_identity_context_valid &&
+    const double cloud_age_sec = obstacle_cloud_stamp.isZero()
+        ? std::numeric_limits<double>::infinity()
+        : std::max(processing_age_sec,
+                   (stamp - obstacle_cloud_stamp).toSec());
+    const bool pending_cloud_fresh = obstacle_cloud_base &&
+        std::isfinite(cloud_age_sec) && cloud_age_sec >= 0.0 &&
+        cloud_age_sec <=
+            cargo_safety_evaluator_.config().maximum_obstacle_cloud_age_sec;
+    CargoSubsystemFrameInput subsystem_input;
+    subsystem_input.source_stamp_sec = envelope.evidence_stamp_sec;
+    subsystem_input.evaluation_stamp_sec = stamp.toSec();
+    subsystem_input.cargo_lifecycle_id = cargo_lifecycle_id_;
+    subsystem_input.cargo_track_id = pending_track_context_id;
+    subsystem_input.envelope = envelope;
+    subsystem_input.config_valid = !cargo_safety_config_error_;
+    subsystem_input.external_output_authorized =
+        cargo_pipeline_external_output_authorized_;
+    subsystem_input.identity_valid = pending_tracking_context_valid;
+    subsystem_input.lifecycle_valid =
+        envelope.cargo_lifecycle_id == cargo_lifecycle_id_;
+    subsystem_input.cloud_fresh = pending_cloud_fresh;
+    subsystem_input.vertical_geometry_valid =
+        pending_pose_physically_plausible && envelope.valid &&
+        std::isfinite(envelope.bottom_z_base) &&
+        std::isfinite(envelope.top_z_base) &&
+        envelope.top_z_base > envelope.bottom_z_base;
+    subsystem_input.vertical_authority = subsystem_input.vertical_geometry_valid
+        ? CargoVerticalAuthority::FRESH_HELD_FORMAL
+        : CargoVerticalAuthority::INVALID;
+    subsystem_input.positive_identity_authorized =
+        recognition_allows_warning && pending_identity_context_valid &&
         pending_cargo_self_evidence_
             .positive_warning_identity_authorized;
+    const CargoSubsystemSnapshot& cargo_snapshot =
+        cargo_subsystem_.update(subsystem_input);
+    // Physical perception/tracking consumes only identity, horizontal
+    // geometry and cloud freshness. Vertical authority is a later hazard
+    // capability and cannot erase an otherwise valid physical observation.
+    const bool pending_tracking_query_allowed =
+        cargo_snapshot.capability.tracking;
+    const bool pending_warning_query_allowed =
+        cargo_snapshot.capability.positive_warning;
     const bool pending_identity_discontinuous =
         hook_lock_.state == HookCargoLockState::EMPTY ||
         hook_lock_.state == HookCargoLockState::CLEAR_WAIT_REARM ||
@@ -21382,10 +21420,6 @@ void NdtSlamNode::runPendingCargoAvoidance(
         pending_unresolved_inside->size();
     cargo_pending_external_shell_points_ = pending_external_shell->size();
     live_input.obstacle_cloud_base = live_shell;
-    const double cloud_age_sec = obstacle_cloud_stamp.isZero()
-        ? std::numeric_limits<double>::infinity()
-        : std::max(processing_age_sec,
-                   (stamp - obstacle_cloud_stamp).toSec());
     live_input.obstacle_cloud_age_sec = cloud_age_sec;
     live_input.obstacle_observation_valid =
         pending_tracking_query_allowed && obstacle_cloud_base &&
