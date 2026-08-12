@@ -60,7 +60,7 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         self.assertIn("CargoSafetyEvaluator::perceive", evaluator)
         self.assertIn("hazard_geometry_valid", tracker)
         self.assertIn("formal_obstacle_perception", node)
-        self.assertIn("external_live_perception", node)
+        self.assertIn("canonical_perception", node)
         self.assertNotIn(
             "static_cast<bool>(observation_cloud_base) &&\n"
             "        last_cargo_bottom_result_.geometry_valid",
@@ -144,7 +144,7 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         self.assertNotIn("perception_phase", perception)
         self.assertNotIn("formal_phase", perception)
         self.assertNotIn("pending_phase", perception)
-        self.assertEqual(node.count("external_live_perception ="), 1)
+        self.assertEqual(node.count("canonical_perception ="), 1)
         self.assertIn(
             "FormalPendingTransportLabelsCannotChangeCanonicalPerception",
             evaluator_test,
@@ -211,6 +211,18 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
             self.assertIn(f"$<TARGET_OBJECTS:{target}>", cmake)
         self.assertEqual(cmake.count("add_executable(ndt_slam_node"), 1)
         self.assertIn("add_library(ndt_slam_lib SHARED", cmake)
+
+    def test_cargo_safety_is_the_only_effective_threshold_snapshot(self):
+        node = read("src/ndt_slam/src/ndt_slam.cpp")
+        config = read("src/ndt_slam/config/live_longterm_mapping.yaml")
+        self.assertIn(
+            'cargo_safety["cargo_bottom_extra_margin_m"]', node
+        )
+        self.assertIn(
+            'cargo_safety["obstacle_min_cluster_points"]', node
+        )
+        self.assertIn("compatibility mirror", node)
+        self.assertIn("only effective Cargo/avoidance policy", config)
 
 
 if __name__ == "__main__":

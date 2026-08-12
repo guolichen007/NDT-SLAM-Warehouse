@@ -351,7 +351,7 @@ class SafetyRecoveryContractTest(unittest.TestCase):
             "Eigen::Vector2f pending_velocity_map"
         )
         live_branch = pending.index(
-            "if (external_live_result.input_valid"
+            "if (canonical_hazard_result.input_valid"
         )
         static_use = pending.index(
             "query.forward_direction_map = pending_velocity_map"

@@ -3301,10 +3301,12 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         safety_config.minimum_vertical_clearance_m = cargo_safety
             ? cargo_safety["minimum_vertical_clearance_m"].as<float>(0.80F)
             : 0.80F;
-        safety_config.cargo_bottom_extra_margin_m =
-            odom_anchor_config_.cargo_warning.cargo_bottom_extra_margin_m;
-        safety_config.obstacle_top_percentile =
-            odom_anchor_config_.cargo_warning.obstacle_top_percentile;
+        safety_config.cargo_bottom_extra_margin_m = cargo_safety
+            ? cargo_safety["cargo_bottom_extra_margin_m"].as<float>(0.05F)
+            : 0.05F;
+        safety_config.obstacle_top_percentile = cargo_safety
+            ? cargo_safety["obstacle_top_percentile"].as<float>(0.95F)
+            : 0.95F;
         safety_config.obstacle_bottom_percentile = cargo_safety
             ? cargo_safety["obstacle_bottom_percentile"].as<float>(0.05F)
             : 0.05F;
@@ -3318,24 +3320,34 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         safety_config.overhead_separation_margin_m = cargo_safety
             ? cargo_safety["overhead_separation_margin_m"].as<float>(0.10F)
             : 0.10F;
-        safety_config.obstacle_cluster_tolerance_m =
-            odom_anchor_config_.cargo_warning.obstacle_cluster_tolerance_m;
-        if (odom_anchor_config_.cargo_warning.obstacle_min_points <= 0) {
+        safety_config.obstacle_cluster_tolerance_m = cargo_safety
+            ? cargo_safety["obstacle_cluster_tolerance_m"].as<float>(0.25F)
+            : 0.25F;
+        const int obstacle_min_cluster_points = cargo_safety
+            ? cargo_safety["obstacle_min_cluster_points"].as<int>(5) : 5;
+        if (obstacle_min_cluster_points <= 0) {
             reject_cargo_config(
                 "cargo_safety.obstacle_min_cluster_points",
                 "must_be_positive");
             safety_config.obstacle_min_cluster_points = 0U;
         } else {
             safety_config.obstacle_min_cluster_points =
-                static_cast<std::size_t>(
-                    odom_anchor_config_.cargo_warning.obstacle_min_points);
+                static_cast<std::size_t>(obstacle_min_cluster_points);
         }
         safety_config.maximum_obstacle_cloud_age_sec = cargo_safety
             ? cargo_safety["maximum_obstacle_cloud_age_sec"].as<double>(0.50)
             : 0.50;
-        safety_config.minimum_roi_finite_points =
-            static_cast<std::size_t>(
-                odom_anchor_config_.cargo_warning.minimum_roi_finite_points);
+        const int minimum_roi_finite_points = cargo_safety
+            ? cargo_safety["minimum_roi_finite_points"].as<int>(20) : 20;
+        if (minimum_roi_finite_points <= 0) {
+            reject_cargo_config(
+                "cargo_safety.minimum_roi_finite_points",
+                "must_be_positive");
+            safety_config.minimum_roi_finite_points = 0U;
+        } else {
+            safety_config.minimum_roi_finite_points =
+                static_cast<std::size_t>(minimum_roi_finite_points);
+        }
         safety_config.minimum_roi_coverage_ratio = cargo_safety
             ? cargo_safety["minimum_roi_coverage_ratio"].as<float>(0.05F)
             : 0.05F;
@@ -3352,6 +3364,30 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             nearly_equal(safety_config.minimum_vertical_clearance_m, 0.80) &&
             nearly_equal(safety_config.minimum_roi_coverage_ratio, 0.05) &&
             nearly_equal(safety_config.maximum_obstacle_cloud_age_sec, 0.50);
+        // Legacy odom-anchor warning fields remain accepted only as an exact
+        // compatibility mirror. They never become a second effective policy.
+        const auto& legacy_warning = odom_anchor_config_.cargo_warning;
+        contract_valid = contract_valid &&
+            nearly_equal(legacy_warning.level1_distance_m,
+                         safety_config.level1_distance_m) &&
+            nearly_equal(legacy_warning.level2_distance_m,
+                         safety_config.level2_distance_m) &&
+            nearly_equal(legacy_warning.min_vertical_clearance_m,
+                         safety_config.minimum_vertical_clearance_m) &&
+            nearly_equal(legacy_warning.cargo_bottom_extra_margin_m,
+                         safety_config.cargo_bottom_extra_margin_m) &&
+            nearly_equal(legacy_warning.obstacle_top_percentile,
+                         safety_config.obstacle_top_percentile) &&
+            nearly_equal(legacy_warning.obstacle_cluster_tolerance_m,
+                         safety_config.obstacle_cluster_tolerance_m) &&
+            legacy_warning.obstacle_min_points ==
+                static_cast<int>(safety_config.obstacle_min_cluster_points) &&
+            legacy_warning.minimum_roi_finite_points ==
+                static_cast<int>(safety_config.minimum_roi_finite_points) &&
+            nearly_equal(legacy_warning.minimum_roi_coverage_ratio,
+                         safety_config.minimum_roi_coverage_ratio) &&
+            nearly_equal(legacy_warning.maximum_obstacle_cloud_age_sec,
+                         safety_config.maximum_obstacle_cloud_age_sec);
 
         const YAML::Node status_codes = config["status_codes"];
         if (status_codes) {
@@ -21175,22 +21211,23 @@ void NdtSlamNode::runPendingCargoAvoidance(
                        PendingCargoEnvelopeSource::RETIRED_FORMAL_SHAPE
                    ? retired_cargo_track_segment_id_
                    : cargo_track_segment_id_);
-    bool recognition_allows_warning = false;
+    bool positive_identity_authorized_by_recognition = false;
     std::string warning_state_reason =
         "recognition_state_not_warning_authorized";
     switch (hook_lock_.state) {
         case HookCargoLockState::CANDIDATE:
         case HookCargoLockState::GEOMETRY_CONFIRMING:
-            recognition_allows_warning = true;
+            positive_identity_authorized_by_recognition = true;
             warning_state_reason = "candidate_tracking_warning_authorized";
             break;
         case HookCargoLockState::LOST_HOLD:
-            recognition_allows_warning =
+            positive_identity_authorized_by_recognition =
                 envelope.source !=
                     PendingCargoEnvelopeSource::CONFIGURED_CONSERVATIVE &&
                 envelope.source !=
                     PendingCargoEnvelopeSource::LIFT_ORIGIN_CANDIDATE;
-            warning_state_reason = recognition_allows_warning
+            warning_state_reason =
+                positive_identity_authorized_by_recognition
                 ? "lost_hold_warning_authorized"
                 : "lost_hold_requires_retained_identity_shape";
             break;
@@ -21203,10 +21240,11 @@ void NdtSlamNode::runPendingCargoAvoidance(
                 "loaded_reacquire_warning_revoked";
             break;
         case HookCargoLockState::LOCKED:
-            recognition_allows_warning =
+            positive_identity_authorized_by_recognition =
                 envelope.source ==
                     PendingCargoEnvelopeSource::ACTIVE_LOCKED_TRACK;
-            warning_state_reason = recognition_allows_warning
+            warning_state_reason =
+                positive_identity_authorized_by_recognition
                 ? "active_locked_pending_warning_authorized"
                 : "formal_geometry_required";
             break;
@@ -21278,7 +21316,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
         ? CargoVerticalAuthority::FRESH_HELD_FORMAL
         : CargoVerticalAuthority::INVALID;
     subsystem_input.positive_identity_authorized =
-        recognition_allows_warning && pending_identity_context_valid &&
+        positive_identity_authorized_by_recognition &&
+        pending_identity_context_valid &&
         pending_cargo_self_evidence_
             .positive_warning_identity_authorized;
     const CargoSubsystemSnapshot& cargo_snapshot =
@@ -21366,7 +21405,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
     fusion_input.pending_authority_confidence =
         pending_cargo_self_evidence_.authority_confidence;
     fusion_input.pending_recognition_state_allows_warning =
-        recognition_allows_warning;
+        positive_identity_authorized_by_recognition;
     fusion_input.pending_warning_query_allowed =
         pending_warning_query_allowed;
     fusion_input.pending_pose_physically_plausible =
@@ -21465,30 +21504,29 @@ void NdtSlamNode::runPendingCargoAvoidance(
     // The positively classified external cloud is the only canonical
     // perception input. Unresolved points remain published for diagnostics,
     // but are never clustered a second time or allowed to create authority.
-    CargoSafetyInput external_live_input = live_input;
-    const ObstaclePerceptionResult external_live_perception =
-        cargo_safety_evaluator_.perceive(external_live_input);
-    const CargoSafetyResult external_live_result =
+    const ObstaclePerceptionResult canonical_perception =
+        cargo_safety_evaluator_.perceive(live_input);
+    const CargoSafetyResult canonical_hazard_result =
         cargo_safety_evaluator_.evaluate(
-            external_live_input, external_live_perception);
+            live_input, canonical_perception);
     fusion_input.live.available =
-        external_live_input.obstacle_observation_valid;
-    fusion_input.live.reliable = external_live_result.input_valid &&
-        external_live_result.warning_valid &&
-        external_live_result.fault == CargoSafetyFault::NONE;
+        live_input.obstacle_observation_valid;
+    fusion_input.live.reliable = canonical_hazard_result.input_valid &&
+        canonical_hazard_result.warning_valid &&
+        canonical_hazard_result.fault == CargoSafetyFault::NONE;
     fusion_input.live.hazard = fusion_input.live.reliable &&
-        (external_live_result.warning_code ==
+        (canonical_hazard_result.warning_code ==
              CargoSafetyEvaluator::kLevel1Code ||
-         external_live_result.warning_code ==
+         canonical_hazard_result.warning_code ==
              CargoSafetyEvaluator::kLevel2Code);
-    fusion_input.live.warning_code = external_live_result.warning_code;
+    fusion_input.live.warning_code = canonical_hazard_result.warning_code;
     fusion_input.live.coverage =
-        external_live_input.obstacle_roi_coverage_ratio;
-    fusion_input.live.reason = external_live_result.reason;
-    if (external_live_result.has_cluster_evidence) {
-        fusion_input.live.distance_m = external_live_result
+        live_input.obstacle_roi_coverage_ratio;
+    fusion_input.live.reason = canonical_hazard_result.reason;
+    if (canonical_hazard_result.has_cluster_evidence) {
+        fusion_input.live.distance_m = canonical_hazard_result
             .most_dangerous_cluster.footprint_distance_m;
-        fusion_input.live.clearance_m = external_live_result
+        fusion_input.live.clearance_m = canonical_hazard_result
             .most_dangerous_cluster.conservative_clearance_m;
     }
     std::vector<CargoObstacleObservation> pending_observations;
@@ -21502,11 +21540,11 @@ void NdtSlamNode::runPendingCargoAvoidance(
     // an accepted NDT measurement.
     Eigen::Vector2f pending_velocity_map = Eigen::Vector2f::Zero();
     bool pending_velocity_valid = false;
-    if (external_live_result.input_valid &&
-        external_live_result.warning_valid &&
-        external_live_result.fault == CargoSafetyFault::NONE) {
+    if (canonical_hazard_result.input_valid &&
+        canonical_hazard_result.warning_valid &&
+        canonical_hazard_result.fault == CargoSafetyFault::NONE) {
         pending_observations.reserve(
-            external_live_result.cluster_evidence.size());
+            canonical_hazard_result.cluster_evidence.size());
         const float map_cell_m =
             static_obstacle_evidence_index_.config().cell_size_m;
         const Eigen::Vector3d cargo_center_map_3d =
@@ -21531,10 +21569,10 @@ void NdtSlamNode::runPendingCargoAvoidance(
             pending_velocity_map.norm() >=
                 cargo_motion_corridor_config_.minimum_motion_speed_mps;
         for (std::size_t evidence_index = 0U;
-             evidence_index < external_live_result.cluster_evidence.size();
+             evidence_index < canonical_hazard_result.cluster_evidence.size();
              ++evidence_index) {
             const CargoSafetyClusterEvidence& evidence =
-                external_live_result.cluster_evidence[evidence_index];
+                canonical_hazard_result.cluster_evidence[evidence_index];
             const bool raw_warning_candidate =
                 evidence.warning_code ==
                     CargoSafetyEvaluator::kLevel1Code ||
@@ -21729,15 +21767,15 @@ void NdtSlamNode::runPendingCargoAvoidance(
             }
             pending_observations.push_back(std::move(observation));
         }
-    } else if (external_live_perception.valid) {
+    } else if (canonical_perception.valid) {
         // Preserve physical identity and true 5-8 m acquisition while the
         // vertical Cargo authority is unavailable. These observations carry
         // no clearance and are structurally incapable of authorizing 17/18.
-        pending_observations.reserve(external_live_perception.clusters.size());
+        pending_observations.reserve(canonical_perception.clusters.size());
         const Eigen::Vector3d cargo_center_map_3d =
             pose_map_base * envelope.center_base.cast<double>();
         for (const ObstaclePerceptionCluster& cluster :
-             external_live_perception.clusters) {
+             canonical_perception.clusters) {
             if (cluster.footprint_distance_m > acquisition_shell_m) continue;
             CargoObstacleObservation observation;
             observation.source_index = cluster.cluster_index;
@@ -21787,9 +21825,9 @@ void NdtSlamNode::runPendingCargoAvoidance(
     const CargoSafetyClusterEvidence* selected_pending_evidence = nullptr;
     if (pending_obstacle_decision.hazard_observed &&
         pending_obstacle_decision.selected_source_index <
-            external_live_result.cluster_evidence.size()) {
+            canonical_hazard_result.cluster_evidence.size()) {
         const CargoSafetyClusterEvidence& selected =
-            external_live_result.cluster_evidence[
+            canonical_hazard_result.cluster_evidence[
                 pending_obstacle_decision.selected_source_index];
         if ((selected.warning_code ==
                  CargoSafetyEvaluator::kLevel1Code ||
@@ -21838,16 +21876,16 @@ void NdtSlamNode::runPendingCargoAvoidance(
         pending_obstacle_decision.selected_embedded_authorized;
     if (fusion_input.pending_external_obstacle_authorized) {
         fusion_input.live.available =
-            external_live_input.obstacle_observation_valid;
+            live_input.obstacle_observation_valid;
         fusion_input.live.reliable =
-            external_live_result.input_valid &&
-            external_live_result.warning_valid &&
-            external_live_result.fault == CargoSafetyFault::NONE;
+            canonical_hazard_result.input_valid &&
+            canonical_hazard_result.warning_valid &&
+            canonical_hazard_result.fault == CargoSafetyFault::NONE;
         fusion_input.live.hazard = true;
         fusion_input.live.warning_code =
             pending_obstacle_decision.warning_code;
         fusion_input.live.coverage =
-            external_live_input.obstacle_roi_coverage_ratio;
+            live_input.obstacle_roi_coverage_ratio;
         fusion_input.live.distance_m =
             selected_pending_evidence->footprint_distance_m;
         fusion_input.live.clearance_m =
@@ -22334,7 +22372,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
            << ",\"pending_lost_growth_m\":"
            << pending_lost_growth_m_
            << ",\"pending_recognition_state_allows_warning\":"
-           << (recognition_allows_warning ? "true" : "false")
+           << (positive_identity_authorized_by_recognition
+                   ? "true" : "false")
            << ",\"pending_tracking_query_allowed\":"
            << (pending_tracking_query_allowed ? "true" : "false")
            << ",\"pending_warning_state_reason\":\""
@@ -22528,7 +22567,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
     pending_diagnostics.source_stamp_sec = obstacle_cloud_stamp.toSec();
     pending_diagnostics.perception_phase = "PENDING";
     pending_diagnostics.perception_executed =
-        external_live_perception.executed;
+        canonical_perception.executed;
     pending_diagnostics.query_geometry_valid =
         cargo_snapshot.envelope.horizontal_valid &&
         cargo_snapshot.envelope.vertical_valid;
@@ -22549,9 +22588,9 @@ void NdtSlamNode::runPendingCargoAvoidance(
     pending_diagnostics.external_point_count =
         pending_external_shell->size();
     pending_diagnostics.clustering_executed =
-        external_live_perception.executed;
+        canonical_perception.executed;
     pending_diagnostics.cluster_count =
-        external_live_perception.cluster_count;
+        canonical_perception.cluster_count;
     pending_diagnostics.tracking_attempted =
         pending_tracking_query_allowed;
     pending_diagnostics.observation_count = pending_observations.size();
@@ -22563,7 +22602,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
         fused.official_valid;
     pending_diagnostics.block_reason = !pending_tracking_query_allowed
         ? "PENDING_PERCEPTION_NOT_RUN"
-        : (!external_live_perception.valid
+        : (!canonical_perception.valid
                ? "PENDING_PERCEPTION_RUN_ZERO_POINTS"
                : (!pending_obstacle_decision.valid
                       ? "TRACKING_BLOCKED"

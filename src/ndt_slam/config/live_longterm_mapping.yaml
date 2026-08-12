@@ -748,10 +748,17 @@ cargo_safety:
   level1_distance_m: 3.0
   level2_distance_m: 5.0
   minimum_vertical_clearance_m: 0.80
+  # This section is the only effective Cargo/avoidance policy snapshot.
+  # odom_anchored_cargo_box.cargo_warning is compatibility validation only.
+  cargo_bottom_extra_margin_m: 0.05
+  obstacle_top_percentile: 0.95
   obstacle_bottom_percentile: 0.05
   obstacle_vertical_bin_size_m: 0.10
   obstacle_min_vertical_continuity_ratio: 0.45
   overhead_separation_margin_m: 0.10
+  obstacle_cluster_tolerance_m: 0.25
+  obstacle_min_cluster_points: 5
+  minimum_roi_finite_points: 20
   minimum_roi_coverage_ratio: 0.05
   maximum_obstacle_cloud_age_sec: 0.50
   # 17/18 need three independent, spatially continuous obstacle clusters.
