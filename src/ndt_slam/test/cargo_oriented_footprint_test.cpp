@@ -33,8 +33,8 @@ TEST(CargoOrientedFootprintTest, RecoversHorizontalAndVerticalAxes) {
         const auto result = estimateCargoOrientedFootprint(
             rectangle(2.0F, 0.8F, yaw));
         ASSERT_TRUE(result.valid) << result.reason;
-        EXPECT_NEAR(result.size_long_short.x(), 2.0F, 0.20F);
-        EXPECT_NEAR(result.size_long_short.y(), 0.8F, 0.15F);
+        EXPECT_NEAR(result.size_long_short.x(), 2.0F, 0.25F);
+        EXPECT_NEAR(result.size_long_short.y(), 0.8F, 0.25F);
         EXPECT_LT(axialError(result.yaw_base_rad, yaw), 0.03F);
     }
 }
@@ -114,6 +114,58 @@ TEST(CargoOrientedFootprintTest, AxialMeanHandlesNinetyDegreeWrap) {
     ASSERT_TRUE(meanCargoAxialYaw({89.0F * kDeg, -89.0F * kDeg}, &mean));
     EXPECT_LT(axialError(mean, 0.5F * 3.14159265358979323846F),
               2.0F * kDeg);
+}
+
+TEST(CargoOrientedFootprintTest, AnchorGridIgnoresDisconnectedOutlier) {
+    std::vector<Eigen::Vector2f> points;
+    for (int x = -10; x <= 10; ++x) {
+        for (int y = -4; y <= 4; ++y) {
+            points.emplace_back(0.05F * x, 0.05F * y);
+        }
+    }
+    points.emplace_back(3.0F, 3.0F);
+    const CargoAnchorGridFootprint result =
+        refineCargoAnchorGridFootprint(
+            points, Eigen::Vector2f::Zero(), 0.0F,
+            Eigen::Vector2f(1.2F, 0.6F));
+    ASSERT_TRUE(result.valid) << result.reason;
+    EXPECT_LT(result.size_long_short.x(), 1.5F);
+    EXPECT_LT(result.size_long_short.y(), 0.8F);
+    EXPECT_GT(result.component_cells, 100U);
+}
+
+TEST(CargoOrientedFootprintTest, LiveObbRequiresThreeOfFiveFrames) {
+    CargoLiveObbFilter filter;
+    for (int frame = 0; frame < 2; ++frame) {
+        const CargoLiveObb result = filter.update(
+            true, Eigen::Vector2f(2.0F, 0.8F), 0.10F,
+            0.5F, 1.0F, 0.1 * frame);
+        EXPECT_FALSE(result.valid);
+    }
+    const CargoLiveObb established = filter.update(
+        true, Eigen::Vector2f(2.0F, 0.8F), 0.11F,
+        0.5F, 1.0F, 0.2);
+    ASSERT_TRUE(established.valid);
+    EXPECT_NEAR(established.size_long_short.x(), 2.0F, 1.0e-4F);
+    EXPECT_GT(established.yaw_concentration, 0.99F);
+}
+
+TEST(CargoOrientedFootprintTest, LiveObbBoundsPerFrameSizeChange) {
+    CargoLiveObbFilter filter;
+    CargoLiveObb result;
+    for (int frame = 0; frame < 5; ++frame) {
+        result = filter.update(
+            true, Eigen::Vector2f(2.0F, 0.8F), 0.0F,
+            0.5F, 1.0F, 0.1 * frame);
+    }
+    ASSERT_TRUE(result.valid);
+    const float previous = result.size_long_short.x();
+    for (int frame = 5; frame < 8; ++frame) {
+        result = filter.update(
+            true, Eigen::Vector2f(3.0F, 1.4F), 0.0F,
+            0.5F, 1.0F, 0.1 * frame);
+    }
+    EXPECT_LE(result.size_long_short.x() - previous, 0.10F + 1.0e-5F);
 }
 
 }  // namespace

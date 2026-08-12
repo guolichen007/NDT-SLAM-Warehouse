@@ -266,6 +266,24 @@ float cargoOrientedOverlapRatio(
       : 0.0F;
 }
 
+bool cargoCandidateContainsHookAnchor(
+    const CargoCandidateDescriptor& candidate,
+    const Eigen::Vector2f& hook_center,
+    float margin_m) {
+  if (!validDescriptor(candidate) || !hook_center.allFinite() ||
+      !std::isfinite(margin_m) || margin_m < 0.0F) {
+    return false;
+  }
+  const Eigen::Vector2f delta =
+      hook_center - candidate.center.head<2>();
+  const float cosine = std::cos(candidate.yaw_rad);
+  const float sine = std::sin(candidate.yaw_rad);
+  const float local_long = cosine * delta.x() + sine * delta.y();
+  const float local_short = -sine * delta.x() + cosine * delta.y();
+  return std::abs(local_long) <= 0.5F * candidate.size.x() + margin_m &&
+      std::abs(local_short) <= 0.5F * candidate.size.y() + margin_m;
+}
+
 CargoCandidateIdentityScore scoreCargoCandidateIdentity(
     const CargoCandidateDescriptor& candidate,
     const CargoCandidateIdentityContext& context) {
@@ -277,8 +295,23 @@ CargoCandidateIdentityScore scoreCargoCandidateIdentity(
     score.reason = "invalid_candidate_or_context";
     return score;
   }
+  if (context.require_hook_containment &&
+      !cargoCandidateContainsHookAnchor(
+          candidate, context.hook_center,
+          context.hook_containment_margin_m)) {
+    score.reason = "hook_anchor_outside_candidate_obb";
+    return score;
+  }
+  const float hook_center_distance =
+      (candidate.center.head<2>() - context.hook_center).norm();
+  if (std::isfinite(context.maximum_hook_center_distance_m) &&
+      (context.maximum_hook_center_distance_m < 0.0F ||
+       hook_center_distance > context.maximum_hook_center_distance_m)) {
+    score.reason = "candidate_center_too_far_from_hook_anchor";
+    return score;
+  }
   score.hook_distance_score = unitScore(
-      (candidate.center.head<2>() - context.hook_center).norm(),
+      hook_center_distance,
       context.hook_region_radius_m);
   score.point_support_confidence = std::clamp(
       static_cast<float>(candidate.point_count) /
