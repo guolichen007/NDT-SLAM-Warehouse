@@ -280,6 +280,9 @@ static_assert(
 NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     : nh_(nh) {
     initializeParameters();
+    ROS_INFO("[StartupMap] PROCESS_START persistent=%d root=%s",
+             persistent_map_enabled_ ? 1 : 0,
+             persistent_map_root_dir_.c_str());
     static_obstacle_evidence_index_.reset(
         static_evidence_epoch_.load(std::memory_order_acquire));
 
@@ -498,6 +501,9 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
 NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHandle& nh)
     : nh_(nh) {
     initializeParameters(config_file_path);
+    ROS_INFO("[StartupMap] PROCESS_START persistent=%d root=%s",
+             persistent_map_enabled_ ? 1 : 0,
+             persistent_map_root_dir_.c_str());
 
     pointcloud_sub_ = nh_.subscribe(pointcloud_topic_, 10, &NdtSlamNode::pointCloudCallback, this);
     if (hook_load_signal_enabled_) {
@@ -3875,6 +3881,11 @@ void NdtSlamNode::resetCargoForHookState(
 
 void NdtSlamNode::pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg) {
     cloud_callback_count_.fetch_add(1, std::memory_order_relaxed);
+    if (!startup_first_cloud_logged_.exchange(
+            true, std::memory_order_acq_rel)) {
+        ROS_INFO("[StartupMap] FIRST_CLOUD stamp=%.9f points=%u",
+                 msg->header.stamp.toSec(), msg->width * msg->height);
+    }
     if (runtime_diag_.isEnabled()) {
         runtime_diag_.recordCallback(msg->header.stamp.toSec());
     }
@@ -5831,6 +5842,13 @@ void NdtSlamNode::processCloudThread() {
                 ndt_attempt_count_.fetch_add(1, std::memory_order_relaxed);
                 ndt_attempted_this_frame = true;
                 ndt_execution_state = "NDT_ATTEMPTED";
+                if (!startup_first_ndt_begin_logged_.exchange(
+                        true, std::memory_order_acq_rel)) {
+                    ROS_INFO("[StartupMap] FIRST_NDT_BEGIN target=%s "
+                             "target_points=%d source_points=%d",
+                             selected_source.c_str(), last_target_points_,
+                             last_source_points_);
+                }
                 ndt_->align(aligned, initial_guess);
                 auto ndt_end = std::chrono::steady_clock::now();
                 double ndt_time_ms = std::chrono::duration<double, std::milli>(ndt_end - ndt_start).count();
@@ -6165,6 +6183,22 @@ void NdtSlamNode::processCloudThread() {
             }
         } catch (const std::exception& e) {
             ROS_ERROR("NDT_OMP exception: %s", e.what());
+        }
+
+        if (ndt_attempted_this_frame &&
+            !startup_first_ndt_result_logged_.exchange(
+                true, std::memory_order_acq_rel)) {
+            ROS_INFO("[StartupMap] FIRST_NDT_RESULT converged=%d fitness=%.9f "
+                     "target=%s target_points=%d",
+                     last_ndt_converged_ ? 1 : 0, last_ndt_fitness_,
+                     last_actual_target_source_.c_str(), last_target_points_);
+        }
+        if (frame_ndt_accepted &&
+            !startup_first_localization_accepted_logged_.exchange(
+                true, std::memory_order_acq_rel)) {
+            ROS_INFO("[StartupMap] FIRST_LOCALIZATION_ACCEPTED fitness=%.9f "
+                     "target=%s",
+                     last_ndt_fitness_, last_actual_target_source_.c_str());
         }
 
         if (ndt_attempted_this_frame) {
@@ -10427,9 +10461,17 @@ void NdtSlamNode::updateRelocalization(
 
     const std::string submitted_map_source = job.map_source;
     const std::size_t submitted_candidates = job.seeds.size();
+    const std::size_t submitted_map_points = job.map ? job.map->size() : 0U;
     if (job.seeds.empty() || !relocalizer_.submit(std::move(job))) {
         publishRelocalizationStatus("DEGRADED", "no_search_candidates");
         return;
+    }
+    if (!startup_relocalizer_search_logged_.exchange(
+            true, std::memory_order_acq_rel)) {
+        ROS_INFO("[StartupMap] RELOCALIZER_FIRST_ACTIVE_SEARCH mode=%s "
+                 "map_source=%s map_points=%zu candidates=%zu",
+                 global ? "GLOBAL" : "LOCAL", submitted_map_source.c_str(),
+                 submitted_map_points, submitted_candidates);
     }
     relocalization_last_submit_frame_ = frame_index;
     relocalization_state_ = global
@@ -10770,10 +10812,17 @@ StationaryMotionDecision NdtSlamNode::updateStationaryMotionState(
 
     const bool catch_up_blocks_maps =
         next_state == RuntimeMotionState::CATCH_UP;
+    const bool persistent_commit_was_allowed = allow_persistent_map_commit_;
     allow_runtime_local_map_update_ =
         decision.allow_local_map_update && !catch_up_blocks_maps;
     allow_persistent_map_commit_ =
         decision.allow_persistent_map_commit && !catch_up_blocks_maps;
+    if (!persistent_commit_was_allowed && allow_persistent_map_commit_ &&
+        !startup_map_commit_rearm_logged_.exchange(
+            true, std::memory_order_acq_rel)) {
+        ROS_INFO("[StartupMap] MAP_COMMIT_REARM state=%s reason=%s",
+                 runtimeMotionStateName(next_state), decision.reason.c_str());
+    }
     if (allow_runtime_local_map_update_) {
         local_map_update_allowed_count_.fetch_add(
             1, std::memory_order_relaxed);
@@ -11945,6 +11994,11 @@ void NdtSlamNode::flushDirtyTiles() {
         // return code so a failed replacement is retained for retry.
         if (std::rename(tmp_path.c_str(), filepath.c_str()) != 0) {
             throw std::runtime_error("failed to replace tile: " + filepath);
+        }
+        if (!startup_first_persistent_write_logged_.exchange(
+                true, std::memory_order_acq_rel)) {
+            ROS_INFO("[StartupMap] FIRST_PERSISTENT_WRITE path=%s points=%zu",
+                     filepath.c_str(), new_cloud ? new_cloud->size() : 0U);
         }
 
         return filtered->size();
@@ -22954,6 +23008,14 @@ void NdtSlamNode::bindNdtInputTarget(
         last_bound_ndt_target_source_ = source;
         ++setInputTarget_count_;
         ++target_rebuild_count_;
+        if (!startup_registration_target_logged_.exchange(
+                true, std::memory_order_acq_rel)) {
+            ROS_INFO("[StartupMap] REGISTRATION_TARGET_READY source=%s "
+                     "version=%llu points=%zu reason=%s",
+                     source.c_str(),
+                     static_cast<unsigned long long>(content_version),
+                     target->size(), reason.c_str());
+        }
         ROS_DEBUG("[LocTarget] bind source=%s version=%llu points=%zu reason=%s setInput=%d",
                  source.c_str(),
                  static_cast<unsigned long long>(content_version),

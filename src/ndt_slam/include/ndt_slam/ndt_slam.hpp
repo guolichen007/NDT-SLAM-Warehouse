@@ -586,6 +586,17 @@ private:
     std::atomic<uint64_t> crane_constraint_fallback_count_{0};
     std::atomic<uint64_t> crane_constraint_invalid_input_count_{0};
 
+    // One-shot persistent-restart lifecycle diagnostics. These flags do not
+    // participate in localization or map-write decisions.
+    std::atomic<bool> startup_first_cloud_logged_{false};
+    std::atomic<bool> startup_registration_target_logged_{false};
+    std::atomic<bool> startup_first_ndt_begin_logged_{false};
+    std::atomic<bool> startup_first_ndt_result_logged_{false};
+    std::atomic<bool> startup_first_localization_accepted_logged_{false};
+    std::atomic<bool> startup_relocalizer_search_logged_{false};
+    std::atomic<bool> startup_map_commit_rearm_logged_{false};
+    std::atomic<bool> startup_first_persistent_write_logged_{false};
+
     // ========== V3: Localization Target (解耦自 local_map_) ==========
     pcl::PointCloud<pcl::PointXYZ>::Ptr localization_target_front_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr localization_target_back_;
