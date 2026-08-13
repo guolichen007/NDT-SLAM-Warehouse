@@ -158,6 +158,7 @@ set(LIBRARY_SOURCES
   src/pending_cargo_self_evidence.cpp
   src/cargo_swing_monitor.cpp
   src/map_session_snapshot.cpp
+  src/persistent_registration_loader.cpp
   src/cargo_motion_corridor.cpp
   src/cargo_residual_classifier.cpp
   src/hook_load_state_filter.cpp
@@ -409,6 +410,13 @@ if(CATKIN_ENABLE_TESTING)
     test/map_session_snapshot_test.cpp)
   if(TARGET map_session_snapshot_test)
     target_link_libraries(map_session_snapshot_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(persistent_registration_loader_test
+    test/persistent_registration_loader_test.cpp)
+  if(TARGET persistent_registration_loader_test)
+    target_link_libraries(persistent_registration_loader_test
       ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
   endif()
 

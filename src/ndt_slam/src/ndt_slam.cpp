@@ -5,6 +5,7 @@
 #include "ndt_slam/registration_input_policy.hpp"
 #include "ndt_slam/rigid_transform_conversion.hpp"
 #include "ndt_slam/pending_origin_binding_policy.hpp"
+#include "ndt_slam/persistent_registration_loader.hpp"
 #include "ndt_slam/relocalization_confirmation_policy.hpp"
 
 #include <algorithm>
@@ -474,6 +475,7 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
              ndt_neighbor_search_method_.c_str());
 
     if (persistent_map_enabled_) {
+        restorePersistentRegistrationTarget();
         publishPersistentDisplayMapFromTiles();
     }
     relocalizer_.configure(relocalization_cfg_);
@@ -718,6 +720,7 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     // Start callbacks only after all publishers, maps, algorithms and
     // diagnostics are fully configured.
     if (persistent_map_enabled_) {
+        restorePersistentRegistrationTarget();
         publishPersistentDisplayMapFromTiles();
     }
     relocalizer_.configure(relocalization_cfg_);
@@ -11791,6 +11794,63 @@ bool NdtSlamNode::writePersistentTileManifest() {
         std::remove(temporary.c_str());
         return false;
     }
+}
+
+bool NdtSlamNode::restorePersistentRegistrationTarget() {
+    ROS_INFO("[StartupMap] REGISTRATION_LOAD_BEGIN root=%s",
+             persistent_map_root_dir_.c_str());
+    PersistentRegistrationLoadResult result;
+    {
+        std::lock_guard<std::mutex> lock(persistent_tile_io_mutex_);
+        result = loadPersistentRegistrationLayer(
+            persistent_map_root_dir_,
+            persistentMapUuid(persistent_map_root_dir_), tile_size_m_);
+    }
+
+    if (result.status ==
+        PersistentRegistrationLoadStatus::NEW_MAP_BOOTSTRAP) {
+        ROS_INFO("[StartupMap] REGISTRATION_LOAD_END mode=NEW_MAP_BOOTSTRAP "
+                 "tiles=0 points=0 reason=%s", result.reason.c_str());
+        return false;
+    }
+    if (result.status ==
+            PersistentRegistrationLoadStatus::INVALID_EXISTING_MAP ||
+        !result.cloud || result.cloud->empty()) {
+        ROS_FATAL("[StartupMap] REGISTRATION_LOAD_END "
+                  "mode=EXISTING_MAP_RESTORE_FAILED reason=%s",
+                  result.reason.c_str());
+        throw std::runtime_error(
+            "persistent_registration_restore_failed:" + result.reason);
+    }
+
+    const std::size_t restored_points = result.cloud->size();
+    const std::size_t minimum_target_points = std::max<std::size_t>(
+        500U, registration_cloud_config_.min_registration_points);
+    if (restored_points < minimum_target_points) {
+        ROS_FATAL("[StartupMap] REGISTRATION_LOAD_END "
+                  "mode=EXISTING_MAP_RESTORE_FAILED reason=target_too_small "
+                  "points=%zu minimum=%zu",
+                  restored_points, minimum_target_points);
+        throw std::runtime_error(
+            "persistent_registration_restore_failed:target_too_small");
+    }
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        global_map_.reset(
+            new pcl::PointCloud<pcl::PointXYZ>(*result.cloud));
+        local_map_ = std::move(result.cloud);
+        ++local_map_version_;
+        if (local_map_version_ == 0U) ++local_map_version_;
+        bootstrap_local_map_complete_ = true;
+        bootstrap_local_map_frames_ = 0;
+    }
+    ROS_INFO("[StartupMap] REGISTRATION_TILE_LOADED count=%zu points=%zu",
+             result.tile_count, restored_points);
+    ROS_INFO("[StartupMap] REGISTRATION_LOAD_END mode=EXISTING_MAP_RESTORE "
+             "tiles=%zu points=%zu", result.tile_count, restored_points);
+    bindNdtInputTarget(local_map_, "local_map", local_map_version_,
+                       "persistent_registration_restored");
+    return true;
 }
 
 bool NdtSlamNode::publishPersistentDisplayMapFromTiles() {

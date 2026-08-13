@@ -1283,6 +1283,7 @@ private:
 
     void writeRuntimeStatus();
     void flushDirtyTiles();
+    bool restorePersistentRegistrationTarget();
     bool publishPersistentDisplayMapFromTiles();
     bool loadPersistentTileLayer(
         const std::string& layer_directory,
