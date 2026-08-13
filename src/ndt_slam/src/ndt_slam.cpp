@@ -2930,29 +2930,18 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                         .as<bool>(true);
             cargo_geometry_fusion_config_
                 .positive_only_uncertainty_floor_m =
-                    std::max(
-                        0.05F,
-                        geometry[
-                            "positive_only_uncertainty_floor_m"]
-                            .as<float>(0.25F));
+                    geometry["positive_only_uncertainty_floor_m"]
+                        .as<float>(0.25F);
             cargo_geometry_fusion_config_
                 .allow_positive_only_on_source_conflict =
                     geometry["allow_positive_only_on_source_conflict"]
                         .as<bool>(true);
             cargo_geometry_fusion_config_.positive_only_confirm_frames =
-                std::max(
-                    3,
-                    geometry["positive_only_confirm_frames"].as<int>(3));
+                geometry["positive_only_confirm_frames"].as<int>(3);
             cargo_geometry_fusion_config_
                 .shape_confirmation_window_frames =
-                    std::max(
-                        std::max(
-                            cargo_geometry_fusion_config_
-                                .minimum_confirm_frames,
-                            cargo_geometry_fusion_config_
-                                .positive_only_confirm_frames),
-                        geometry["shape_confirmation_window_frames"]
-                            .as<int>(8));
+                    geometry["shape_confirmation_window_frames"]
+                        .as<int>(8);
             cargo_geometry_fusion_config_.maximum_observation_gap_sec =
                 geometry["maximum_observation_gap_sec"].as<double>(0.5);
             cargo_geometry_fusion_config_.maximum_source_disagreement_m =
@@ -2961,9 +2950,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 geometry["maximum_fused_uncertainty_m"].as<float>(0.20F);
             cargo_geometry_fusion_config_.minimum_height_m =
                 geometry["minimum_height_m"].as<float>(0.30F);
-            cargo_geometry_fusion_config_.maximum_height_m = std::min(
-                geometry["maximum_height_m"].as<float>(2.00F),
-                odom_anchor_config_.max_size_z);
+            cargo_geometry_fusion_config_.maximum_height_m =
+                geometry["maximum_height_m"].as<float>(2.00F);
             cargo_geometry_fusion_config_.huber_delta_m =
                 geometry["huber_delta_m"].as<float>(0.20F);
             cargo_geometry_fusion_config_.configured_bottom_margin_m =
@@ -2976,32 +2964,27 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 geometry["immediate_expand_enabled"].as<bool>(false);
             cargo_geometry_fusion_config_
                 .conservative_expand_confirm_frames =
-                    std::max(
-                        1,
-                        geometry["conservative_expand_confirm_frames"]
-                            .as<int>(8));
+                    geometry["conservative_expand_confirm_frames"]
+                        .as<int>(8);
             cargo_geometry_fusion_config_
                 .minimum_live_shape_confidence_for_expand =
-                    std::clamp(
-                        geometry[
-                            "minimum_live_shape_confidence_for_expand"]
-                            .as<float>(0.85F),
-                        0.0F,
-                        1.0F);
+                    geometry[
+                        "minimum_live_shape_confidence_for_expand"]
+                        .as<float>(0.85F);
+            const int minimum_live_dimension_support =
+                geometry["minimum_live_dimension_support"].as<int>(30);
             cargo_geometry_fusion_config_.minimum_live_dimension_support =
-                static_cast<std::size_t>(std::max(
-                    1, geometry["minimum_live_dimension_support"].as<int>(30)));
+                minimum_live_dimension_support > 0
+                    ? static_cast<std::size_t>(minimum_live_dimension_support)
+                    : 0U;
             cargo_geometry_fusion_config_
                 .minimum_initial_shape_confidence =
-                    std::clamp(
-                        geometry["minimum_initial_shape_confidence"]
-                            .as<float>(0.55F),
-                        0.0F, 1.0F);
+                    geometry["minimum_initial_shape_confidence"]
+                        .as<float>(0.55F);
             cargo_geometry_fusion_config_
-                .maximum_initial_dimension_mad_m = std::max(
-                    0.05F,
+                .maximum_initial_dimension_mad_m =
                     geometry["maximum_initial_dimension_mad_m"]
-                        .as<float>(0.30F));
+                        .as<float>(0.30F);
             cargo_geometry_fusion_config_
                 .minimum_live_shape_confidence_for_shrink =
                     geometry["minimum_live_shape_confidence_for_shrink"]
@@ -3020,7 +3003,26 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 geometry["configured_fallback_is_formal_floor"]
                     .as<bool>(false);
         }
-        cargo_geometry_fusion_.setConfig(cargo_geometry_fusion_config_);
+        const CargoConfigValidationResult geometry_validation =
+            cargo_geometry_fusion_.setConfig(
+                cargo_geometry_fusion_config_);
+        if (std::isfinite(cargo_geometry_fusion_config_.maximum_height_m) &&
+            std::isfinite(odom_anchor_config_.max_size_z) &&
+            cargo_geometry_fusion_config_.maximum_height_m >
+                odom_anchor_config_.max_size_z) {
+            cargo_safety_config_error_ = true;
+            if (!cargo_safety_config_error_detail_.empty())
+                cargo_safety_config_error_detail_ += ';';
+            cargo_safety_config_error_detail_ +=
+                "cargo_geometry_fusion.maximum_height_m:exceeds_odom_anchor_max_size_z";
+        }
+        if (!geometry_validation.valid) {
+            cargo_safety_config_error_ = true;
+            if (!cargo_safety_config_error_detail_.empty())
+                cargo_safety_config_error_detail_ += ';';
+            cargo_safety_config_error_detail_ +=
+                "cargo_geometry_fusion." + geometry_validation.summary();
+        }
 
         if (config["pending_cargo_envelope"]) {
             const YAML::Node pending = config["pending_cargo_envelope"];
@@ -14963,15 +14965,17 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"geometry_frozen\": "
       << (cargo_frozen_geometry_.frozen ? "true" : "false") << ",\n";
     f << "  \"formal_geometry_valid\": "
-      << (cargo_frozen_geometry_.valid &&
+      << (!cargo_safety_config_error_ && cargo_frozen_geometry_.valid &&
                   cargo_frozen_geometry_.formal_authorized
               ? "true" : "false") << ",\n";
     f << "  \"formal_geometry_frozen\": "
-      << (cargo_frozen_geometry_.frozen &&
+      << (!cargo_safety_config_error_ && cargo_frozen_geometry_.frozen &&
                   cargo_frozen_geometry_.formal_authorized
               ? "true" : "false") << ",\n";
     f << "  \"formal_geometry_authorized\": "
-      << (cargo_frozen_geometry_.formal_authorized ? "true" : "false")
+      << (!cargo_safety_config_error_ &&
+                  cargo_frozen_geometry_.formal_authorized
+              ? "true" : "false")
       << ",\n";
     f << "  \"geometry_authorization\": \""
       << cargoGeometryAuthorizationName(
@@ -17068,6 +17072,7 @@ void NdtSlamNode::updateLiveCargoPose(
         hook_lock_.state == HookCargoLockState::LOCKED &&
         cargo_lifecycle_id_ != 0U &&
         hook_lock_.locked_shape.valid &&
+        !cargo_safety_config_error_ &&
         cargo_frozen_geometry_.formal_authorized &&
         !cargo_frozen_geometry_.source_conflict &&
         gravity_loaded &&
@@ -19080,7 +19085,8 @@ void NdtSlamNode::publishCargoGeometryDebug(
            << (cargo_frozen_geometry_.valid &&
                cargo_frozen_geometry_.frozen)
            << ",\"geometry_formal_authorized\":"
-           << cargo_frozen_geometry_.formal_authorized
+           << (!cargo_safety_config_error_ &&
+               cargo_frozen_geometry_.formal_authorized)
            << ",\"geometry_degraded_live_only\":"
            << cargo_frozen_geometry_.degraded_live_only
            << ",\"pose_evidence_age_sec\":";
@@ -20573,7 +20579,8 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         shape.cargo_lifecycle_id = cargo_lifecycle_id_;
         shape.source = CargoEnvelopeShapeSource::STATIC_ORIGIN_COMPONENT;
     }
-    if (cargo_frozen_geometry_.valid && cargo_frozen_geometry_.frozen &&
+    if (!cargo_safety_config_error_ &&
+        cargo_frozen_geometry_.valid && cargo_frozen_geometry_.frozen &&
         cargo_frozen_geometry_.formal_authorized &&
         cargo_frozen_geometry_.cargo_lifecycle_id == cargo_lifecycle_id_) {
         auto& shape = pending_input.formal_frozen_shape;
@@ -21290,7 +21297,9 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         << ",\"geometry_frozen\":"
         << (cargo_frozen_geometry_.frozen ? "true" : "false")
         << ",\"geometry_formal_authorized\":"
-        << (cargo_frozen_geometry_.formal_authorized ? "true" : "false")
+        << (!cargo_safety_config_error_ &&
+                    cargo_frozen_geometry_.formal_authorized
+                ? "true" : "false")
         << ",\"geometry_authorization\":\""
         << cargoGeometryAuthorizationName(
                cargo_frozen_geometry_.authorization)
@@ -22450,7 +22459,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
            << ",\"geometry_frozen\":"
            << (cargo_frozen_geometry_.frozen ? "true" : "false")
            << ",\"geometry_formal_authorized\":"
-           << (cargo_frozen_geometry_.formal_authorized
+           << (!cargo_safety_config_error_ &&
+                       cargo_frozen_geometry_.formal_authorized
                    ? "true" : "false")
            << ",\"geometry_authorization\":\""
            << cargoGeometryAuthorizationName(
@@ -23659,7 +23669,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         formal_cargo_removal_authorized_ = false;
         return;
     }
-    const bool frozen_geometry_ready = cargo_frozen_geometry_.valid &&
+    const bool frozen_geometry_ready = !cargo_safety_config_error_ &&
+        cargo_frozen_geometry_.valid &&
         cargo_frozen_geometry_.frozen &&
         cargo_frozen_geometry_.cargo_lifecycle_id == cargo_lifecycle_id_;
     if (cargo_presence_result_.cargo_present &&
@@ -23809,7 +23820,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     last_cargo_pipeline_stamp_ = stamp;
     RigidCargoGeometry rigid_geometry =
         buildCurrentRigidCargoGeometryForPose(pose_map_base, stamp);
-    const bool frozen_geometry_envelope = cargo_frozen_geometry_.valid &&
+    const bool frozen_geometry_envelope = !cargo_safety_config_error_ &&
+        cargo_frozen_geometry_.valid &&
         cargo_frozen_geometry_.frozen &&
         cargo_frozen_geometry_.cargo_lifecycle_id == cargo_lifecycle_id_;
     effective_cargo_envelope_ = resolveEffectiveCargoEnvelope(
@@ -23895,6 +23907,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_state_.source = std::string("rigid:") +
             cargoPoseSourceName(rigid_geometry.pose.source);
         formal_cargo_removal_authorized_ = active_track &&
+            !cargo_safety_config_error_ &&
             cargo_frozen_geometry_.formal_authorized &&
             effective_cargo_envelope_.can_authorize_clear &&
             formal_height.valid && formal_use.formal_removal_valid;
@@ -25431,13 +25444,15 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     avoidance_input.warning_candidate_code =
         raw_cargo_safety_result.warning_code;
     avoidance_input.formal_cargo_geometry_valid =
-        rigid_geometry.valid && formal_use.formal_safety_valid;
+        !cargo_safety_config_error_ && rigid_geometry.valid &&
+        formal_use.formal_safety_valid;
     avoidance_input.formal_cargo_bottom_valid =
-        last_cargo_bottom_result_.valid &&
+        !cargo_safety_config_error_ && last_cargo_bottom_result_.valid &&
         last_cargo_bottom_result_.geometry_valid &&
         std::isfinite(
             last_cargo_bottom_result_.geometry.bottom_z_map);
     avoidance_input.formal_clear_authorized =
+        !cargo_safety_config_error_ &&
         cargo_frozen_geometry_.formal_authorized &&
         effective_cargo_envelope_.can_authorize_clear &&
         formal_use.formal_removal_valid;
@@ -25505,6 +25520,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         // cargo-self false 17/18 without turning the exclusion into code 14.
         static_query.cargo_self_exclusion_authorized =
             active_track &&
+            !cargo_safety_config_error_ &&
             cargo_frozen_geometry_.formal_authorized &&
             formal_use.formal_removal_valid &&
             rigid_geometry.valid;
@@ -26100,6 +26116,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             : std::string("cargo_bottom_invalid:") +
                   last_cargo_bottom_result_.reason;
         const bool positive_only_warning =
+            !cargo_safety_config_error_ &&
             cargo_frozen_geometry_.authorization ==
                 CargoGeometryAuthorization::POSITIVE_ONLY &&
             result.warning_valid &&
@@ -26108,8 +26125,10 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         return composeCargoSafetyStatus(
             message, false, result.fault, result.warning_code,
             result.warning_valid, reason, true, positive_only_warning,
-            cargo_frozen_geometry_.formal_authorized,
-            cargo_frozen_geometry_.formal_authorized &&
+            !cargo_safety_config_error_ &&
+                cargo_frozen_geometry_.formal_authorized,
+            !cargo_safety_config_error_ &&
+                cargo_frozen_geometry_.formal_authorized &&
                 effective_cargo_envelope_.can_authorize_clear &&
                 formal_use.formal_removal_valid,
             apply_review_episode);

@@ -48,6 +48,36 @@ TEST(CargoGeometryFusionTest, FreezesAfterIndependentConsistentSources) {
 }
 
 TEST(CargoGeometryFusionTest,
+     InvalidConfigIsRetainedAndCannotSilentlyRestoreFormalDefaults) {
+  CargoGeometryFusionConfig config;
+  config.minimum_confirm_frames = 0;
+  config.minimum_height_m = 2.0F;
+  config.maximum_height_m = 1.0F;
+  config.minimum_live_dimension_support = 0U;
+  CargoGeometryFusion fusion;
+
+  const CargoConfigValidationResult validation = fusion.setConfig(config);
+  EXPECT_FALSE(validation.valid);
+  EXPECT_NE(validation.summary().find("minimum_confirm_frames"),
+            std::string::npos);
+  EXPECT_NE(validation.summary().find("maximum_height_m"),
+            std::string::npos);
+  EXPECT_NE(validation.summary().find("minimum_live_dimension_support"),
+            std::string::npos);
+  EXPECT_EQ(fusion.config().minimum_confirm_frames, 0);
+  EXPECT_FLOAT_EQ(fusion.config().minimum_height_m, 2.0F);
+  EXPECT_FLOAT_EQ(fusion.config().maximum_height_m, 1.0F);
+
+  const CargoFrozenGeometry result = fusion.update(frame(1.0));
+  EXPECT_FALSE(result.valid);
+  EXPECT_FALSE(result.frozen);
+  EXPECT_FALSE(result.formal_authorized);
+  EXPECT_EQ(result.authorization, CargoGeometryAuthorization::PENDING);
+  EXPECT_NE(result.reason.find("invalid_geometry_fusion_config"),
+            std::string::npos);
+}
+
+TEST(CargoGeometryFusionTest,
      AuthoritativeOriginAndLiveExtentCanFreezeFormalThickness) {
   CargoGeometryFusionConfig config;
   config.minimum_confirm_frames = 1;

@@ -129,10 +129,18 @@ class CargoBoundingBoxContractTest(unittest.TestCase):
         self.assertIn("maximum_height_m: 2.00", fusion_config)
         self.assertIn("max_size_x: 3.50", CONFIG)
         self.assertIn(
+            "cargo_geometry_fusion_config_.maximum_height_m >",
+            NODE,
+        )
+        self.assertIn(
+            "cargo_geometry_fusion.maximum_height_m:"
+            "exceeds_odom_anchor_max_size_z",
+            NODE,
+        )
+        self.assertNotIn(
             "cargo_geometry_fusion_config_.maximum_height_m = std::min(",
             NODE,
         )
-        self.assertIn("odom_anchor_config_.max_size_z);", NODE)
 
 
 if __name__ == "__main__":

@@ -70,6 +70,10 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
     def test_invalid_policy_is_fail_closed_without_silent_defaults(self):
         tracker = read("src/ndt_slam/src/cargo_obstacle_tracker.cpp")
         temporal = read("src/ndt_slam/src/cargo_safety_temporal_filter.cpp")
+        geometry = read("src/ndt_slam/src/cargo_geometry_fusion.cpp")
+        geometry_test = read(
+            "src/ndt_slam/test/cargo_geometry_fusion_test.cpp"
+        )
         node = read("src/ndt_slam/src/ndt_slam.cpp")
         self.assertNotIn(
             "validConfig(config) ? config : CargoObstacleTrackerConfig{}",
@@ -79,10 +83,52 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
             "validConfig(config) ? config : CargoSafetyTemporalConfig{}",
             temporal,
         )
+        self.assertNotIn(
+            "validConfig(config) ? config : CargoGeometryFusionConfig{}",
+            geometry,
+        )
+        self.assertIn("validateCargoGeometryFusionConfig", geometry)
+        self.assertIn("config_ = config;", geometry)
+        self.assertIn(
+            "InvalidConfigIsRetainedAndCannotSilentlyRestoreFormalDefaults",
+            geometry_test,
+        )
         self.assertIn("CargoConfigValidationResult", tracker)
         self.assertIn("refusing Cargo/avoidance authority with Code35", node)
         self.assertNotIn("restoring 3.0/5.0/0.80", node)
         self.assertIn("cargo_safety_config_error_detail_", node)
+        self.assertIn(
+            '"cargo_geometry_fusion." + geometry_validation.summary()',
+            node,
+        )
+        self.assertIn(
+            "const bool frozen_geometry_ready = !cargo_safety_config_error_",
+            node,
+        )
+        self.assertIn(
+            "avoidance_input.formal_cargo_geometry_valid =\n"
+            "        !cargo_safety_config_error_",
+            node,
+        )
+        self.assertIn(
+            "formal_cargo_removal_authorized_ = active_track &&\n"
+            "            !cargo_safety_config_error_",
+            node,
+        )
+
+    def test_obstacle_vertical_identity_contract_is_explicit(self):
+        tracker = read("src/ndt_slam/src/cargo_obstacle_tracker.cpp")
+        tracker_test = read("src/ndt_slam/test/cargo_obstacle_tracker_test.cpp")
+        self.assertIn("association_max_top_step_m", tracker)
+        self.assertIn(
+            "PartialBottomVisibilityDoesNotSplitSameXyAndTopIdentity",
+            tracker_test,
+        )
+        self.assertIn(
+            "DistinctTopAtSameXyCannotInheritMatureFarHistory",
+            tracker_test,
+        )
+        self.assertIn("Bottom-Z is visibility-dependent", tracker_test)
 
     def test_ambiguous_association_cannot_transfer_authority(self):
         tracker = read("src/ndt_slam/src/cargo_obstacle_tracker.cpp")

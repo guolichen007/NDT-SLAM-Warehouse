@@ -9,43 +9,6 @@
 namespace ndt_slam {
 namespace {
 
-bool validConfig(const CargoGeometryFusionConfig& config) {
-  return config.minimum_confirm_frames > 0 &&
-      config.shape_confirmation_window_frames >=
-          config.minimum_confirm_frames &&
-      config.shape_confirmation_window_frames >=
-          config.positive_only_confirm_frames &&
-      config.maximum_initial_dimension_mad_m > 0.0F &&
-      std::isfinite(config.positive_only_uncertainty_floor_m) &&
-      config.positive_only_uncertainty_floor_m > 0.0F &&
-      config.positive_only_confirm_frames > 0 &&
-      config.maximum_observation_gap_sec > 0.0 &&
-      config.maximum_source_disagreement_m > 0.0F &&
-      config.maximum_fused_uncertainty_m > 0.0F &&
-      config.maximum_height_m > config.minimum_height_m &&
-      config.huber_delta_m > 0.0F &&
-      config.configured_bottom_margin_m >= 0.0F &&
-      config.conservative_shrink_confirm_frames > 0 &&
-      config.maximum_shrink_per_frame_m > 0.0F &&
-      config.conservative_expand_confirm_frames > 0 &&
-      config.minimum_live_shape_confidence_for_expand >= 0.0F &&
-      config.minimum_live_shape_confidence_for_expand <= 1.0F &&
-      config.minimum_live_dimension_support > 0U &&
-      config.minimum_initial_shape_confidence >= 0.0F &&
-      config.minimum_initial_shape_confidence <= 1.0F &&
-      config.minimum_live_shape_confidence_for_shrink >= 0.0F &&
-      config.minimum_live_shape_confidence_for_shrink <= 1.0F &&
-      config.minimum_physical_length_m > 0.0F &&
-      config.minimum_physical_width_m > 0.0F &&
-      std::isfinite(config.formal_transition_start_length_m) &&
-      config.formal_transition_start_length_m >=
-          config.minimum_physical_length_m &&
-      std::isfinite(config.formal_transition_start_width_m) &&
-      config.formal_transition_start_width_m >=
-          config.minimum_physical_width_m &&
-      !config.configured_fallback_is_formal_floor;
-}
-
 bool validDimensionEvidence(const CargoGeometryFrame& frame,
                             const CargoGeometryFusionConfig& config,
                             float minimum_shape_confidence) {
@@ -156,6 +119,106 @@ float finiteMad(const std::vector<float>& values, float median) {
 
 }  // namespace
 
+CargoConfigValidationResult validateCargoGeometryFusionConfig(
+    const CargoGeometryFusionConfig& config) {
+  CargoConfigValidationResult result;
+  const auto positive = [&result](const char* field, double value) {
+    if (!std::isfinite(value)) result.reject(field, "non_finite");
+    else if (value <= 0.0) result.reject(field, "must_be_positive");
+  };
+  const auto nonnegative = [&result](const char* field, double value) {
+    if (!std::isfinite(value)) result.reject(field, "non_finite");
+    else if (value < 0.0) result.reject(field, "must_be_nonnegative");
+  };
+  const auto unit = [&result](const char* field, double value) {
+    if (!std::isfinite(value)) result.reject(field, "non_finite");
+    else if (value < 0.0 || value > 1.0)
+      result.reject(field, "outside_0_1");
+  };
+
+  if (config.minimum_confirm_frames <= 0)
+    result.reject("minimum_confirm_frames", "must_be_positive");
+  if (config.positive_only_confirm_frames <= 0)
+    result.reject("positive_only_confirm_frames", "must_be_positive");
+  if (config.shape_confirmation_window_frames <= 0) {
+    result.reject("shape_confirmation_window_frames", "must_be_positive");
+  } else {
+    if (config.shape_confirmation_window_frames <
+        config.minimum_confirm_frames) {
+      result.reject(
+          "shape_confirmation_window_frames", "below_minimum_confirm_frames");
+    }
+    if (config.shape_confirmation_window_frames <
+        config.positive_only_confirm_frames) {
+      result.reject(
+          "shape_confirmation_window_frames",
+          "below_positive_only_confirm_frames");
+    }
+  }
+  positive("maximum_initial_dimension_mad_m",
+           config.maximum_initial_dimension_mad_m);
+  positive("positive_only_uncertainty_floor_m",
+           config.positive_only_uncertainty_floor_m);
+  positive("maximum_observation_gap_sec",
+           config.maximum_observation_gap_sec);
+  positive("maximum_source_disagreement_m",
+           config.maximum_source_disagreement_m);
+  positive("maximum_fused_uncertainty_m",
+           config.maximum_fused_uncertainty_m);
+  positive("minimum_height_m", config.minimum_height_m);
+  positive("maximum_height_m", config.maximum_height_m);
+  if (std::isfinite(config.minimum_height_m) &&
+      std::isfinite(config.maximum_height_m) &&
+      config.maximum_height_m <= config.minimum_height_m) {
+    result.reject("maximum_height_m", "must_exceed_minimum_height_m");
+  }
+  positive("huber_delta_m", config.huber_delta_m);
+  nonnegative("configured_bottom_margin_m",
+              config.configured_bottom_margin_m);
+  if (config.conservative_shrink_confirm_frames <= 0) {
+    result.reject("conservative_shrink_confirm_frames", "must_be_positive");
+  }
+  positive("maximum_shrink_per_frame_m",
+           config.maximum_shrink_per_frame_m);
+  if (config.conservative_expand_confirm_frames <= 0) {
+    result.reject("conservative_expand_confirm_frames", "must_be_positive");
+  }
+  unit("minimum_live_shape_confidence_for_expand",
+       config.minimum_live_shape_confidence_for_expand);
+  if (config.minimum_live_dimension_support == 0U) {
+    result.reject("minimum_live_dimension_support", "must_be_positive");
+  }
+  unit("minimum_initial_shape_confidence",
+       config.minimum_initial_shape_confidence);
+  unit("minimum_live_shape_confidence_for_shrink",
+       config.minimum_live_shape_confidence_for_shrink);
+  positive("minimum_physical_length_m", config.minimum_physical_length_m);
+  positive("minimum_physical_width_m", config.minimum_physical_width_m);
+  positive("formal_transition_start_length_m",
+           config.formal_transition_start_length_m);
+  if (std::isfinite(config.formal_transition_start_length_m) &&
+      std::isfinite(config.minimum_physical_length_m) &&
+      config.formal_transition_start_length_m <
+          config.minimum_physical_length_m) {
+    result.reject(
+        "formal_transition_start_length_m", "below_minimum_physical_length_m");
+  }
+  positive("formal_transition_start_width_m",
+           config.formal_transition_start_width_m);
+  if (std::isfinite(config.formal_transition_start_width_m) &&
+      std::isfinite(config.minimum_physical_width_m) &&
+      config.formal_transition_start_width_m <
+          config.minimum_physical_width_m) {
+    result.reject(
+        "formal_transition_start_width_m", "below_minimum_physical_width_m");
+  }
+  if (config.configured_fallback_is_formal_floor) {
+    result.reject(
+        "configured_fallback_is_formal_floor", "must_remain_false");
+  }
+  return result;
+}
+
 const char* cargoThicknessSourceName(CargoThicknessSource source) noexcept {
   switch (source) {
     case CargoThicknessSource::STATIC_ORIGIN_TOP_SUPPORT:
@@ -203,10 +266,15 @@ CargoGeometryFusion::CargoGeometryFusion(
   setConfig(config);
 }
 
-void CargoGeometryFusion::setConfig(
+CargoConfigValidationResult CargoGeometryFusion::setConfig(
     const CargoGeometryFusionConfig& config) {
-  config_ = validConfig(config) ? config : CargoGeometryFusionConfig{};
+  // Preserve the requested snapshot even when invalid. Silently replacing
+  // one bad field with an entire default policy changes safety semantics and
+  // can accidentally restore Formal authority.
+  config_ = config;
+  config_validation_ = validateCargoGeometryFusionConfig(config_);
   reset();
+  return config_validation_;
 }
 
 void CargoGeometryFusion::reset() {
@@ -236,6 +304,15 @@ void CargoGeometryFusion::reset() {
 
 CargoFrozenGeometry CargoGeometryFusion::update(
     const CargoGeometryFrame& frame) {
+  if (!config_validation_.valid) {
+    result_.valid = false;
+    result_.frozen = false;
+    result_.formal_authorized = false;
+    result_.authorization = CargoGeometryAuthorization::PENDING;
+    result_.reason =
+        "invalid_geometry_fusion_config:" + config_validation_.summary();
+    return result_;
+  }
   const double previous_stamp_sec = last_stamp_sec_;
   if (!std::isfinite(frame.stamp_sec) || frame.stamp_sec <= 0.0 ||
       (last_stamp_sec_ > 0.0 && frame.stamp_sec <= last_stamp_sec_)) {

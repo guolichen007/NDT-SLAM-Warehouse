@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "ndt_slam/cargo_config_validation.hpp"
+
 namespace ndt_slam {
 
 enum class CargoThicknessSource : std::uint8_t {
@@ -160,17 +162,26 @@ struct CargoFrozenGeometry {
   std::string reason = "not_initialized";
 };
 
+CargoConfigValidationResult validateCargoGeometryFusionConfig(
+    const CargoGeometryFusionConfig& config);
+
 class CargoGeometryFusion {
  public:
   explicit CargoGeometryFusion(
       const CargoGeometryFusionConfig& config = CargoGeometryFusionConfig{});
-  void setConfig(const CargoGeometryFusionConfig& config);
+  CargoConfigValidationResult setConfig(
+      const CargoGeometryFusionConfig& config);
+  const CargoConfigValidationResult& configValidation() const noexcept {
+    return config_validation_;
+  }
+  const CargoGeometryFusionConfig& config() const noexcept { return config_; }
   void reset();
   CargoFrozenGeometry update(const CargoGeometryFrame& frame);
   const CargoFrozenGeometry& result() const noexcept { return result_; }
 
  private:
   CargoGeometryFusionConfig config_;
+  CargoConfigValidationResult config_validation_;
   CargoFrozenGeometry result_;
   std::uint64_t thickness_confirm_track_segment_id_ = 0U;
   std::deque<float> thickness_candidate_window_;

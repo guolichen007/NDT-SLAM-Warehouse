@@ -546,6 +546,63 @@ TEST(CargoObstacleTracker, CellOverlapPreservesStaticTrackIdentity) {
   EXPECT_GT(associated.selected_track_cell_overlap, 0.70F);
 }
 
+TEST(CargoObstacleTracker,
+     PartialBottomVisibilityDoesNotSplitSameXyAndTopIdentity) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  CargoObstacleObservation full = hazard(0U, 0.0F, 0.0F);
+  full.top_z95_map = 2.0F;
+  full.bottom_z05_map = 0.2F;
+  const CargoObstacleTrackerDecision initial = tracker.update(1.0, {full});
+
+  CargoObstacleObservation partial = full;
+  partial.source_index = 1U;
+  partial.centroid_map.x() = 0.02F;
+  partial.bottom_z05_map = 1.4F;
+  const CargoObstacleTrackerDecision continued =
+      tracker.update(1.2, {partial});
+
+  // Bottom-Z is visibility-dependent for the overhead LiDAR and is not an
+  // identity gate. XY/cell and top-Z identify the same conservative hazard;
+  // a partial lower edge must not churn the physical track or lose its true
+  // far-history. Clearance authority still uses the current evaluated top.
+  EXPECT_EQ(continued.selected_track_id, initial.selected_track_id);
+  ASSERT_EQ(tracker.tracks().size(), 1U);
+  EXPECT_FLOAT_EQ(tracker.tracks().front().top_z95_map, 2.0F);
+  EXPECT_FLOAT_EQ(tracker.tracks().front().bottom_z05_map, 1.4F);
+  EXPECT_EQ(tracker.tracks().front().validated_consecutive_observations, 2);
+}
+
+TEST(CargoObstacleTracker,
+     DistinctTopAtSameXyCannotInheritMatureFarHistory) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  config.far_history_confirm_frames = 3;
+  config.far_history_confirm_duration_sec = 0.2;
+  CargoObstacleTracker tracker(config);
+
+  CargoObstacleObservation far = directionalPretrack(0U, 0.0F, 0.0F);
+  tracker.update(1.0, {far});
+  far.source_index = 1U;
+  tracker.update(1.1, {far});
+  far.source_index = 2U;
+  const CargoObstacleTrackerDecision mature = tracker.update(1.2, {far});
+  ASSERT_TRUE(mature.selected_far_field_history_valid);
+  const std::uint64_t mature_track_id = mature.selected_track_id;
+
+  CargoObstacleObservation vertically_distinct =
+      hazard(3U, 0.01F, 0.0F, 18U);
+  vertically_distinct.top_z95_map =
+      far.top_z95_map + config.association_max_top_step_m + 0.10F;
+  vertically_distinct.bottom_z05_map = 1.4F;
+  const CargoObstacleTrackerDecision decision =
+      tracker.update(1.3, {vertically_distinct});
+
+  EXPECT_FALSE(decision.confirmed_hazard);
+  EXPECT_FALSE(decision.selected_far_field_history_valid);
+  EXPECT_NE(decision.selected_track_id, mature_track_id);
+  EXPECT_EQ(tracker.tracks().size(), 2U);
+}
+
 TEST(CargoObstacleTracker, TrackCreationAndAssociationResetAreCounted) {
   CargoObstacleTracker tracker(ordinaryHazardConfig());
   const auto first = tracker.update(1.0, {hazard(0U, 0.0F, 0.0F)});

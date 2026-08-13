@@ -138,8 +138,15 @@ def main() -> int:
     require("CargoConfigValidationResult" in safety_header and
             "restoring 3.0/5.0/0.80" not in node and
             "cargo_safety_config_error_detail_" in node and
+            "validateCargoGeometryFusionConfig" in cargo_geometry and
+            "CargoGeometryFusionConfig{}" not in
+                cargo_geometry.split("CargoGeometryFusion::setConfig", 1)[1]
+                    .split("CargoGeometryFusion::reset", 1)[0] and
+            "invalid_geometry_fusion_config:" in cargo_geometry and
+            "const bool frozen_geometry_ready = !cargo_safety_config_error_"
+                in node and
             "refusing Cargo/avoidance authority with Code35" in node,
-            "invalid Cargo policy can still silently restore runtime defaults",
+            "invalid Cargo policy can still restore defaults or retain formal authority",
             failures)
     require('result.reason = "clear_no_external_obstacle"' in
             safety_evaluator and
@@ -367,6 +374,8 @@ def main() -> int:
 
     cargo_track_policy = read(
         "src/ndt_slam/src/cargo_track_policy.cpp")
+    cargo_track_policy_header = read(
+        "src/ndt_slam/include/ndt_slam/cargo_track_policy.hpp")
     require("GEOMETRY_CONFIRMING" in node and
             "summarizeCargoProvisionalLock" in node and
             "overall_lock_confidence" in node and
@@ -380,11 +389,18 @@ def main() -> int:
             "cluster_indices.assign(1U, selected_component)" not in node,
             "cargo detector does not score single/merged component hypotheses",
             failures)
-    require("reference_center = hook_lock_.live_pose_measured_base" in node and
-            "association_center = reference_center" in node and
+    require("selectCargoCenterReference(center_reference_input)" in node and
+            "filtered_pose_valid" in cargo_track_policy_header and
+            "filtered_prediction_valid" in cargo_track_policy_header and
+            "trusted_complete_measurement_valid" in
+                cargo_track_policy_header and
+            "CargoCenterReferenceSource::TRUSTED_COMPLETE_MEASUREMENT" in
+                cargo_track_policy and
             "association_prediction_horizon_sec" in node and
             "association_prediction_max_displacement_m" in node and
             "support_input.predicted_center.head<2>() = association_center" in node and
+            "evaluateCargoFrozenObbSupport(support_input)" in node and
+            '"locked_obb_support_insufficient"' in node and
             '"center_too_far"' in node and
             "center_x = cx;" in node and "center_y = cy;" in node,
             "retained cargo association lacks an independent measured "
