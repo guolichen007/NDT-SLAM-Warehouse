@@ -2124,6 +2124,10 @@ private:
         LiveCargoPose live_pose;
         Eigen::Vector3f live_pose_velocity_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f live_pose_measured_base = Eigen::Vector3f::Zero();
+        bool trusted_complete_xy_valid = false;
+        Eigen::Vector2f trusted_complete_xy_center_base =
+            Eigen::Vector2f::Zero();
+        double trusted_complete_xy_stamp_sec = 0.0;
         Eigen::Vector3f live_pose_predicted_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f live_pose_innovation_base = Eigen::Vector3f::Zero();
         Eigen::Vector3f live_pose_residual_base = Eigen::Vector3f::Zero();
@@ -2176,6 +2180,15 @@ private:
             std::numeric_limits<float>::infinity();
         float association_predicted_center_distance_m =
             std::numeric_limits<float>::infinity();
+        float association_trusted_center_distance_m =
+            std::numeric_limits<float>::infinity();
+        float association_selected_center_distance_m =
+            std::numeric_limits<float>::infinity();
+        Eigen::Vector2f association_detected_center_base =
+            Eigen::Vector2f::Zero();
+        Eigen::Vector2f association_reference_center_base =
+            Eigen::Vector2f::Zero();
+        std::string association_reference_source = "NONE";
         bool association_prediction_used = false;
         float observed_yaw_rad = 0.0F;
         float yaw_residual_rad = 0.0F;
@@ -2390,9 +2403,9 @@ private:
     ros::Time cargo_hoist_state_received_stamp_;
     PhysicalObstacleTrackStore physical_obstacle_track_store_;
     AnomalyReviewEpisodeTracker anomaly_review_episode_tracker_;
-    // Pending cargo uses an independent track namespace. Its only purpose is
-    // to prove that an already-separated live cluster has a stable external
-    // identity before a provisional 17/18 can become official.
+    // Pending and Formal are authority projections over this single physical
+    // track store. A phase transition never creates a second identity or
+    // replays far-history evidence.
     // Low-clearance observations are tracked outside the 5 m warning shell:
     // directionally with authoritative motion, otherwise radially. They can
     // mature identity/provenance but cannot alter the 5 m/3 m thresholds.

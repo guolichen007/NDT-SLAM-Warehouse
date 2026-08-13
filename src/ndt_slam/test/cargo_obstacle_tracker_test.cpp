@@ -672,6 +672,54 @@ TEST(CargoObstacleTracker,
   }
 }
 
+TEST(CargoObstacleTracker,
+     AmbiguousAssociationDoesNotMoveAuthoritativePhysicalPredictor) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  config.far_history_confirm_frames = 3;
+  config.far_history_confirm_duration_sec = 0.2;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation left = directionalPretrack(1U, -0.5F, 0.0F);
+  CargoObstacleObservation right = directionalPretrack(2U, 0.5F, 0.0F);
+  tracker.update(1.0, {left, right});
+  left.source_index = 3U;
+  right.source_index = 4U;
+  tracker.update(1.1, {left, right});
+  const auto before = tracker.tracks();
+  ASSERT_EQ(before.size(), 2U);
+
+  CargoObstacleObservation ambiguous_a =
+      directionalPretrack(5U, 0.0F, 0.0F);
+  CargoObstacleObservation ambiguous_b =
+      directionalPretrack(6U, 0.0F, 0.0F);
+  tracker.update(1.2, {ambiguous_a, ambiguous_b});
+  ASSERT_EQ(tracker.tracks().size(), before.size());
+  for (std::size_t index = 0U; index < before.size(); ++index) {
+    const CargoObstacleTrack& frozen = tracker.tracks()[index];
+    EXPECT_TRUE(frozen.centroid_map.isApprox(before[index].centroid_map));
+    EXPECT_TRUE(frozen.velocity_map.isApprox(before[index].velocity_map));
+    EXPECT_FLOAT_EQ(frozen.top_z95_map, before[index].top_z95_map);
+    EXPECT_FLOAT_EQ(frozen.bottom_z05_map, before[index].bottom_z05_map);
+    EXPECT_EQ(frozen.occupied_map_cells, before[index].occupied_map_cells);
+    EXPECT_DOUBLE_EQ(frozen.last_stamp_sec, before[index].last_stamp_sec);
+    EXPECT_EQ(
+        frozen.last_observation_cycle,
+        before[index].last_observation_cycle);
+    EXPECT_EQ(
+        frozen.far_field_validated_observations,
+        before[index].far_field_validated_observations);
+  }
+
+  // A later right-side observation cannot use the ambiguous midpoint as a
+  // bridge into the left track's physical identity or maturity.
+  CargoObstacleObservation recovered =
+      directionalPretrack(7U, 0.52F, 0.0F);
+  const CargoObstacleTrackerDecision decision =
+      tracker.update(1.3, {recovered});
+  EXPECT_EQ(decision.selected_track_id, before[1].track_id);
+  EXPECT_FALSE(decision.selected_far_field_history_valid);
+}
+
 TEST(PhysicalObstacleTrackStore,
      PendingToFormalChangesAuthorityWithoutDuplicatingHistory) {
   CargoObstacleTrackerConfig config = ordinaryHazardConfig();

@@ -123,6 +123,61 @@ const char* cargoLockAuthoritySourceName(CargoLockAuthoritySource source) {
   return "NONE";
 }
 
+const char* cargoCenterReferenceSourceName(
+    CargoCenterReferenceSource source) noexcept {
+  switch (source) {
+    case CargoCenterReferenceSource::NONE: return "NONE";
+    case CargoCenterReferenceSource::FILTERED_POSE:
+      return "FILTERED_POSE";
+    case CargoCenterReferenceSource::FILTERED_PREDICTION:
+      return "FILTERED_PREDICTION";
+    case CargoCenterReferenceSource::TRUSTED_COMPLETE_MEASUREMENT:
+      return "TRUSTED_COMPLETE_MEASUREMENT";
+  }
+  return "NONE";
+}
+
+CargoCenterReferenceDecision selectCargoCenterReference(
+    const CargoCenterReferenceInput& input) noexcept {
+  CargoCenterReferenceDecision decision;
+  if (!input.detected_center.allFinite() ||
+      !std::isfinite(input.maximum_trusted_measurement_age_sec) ||
+      input.maximum_trusted_measurement_age_sec < 0.0) {
+    return decision;
+  }
+  const auto consider = [&decision, &input](
+      bool enabled, const Eigen::Vector2f& center,
+      CargoCenterReferenceSource source, float* distance) {
+    if (!enabled || !center.allFinite()) return;
+    *distance = (input.detected_center - center).norm();
+    if (!std::isfinite(*distance)) return;
+    if (!decision.valid || *distance < decision.selected_distance_m) {
+      decision.valid = true;
+      decision.source = source;
+      decision.center = center;
+      decision.selected_distance_m = *distance;
+    }
+  };
+  consider(
+      input.filtered_pose_valid, input.filtered_center,
+      CargoCenterReferenceSource::FILTERED_POSE,
+      &decision.filtered_distance_m);
+  consider(
+      input.filtered_prediction_valid, input.filtered_predicted_center,
+      CargoCenterReferenceSource::FILTERED_PREDICTION,
+      &decision.predicted_distance_m);
+  const bool trusted_fresh = input.trusted_complete_measurement_valid &&
+      std::isfinite(input.trusted_complete_measurement_age_sec) &&
+      input.trusted_complete_measurement_age_sec >= 0.0 &&
+      input.trusted_complete_measurement_age_sec <=
+          input.maximum_trusted_measurement_age_sec;
+  consider(
+      trusted_fresh, input.trusted_complete_measurement_center,
+      CargoCenterReferenceSource::TRUSTED_COMPLETE_MEASUREMENT,
+      &decision.trusted_measurement_distance_m);
+  return decision;
+}
+
 CargoPhysicalLockAuthorityDecision evaluateCargoPhysicalLockAuthority(
     const CargoPhysicalLockAuthorityInput& input) {
   CargoPhysicalLockAuthorityDecision decision;

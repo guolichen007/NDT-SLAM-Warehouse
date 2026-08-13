@@ -11,6 +11,8 @@ struct AvoidanceDiagnosticsSnapshot {
   double source_stamp_sec = 0.0;
   std::string perception_phase = "NONE";
   bool perception_executed = false;
+  bool perception_valid = false;
+  std::string perception_reason = "not_executed";
   bool query_geometry_valid = false;
   std::string query_geometry_source = "NONE";
   double query_geometry_age_sec = 0.0;
@@ -21,6 +23,7 @@ struct AvoidanceDiagnosticsSnapshot {
   bool external_extraction_executed = false;
   std::size_t external_point_count = 0U;
   bool clustering_executed = false;
+  bool clustering_completed = false;
   std::size_t cluster_count = 0U;
   bool tracking_attempted = false;
   std::size_t observation_count = 0U;

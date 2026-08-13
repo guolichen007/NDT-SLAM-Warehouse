@@ -65,6 +65,9 @@ struct ObstaclePerceptionResult {
   bool executed = false;
   bool valid = false;
   bool query_horizontal_valid = false;
+  bool finite_filter_executed = false;
+  bool clustering_attempted = false;
+  bool clustering_completed = false;
   std::size_t finite_input_points = 0U;
   std::size_t cluster_count = 0U;
   std::vector<ObstaclePerceptionCluster> clusters;
@@ -78,5 +81,10 @@ bool validateObstaclePerceptionConfig(
 ObstaclePerceptionResult perceiveObstacles(
     const ObstaclePerceptionConfig& config,
     const ObstaclePerceptionInput& input);
+
+std::string obstaclePerceptionBlockReason(
+    const char* phase,
+    bool query_allowed,
+    const ObstaclePerceptionResult& result);
 
 }  // namespace ndt_slam

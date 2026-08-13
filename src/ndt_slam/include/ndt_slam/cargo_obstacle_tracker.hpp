@@ -50,7 +50,9 @@ struct CargoObstacleTrackerConfig {
   float static_track_cell_overlap_min = 0.20F;
   float static_track_iou_min = 0.10F;
   float static_provenance_min_cargo_motion_m = 0.30F;
-  // Phase-one production policy: 20-point clusters may retain a diagnostic
+  // Library-safe fail-closed default. Production YAML explicitly disables
+  // this gate where same-track far-history is the commissioned authority.
+  // Phase-one policy: 20-point clusters may retain a diagnostic
   // identity, but only independently proven warehouse cargo stacks can issue
   // a formal 17/18. Small-object warning can be enabled after its dedicated
   // provenance policy is commissioned.

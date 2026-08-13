@@ -797,6 +797,7 @@ cargo_safety:
   require_far_field_history_for_warnings: true
   far_history_confirm_frames: 3
   far_history_confirm_duration_sec: 0.2
+  # Explicit production override of the library-safe fail-closed default.
   # Live far-history is the normal warning authority on this branch; runtime
   # static maturity must not delay a correctly tracked approaching obstacle.
   require_static_cargo_for_warning: false

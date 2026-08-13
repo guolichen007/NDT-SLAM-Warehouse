@@ -16441,34 +16441,33 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
         return false;
     }
 
-    // Keep the filtered centre as the primary identity reference, but also
-    // evaluate a short, displacement-bounded prediction. This covers the
-    // normal lag of the low-pass live pose while a load is moving. Prediction
-    // never widens the gate and the frozen-OBB point support below remains a
-    // mandatory independent identity check.
-    Eigen::Vector2f reference_center;
-    if (hook_lock_.live_pose.valid &&
-        hook_lock_.live_pose_measured_base.allFinite()) {
-        // Association follows the actual LiDAR return. The published/safety
-        // box is independently anchored to odom, so display policy cannot
-        // manufacture track churn.
-        reference_center = hook_lock_.live_pose_measured_base.head<2>();
-    } else {
-        reference_center = hook_lock_.last_accepted_center.head<2>();
-    }
+    // Select among references which each have an explicit source and time
+    // basis. The previous implementation extrapolated a raw measured center
+    // using the filtered pose timestamp/velocity; partial observations could
+    // also replace that raw reference. Both paths manufactured a center gap.
+    // Reference selection never widens the fixed association gate, and the
+    // frozen-OBB support/shape checks below remain mandatory.
     Eigen::Vector2f detected_center;
     if (det.oriented_footprint_valid) {
         detected_center = det.footprint_center_base;
     } else {
         detected_center = det.center_base.head<2>();
     }
-    const float filtered_center_distance =
-        (detected_center - reference_center).norm();
-    Eigen::Vector2f association_center = reference_center;
-    float predicted_center_distance =
-        std::numeric_limits<float>::infinity();
-    bool prediction_used = false;
+    Eigen::Vector2f filtered_center =
+        hook_lock_.has_last_accepted
+            ? hook_lock_.last_accepted_center.head<2>()
+            : Eigen::Vector2f::Zero();
+    bool filtered_center_valid = hook_lock_.has_last_accepted &&
+        filtered_center.allFinite();
     if (hook_lock_.live_pose.valid &&
+        hook_lock_.live_pose.center_base.allFinite()) {
+        filtered_center = hook_lock_.live_pose.center_base.head<2>();
+        filtered_center_valid = true;
+    }
+    Eigen::Vector2f predicted_center = filtered_center;
+    bool predicted_center_valid = false;
+    if (hook_lock_.live_pose.valid &&
+        hook_lock_.live_pose.center_base.allFinite() &&
         hook_lock_.live_pose_velocity_base.head<2>().allFinite() &&
         std::isfinite(hook_lock_.live_pose.evidence_stamp_sec) &&
         !hook_observation_association_stamp_.isZero()) {
@@ -16491,23 +16490,55 @@ bool NdtSlamNode::isDetectionConsistentWithLockedBox(
                 displacement_norm > 1.0e-6F) {
                 displacement *= maximum_displacement / displacement_norm;
             }
-            const Eigen::Vector2f predicted_center =
-                reference_center + displacement;
-            predicted_center_distance =
-                (detected_center - predicted_center).norm();
-            if (std::isfinite(predicted_center_distance) &&
-                predicted_center_distance < filtered_center_distance) {
-                association_center = predicted_center;
-                prediction_used = true;
-            }
+            predicted_center = filtered_center + displacement;
+            predicted_center_valid = predicted_center.allFinite();
         }
     }
-    const float center_distance = prediction_used
-        ? predicted_center_distance : filtered_center_distance;
+    const double association_stamp_sec =
+        hook_observation_association_stamp_.isZero()
+            ? 0.0 : hook_observation_association_stamp_.toSec();
+    const double trusted_measurement_age_sec =
+        hook_lock_.trusted_complete_xy_valid &&
+                association_stamp_sec > 0.0
+            ? association_stamp_sec -
+                  hook_lock_.trusted_complete_xy_stamp_sec
+            : std::numeric_limits<double>::infinity();
+    CargoCenterReferenceInput center_reference_input;
+    center_reference_input.detected_center = detected_center;
+    center_reference_input.filtered_pose_valid = filtered_center_valid;
+    center_reference_input.filtered_center = filtered_center;
+    center_reference_input.filtered_prediction_valid =
+        predicted_center_valid;
+    center_reference_input.filtered_predicted_center = predicted_center;
+    center_reference_input.trusted_complete_measurement_valid =
+        hook_lock_.trusted_complete_xy_valid;
+    center_reference_input.trusted_complete_measurement_center =
+        hook_lock_.trusted_complete_xy_center_base;
+    center_reference_input.trusted_complete_measurement_age_sec =
+        trusted_measurement_age_sec;
+    center_reference_input.maximum_trusted_measurement_age_sec =
+        hook_lock_config_.association_prediction_horizon_sec;
+    const CargoCenterReferenceDecision center_reference =
+        selectCargoCenterReference(center_reference_input);
+    if (!center_reference.valid) {
+        *reject_reason = "association_reference_unavailable";
+        return false;
+    }
+    const Eigen::Vector2f association_center = center_reference.center;
+    const float center_distance = center_reference.selected_distance_m;
     hook_lock_.association_filtered_center_distance_m =
-        filtered_center_distance;
+        center_reference.filtered_distance_m;
     hook_lock_.association_predicted_center_distance_m =
-        predicted_center_distance;
+        center_reference.predicted_distance_m;
+    hook_lock_.association_trusted_center_distance_m =
+        center_reference.trusted_measurement_distance_m;
+    hook_lock_.association_selected_center_distance_m = center_distance;
+    hook_lock_.association_detected_center_base = detected_center;
+    hook_lock_.association_reference_center_base = association_center;
+    hook_lock_.association_reference_source =
+        cargoCenterReferenceSourceName(center_reference.source);
+    const bool prediction_used = center_reference.source ==
+        CargoCenterReferenceSource::FILTERED_PREDICTION;
     hook_lock_.association_prediction_used = prediction_used;
     const bool lost_reacquisition =
         hook_lock_.state == HookCargoLockState::LOST_HOLD;
@@ -16973,6 +17004,16 @@ void NdtSlamNode::updateLiveCargoPose(
     }
     raw_measured.z() = measured.z();
     hook_lock_.live_pose_measured_base = raw_measured;
+    if (complete_xy_observation &&
+        source == CargoPoseSource::CURRENT_ASSOCIATED_LIDAR) {
+        // Only a complete, accepted LiDAR OBB advances this reference.
+        // Partial/held/predicted poses remain useful to the safety envelope,
+        // but cannot rewrite physical cargo identity.
+        hook_lock_.trusted_complete_xy_valid = true;
+        hook_lock_.trusted_complete_xy_center_base =
+            raw_measured.head<2>();
+        hook_lock_.trusted_complete_xy_stamp_sec = stamp_sec;
+    }
     hook_lock_.live_pose.valid = true;
     hook_lock_.live_pose.evidence_stamp_sec = stamp_sec;
     hook_lock_.live_pose.evaluation_stamp_sec = stamp_sec;
@@ -17229,6 +17270,9 @@ void NdtSlamNode::clearHookLock() {
     hook_lock_.live_pose = LiveCargoPose{};
     hook_lock_.live_pose_velocity_base.setZero();
     hook_lock_.live_pose_measured_base.setZero();
+    hook_lock_.trusted_complete_xy_valid = false;
+    hook_lock_.trusted_complete_xy_center_base.setZero();
+    hook_lock_.trusted_complete_xy_stamp_sec = 0.0;
     hook_lock_.live_pose_predicted_base.setZero();
     hook_lock_.live_pose_innovation_base.setZero();
     hook_lock_.live_pose_residual_base.setZero();
@@ -17250,6 +17294,13 @@ void NdtSlamNode::clearHookLock() {
         std::numeric_limits<float>::infinity();
     hook_lock_.association_predicted_center_distance_m =
         std::numeric_limits<float>::infinity();
+    hook_lock_.association_trusted_center_distance_m =
+        std::numeric_limits<float>::infinity();
+    hook_lock_.association_selected_center_distance_m =
+        std::numeric_limits<float>::infinity();
+    hook_lock_.association_detected_center_base.setZero();
+    hook_lock_.association_reference_center_base.setZero();
+    hook_lock_.association_reference_source = "NONE";
     hook_lock_.association_prediction_used = false;
     hook_lock_.observed_yaw_rad = 0.0F;
     hook_lock_.yaw_residual_rad = 0.0F;
@@ -18104,14 +18155,22 @@ void NdtSlamNode::updateHookCargoLock(
                 ROS_DEBUG_THROTTLE(2.0,
                     "[CargoLockUpdate] accepted=0 reason=%s "
                     "raw_center=(%.2f,%.2f,%.2f) anchor=(%.2f,%.2f) "
-                    "center_distance=(filtered=%.2f,predicted=%.2f,use=%d) "
+                    "center=(detected=%.2f/%.2f,reference=%.2f/%.2f,"
+                    "source=%s,selected=%.2f,filtered=%.2f,predicted=%.2f,"
+                    "trusted=%.2f) "
                     "raw_points=%zu",
                     reject_reason.c_str(),
                     det.center_base.x(), det.center_base.y(), det.center_base.z(),
                     anchor.x(), anchor.y(),
+                    hook_lock_.association_detected_center_base.x(),
+                    hook_lock_.association_detected_center_base.y(),
+                    hook_lock_.association_reference_center_base.x(),
+                    hook_lock_.association_reference_center_base.y(),
+                    hook_lock_.association_reference_source.c_str(),
+                    hook_lock_.association_selected_center_distance_m,
                     hook_lock_.association_filtered_center_distance_m,
                     hook_lock_.association_predicted_center_distance_m,
-                    hook_lock_.association_prediction_used ? 1 : 0,
+                    hook_lock_.association_trusted_center_distance_m,
                     det.core_points_base ? det.core_points_base->size() : 0);
                 const double lost_age =
                     (stamp - hook_lock_.last_seen_stamp).toSec();
@@ -18176,15 +18235,23 @@ void NdtSlamNode::updateHookCargoLock(
                     2.0,
                     "[CargoAssociation] LOST_HOLD recovery rejected age=%.2f "
                     "reason=%s center_gate=%.2f "
-                    "center_distance=(filtered=%.2f,predicted=%.2f,use=%d) "
+                    "center=(detected=%.2f/%.2f,reference=%.2f/%.2f,"
+                    "source=%s,selected=%.2f,filtered=%.2f,predicted=%.2f,"
+                    "trusted=%.2f) "
                     "points=%zu "
                     "obb_inside=%.2f coverage=(%.2f,%.2f) "
                     "observed_shape=(%.2f,%.2f) clamped=%d",
                     lost_age, reject_reason.c_str(),
                     hook_lock_.association_xy_gate_m,
+                    hook_lock_.association_detected_center_base.x(),
+                    hook_lock_.association_detected_center_base.y(),
+                    hook_lock_.association_reference_center_base.x(),
+                    hook_lock_.association_reference_center_base.y(),
+                    hook_lock_.association_reference_source.c_str(),
+                    hook_lock_.association_selected_center_distance_m,
                     hook_lock_.association_filtered_center_distance_m,
                     hook_lock_.association_predicted_center_distance_m,
-                    hook_lock_.association_prediction_used ? 1 : 0,
+                    hook_lock_.association_trusted_center_distance_m,
                     det.core_points_base
                         ? det.core_points_base->size() : 0U,
                     hook_lock_.locked_obb_support.inside_ratio,
@@ -18957,6 +19024,27 @@ void NdtSlamNode::publishCargoGeometryDebug(
     stream << ",\"center_x\":"; append_number(center.x());
     stream << ",\"center_y\":"; append_number(center.y());
     stream << ",\"center_z\":"; append_number(center.z());
+    stream << ",\"association_detected_center_x\":";
+    append_number(hook_lock_.association_detected_center_base.x());
+    stream << ",\"association_detected_center_y\":";
+    append_number(hook_lock_.association_detected_center_base.y());
+    stream << ",\"association_reference_center_x\":";
+    append_number(hook_lock_.association_reference_center_base.x());
+    stream << ",\"association_reference_center_y\":";
+    append_number(hook_lock_.association_reference_center_base.y());
+    stream << ",\"association_reference_source\":\""
+           << escapeJsonString(hook_lock_.association_reference_source)
+           << "\"";
+    stream << ",\"association_selected_distance_m\":";
+    append_number(hook_lock_.association_selected_center_distance_m);
+    stream << ",\"association_filtered_distance_m\":";
+    append_number(hook_lock_.association_filtered_center_distance_m);
+    stream << ",\"association_predicted_distance_m\":";
+    append_number(hook_lock_.association_predicted_center_distance_m);
+    stream << ",\"association_trusted_distance_m\":";
+    append_number(hook_lock_.association_trusted_center_distance_m);
+    stream << ",\"association_gate_m\":";
+    append_number(hook_lock_.association_xy_gate_m);
     stream << ",\"length_m\":"; append_number(size.x());
     stream << ",\"width_m\":"; append_number(size.y());
     stream << ",\"height_m\":"; append_number(size.z());
@@ -19098,6 +19186,10 @@ void NdtSlamNode::publishOperationalStatus(
            << escapeJsonString(diagnostics.perception_phase) << "\""
            << ",\"perception_executed\":"
            << diagnostics.perception_executed
+           << ",\"perception_valid\":"
+           << diagnostics.perception_valid
+           << ",\"perception_reason\":\""
+           << escapeJsonString(diagnostics.perception_reason) << "\""
            << ",\"query_geometry_valid\":"
            << diagnostics.query_geometry_valid
            << ",\"query_geometry_source\":\""
@@ -19116,6 +19208,8 @@ void NdtSlamNode::publishOperationalStatus(
            << diagnostics.external_point_count
            << ",\"clustering_executed\":"
            << diagnostics.clustering_executed
+           << ",\"clustering_completed\":"
+           << diagnostics.clustering_completed
            << ",\"cluster_count\":" << diagnostics.cluster_count
            << ",\"tracking_attempted\":"
            << diagnostics.tracking_attempted
@@ -19317,14 +19411,13 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
             (hook_evidence.gravity_conflict
                 ? std::string("gravity_lidar_conflict:") + evidence_reason
                 : evidence_reason)));
-    CargoSafetyDecision decision =
-        avoidance_decision_owner_.decide(decision_input);
-
-    bool anomaly_review_suppressed = false;
+    const CargoSafetyDecision decision_preview =
+        avoidance_decision_owner_.preview(decision_input);
+    CargoAnomalyReviewProjection review_projection;
     if (apply_anomaly_review_episode) {
         AnomalyReviewEpisodeInput review_input;
         review_input.stamp_sec = status.header.stamp.toSec();
-        review_input.candidate_code = decision.requested_code;
+        review_input.candidate_code = decision_preview.requested_code;
         review_input.key.cargo_lifecycle_id = cargo_lifecycle_id_;
         review_input.key.cargo_track_id = status.cargo_track_id;
         review_input.key.obstacle_track_id = status.obstacle_track_id;
@@ -19334,26 +19427,20 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
         review_input.key.map_generation = localization_map_generation_;
         const AnomalyReviewEpisodeDecision review_decision =
             anomaly_review_episode_tracker_.update(review_input);
-        if (decision.requested_code ==
+        if (decision_preview.requested_code ==
             CargoSafetyProtocol::kAnomalyReview) {
-            if (review_decision.output_code !=
-                CargoSafetyProtocol::kAnomalyReview) {
-                anomaly_review_suppressed = true;
-                decision.valid = false;
-                decision.warning_valid = false;
-                decision.warning_code = 0;
-                decision.requested_code =
-                    CargoSafetyProtocol::kObstacleInvalid;
-                decision.fault_code = CargoSafetyProtocol::kObstacleInvalid;
-                decision.fault_mask |= Status::FAULT_OBSTACLE;
-            }
-            if (review_decision.event != "ACTIVE" &&
-                review_decision.event != "NONE") {
-                decision.reason += ";review_episode=" +
-                    review_decision.event;
-            }
+            review_projection.enabled = true;
+            review_projection.output_code = review_decision.output_code;
+            review_projection.event = review_decision.event;
         }
     }
+    const CargoSafetyDecision decision =
+        avoidance_decision_owner_.decide(
+            decision_input, review_projection);
+    const bool anomaly_review_suppressed =
+        decision_preview.requested_code ==
+            CargoSafetyProtocol::kAnomalyReview &&
+        decision.requested_code != CargoSafetyProtocol::kAnomalyReview;
 
     status.localization_valid = localization_valid;
     status.valid = decision.valid;
@@ -21513,8 +21600,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
         envelope.vertical_uncertainty_m;
     live_input.footprint_base = toCargoObbFootprint(
         envelope, envelope.horizontal_uncertainty_m, 0.0F);
-    // PendingCargoEnvelope::valid includes vertical authority. Canonical
-    // perception only needs its independently validated horizontal OBB.
+    // Pending horizontal and vertical authority are independent. Canonical
+    // perception needs only its independently validated horizontal OBB.
     live_input.footprint_base.valid =
         cargo_snapshot.envelope.horizontal_valid;
     pcl::PointCloud<pcl::PointXYZ>::Ptr pending_self_removed(
@@ -22653,6 +22740,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
     pending_diagnostics.perception_phase = "PENDING";
     pending_diagnostics.perception_executed =
         canonical_perception.executed;
+    pending_diagnostics.perception_valid = canonical_perception.valid;
+    pending_diagnostics.perception_reason = canonical_perception.reason;
     pending_diagnostics.query_geometry_valid =
         cargo_snapshot.envelope.horizontal_valid &&
         cargo_snapshot.envelope.vertical_valid;
@@ -22673,7 +22762,9 @@ void NdtSlamNode::runPendingCargoAvoidance(
     pending_diagnostics.external_point_count =
         pending_external_shell->size();
     pending_diagnostics.clustering_executed =
-        canonical_perception.executed;
+        canonical_perception.clustering_attempted;
+    pending_diagnostics.clustering_completed =
+        canonical_perception.clustering_completed;
     pending_diagnostics.cluster_count =
         canonical_perception.cluster_count;
     pending_diagnostics.tracking_attempted =
@@ -22685,14 +22776,15 @@ void NdtSlamNode::runPendingCargoAvoidance(
         pending_warning_query_allowed;
     pending_diagnostics.warning_authority_valid =
         fused.official_valid;
-    pending_diagnostics.block_reason = !pending_tracking_query_allowed
-        ? "PENDING_PERCEPTION_NOT_RUN"
-        : (!canonical_perception.valid
-               ? "PENDING_PERCEPTION_RUN_ZERO_POINTS"
-               : (!pending_obstacle_decision.valid
-                      ? "TRACKING_BLOCKED"
-                      : (!fused.official_valid
-                             ? "WARNING_AUTHORITY_BLOCKED" : "NONE")));
+    pending_diagnostics.block_reason = obstaclePerceptionBlockReason(
+        "PENDING", pending_tracking_query_allowed, canonical_perception);
+    if (pending_diagnostics.block_reason == "NONE" &&
+        !pending_obstacle_decision.valid) {
+        pending_diagnostics.block_reason = "TRACKING_BLOCKED";
+    } else if (pending_diagnostics.block_reason == "NONE" &&
+               !fused.official_valid) {
+        pending_diagnostics.block_reason = "WARNING_AUTHORITY_BLOCKED";
+    }
     avoidance_diagnostics_.replace(std::move(pending_diagnostics));
 
     const std::int32_t provisional_code = fused.official_valid &&
@@ -26041,6 +26133,10 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     formal_diagnostics.perception_phase = "FORMAL";
     formal_diagnostics.perception_executed =
         formal_obstacle_perception.executed;
+    formal_diagnostics.perception_valid =
+        formal_obstacle_perception.valid;
+    formal_diagnostics.perception_reason =
+        formal_obstacle_perception.reason;
     formal_diagnostics.query_geometry_valid = rigid_geometry.valid;
     formal_diagnostics.query_geometry_source =
         effectiveCargoEnvelopeSourceName(effective_cargo_envelope_.source);
@@ -26058,7 +26154,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     formal_diagnostics.external_point_count =
         external_obstacle_cloud->size();
     formal_diagnostics.clustering_executed =
-        formal_obstacle_perception.executed;
+        formal_obstacle_perception.clustering_attempted;
+    formal_diagnostics.clustering_completed =
+        formal_obstacle_perception.clustering_completed;
     formal_diagnostics.cluster_count =
         formal_obstacle_perception.cluster_count;
     formal_diagnostics.tracking_attempted =
@@ -26071,14 +26169,16 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         last_cargo_bottom_result_.valid &&
         formal_obstacle_perception.valid;
     formal_diagnostics.warning_authority_valid = safety_msg.valid;
-    formal_diagnostics.block_reason = !formal_diagnostics.roi_attempted
-        ? "FORMAL_PERCEPTION_NOT_RUN"
-        : (!formal_obstacle_perception.valid
-               ? "FORMAL_PERCEPTION_RUN_ZERO_POINTS"
-               : (!obstacle_track_decision.valid
-                      ? "TRACKING_BLOCKED"
-                      : (!safety_msg.valid
-                             ? "WARNING_AUTHORITY_BLOCKED" : "NONE")));
+    formal_diagnostics.block_reason = obstaclePerceptionBlockReason(
+        "FORMAL", formal_diagnostics.roi_attempted,
+        formal_obstacle_perception);
+    if (formal_diagnostics.block_reason == "NONE" &&
+        !obstacle_track_decision.valid) {
+        formal_diagnostics.block_reason = "TRACKING_BLOCKED";
+    } else if (formal_diagnostics.block_reason == "NONE" &&
+               !safety_msg.valid) {
+        formal_diagnostics.block_reason = "WARNING_AUTHORITY_BLOCKED";
+    }
     avoidance_diagnostics_.replace(std::move(formal_diagnostics));
     publishOperationalStatus(safety_msg, stamp);
 }
@@ -29001,6 +29101,25 @@ void NdtSlamNode::logCargoHealthPeriodic() {
     rec.measured_center_x = hook_lock_.live_pose_measured_base.x();
     rec.measured_center_y = hook_lock_.live_pose_measured_base.y();
     rec.measured_center_z = hook_lock_.live_pose_measured_base.z();
+    rec.association_detected_center_x =
+        hook_lock_.association_detected_center_base.x();
+    rec.association_detected_center_y =
+        hook_lock_.association_detected_center_base.y();
+    rec.association_reference_center_x =
+        hook_lock_.association_reference_center_base.x();
+    rec.association_reference_center_y =
+        hook_lock_.association_reference_center_base.y();
+    rec.association_reference_source =
+        hook_lock_.association_reference_source;
+    rec.association_selected_distance_m =
+        hook_lock_.association_selected_center_distance_m;
+    rec.association_filtered_distance_m =
+        hook_lock_.association_filtered_center_distance_m;
+    rec.association_predicted_distance_m =
+        hook_lock_.association_predicted_center_distance_m;
+    rec.association_trusted_distance_m =
+        hook_lock_.association_trusted_center_distance_m;
+    rec.association_gate_m = hook_lock_.association_xy_gate_m;
     rec.predicted_center_x = hook_lock_.live_pose_predicted_base.x();
     rec.predicted_center_y = hook_lock_.live_pose_predicted_base.y();
     rec.predicted_center_z = hook_lock_.live_pose_predicted_base.z();

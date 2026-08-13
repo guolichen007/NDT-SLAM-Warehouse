@@ -125,6 +125,7 @@ ObstaclePerceptionResult perceiveObstacles(
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr finite_cloud(
       new pcl::PointCloud<pcl::PointXYZ>);
+  result.finite_filter_executed = true;
   std::vector<int> finite_source_indices;
   finite_cloud->reserve(input.cloud_base->size());
   finite_source_indices.reserve(input.cloud_base->size());
@@ -147,6 +148,7 @@ ObstaclePerceptionResult perceiveObstacles(
   }
 
   std::vector<pcl::PointIndices> cluster_indices;
+  result.clustering_attempted = true;
   try {
     pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(
         new pcl::search::KdTree<pcl::PointXYZ>);
@@ -159,6 +161,7 @@ ObstaclePerceptionResult perceiveObstacles(
     extraction.setSearchMethod(tree);
     extraction.setInputCloud(finite_cloud);
     extraction.extract(cluster_indices);
+    result.clustering_completed = true;
   } catch (const std::exception&) {
     result.reason = "clustering_failed";
     return result;
@@ -250,6 +253,25 @@ ObstaclePerceptionResult perceiveObstacles(
   result.valid = true;
   result.reason = "obstacle_clusters_ready";
   return result;
+}
+
+std::string obstaclePerceptionBlockReason(
+    const char* phase,
+    bool query_allowed,
+    const ObstaclePerceptionResult& result) {
+  const std::string prefix = phase != nullptr && phase[0] != '\0'
+      ? phase : "UNKNOWN";
+  if (!query_allowed) return prefix + "_PERCEPTION_NOT_RUN";
+  if (!result.executed) {
+    return prefix + "_PERCEPTION_NOT_EXECUTED:" + result.reason;
+  }
+  if (!result.valid) {
+    return prefix + "_PERCEPTION_INVALID:" + result.reason;
+  }
+  if (result.finite_input_points == 0U) {
+    return prefix + "_PERCEPTION_RUN_ZERO_POINTS";
+  }
+  return "NONE";
 }
 
 }  // namespace ndt_slam

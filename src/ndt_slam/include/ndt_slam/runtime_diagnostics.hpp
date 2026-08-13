@@ -383,6 +383,20 @@ struct CargoFrameRecord {
   double center_x = 0.0, center_y = 0.0, center_z = 0.0;
   double measured_center_x = 0.0, measured_center_y = 0.0,
          measured_center_z = 0.0;
+  double association_detected_center_x = 0.0;
+  double association_detected_center_y = 0.0;
+  double association_reference_center_x = 0.0;
+  double association_reference_center_y = 0.0;
+  std::string association_reference_source = "NONE";
+  double association_selected_distance_m =
+      std::numeric_limits<double>::infinity();
+  double association_filtered_distance_m =
+      std::numeric_limits<double>::infinity();
+  double association_predicted_distance_m =
+      std::numeric_limits<double>::infinity();
+  double association_trusted_distance_m =
+      std::numeric_limits<double>::infinity();
+  double association_gate_m = 0.0;
   double predicted_center_x = 0.0, predicted_center_y = 0.0,
          predicted_center_z = 0.0;
   double center_residual_x = 0.0, center_residual_y = 0.0,

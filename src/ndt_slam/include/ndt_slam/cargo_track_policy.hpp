@@ -210,6 +210,47 @@ struct CargoAssociationDecision {
   std::string reason = "not_evaluated";
 };
 
+enum class CargoCenterReferenceSource : std::uint8_t {
+  NONE = 0,
+  FILTERED_POSE = 1,
+  FILTERED_PREDICTION = 2,
+  TRUSTED_COMPLETE_MEASUREMENT = 3
+};
+
+const char* cargoCenterReferenceSourceName(
+    CargoCenterReferenceSource source) noexcept;
+
+// Center selection is deliberately independent from the association gate.
+// It may compensate bounded filter lag, but it must never enlarge the gate or
+// turn a partial observation into a trusted identity measurement.
+struct CargoCenterReferenceInput {
+  Eigen::Vector2f detected_center = Eigen::Vector2f::Zero();
+  bool filtered_pose_valid = false;
+  Eigen::Vector2f filtered_center = Eigen::Vector2f::Zero();
+  bool filtered_prediction_valid = false;
+  Eigen::Vector2f filtered_predicted_center = Eigen::Vector2f::Zero();
+  bool trusted_complete_measurement_valid = false;
+  Eigen::Vector2f trusted_complete_measurement_center =
+      Eigen::Vector2f::Zero();
+  double trusted_complete_measurement_age_sec =
+      std::numeric_limits<double>::infinity();
+  double maximum_trusted_measurement_age_sec = 0.50;
+};
+
+struct CargoCenterReferenceDecision {
+  bool valid = false;
+  CargoCenterReferenceSource source = CargoCenterReferenceSource::NONE;
+  Eigen::Vector2f center = Eigen::Vector2f::Zero();
+  float selected_distance_m = std::numeric_limits<float>::infinity();
+  float filtered_distance_m = std::numeric_limits<float>::infinity();
+  float predicted_distance_m = std::numeric_limits<float>::infinity();
+  float trusted_measurement_distance_m =
+      std::numeric_limits<float>::infinity();
+};
+
+CargoCenterReferenceDecision selectCargoCenterReference(
+    const CargoCenterReferenceInput& input) noexcept;
+
 struct CargoFrozenObbSupportInput {
   std::vector<Eigen::Vector3f> points;
   Eigen::Vector3f predicted_center = Eigen::Vector3f::Zero();

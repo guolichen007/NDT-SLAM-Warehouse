@@ -413,6 +413,51 @@ TEST(CargoTrackPolicy, ReacquisitionGateHasHardMaximum) {
   EXPECT_LE(decision.dynamic_z_gate_m, 0.65F);
 }
 
+TEST(CargoTrackPolicy,
+     CompleteMeasurementCanBridgeFilteredPoseLagWithoutWideningGate) {
+  CargoCenterReferenceInput input;
+  input.detected_center = Eigen::Vector2f(0.82F, 0.0F);
+  input.filtered_pose_valid = true;
+  input.filtered_center = Eigen::Vector2f::Zero();
+  input.filtered_prediction_valid = true;
+  input.filtered_predicted_center = Eigen::Vector2f(0.25F, 0.0F);
+  input.trusted_complete_measurement_valid = true;
+  input.trusted_complete_measurement_center =
+      Eigen::Vector2f(0.80F, 0.0F);
+  input.trusted_complete_measurement_age_sec = 0.10;
+  const CargoCenterReferenceDecision decision =
+      selectCargoCenterReference(input);
+  ASSERT_TRUE(decision.valid);
+  EXPECT_EQ(
+      decision.source,
+      CargoCenterReferenceSource::TRUSTED_COMPLETE_MEASUREMENT);
+  EXPECT_NEAR(decision.selected_distance_m, 0.02F, 1.0e-5F);
+  // The caller still applies the unchanged 0.65 m production gate.
+  EXPECT_LT(decision.selected_distance_m, 0.65F);
+}
+
+TEST(CargoTrackPolicy, StaleCompleteMeasurementCannotHideObbJump) {
+  CargoCenterReferenceInput input;
+  input.detected_center = Eigen::Vector2f(1.20F, 0.0F);
+  input.filtered_pose_valid = true;
+  input.filtered_center = Eigen::Vector2f::Zero();
+  input.filtered_prediction_valid = true;
+  input.filtered_predicted_center = Eigen::Vector2f(0.20F, 0.0F);
+  input.trusted_complete_measurement_valid = true;
+  input.trusted_complete_measurement_center =
+      Eigen::Vector2f(1.18F, 0.0F);
+  input.trusted_complete_measurement_age_sec = 0.60;
+  input.maximum_trusted_measurement_age_sec = 0.50;
+  const CargoCenterReferenceDecision decision =
+      selectCargoCenterReference(input);
+  ASSERT_TRUE(decision.valid);
+  EXPECT_EQ(
+      decision.source,
+      CargoCenterReferenceSource::FILTERED_PREDICTION);
+  EXPECT_GT(decision.selected_distance_m, 0.65F);
+  EXPECT_FALSE(std::isfinite(decision.trusted_measurement_distance_m));
+}
+
 TEST(CargoTrackPolicy, SparseLongCargoMaintainsLockedYaw) {
   CargoFrozenObbSupportInput input;
   input.predicted_center = Eigen::Vector3f(0.0F, 0.0F, 2.0F);

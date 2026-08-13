@@ -659,6 +659,36 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     const bool consecutive =
         track.last_observation_cycle + 1U == cycle_ &&
         dt_sec <= config_.maximum_observation_gap_sec + kStampEpsilonSec;
+    // Pair metrics are diagnostic-only and may be recorded before authority
+    // is granted. Physical state, timestamps and every maturity/provenance
+    // field below are updated only by a reciprocal unique association.
+    track.last_cell_overlap = best_overlap;
+    track.last_cell_iou = best_iou;
+    track.last_neighbor_cell_overlap = best_neighbor_overlap;
+    track.last_anchor_cell_overlap = cellOverlap(
+        observation.occupied_map_cells,
+        track.identity_anchor_map_cells);
+    track.last_association_cost = best_cost;
+    track.association_reset_reason.clear();
+    track.association_ambiguous = !reciprocal_unique_match;
+    if (!reciprocal_unique_match) {
+      // Freeze the authoritative predictor as well as safety maturity. Moving
+      // centroid/velocity/occupied cells before this check allowed a 2x2
+      // ambiguity to steer a mature track toward another obstacle and inherit
+      // its far-history on the next unambiguous frame.
+      ++ambiguous_association_count_;
+      decision.ambiguous_association_count = ambiguous_association_count_;
+      track.association_reset_reason =
+          "ambiguous_non_reciprocal_authority_frozen";
+      // Expose the ambiguity in this cycle without advancing the physical
+      // observation clock. Repeated ambiguity will therefore expire/reset the
+      // old identity instead of silently keeping it alive.
+      track.observed_this_cycle = true;
+      track.current_source_index = observation.source_index;
+      track.current_source_validated = false;
+      track.current_warning_eligible = false;
+      continue;
+    }
     if (dt_sec > kStampEpsilonSec) {
       track.velocity_map =
           (observation.centroid_map - previous_centroid) /
@@ -678,30 +708,6 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.warning_code = observation.warning_code;
     track.large_cluster_geometry_valid =
         hasLargeStaticCargoGeometry(observation, config_);
-    track.last_cell_overlap = best_overlap;
-    track.last_cell_iou = best_iou;
-    track.last_neighbor_cell_overlap = best_neighbor_overlap;
-    track.last_anchor_cell_overlap = cellOverlap(
-        observation.occupied_map_cells,
-        track.identity_anchor_map_cells);
-    track.last_association_cost = best_cost;
-    track.association_reset_reason.clear();
-    track.association_ambiguous = !reciprocal_unique_match;
-    if (!reciprocal_unique_match) {
-      // Keep the physical prediction attached deterministically, but freeze
-      // every field that can transfer safety authority between identities.
-      ++ambiguous_association_count_;
-      decision.ambiguous_association_count = ambiguous_association_count_;
-      track.association_reset_reason =
-          "ambiguous_non_reciprocal_authority_frozen";
-      track.last_stamp_sec = stamp_sec;
-      track.last_observation_cycle = cycle_;
-      track.observed_this_cycle = true;
-      track.current_source_index = observation.source_index;
-      track.current_source_validated = false;
-      track.current_warning_eligible = false;
-      continue;
-    }
     track.total_consecutive_observations = consecutive
         ? track.total_consecutive_observations + 1 : 1;
     track.consecutive_observations =

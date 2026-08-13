@@ -166,6 +166,44 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
             tracker_test,
         )
 
+    def test_node_pending_to_formal_keeps_physical_store_and_history(self):
+        node = read("src/ndt_slam/src/ndt_slam.cpp")
+        self.assertEqual(
+            node.count("physical_obstacle_track_store_.update("), 2
+        )
+        context_start = node.index(
+            "const bool pending_physical_identity_changed ="
+        )
+        context_end = node.index(
+            "if (pending_obstacle_context_changed)", context_start
+        )
+        reset_contract = node[context_start:context_end]
+        self.assertIn("pending_obstacle_context_lifecycle_id_", reset_contract)
+        self.assertIn("pending_identity_discontinuous", reset_contract)
+        self.assertNotIn("track_segment_pose_discontinuity", reset_contract)
+        self.assertNotIn("actual_geometry_discontinuity", reset_contract)
+        self.assertNotIn("envelope.source", reset_contract)
+
+    def test_cargo_center_reference_has_matched_time_basis_and_fixed_gate(self):
+        node = read("src/ndt_slam/src/ndt_slam.cpp")
+        policy = read("src/ndt_slam/src/cargo_track_policy.cpp")
+        self.assertIn("selectCargoCenterReference", node)
+        self.assertIn(
+            "predicted_center = filtered_center + displacement", node
+        )
+        self.assertIn("trusted_complete_xy_stamp_sec", node)
+        self.assertIn(
+            "source == CargoPoseSource::CURRENT_ASSOCIATED_LIDAR", node
+        )
+        self.assertIn(
+            "complete_xy_observation &&\n        source ==", node
+        )
+        self.assertIn(
+            ": hook_lock_config_.locked_update_max_center_dist", node
+        )
+        self.assertNotIn("reference_center + displacement", node)
+        self.assertIn("maximum_trusted_measurement_age_sec", policy)
+
     def test_hazard_and_final_protocol_have_explicit_single_owners(self):
         evaluator = read("src/ndt_slam/src/cargo_safety_evaluator.cpp")
         hazard = read("src/ndt_slam/src/hazard_evaluator.cpp")
@@ -174,8 +212,20 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         self.assertIn("HazardEvaluator", evaluator)
         self.assertIn("conservative_clearance_m", hazard)
         self.assertNotIn("composeCargoSafetyDecision", evaluator)
-        self.assertEqual(decision.count("composeCargoSafetyDecision("), 1)
+        self.assertEqual(
+            decision.count("CargoSafetyDecision composeCargoSafetyDecision("),
+            1,
+        )
+        self.assertIn(
+            "CargoSafetyDecision AvoidanceDecisionOwner::decide", decision
+        )
         self.assertIn("avoidance_decision_owner_.decide", node)
+        compose_start = node.index("composeCargoSafetyStatus(")
+        compose_end = node.index("void NdtSlamNode::logCargoSafetyStatus", compose_start)
+        compose = node[compose_start:compose_end]
+        final_owner = compose.index("avoidance_decision_owner_.decide(")
+        self.assertNotIn("decision.valid =", compose[final_owner:])
+        self.assertNotIn("decision.warning_code =", compose[final_owner:])
 
     def test_operational_diagnostics_are_read_only_post_decision_snapshots(self):
         diagnostics = read(
@@ -185,10 +235,13 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         for field in (
             "perception_phase",
             "perception_executed",
+            "perception_valid",
+            "perception_reason",
             "query_horizontal_valid",
             "query_vertical_valid",
             "external_point_count",
             "cluster_count",
+            "clustering_completed",
             "observation_count",
             "warning_authority_valid",
             "block_reason",
@@ -198,6 +251,22 @@ class CargoAvoidanceRefactorContractTest(unittest.TestCase):
         self.assertIn("avoidance_diagnostics_.replace", node)
         self.assertNotIn("requested_code", diagnostics)
         self.assertNotIn("warning_code", diagnostics)
+
+    def test_ambiguous_association_freezes_physical_state_before_mutation(self):
+        tracker = read("src/ndt_slam/src/cargo_obstacle_tracker.cpp")
+        update_start = tracker.index("CargoObstacleTrack& track = tracks_[best_index]")
+        update_end = tracker.index("track.total_consecutive_observations", update_start)
+        ambiguous_block = tracker[update_start:update_end]
+        guard = ambiguous_block.index("if (!reciprocal_unique_match)")
+        for authoritative_write in (
+            "track.centroid_map = observation.centroid_map",
+            "track.velocity_map =",
+            "track.top_z95_map = observation.top_z95_map",
+            "track.bottom_z05_map = observation.bottom_z05_map",
+        ):
+            self.assertGreater(
+                ambiguous_block.index(authoritative_write), guard
+            )
 
     def test_build_has_four_in_process_core_boundaries_and_one_ros_node(self):
         cmake = read("src/ndt_slam/CMakeLists.txt")

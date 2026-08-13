@@ -150,6 +150,11 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
                << "safety_reason,"
                << "live_center_x,live_center_y,live_center_z,"
                << "measured_center_x,measured_center_y,measured_center_z,"
+               << "association_detected_center_x,association_detected_center_y,"
+               << "association_reference_center_x,association_reference_center_y,"
+               << "association_reference_source,association_selected_distance_m,"
+               << "association_filtered_distance_m,association_predicted_distance_m,"
+               << "association_trusted_distance_m,association_gate_m,"
                << "predicted_center_x,predicted_center_y,predicted_center_z,"
                << "center_residual_x,center_residual_y,center_residual_z,"
                << "pose_sensor_dt_sec,position_source,vertical_position_source,"
@@ -635,6 +640,16 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << rec.center_x << "," << rec.center_y << "," << rec.center_z << ","
                << rec.measured_center_x << "," << rec.measured_center_y << ","
                << rec.measured_center_z << ","
+               << rec.association_detected_center_x << ","
+               << rec.association_detected_center_y << ","
+               << rec.association_reference_center_x << ","
+               << rec.association_reference_center_y << ","
+               << rec.association_reference_source << ","
+               << rec.association_selected_distance_m << ","
+               << rec.association_filtered_distance_m << ","
+               << rec.association_predicted_distance_m << ","
+               << rec.association_trusted_distance_m << ","
+               << rec.association_gate_m << ","
                << rec.predicted_center_x << "," << rec.predicted_center_y << ","
                << rec.predicted_center_z << ","
                << rec.center_residual_x << "," << rec.center_residual_y << ","
@@ -810,6 +825,14 @@ void RuntimeDiagnostics::logCargoHealth(const CargoFrameRecord& rec) {
             << " support=" << rec.support_points
             << " live_center=(" << std::setprecision(3) << rec.center_x
             << "," << rec.center_y << "," << rec.center_z << ")"
+            << " association=(detected="
+            << rec.association_detected_center_x << "/"
+            << rec.association_detected_center_y
+            << ",reference=" << rec.association_reference_center_x << "/"
+            << rec.association_reference_center_y
+            << ",source=" << rec.association_reference_source
+            << ",distance=" << rec.association_selected_distance_m
+            << ",gate=" << rec.association_gate_m << ")"
             << " locked_shape=(" << rec.size_x << "," << rec.size_y
             << "," << rec.size_z << ")"
             << " vertical_source=" << rec.vertical_position_source

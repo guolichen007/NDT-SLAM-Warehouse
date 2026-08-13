@@ -2,6 +2,45 @@
 
 namespace ndt_slam {
 
+CargoSafetyDecision AvoidanceDecisionOwner::preview(
+    const CargoSafetyDecisionInput& input) const {
+  return decide(input);
+}
+
+CargoSafetyDecision AvoidanceDecisionOwner::decide(
+    const CargoSafetyDecisionInput& input) const {
+  return decide(input, CargoAnomalyReviewProjection{});
+}
+
+CargoSafetyDecision AvoidanceDecisionOwner::decide(
+    const CargoSafetyDecisionInput& input,
+    const CargoAnomalyReviewProjection& review) const {
+  CargoSafetyDecision decision = composeCargoSafetyDecision(input);
+  if (review.enabled &&
+      decision.requested_code == CargoSafetyProtocol::kAnomalyReview &&
+      review.output_code != CargoSafetyProtocol::kAnomalyReview) {
+    decision.valid = false;
+    decision.warning_valid = false;
+    decision.warning_code = 0;
+    decision.requested_code = CargoSafetyProtocol::kObstacleInvalid;
+    decision.fault_code = CargoSafetyProtocol::kObstacleInvalid;
+    decision.fault_mask = CargoSafetyProtocol::kFaultObstacle;
+    decision.reason += ";review_suppressed";
+  }
+  if (review.enabled && review.event != "ACTIVE" &&
+      review.event != "NONE" && !review.event.empty()) {
+    decision.reason += ";review_episode=" + review.event;
+  }
+  if (!cargoSafetyDecisionSelfConsistent(decision)) {
+    decision = CargoSafetyDecision{};
+    decision.requested_code = CargoSafetyProtocol::kInternalError;
+    decision.fault_code = CargoSafetyProtocol::kInternalError;
+    decision.fault_mask = CargoSafetyProtocol::kFaultInternal;
+    decision.reason = "final_decision_self_consistency_failure";
+  }
+  return decision;
+}
+
 CargoSafetyPhaseSelection deriveCargoSafetyDecisionPhase(
     const CargoSafetyDecisionInput& input) {
     CargoSafetyPhaseSelection selection;

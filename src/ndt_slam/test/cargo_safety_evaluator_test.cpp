@@ -1,3 +1,4 @@
+#include "ndt_slam/avoidance_decision.hpp"
 #include "ndt_slam/cargo_safety_evaluator.hpp"
 
 #include <gtest/gtest.h>
@@ -109,6 +110,60 @@ CargoSafetyDecisionInput pendingDecision(std::uint16_t warning_code) {
     input.obstacle_evidence_ready = true;
     input.warning_code = warning_code;
     return input;
+}
+
+TEST(AvoidanceDecisionOwner, AnomalyReviewSuppressionIsFinalAndConsistent) {
+    AvoidanceDecisionOwner owner;
+    const CargoSafetyDecisionInput input = pendingDecision(
+        CargoSafetyProtocol::kAnomalyReview);
+    CargoAnomalyReviewProjection review;
+    review.enabled = true;
+    review.output_code = CargoSafetyProtocol::kObstacleInvalid;
+    review.event = "SUPPRESSED_COOLDOWN";
+    const CargoSafetyDecision result = owner.decide(input, review);
+    EXPECT_EQ(result.requested_code, CargoSafetyProtocol::kObstacleInvalid);
+    EXPECT_EQ(result.fault_code, CargoSafetyProtocol::kObstacleInvalid);
+    EXPECT_EQ(result.fault_mask, CargoSafetyProtocol::kFaultObstacle);
+    EXPECT_FALSE(result.valid);
+    EXPECT_FALSE(result.warning_valid);
+    EXPECT_TRUE(cargoSafetyDecisionSelfConsistent(result));
+    EXPECT_NE(result.reason.find("review_episode=SUPPRESSED_COOLDOWN"),
+              std::string::npos);
+}
+
+TEST(AvoidanceDecisionOwner, ActiveAnomalyReviewRetainsCode29) {
+    AvoidanceDecisionOwner owner;
+    const CargoSafetyDecisionInput input = pendingDecision(
+        CargoSafetyProtocol::kAnomalyReview);
+    CargoAnomalyReviewProjection review;
+    review.enabled = true;
+    review.output_code = CargoSafetyProtocol::kAnomalyReview;
+    review.event = "ACTIVE";
+    const CargoSafetyDecision result = owner.decide(input, review);
+    EXPECT_EQ(result.requested_code, CargoSafetyProtocol::kAnomalyReview);
+    EXPECT_TRUE(result.valid);
+    EXPECT_TRUE(cargoSafetyDecisionSelfConsistent(result));
+}
+
+TEST(ObstaclePerceptionDiagnostics, DistinguishesInvalidFromZeroPoints) {
+    ObstaclePerceptionResult invalid;
+    invalid.executed = true;
+    invalid.reason = "obstacle_observation_insufficient";
+    EXPECT_EQ(
+        obstaclePerceptionBlockReason("FORMAL", true, invalid),
+        "FORMAL_PERCEPTION_INVALID:obstacle_observation_insufficient");
+
+    ObstaclePerceptionResult empty;
+    empty.executed = true;
+    empty.valid = true;
+    empty.finite_input_points = 0U;
+    empty.reason = "clear_no_external_obstacle";
+    EXPECT_EQ(
+        obstaclePerceptionBlockReason("PENDING", true, empty),
+        "PENDING_PERCEPTION_RUN_ZERO_POINTS");
+    EXPECT_EQ(
+        obstaclePerceptionBlockReason("PENDING", false, empty),
+        "PENDING_PERCEPTION_NOT_RUN");
 }
 
 TEST(CargoSafetyDecision, EndToEndStatusCodePriorityAndFaultMask) {
