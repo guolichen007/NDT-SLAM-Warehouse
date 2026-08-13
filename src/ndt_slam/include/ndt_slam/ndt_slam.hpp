@@ -268,7 +268,7 @@ private:
     void initializeParameters();
     void initializeParameters(const std::string& config_file_path);
 
-    void timerCallback(const ros::TimerEvent&);
+    void timerCallback(const ros::WallTimerEvent&);
 
     void performRelocalization();
     void updatePoseFromLoopClosure(const Sophus::SE3d& new_pose,
@@ -582,6 +582,7 @@ private:
     std::atomic<uint64_t> ndt_nonconverged_count_{0};
     std::atomic<uint64_t> ekf_accept_count_{0};
     std::atomic<uint64_t> ekf_reject_count_{0};
+    std::atomic<uint64_t> accepted_localization_count_{0};
     std::atomic<uint64_t> odom_publish_count_{0};
     std::atomic<uint64_t> crane_constraint_fallback_count_{0};
     std::atomic<uint64_t> crane_constraint_invalid_input_count_{0};
@@ -596,6 +597,19 @@ private:
     std::atomic<bool> startup_relocalizer_search_logged_{false};
     std::atomic<bool> startup_map_commit_rearm_logged_{false};
     std::atomic<bool> startup_first_persistent_write_logged_{false};
+
+    // LiDAR source-time epoch diagnostics are rearmed on every rollback.
+    // These values are diagnostic-only and never grant mapping authority.
+    std::atomic<std::uint64_t> time_epoch_reset_count_{0U};
+    std::atomic<std::uint64_t> current_time_epoch_id_{0U};
+    std::atomic<double> time_epoch_old_source_stamp_{0.0};
+    std::atomic<double> time_epoch_new_source_stamp_{0.0};
+    std::atomic<double> time_epoch_rollback_delta_sec_{0.0};
+    std::atomic<bool> time_epoch_first_ndt_pending_{false};
+    std::atomic<bool> time_epoch_first_accept_pending_{false};
+    std::atomic<bool> time_epoch_map_commit_rearm_pending_{false};
+    std::atomic<bool> time_epoch_first_keyframe_pending_{false};
+    std::atomic<bool> time_epoch_first_tile_flush_pending_{false};
 
     // ========== V3: Localization Target (解耦自 local_map_) ==========
     pcl::PointCloud<pcl::PointXYZ>::Ptr localization_target_front_;
@@ -687,6 +701,9 @@ private:
     struct MapCommitJob {
         std::uint64_t sequence = 0U;
         std::uint64_t lifecycle_epoch = 0U;
+        // Diagnostic tag only; lifecycle_epoch remains the sole authority
+        // fence for commit execution.
+        std::uint64_t time_epoch_id = 0U;
         std::uint64_t static_evidence_epoch = 0U;
         ros::Time stamp;
         Sophus::SE3d pose;
@@ -963,7 +980,7 @@ private:
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr last_cloud_;
     Sophus::SE3d relocalized_pose_;
-    ros::Timer timer_;
+    ros::WallTimer timer_;
 
     // Loop closure deduplication
     std::mutex processed_loops_mutex_;
@@ -1197,6 +1214,8 @@ private:
     void resetStationaryState(const std::string& reason);
     void handleLidarTimeRollback(const ros::Time& previous_stamp,
                                  const ros::Time& current_stamp);
+    void logTimeEpochMilestone(const char* milestone,
+                               std::uint64_t epoch_id) const;
 
     // The only production entry point to MotionGate.  It verifies that gate
     // evaluation cannot modify the runtime EKF state or current pose.
@@ -1245,7 +1264,6 @@ private:
     std::mutex persistent_tile_io_mutex_;
     std::mutex failed_tile_flush_mutex_;
     std::map<std::string, TileLayers> failed_tile_flush_batch_;
-    ros::Time last_flush_time_;
 
     // tile 体素大小配置
     double tile_voxel_registration_ = 0.30;
@@ -1280,6 +1298,8 @@ private:
     std::atomic<bool> disk_guard_triggered_{false};
     ros::Time last_flush_time_local_;
     std::atomic<double> last_active_map_rebuild_time_sec_{0.0};
+    std::mutex runtime_status_write_mutex_;
+    std::atomic<std::uint64_t> runtime_status_seq_{0U};
 
     void writeRuntimeStatus();
     void flushDirtyTiles();
@@ -1344,8 +1364,9 @@ private:
 
     // ========== 点云看门狗 ==========
     ros::Time last_pointcloud_time_;
+    std::atomic<double> last_pointcloud_wall_sec_{0.0};
     double pointcloud_stale_timeout_sec_ = 10.0;
-    bool pointcloud_stale_ = false;
+    std::atomic<bool> pointcloud_stale_{false};
 
     // ========== NDT 健康监控 ==========
     double last_ndt_fitness_ = 0.0;

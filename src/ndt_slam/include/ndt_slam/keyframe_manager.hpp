@@ -83,6 +83,10 @@ public:
 
     bool isKeyFrame(const Sophus::SE3d& current_pose, const ros::Time& current_time);
     void addKeyFrame(const Sophus::SE3d& pose, const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const ros::Time& stamp);
+    // Rebase only the source-time eligibility gate after a LiDAR timestamp
+    // epoch transition. Persistent keyframes, identity, poses and indices
+    // remain authoritative.
+    void resetTemporalGateForSourceEpoch(const ros::Time& new_epoch_stamp);
 
     const std::deque<KeyFrame>& getKeyFrames() const { return keyframes_; }
     std::deque<KeyFrame>& getKeyFramesNonConst() { return keyframes_; }

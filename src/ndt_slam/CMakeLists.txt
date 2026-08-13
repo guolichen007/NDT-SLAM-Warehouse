@@ -235,6 +235,20 @@ target_link_libraries(hook_load_state_node
 )
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(time_epoch_contract_test
+    test/time_epoch_contract_test.cpp)
+  if(TARGET time_epoch_contract_test)
+    target_link_libraries(time_epoch_contract_test
+      ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(keyframe_manager_time_epoch_test
+    test/keyframe_manager_time_epoch_test.cpp)
+  if(TARGET keyframe_manager_time_epoch_test)
+    target_link_libraries(keyframe_manager_time_epoch_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
   catkin_add_gtest(cargo_bottom_fusion_test
     test/cargo_bottom_fusion_test.cpp)
   if(TARGET cargo_bottom_fusion_test)

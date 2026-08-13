@@ -7,6 +7,7 @@
 #include "ndt_slam/pending_origin_binding_policy.hpp"
 #include "ndt_slam/persistent_registration_loader.hpp"
 #include "ndt_slam/relocalization_confirmation_policy.hpp"
+#include "ndt_slam/time_epoch_contract.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -281,6 +282,8 @@ static_assert(
 NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     : nh_(nh) {
     initializeParameters();
+    last_pointcloud_wall_sec_.store(
+        ros::WallTime::now().toSec(), std::memory_order_release);
     ROS_INFO("[StartupMap] PROCESS_START persistent=%d root=%s",
              persistent_map_enabled_ ? 1 : 0,
              persistent_map_root_dir_.c_str());
@@ -489,7 +492,8 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     map_commit_thread_ = std::thread(&NdtSlamNode::mapCommitThread, this);
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
 
-    timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
+    timer_ = nh_.createWallTimer(
+        ros::WallDuration(5.0), &NdtSlamNode::timerCallback, this);
     if (memory_guard_enabled_) {
         memory_guard_timer_ = nh_.createWallTimer(
             ros::WallDuration(std::max(1, memory_check_interval_sec_)),
@@ -503,6 +507,8 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
 NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHandle& nh)
     : nh_(nh) {
     initializeParameters(config_file_path);
+    last_pointcloud_wall_sec_.store(
+        ros::WallTime::now().toSec(), std::memory_order_release);
     ROS_INFO("[StartupMap] PROCESS_START persistent=%d root=%s",
              persistent_map_enabled_ ? 1 : 0,
              persistent_map_root_dir_.c_str());
@@ -734,7 +740,8 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     map_commit_thread_ = std::thread(&NdtSlamNode::mapCommitThread, this);
     process_thread_ = std::thread(&NdtSlamNode::processCloudThread, this);
 
-    timer_ = nh_.createTimer(ros::Duration(5.0), &NdtSlamNode::timerCallback, this);
+    timer_ = nh_.createWallTimer(
+        ros::WallDuration(5.0), &NdtSlamNode::timerCallback, this);
     if (memory_guard_enabled_) {
         memory_guard_timer_ = nh_.createWallTimer(
             ros::WallDuration(std::max(1, memory_check_interval_sec_)),
@@ -839,6 +846,8 @@ void NdtSlamNode::enqueueMapCommitJob(
     MapCommitJob job;
     job.lifecycle_epoch =
         map_rebuild_generation_.load(std::memory_order_acquire);
+    job.time_epoch_id =
+        current_time_epoch_id_.load(std::memory_order_acquire);
     job.static_evidence_epoch =
         static_evidence_epoch_.load(std::memory_order_acquire);
     job.stamp = stamp;
@@ -900,37 +909,57 @@ void NdtSlamNode::mapCommitThread() {
             map_commit_queue_.pop_front();
         }
 
-        if (job.lifecycle_epoch !=
-            map_rebuild_generation_.load(std::memory_order_acquire)) {
+        if (!isMapCommitLifecycleCurrent(
+                job.lifecycle_epoch,
+                map_rebuild_generation_.load(std::memory_order_acquire))) {
             map_commit_stale_.fetch_add(1U, std::memory_order_relaxed);
             continue;
         }
 
         bool committed = false;
+        bool lifecycle_stale = false;
         {
             // Reset/load/rebuild takes the same mutex before changing the
             // epoch or any MapCommit-owned tracker/map state.
             std::lock_guard<std::mutex> lifecycle_lock(
                 map_commit_lifecycle_mutex_);
-            if (job.lifecycle_epoch ==
-                map_rebuild_generation_.load(std::memory_order_acquire)) {
+            if (isMapCommitLifecycleCurrent(
+                    job.lifecycle_epoch,
+                    map_rebuild_generation_.load(std::memory_order_acquire))) {
                 committed = commitKeyFrameWithDynamicFiltering(job);
+            } else {
+                lifecycle_stale = true;
             }
+        }
+        if (lifecycle_stale) {
+            map_commit_stale_.fetch_add(1U, std::memory_order_relaxed);
+            continue;
         }
         if (!committed) {
             continue;
         }
 
         map_commit_completed_.fetch_add(1U, std::memory_order_relaxed);
+        bool completion_current = false;
         {
             std::lock_guard<std::mutex> lock(map_commit_completion_mutex_);
-            map_commit_completion_.pending = true;
-            map_commit_completion_.lifecycle_epoch = job.lifecycle_epoch;
-            map_commit_completion_.pose = job.pose;
-            map_commit_completion_.has_raw_ndt_pose = job.has_raw_ndt_pose;
-            map_commit_completion_.raw_ndt_pose = job.raw_ndt_pose;
-            map_commit_completion_.refined_pose = job.refined_pose;
-            map_commit_completion_.runtime_pose = job.runtime_pose;
+            completion_current = isMapCommitLifecycleCurrent(
+                job.lifecycle_epoch,
+                map_rebuild_generation_.load(std::memory_order_acquire));
+            if (completion_current) {
+                map_commit_completion_.pending = true;
+                map_commit_completion_.lifecycle_epoch = job.lifecycle_epoch;
+                map_commit_completion_.pose = job.pose;
+                map_commit_completion_.has_raw_ndt_pose = job.has_raw_ndt_pose;
+                map_commit_completion_.raw_ndt_pose = job.raw_ndt_pose;
+                map_commit_completion_.refined_pose = job.refined_pose;
+                map_commit_completion_.runtime_pose = job.runtime_pose;
+            }
+        }
+        if (!completion_current) {
+            // The physical map write remains valid. Only its old source-time
+            // completion authority is rejected.
+            map_commit_stale_.fetch_add(1U, std::memory_order_relaxed);
         }
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -979,7 +1008,7 @@ void NdtSlamNode::consumeMapCommitCompletion() {
     has_commit_gate_reference_ = true;
 }
 
-void NdtSlamNode::timerCallback(const ros::TimerEvent&) {
+void NdtSlamNode::timerCallback(const ros::WallTimerEvent&) {
     static int timer_count = 0;
     timer_count++;
 
@@ -992,6 +1021,21 @@ void NdtSlamNode::timerCallback(const ros::TimerEvent&) {
     }
     ROS_DEBUG("[Timer] keyframes=%zu, cloud=%zu, init=%d",
              keyframe_count, current_cloud_points, initialized_ ? 1 : 0);
+
+    if (longterm_mapping_enabled_ && persistent_map_enabled_) {
+        const double now_wall_sec = ros::WallTime::now().toSec();
+        const double last_pointcloud_wall_sec =
+            last_pointcloud_wall_sec_.load(std::memory_order_acquire);
+        pointcloud_stale_ = last_pointcloud_wall_sec <= 0.0 ||
+            now_wall_sec - last_pointcloud_wall_sec >
+                pointcloud_stale_timeout_sec_;
+
+        // Keep the observer alive even when no LiDAR callback arrives. The
+        // actual status write remains serialized on the owner thread.
+        runtime_status_pending_.store(true, std::memory_order_release);
+        map_maintenance_pending_.store(true, std::memory_order_release);
+        queue_cv_.notify_one();
+    }
 
     // 不在这里发布 TF，避免与 publishOdometry 冲突导致 TF_REPEATED_DATA
     // TF 由 publishOdometry 在每帧处理后统一发布
@@ -3893,6 +3937,8 @@ void NdtSlamNode::pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& m
         runtime_diag_.recordCallback(msg->header.stamp.toSec());
     }
     last_pointcloud_time_ = ros::Time::now();
+    last_pointcloud_wall_sec_.store(
+        ros::WallTime::now().toSec(), std::memory_order_release);
     pointcloud_stale_ = false;
 
     {
@@ -4756,7 +4802,6 @@ void NdtSlamNode::processCloudThread() {
     // 统计变量
     int total_frames = 0;
     int success_frames = 0;
-    ros::Time last_log_time = ros::Time::now();
     Sophus::SE3d diag_previous_raw_ndt_pose;
     Sophus::SE3d diag_previous_published_pose;
     ros::Time diag_previous_published_stamp;
@@ -4764,6 +4809,10 @@ void NdtSlamNode::processCloudThread() {
     bool diag_have_previous_published_pose = false;
 
     using DiagClock = std::chrono::steady_clock;
+    auto last_log_time = DiagClock::now();
+    auto last_diag_health_time = DiagClock::now();
+    auto last_status_schedule_time = DiagClock::now();
+    auto last_flush_schedule_time = DiagClock::now();
     const auto elapsedMs = [](const DiagClock::time_point& begin) {
         return std::chrono::duration<double, std::milli>(
             DiagClock::now() - begin).count();
@@ -4903,9 +4952,9 @@ void NdtSlamNode::processCloudThread() {
         double sensor_dt = 0.10;
         if (!last_processed_frame_stamp_.isZero()) {
             const bool lidar_time_rollback =
-                !msg->header.stamp.isZero() &&
-                msg->header.stamp.toSec() + 1.0e-6 <
-                    last_processed_frame_stamp_.toSec();
+                !msg->header.stamp.isZero() && isSourceTimestampRollback(
+                    last_processed_frame_stamp_.toSec(),
+                    msg->header.stamp.toSec());
             if (lidar_time_rollback) {
                 handleLidarTimeRollback(
                     last_processed_frame_stamp_, msg->header.stamp);
@@ -6203,6 +6252,22 @@ void NdtSlamNode::processCloudThread() {
                      "target=%s",
                      last_ndt_fitness_, last_actual_target_source_.c_str());
         }
+        const std::uint64_t frame_time_epoch =
+            current_time_epoch_id_.load(std::memory_order_acquire);
+        if (ndt_attempted_this_frame && frame_time_epoch > 0U &&
+            time_epoch_first_ndt_pending_.exchange(
+                false, std::memory_order_acq_rel)) {
+            logTimeEpochMilestone("FIRST_NDT_AFTER_RESET", frame_time_epoch);
+        }
+        if (frame_ndt_accepted && frame_time_epoch > 0U &&
+            time_epoch_first_accept_pending_.exchange(
+                false, std::memory_order_acq_rel)) {
+            logTimeEpochMilestone("FIRST_ACCEPT_AFTER_RESET", frame_time_epoch);
+        }
+        if (frame_ndt_accepted) {
+            accepted_localization_count_.fetch_add(
+                1U, std::memory_order_relaxed);
+        }
 
         if (ndt_attempted_this_frame) {
             ndt_execution_state = last_ndt_converged_
@@ -6696,6 +6761,29 @@ void NdtSlamNode::processCloudThread() {
         // after synchronous diagnostics and stored for next-cycle CSV output.
         average_process_time_ms_ = elapsedMs(start_time);
         last_total_ms_ = average_process_time_ms_;
+        const auto periodic_now = DiagClock::now();
+
+        // Process-time schedules are independent of ROS sim/source time.
+        // Keeping this outside the 30-second human log block preserves the
+        // configured status and flush cadence.
+        if (longterm_mapping_enabled_ && persistent_map_enabled_) {
+            const double steady_since_flush = std::chrono::duration<double>(
+                periodic_now - last_flush_schedule_time).count();
+            if (steady_since_flush >= flush_interval_sec_ ||
+                dirty_tile_count_ >= max_dirty_tiles_) {
+                flush_tiles_pending_.store(true, std::memory_order_release);
+                map_maintenance_pending_ = true;
+                last_flush_schedule_time = periodic_now;
+            }
+            const double steady_since_status = std::chrono::duration<double>(
+                periodic_now - last_status_schedule_time).count();
+            if (steady_since_status >= 5.0) {
+                runtime_status_pending_.store(true, std::memory_order_release);
+                map_maintenance_pending_ = true;
+                last_status_schedule_time = periodic_now;
+            }
+            if (map_maintenance_pending_) queue_cv_.notify_one();
+        }
 
         if (runtime_diag_.isEnabled() && diag_pending_ndt_record_valid_) {
             runtime_diag_.writeNdtFrame(diag_pending_ndt_record_);
@@ -6973,10 +7061,11 @@ void NdtSlamNode::processCloudThread() {
             }
 
             // 周期性健康日志
-            static ros::Time last_diag_health_time;
-            if ((ros::Time::now() - last_diag_health_time).toSec() >= 5.0) {
+            const auto diag_health_now = DiagClock::now();
+            if (std::chrono::duration<double>(
+                    diag_health_now - last_diag_health_time).count() >= 5.0) {
                 logNdtHealthPeriodic();
-                last_diag_health_time = ros::Time::now();
+                last_diag_health_time = diag_health_now;
             }
 
             // Cargo CSV is frame-by-frame. RuntimeDiagnostics performs its own
@@ -7009,7 +7098,8 @@ void NdtSlamNode::processCloudThread() {
             static_cast<unsigned long long>(odom_publish_count_.load(std::memory_order_relaxed)));
 
         // Status 只在运动时报告，每 30 秒一次
-        if ((ros::Time::now() - last_log_time).toSec() > 30.0) {
+        if (std::chrono::duration<double>(
+                periodic_now - last_log_time).count() > 30.0) {
             Eigen::Vector3d pos = current_pose_.translation();
             ROS_DEBUG("[Status] frames=%d/%d, pose=(%.2f, %.2f, %.2f), "
                      "keyframes=%d, tiles_flushed=%d, "
@@ -7018,7 +7108,7 @@ void NdtSlamNode::processCloudThread() {
                      keyframe_count_.load(std::memory_order_relaxed),
                      flushed_tile_count_.load(std::memory_order_relaxed),
                      local_map_->size(), global_map_->size(), elapsed);
-            last_log_time = ros::Time::now();
+            last_log_time = periodic_now;
 
             // ========== 长期建图维护 ==========
             if (longterm_mapping_enabled_) {
@@ -7039,21 +7129,26 @@ void NdtSlamNode::processCloudThread() {
 
                 // 定期 flush dirty tiles
                 if (persistent_map_enabled_) {
-                    double time_since_flush = (ros::Time::now() - last_flush_time_).toSec();
-                    if (time_since_flush >= flush_interval_sec_ || dirty_tile_count_ >= max_dirty_tiles_) {
+                    const double time_since_flush =
+                        std::chrono::duration<double>(
+                            periodic_now - last_flush_schedule_time).count();
+                    if (time_since_flush >= flush_interval_sec_ ||
+                        dirty_tile_count_ >= max_dirty_tiles_) {
                         flush_tiles_pending_.store(
                             true, std::memory_order_release);
                         map_maintenance_pending_ = true;
+                        last_flush_schedule_time = periodic_now;
                     }
 
                     // 定期写入 runtime status（每 5 秒）
-                    static ros::Time last_status_write_time;
-                    double time_since_status = (ros::Time::now() - last_status_write_time).toSec();
+                    const double time_since_status =
+                        std::chrono::duration<double>(
+                            periodic_now - last_status_schedule_time).count();
                     if (time_since_status >= 5.0) {
                         runtime_status_pending_.store(
                             true, std::memory_order_release);
                         map_maintenance_pending_ = true;
-                        last_status_write_time = ros::Time::now();
+                        last_status_schedule_time = periodic_now;
                     }
                 }
 
@@ -10826,6 +10921,15 @@ StationaryMotionDecision NdtSlamNode::updateStationaryMotionState(
         ROS_INFO("[StartupMap] MAP_COMMIT_REARM state=%s reason=%s",
                  runtimeMotionStateName(next_state), decision.reason.c_str());
     }
+    if (!persistent_commit_was_allowed && allow_persistent_map_commit_) {
+        const std::uint64_t epoch_id =
+            current_time_epoch_id_.load(std::memory_order_acquire);
+        if (epoch_id > 0U && time_epoch_map_commit_rearm_pending_.exchange(
+                false, std::memory_order_acq_rel)) {
+            logTimeEpochMilestone(
+                "MAP_COMMIT_REARM_AFTER_RESET", epoch_id);
+        }
+    }
     if (allow_runtime_local_map_update_) {
         local_map_update_allowed_count_.fetch_add(
             1, std::memory_order_relaxed);
@@ -10886,52 +10990,166 @@ void NdtSlamNode::resetStationaryState(const std::string& reason) {
     ROS_INFO("[MotionState] reset reason=%s", reason.c_str());
 }
 
+void NdtSlamNode::logTimeEpochMilestone(
+    const char* milestone, std::uint64_t epoch_id) const {
+    if (epoch_id == 0U || epoch_id !=
+        current_time_epoch_id_.load(std::memory_order_acquire)) {
+        return;
+    }
+    ROS_WARN("[TimeEpoch] %s epoch=%llu old_source_stamp=%.6f "
+             "new_source_stamp=%.6f rollback_delta_sec=%.6f",
+             milestone,
+             static_cast<unsigned long long>(epoch_id),
+             time_epoch_old_source_stamp_.load(std::memory_order_relaxed),
+             time_epoch_new_source_stamp_.load(std::memory_order_relaxed),
+             time_epoch_rollback_delta_sec_.load(std::memory_order_relaxed));
+}
+
 void NdtSlamNode::handleLidarTimeRollback(
     const ros::Time& previous_stamp,
     const ros::Time& current_stamp) {
+    // processCloudThread owns runtime_state_mutex_ before entering here. The
+    // lifecycle fence is always acquired before subsystem ownership locks.
+    std::uint64_t epoch_id = 0U;
+    std::uint64_t lifecycle_epoch = 0U;
+    std::size_t preserved_global_points = 0U;
+    std::size_t preserved_local_points = 0U;
     {
-        std::lock_guard<std::mutex> lock(hook_load_state_mutex_);
-        pending_origin_height_valid_ = false;
-        pending_origin_height_m_ = 0.0F;
-        pending_origin_center_base_.setZero();
-        pending_origin_stamp_ = ros::Time();
-        empty_hook_height_history_.clear();
+        // Wait for a physical write already inside the lifecycle section. Its
+        // map content remains valid; its old temporal completion is fenced.
+        std::lock_guard<std::mutex> lifecycle_lock(
+            map_commit_lifecycle_mutex_);
+        lifecycle_epoch = map_rebuild_generation_.fetch_add(
+            1U, std::memory_order_acq_rel) + 1U;
+        // Publish the diagnostic epoch only after the old MapCommit writer is
+        // fenced. Otherwise an old writer could consume a new FIRST_* flag.
+        epoch_id = time_epoch_reset_count_.fetch_add(
+            1U, std::memory_order_acq_rel) + 1U;
+        current_time_epoch_id_.store(epoch_id, std::memory_order_release);
+        time_epoch_old_source_stamp_.store(
+            previous_stamp.toSec(), std::memory_order_release);
+        time_epoch_new_source_stamp_.store(
+            current_stamp.toSec(), std::memory_order_release);
+        time_epoch_rollback_delta_sec_.store(
+            current_stamp.toSec() - previous_stamp.toSec(),
+            std::memory_order_release);
+        time_epoch_first_ndt_pending_.store(true, std::memory_order_release);
+        time_epoch_first_accept_pending_.store(true, std::memory_order_release);
+        time_epoch_map_commit_rearm_pending_.store(
+            true, std::memory_order_release);
+        time_epoch_first_keyframe_pending_.store(
+            true, std::memory_order_release);
+        time_epoch_first_tile_flush_pending_.store(
+            true, std::memory_order_release);
+        logTimeEpochMilestone("RESET_BEGIN", epoch_id);
+        {
+            std::lock_guard<std::mutex> map_lock(map_mutex_);
+            preserved_global_points = global_map_ ? global_map_->size() : 0U;
+            preserved_local_points = local_map_ ? local_map_->size() : 0U;
+            if (latest_completed_map_bundle_.valid) {
+                // Rebind authority without replacing map pointers/content.
+                latest_completed_map_bundle_.lifecycle_epoch = lifecycle_epoch;
+                // The content is preserved, but its scheduling/evidence stamp
+                // must not remain in the old future source epoch.
+                latest_completed_map_bundle_.source_stamp = current_stamp;
+            }
+        }
+
+        // This is the formal KeyFrameManager ownership lock wrapper. It only
+        // rebases last_keyframe_time_; database/pose/ID/index remain intact.
+        loop_closure_detector_.resetTemporalGateForSourceEpoch(current_stamp);
+
+        {
+            std::lock_guard<std::mutex> lock(hook_load_state_mutex_);
+            pending_origin_height_valid_ = false;
+            pending_origin_height_m_ = 0.0F;
+            pending_origin_center_base_.setZero();
+            pending_origin_stamp_ = ros::Time();
+            empty_hook_height_history_.clear();
+        }
+        resetCargoForHookState(false);
+        cargo_marker_lifecycle_.reset();
+        last_cargo_pipeline_stamp_ = ros::Time();
+        last_cargo_warning_stamp_ = ros::Time();
+        last_anchor_detect_stamp_ = ros::Time();
+        last_anchor_marker_stamp_ = ros::Time();
+        last_anchor_summary_stamp_ = ros::Time();
+
+        crane_motion_ekf_.reset();
+        resetStationaryState("lidar_source_time_rollback");
+        has_last_raw_ndt_pose_ = false;
+        has_commit_gate_reference_ = false;
+        filtered_yaw_initialized_ = false;
+
+        // Confirmed first false gate: preserve its spatial reference and
+        // rebase only the source-time reference into the new epoch.
+        last_keyframe_time_for_gate_ = current_stamp;
+        delta_translation_ = 0.0;
+        delta_yaw_ = 0.0;
+        moved_frame_count_ = 0;
+
+        last_processed_stamp_ = -1.0;
+        last_stamp_ = current_stamp;
+        last_tf_stamp_ = ros::Time();
+        diag_last_cloud_stamp_ = 0.0;
+        diag_last_valid_ndt_stamp_ = 0.0;
+        diag_consecutive_prediction_only_ = 0;
+        runtime_diag_.resetTimeEpoch();
+
+        relocalization_bad_frames_ = 0;
+        relocalization_good_frames_ = 0;
+        relocalization_confirmation_count_ = 0;
+        relocalization_last_submit_frame_ = 0;
+        relocalization_last_result_frame_ = 0;
+        relocalization_cooldown_until_frame_ = 0;
+        relocalization_force_global_.store(false, std::memory_order_release);
+        relocalization_state_ = RelocalizationState::IDLE;
+        relocalization_pose_reliable_ = true;
+        relocalization_invalid_safety_published_ = false;
     }
-    resetCargoForHookState(false);
-    cargo_marker_lifecycle_.reset();
-    last_cargo_pipeline_stamp_ = ros::Time();
-    last_cargo_warning_stamp_ = ros::Time();
-    last_anchor_detect_stamp_ = ros::Time();
-    last_anchor_marker_stamp_ = ros::Time();
-    last_anchor_summary_stamp_ = ros::Time();
 
-    crane_motion_ekf_.reset();
-    resetStationaryState("lidar_source_time_rollback");
-    has_last_raw_ndt_pose_ = false;
-    has_commit_gate_reference_ = false;
-    filtered_yaw_initialized_ = false;
-    last_processed_stamp_ = -1.0;
-    last_stamp_ = current_stamp;
-    last_tf_stamp_ = ros::Time();
-    diag_last_cloud_stamp_ = 0.0;
-    diag_last_valid_ndt_stamp_ = 0.0;
-    diag_consecutive_prediction_only_ = 0;
-    runtime_diag_.resetTimeEpoch();
+    std::size_t stale_queued_jobs = 0U;
+    {
+        // Never wait for lifecycle while owning the queue lock. At this point
+        // the generation is advanced, so removed jobs are explicitly stale.
+        std::lock_guard<std::mutex> queue_lock(map_commit_queue_mutex_);
+        stale_queued_jobs = map_commit_queue_.size();
+        map_commit_queue_.clear();
+    }
+    if (stale_queued_jobs > 0U) {
+        map_commit_stale_.fetch_add(
+            stale_queued_jobs, std::memory_order_relaxed);
+    }
+    bool stale_completion_removed = false;
+    {
+        std::lock_guard<std::mutex> completion_lock(
+            map_commit_completion_mutex_);
+        if (map_commit_completion_.pending &&
+            map_commit_completion_.lifecycle_epoch != lifecycle_epoch) {
+            map_commit_completion_.pending = false;
+            stale_completion_removed = true;
+        }
+    }
 
-    relocalization_bad_frames_ = 0;
-    relocalization_good_frames_ = 0;
-    relocalization_confirmation_count_ = 0;
-    relocalization_last_submit_frame_ = 0;
-    relocalization_last_result_frame_ = 0;
-    relocalization_cooldown_until_frame_ = 0;
-    relocalization_force_global_.store(false, std::memory_order_release);
-    relocalization_state_ = RelocalizationState::IDLE;
-    relocalization_pose_reliable_ = true;
-    relocalization_invalid_safety_published_ = false;
+    // Do not inspect or clear dirty/failed batches here. The normal flush path
+    // merges failed data back and owns all tile locks.
+    if (persistent_map_enabled_) {
+        flush_tiles_pending_.store(true, std::memory_order_release);
+        map_maintenance_pending_.store(true, std::memory_order_release);
+        queue_cv_.notify_one();
+    }
 
-    ROS_WARN("[TIME_EPOCH_RESET] source=lidar previous=%.6f current=%.6f "
-             "ekf=reset motion=reset cargo=reset diagnostics=reset",
-             previous_stamp.toSec(), current_stamp.toSec());
+    ROS_INFO("[TimeEpoch] MAP_STATE_PRESERVED epoch=%llu "
+             "old_source_stamp=%.6f new_source_stamp=%.6f "
+             "rollback_delta_sec=%.6f lifecycle=%llu global_points=%zu "
+             "local_points=%zu stale_queued=%zu stale_completion=%d",
+             static_cast<unsigned long long>(epoch_id),
+             previous_stamp.toSec(), current_stamp.toSec(),
+             current_stamp.toSec() - previous_stamp.toSec(),
+             static_cast<unsigned long long>(lifecycle_epoch),
+             preserved_global_points, preserved_local_points,
+             stale_queued_jobs, stale_completion_removed ? 1 : 0);
+    logTimeEpochMilestone("MAPPING_TEMPORAL_STATE_RESET", epoch_id);
 }
 
 // CRITICAL RUNTIME CHAIN - DO NOT MODIFY
@@ -11011,6 +11229,15 @@ bool NdtSlamNode::evaluateMotionGateForMapCommit(
 bool NdtSlamNode::shouldCommitKeyframe(
     const Sophus::SE3d& current_pose,
     const ros::Time& current_time) {
+    if (!motion_gate_enabled_ || allow_persistent_map_commit_) {
+        const std::uint64_t epoch_id =
+            current_time_epoch_id_.load(std::memory_order_acquire);
+        if (epoch_id > 0U && time_epoch_map_commit_rearm_pending_.exchange(
+                false, std::memory_order_acq_rel)) {
+            logTimeEpochMilestone(
+                "MAP_COMMIT_REARM_AFTER_RESET", epoch_id);
+        }
+    }
     if (!motion_gate_enabled_) {
         return true;
     }
@@ -11991,13 +12218,19 @@ void NdtSlamNode::flushDirtyTiles() {
         flush_batch.swap(dirty_tiles_);
         dirty_tile_count_.store(0, std::memory_order_release);
     }
-    last_flush_time_ = ros::Time::now();
-    last_flush_time_local_ = last_flush_time_;
+    // ROS/sim time is retained as status metadata only. Periodic ownership is
+    // the steady-clock schedule in processCloudThread.
+    last_flush_time_local_ = ros::Time::now();
+    const std::uint64_t flush_lifecycle_epoch =
+        map_rebuild_generation_.load(std::memory_order_acquire);
+    const std::uint64_t flush_time_epoch_id =
+        current_time_epoch_id_.load(std::memory_order_acquire);
     tile_flush_running_.store(true, std::memory_order_release);
 
     tile_flush_thread_ = std::thread(
         [this, flush_batch = std::move(flush_batch),
-         persist_static_evidence]() mutable {
+         persist_static_evidence, flush_lifecycle_epoch,
+         flush_time_epoch_id]() mutable {
     try {
     std::lock_guard<std::mutex> tile_io_lock(persistent_tile_io_mutex_);
 
@@ -12161,6 +12394,14 @@ void NdtSlamNode::flushDirtyTiles() {
 
     ROS_INFO("[TileFlush] %d tiles flushed to disk | total_flushed=%d",
              flushed, total_flushed);
+    if (flushed > 0 && flush_time_epoch_id > 0U &&
+        flush_lifecycle_epoch ==
+            map_rebuild_generation_.load(std::memory_order_acquire) &&
+        time_epoch_first_tile_flush_pending_.exchange(
+            false, std::memory_order_acq_rel)) {
+        logTimeEpochMilestone(
+            "FIRST_TILE_FLUSH_AFTER_RESET", flush_time_epoch_id);
+    }
     const ros::WallTime display_now = ros::WallTime::now();
     if (flushed > 0 &&
         (persistent_display_last_publish_wall_.isZero() ||
@@ -12191,6 +12432,8 @@ void NdtSlamNode::flushDirtyTiles() {
 
 void NdtSlamNode::writeRuntimeStatus() {
     if (!persistent_map_enabled_) return;
+    std::lock_guard<std::mutex> status_write_lock(
+        runtime_status_write_mutex_);
 
     // 确保目录存在
     boost::filesystem::create_directories(persistent_map_root_dir_);
@@ -12200,6 +12443,8 @@ void NdtSlamNode::writeRuntimeStatus() {
     std::string tmp_file = status_file + ".tmp";
     std::ofstream f(tmp_file);
     if (!f.is_open()) return;
+    const std::uint64_t next_runtime_status_seq =
+        runtime_status_seq_.load(std::memory_order_acquire) + 1U;
 
     // 获取磁盘空间
     double disk_free_gb = getDiskFreeGB();
@@ -12208,7 +12453,12 @@ void NdtSlamNode::writeRuntimeStatus() {
     long mem_mb = getProcessMemoryMB();
 
     // 检查点云超时
-    double pc_elapsed = (ros::Time::now() - last_pointcloud_time_).toSec();
+    const double last_pointcloud_wall_sec =
+        last_pointcloud_wall_sec_.load(std::memory_order_acquire);
+    const double pc_elapsed = last_pointcloud_wall_sec > 0.0
+        ? std::max(0.0, ros::WallTime::now().toSec() -
+                            last_pointcloud_wall_sec)
+        : std::numeric_limits<double>::infinity();
     pointcloud_stale_ = (pc_elapsed > pointcloud_stale_timeout_sec_);
 
     // 获取各地图点数
@@ -12234,6 +12484,25 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << std::fixed << std::setprecision(2);
     f << "{\n";
     f << "  \"timestamp\": \"" << ros::Time::now() << "\",\n";
+    f << "  \"runtime_status_seq\": " << next_runtime_status_seq
+      << ",\n";
+    f << "  \"cloud_callback_count\": "
+      << cloud_callback_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"ndt_attempt_count\": "
+      << ndt_attempt_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"accepted_localization_count\": "
+      << accepted_localization_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"keyframe_count\": "
+      << keyframe_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"map_commit_completed_count\": "
+      << map_commit_completed_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"tile_flush_completed_count\": "
+      << flushed_tile_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"time_epoch_reset_count\": "
+      << time_epoch_reset_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"current_time_epoch_id\": "
+      << current_time_epoch_id_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"total_frames\": " << total_frames_ << ",\n";
     f << "  \"total_keyframes\": " << total_keyframes_ << ",\n";
     f << "  \"active_keyframes\": " << active_keyframes_ << ",\n";
@@ -12464,10 +12733,24 @@ void NdtSlamNode::writeRuntimeStatus() {
       << cargo_obstacle_track_reset_count_ << ",\n";
     f << "  \"last_update\": \"" << ros::Time::now() << "\"\n";
     f << "}\n";
+    f.flush();
+    if (!f.good()) {
+        f.close();
+        std::remove(tmp_file.c_str());
+        ROS_ERROR("[RuntimeStatus] failed to flush temporary status file");
+        return;
+    }
     f.close();
 
-    // 原子重命名
-    boost::filesystem::rename(tmp_file, status_file);
+    // The atomic replacement is the publication point. Do not advance the
+    // observer sequence when publication fails.
+    if (std::rename(tmp_file.c_str(), status_file.c_str()) != 0) {
+        ROS_ERROR("[RuntimeStatus] atomic replace failed tmp=%s target=%s",
+                  tmp_file.c_str(), status_file.c_str());
+        return;
+    }
+    runtime_status_seq_.store(
+        next_runtime_status_seq, std::memory_order_release);
 
 }
 
@@ -23964,6 +24247,14 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     }
 
     keyframe_count_++;
+    if (job.time_epoch_id > 0U &&
+        job.lifecycle_epoch ==
+            map_rebuild_generation_.load(std::memory_order_acquire) &&
+        time_epoch_first_keyframe_pending_.exchange(
+            false, std::memory_order_acq_rel)) {
+        logTimeEpochMilestone(
+            "FIRST_KEYFRAME_AFTER_RESET", job.time_epoch_id);
+    }
 
     // [MapCommit] 日志（要求的格式）
     ROS_DEBUG("[MapCommit] seq=%d keyframe=%d commit_total=%zu commit_objects=%zu cargo_removed=%zu human_removed=%zu",

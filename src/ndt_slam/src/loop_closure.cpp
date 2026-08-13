@@ -589,6 +589,12 @@ std::size_t LoopClosureDetector::getKeyFrameCount() const {
     return keyframe_manager_.getKeyFrameCount();
 }
 
+void LoopClosureDetector::resetTemporalGateForSourceEpoch(
+    const ros::Time& new_epoch_stamp) {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    keyframe_manager_.resetTemporalGateForSourceEpoch(new_epoch_stamp);
+}
+
 void LoopClosureDetector::clear() {
     std::lock_guard<std::mutex> lock(keyframes_mutex_);
     keyframe_manager_.clear();

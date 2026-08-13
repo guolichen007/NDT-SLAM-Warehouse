@@ -98,6 +98,11 @@ void KeyFrameManager::addKeyFrame(const Sophus::SE3d& pose, const pcl::PointClou
     last_keyframe_pose_ = pose;
 }
 
+void KeyFrameManager::resetTemporalGateForSourceEpoch(
+    const ros::Time& new_epoch_stamp) {
+    last_keyframe_time_ = new_epoch_stamp;
+}
+
 bool KeyFrameManager::saveKeyFrameDatabase(const std::string& session_dir) const {
     try {
         std::filesystem::path session_path(session_dir);

@@ -117,6 +117,7 @@ public:
 
     std::deque<KeyFrame> getKeyFramesSnapshot() const;
     std::size_t getKeyFrameCount() const;
+    void resetTemporalGateForSourceEpoch(const ros::Time& new_epoch_stamp);
     void clear();
     bool saveKeyFrameDatabase(const std::string& session_dir) const;
     bool loadKeyFrameDatabase(const std::string& session_dir);
