@@ -720,6 +720,18 @@ private:
         bool lidar_removal_authorized = false;
         bool formal_footprint_valid = false;
         CargoObbFootprint formal_footprint;
+        // Bounded base-frame cargo quarantine. When the hook is loaded but the
+        // cargo has no formal removal/map authority, sparse cargo points inside
+        // this existing odom-anchor search region must not gain persistent or
+        // static map authority. This is a local fail-closed region, never a
+        // global map clear and never a hook_loaded => skip-all-MapCommit gate.
+        bool cargo_quarantine_active = false;
+        float cargo_quarantine_center_x = 0.0F;
+        float cargo_quarantine_center_y = 0.0F;
+        float cargo_quarantine_half_x = 0.0F;
+        float cargo_quarantine_half_y = 0.0F;
+        float cargo_quarantine_z_min = 0.0F;
+        float cargo_quarantine_z_max = 0.0F;
         bool allow_persistent_map_commit = false;
         bool has_raw_ndt_pose = false;
         Sophus::SE3d raw_ndt_pose;

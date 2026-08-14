@@ -865,6 +865,25 @@ void NdtSlamNode::enqueueMapCommitJob(
         job.formal_footprint =
             toCargoObbFootprint(current_rigid_cargo_geometry_);
     }
+    // Bounded cargo quarantine. When the hook is loaded but no formal
+    // removal/map authority is available (sparse/ambiguous cargo, churn, or
+    // pre-formal pending), the odom-anchor cargo search region is a local
+    // fail-closed exclusion: its points must not gain persistent/static map
+    // authority. This never disables the whole MapCommit and never uses the
+    // configured fallback as a removal geometry.
+    const bool hook_loaded = hook.valid &&
+        hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED;
+    if (hook_loaded && !job.lidar_removal_authorized &&
+        odom_anchor_config_.enabled) {
+        const Eigen::Vector2f anchor = getCargoAnchorXY();
+        job.cargo_quarantine_active = true;
+        job.cargo_quarantine_center_x = anchor.x();
+        job.cargo_quarantine_center_y = anchor.y();
+        job.cargo_quarantine_half_x = odom_anchor_config_.search_half_x;
+        job.cargo_quarantine_half_y = odom_anchor_config_.search_half_y;
+        job.cargo_quarantine_z_min = odom_anchor_config_.search_z_min;
+        job.cargo_quarantine_z_max = odom_anchor_config_.search_z_max;
+    }
     job.allow_persistent_map_commit =
         allow_persistent_map_commit_ && canCommit();
     job.has_raw_ndt_pose = has_last_raw_ndt_pose_;
@@ -25057,6 +25076,42 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                  removal_footprint.max_z - removal_footprint.min_z,
                  removal_footprint.yaw_base_rad * 180.0F /
                      3.14159265358979323846F);
+    }
+
+    // Bounded cargo quarantine (fail-closed). When the hook is loaded but the
+    // cargo has no formal removal/map authority, sparse cargo points inside the
+    // existing odom-anchor search region are excluded before the map write.
+    // This never disables the whole MapCommit: ground, keyframes, tile flush
+    // and non-cargo warehouse points all continue normally.
+    if (job.cargo_quarantine_active) {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_quarantine(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        objects_after_quarantine->reserve(objects_after_cargo_base->size());
+        std::size_t quarantine_removed = 0U;
+        for (const auto& point : objects_after_cargo_base->points) {
+            if (point.x < job.cargo_quarantine_center_x -
+                              job.cargo_quarantine_half_x ||
+                point.x > job.cargo_quarantine_center_x +
+                              job.cargo_quarantine_half_x ||
+                point.y < job.cargo_quarantine_center_y -
+                              job.cargo_quarantine_half_y ||
+                point.y > job.cargo_quarantine_center_y +
+                              job.cargo_quarantine_half_y ||
+                point.z < job.cargo_quarantine_z_min ||
+                point.z > job.cargo_quarantine_z_max) {
+                objects_after_quarantine->push_back(point);
+            } else {
+                ++quarantine_removed;
+            }
+        }
+        objects_after_cargo_base = objects_after_quarantine;
+        ROS_DEBUG_THROTTLE(2.0,
+            "[CargoQuarantine] loaded_no_authority removed=%zu kept=%zu "
+            "center=(%.2f,%.2f) half=(%.2f,%.2f) z=[%.2f,%.2f]",
+            quarantine_removed, objects_after_cargo_base->size(),
+            job.cargo_quarantine_center_x, job.cargo_quarantine_center_y,
+            job.cargo_quarantine_half_x, job.cargo_quarantine_half_y,
+            job.cargo_quarantine_z_min, job.cargo_quarantine_z_max);
     }
 
     // [CargoCommit] 日志
