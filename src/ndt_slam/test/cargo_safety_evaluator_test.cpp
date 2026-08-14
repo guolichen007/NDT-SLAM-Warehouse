@@ -1,3 +1,4 @@
+#include "ndt_slam/avoidance_decision.hpp"
 #include "ndt_slam/cargo_safety_evaluator.hpp"
 
 #include <gtest/gtest.h>
@@ -111,6 +112,60 @@ CargoSafetyDecisionInput pendingDecision(std::uint16_t warning_code) {
     return input;
 }
 
+TEST(AvoidanceDecisionOwner, AnomalyReviewSuppressionIsFinalAndConsistent) {
+    AvoidanceDecisionOwner owner;
+    const CargoSafetyDecisionInput input = pendingDecision(
+        CargoSafetyProtocol::kAnomalyReview);
+    CargoAnomalyReviewProjection review;
+    review.enabled = true;
+    review.output_code = CargoSafetyProtocol::kObstacleInvalid;
+    review.event = "SUPPRESSED_COOLDOWN";
+    const CargoSafetyDecision result = owner.decide(input, review);
+    EXPECT_EQ(result.requested_code, CargoSafetyProtocol::kObstacleInvalid);
+    EXPECT_EQ(result.fault_code, CargoSafetyProtocol::kObstacleInvalid);
+    EXPECT_EQ(result.fault_mask, CargoSafetyProtocol::kFaultObstacle);
+    EXPECT_FALSE(result.valid);
+    EXPECT_FALSE(result.warning_valid);
+    EXPECT_TRUE(cargoSafetyDecisionSelfConsistent(result));
+    EXPECT_NE(result.reason.find("review_episode=SUPPRESSED_COOLDOWN"),
+              std::string::npos);
+}
+
+TEST(AvoidanceDecisionOwner, ActiveAnomalyReviewRetainsCode29) {
+    AvoidanceDecisionOwner owner;
+    const CargoSafetyDecisionInput input = pendingDecision(
+        CargoSafetyProtocol::kAnomalyReview);
+    CargoAnomalyReviewProjection review;
+    review.enabled = true;
+    review.output_code = CargoSafetyProtocol::kAnomalyReview;
+    review.event = "ACTIVE";
+    const CargoSafetyDecision result = owner.decide(input, review);
+    EXPECT_EQ(result.requested_code, CargoSafetyProtocol::kAnomalyReview);
+    EXPECT_TRUE(result.valid);
+    EXPECT_TRUE(cargoSafetyDecisionSelfConsistent(result));
+}
+
+TEST(ObstaclePerceptionDiagnostics, DistinguishesInvalidFromZeroPoints) {
+    ObstaclePerceptionResult invalid;
+    invalid.executed = true;
+    invalid.reason = "obstacle_observation_insufficient";
+    EXPECT_EQ(
+        obstaclePerceptionBlockReason("FORMAL", true, invalid),
+        "FORMAL_PERCEPTION_INVALID:obstacle_observation_insufficient");
+
+    ObstaclePerceptionResult empty;
+    empty.executed = true;
+    empty.valid = true;
+    empty.finite_input_points = 0U;
+    empty.reason = "clear_no_external_obstacle";
+    EXPECT_EQ(
+        obstaclePerceptionBlockReason("PENDING", true, empty),
+        "PENDING_PERCEPTION_RUN_ZERO_POINTS");
+    EXPECT_EQ(
+        obstaclePerceptionBlockReason("PENDING", false, empty),
+        "PENDING_PERCEPTION_NOT_RUN");
+}
+
 TEST(CargoSafetyDecision, EndToEndStatusCodePriorityAndFaultMask) {
     EXPECT_EQ(composeCargoSafetyDecision(strictEmptyDecision(
                   HookLoadSignalRole::REQUIRED)).requested_code,
@@ -118,7 +173,8 @@ TEST(CargoSafetyDecision, EndToEndStatusCodePriorityAndFaultMask) {
     for (std::uint16_t warning : {
              static_cast<std::uint16_t>(CargoSafetyProtocol::kClear),
              static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel1Warning),
-             static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel2Warning)}) {
+             static_cast<std::uint16_t>(CargoSafetyProtocol::kLevel2Warning),
+             static_cast<std::uint16_t>(CargoSafetyProtocol::kAnomalyReview)}) {
         const CargoSafetyDecision result =
             composeCargoSafetyDecision(formalDecision(warning));
         EXPECT_TRUE(result.valid);
@@ -374,6 +430,80 @@ TEST(CargoSafetyEvaluator, InvalidHeightNeverBecomesLevel2Warning) {
     EXPECT_EQ(stale_result.fault, CargoSafetyFault::CARGO_HEIGHT_INVALID);
 }
 
+TEST(CargoSafetyEvaluator,
+     InvalidHeightPreservesCanonicalPhysicalPerception) {
+    CargoSafetyInput input = baseInput();
+    addCluster(&input, 4.0F, 1.75F);
+    input.height.valid = false;
+    const CargoSafetyEvaluator evaluator;
+    const ObstaclePerceptionResult perception = evaluator.perceive(input);
+    ASSERT_TRUE(perception.executed);
+    ASSERT_TRUE(perception.valid) << perception.reason;
+    ASSERT_EQ(perception.clusters.size(), 1U);
+    EXPECT_NEAR(perception.clusters.front().footprint_distance_m,
+                4.0F, 0.05F);
+
+    const CargoSafetyResult hazard = evaluator.evaluate(input, perception);
+    EXPECT_FALSE(hazard.warning_valid);
+    EXPECT_EQ(hazard.warning_code, 0U);
+    EXPECT_EQ(hazard.fault, CargoSafetyFault::CARGO_HEIGHT_INVALID);
+    EXPECT_EQ(hazard.reason, "height_invalid");
+}
+
+TEST(ObstaclePerception, ClusterIndicesRemainInSourceCloudDomain) {
+    CargoSafetyInput input = baseInput();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = mutableObstacleCloud(&input);
+    cloud->push_back(pcl::PointXYZ(
+        std::numeric_limits<float>::quiet_NaN(), 0.0F, 1.0F));
+    for (int i = 0; i < 8; ++i) {
+        cloud->push_back(pcl::PointXYZ(
+            4.5F + 0.005F * static_cast<float>(i),
+            0.004F * static_cast<float>(i % 3), 1.5F));
+    }
+    const ObstaclePerceptionResult perception =
+        CargoSafetyEvaluator().perceive(input);
+    ASSERT_TRUE(perception.valid) << perception.reason;
+    ASSERT_EQ(perception.clusters.size(), 1U);
+    ASSERT_FALSE(perception.clusters.front().point_indices.empty());
+    EXPECT_EQ(perception.clusters.front().point_indices.front(), 1);
+}
+
+TEST(ObstaclePerception,
+     FormalPendingTransportLabelsCannotChangeCanonicalPerception) {
+    CargoSafetyInput canonical = baseInput();
+    canonical.source_stamp_sec = 9.75;
+    canonical.source_sequence = 975U;
+    canonical.frame_id = "base_link";
+    addCluster(&canonical, 4.0F, 1.75F);
+    const CargoSafetyEvaluator evaluator;
+
+    // Formal/Pending are deliberately absent from CargoSafetyInput. Both
+    // transport projections consume this one phase-neutral result.
+    const ObstaclePerceptionResult formal_projection =
+        evaluator.perceive(canonical);
+    const ObstaclePerceptionResult pending_projection =
+        evaluator.perceive(canonical);
+    ASSERT_TRUE(formal_projection.valid);
+    ASSERT_TRUE(pending_projection.valid);
+    ASSERT_EQ(formal_projection.source_sequence,
+              pending_projection.source_sequence);
+    ASSERT_EQ(formal_projection.cluster_count,
+              pending_projection.cluster_count);
+    ASSERT_EQ(formal_projection.clusters.size(),
+              pending_projection.clusters.size());
+    for (std::size_t index = 0U;
+         index < formal_projection.clusters.size(); ++index) {
+        const auto& formal = formal_projection.clusters[index];
+        const auto& pending = pending_projection.clusters[index];
+        EXPECT_EQ(formal.point_indices, pending.point_indices);
+        EXPECT_EQ(formal.point_count, pending.point_count);
+        EXPECT_FLOAT_EQ(formal.footprint_distance_m,
+                        pending.footprint_distance_m);
+        EXPECT_FLOAT_EQ(formal.top_z95_m, pending.top_z95_m);
+        EXPECT_FLOAT_EQ(formal.bottom_z05_m, pending.bottom_z05_m);
+    }
+}
+
 TEST(CargoSafetyEvaluator, InvalidObstacleEvidenceNeverBecomesLevel2Warning) {
     CargoSafetyEvaluator evaluator;
 
@@ -472,6 +602,30 @@ TEST(CargoSafetyEvaluator, InvalidConfigAndInputAreInternalErrors) {
     EXPECT_EQ(input_result.fault, CargoSafetyFault::INTERNAL_ERROR);
 }
 
+TEST(CargoSafetyConfig, ReportsEveryInvalidFieldWithoutReplacingPolicy) {
+    CargoSafetyConfig config;
+    config.level1_distance_m = -1.0F;
+    config.level2_distance_m = std::numeric_limits<float>::quiet_NaN();
+    config.minimum_roi_coverage_ratio = 1.2F;
+    config.obstacle_bottom_percentile = config.obstacle_top_percentile;
+    config.obstacle_min_cluster_points = 0U;
+    CargoSafetyEvaluator evaluator;
+    const CargoConfigValidationResult validation = evaluator.setConfig(config);
+    EXPECT_FALSE(validation.valid);
+    EXPECT_NE(validation.summary().find("level1_distance_m"),
+              std::string::npos);
+    EXPECT_NE(validation.summary().find("level2_distance_m"),
+              std::string::npos);
+    EXPECT_NE(validation.summary().find("minimum_roi_coverage_ratio"),
+              std::string::npos);
+    EXPECT_NE(validation.summary().find("obstacle_bottom_percentile"),
+              std::string::npos);
+    EXPECT_NE(validation.summary().find("obstacle_min_cluster_points"),
+              std::string::npos);
+    EXPECT_FLOAT_EQ(evaluator.config().level1_distance_m, -1.0F);
+    EXPECT_TRUE(std::isnan(evaluator.config().level2_distance_m));
+}
+
 TEST(CargoSafetyEvaluator, Level1HasPriorityAcrossClusters) {
     CargoSafetyInput mixed = baseInput();
     addCluster(&mixed, 4.0F, 1.20F, 0.0F);
@@ -491,6 +645,34 @@ TEST(CargoSafetyEvaluator, Level1HasPriorityAcrossClusters) {
     addCluster(&clear, 4.0F, 0.20F, 0.5F);
     EXPECT_EQ(CargoSafetyEvaluator().evaluate(clear).warning_code,
               CargoSafetyEvaluator::kSafeCode);
+}
+
+TEST(CargoSafetyEvaluator, EntireClusterAboveCargoDoesNotWarn) {
+    CargoSafetyInput input = baseInput();
+    addCluster(&input, 2.0F, 4.20F);
+    const CargoSafetyResult result = CargoSafetyEvaluator().evaluate(input);
+    ASSERT_TRUE(result.warning_valid) << result.reason;
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kSafeCode);
+    ASSERT_TRUE(result.has_cluster_evidence);
+    EXPECT_TRUE(result.most_dangerous_cluster.entirely_above_cargo);
+}
+
+TEST(CargoSafetyEvaluator, VerticallyContinuousHighWallStillWarns) {
+    CargoSafetyInput input = baseInput();
+    auto cloud = mutableObstacleCloud(&input);
+    for (int index = 0; index < 32; ++index) {
+        cloud->push_back(pcl::PointXYZ(
+            2.0F + 0.003F * static_cast<float>(index % 3),
+            0.003F * static_cast<float>(index % 4),
+            0.20F + 0.10F * static_cast<float>(index)));
+    }
+    const CargoSafetyResult result = CargoSafetyEvaluator().evaluate(input);
+    ASSERT_TRUE(result.warning_valid) << result.reason;
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel1Code);
+    ASSERT_TRUE(result.has_cluster_evidence);
+    EXPECT_FALSE(result.most_dangerous_cluster.entirely_above_cargo);
+    EXPECT_GE(result.most_dangerous_cluster.vertical_continuity_ratio,
+              0.45F);
 }
 
 TEST(CargoSafetyEvaluator, NeverExcludesObstacleBelowFusedBottom) {

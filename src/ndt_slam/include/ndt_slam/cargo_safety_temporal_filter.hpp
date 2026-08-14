@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <string>
 
+#include "ndt_slam/cargo_config_validation.hpp"
+
 namespace ndt_slam {
 
 struct CargoSafetyTemporalConfig {
@@ -54,7 +56,11 @@ class CargoSafetyTemporalFilter {
   explicit CargoSafetyTemporalFilter(
       const CargoSafetyTemporalConfig& config = CargoSafetyTemporalConfig());
 
-  void setConfig(const CargoSafetyTemporalConfig& config);
+  CargoConfigValidationResult setConfig(
+      const CargoSafetyTemporalConfig& config);
+  const CargoConfigValidationResult& configValidation() const noexcept {
+    return config_validation_;
+  }
   const CargoSafetyTemporalConfig& config() const noexcept { return config_; }
   void reset();
   CargoSafetyTemporalDecision update(
@@ -62,6 +68,7 @@ class CargoSafetyTemporalFilter {
 
  private:
   CargoSafetyTemporalConfig config_;
+  CargoConfigValidationResult config_validation_;
   bool has_source_stamp_ = false;
   double last_source_stamp_sec_ = 0.0;
 
@@ -81,5 +88,8 @@ class CargoSafetyTemporalFilter {
   CargoSafetyTemporalDecision pendingDecision(
       const std::string& reason) const;
 };
+
+CargoConfigValidationResult validateCargoSafetyTemporalConfig(
+    const CargoSafetyTemporalConfig& config);
 
 }  // namespace ndt_slam

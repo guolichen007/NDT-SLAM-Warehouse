@@ -10,7 +10,9 @@
 #include <pcl/point_types.h>
 
 #include "ndt_slam/hook_load_evidence_policy.hpp"
+#include "ndt_slam/cargo_config_validation.hpp"
 #include "ndt_slam/cargo_rigid_geometry.hpp"
+#include "ndt_slam/obstacle_perception.hpp"
 
 namespace ndt_slam {
 
@@ -50,6 +52,9 @@ struct CargoSafetyConfig {
 };
 
 struct CargoSafetyInput {
+    double source_stamp_sec = 0.0;
+    std::uint64_t source_sequence = 0U;
+    std::string frame_id = "base_link";
     CargoHeightState height;
     CargoBaseFootprint footprint_base;
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr obstacle_cloud_base;
@@ -106,7 +111,8 @@ enum class CargoSafetyEvidenceState : std::uint8_t {
     TRACK_CONFIRMATION_PENDING,
     SPARSE_PENDING,
     SOURCE_UNRESOLVED,
-    HARD_FAULT
+    HARD_FAULT,
+    REVIEW_REQUIRED
 };
 
 struct CargoSafetyProtocol {
@@ -218,16 +224,36 @@ public:
     static constexpr std::uint16_t kSafeCode = 14;
     static constexpr std::uint16_t kLevel1Code = 17;
     static constexpr std::uint16_t kLevel2Code = 18;
+    static constexpr std::uint16_t kReviewCode = 29;
 
     explicit CargoSafetyEvaluator(const CargoSafetyConfig& config = CargoSafetyConfig());
 
-    void setConfig(const CargoSafetyConfig& config);
+    CargoConfigValidationResult setConfig(const CargoSafetyConfig& config);
     const CargoSafetyConfig& config() const;
+    const CargoConfigValidationResult& configValidation() const noexcept {
+        return config_validation_;
+    }
 
     CargoSafetyResult evaluate(const CargoSafetyInput& input) const;
 
+    // Reuses a canonical physical-perception result. This prevents Formal and
+    // Pending authority projections from clustering the same physical frame
+    // more than once.
+    CargoSafetyResult evaluate(
+        const CargoSafetyInput& input,
+        const ObstaclePerceptionResult& perception) const;
+
+    // Physical external-cluster perception deliberately does not require a
+    // Cargo bottom. Callers may keep obstacle identity/far-history alive while
+    // evaluate() remains fail-closed for 14/17/18.
+    ObstaclePerceptionResult perceive(const CargoSafetyInput& input) const;
+
 private:
     CargoSafetyConfig config_;
+    CargoConfigValidationResult config_validation_;
 };
+
+CargoConfigValidationResult validateCargoSafetyConfig(
+    const CargoSafetyConfig& config);
 
 }  // namespace ndt_slam

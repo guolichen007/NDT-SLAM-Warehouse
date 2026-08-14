@@ -737,7 +737,9 @@ cargo_safety:
   # At the configured operating speed the 7 m acquisition path establishes
   # this history before the real 5 m/code-18 and 3 m/code-17 boundaries.
   require_far_field_history_for_level1: true
-  require_static_cargo_for_warning: true
+  # Live same-track far-history is normal warning authority. Static maturity
+  # is an independent certified path and must not delay a tracked obstacle.
+  require_static_cargo_for_warning: false
   static_cargo_min_voxel_points: 80
   # Disabled until the upstream merged-cloud message carries an honest raw
   # return count; never synthesize a raw count from voxelized points.
@@ -746,8 +748,9 @@ cargo_safety:
   static_cargo_min_long_side_m: 0.80
   static_cargo_min_height_span_m: 0.40
   static_cargo_min_occupied_cells: 12
-  static_cargo_confirm_frames: 8
-  static_cargo_confirm_sec: 1.0
+  known_static_confirm_frames: 3
+  static_cargo_confirm_frames: 5
+  static_cargo_confirm_sec: 0.8
   obstacle_track_static_velocity_mps: 0.08
   # Long-term static evidence is built only from the clean objects stream
   # after Human/Cargo/swept-volume removal. Safety performs a bounded cell
@@ -786,6 +789,9 @@ cargo_safety:
   # motion is unavailable. Acquisition never changes the 5 m/3 m thresholds
   # and cannot itself publish 17/18.
   collision_tracking_acquisition_distance_m: 8.0
+  anomaly_review_enter_confirm_frames: 2
+  anomaly_review_maximum_episode_sec: 1.50
+  anomaly_review_same_episode_rearm_sec: 2.00
   # Compatibility kill switch only. true does not bypass the typed policy.
   fusion_provisional_warning_to_official_code: true
   motion_corridor_enabled: true
@@ -817,6 +823,7 @@ status_codes:
   clear: 14
   level1: 17
   level2: 18
+  anomaly_review: 29
   system_not_ready: 30
   localization_invalid: 31
   gravity_invalid: 32

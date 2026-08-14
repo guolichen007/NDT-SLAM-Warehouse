@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "ndt_slam/cargo_config_validation.hpp"
+
 namespace ndt_slam {
 
 enum class ExternalProvenance : std::uint8_t {
@@ -48,7 +50,9 @@ struct CargoObstacleTrackerConfig {
   float static_track_cell_overlap_min = 0.20F;
   float static_track_iou_min = 0.10F;
   float static_provenance_min_cargo_motion_m = 0.30F;
-  // Phase-one production policy: 20-point clusters may retain a diagnostic
+  // Library-safe fail-closed default. Production YAML explicitly disables
+  // this gate where same-track far-history is the commissioned authority.
+  // Phase-one policy: 20-point clusters may retain a diagnostic
   // identity, but only independently proven warehouse cargo stacks can issue
   // a formal 17/18. Small-object warning can be enabled after its dedicated
   // provenance policy is commissioned.
@@ -62,6 +66,7 @@ struct CargoObstacleTrackerConfig {
   float static_cargo_min_long_side_m = 0.80F;
   float static_cargo_min_height_span_m = 0.40F;
   std::size_t static_cargo_min_occupied_cells = 12U;
+  int known_static_confirm_frames = 3;
   int static_cargo_confirm_frames = 8;
   double static_cargo_confirm_sec = 1.0;
   float static_velocity_threshold_mps = 0.08F;
@@ -77,6 +82,10 @@ struct CargoObstacleObservation {
   float footprint_distance_m = std::numeric_limits<float>::infinity();
   float conservative_clearance_m =
       std::numeric_limits<float>::quiet_NaN();
+  // False means that physical XY/Z cluster facts are usable for identity and
+  // far-field acquisition, but Cargo bottom authority is unavailable. Such
+  // an observation can never advance warning, clearance or CLEAR authority.
+  bool hazard_geometry_valid = true;
   // Combined cargo, obstacle and localization XY uncertainty. A far sample
   // is authoritative only when footprint_distance - uncertainty remains >5m.
   float horizontal_uncertainty_m = 0.0F;
@@ -90,7 +99,7 @@ struct CargoObstacleObservation {
   Eigen::Vector2f cargo_center_map = Eigen::Vector2f::Zero();
   bool cargo_center_valid = false;
   std::uint16_t warning_code = 0U;
-  // False for a 5-8 m acquisition observation. Such a frame may build
+  // False for a 5-7 m acquisition observation. Such a frame may build
   // identity/provenance history but can never publish 17/18.
   bool warning_eligible = true;
   bool source_validated = true;
@@ -112,6 +121,7 @@ struct CargoObstacleTrack {
   float footprint_distance_m = std::numeric_limits<float>::infinity();
   float conservative_clearance_m =
       std::numeric_limits<float>::quiet_NaN();
+  bool current_hazard_geometry_valid = false;
   std::size_t point_count = 0U;
   std::uint16_t warning_code = 0U;
   int total_consecutive_observations = 0;
@@ -149,6 +159,7 @@ struct CargoObstacleTrack {
   float last_neighbor_cell_overlap = 0.0F;
   float last_anchor_cell_overlap = 0.0F;
   float last_association_cost = 0.0F;
+  bool association_ambiguous = false;
   std::string association_reset_reason;
   bool current_source_validated = false;
   bool current_warning_eligible = false;
@@ -174,9 +185,9 @@ struct CargoObstacleTrackerDecision {
   int selected_separated_observations = 0;
   bool selected_near_field = false;
   bool selected_near_field_authorized = false;
+  bool selected_far_field_history_valid = false;
   int selected_far_field_observations = 0;
   double selected_far_field_duration_sec = 0.0;
-  bool selected_far_field_history_valid = false;
   bool selected_certified_static_provenance = false;
   int selected_static_provenance_streak = 0;
   double selected_static_age_sec = 0.0;
@@ -184,11 +195,20 @@ struct CargoObstacleTrackerDecision {
   float selected_track_iou = 0.0F;
   float selected_track_neighbor_cell_overlap = 0.0F;
   float selected_association_cost = 0.0F;
+  bool selected_association_ambiguous = false;
   std::string selected_association_reset_reason;
   std::uint64_t created_track_count = 0U;
   std::uint64_t association_reset_count = 0U;
+  std::uint64_t ambiguous_association_count = 0U;
   Eigen::Vector3f selected_track_velocity = Eigen::Vector3f::Zero();
   std::string reason = "not_evaluated";
+};
+
+// Physical identity/history is stateful and unique. Formal/Pending only
+// supply an immutable policy for the current decision projection.
+struct CargoObstacleAuthorityPolicy {
+  bool require_static_cargo_for_warning = true;
+  bool require_large_geometry_for_warning = false;
 };
 
 // Associates warning clusters and directional/radial 5-7 m acquisition
@@ -202,18 +222,27 @@ class CargoObstacleTracker {
       const CargoObstacleTrackerConfig& config =
           CargoObstacleTrackerConfig());
 
-  void setConfig(const CargoObstacleTrackerConfig& config);
+  CargoConfigValidationResult setConfig(
+      const CargoObstacleTrackerConfig& config);
+  const CargoConfigValidationResult& configValidation() const noexcept {
+    return config_validation_;
+  }
   const CargoObstacleTrackerConfig& config() const noexcept { return config_; }
   void reset();
   CargoObstacleTrackerDecision update(
       double stamp_sec,
       const std::vector<CargoObstacleObservation>& observations);
+  CargoObstacleTrackerDecision update(
+      double stamp_sec,
+      const std::vector<CargoObstacleObservation>& observations,
+      const CargoObstacleAuthorityPolicy& authority_policy);
   const std::vector<CargoObstacleTrack>& tracks() const noexcept {
     return tracks_;
   }
 
  private:
   CargoObstacleTrackerConfig config_;
+  CargoConfigValidationResult config_validation_;
   std::vector<CargoObstacleTrack> tracks_;
   std::uint64_t next_track_id_ = 1U;
   std::uint64_t cycle_ = 0U;
@@ -221,6 +250,12 @@ class CargoObstacleTracker {
   double last_stamp_sec_ = 0.0;
   std::uint64_t created_track_count_ = 0U;
   std::uint64_t association_reset_count_ = 0U;
+  std::uint64_t ambiguous_association_count_ = 0U;
 };
+
+using PhysicalObstacleTrackStore = CargoObstacleTracker;
+
+CargoConfigValidationResult validateCargoObstacleTrackerConfig(
+    const CargoObstacleTrackerConfig& config);
 
 }  // namespace ndt_slam

@@ -79,6 +79,7 @@ public:
     static constexpr int kHookRoleRequired = 1;
     static constexpr int kHookRoleAuxiliary = 2;
     static constexpr int kEvidenceHazardCandidate = 3;
+    static constexpr int kEvidenceReviewRequired = 8;
 
     struct Result {
         int code = kSystemNotReady;
@@ -283,7 +284,8 @@ StatusContractResult validateStatusContract(
     const bool provisional_positive_loaded = input.localization_valid &&
         hook_supports_loaded && !input.no_cargo_confirmed &&
         !input.cargo_valid && input.obstacle_valid &&
-        input.evidence_state == State::kEvidenceHazardCandidate;
+        (input.evidence_state == State::kEvidenceHazardCandidate ||
+         input.evidence_state == State::kEvidenceReviewRequired);
     const bool provisional_track_contract =
         input.cargo_track_id > 0U &&
         input.obstacle_track_id > 0U &&
@@ -324,6 +326,15 @@ StatusContractResult validateStatusContract(
         }
         return {State::kClear, true, false, "clear_status"};
     }
+    if (input.warning_code == State::kAnomalyReview) {
+        if ((!valid_loaded && !provisional_positive_loaded) ||
+            !cluster_geometry_valid) {
+            return {State::kInternalError, false, false,
+                    "review_geometry_mismatch"};
+        }
+        return {State::kAnomalyReview, true, false,
+                "anomaly_review_status"};
+    }
     const bool level1_geometry =
         input.nearest_obstacle_distance_m <= config.level1_distance_m &&
         input.conservative_vertical_clearance_m <
@@ -337,9 +348,7 @@ StatusContractResult validateStatusContract(
         (provisional_positive_loaded && !provisional_track_contract) ||
         !cluster_geometry_valid ||
         (input.warning_code == State::kLevel1Warning && !level1_geometry) ||
-        (input.warning_code == State::kLevel2Warning && !level2_geometry) ||
-        (input.warning_code == State::kAnomalyReview &&
-         !cluster_geometry_valid)) {
+        (input.warning_code == State::kLevel2Warning && !level2_geometry)) {
         return {State::kInternalError, false, false,
                 "warning_geometry_mismatch"};
     }
@@ -437,8 +446,15 @@ private:
     }
 
     void statusCallback(const lidar_slam2_msgs::CargoSafetyStatus::ConstPtr& msg) {
-        static_assert(lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION == 6,
-                      "CargoSafetyStatus schema v6 is required");
+        static_assert(lidar_slam2_msgs::CargoSafetyStatus::SCHEMA_VERSION == 7,
+                      "CargoSafetyStatus schema v7 is required");
+        static_assert(
+            lidar_slam2_msgs::CargoSafetyStatus::CODE_ANOMALY_REVIEW ==
+                    AlarmStateMachine::kAnomalyReview &&
+                lidar_slam2_msgs::CargoSafetyStatus::
+                        EVIDENCE_REVIEW_REQUIRED ==
+                    AlarmStateMachine::kEvidenceReviewRequired,
+            "Heartbeat review constants do not match the message schema");
         static_assert(
             lidar_slam2_msgs::CargoSafetyStatus::HOOK_ROLE_DISABLED ==
                 AlarmStateMachine::kHookRoleDisabled &&
@@ -589,7 +605,8 @@ private:
         pending_error_reported_ = false;
         const bool urgent_warning =
             code == AlarmStateMachine::kLevel1Warning ||
-            code == AlarmStateMachine::kLevel2Warning ||
+            code == AlarmStateMachine::kLevel2Warning;
+        const bool review_required =
             code == AlarmStateMachine::kAnomalyReview;
         const bool warning_repeat_due = urgent_warning &&
             (last_warning_log_wall_sec_ <= 0.0 ||
@@ -602,7 +619,11 @@ private:
             (last_fault_log_wall_sec_ <= 0.0 ||
              wall_now_sec - last_fault_log_wall_sec_ >=
                  pending_repeat_sec_);
-        if (!log_change && !warning_repeat_due && !fault_repeat_due) return;
+        // Code 29 is an episode edge, not a periodic warning. Repeating it
+        // would turn one review episode into multiple operator events.
+        const bool review_enter_due = review_required && log_change;
+        if (!log_change && !warning_repeat_due && !review_enter_due &&
+            !fault_repeat_due) return;
         if (code == AlarmStateMachine::kClear) {
             ROS_INFO("[SAFETY] code=14 state=CLEAR "
                      "localization_valid=%d gravity_valid=%d "
@@ -612,21 +633,37 @@ private:
                      has_last_status_ && last_status_.cargo_valid,
                      has_last_status_ && last_status_.obstacle_valid);
         } else if (code == AlarmStateMachine::kLevel1Warning ||
-                   code == AlarmStateMachine::kLevel2Warning ||
-                   code == AlarmStateMachine::kAnomalyReview) {
-            const int level = code == AlarmStateMachine::kAnomalyReview ? 0
-                : (code == AlarmStateMachine::kLevel1Warning ? 1 : 2);
+                   code == AlarmStateMachine::kLevel2Warning) {
             ROS_WARN("[SAFETY_WARN] code=%d level=%d distance=%.2f "
                      "clearance=%.2f cargo_bottom=%.2f obstacle_top=%.2f "
                      "cargo_track=%u obstacle_track=%u confidence=%.2f "
                      "reason=%s",
-                     code, level,
+                     code,
+                     code == AlarmStateMachine::kLevel1Warning ? 1 : 2,
                      last_status_.nearest_obstacle_distance_m,
                      last_status_.conservative_vertical_clearance_m,
                      last_status_.cargo_bottom_z_map,
                      last_status_.obstacle_top_z_map,
                      last_status_.cargo_track_id,
                      last_status_.obstacle_track_id,
+                     last_status_.confidence,
+                     last_status_.reason.c_str());
+            last_warning_log_wall_sec_ = wall_now_sec;
+        } else if (code == AlarmStateMachine::kAnomalyReview) {
+            ROS_WARN("[SAFETY_REVIEW] code=29 distance=%.2f "
+                     "clearance=%.2f cargo_bottom=%.2f obstacle_top=%.2f "
+                     "cargo_track=%u obstacle_track=%u confirmations=%u "
+                     "provenance=%u/%d confidence=%.2f reason=%s",
+                     last_status_.nearest_obstacle_distance_m,
+                     last_status_.conservative_vertical_clearance_m,
+                     last_status_.cargo_bottom_z_map,
+                     last_status_.obstacle_top_z_map,
+                     last_status_.cargo_track_id,
+                     last_status_.obstacle_track_id,
+                     last_status_.obstacle_validated_streak,
+                     static_cast<unsigned int>(
+                         last_status_.obstacle_provenance_type),
+                     last_status_.obstacle_provenance_valid ? 1 : 0,
                      last_status_.confidence,
                      last_status_.reason.c_str());
             last_warning_log_wall_sec_ = wall_now_sec;

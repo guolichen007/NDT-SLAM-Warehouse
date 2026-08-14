@@ -164,6 +164,80 @@ TEST(CargoTrackPolicy, CandidateCenterMustRemainNearHook) {
   EXPECT_EQ(score.reason, "candidate_center_too_far_from_hook_anchor");
 }
 
+TEST(CargoTrackPolicy, CandidateTouchingHookAtNarrowEdgeIsNotCargo) {
+  CargoCandidateIdentityContext context;
+  context.hook_center = Eigen::Vector2f::Zero();
+  context.hook_region_radius_m = 2.0F;
+  context.require_hook_containment = true;
+  context.hook_containment_margin_m = 0.10F;
+  context.maximum_hook_center_distance_m = 0.35F;
+  context.maximum_hook_normalized_offset = 0.65F;
+  const CargoCandidateIdentityScore score = scoreCargoCandidateIdentity(
+      candidate(8, 0.0F, 0.30F, 1.0F, 1.8F, 0.8F, 1.0F, 0.0F),
+      context);
+  EXPECT_FALSE(score.valid);
+  EXPECT_GT(score.hook_normalized_offset, 0.65F);
+  EXPECT_EQ(score.reason,
+            "hook_anchor_outside_candidate_central_region");
+}
+
+TEST(CargoTrackPolicy, CandidateCenteredOnHookPassesCentralRegionGate) {
+  CargoCandidateIdentityContext context;
+  context.hook_center = Eigen::Vector2f::Zero();
+  context.hook_region_radius_m = 2.0F;
+  context.require_hook_containment = true;
+  context.maximum_hook_center_distance_m = 0.35F;
+  context.maximum_hook_normalized_offset = 0.65F;
+  const CargoCandidateIdentityScore score = scoreCargoCandidateIdentity(
+      candidate(9, 0.20F, 0.08F, 1.0F, 1.8F, 0.8F, 1.0F, 0.0F),
+      context);
+  EXPECT_TRUE(score.valid) << score.reason;
+  EXPECT_LT(score.hook_normalized_offset, 0.65F);
+}
+
+TEST(CargoTrackPolicy, LongEccentricCargoUsesBoundedSizeAwareHookGate) {
+  CargoCandidateIdentityContext context;
+  context.hook_center = Eigen::Vector2f::Zero();
+  context.hook_region_radius_m = 2.0F;
+  context.maximum_hook_center_distance_m = 0.35F;
+  context.size_aware_hook_gate = true;
+  context.maximum_dynamic_hook_center_distance_m = 1.05F;
+  const CargoCandidateIdentityScore score = scoreCargoCandidateIdentity(
+      candidate(10, 0.70F, 0.0F, 1.0F, 3.0F, 0.8F, 1.0F, 0.0F),
+      context);
+  EXPECT_TRUE(score.valid) << score.reason;
+  EXPECT_GT(score.hook_dynamic_gate_m, 0.35F);
+  EXPECT_LE(score.hook_dynamic_gate_m, 1.05F);
+}
+
+TEST(CargoTrackPolicy, LearnedOffsetDoesNotMoveSafetyGeometryToHook) {
+  CargoCandidateIdentityContext context;
+  context.hook_center = Eigen::Vector2f::Zero();
+  context.hook_region_radius_m = 2.0F;
+  context.maximum_hook_center_distance_m = 0.35F;
+  context.size_aware_hook_gate = true;
+  context.learned_cargo_to_hook_offset_valid = true;
+  context.learned_cargo_to_hook_offset = Eigen::Vector2f(0.65F, -0.10F);
+  context.maximum_dynamic_hook_center_distance_m = 1.05F;
+  const CargoCandidateDescriptor observed = candidate(
+      11, 0.68F, -0.12F, 1.0F, 2.5F, 0.8F, 1.0F, 0.0F);
+  const CargoCandidateIdentityScore score =
+      scoreCargoCandidateIdentity(observed, context);
+  ASSERT_TRUE(score.valid) << score.reason;
+  EXPECT_LT(score.hook_association_residual_m, 0.05F);
+
+  MeasuredCargoPose measured;
+  measured.valid = true;
+  measured.complete_xy_observation = true;
+  measured.center = observed.center;
+  CargoSafetyGeometry safety;
+  safety.valid = measured.valid;
+  safety.current_measured_xy = measured.complete_xy_observation;
+  safety.center = measured.center;
+  EXPECT_NEAR(safety.center.x(), 0.68F, 1.0e-6F);
+  EXPECT_NE(safety.center.x(), context.hook_center.x());
+}
+
 TEST(CargoTrackPolicy, AssociationUsesPredictedCenterAndDt) {
   CargoAssociationInput input;
   input.candidate = candidate(
@@ -337,6 +411,51 @@ TEST(CargoTrackPolicy, ReacquisitionGateHasHardMaximum) {
       evaluateCargoPredictedAssociation(input);
   EXPECT_LE(decision.dynamic_xy_gate_m, 0.55F);
   EXPECT_LE(decision.dynamic_z_gate_m, 0.65F);
+}
+
+TEST(CargoTrackPolicy,
+     CompleteMeasurementCanBridgeFilteredPoseLagWithoutWideningGate) {
+  CargoCenterReferenceInput input;
+  input.detected_center = Eigen::Vector2f(0.82F, 0.0F);
+  input.filtered_pose_valid = true;
+  input.filtered_center = Eigen::Vector2f::Zero();
+  input.filtered_prediction_valid = true;
+  input.filtered_predicted_center = Eigen::Vector2f(0.25F, 0.0F);
+  input.trusted_complete_measurement_valid = true;
+  input.trusted_complete_measurement_center =
+      Eigen::Vector2f(0.80F, 0.0F);
+  input.trusted_complete_measurement_age_sec = 0.10;
+  const CargoCenterReferenceDecision decision =
+      selectCargoCenterReference(input);
+  ASSERT_TRUE(decision.valid);
+  EXPECT_EQ(
+      decision.source,
+      CargoCenterReferenceSource::TRUSTED_COMPLETE_MEASUREMENT);
+  EXPECT_NEAR(decision.selected_distance_m, 0.02F, 1.0e-5F);
+  // The caller still applies the unchanged 0.65 m production gate.
+  EXPECT_LT(decision.selected_distance_m, 0.65F);
+}
+
+TEST(CargoTrackPolicy, StaleCompleteMeasurementCannotHideObbJump) {
+  CargoCenterReferenceInput input;
+  input.detected_center = Eigen::Vector2f(1.20F, 0.0F);
+  input.filtered_pose_valid = true;
+  input.filtered_center = Eigen::Vector2f::Zero();
+  input.filtered_prediction_valid = true;
+  input.filtered_predicted_center = Eigen::Vector2f(0.20F, 0.0F);
+  input.trusted_complete_measurement_valid = true;
+  input.trusted_complete_measurement_center =
+      Eigen::Vector2f(1.18F, 0.0F);
+  input.trusted_complete_measurement_age_sec = 0.60;
+  input.maximum_trusted_measurement_age_sec = 0.50;
+  const CargoCenterReferenceDecision decision =
+      selectCargoCenterReference(input);
+  ASSERT_TRUE(decision.valid);
+  EXPECT_EQ(
+      decision.source,
+      CargoCenterReferenceSource::FILTERED_PREDICTION);
+  EXPECT_GT(decision.selected_distance_m, 0.65F);
+  EXPECT_FALSE(std::isfinite(decision.trusted_measurement_distance_m));
 }
 
 TEST(CargoTrackPolicy, SparseLongCargoMaintainsLockedYaw) {

@@ -35,6 +35,23 @@ TEST(CargoSafetyTemporalFilter, SparseOrJumpingPointsCannotCreateLevelOne) {
   EXPECT_FALSE(filter.update(hazard(1.6, 1.5F)).stable);
 }
 
+TEST(CargoSafetyTemporalFilter,
+     InvalidConfigIsExplicitAndNeverRestoredToDefaults) {
+  CargoSafetyTemporalConfig config;
+  config.hazard_confirm_frames = 1;
+  config.maximum_evidence_gap_sec = -1.0;
+  CargoSafetyTemporalFilter filter;
+  const CargoConfigValidationResult validation = filter.setConfig(config);
+  EXPECT_FALSE(validation.valid);
+  EXPECT_NE(validation.summary().find("hazard_confirm_frames"),
+            std::string::npos);
+  EXPECT_NE(validation.summary().find("maximum_evidence_gap_sec"),
+            std::string::npos);
+  EXPECT_EQ(filter.config().hazard_confirm_frames, 1);
+  EXPECT_DOUBLE_EQ(filter.config().maximum_evidence_gap_sec, -1.0);
+  EXPECT_FALSE(filter.update(hazard(1.0, 0.0F)).stable);
+}
+
 TEST(CargoSafetyTemporalFilter, ThreeContinuousFreshClustersConfirmHazard) {
   CargoSafetyTemporalFilter filter;
   EXPECT_FALSE(filter.update(hazard(1.0, 0.00F)).stable);

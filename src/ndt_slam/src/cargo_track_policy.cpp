@@ -123,6 +123,61 @@ const char* cargoLockAuthoritySourceName(CargoLockAuthoritySource source) {
   return "NONE";
 }
 
+const char* cargoCenterReferenceSourceName(
+    CargoCenterReferenceSource source) noexcept {
+  switch (source) {
+    case CargoCenterReferenceSource::NONE: return "NONE";
+    case CargoCenterReferenceSource::FILTERED_POSE:
+      return "FILTERED_POSE";
+    case CargoCenterReferenceSource::FILTERED_PREDICTION:
+      return "FILTERED_PREDICTION";
+    case CargoCenterReferenceSource::TRUSTED_COMPLETE_MEASUREMENT:
+      return "TRUSTED_COMPLETE_MEASUREMENT";
+  }
+  return "NONE";
+}
+
+CargoCenterReferenceDecision selectCargoCenterReference(
+    const CargoCenterReferenceInput& input) noexcept {
+  CargoCenterReferenceDecision decision;
+  if (!input.detected_center.allFinite() ||
+      !std::isfinite(input.maximum_trusted_measurement_age_sec) ||
+      input.maximum_trusted_measurement_age_sec < 0.0) {
+    return decision;
+  }
+  const auto consider = [&decision, &input](
+      bool enabled, const Eigen::Vector2f& center,
+      CargoCenterReferenceSource source, float* distance) {
+    if (!enabled || !center.allFinite()) return;
+    *distance = (input.detected_center - center).norm();
+    if (!std::isfinite(*distance)) return;
+    if (!decision.valid || *distance < decision.selected_distance_m) {
+      decision.valid = true;
+      decision.source = source;
+      decision.center = center;
+      decision.selected_distance_m = *distance;
+    }
+  };
+  consider(
+      input.filtered_pose_valid, input.filtered_center,
+      CargoCenterReferenceSource::FILTERED_POSE,
+      &decision.filtered_distance_m);
+  consider(
+      input.filtered_prediction_valid, input.filtered_predicted_center,
+      CargoCenterReferenceSource::FILTERED_PREDICTION,
+      &decision.predicted_distance_m);
+  const bool trusted_fresh = input.trusted_complete_measurement_valid &&
+      std::isfinite(input.trusted_complete_measurement_age_sec) &&
+      input.trusted_complete_measurement_age_sec >= 0.0 &&
+      input.trusted_complete_measurement_age_sec <=
+          input.maximum_trusted_measurement_age_sec;
+  consider(
+      trusted_fresh, input.trusted_complete_measurement_center,
+      CargoCenterReferenceSource::TRUSTED_COMPLETE_MEASUREMENT,
+      &decision.trusted_measurement_distance_m);
+  return decision;
+}
+
 CargoPhysicalLockAuthorityDecision evaluateCargoPhysicalLockAuthority(
     const CargoPhysicalLockAuthorityInput& input) {
   CargoPhysicalLockAuthorityDecision decision;
@@ -304,15 +359,62 @@ CargoCandidateIdentityScore scoreCargoCandidateIdentity(
   }
   const float hook_center_distance =
       (candidate.center.head<2>() - context.hook_center).norm();
-  if (std::isfinite(context.maximum_hook_center_distance_m) &&
-      (context.maximum_hook_center_distance_m < 0.0F ||
-       hook_center_distance > context.maximum_hook_center_distance_m)) {
+  Eigen::Vector2f expected_center = context.hook_center;
+  if (context.learned_cargo_to_hook_offset_valid &&
+      context.learned_cargo_to_hook_offset.allFinite()) {
+    expected_center += context.learned_cargo_to_hook_offset;
+  }
+  score.hook_association_residual_m =
+      (candidate.center.head<2>() - expected_center).norm();
+  const float configured_base_gate =
+      std::isfinite(context.maximum_hook_center_distance_m)
+          ? std::max(0.0F, context.maximum_hook_center_distance_m)
+          : context.hook_region_radius_m;
+  const float size_allowance = context.size_aware_hook_gate
+      ? 0.35F * std::max(candidate.size.x(), candidate.size.y())
+      : 0.0F;
+  const float maximum_dynamic_gate = std::max(
+      configured_base_gate,
+      context.maximum_dynamic_hook_center_distance_m);
+  const float dynamic_gate = context.size_aware_hook_gate
+      ? std::min(
+            configured_base_gate + size_allowance +
+                std::max(0.0F, context.hook_xy_uncertainty_m),
+            maximum_dynamic_gate)
+      : configured_base_gate;
+  score.hook_dynamic_gate_m = dynamic_gate;
+  const float gated_distance =
+      context.learned_cargo_to_hook_offset_valid
+          ? score.hook_association_residual_m
+          : hook_center_distance;
+  if (!std::isfinite(dynamic_gate) || dynamic_gate <= 0.0F ||
+      gated_distance > dynamic_gate) {
     score.reason = "candidate_center_too_far_from_hook_anchor";
     return score;
   }
+  const Eigen::Vector2f hook_delta =
+      context.hook_center - candidate.center.head<2>();
+  const float candidate_cosine = std::cos(candidate.yaw_rad);
+  const float candidate_sine = std::sin(candidate.yaw_rad);
+  const float normalized_long = std::abs(
+      candidate_cosine * hook_delta.x() +
+      candidate_sine * hook_delta.y()) /
+      std::max(0.05F, 0.5F * candidate.size.x());
+  const float normalized_short = std::abs(
+      -candidate_sine * hook_delta.x() +
+      candidate_cosine * hook_delta.y()) /
+      std::max(0.05F, 0.5F * candidate.size.y());
+  score.hook_normalized_offset =
+      std::max(normalized_long, normalized_short);
+  if (std::isfinite(context.maximum_hook_normalized_offset) &&
+      (context.maximum_hook_normalized_offset <= 0.0F ||
+       score.hook_normalized_offset >
+           context.maximum_hook_normalized_offset)) {
+    score.reason = "hook_anchor_outside_candidate_central_region";
+    return score;
+  }
   score.hook_distance_score = unitScore(
-      hook_center_distance,
-      context.hook_region_radius_m);
+      gated_distance, std::max(dynamic_gate, 0.05F));
   score.point_support_confidence = std::clamp(
       static_cast<float>(candidate.point_count) /
           static_cast<float>(std::max<std::size_t>(1U,

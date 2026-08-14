@@ -74,6 +74,10 @@
 #include <ndt_slam/cargo_safety_temporal_filter.hpp>
 #include <ndt_slam/cargo_track_policy.hpp>
 #include <ndt_slam/cargo_component_fusion.hpp>
+#include <ndt_slam/cargo_subsystem.hpp>
+#include <ndt_slam/avoidance_decision.hpp>
+#include <ndt_slam/avoidance_diagnostics.hpp>
+#include <ndt_slam/anomaly_review_episode_tracker.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
 #include <set>
 
@@ -2087,6 +2091,7 @@ private:
     RevealedSupportObserver revealed_support_observer_;
     RevealedSupportObservation revealed_support_observation_;
     CargoAvoidanceFusionConfig cargo_avoidance_fusion_config_;
+    AnomalyReviewEpisodeTracker anomaly_review_episode_tracker_;
     PendingStaticHazardTracker pending_static_hazard_tracker_;
     CargoPresenceConfig cargo_presence_config_;
     CargoPresenceStateMachine cargo_presence_state_machine_;
@@ -2175,15 +2180,13 @@ private:
     ros::Time cargo_swing_hook_anchor_received_stamp_;
     lidar_slam2_msgs::HoistMotionState cargo_hoist_state_message_;
     ros::Time cargo_hoist_state_received_stamp_;
-    CargoObstacleTracker cargo_obstacle_tracker_;
-    // Pending cargo uses an independent track namespace. Its only purpose is
-    // to prove that an already-separated live cluster has a stable external
-    // identity before a provisional 17/18 can become official.
-    CargoObstacleTracker pending_cargo_obstacle_tracker_;
+    // One physical store owns identity and far-history across Pending/Formal
+    // projections. Authority policy is supplied per decision.
+    PhysicalObstacleTrackStore physical_obstacle_track_store_;
     // Low-clearance observations are tracked outside the 5 m warning shell:
     // directionally with authoritative motion, otherwise radially. They can
     // mature identity/provenance but cannot alter the 5 m/3 m thresholds.
-    float cargo_collision_tracking_acquisition_distance_m_ = 7.0F;
+    float cargo_collision_tracking_acquisition_distance_m_ = 8.0F;
     std::uint64_t pending_obstacle_context_lifecycle_id_ = 0U;
     std::uint64_t pending_obstacle_context_track_segment_id_ = 0U;
     PendingCargoEnvelopeSource pending_obstacle_context_envelope_source_ =
@@ -2194,6 +2197,11 @@ private:
         CargoEnvelopeShapeSource::NONE;
     HookCargoLockState pending_obstacle_context_recognition_state_ =
         HookCargoLockState::EMPTY;
+    bool pending_obstacle_context_geometry_valid_ = false;
+    Eigen::Vector3f pending_obstacle_context_center_base_ =
+        Eigen::Vector3f::Zero();
+    Eigen::Vector3f pending_obstacle_context_size_m_ =
+        Eigen::Vector3f::Zero();
     StaticObstacleEvidenceIndex static_obstacle_evidence_index_;
     std::shared_ptr<const StaticHeightField> static_height_field_;
     bool verified_map_session_loaded_ = false;
@@ -2221,6 +2229,9 @@ private:
     float cargo_residual_surface_band_above_m_ = 0.20F;
     CargoSafetyTemporalFilter cargo_safety_temporal_filter_;
     CargoBottomResult last_cargo_bottom_result_;
+    CargoSubsystem cargo_subsystem_;
+    AvoidanceDecisionOwner avoidance_decision_owner_;
+    AvoidanceDiagnosticsStore avoidance_diagnostics_;
     CargoSafetyResult last_cargo_safety_result_;
     CargoSafetyResult confirmed_cargo_safety_result_;
     std::size_t cargo_self_removed_points_ = 0U;
@@ -2463,7 +2474,8 @@ private:
         const std::string& evidence_reason,
         bool evidence_initialized = true,
         bool provisional_positive_warning = false,
-        bool formal_clear_authorized = false) const;
+        bool formal_clear_authorized = false,
+        bool apply_anomaly_review_episode = true);
     void publishHookOnlySafetyStatus(const HookLoadSnapshot& hook,
                                      const ros::Time& stamp,
                                      bool visual_conflict,

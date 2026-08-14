@@ -1,11 +1,12 @@
 # Authoritative cargo safety evidence and final status consumed by the main
-# controller.  Warning codes describe physical hazards only; system faults use
-# a separate code range and fault mask.
-uint16 SCHEMA_VERSION=6
+# controller. Codes 17/18 describe confirmed physical hazards, code 29 carries
+# anomaly evidence for operator review, and system faults use a separate range.
+uint16 SCHEMA_VERSION=7
 
 int32 CODE_CLEAR=14
 int32 CODE_LEVEL1_WARNING=17
 int32 CODE_LEVEL2_WARNING=18
+int32 CODE_ANOMALY_REVIEW=29
 
 int32 CODE_SYSTEM_NOT_READY=30
 int32 CODE_LOCALIZATION_INVALID=31
@@ -40,6 +41,7 @@ uint8 EVIDENCE_TRACK_CONFIRMATION_PENDING=4
 uint8 EVIDENCE_SPARSE_PENDING=5
 uint8 EVIDENCE_SOURCE_UNRESOLVED=6
 uint8 EVIDENCE_HARD_FAULT=7
+uint8 EVIDENCE_REVIEW_REQUIRED=8
 
 uint8 PROVENANCE_NONE=0
 uint8 PROVENANCE_OUTSIDE_CARGO_SHELL_ONLY=1

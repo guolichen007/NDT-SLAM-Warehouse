@@ -31,6 +31,8 @@ struct PendingStaticHazardDecision {
   std::int32_t warning_code = 0;
   std::uint32_t obstacle_id = 0U;
   int confirmations = 0;
+  int far_field_confirmations = 0;
+  bool far_field_history_valid = false;
   float cell_overlap = 0.0F;
   std::string reason = "not_evaluated";
 };
@@ -60,6 +62,8 @@ class PendingStaticHazardTracker {
   std::uint64_t map_generation_ = 0U;
   std::uint32_t obstacle_id_ = 0U;
   int confirmations_ = 0;
+  int far_field_confirmations_ = 0;
+  bool far_field_history_valid_ = false;
   std::vector<std::int64_t> matched_cell_keys_;
 };
 

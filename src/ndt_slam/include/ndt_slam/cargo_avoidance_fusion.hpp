@@ -26,11 +26,60 @@ struct CargoAvoidanceSourceRisk {
   float distance_m = std::numeric_limits<float>::infinity();
   float clearance_m = std::numeric_limits<float>::quiet_NaN();
   float coverage = 0.0F;
+  std::uint64_t cargo_lifecycle_id = 0U;
+  std::uint64_t cargo_track_id = 0U;
+  std::uint64_t obstacle_track_id = 0U;
+  std::uint64_t pose_generation = 0U;
+  std::uint64_t map_generation = 0U;
+  float obstacle_top_z_map = std::numeric_limits<float>::quiet_NaN();
+  float uncertainty_m = std::numeric_limits<float>::quiet_NaN();
+  float confidence = 0.0F;
+  bool far_field_history_valid = false;
+  bool provenance_valid = false;
+  bool certified_static_provenance = false;
+  int validated_streak = 0;
   std::string reason;
 };
 
+enum class CargoAvoidanceHazardSource : std::uint8_t {
+  NONE = 0,
+  LIVE = 1,
+  STATIC_MAP = 2,
+};
+
+enum class CargoWarningAuthority : std::uint8_t {
+  NONE = 0,
+  POSITIVE_ONLY = 1,
+  FORMAL = 2,
+};
+
+struct AuthoritativeCargoHazard {
+  bool valid = false;
+  CargoAvoidanceHazardSource source = CargoAvoidanceHazardSource::NONE;
+  std::int32_t warning_code = 0;
+  float distance_m = std::numeric_limits<float>::infinity();
+  float clearance_m = std::numeric_limits<float>::quiet_NaN();
+  std::uint64_t cargo_lifecycle_id = 0U;
+  std::uint64_t cargo_track_id = 0U;
+  std::uint64_t obstacle_track_id = 0U;
+  std::uint64_t pose_generation = 0U;
+  std::uint64_t map_generation = 0U;
+  float obstacle_top_z_map = std::numeric_limits<float>::quiet_NaN();
+  float uncertainty_m = std::numeric_limits<float>::quiet_NaN();
+  float confidence = 0.0F;
+  bool far_field_history_valid = false;
+  bool provenance_valid = false;
+  bool certified_static_provenance = false;
+  int validated_streak = 0;
+};
+
+using AuthoritativeHazard = AuthoritativeCargoHazard;
+
 struct CargoAvoidanceFusionConfig {
   float minimum_live_coverage_for_clear = 0.05F;
+  // ========== 修复 ==========
+  // 旧默认值 DISABLED: 配置遗漏/解析失败/单元测试默认构造时静默关闭 Positive Only 17/18。
+  // 新默认值 EVIDENCE_BACKED_ONLY: 与生产 YAML 一致。
   PendingWarningPromotionPolicy pending_warning_promotion_policy =
       PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY;
   int pending_minimum_obstacle_confirmations = 3;
@@ -43,8 +92,22 @@ struct CargoAvoidanceFusionInput {
   // Warning authority is withheld while cargo motion/direction is not
   // authoritative. Tracking continues outside this fusion contract.
   bool warning_motion_authorized = true;
-  // A code-17 source must belong to a track confirmed outside the 3 m shell.
-  bool near_field_history_authorized = true;
+  // Compatibility field names retained internally: for both code 17 and 18,
+  // these mean true >5 m same-track history (or separately certified static
+  // provenance), not merely an observation outside 3 m.
+  bool live_near_field_history_authorized = true;
+  bool static_near_field_history_authorized = true;
+  bool static_hazard_track_confirmed = true;
+  // Confirmed abnormal geometry is preserved for operator review without
+  // promoting it to the normal 17/18 hazard protocol.
+  bool anomaly_review_candidate = false;
+  bool anomaly_review_live = false;
+  bool anomaly_review_static = false;
+  std::string anomaly_review_reason;
+  float anomaly_review_distance_m =
+      std::numeric_limits<float>::infinity();
+  float anomaly_review_clearance_m =
+      std::numeric_limits<float>::quiet_NaN();
   // Raw evaluator candidate used only by the two authorization gates above.
   // It cannot directly become an official warning.
   bool warning_candidate_present = false;
@@ -100,11 +163,20 @@ struct CargoAvoidanceFusionResult {
   bool risk_live = false;
   bool risk_static = false;
   bool map_live_conflict = false;
+  bool motion_not_authoritative = false;
+  bool anomaly_review = false;
+  bool anomaly_review_live = false;
+  bool anomaly_review_static = false;
   bool pending_warning_authorized = false;
   bool pending_live_warning_authorized = false;
   bool pending_static_warning_authorized = false;
   std::string pending_authority_reason = "not_evaluated";
   std::string provisional_status = "UNKNOWN";
+  // Code, distance and clearance are selected as one indivisible record.
+  // Downstream status/marker code must use this source rather than mixing
+  // the minimum metric from one source with the code/track of another.
+  AuthoritativeCargoHazard authoritative_hazard;
+  CargoWarningAuthority warning_authority = CargoWarningAuthority::NONE;
 };
 
 CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(

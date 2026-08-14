@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -11,12 +12,12 @@ namespace {
 
 constexpr std::uint16_t kLevel1 = 17U;
 constexpr std::uint16_t kLevel2 = 18U;
-constexpr std::uint16_t kAnomaly = 29U;
 constexpr std::uint16_t kClear = 14U;
 constexpr double kStampEpsilonSec = 1.0e-4;
+constexpr float kAssociationCostEpsilon = 1.0e-5F;
 
 bool warningCode(std::uint16_t code) {
-  return code == kLevel1 || code == kLevel2 || code == kAnomaly;
+  return code == kLevel1 || code == kLevel2;
 }
 
 std::size_t cellIntersectionCount(
@@ -106,55 +107,6 @@ float neighborCellOverlap(
       directionalNeighborCellOverlap(right, left, radius));
 }
 
-bool validConfig(const CargoObstacleTrackerConfig& config) {
-  return config.confirm_frames >= 2 && config.minimum_points > 0U &&
-      config.far_history_confirm_frames >= 2 &&
-      std::isfinite(config.far_history_confirm_duration_sec) &&
-      config.far_history_confirm_duration_sec >= 0.0 &&
-      std::isfinite(config.level1_warning_distance_m) &&
-      config.level1_warning_distance_m > 0.0F &&
-      std::isfinite(config.level2_warning_distance_m) &&
-      config.level2_warning_distance_m >
-          config.level1_warning_distance_m &&
-      std::isfinite(config.acquisition_distance_m) &&
-      config.acquisition_distance_m > config.level2_warning_distance_m &&
-      std::isfinite(config.embedded_distance_threshold_m) &&
-      config.embedded_distance_threshold_m >= 0.0F &&
-      config.embedded_distance_threshold_m <
-          config.level1_warning_distance_m &&
-      std::isfinite(config.maximum_observation_gap_sec) &&
-      config.maximum_observation_gap_sec > 0.0 &&
-      std::isfinite(config.stale_track_sec) &&
-      config.stale_track_sec >= config.maximum_observation_gap_sec &&
-      std::isfinite(config.association_max_centroid_distance_m) &&
-      config.association_max_centroid_distance_m > 0.0F &&
-      std::isfinite(config.association_max_top_step_m) &&
-      config.association_max_top_step_m > 0.0F &&
-      config.association_neighbor_cell_radius >= 0 &&
-      config.association_neighbor_cell_radius <= 2 &&
-      std::isfinite(config.static_track_cell_overlap_min) &&
-      config.static_track_cell_overlap_min > 0.0F &&
-      config.static_track_cell_overlap_min <= 1.0F &&
-      std::isfinite(config.static_track_iou_min) &&
-      config.static_track_iou_min > 0.0F &&
-      config.static_track_iou_min <= 1.0F &&
-      std::isfinite(config.static_provenance_min_cargo_motion_m) &&
-      config.static_provenance_min_cargo_motion_m >= 0.0F &&
-      config.static_cargo_min_voxel_points >= config.minimum_points &&
-      std::isfinite(config.static_cargo_min_xy_area_m2) &&
-      config.static_cargo_min_xy_area_m2 > 0.0F &&
-      std::isfinite(config.static_cargo_min_long_side_m) &&
-      config.static_cargo_min_long_side_m > 0.0F &&
-      std::isfinite(config.static_cargo_min_height_span_m) &&
-      config.static_cargo_min_height_span_m > 0.0F &&
-      config.static_cargo_min_occupied_cells > 0U &&
-      config.static_cargo_confirm_frames >= config.confirm_frames &&
-      std::isfinite(config.static_cargo_confirm_sec) &&
-      config.static_cargo_confirm_sec >= 0.0 &&
-      std::isfinite(config.static_velocity_threshold_mps) &&
-      config.static_velocity_threshold_mps >= 0.0F;
-}
-
 bool qualifiesForFarHistory(
     const CargoObstacleObservation& observation,
     const CargoObstacleTrackerConfig& config) {
@@ -181,7 +133,11 @@ bool validObservation(const CargoObstacleObservation& observation,
                 config.level1_warning_distance_m &&
             observation.footprint_distance_m <=
                 config.level2_warning_distance_m;
-  const bool decision_code_valid = observation.warning_eligible
+  const bool decision_code_valid = !observation.hazard_geometry_valid
+      ? !observation.warning_eligible && observation.warning_code == kClear &&
+            observation.footprint_distance_m <=
+                config.acquisition_distance_m
+      : observation.warning_eligible
       ? warningCode(observation.warning_code) && warning_distance_valid
       : observation.warning_code == kClear &&
             observation.footprint_distance_m >
@@ -198,7 +154,8 @@ bool validObservation(const CargoObstacleObservation& observation,
       (!observation.warning_eligible || !observation.entirely_above_cargo) &&
       std::isfinite(observation.footprint_distance_m) &&
       observation.footprint_distance_m >= 0.0F &&
-      std::isfinite(observation.conservative_clearance_m) &&
+      (!observation.hazard_geometry_valid ||
+       std::isfinite(observation.conservative_clearance_m)) &&
       std::isfinite(observation.horizontal_uncertainty_m) &&
       observation.horizontal_uncertainty_m >= 0.0F &&
       observation.point_count >= config.minimum_points &&
@@ -235,8 +192,16 @@ bool moreDangerous(const CargoObstacleTrack& candidate,
   if (candidate_priority != current_priority) {
     return candidate_priority > current_priority;
   }
-  if (candidate.conservative_clearance_m !=
-      current.conservative_clearance_m) {
+  const bool candidate_clearance_valid =
+      std::isfinite(candidate.conservative_clearance_m);
+  const bool current_clearance_valid =
+      std::isfinite(current.conservative_clearance_m);
+  if (candidate_clearance_valid != current_clearance_valid) {
+    return candidate_clearance_valid;
+  }
+  if (candidate_clearance_valid &&
+      candidate.conservative_clearance_m !=
+          current.conservative_clearance_m) {
     return candidate.conservative_clearance_m <
         current.conservative_clearance_m;
   }
@@ -244,6 +209,30 @@ bool moreDangerous(const CargoObstacleTrack& candidate,
     return candidate.footprint_distance_m < current.footprint_distance_m;
   }
   return candidate.track_id < current.track_id;
+}
+
+bool canonicalObservationLess(
+    const CargoObstacleObservation& left,
+    const CargoObstacleObservation& right) {
+  const float left_clearance =
+      std::isfinite(left.conservative_clearance_m)
+          ? left.conservative_clearance_m
+          : std::numeric_limits<float>::infinity();
+  const float right_clearance =
+      std::isfinite(right.conservative_clearance_m)
+          ? right.conservative_clearance_m
+          : std::numeric_limits<float>::infinity();
+  const auto left_key = std::make_tuple(
+      left.centroid_map.x(), left.centroid_map.y(), left.centroid_map.z(),
+      left.top_z95_map, left.bottom_z05_map, left.footprint_distance_m,
+      left_clearance, left.hazard_geometry_valid, left.source_index,
+      left.occupied_map_cells);
+  const auto right_key = std::make_tuple(
+      right.centroid_map.x(), right.centroid_map.y(), right.centroid_map.z(),
+      right.top_z95_map, right.bottom_z05_map, right.footprint_distance_m,
+      right_clearance, right.hazard_geometry_valid, right.source_index,
+      right.occupied_map_cells);
+  return left_key < right_key;
 }
 
 }  // namespace
@@ -279,10 +268,87 @@ CargoObstacleTracker::CargoObstacleTracker(
   setConfig(config);
 }
 
-void CargoObstacleTracker::setConfig(
+CargoConfigValidationResult validateCargoObstacleTrackerConfig(
     const CargoObstacleTrackerConfig& config) {
-  config_ = validConfig(config) ? config : CargoObstacleTrackerConfig{};
+  CargoConfigValidationResult result;
+  const auto positive = [&result](const char* field, double value) {
+    if (!std::isfinite(value)) result.reject(field, "non_finite");
+    else if (value <= 0.0) result.reject(field, "must_be_positive");
+  };
+  const auto nonnegative = [&result](const char* field, double value) {
+    if (!std::isfinite(value)) result.reject(field, "non_finite");
+    else if (value < 0.0) result.reject(field, "must_be_nonnegative");
+  };
+  const auto unit = [&result](const char* field, double value) {
+    if (!std::isfinite(value)) result.reject(field, "non_finite");
+    else if (value <= 0.0 || value > 1.0)
+      result.reject(field, "outside_0_exclusive_1_inclusive");
+  };
+  if (config.confirm_frames < 2)
+    result.reject("confirm_frames", "must_be_at_least_2");
+  if (config.minimum_points == 0U)
+    result.reject("minimum_points", "must_be_positive");
+  if (config.far_history_confirm_frames < 2)
+    result.reject("far_history_confirm_frames", "must_be_at_least_2");
+  nonnegative("far_history_confirm_duration_sec",
+              config.far_history_confirm_duration_sec);
+  positive("level1_warning_distance_m", config.level1_warning_distance_m);
+  positive("level2_warning_distance_m", config.level2_warning_distance_m);
+  if (std::isfinite(config.level1_warning_distance_m) &&
+      std::isfinite(config.level2_warning_distance_m) &&
+      config.level2_warning_distance_m <= config.level1_warning_distance_m)
+    result.reject("level2_warning_distance_m", "must_exceed_level1");
+  positive("acquisition_distance_m", config.acquisition_distance_m);
+  if (std::isfinite(config.acquisition_distance_m) &&
+      std::isfinite(config.level2_warning_distance_m) &&
+      config.acquisition_distance_m <= config.level2_warning_distance_m)
+    result.reject("acquisition_distance_m", "must_exceed_level2");
+  nonnegative("embedded_distance_threshold_m",
+              config.embedded_distance_threshold_m);
+  if (std::isfinite(config.embedded_distance_threshold_m) &&
+      std::isfinite(config.level1_warning_distance_m) &&
+      config.embedded_distance_threshold_m >= config.level1_warning_distance_m)
+    result.reject("embedded_distance_threshold_m", "must_be_below_level1");
+  positive("maximum_observation_gap_sec", config.maximum_observation_gap_sec);
+  positive("stale_track_sec", config.stale_track_sec);
+  if (std::isfinite(config.stale_track_sec) &&
+      std::isfinite(config.maximum_observation_gap_sec) &&
+      config.stale_track_sec < config.maximum_observation_gap_sec)
+    result.reject("stale_track_sec", "below_observation_gap");
+  positive("association_max_centroid_distance_m",
+           config.association_max_centroid_distance_m);
+  positive("association_max_top_step_m", config.association_max_top_step_m);
+  if (config.association_neighbor_cell_radius < 0 ||
+      config.association_neighbor_cell_radius > 2)
+    result.reject("association_neighbor_cell_radius", "outside_0_2");
+  unit("static_track_cell_overlap_min", config.static_track_cell_overlap_min);
+  unit("static_track_iou_min", config.static_track_iou_min);
+  nonnegative("static_provenance_min_cargo_motion_m",
+              config.static_provenance_min_cargo_motion_m);
+  if (config.static_cargo_min_voxel_points < config.minimum_points)
+    result.reject("static_cargo_min_voxel_points", "below_minimum_points");
+  positive("static_cargo_min_xy_area_m2", config.static_cargo_min_xy_area_m2);
+  positive("static_cargo_min_long_side_m", config.static_cargo_min_long_side_m);
+  positive("static_cargo_min_height_span_m",
+           config.static_cargo_min_height_span_m);
+  if (config.static_cargo_min_occupied_cells == 0U)
+    result.reject("static_cargo_min_occupied_cells", "must_be_positive");
+  if (config.known_static_confirm_frames < config.confirm_frames)
+    result.reject("known_static_confirm_frames", "below_confirm_frames");
+  if (config.static_cargo_confirm_frames < config.confirm_frames)
+    result.reject("static_cargo_confirm_frames", "below_confirm_frames");
+  nonnegative("static_cargo_confirm_sec", config.static_cargo_confirm_sec);
+  nonnegative("static_velocity_threshold_mps",
+              config.static_velocity_threshold_mps);
+  return result;
+}
+
+CargoConfigValidationResult CargoObstacleTracker::setConfig(
+    const CargoObstacleTrackerConfig& config) {
+  config_ = config;
+  config_validation_ = validateCargoObstacleTrackerConfig(config_);
   reset();
+  return config_validation_;
 }
 
 void CargoObstacleTracker::reset() {
@@ -296,12 +362,27 @@ void CargoObstacleTracker::reset() {
 CargoObstacleTrackerDecision CargoObstacleTracker::update(
     double stamp_sec,
     const std::vector<CargoObstacleObservation>& observations) {
+  CargoObstacleAuthorityPolicy authority_policy;
+  authority_policy.require_static_cargo_for_warning =
+      config_.require_static_cargo_for_warning;
+  authority_policy.require_large_geometry_for_warning =
+      config_.require_large_geometry_for_warning;
+  return update(stamp_sec, observations, authority_policy);
+}
+
+CargoObstacleTrackerDecision CargoObstacleTracker::update(
+    double stamp_sec,
+    const std::vector<CargoObstacleObservation>& observations,
+    const CargoObstacleAuthorityPolicy& authority_policy) {
   CargoObstacleTrackerDecision decision;
   decision.created_track_count = created_track_count_;
   decision.association_reset_count = association_reset_count_;
-  if (!validConfig(config_) || !std::isfinite(stamp_sec) ||
+  decision.ambiguous_association_count = ambiguous_association_count_;
+  if (!config_validation_.valid || !std::isfinite(stamp_sec) ||
       stamp_sec <= 0.0) {
-    decision.reason = "invalid_obstacle_track_input";
+    decision.reason = config_validation_.valid
+        ? "invalid_obstacle_track_input"
+        : "invalid_obstacle_tracker_config:" + config_validation_.summary();
     return decision;
   }
   if (has_stamp_ && stamp_sec + kStampEpsilonSec < last_stamp_sec_) {
@@ -329,7 +410,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.observed_this_cycle = false;
   }
 
-  std::vector<bool> track_assigned(tracks_.size(), false);
+  std::vector<CargoObstacleObservation> valid_observations;
+  valid_observations.reserve(observations.size());
   for (CargoObstacleObservation observation : observations) {
     if (!validObservation(observation, config_)) continue;
     std::sort(observation.occupied_map_cells.begin(),
@@ -342,15 +424,29 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         decision.hazard_observed ||
         (observation.warning_eligible &&
          warningCode(observation.warning_code));
+    valid_observations.push_back(std::move(observation));
+  }
+  std::sort(valid_observations.begin(), valid_observations.end(),
+            canonicalObservationLess);
 
-    std::size_t best_index = tracks_.size();
-    float best_cost = std::numeric_limits<float>::infinity();
-    float best_overlap = 0.0F;
-    float best_iou = 0.0F;
-    float best_neighbor_overlap = 0.0F;
-    for (std::size_t index = 0; index < tracks_.size(); ++index) {
-      if (track_assigned[index]) continue;
-      const CargoObstacleTrack& track = tracks_[index];
+  struct AssociationPair {
+    std::size_t observation_index = 0U;
+    std::size_t track_index = 0U;
+    float cost = std::numeric_limits<float>::infinity();
+    float overlap = 0.0F;
+    float iou = 0.0F;
+    float neighbor_overlap = 0.0F;
+  };
+  const std::size_t existing_track_count = tracks_.size();
+  std::vector<AssociationPair> legal_pairs;
+  for (std::size_t observation_index = 0U;
+       observation_index < valid_observations.size();
+       ++observation_index) {
+    const CargoObstacleObservation& observation =
+        valid_observations[observation_index];
+    for (std::size_t track_index = 0U;
+         track_index < existing_track_count; ++track_index) {
+      const CargoObstacleTrack& track = tracks_[track_index];
       const double gap_sec = stamp_sec - track.last_stamp_sec;
       if (gap_sec < -kStampEpsilonSec ||
           gap_sec > config_.maximum_observation_gap_sec +
@@ -359,8 +455,11 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       }
       const Eigen::Vector3f predicted_centroid = track.centroid_map +
           track.velocity_map * static_cast<float>(std::max(0.0, gap_sec));
+      // XY determines spatial identity in the 2.5D obstacle model. Height
+      // identity remains independently protected by the top-Z step gate.
       const float centroid_distance =
-          (observation.centroid_map - predicted_centroid).norm();
+          (observation.centroid_map.head<2>() -
+           predicted_centroid.head<2>()).norm();
       const float overlap = cellOverlap(
           observation.occupied_map_cells, track.occupied_map_cells);
       const float iou = cellIou(
@@ -375,8 +474,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       const bool spatial_match = centroid_distance <=
               config_.association_max_centroid_distance_m ||
           overlap >= config_.static_track_cell_overlap_min ||
-          iou >= config_.static_track_iou_min ||
-          neighboring_fragment_match;
+          iou >= config_.static_track_iou_min || neighboring_fragment_match;
       if (!spatial_match ||
           std::abs(observation.top_z95_map - track.top_z95_map) >
               config_.association_max_top_step_m) {
@@ -389,18 +487,85 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
                    track.occupied_map_cells.empty()
                ? 1.0F
                : 1.0F - std::max(
-                     std::max(overlap, iou),
-                     0.80F * neighbor_overlap));
-      if (cost < best_cost) {
-        best_cost = cost;
-        best_overlap = overlap;
-        best_iou = iou;
-        best_neighbor_overlap = neighbor_overlap;
-        best_index = index;
-      }
+                     std::max(overlap, iou), 0.80F * neighbor_overlap));
+      legal_pairs.push_back(AssociationPair{
+          observation_index, track_index, cost, overlap, iou,
+          neighbor_overlap});
     }
+  }
+  std::sort(legal_pairs.begin(), legal_pairs.end(),
+            [&](const AssociationPair& left, const AssociationPair& right) {
+              if (left.cost != right.cost) return left.cost < right.cost;
+              const std::uint64_t left_track_id =
+                  tracks_[left.track_index].track_id;
+              const std::uint64_t right_track_id =
+                  tracks_[right.track_index].track_id;
+              if (left_track_id != right_track_id) {
+                return left_track_id < right_track_id;
+              }
+              return left.observation_index < right.observation_index;
+            });
+  std::vector<float> observation_best_cost(
+      valid_observations.size(), std::numeric_limits<float>::infinity());
+  std::vector<int> observation_best_count(valid_observations.size(), 0);
+  std::vector<float> track_best_cost(
+      existing_track_count, std::numeric_limits<float>::infinity());
+  std::vector<int> track_best_count(existing_track_count, 0);
+  for (const AssociationPair& pair : legal_pairs) {
+    const auto accumulate_best = [](float cost, float* best, int* count) {
+      if (cost + kAssociationCostEpsilon < *best) {
+        *best = cost;
+        *count = 1;
+      } else if (std::abs(cost - *best) <= kAssociationCostEpsilon) {
+        ++*count;
+      }
+    };
+    accumulate_best(
+        pair.cost, &observation_best_cost[pair.observation_index],
+        &observation_best_count[pair.observation_index]);
+    accumulate_best(
+        pair.cost, &track_best_cost[pair.track_index],
+        &track_best_count[pair.track_index]);
+  }
+  const std::size_t no_track = existing_track_count;
+  std::vector<std::size_t> assigned_track(
+      valid_observations.size(), no_track);
+  std::vector<const AssociationPair*> assigned_pair(
+      valid_observations.size(), nullptr);
+  std::vector<bool> track_assigned(existing_track_count, false);
+  for (const AssociationPair& pair : legal_pairs) {
+    if (assigned_track[pair.observation_index] != no_track ||
+        track_assigned[pair.track_index]) {
+      continue;
+    }
+    assigned_track[pair.observation_index] = pair.track_index;
+    assigned_pair[pair.observation_index] = &pair;
+    track_assigned[pair.track_index] = true;
+  }
 
-    if (best_index == tracks_.size()) {
+  for (std::size_t observation_index = 0U;
+       observation_index < valid_observations.size();
+       ++observation_index) {
+    const CargoObstacleObservation& observation =
+        valid_observations[observation_index];
+    const std::size_t best_index = assigned_track[observation_index];
+    const AssociationPair* match = assigned_pair[observation_index];
+    const float best_cost = match
+        ? match->cost : std::numeric_limits<float>::infinity();
+    const float best_overlap = match ? match->overlap : 0.0F;
+    const float best_iou = match ? match->iou : 0.0F;
+    const float best_neighbor_overlap =
+        match ? match->neighbor_overlap : 0.0F;
+    const bool reciprocal_unique_match = match != nullptr &&
+        observation_best_count[observation_index] == 1 &&
+        track_best_count[best_index] == 1 &&
+        std::abs(match->cost -
+                 observation_best_cost[observation_index]) <=
+            kAssociationCostEpsilon &&
+        std::abs(match->cost - track_best_cost[best_index]) <=
+            kAssociationCostEpsilon;
+
+    if (best_index == no_track) {
       CargoObstacleTrack track;
       track.track_id = next_track_id_++;
       if (next_track_id_ == 0U) next_track_id_ = 1U;
@@ -413,6 +578,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.footprint_distance_m = observation.footprint_distance_m;
       track.conservative_clearance_m =
           observation.conservative_clearance_m;
+      track.current_hazard_geometry_valid =
+          observation.hazard_geometry_valid;
       track.point_count = observation.point_count;
       track.warning_code = observation.warning_code;
       track.total_consecutive_observations = 1;
@@ -479,10 +646,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.current_source_index = observation.source_index;
       track.current_source_validated = observation.source_validated;
       track.current_warning_eligible =
+          observation.hazard_geometry_valid &&
           observation.warning_eligible &&
           warningCode(observation.warning_code);
       tracks_.push_back(track);
-      track_assigned.push_back(true);
       continue;
     }
 
@@ -492,16 +659,36 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     const bool consecutive =
         track.last_observation_cycle + 1U == cycle_ &&
         dt_sec <= config_.maximum_observation_gap_sec + kStampEpsilonSec;
-    track.total_consecutive_observations = consecutive
-        ? track.total_consecutive_observations + 1 : 1;
-    track.consecutive_observations =
-        track.total_consecutive_observations;
-    track.validated_consecutive_observations =
-        observation.source_validated
-            ? (consecutive
-                   ? track.validated_consecutive_observations + 1
-                   : 1)
-            : 0;
+    // Pair metrics are diagnostic-only and may be recorded before authority
+    // is granted. Physical state, timestamps and every maturity/provenance
+    // field below are updated only by a reciprocal unique association.
+    track.last_cell_overlap = best_overlap;
+    track.last_cell_iou = best_iou;
+    track.last_neighbor_cell_overlap = best_neighbor_overlap;
+    track.last_anchor_cell_overlap = cellOverlap(
+        observation.occupied_map_cells,
+        track.identity_anchor_map_cells);
+    track.last_association_cost = best_cost;
+    track.association_reset_reason.clear();
+    track.association_ambiguous = !reciprocal_unique_match;
+    if (!reciprocal_unique_match) {
+      // Freeze the authoritative predictor as well as safety maturity. Moving
+      // centroid/velocity/occupied cells before this check allowed a 2x2
+      // ambiguity to steer a mature track toward another obstacle and inherit
+      // its far-history on the next unambiguous frame.
+      ++ambiguous_association_count_;
+      decision.ambiguous_association_count = ambiguous_association_count_;
+      track.association_reset_reason =
+          "ambiguous_non_reciprocal_authority_frozen";
+      // Expose the ambiguity in this cycle without advancing the physical
+      // observation clock. Repeated ambiguity will therefore expire/reset the
+      // old identity instead of silently keeping it alive.
+      track.observed_this_cycle = true;
+      track.current_source_index = observation.source_index;
+      track.current_source_validated = false;
+      track.current_warning_eligible = false;
+      continue;
+    }
     if (dt_sec > kStampEpsilonSec) {
       track.velocity_map =
           (observation.centroid_map - previous_centroid) /
@@ -515,10 +702,22 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.entirely_above_cargo = observation.entirely_above_cargo;
     track.footprint_distance_m = observation.footprint_distance_m;
     track.conservative_clearance_m = observation.conservative_clearance_m;
+    track.current_hazard_geometry_valid =
+        observation.hazard_geometry_valid;
     track.point_count = observation.point_count;
     track.warning_code = observation.warning_code;
     track.large_cluster_geometry_valid =
         hasLargeStaticCargoGeometry(observation, config_);
+    track.total_consecutive_observations = consecutive
+        ? track.total_consecutive_observations + 1 : 1;
+    track.consecutive_observations =
+        track.total_consecutive_observations;
+    track.validated_consecutive_observations =
+        observation.source_validated
+            ? (consecutive
+                   ? track.validated_consecutive_observations + 1
+                   : 1)
+            : 0;
     track.geometry_validated_consecutive_observations =
         observation.source_validated &&
                 track.large_cluster_geometry_valid
@@ -526,14 +725,6 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
                    ? track.geometry_validated_consecutive_observations + 1
                    : 1)
             : 0;
-    track.last_cell_overlap = best_overlap;
-    track.last_cell_iou = best_iou;
-    track.last_neighbor_cell_overlap = best_neighbor_overlap;
-    track.last_anchor_cell_overlap = cellOverlap(
-        observation.occupied_map_cells,
-        track.identity_anchor_map_cells);
-    track.last_association_cost = best_cost;
-    track.association_reset_reason.clear();
     if (observation.cargo_center_valid &&
         observation.cargo_center_map.allFinite()) {
       if (!track.first_cargo_center_valid) {
@@ -554,12 +745,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         track.last_anchor_cell_overlap >= 0.50F;
     if (authorizesStaticObstacle(observation.provenance)) {
       track.provenance = observation.provenance;
-    }
-    track.certified_static_provenance =
-        track.certified_static_provenance ||
-        observation.certified_static_provenance;
-    if (!authorizesStaticObstacle(observation.provenance) &&
-        !track.provenance_valid &&
+    } else if (!track.provenance_valid &&
                observation.source_validated &&
                track.large_cluster_geometry_valid &&
                map_identity_stable &&
@@ -574,6 +760,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.provenance = observation.provenance;
     }
     track.provenance_valid = authorizesStaticObstacle(track.provenance);
+    track.certified_static_provenance =
+        track.certified_static_provenance ||
+        observation.certified_static_provenance;
     track.current_embedded =
         observation.footprint_distance_m <
         config_.embedded_distance_threshold_m;
@@ -638,19 +827,27 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.observed_this_cycle = true;
     track.confirmed = track.validated_consecutive_observations >=
         config_.confirm_frames;
+    const bool known_static_source =
+        track.provenance == ExternalProvenance::STATIC_MAP_MATCH ||
+        track.provenance == ExternalProvenance::PRE_CARGO_OCCUPANCY;
+    const int required_static_frames = known_static_source
+        ? config_.known_static_confirm_frames
+        : config_.static_cargo_confirm_frames;
+    const double required_static_duration_sec = known_static_source
+        ? 0.0 : config_.static_cargo_confirm_sec;
     track.static_obstacle = track.confirmed &&
         track.static_provenance_consecutive_observations >=
-            config_.static_cargo_confirm_frames &&
+            required_static_frames &&
         track.static_provenance_first_stamp_sec > 0.0 &&
         stamp_sec - track.static_provenance_first_stamp_sec +
                 kStampEpsilonSec >=
-            config_.static_cargo_confirm_sec;
+            required_static_duration_sec;
     track.current_source_index = observation.source_index;
     track.current_source_validated = observation.source_validated;
     track.current_warning_eligible =
+        observation.hazard_geometry_valid &&
         observation.warning_eligible &&
         warningCode(observation.warning_code);
-    track_assigned[best_index] = true;
   }
 
   decision.valid = true;
@@ -661,20 +858,20 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     if (candidate == nullptr || moreDangerous(track, *candidate)) {
       candidate = &track;
     }
-    const bool has_far_authority = track.far_field_history_valid ||
-        track.certified_static_provenance;
     const bool warning_authorized = track.current_warning_eligible &&
         warningCode(track.warning_code) && track.confirmed &&
         (!config_.require_far_field_history_for_warnings ||
-         has_far_authority) &&
-        (!config_.require_large_geometry_for_warning ||
+         track.far_field_history_valid ||
+         track.certified_static_provenance) &&
+        (!authority_policy.require_large_geometry_for_warning ||
          track.geometry_validated_consecutive_observations >=
              config_.confirm_frames) &&
         track.current_source_validated &&
         (!track.current_embedded ||
          track.separated_obstacle_history_valid ||
          track.provenance_valid) &&
-        (!config_.require_static_cargo_for_warning || track.static_obstacle);
+        (!authority_policy.require_static_cargo_for_warning ||
+         track.static_obstacle);
     if (warning_authorized &&
         (selected == nullptr || moreDangerous(track, *selected))) {
       selected = &track;
@@ -729,6 +926,8 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.selected_track_neighbor_cell_overlap =
         diagnostic->last_neighbor_cell_overlap;
     decision.selected_association_cost = diagnostic->last_association_cost;
+    decision.selected_association_ambiguous =
+        diagnostic->association_ambiguous;
     decision.selected_association_reset_reason =
         diagnostic->association_reset_reason;
     decision.selected_track_velocity = diagnostic->velocity_map;
@@ -737,22 +936,11 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.confirmed_hazard = true;
     decision.warning_code = selected->warning_code;
     decision.reason = "persistent_obstacle_track_confirmed";
-  } else if (decision.hazard_observed && diagnostic != nullptr &&
-             diagnostic->current_warning_eligible &&
-             warningCode(diagnostic->warning_code) &&
-             diagnostic->confirmed &&
-             config_.require_far_field_history_for_warnings &&
-             !diagnostic->far_field_history_valid &&
-             !diagnostic->certified_static_provenance) {
-    // Anomalous proximity: obstacle is within 5 m with low clearance but
-    // lacks the required 5-8 m far-field approach history. This is not a
-    // normal 17/18; it is code 29 (ANOMALY_REVIEW).
-    decision.confirmed_hazard = true;
-    decision.warning_code = kAnomaly;
-    decision.reason = "anomalous_proximity_without_far_authority";
   } else if (decision.hazard_observed) {
     if (diagnostic == nullptr) {
       decision.reason = "static_track_association_reset";
+    } else if (diagnostic->association_ambiguous) {
+      decision.reason = "ambiguous_obstacle_association_authority_frozen";
     } else if (!diagnostic->current_source_validated) {
       decision.reason = "current_source_unvalidated";
     } else if (diagnostic->current_embedded &&
@@ -764,9 +952,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
                !diagnostic->far_field_history_valid &&
                !diagnostic->certified_static_provenance) {
       decision.reason = "warning_track_missing_true_far_history";
-    } else if (!config_.require_static_cargo_for_warning) {
+    } else if (!authority_policy.require_static_cargo_for_warning) {
       decision.reason = "persistent_obstacle_track_pending";
-    } else if (config_.require_large_geometry_for_warning &&
+    } else if (authority_policy.require_large_geometry_for_warning &&
                (!diagnostic->large_cluster_geometry_valid ||
                 diagnostic->geometry_validated_consecutive_observations <
                     config_.confirm_frames)) {
@@ -778,12 +966,22 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
                diagnostic->last_anchor_cell_overlap < 0.50F) {
       decision.reason = "static_velocity_not_stable";
     } else if (diagnostic->static_provenance_consecutive_observations <
-               config_.static_cargo_confirm_frames) {
+               ((diagnostic->provenance ==
+                     ExternalProvenance::STATIC_MAP_MATCH ||
+                 diagnostic->provenance ==
+                     ExternalProvenance::PRE_CARGO_OCCUPANCY)
+                    ? config_.known_static_confirm_frames
+                    : config_.static_cargo_confirm_frames)) {
       decision.reason = "static_frames_pending";
     } else if (diagnostic->static_provenance_first_stamp_sec <= 0.0 ||
                stamp_sec - diagnostic->static_provenance_first_stamp_sec +
                        kStampEpsilonSec <
-                   config_.static_cargo_confirm_sec) {
+                   ((diagnostic->provenance ==
+                         ExternalProvenance::STATIC_MAP_MATCH ||
+                     diagnostic->provenance ==
+                         ExternalProvenance::PRE_CARGO_OCCUPANCY)
+                        ? 0.0
+                        : config_.static_cargo_confirm_sec)) {
       decision.reason = "static_duration_pending";
     } else if (!diagnostic->association_reset_reason.empty()) {
       decision.reason = "static_track_association_reset";

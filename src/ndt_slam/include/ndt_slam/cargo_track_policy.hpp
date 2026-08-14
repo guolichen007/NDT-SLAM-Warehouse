@@ -76,6 +76,34 @@ struct CargoCandidateDescriptor {
   bool suspension_evidence = false;
 };
 
+// The association anchor is an identity prior only.  It must never be copied
+// into a safety box as the cargo centre.
+struct CargoAssociationAnchor {
+  bool valid = false;
+  Eigen::Vector2f center = Eigen::Vector2f::Zero();
+  float xy_uncertainty_m = 0.0F;
+};
+
+// The direct LiDAR observation remains independent from both the hook anchor
+// and the conservative geometry consumed by avoidance.
+struct MeasuredCargoPose {
+  bool valid = false;
+  bool complete_xy_observation = false;
+  Eigen::Vector3f center = Eigen::Vector3f::Zero();
+  Eigen::Vector3f size = Eigen::Vector3f::Zero();
+  float yaw_rad = 0.0F;
+};
+
+struct CargoSafetyGeometry {
+  bool valid = false;
+  bool current_measured_xy = false;
+  Eigen::Vector3f center = Eigen::Vector3f::Zero();
+  Eigen::Vector3f size = Eigen::Vector3f::Zero();
+  float yaw_rad = 0.0F;
+  float xy_uncertainty_m = 0.0F;
+  float vertical_uncertainty_m = 0.0F;
+};
+
 struct CargoCandidateIdentityContext {
   Eigen::Vector2f hook_center = Eigen::Vector2f::Zero();
   float hook_region_radius_m = 1.5F;
@@ -85,6 +113,20 @@ struct CargoCandidateIdentityContext {
   bool require_hook_containment = false;
   float hook_containment_margin_m = 0.10F;
   float maximum_hook_center_distance_m =
+      std::numeric_limits<float>::infinity();
+  // Size-aware association preserves the strict hook identity prior while
+  // allowing a bounded, learned eccentric cargo offset.  The learned offset
+  // is never a safety-centre replacement.
+  bool size_aware_hook_gate = false;
+  bool learned_cargo_to_hook_offset_valid = false;
+  Eigen::Vector2f learned_cargo_to_hook_offset =
+      Eigen::Vector2f::Zero();
+  float hook_xy_uncertainty_m = 0.0F;
+  float maximum_dynamic_hook_center_distance_m = 1.05F;
+  // Normalized distance of the hook from the candidate OBB centre. A value
+  // of 1.0 is the measured OBB edge; requiring a smaller value prevents an
+  // adjacent object which merely overlaps the hook from becoming cargo.
+  float maximum_hook_normalized_offset =
       std::numeric_limits<float>::infinity();
   std::size_t strong_point_count = 80U;
   bool predicted_track_valid = false;
@@ -98,6 +140,12 @@ struct CargoCandidateIdentityScore {
   bool valid = false;
   int component_id = -1;
   float hook_distance_score = 0.0F;
+  float hook_normalized_offset =
+      std::numeric_limits<float>::infinity();
+  float hook_association_residual_m =
+      std::numeric_limits<float>::infinity();
+  float hook_dynamic_gate_m =
+      std::numeric_limits<float>::infinity();
   float predicted_center_score = 0.0F;
   float overlap_score = 0.0F;
   float shape_confidence = 0.0F;
@@ -161,6 +209,47 @@ struct CargoAssociationDecision {
   bool yaw_used_as_hard_gate = true;
   std::string reason = "not_evaluated";
 };
+
+enum class CargoCenterReferenceSource : std::uint8_t {
+  NONE = 0,
+  FILTERED_POSE = 1,
+  FILTERED_PREDICTION = 2,
+  TRUSTED_COMPLETE_MEASUREMENT = 3
+};
+
+const char* cargoCenterReferenceSourceName(
+    CargoCenterReferenceSource source) noexcept;
+
+// Center selection is deliberately independent from the association gate.
+// It may compensate bounded filter lag, but it must never enlarge the gate or
+// turn a partial observation into a trusted identity measurement.
+struct CargoCenterReferenceInput {
+  Eigen::Vector2f detected_center = Eigen::Vector2f::Zero();
+  bool filtered_pose_valid = false;
+  Eigen::Vector2f filtered_center = Eigen::Vector2f::Zero();
+  bool filtered_prediction_valid = false;
+  Eigen::Vector2f filtered_predicted_center = Eigen::Vector2f::Zero();
+  bool trusted_complete_measurement_valid = false;
+  Eigen::Vector2f trusted_complete_measurement_center =
+      Eigen::Vector2f::Zero();
+  double trusted_complete_measurement_age_sec =
+      std::numeric_limits<double>::infinity();
+  double maximum_trusted_measurement_age_sec = 0.50;
+};
+
+struct CargoCenterReferenceDecision {
+  bool valid = false;
+  CargoCenterReferenceSource source = CargoCenterReferenceSource::NONE;
+  Eigen::Vector2f center = Eigen::Vector2f::Zero();
+  float selected_distance_m = std::numeric_limits<float>::infinity();
+  float filtered_distance_m = std::numeric_limits<float>::infinity();
+  float predicted_distance_m = std::numeric_limits<float>::infinity();
+  float trusted_measurement_distance_m =
+      std::numeric_limits<float>::infinity();
+};
+
+CargoCenterReferenceDecision selectCargoCenterReference(
+    const CargoCenterReferenceInput& input) noexcept;
 
 struct CargoFrozenObbSupportInput {
   std::vector<Eigen::Vector3f> points;
