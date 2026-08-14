@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "ndt_slam/cargo_config_validation.hpp"
+
 namespace ndt_slam {
 
 enum class CargoThicknessSource : std::uint8_t {
@@ -21,23 +23,43 @@ enum class CargoThicknessSource : std::uint8_t {
 
 const char* cargoThicknessSourceName(CargoThicknessSource source) noexcept;
 
+enum class CargoThicknessConstraint : std::uint8_t {
+  FULL_MEASUREMENT = 0,
+  LOWER_BOUND = 1,
+  PRIOR_ONLY = 2,
+};
+
+const char* cargoThicknessConstraintName(
+    CargoThicknessConstraint constraint) noexcept;
+
+enum class CargoGeometryAuthorization : std::uint8_t {
+  PENDING = 0,
+  POSITIVE_ONLY = 1,
+  FORMAL = 2,
+};
+
+const char* cargoGeometryAuthorizationName(
+    CargoGeometryAuthorization authorization) noexcept;
+
 struct CargoGeometryFusionConfig {
-  std::size_t minimum_independent_sources = 2U;
-  // Formal height requires one authoritative pre-lift static observation
-  // (the bound origin height or its post-lift revealed support) plus a
-  // contemporaneous LiDAR extent. Retired/configured geometry cannot replace
-  // either physical side of this pair.
-  bool require_authoritative_static_and_live_thickness = true;
-  // A stable multi-frame LiDAR height may freeze a geometry for positive
-  // avoidance when the static layer is unavailable. This degraded geometry
-  // never authorizes CLEAR, cargo-point removal, or MapCommit filtering.
-  bool allow_degraded_live_only_freeze = true;
-  float degraded_live_only_uncertainty_floor_m = 0.25F;
+  // A stable multi-frame LiDAR lower bound may form a POSITIVE_ONLY geometry
+  // when no current static baseline exists. It never authorizes CLEAR,
+  // cargo-point removal, or MapCommit filtering.
+  bool allow_positive_only_without_static_baseline = true;
+  float positive_only_uncertainty_floor_m = 0.25F;
+  // A conflicting but stable live lower bound must not permanently deadlock
+  // positive avoidance. It may create a conservative POSITIVE_ONLY geometry;
+  // CLEAR/removal/map-commit still require FORMAL authorization.
+  bool allow_positive_only_on_source_conflict = true;
+  int positive_only_confirm_frames = 3;
   int minimum_confirm_frames = 5;
   // Shape quality is evaluated in a bounded recent window. This preserves the
   // multi-frame requirement without allowing one partial/occluded scan to
   // erase several good observations from the same physical track segment.
   int shape_confirmation_window_frames = 8;
+  // Initial dimensions use the robust median of the same bounded window.
+  // A dispersed window remains PENDING instead of freezing one merged scan.
+  float maximum_initial_dimension_mad_m = 0.30F;
   double maximum_observation_gap_sec = 0.50;
   float maximum_source_disagreement_m = 0.25F;
   float maximum_fused_uncertainty_m = 0.20F;
@@ -47,15 +69,20 @@ struct CargoGeometryFusionConfig {
   float maximum_height_m = 2.00F;
   float huber_delta_m = 0.20F;
   float configured_bottom_margin_m = 0.10F;
-  int conservative_shrink_confirm_frames = 8;
+  int conservative_shrink_confirm_frames = 5;
   float maximum_shrink_per_frame_m = 0.03F;
-  // Frozen cargo does not physically grow during one lifting lifecycle.
-  // Expansion therefore needs a high-confidence continuous confirmation
-  // streak. The legacy immediate mode remains an explicit opt-in only.
+  // A complete, high-confidence associated observation may enlarge the
+  // safety envelope immediately. Shrinkage remains bounded and requires the
+  // configured number of valid observations in the recent shape window.
+  // Disabled in production by default: a suspended rigid cargo cannot grow
+  // physically within one lifecycle, while a single merged cluster can.
   bool immediate_expand_enabled = false;
   int conservative_expand_confirm_frames = 8;
   float minimum_live_shape_confidence_for_expand = 0.85F;
   std::size_t minimum_live_dimension_support = 30U;
+  // Initial POSITIVE_ONLY admission uses identity + support + 5/8 temporal
+  // consistency. Keep it separate from the stricter frozen-shape shrink gate.
+  float minimum_initial_shape_confidence = 0.55F;
   float minimum_live_shape_confidence_for_shrink = 0.75F;
   float minimum_physical_length_m = 0.30F;
   float minimum_physical_width_m = 0.20F;
@@ -71,14 +98,19 @@ struct CargoThicknessObservation {
   float uncertainty_m = std::numeric_limits<float>::quiet_NaN();
   float confidence = 0.0F;
   bool valid = false;
+  CargoThicknessConstraint constraint =
+      CargoThicknessConstraint::FULL_MEASUREMENT;
 };
 
 struct CargoGeometryFrame {
   std::uint64_t cargo_lifecycle_id = 0U;
   std::uint64_t track_segment_id = 0U;
   double stamp_sec = 0.0;
-  // Degraded single-source freezing is allowed only after the recognition
-  // state machine has established a formal same-lifecycle cargo lock.
+  // Positive warnings may use a current, multi-frame cargo identity before
+  // dual-source thickness reaches FORMAL.  This never authorizes CLEAR,
+  // cargo removal, or map commits.
+  bool warning_track_stable = false;
+  // FORMAL promotion remains tied to the strict recognition lock.
   bool formal_track_locked = false;
   bool center_valid = false;
   Eigen::Vector3f center = Eigen::Vector3f::Zero();
@@ -103,6 +135,9 @@ struct CargoFrozenGeometry {
   bool frozen = false;
   bool formal_authorized = false;
   bool degraded_live_only = false;
+  CargoGeometryAuthorization authorization =
+      CargoGeometryAuthorization::PENDING;
+  bool source_conflict = false;
   std::uint64_t cargo_lifecycle_id = 0U;
   std::uint64_t track_segment_id = 0U;
   Eigen::Vector3f center = Eigen::Vector3f::Zero();
@@ -111,8 +146,15 @@ struct CargoFrozenGeometry {
   float height_m = 0.0F;
   float yaw_rad = 0.0F;
   float height_uncertainty_m = 1.0F;
+  float thickness_lower_bound_m = 0.0F;
+  float thickness_upper_bound_m = 0.0F;
   float bottom_m = std::numeric_limits<float>::quiet_NaN();
   float conservative_bottom_m = std::numeric_limits<float>::quiet_NaN();
+  float conservative_top_reference_m =
+      std::numeric_limits<float>::quiet_NaN();
+  float conservative_tracking_allowance_m = 0.0F;
+  float conservative_baseline_allowance_m = 0.0F;
+  float conservative_safety_margin_m = 0.0F;
   int confirm_frames = 0;
   int shape_confirm_frames = 0;
   std::size_t independent_sources = 0U;
@@ -120,24 +162,37 @@ struct CargoFrozenGeometry {
   std::string reason = "not_initialized";
 };
 
+CargoConfigValidationResult validateCargoGeometryFusionConfig(
+    const CargoGeometryFusionConfig& config);
+
 class CargoGeometryFusion {
  public:
   explicit CargoGeometryFusion(
       const CargoGeometryFusionConfig& config = CargoGeometryFusionConfig{});
-  void setConfig(const CargoGeometryFusionConfig& config);
+  CargoConfigValidationResult setConfig(
+      const CargoGeometryFusionConfig& config);
+  const CargoConfigValidationResult& configValidation() const noexcept {
+    return config_validation_;
+  }
+  const CargoGeometryFusionConfig& config() const noexcept { return config_; }
   void reset();
   CargoFrozenGeometry update(const CargoGeometryFrame& frame);
   const CargoFrozenGeometry& result() const noexcept { return result_; }
 
  private:
   CargoGeometryFusionConfig config_;
+  CargoConfigValidationResult config_validation_;
   CargoFrozenGeometry result_;
-  float pending_height_m_ = 0.0F;
-  float pending_uncertainty_m_ = 1.0F;
-  bool pending_valid_ = false;
+  std::uint64_t thickness_confirm_track_segment_id_ = 0U;
+  std::deque<float> thickness_candidate_window_;
+  bool thickness_confirmation_mode_initialized_ = false;
+  bool thickness_confirmation_formal_mode_ = false;
   double last_stamp_sec_ = 0.0;
   int shrink_confirm_count_ = 0;
   std::uint64_t shrink_track_segment_id_ = 0U;
+  std::deque<bool> shrink_quality_window_;
+  std::deque<float> shrink_length_window_;
+  std::deque<float> shrink_width_window_;
   int expand_confirm_count_ = 0;
   std::uint64_t expand_track_segment_id_ = 0U;
   float pending_expand_length_m_ = 0.0F;
@@ -145,6 +200,8 @@ class CargoGeometryFusion {
   int shape_confirm_count_ = 0;
   std::uint64_t shape_confirm_track_segment_id_ = 0U;
   std::deque<bool> shape_quality_window_;
+  std::deque<float> initial_length_window_;
+  std::deque<float> initial_width_window_;
   int formal_promotion_confirm_count_ = 0;
   std::uint64_t formal_promotion_track_segment_id_ = 0U;
 };

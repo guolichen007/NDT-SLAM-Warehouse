@@ -785,14 +785,16 @@ cargo_safety:
   # directionally when motion is authoritative, radially while stationary or
   # motion is unavailable. Acquisition never changes the 5 m/3 m thresholds
   # and cannot itself publish 17/18.
-  collision_tracking_acquisition_distance_m: 7.0
+  collision_tracking_acquisition_distance_m: 8.0
   # Compatibility kill switch only. true does not bypass the typed policy.
   fusion_provisional_warning_to_official_code: true
   motion_corridor_enabled: true
   motion_corridor_immediate_near_field_m: 0.30
   motion_corridor_minimum_speed_mps: 0.05
   motion_corridor_prediction_horizon_sec: 3.0
-  motion_corridor_minimum_prediction_distance_m: 7.0
+  motion_corridor_minimum_prediction_distance_m: 8.0
+  # Running-path sector: forward 90 degrees (45 degrees on each side).
+  motion_corridor_forward_half_angle_deg: 45.0
   motion_corridor_lateral_margin_m: 0.30
   motion_corridor_rear_margin_m: 0.30
   motion_corridor_velocity_alpha: 0.35
@@ -889,6 +891,23 @@ static_origin_component:
   maximum_anchor_distance_m: 2.0
   minimum_candidate_overlap: 0.15
 
+# Independent EMPTY-state pickup baseline. It reads only authoritative
+# map-frame top/support layers while localization is healthy. A component that
+# is already mature and predates the cargo lifecycle may also be sampled while
+# moving; identity, generation and geometry must remain stable.
+cargo_preload_baseline:
+  allow_moving_mature_static: true
+  minimum_confirm_frames: 5
+  window_frames: 8
+  maximum_observation_gap_sec: 0.5
+  maximum_center_step_m: 0.35
+  maximum_thickness_step_m: 0.25
+  maximum_thickness_mad_m: 0.10
+  maximum_size_relative_step: 0.30
+  maximum_anchor_component_distance_m: 0.50
+  minimum_occupied_cells: 6
+  maximum_component_uncertainty_m: 0.20
+
 cargo_lift_origin:
   enabled: true
   maximum_anchor_distance_m: 2.0
@@ -905,20 +924,19 @@ cargo_lift_origin:
   maximum_height_m: 5.00
 
 cargo_geometry_fusion:
-  minimum_independent_sources: 2
-  # Formal thickness always combines an authoritative pre-lift static height
-  # (bound origin or revealed support) with the current LiDAR extent.
-  # Configured and retired shapes remain pending-only and cannot substitute.
-  require_authoritative_static_and_live_thickness: true
-  # If static maturity is not yet available, eight good LiDAR frames may
-  # freeze a degraded avoidance-only box. It can emit positive 17/18 hazards,
-  # but can never authorize CLEAR 14, cargo-point removal or MapCommit.
-  allow_degraded_live_only_freeze: true
-  degraded_live_only_uncertainty_floor_m: 0.25
+  # Stable live bounds may freeze a positive-only geometry when the static
+  # baseline is unavailable or conflicts with the visible LiDAR extent. This
+  # path can emit 17/18 but never authorizes CLEAR/removal/MapCommit.
+  allow_positive_only_without_static_baseline: true
+  positive_only_uncertainty_floor_m: 0.25
+  allow_positive_only_on_source_conflict: true
+  positive_only_confirm_frames: 3
   minimum_confirm_frames: 5
   # Five good dimension observations are required inside the latest eight;
   # a single partial scan no longer erases the whole same-track window.
   shape_confirmation_window_frames: 8
+  # Freeze the median footprint only when the recent dimensions are compact.
+  maximum_initial_dimension_mad_m: 0.30
   maximum_observation_gap_sec: 0.5
   maximum_source_disagreement_m: 0.25
   maximum_fused_uncertainty_m: 0.20
@@ -928,7 +946,7 @@ cargo_geometry_fusion:
   maximum_height_m: 2.00
   huber_delta_m: 0.20
   configured_bottom_margin_m: 0.10
-  conservative_shrink_confirm_frames: 8
+  conservative_shrink_confirm_frames: 5
   maximum_shrink_per_frame_m: 0.03
   # Frozen cargo dimensions are lifecycle-stable. A larger observation must
   # be high confidence and persist continuously; a single merged component
@@ -937,6 +955,9 @@ cargo_geometry_fusion:
   conservative_expand_confirm_frames: 8
   minimum_live_shape_confidence_for_expand: 0.85
   minimum_live_dimension_support: 30
+  # Initial positive-warning geometry is already protected by current cargo
+  # identity and 5/8 temporal consistency. Frozen shrink remains stricter.
+  minimum_initial_shape_confidence: 0.55
   minimum_live_shape_confidence_for_shrink: 0.75
   minimum_physical_length_m: 0.30
   minimum_physical_width_m: 0.20

@@ -64,6 +64,7 @@
 #include <ndt_slam/cargo_physical_motion_estimator.hpp>
 #include <ndt_slam/cargo_lift_origin_binder.hpp>
 #include <ndt_slam/cargo_geometry_fusion.hpp>
+#include <ndt_slam/cargo_preload_baseline_tracker.hpp>
 #include <ndt_slam/pending_cargo_envelope.hpp>
 #include <ndt_slam/pending_cargo_self_evidence.hpp>
 #include <ndt_slam/revealed_support_observer.hpp>
@@ -2072,6 +2073,9 @@ private:
     // component is the lift-origin reference after the cargo and hook move
     // away from the pickup location.
     StaticHeightComponent cargo_preload_origin_component_;
+    CargoPreloadBaselineConfig cargo_preload_baseline_config_;
+    CargoPreloadBaselineTracker cargo_preload_baseline_tracker_;
+    CargoPreloadBaselineResult cargo_preload_baseline_result_;
     StaticHeightComponent cargo_origin_component_;
     // Same physical origin re-resolved in the current height-field
     // generation. It is used only to exclude the pickup-place cargo residue
@@ -2289,6 +2293,7 @@ private:
     RigidCargoGeometry previous_self_mask_geometry_;
     RigidCargoGeometry accepted_self_mask_geometry_;
     bool cargo_safety_config_error_ = false;
+    std::string cargo_safety_config_error_detail_;
     std::uint64_t cargo_fusion_track_id_ = 0;
     bool cargo_fusion_track_active_ = false;
     bool formal_cargo_removal_authorized_ = false;

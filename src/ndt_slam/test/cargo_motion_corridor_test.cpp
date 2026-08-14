@@ -56,7 +56,30 @@ TEST(CargoMotionCorridor, SideRearObstacleIsExcluded) {
       CargoMotionCorridorConfig{}, movingInput(-2.0F, 2.0F));
   EXPECT_TRUE(decision.valid);
   EXPECT_FALSE(decision.eligible);
-  EXPECT_EQ(decision.reason, "obstacle_outside_motion_corridor");
+  EXPECT_EQ(decision.reason, "obstacle_outside_forward_sector");
+}
+
+TEST(CargoMotionCorridor, FortyFiveDegreeBoundaryIsIncluded) {
+  CargoMotionCorridorInput input = movingInput(1.5F, 1.5F);
+  input.cargo_length_m = 4.0F;
+  input.cargo_width_m = 0.5F;
+  input.cargo_yaw_map_rad = 1.57079632679F;
+  const auto decision = evaluateCargoMotionCorridor(
+      CargoMotionCorridorConfig{}, input);
+  EXPECT_TRUE(decision.eligible);
+  EXPECT_NEAR(decision.forward_angle_deg, 45.0F, 0.01F);
+}
+
+TEST(CargoMotionCorridor, SideObstacleInsideWideRectangleIsAngleRejected) {
+  CargoMotionCorridorInput input = movingInput(1.0F, 1.5F);
+  input.cargo_length_m = 4.0F;
+  input.cargo_width_m = 0.5F;
+  input.cargo_yaw_map_rad = 1.57079632679F;
+  const auto decision = evaluateCargoMotionCorridor(
+      CargoMotionCorridorConfig{}, input);
+  EXPECT_FALSE(decision.eligible);
+  EXPECT_GT(decision.forward_angle_deg, 45.0F);
+  EXPECT_EQ(decision.reason, "obstacle_outside_forward_sector");
 }
 
 TEST(CargoMotionCorridor, ImmediateNearFieldAlwaysWins) {
@@ -75,15 +98,17 @@ TEST(CargoMotionCorridor, MissingVelocityIsExplicitRadialFallback) {
   EXPECT_EQ(decision.mode, CargoSafetySpatialMode::RADIAL_FALLBACK);
 }
 
-TEST(CargoMotionCorridor, ValidZeroVelocityUsesStationaryGuard) {
+TEST(CargoMotionCorridor, ValidZeroVelocityPreservesConfirmedRadialHazard) {
   CargoMotionCorridorInput input = movingInput(2.0F, 0.0F);
   input.cargo_velocity_map.setZero();
   input.current_footprint_distance_m = 1.0F;
   const auto decision = evaluateCargoMotionCorridor(
       CargoMotionCorridorConfig{}, input);
   EXPECT_TRUE(decision.valid);
-  EXPECT_FALSE(decision.eligible);
-  EXPECT_EQ(decision.mode, CargoSafetySpatialMode::STATIONARY_GUARD);
+  EXPECT_TRUE(decision.eligible);
+  EXPECT_EQ(decision.mode, CargoSafetySpatialMode::RADIAL_FALLBACK);
+  EXPECT_EQ(decision.reason,
+            "stationary_confirmed_hazard_radial_fallback");
 }
 
 TEST(CargoMotionCorridor,
@@ -96,7 +121,7 @@ TEST(CargoMotionCorridor,
       CargoMotionCorridorConfig{}, input);
   EXPECT_TRUE(decision.valid);
   EXPECT_TRUE(decision.eligible);
-  EXPECT_EQ(decision.mode, CargoSafetySpatialMode::STATIONARY_GUARD);
+  EXPECT_EQ(decision.mode, CargoSafetySpatialMode::RADIAL_FALLBACK);
   EXPECT_EQ(decision.reason, "stationary_radial_acquisition");
 }
 
@@ -121,7 +146,7 @@ TEST(CargoMotionCorridor, StationaryEmergencyShellRemainsEligible) {
   const auto decision = evaluateCargoMotionCorridor(
       CargoMotionCorridorConfig{}, input);
   EXPECT_TRUE(decision.eligible);
-  EXPECT_EQ(decision.mode, CargoSafetySpatialMode::STATIONARY_GUARD);
+  EXPECT_EQ(decision.mode, CargoSafetySpatialMode::RADIAL_FALLBACK);
 }
 
 TEST(CargoMotionCorridor, UsesProjectedObbWidthNotHalfDiagonal) {

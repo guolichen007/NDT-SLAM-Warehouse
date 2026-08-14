@@ -33,8 +33,8 @@ TEST(CargoOrientedFootprintTest, RecoversHorizontalAndVerticalAxes) {
         const auto result = estimateCargoOrientedFootprint(
             rectangle(2.0F, 0.8F, yaw));
         ASSERT_TRUE(result.valid) << result.reason;
-        EXPECT_NEAR(result.size_long_short.x(), 2.0F, 0.25F);
-        EXPECT_NEAR(result.size_long_short.y(), 0.8F, 0.25F);
+        EXPECT_NEAR(result.size_long_short.x(), 2.0F, 0.20F);
+        EXPECT_NEAR(result.size_long_short.y(), 0.8F, 0.15F);
         EXPECT_LT(axialError(result.yaw_base_rad, yaw), 0.03F);
     }
 }

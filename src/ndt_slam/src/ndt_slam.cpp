@@ -2683,6 +2683,41 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         static_origin_component_extractor_.setConfig(
             static_origin_component_config_);
 
+        if (config["cargo_preload_baseline"]) {
+            const YAML::Node preload = config["cargo_preload_baseline"];
+            cargo_preload_baseline_config_.allow_moving_mature_static =
+                preload["allow_moving_mature_static"].as<bool>(true);
+            cargo_preload_baseline_config_.minimum_confirm_frames =
+                std::max(5, preload["minimum_confirm_frames"].as<int>(5));
+            cargo_preload_baseline_config_.window_frames = std::max(
+                cargo_preload_baseline_config_.minimum_confirm_frames,
+                preload["window_frames"].as<int>(8));
+            cargo_preload_baseline_config_.maximum_observation_gap_sec =
+                preload["maximum_observation_gap_sec"].as<double>(0.5);
+            cargo_preload_baseline_config_.maximum_center_step_m =
+                preload["maximum_center_step_m"].as<float>(0.35F);
+            cargo_preload_baseline_config_.maximum_thickness_step_m =
+                preload["maximum_thickness_step_m"].as<float>(0.25F);
+            cargo_preload_baseline_config_.maximum_thickness_mad_m =
+                preload["maximum_thickness_mad_m"].as<float>(0.10F);
+            cargo_preload_baseline_config_.maximum_size_relative_step =
+                preload["maximum_size_relative_step"].as<float>(0.30F);
+            cargo_preload_baseline_config_
+                .maximum_anchor_component_distance_m =
+                    preload["maximum_anchor_component_distance_m"]
+                        .as<float>(0.50F);
+            cargo_preload_baseline_config_.minimum_occupied_cells =
+                static_cast<std::size_t>(std::max(
+                    3, preload["minimum_occupied_cells"].as<int>(6)));
+            cargo_preload_baseline_config_
+                .maximum_component_uncertainty_m =
+                    std::max(0.05F,
+                        preload["maximum_component_uncertainty_m"]
+                            .as<float>(0.20F));
+        }
+        cargo_preload_baseline_tracker_.setConfig(
+            cargo_preload_baseline_config_);
+
         if (config["cargo_lift_origin"]) {
             const YAML::Node lift = config["cargo_lift_origin"];
             cargo_lift_origin_enabled_ = lift["enabled"].as<bool>(true);
@@ -2715,31 +2750,27 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
 
         if (config["cargo_geometry_fusion"]) {
             const YAML::Node geometry = config["cargo_geometry_fusion"];
-            cargo_geometry_fusion_config_.minimum_independent_sources =
-                static_cast<std::size_t>(std::max(
-                    2, geometry["minimum_independent_sources"].as<int>(2)));
             cargo_geometry_fusion_config_.minimum_confirm_frames =
                 geometry["minimum_confirm_frames"].as<int>(5);
             cargo_geometry_fusion_config_
-                .require_authoritative_static_and_live_thickness =
+                .allow_positive_only_without_static_baseline =
                     geometry[
-                        "require_authoritative_static_and_live_thickness"]
+                        "allow_positive_only_without_static_baseline"]
                         .as<bool>(true);
-            cargo_geometry_fusion_config_.allow_degraded_live_only_freeze =
-                geometry["allow_degraded_live_only_freeze"].as<bool>(true);
             cargo_geometry_fusion_config_
-                .degraded_live_only_uncertainty_floor_m =
-                    std::max(
-                        0.05F,
-                        geometry[
-                            "degraded_live_only_uncertainty_floor_m"]
-                            .as<float>(0.25F));
+                .positive_only_uncertainty_floor_m =
+                    geometry["positive_only_uncertainty_floor_m"]
+                        .as<float>(0.25F);
+            cargo_geometry_fusion_config_
+                .allow_positive_only_on_source_conflict =
+                    geometry["allow_positive_only_on_source_conflict"]
+                        .as<bool>(true);
+            cargo_geometry_fusion_config_.positive_only_confirm_frames =
+                geometry["positive_only_confirm_frames"].as<int>(3);
             cargo_geometry_fusion_config_
                 .shape_confirmation_window_frames =
-                    std::max(
-                        cargo_geometry_fusion_config_.minimum_confirm_frames,
-                        geometry["shape_confirmation_window_frames"]
-                            .as<int>(8));
+                    geometry["shape_confirmation_window_frames"]
+                        .as<int>(8);
             cargo_geometry_fusion_config_.maximum_observation_gap_sec =
                 geometry["maximum_observation_gap_sec"].as<double>(0.5);
             cargo_geometry_fusion_config_.maximum_source_disagreement_m =
@@ -2748,36 +2779,41 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 geometry["maximum_fused_uncertainty_m"].as<float>(0.20F);
             cargo_geometry_fusion_config_.minimum_height_m =
                 geometry["minimum_height_m"].as<float>(0.30F);
-            cargo_geometry_fusion_config_.maximum_height_m = std::min(
-                geometry["maximum_height_m"].as<float>(2.00F),
-                odom_anchor_config_.max_size_z);
+            cargo_geometry_fusion_config_.maximum_height_m =
+                geometry["maximum_height_m"].as<float>(2.00F);
             cargo_geometry_fusion_config_.huber_delta_m =
                 geometry["huber_delta_m"].as<float>(0.20F);
             cargo_geometry_fusion_config_.configured_bottom_margin_m =
                 geometry["configured_bottom_margin_m"].as<float>(0.10F);
             cargo_geometry_fusion_config_.conservative_shrink_confirm_frames =
-                geometry["conservative_shrink_confirm_frames"].as<int>(8);
+                geometry["conservative_shrink_confirm_frames"].as<int>(5);
             cargo_geometry_fusion_config_.maximum_shrink_per_frame_m =
                 geometry["maximum_shrink_per_frame_m"].as<float>(0.03F);
             cargo_geometry_fusion_config_.immediate_expand_enabled =
                 geometry["immediate_expand_enabled"].as<bool>(false);
             cargo_geometry_fusion_config_
                 .conservative_expand_confirm_frames =
-                    std::max(
-                        1,
-                        geometry["conservative_expand_confirm_frames"]
-                            .as<int>(8));
+                    geometry["conservative_expand_confirm_frames"]
+                        .as<int>(8);
             cargo_geometry_fusion_config_
                 .minimum_live_shape_confidence_for_expand =
-                    std::clamp(
-                        geometry[
-                            "minimum_live_shape_confidence_for_expand"]
-                            .as<float>(0.85F),
-                        0.0F,
-                        1.0F);
+                    geometry[
+                        "minimum_live_shape_confidence_for_expand"]
+                        .as<float>(0.85F);
+            const int minimum_live_dimension_support =
+                geometry["minimum_live_dimension_support"].as<int>(30);
             cargo_geometry_fusion_config_.minimum_live_dimension_support =
-                static_cast<std::size_t>(std::max(
-                    1, geometry["minimum_live_dimension_support"].as<int>(30)));
+                minimum_live_dimension_support > 0
+                    ? static_cast<std::size_t>(minimum_live_dimension_support)
+                    : 0U;
+            cargo_geometry_fusion_config_
+                .minimum_initial_shape_confidence =
+                    geometry["minimum_initial_shape_confidence"]
+                        .as<float>(0.55F);
+            cargo_geometry_fusion_config_
+                .maximum_initial_dimension_mad_m =
+                    geometry["maximum_initial_dimension_mad_m"]
+                        .as<float>(0.30F);
             cargo_geometry_fusion_config_
                 .minimum_live_shape_confidence_for_shrink =
                     geometry["minimum_live_shape_confidence_for_shrink"]
@@ -2796,7 +2832,25 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                 geometry["configured_fallback_is_formal_floor"]
                     .as<bool>(false);
         }
-        cargo_geometry_fusion_.setConfig(cargo_geometry_fusion_config_);
+        const CargoConfigValidationResult geometry_validation =
+            cargo_geometry_fusion_.setConfig(cargo_geometry_fusion_config_);
+        if (std::isfinite(cargo_geometry_fusion_config_.maximum_height_m) &&
+            std::isfinite(odom_anchor_config_.max_size_z) &&
+            cargo_geometry_fusion_config_.maximum_height_m >
+                odom_anchor_config_.max_size_z) {
+            cargo_safety_config_error_ = true;
+            if (!cargo_safety_config_error_detail_.empty())
+                cargo_safety_config_error_detail_ += ';';
+            cargo_safety_config_error_detail_ +=
+                "cargo_geometry_fusion.maximum_height_m:exceeds_odom_anchor_max_size_z";
+        }
+        if (!geometry_validation.valid) {
+            cargo_safety_config_error_ = true;
+            if (!cargo_safety_config_error_detail_.empty())
+                cargo_safety_config_error_detail_ += ';';
+            cargo_safety_config_error_detail_ +=
+                "cargo_geometry_fusion." + geometry_validation.summary();
+        }
 
         if (config["pending_cargo_envelope"]) {
             const YAML::Node pending = config["pending_cargo_envelope"];
@@ -3444,7 +3498,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             const float configured_prediction_distance_m =
                 cargo_safety[
                     "motion_corridor_minimum_prediction_distance_m"]
-                    .as<float>(7.0F);
+                    .as<float>(8.0F);
             cargo_motion_corridor_config_.minimum_prediction_distance_m =
                 std::isfinite(configured_prediction_distance_m)
                 ? std::clamp(
@@ -3452,6 +3506,14 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                       cargo_collision_tracking_acquisition_distance_m_,
                       12.0F)
                 : cargo_collision_tracking_acquisition_distance_m_;
+            const float configured_forward_half_angle_deg =
+                cargo_safety["motion_corridor_forward_half_angle_deg"]
+                    .as<float>(45.0F);
+            cargo_motion_corridor_config_.forward_half_angle_deg =
+                std::isfinite(configured_forward_half_angle_deg)
+                    ? std::clamp(configured_forward_half_angle_deg,
+                                 1.0F, 90.0F)
+                    : 45.0F;
             cargo_motion_corridor_config_.lateral_margin_m =
                 std::max(0.0F,
                     cargo_safety["motion_corridor_lateral_margin_m"]
@@ -3842,7 +3904,11 @@ void NdtSlamNode::resetCargoForHookState(
     cargo_pending_unresolved_inside_points_ = 0U;
     cargo_pending_external_shell_points_ = 0U;
     cargo_origin_exclusion_active_ = false;
-    cargo_preload_origin_component_ = StaticHeightComponent{};
+    if (!preserve_origin_height) {
+        cargo_preload_origin_component_ = StaticHeightComponent{};
+        cargo_preload_baseline_tracker_.reset();
+        cargo_preload_baseline_result_ = CargoPreloadBaselineResult{};
+    }
     cargo_origin_component_ = StaticHeightComponent{};
     cargo_origin_exclusion_component_ = StaticHeightComponent{};
     cargo_origin_exclusion_attempt_generation_ = 0U;
@@ -10664,6 +10730,8 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
     cargo_lift_origin_binder_.reset();
     cargo_lift_origin_result_ = CargoLiftOriginResult{};
     cargo_preload_origin_component_ = StaticHeightComponent{};
+    cargo_preload_baseline_tracker_.reset();
+    cargo_preload_baseline_result_ = CargoPreloadBaselineResult{};
     cargo_origin_component_ = StaticHeightComponent{};
     cargo_origin_exclusion_component_ = StaticHeightComponent{};
     cargo_origin_exclusion_attempt_generation_ = 0U;
@@ -12692,7 +12760,8 @@ void NdtSlamNode::writeRuntimeStatus() {
       << (cargo_frozen_geometry_.degraded_live_only ? "true" : "false")
       << ",\n";
     f << "  \"geometry_degraded_live_only_enabled\": "
-      << (cargo_geometry_fusion_config_.allow_degraded_live_only_freeze
+      << (cargo_geometry_fusion_config_
+                  .allow_positive_only_without_static_baseline
               ? "true" : "false") << ",\n";
     f << "  \"geometry_confirm_frames\": "
       << cargo_frozen_geometry_.confirm_frames << ",\n";
@@ -17287,16 +17356,38 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         for (const StaticHeightComponent& component : origin_components) {
             append_static_origin_candidate(component);
         }
-        if (!hook_loaded && !origin_components.empty()) {
-            // Capture the latest authoritative component before gravity
-            // transitions to LOADED. Later frames must continue to observe
-            // these original map cells even after the hook/cargo moves and
-            // the current-anchor query no longer overlaps them. This must not
-            // depend on cargo detection: REQUIRED gravity deliberately
-            // disables detectCargoAroundOdomAnchor() while the hook is EMPTY.
-            // The extractor has already constrained and ranked components by
-            // the authoritative height field and hook-anchor distance.
-            cargo_preload_origin_component_ = origin_components.front();
+        if (!hook_loaded) {
+            CargoPreloadBaselineInput preload_input;
+            preload_input.stamp_sec = stamp.toSec();
+            preload_input.hook_empty = true;
+            preload_input.localization_valid =
+                !tracking_lost_.load() && relocalization_pose_reliable_ &&
+                anchor_map.allFinite();
+            preload_input.stationary = motion_gate_stationary_ ||
+                is_stationary_;
+            if (!origin_components.empty()) {
+                const auto preferred_preload = std::find_if(
+                    origin_components.begin(), origin_components.end(),
+                    [](const StaticHeightComponent& component) {
+                        return component.predates_cargo_lifecycle &&
+                            authorizeStaticEvidence(component.authority)
+                                .formal_origin_authorized;
+                    });
+                preload_input.component = preferred_preload !=
+                        origin_components.end()
+                    ? *preferred_preload : origin_components.front();
+                const StaticEvidenceAuthorization preload_authorization =
+                    authorizeStaticEvidence(preload_input.component.authority);
+                preload_input.independently_mature_static =
+                    preload_input.component.predates_cargo_lifecycle &&
+                    preload_authorization.formal_origin_authorized;
+            }
+            cargo_preload_baseline_result_ =
+                cargo_preload_baseline_tracker_.update(preload_input);
+            if (cargo_preload_baseline_result_.ready) {
+                cargo_preload_origin_component_ =
+                    cargo_preload_baseline_result_.component;
+            }
         }
         append_static_origin_candidate(cargo_preload_origin_component_);
         append_static_origin_candidate(cargo_origin_component_);
@@ -18224,6 +18315,14 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         hook_fixed_cargo_.shape_confidence;
     geometry_frame.dimension_observation_complete =
         pending_input.current_high_quality_shape.valid;
+    geometry_frame.warning_track_stable =
+        pending_cargo_self_evidence_.valid &&
+        pending_cargo_self_evidence_
+            .positive_warning_identity_authorized &&
+        (pending_cargo_self_evidence_.source ==
+             PendingCargoEnvelopeSource::CURRENT_CANDIDATE ||
+         pending_cargo_self_evidence_.source ==
+             PendingCargoEnvelopeSource::ACTIVE_LOCKED_TRACK);
     const bool formal_locked_shape_evidence = active_track &&
         hook_lock_.locked_shape.valid &&
         hook_lock_.provisional_summary.formal_lock_allowed;
@@ -18265,7 +18364,8 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
             cargo_lift_origin_result_.static_thickness_m,
             std::max(0.05F,
                      cargo_lift_origin_result_.origin.uncertainty_m),
-            0.80F, true});
+            0.80F, true,
+            CargoThicknessConstraint::FULL_MEASUREMENT});
     }
     if (authorized_origin && cargo_lift_origin_result_.thickness_ready &&
         std::isfinite(cargo_lift_origin_result_.revealed_thickness_m)) {
@@ -18274,7 +18374,8 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
             cargo_lift_origin_result_.revealed_thickness_m,
             std::max(0.08F,
                      cargo_lift_origin_result_.origin.uncertainty_m),
-            0.75F, true});
+            0.75F, true,
+            CargoThicknessConstraint::FULL_MEASUREMENT});
     }
     bool live_visible_extent_added = false;
     if (detection_current && hook_fixed_bottom_.valid &&
@@ -18287,11 +18388,16 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         hook_fixed_bottom_.uncertainty > 0.0F &&
         std::isfinite(hook_fixed_bottom_.confidence) &&
         hook_fixed_bottom_.confidence > 0.0F) {
+        const CargoThicknessConstraint live_constraint =
+            hook_fixed_bottom_.source == "points_visible_side"
+                ? CargoThicknessConstraint::FULL_MEASUREMENT
+                : CargoThicknessConstraint::LOWER_BOUND;
         geometry_frame.thickness.push_back({
             CargoThicknessSource::LIVE_VISIBLE_EXTENT,
             hook_fixed_bottom_.height,
             std::max(0.05F, hook_fixed_bottom_.uncertainty),
-            std::clamp(hook_fixed_bottom_.confidence, 0.0F, 1.0F), true});
+            std::clamp(hook_fixed_bottom_.confidence, 0.0F, 1.0F), true,
+            live_constraint});
         live_visible_extent_added = true;
     }
     if (!live_visible_extent_added && formal_locked_shape_evidence &&
@@ -18312,7 +18418,7 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
             std::clamp(
                 hook_lock_.provisional_summary.shape_confidence,
                 0.50F, 1.0F),
-            true});
+            true, CargoThicknessConstraint::LOWER_BOUND});
         live_visible_extent_added = true;
     }
     const double retired_shape_age_sec = retired_cargo_stamp_.isZero()
@@ -18327,9 +18433,36 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
             pending_cargo_envelope_config_.maximum_retired_age_sec) {
         geometry_frame.thickness.push_back({
             CargoThicknessSource::RETIRED_LOCKED_SHAPE,
-            retired_cargo_shape_.height_m, 0.15F, 0.70F, true});
+            retired_cargo_shape_.height_m, 0.15F, 0.70F, true,
+            CargoThicknessConstraint::PRIOR_ONLY});
     }
     cargo_frozen_geometry_ = cargo_geometry_fusion_.update(geometry_frame);
+    if (cargo_frozen_geometry_.valid &&
+        cargo_frozen_geometry_.frozen &&
+        cargo_frozen_geometry_.authorization ==
+            CargoGeometryAuthorization::POSITIVE_ONLY &&
+        pending_cargo_envelope_.valid &&
+        pending_cargo_envelope_.cargo_lifecycle_id == cargo_lifecycle_id_) {
+        pending_cargo_envelope_.center_base = cargo_frozen_geometry_.center;
+        pending_cargo_envelope_.length_m = cargo_frozen_geometry_.length_m;
+        pending_cargo_envelope_.width_m = cargo_frozen_geometry_.width_m;
+        pending_cargo_envelope_.height_m = cargo_frozen_geometry_.height_m;
+        pending_cargo_envelope_.yaw_base_rad = cargo_frozen_geometry_.yaw_rad;
+        pending_cargo_envelope_.bottom_z_base =
+            cargo_frozen_geometry_.bottom_m;
+        pending_cargo_envelope_.top_z_base =
+            cargo_frozen_geometry_.conservative_top_reference_m;
+        pending_cargo_envelope_.horizontal_uncertainty_m = std::max(
+            pending_cargo_envelope_.horizontal_uncertainty_m,
+            cargo_frozen_geometry_.conservative_tracking_allowance_m);
+        pending_cargo_envelope_.vertical_uncertainty_m = std::max(
+            pending_cargo_envelope_.vertical_uncertainty_m,
+            std::max(0.0F,
+                cargo_frozen_geometry_.bottom_m -
+                    cargo_frozen_geometry_.conservative_bottom_m));
+        pending_cargo_envelope_.reason =
+            "positive_only_confirmed_nominal_geometry";
+    }
     const bool static_physical_thickness_added = std::any_of(
         geometry_frame.thickness.begin(), geometry_frame.thickness.end(),
         [](const CargoThicknessObservation& observation) {
@@ -18352,7 +18485,8 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
     std::string geometry_chain_blocker = "none";
     if (!cargo_frozen_geometry_.frozen) {
         const bool degraded_live_path_available =
-            cargo_geometry_fusion_config_.allow_degraded_live_only_freeze &&
+            cargo_geometry_fusion_config_
+                .allow_positive_only_without_static_baseline &&
             live_visible_extent_added;
         if (degraded_live_path_available) {
             geometry_chain_blocker = cargo_frozen_geometry_.reason;
@@ -18470,12 +18604,30 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         << (cargo_frozen_geometry_.frozen ? "true" : "false")
         << ",\"geometry_formal_authorized\":"
         << (cargo_frozen_geometry_.formal_authorized ? "true" : "false")
+        << ",\"geometry_authorization\":\""
+        << cargoGeometryAuthorizationName(
+               cargo_frozen_geometry_.authorization)
+        << "\""
+        << ",\"geometry_source_conflict\":"
+        << (cargo_frozen_geometry_.source_conflict ? "true" : "false")
+        << ",\"geometry_thickness_lower_bound_m\":"
+        << diagnostic_float(cargo_frozen_geometry_.thickness_lower_bound_m)
+        << ",\"geometry_thickness_upper_bound_m\":"
+        << diagnostic_float(cargo_frozen_geometry_.thickness_upper_bound_m)
         << ",\"geometry_degraded_live_only\":"
         << (cargo_frozen_geometry_.degraded_live_only ? "true" : "false")
         << ",\"geometry_confirm_frames\":"
         << cargo_frozen_geometry_.confirm_frames
         << ",\"geometry_shape_confirm_frames\":"
         << cargo_frozen_geometry_.shape_confirm_frames
+        << ",\"geometry_warning_track_stable\":"
+        << (geometry_frame.warning_track_stable ? "true" : "false")
+        << ",\"geometry_minimum_initial_shape_confidence\":"
+        << cargo_geometry_fusion_config_
+               .minimum_initial_shape_confidence
+        << ",\"geometry_maximum_initial_dimension_mad_m\":"
+        << cargo_geometry_fusion_config_
+               .maximum_initial_dimension_mad_m
         << ",\"geometry_independent_sources\":"
         << cargo_frozen_geometry_.independent_sources
         << ",\"geometry_reason\":\""
@@ -20165,6 +20317,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             pending_obstacle_context_recognition_state_ =
                 HookCargoLockState::EMPTY;
             cargo_preload_origin_component_ = StaticHeightComponent{};
+            cargo_preload_baseline_tracker_.reset();
+            cargo_preload_baseline_result_ = CargoPreloadBaselineResult{};
             cargo_origin_component_ = StaticHeightComponent{};
             cargo_origin_exclusion_component_ =
                 StaticHeightComponent{};
