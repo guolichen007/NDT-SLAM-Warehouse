@@ -74,6 +74,7 @@
 #include <ndt_slam/cargo_safety_temporal_filter.hpp>
 #include <ndt_slam/cargo_track_policy.hpp>
 #include <ndt_slam/cargo_component_fusion.hpp>
+#include <ndt_slam/cargo_frame_decision.hpp>
 #include <ndt_slam/cargo_subsystem.hpp>
 #include <ndt_slam/avoidance_decision.hpp>
 #include <ndt_slam/avoidance_diagnostics.hpp>
@@ -2218,9 +2219,17 @@ private:
     std::uint64_t cargo_obstacle_track_reset_count_ = 0U;
     ros::WallTime cargo_static_summary_last_wall_;
     std::atomic<std::uint64_t> static_evidence_epoch_{1U};
+    // Avoidance-only pose continuity lineage. It advances exactly
+    // once per avoidance identity continuity break (relocalization
+    // pose jump, degraded localization, natural recovery, clean-map
+    // rebuild, source-time epoch reset), never per normal NDT accept.
+    // Initial value is 1, matching the static evidence epoch contract,
+    // so a zero value is never authoritative.
+    std::atomic<std::uint64_t> avoidance_pose_generation_{1U};
     std::uint64_t cargo_static_evidence_track_start_sequence_ = 0U;
     bool cargo_static_evidence_lifecycle_boundary_valid_ = false;
     std::uint64_t advanceStaticEvidenceEpoch();
+    std::uint64_t advanceAvoidancePoseGeneration(const std::string& reason);
     CargoMotionCorridorConfig cargo_motion_corridor_config_;
     std::size_t cargo_directional_pretrack_clusters_ = 0U;
     std::size_t cargo_radial_pretrack_clusters_ = 0U;

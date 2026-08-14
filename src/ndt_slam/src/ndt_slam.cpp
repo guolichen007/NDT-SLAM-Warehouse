@@ -4221,6 +4221,25 @@ std::uint64_t NdtSlamNode::advanceStaticEvidenceEpoch() {
     return next;
 }
 
+std::uint64_t NdtSlamNode::advanceAvoidancePoseGeneration(
+    const std::string& reason) {
+    const std::uint64_t old = avoidance_pose_generation_.fetch_add(
+        1U, std::memory_order_acq_rel);
+    std::uint64_t next = old + 1U;
+    if (next == 0U) {
+        avoidance_pose_generation_.store(1U, std::memory_order_release);
+        next = 1U;
+    }
+    ROS_WARN("[AvoidanceGeneration] reason=%s pose_generation_old=%llu "
+             "pose_generation_new=%llu map_generation=%llu",
+             reason.c_str(),
+             static_cast<unsigned long long>(old),
+             static_cast<unsigned long long>(next),
+             static_cast<unsigned long long>(
+                 static_evidence_epoch_.load(std::memory_order_acquire)));
+    return next;
+}
+
 void NdtSlamNode::startCleanMapRebuildJob() {
     if (clean_map_rebuild_running_.load(std::memory_order_acquire)) {
         // The in-flight immutable snapshot remains publishable even if a newer
@@ -10746,6 +10765,7 @@ void NdtSlamNode::applyRelocalizedPose(
 }
 
 void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
+    advanceAvoidancePoseGeneration("cargo_pose_discontinuity");
     anomaly_review_episode_tracker_.reset();
     cargo_subsystem_.reset();
     payload_tracker_.reset();
@@ -11163,6 +11183,11 @@ void NdtSlamNode::handleLidarTimeRollback(
             empty_hook_height_history_.clear();
         }
         resetCargoForHookState(false);
+        // Source-time epoch reset is a distinct avoidance identity continuity
+        // break. handleLidarTimeRollback does not route through
+        // resetCargoAfterPoseDiscontinuity, so bump here exactly once to avoid
+        // a double increment while still invalidating old avoidance authority.
+        advanceAvoidancePoseGeneration("lidar_source_time_rollback");
         cargo_marker_lifecycle_.reset();
         last_cargo_pipeline_stamp_ = ros::Time();
         last_cargo_warning_stamp_ = ros::Time();
@@ -16937,9 +16962,10 @@ lidar_slam2_msgs::CargoSafetyStatus NdtSlamNode::composeCargoSafetyStatus(
         review_input.key.cargo_track_id = status.cargo_track_id;
         review_input.key.obstacle_track_id = status.obstacle_track_id;
         review_input.key.pose_generation =
-            localization_continuity_generation_.load(
+            avoidance_pose_generation_.load(
                 std::memory_order_acquire);
-        review_input.key.map_generation = localization_map_generation_;
+        review_input.key.map_generation =
+            static_evidence_epoch_.load(std::memory_order_acquire);
         const AnomalyReviewEpisodeDecision review_decision =
             anomaly_review_episode_tracker_.update(review_input);
         if (decision_preview.requested_code ==
@@ -19711,14 +19737,16 @@ void NdtSlamNode::runPendingCargoAvoidance(
             fusion_input.static_map.clearance_m;
     }
     const std::uint64_t pending_pose_continuity =
-        localization_continuity_generation_.load(
+        avoidance_pose_generation_.load(
             std::memory_order_acquire);
+    const std::uint64_t pending_map_generation =
+        static_evidence_epoch_.load(std::memory_order_acquire);
     fusion_input.live.cargo_lifecycle_id = cargo_lifecycle_id_;
     fusion_input.live.cargo_track_id = pending_track_context_id;
     fusion_input.live.obstacle_track_id =
         pending_obstacle_decision.selected_track_id;
     fusion_input.live.pose_generation = pending_pose_continuity;
-    fusion_input.live.map_generation = localization_map_generation_;
+    fusion_input.live.map_generation = pending_map_generation;
     fusion_input.live.confidence =
         fusion_input.pending_authority_confidence;
     fusion_input.live.far_field_history_valid =
@@ -19744,7 +19772,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
         pending_static_decision.authorized
             ? pending_static_decision.obstacle_id : 0U;
     fusion_input.static_map.pose_generation = pending_pose_continuity;
-    fusion_input.static_map.map_generation = localization_map_generation_;
+    fusion_input.static_map.map_generation = pending_map_generation;
     fusion_input.static_map.obstacle_top_z_map =
         static_result.highest_z95_m;
     fusion_input.static_map.uncertainty_m =
@@ -23035,14 +23063,16 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             avoidance_input.static_map.clearance_m;
     }
     const std::uint64_t formal_pose_continuity =
-        localization_continuity_generation_.load(
+        avoidance_pose_generation_.load(
             std::memory_order_acquire);
+    const std::uint64_t formal_map_generation =
+        static_evidence_epoch_.load(std::memory_order_acquire);
     avoidance_input.live.cargo_lifecycle_id = cargo_lifecycle_id_;
     avoidance_input.live.cargo_track_id = cargo_fusion_track_id_;
     avoidance_input.live.obstacle_track_id =
         obstacle_track_decision.selected_track_id;
     avoidance_input.live.pose_generation = formal_pose_continuity;
-    avoidance_input.live.map_generation = localization_map_generation_;
+    avoidance_input.live.map_generation = formal_map_generation;
     avoidance_input.live.confidence =
         obstacle_track_decision.confirmed_hazard ? 1.0F : 0.0F;
     avoidance_input.live.far_field_history_valid =
@@ -23069,7 +23099,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         formal_static_hazard_decision.authorized
             ? formal_static_hazard_decision.obstacle_id : 0U;
     avoidance_input.static_map.pose_generation = formal_pose_continuity;
-    avoidance_input.static_map.map_generation = localization_map_generation_;
+    avoidance_input.static_map.map_generation = formal_map_generation;
     avoidance_input.static_map.confidence =
         formal_static_hazard_decision.authorized ? 1.0F : 0.0F;
     avoidance_input.static_map.far_field_history_valid =

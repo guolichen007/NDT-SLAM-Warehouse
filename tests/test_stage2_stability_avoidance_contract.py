@@ -163,6 +163,54 @@ class Stage2StabilityAvoidanceContractTest(unittest.TestCase):
         self.assertIn('"TRACK_PENDING"', self.node)
         self.assertIn('"AUTHORITY_BLOCKED"', self.node)
 
+    def test_avoidance_generation_lineage_is_authoritative(self) -> None:
+        # cargo_frame_decision.hpp must be included by the header itself, not
+        # via a local .cpp include that masks the header dependency.
+        self.assertIn(
+            "#include <ndt_slam/cargo_frame_decision.hpp>", self.header)
+        # Avoidance pose generation starts at 1, never 0.
+        self.assertIn(
+            "std::atomic<std::uint64_t> avoidance_pose_generation_{1U}",
+            self.header)
+        self.assertIn("advanceAvoidancePoseGeneration", self.header)
+        # The increment helper exists and wraps a 0 result back to 1.
+        self.assertIn("avoidance_pose_generation_.fetch_add", self.node)
+        self.assertIn("avoidance_pose_generation_.store(1U", self.node)
+        # resetCargoAfterPoseDiscontinuity bumps exactly once at entry.
+        reset_after = section(
+            self.node,
+            "void NdtSlamNode::resetCargoAfterPoseDiscontinuity()",
+            "void NdtSlamNode::publishRelocalizationStatus(",
+        )
+        self.assertEqual(
+            reset_after.count("advanceAvoidancePoseGeneration("), 1)
+        # handleLidarTimeRollback bumps exactly once and does NOT route
+        # through resetCargoAfterPoseDiscontinuity (no double increment).
+        rollback = section(
+            self.node,
+            "void NdtSlamNode::handleLidarTimeRollback(",
+            "bool NdtSlamNode::cargoTrackRetained(",
+        )
+        self.assertEqual(
+            rollback.count(
+                'advanceAvoidancePoseGeneration("lidar_source_time_rollback")'),
+            1)
+        self.assertNotIn("resetCargoAfterPoseDiscontinuity()", rollback)
+        # Map generation is a static_evidence_epoch_ snapshot; the dead
+        # localization_map_generation_ member must not exist anywhere.
+        for token in (
+            "review_input.key.map_generation",
+            "fusion_input.live.map_generation",
+            "fusion_input.static_map.map_generation",
+            "avoidance_input.live.map_generation",
+            "avoidance_input.static_map.map_generation",
+        ):
+            self.assertIn(token, self.node)
+        self.assertIn("static_evidence_epoch_.load", self.node)
+        for source in (self.node, self.header):
+            self.assertNotIn("localization_map_generation_", source)
+            self.assertNotIn("localization_continuity_generation_", source)
+
 
 if __name__ == "__main__":
     unittest.main()
