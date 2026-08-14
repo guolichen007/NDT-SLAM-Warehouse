@@ -31,6 +31,7 @@ CargoSwingInput validInput(double stamp) {
   input.cargo_length_m = 2.0F;
   input.cargo_width_m = 1.0F;
   input.hoist_state_available = true;
+  input.hoist_state_fresh = true;
   return input;
 }
 

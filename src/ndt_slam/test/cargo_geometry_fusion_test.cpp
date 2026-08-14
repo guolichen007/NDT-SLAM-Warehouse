@@ -186,7 +186,9 @@ TEST(CargoGeometryFusionTest,
 
 TEST(CargoGeometryFusionTest,
      FiveStableThicknessFramesInEightTolerateOneOutlier) {
-  CargoGeometryFusion fusion;
+  CargoGeometryFusionConfig config;
+  config.positive_only_confirm_frames = 5;
+  CargoGeometryFusion fusion(config);
   auto value = frame(1.0);
   value.thickness = {{
       CargoThicknessSource::LIVE_VISIBLE_EXTENT,

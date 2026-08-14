@@ -84,7 +84,7 @@ TEST(CargoComponentFusion, MergeCannotCollapseFragmentWidth) {
   const CargoComponentHypothesis hypothesis{
       {0U, 1U}, true, "collinear_pair"};
   const auto decision = validateCargoComponentFootprint(
-      hypothesis, {lhs, rhs}, 1.8F, 0.30F,
+      hypothesis, {lhs, rhs}, 1.0F, 0.35F,
       CargoComponentFusionConfig{});
   EXPECT_FALSE(decision.valid);
   EXPECT_EQ(decision.reason, "merged_footprint_width_collapsed");

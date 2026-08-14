@@ -676,6 +676,22 @@ CargoAvoidanceFusionResult fuseCargoAvoidanceRisk(
     return result;
   }
 
+  // An unverified/uncertified static map that still reports a positive
+  // hazard must not be silently dropped in favor of CLEAR. When authority
+  // is missing the hazard claim cannot become a formal risk, but we also
+  // cannot confirm the way is clear, so fall back to 34.
+  const bool unresolved_static_hazard =
+      input.static_map.available && input.static_map.reliable &&
+      input.static_map.hazard &&
+      warningCode(input.static_map.warning_code) &&
+      lowClearance(input.static_map.clearance_m) &&
+      !result.risk_static;
+  if (unresolved_static_hazard) {
+    result.official_code = kObstacleInvalid;
+    result.reason = "unverified_static_hazard_blocks_clear";
+    return result;
+  }
+
   result.official_valid = true;
   result.official_code = kClear;
   result.reason = "formal_live_clear";

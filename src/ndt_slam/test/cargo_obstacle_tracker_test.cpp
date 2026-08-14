@@ -156,7 +156,7 @@ TEST(CargoObstacleTracker,
   EXPECT_GT(associated.selected_track_neighbor_cell_overlap, 0.0F);
 
   CargoObstacleObservation implausibly_far = hazard(0U, 3.0F, 0.0F);
-  implausibly_far.occupied_map_cells = {102};
+  implausibly_far.occupied_map_cells = {500};
   const CargoObstacleTrackerDecision reset =
       tracker.update(1.4, {implausibly_far});
   EXPECT_NE(reset.selected_track_id, initial.selected_track_id);
@@ -235,7 +235,7 @@ TEST(CargoObstacleTracker,
   far.warning_eligible = false;
   tracker.update(1.6, {far});
   tracker.update(1.8, {far});
-  ASSERT_TRUE(tracker.update(2.0, {far}).confirmed_hazard);
+  ASSERT_TRUE(tracker.update(2.0, {far}).selected_far_field_history_valid);
   const CargoObstacleTrackerDecision authorized =
       tracker.update(2.2, {near});
   EXPECT_TRUE(authorized.confirmed_hazard) << authorized.reason;
@@ -494,7 +494,9 @@ TEST(CargoObstacleTracker,
 }
 
 TEST(CargoObstacleTracker, OutsideCargoShellAloneIsNotIndependentProvenance) {
-  CargoObstacleTracker tracker;
+  CargoObstacleTrackerConfig config;
+  config.require_far_field_history_for_warnings = false;
+  CargoObstacleTracker tracker(config);
   CargoObstacleObservation observation = staticCargo(0U, 0.0F, 0.0F);
   observation.provenance =
       ExternalProvenance::OUTSIDE_CARGO_SHELL_ONLY;

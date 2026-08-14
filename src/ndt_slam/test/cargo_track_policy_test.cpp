@@ -122,8 +122,8 @@ TEST(CargoTrackPolicy, WrongStableBackgroundClusterCannotFormalLock) {
       candidate(3, 1.45F, 1.40F, 0.35F, 1.5F, 1.0F, 0.55F,
                 1.21F, false),
       context);
-  EXPECT_TRUE(score.valid);
-  EXPECT_LT(score.overall_lock_confidence, 0.70F);
+  EXPECT_FALSE(score.valid);
+  EXPECT_EQ(score.reason, "candidate_center_too_far_from_hook_anchor");
 }
 
 TEST(CargoTrackPolicy, AdjacentCandidateCannotBeRecenteredOntoHook) {
