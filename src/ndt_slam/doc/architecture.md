@@ -31,7 +31,7 @@
   → Cargo Bottom（支撑点/跨度/网格覆盖/底部高度）
   → CargoObstacleTracker（近场/远场历史、静态 provenance、独立/嵌入 track）
   → CargoAvoidanceFusion（安全决策融合）
-  → CargoSafetyStatus（类型化输出，schema v6）
+  → CargoSafetyStatus（类型化输出，schema v7，含 Code29 review）
   → cargo_alarm_heartbeat_node（合同校验 + 5Hz 状态重发）
   → /cargo_avoidance/status_code
   → 外部主控程序

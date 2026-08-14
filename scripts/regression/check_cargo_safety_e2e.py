@@ -73,9 +73,10 @@ def main() -> int:
     require("CargoBottomEstimate.msg" in messages and
             "CargoSafetyStatus.msg" in messages,
             "typed Cargo messages are not generated", failures)
-    require("SCHEMA_VERSION=6" in safety_message and
+    require("SCHEMA_VERSION=7" in safety_message and
             all(f"CODE_{name}" in safety_message for name in (
                 "CLEAR", "LEVEL1_WARNING", "LEVEL2_WARNING",
+                "ANOMALY_REVIEW",
                 "SYSTEM_NOT_READY", "LOCALIZATION_INVALID",
                 "GRAVITY_INVALID", "CARGO_INVALID", "OBSTACLE_INVALID",
                 "INTERNAL_ERROR")) and
@@ -85,8 +86,9 @@ def main() -> int:
                 "hook_signal_conflict", "EVIDENCE_HAZARD_CONFIRMED",
                 "EVIDENCE_TRACK_CONFIRMATION_PENDING",
                 "EVIDENCE_SPARSE_PENDING", "EVIDENCE_SOURCE_UNRESOLVED",
+                "EVIDENCE_REVIEW_REQUIRED",
                 "evidence_state", "obstacle_track_id")),
-            "CargoSafetyStatus v6 role/code/evidence contract is incomplete",
+            "CargoSafetyStatus v7 role/code/evidence contract is incomplete",
             failures)
 
     for include in ("cargo_bottom_fusion.hpp", "cargo_safety_evaluator.hpp",
@@ -102,8 +104,10 @@ def main() -> int:
             "raw cargo safety diagnostics are not advertised", failures)
     require("cargo_bottom_fusion_.update(observation)" in node,
             "CargoBottomFusion is not invoked by the runtime", failures)
-    require("cargo_safety_evaluator_.evaluate(safety_input)" in node,
-            "CargoSafetyEvaluator is not invoked by the runtime", failures)
+    require("cargo_safety_evaluator_.perceive(safety_input)" in node and
+            "safety_input, formal_obstacle_perception" in node,
+            "canonical obstacle perception/evaluation is not invoked",
+            failures)
     require("composeCargoSafetyStatus(" in node and
             len(re.findall(
                 r"status\.requested_alarm_code\s*=(?!=)", node)) == 1,
@@ -369,13 +373,18 @@ def main() -> int:
             "17/18 do not require fresh spatially continuous cluster evidence",
             failures)
     require("src/cargo_obstacle_tracker.cpp" in cmake and
-            "cargo_obstacle_tracker_.update" in node and
+            "physical_obstacle_track_store_.update" in node and
+            "using PhysicalObstacleTrackStore" in
+                read("src/ndt_slam/include/ndt_slam/cargo_obstacle_tracker.hpp") and
             "cluster_evidence.push_back" in safety_evaluator and
             "current_source_index" in obstacle_tracker and
             "consecutive_observations" in obstacle_tracker and
             "validated_consecutive_observations" in obstacle_tracker and
             "static_provenance_first_stamp_sec" in obstacle_tracker and
-            "require_static_cargo_for_warning: true" in live_config and
+            "require_static_cargo_for_warning: false" in live_config and
+            "require_far_field_history_for_warnings: true" in live_config and
+            "far_history_confirm_frames: 3" in live_config and
+            "selected_far_field_history_valid" in obstacle_tracker and
             "static_cargo_min_voxel_points: 80" in live_config and
             "static_cargo_min_occupied_cells: 12" in live_config and
             "ExternalProvenance" in obstacle_tracker and
@@ -605,10 +614,14 @@ def main() -> int:
             "fuseCargoAvoidanceRisk(" in pending_body and
             "static_height_field_" in pending_body and
             "cargo_safety_evaluator_.evaluate(live_input)" in pending_body and
-            "cargo_safety_evaluator_.evaluate(external_live_input)" in pending_body and
-            "pending_cargo_obstacle_tracker_.update(" in pending_body and
+            "cargo_safety_evaluator_.perceive(external_live_input)" in
+                pending_body and
+            "external_live_input, pending_obstacle_perception" in
+                pending_body and
+            "physical_obstacle_track_store_.update(" in pending_body and
             "formal_cargo_removal_authorized_ = true" not in pending_body and
-            "kSafeCode" not in pending_body,
+            "observation.hazard_geometry_valid = false" in pending_body and
+            "observation.warning_eligible = false" in pending_body,
             "Pending envelope can clear/remove cargo or skips live/static fusion",
             failures)
     require("PendingWarningPromotionPolicy::EVIDENCE_BACKED_ONLY" in

@@ -41,7 +41,7 @@
 
 | 话题 | 消息类型 | 说明 |
 |---|---|---|
-| `/cargo_avoidance/safety_status` | `lidar_slam2_msgs/CargoSafetyStatus` | 正式安全状态（schema v6），含安全码、距离、净空、几何来源、时间戳 |
+| `/cargo_avoidance/safety_status` | `lidar_slam2_msgs/CargoSafetyStatus` | 正式安全状态（schema v7），含安全码、Code29 review、距离、净空、几何来源、时间戳 |
 | `/cargo_avoidance/status_code` | `std_msgs/Int32` | Heartbeat 简码输出（14/17/18/30-35） |
 
 ### 吊物诊断
@@ -66,7 +66,7 @@
 
 ## 消息类型
 
-### CargoSafetyStatus（schema v6）
+### CargoSafetyStatus（schema v7）
 
 正式安全输出消息，定义于 `src/lidar_slam2_msgs/msg/CargoSafetyStatus.msg`。
 
@@ -95,7 +95,7 @@
 
 ### 安全输出
 
-类型化输出 `/cargo_avoidance/safety_status`（`CargoSafetyStatus` schema v6）是主控程序的安全权威输入。
+类型化输出 `/cargo_avoidance/safety_status`（`CargoSafetyStatus` schema v7）是主控程序的安全权威输入。
 
 Heartbeat 简码 `/cargo_avoidance/status_code`（`std_msgs/Int32`）供兼容显示和冗余心跳。
 

@@ -736,7 +736,9 @@ cargo_safety:
   # Code 17 requires the same track to complete confirmation outside 3 m.
   # At the configured operating speed the 7 m acquisition path establishes
   # this history before the real 5 m/code-18 and 3 m/code-17 boundaries.
-  require_far_field_history_for_level1: true
+  require_far_field_history_for_warnings: true
+  far_history_confirm_frames: 3
+  far_history_confirm_duration_sec: 0.2
   # Live same-track far-history is normal warning authority. Static maturity
   # is an independent certified path and must not delay a tracked obstacle.
   require_static_cargo_for_warning: false

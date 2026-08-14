@@ -2,7 +2,7 @@
 
 `server_runtime_monitor.py` 是正式的只读监控入口。它不创建 Publisher、
 不修改 ROS 参数、不写地图与 Manifest，也不参与 14/17/18/30–35 的判定。
-监控故障不会改变主系统输出；`CargoSafetyStatus schema v6` 始终是安全权威源。
+监控故障不会改变主系统输出；`CargoSafetyStatus schema v7` 始终是安全权威源。
 
 ## 数据流
 
