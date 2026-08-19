@@ -84,6 +84,13 @@ struct CargoSafetyClusterEvidence {
     float obstacle_uncertainty_m = std::numeric_limits<float>::quiet_NaN();
     float conservative_clearance_m = std::numeric_limits<float>::quiet_NaN();
 
+    // H1 diagnostics: unresolved vertical geometry that must not be cleared.
+    // `vertical_geometry_unresolved` mirrors HazardEvaluationResult; when set
+    // with near-field low clearance, `potential_warning_code` records the
+    // severity this cluster would warrant if its geometry were confirmed.
+    bool vertical_geometry_unresolved = false;
+    std::uint16_t potential_warning_code = 0;
+
     pcl::PointXYZ centroid_base;
     pcl::PointXYZ nearest_point_base;
     std::vector<int> point_indices;

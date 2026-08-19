@@ -25,6 +25,10 @@ struct HazardEvaluationResult {
   bool entirely_above_cargo = false;
   bool vertically_continuous = false;
   bool low_clearance = false;
+  // True when geometry is finite, the cluster is not entirely above the cargo,
+  // and its vertical continuity could not be established. Such a cluster must
+  // never be interpreted as "proven safe" (see H1 fail-closed contract).
+  bool vertical_geometry_unresolved = false;
   std::string reason = "not_evaluated";
 };
 

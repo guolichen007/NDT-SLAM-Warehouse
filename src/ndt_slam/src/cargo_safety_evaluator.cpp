@@ -252,6 +252,8 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(
         evidence.entirely_above_cargo = hazard.entirely_above_cargo;
         evidence.conservative_clearance_m =
             hazard.assessment.conservative_clearance_m;
+        evidence.vertical_geometry_unresolved =
+            hazard.vertical_geometry_unresolved;
 
         if (!hazard.assessment.valid ||
             !isFinite(evidence.footprint_distance_m) ||
@@ -278,6 +280,21 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(
             evidence.warning_code = kSafeCode;
         }
 
+        // H1: a near-field low-clearance cluster whose vertical geometry could
+        // not be established is an unresolved potential hazard, not proof of
+        // safety. Record its potential severity so the frame decision can
+        // refuse to clear when it outranks any resolved positive warning.
+        const bool unresolved_h1_blocker =
+            evidence.vertical_geometry_unresolved &&
+            evidence.conservative_clearance_m <
+                config_.minimum_vertical_clearance_m &&
+            evidence.footprint_distance_m <= config_.level2_distance_m;
+        if (unresolved_h1_blocker) {
+            evidence.potential_warning_code =
+                evidence.footprint_distance_m <= config_.level1_distance_m
+                    ? kLevel1Code : kLevel2Code;
+        }
+
         ++result.evaluated_cluster_count;
         result.cluster_evidence.push_back(evidence);
         if (!result.has_cluster_evidence ||
@@ -295,6 +312,46 @@ CargoSafetyResult CargoSafetyEvaluator::evaluate(
         result.evidence_state = CargoSafetyEvidenceState::SPARSE_PENDING;
         result.reason = "obstacle_clusters_insufficient";
         return result;
+    }
+
+    // H1 fail-closed: select the most dangerous unresolved near-field
+    // low-clearance cluster. If its potential severity strictly exceeds the
+    // resolved positive warning, refuse to clear (or downgrade): emit an
+    // invalid-evidence fault instead of Code14 or a lower-severity warning.
+    CargoSafetyClusterEvidence unresolved_hazard;
+    bool has_unresolved_hazard = false;
+    int unresolved_priority = 0;
+    for (const CargoSafetyClusterEvidence& evidence : result.cluster_evidence) {
+        if (evidence.potential_warning_code == 0U) {
+            continue;
+        }
+        const int priority = warningPriority(evidence.potential_warning_code);
+        const bool more_dangerous =
+            !has_unresolved_hazard ||
+            priority > unresolved_priority ||
+            (priority == unresolved_priority &&
+             evidence.conservative_clearance_m <
+                 unresolved_hazard.conservative_clearance_m);
+        if (more_dangerous) {
+            unresolved_hazard = evidence;
+            unresolved_priority = priority;
+            has_unresolved_hazard = true;
+        }
+    }
+    if (has_unresolved_hazard) {
+        const int resolved_priority =
+            warningPriority(result.most_dangerous_cluster.warning_code);
+        if (unresolved_priority > resolved_priority) {
+            result.warning_valid = false;
+            result.warning_code = 0;
+            result.fault = CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID;
+            result.evidence_state =
+                CargoSafetyEvidenceState::SOURCE_UNRESOLVED;
+            result.reason =
+                "vertical_continuity_insufficient_low_clearance";
+            result.most_dangerous_cluster = unresolved_hazard;
+            return result;
+        }
     }
 
     result.warning_valid = true;

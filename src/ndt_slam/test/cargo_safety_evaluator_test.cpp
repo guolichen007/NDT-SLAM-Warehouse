@@ -707,5 +707,195 @@ TEST(CargoSafetyEvaluator, RotatedFootprintUsesObbDistanceWithoutSelfRemoval) {
     EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel1Code);
 }
 
+// ---- H1 fail-closed: unresolved near-field low-clearance geometry ----
+
+ObstaclePerceptionCluster h1Cluster(float distance, float top_z,
+                                    float bottom_z, float continuity,
+                                    float uncertainty = 0.10F) {
+    ObstaclePerceptionCluster cluster;
+    cluster.footprint_distance_m = distance;
+    cluster.top_z95_m = top_z;
+    cluster.bottom_z05_m = bottom_z;
+    cluster.minimum_z_m = bottom_z;
+    cluster.maximum_z_m = top_z;
+    cluster.vertical_span_m = top_z - bottom_z;
+    cluster.vertical_continuity_ratio = continuity;
+    cluster.tail_spread_m = 0.0F;
+    cluster.obstacle_uncertainty_m = uncertainty;
+    cluster.point_count = 8U;
+    cluster.point_indices = {0, 1, 2, 3, 4, 5, 6, 7};
+    return cluster;
+}
+
+// Pins vertical_continuity_ratio directly so the H1 contract can be tested
+// without depending on clustering bin occupancy.
+CargoSafetyResult evaluateH1(
+    CargoSafetyInput input,
+    std::vector<ObstaclePerceptionCluster> clusters) {
+    ObstaclePerceptionResult perception;
+    perception.executed = true;
+    perception.valid = true;
+    perception.finite_input_points = 100U;
+    for (std::size_t index = 0U; index < clusters.size(); ++index) {
+        clusters[index].cluster_index = index;
+        perception.clusters.push_back(clusters[index]);
+    }
+    perception.cluster_count = perception.clusters.size();
+    return CargoSafetyEvaluator().evaluate(input, perception);
+}
+
+TEST(CargoSafetyEvaluator, H1UnresolvedNearFieldLowClearanceNeverClears) {
+    // distance <= 3, clearance < 0.8, continuity < 0.45, not overhead.
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(
+        input, {h1Cluster(2.0F, 1.20F, 0.50F, 0.30F)});
+    EXPECT_FALSE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, 0U);
+    EXPECT_EQ(result.fault, CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
+    EXPECT_EQ(result.evidence_state, CargoSafetyEvidenceState::SOURCE_UNRESOLVED);
+    EXPECT_EQ(result.reason, "vertical_continuity_insufficient_low_clearance");
+    ASSERT_TRUE(result.has_cluster_evidence);
+    EXPECT_TRUE(result.most_dangerous_cluster.vertical_geometry_unresolved);
+    EXPECT_EQ(result.most_dangerous_cluster.potential_warning_code,
+              CargoSafetyEvaluator::kLevel1Code);
+    EXPECT_NE(result.warning_code, CargoSafetyEvaluator::kSafeCode);
+}
+
+TEST(CargoSafetyEvaluator, H1UnresolvedLevel2BandNeverClears) {
+    // 3 < distance <= 5, clearance < 0.8, continuity < 0.45, not overhead.
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(
+        input, {h1Cluster(4.0F, 1.20F, 0.50F, 0.30F)});
+    EXPECT_FALSE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, 0U);
+    EXPECT_EQ(result.fault, CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
+    EXPECT_EQ(result.evidence_state, CargoSafetyEvidenceState::SOURCE_UNRESOLVED);
+    EXPECT_EQ(result.reason, "vertical_continuity_insufficient_low_clearance");
+    EXPECT_EQ(result.most_dangerous_cluster.potential_warning_code,
+              CargoSafetyEvaluator::kLevel2Code);
+}
+
+TEST(CargoSafetyEvaluator, H1ClearanceAtOrAboveThresholdNotBlocked) {
+    // clearance >= 0.8 -> not an H1 blocker; original safe behavior holds.
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(
+        input, {h1Cluster(2.0F, 0.90F, 0.50F, 0.30F)});
+    EXPECT_TRUE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kSafeCode);
+    EXPECT_EQ(result.fault, CargoSafetyFault::NONE);
+    EXPECT_EQ(result.most_dangerous_cluster.potential_warning_code, 0U);
+}
+
+TEST(CargoSafetyEvaluator, H1EntirelyAboveCargoNotBlocked) {
+    // overhead geometry is safe regardless of continuity.
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(
+        input, {h1Cluster(2.0F, 4.0F, 3.5F, 0.30F)});
+    EXPECT_TRUE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kSafeCode);
+    EXPECT_EQ(result.fault, CargoSafetyFault::NONE);
+    EXPECT_TRUE(result.most_dangerous_cluster.entirely_above_cargo);
+    EXPECT_FALSE(result.most_dangerous_cluster.vertical_geometry_unresolved);
+}
+
+TEST(CargoSafetyEvaluator, H1BeyondLevel2DistanceNotBlocked) {
+    // distance > 5 must not create new 17/18/29 authority from low continuity.
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(
+        input, {h1Cluster(5.5F, 1.20F, 0.50F, 0.30F)});
+    EXPECT_TRUE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kSafeCode);
+    EXPECT_EQ(result.fault, CargoSafetyFault::NONE);
+    EXPECT_EQ(result.most_dangerous_cluster.potential_warning_code, 0U);
+}
+
+TEST(CargoSafetyEvaluator, H1ContinuityAtThresholdIsContinuous) {
+    // continuity == threshold is vertically continuous and not H1 blocked.
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(
+        input, {h1Cluster(2.0F, 1.20F, 0.50F, 0.45F)});
+    EXPECT_TRUE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel1Code);
+    EXPECT_EQ(result.fault, CargoSafetyFault::NONE);
+}
+
+TEST(CargoSafetyEvaluator, H1ClearanceExactlyAtThresholdNotBlocked) {
+    // H1 is strictly clearance < 0.80; the boundary itself is not a blocker.
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(
+        input, {h1Cluster(2.0F, 1.00F, 0.50F, 0.30F, 0.05F)});
+    EXPECT_TRUE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kSafeCode);
+    EXPECT_EQ(result.fault, CargoSafetyFault::NONE);
+    EXPECT_NEAR(result.most_dangerous_cluster.conservative_clearance_m,
+                0.80F, 1.0e-3F);
+    EXPECT_EQ(result.most_dangerous_cluster.potential_warning_code, 0U);
+}
+
+TEST(CargoSafetyEvaluator, H1ResolvedLevel1WithPotentialLevel2KeepsLevel1) {
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(
+        input, {h1Cluster(2.0F, 1.20F, 0.50F, 1.0F),   // resolved 17
+                h1Cluster(4.0F, 1.20F, 0.50F, 0.30F)}); // unresolved 18
+    EXPECT_TRUE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel1Code);
+    EXPECT_EQ(result.fault, CargoSafetyFault::NONE);
+}
+
+TEST(CargoSafetyEvaluator, H1ResolvedLevel1WithPotentialLevel1KeepsLevel1) {
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(
+        input, {h1Cluster(2.0F, 1.20F, 0.50F, 1.0F),   // resolved 17
+                h1Cluster(2.5F, 1.20F, 0.50F, 0.30F)}); // unresolved 17
+    EXPECT_TRUE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel1Code);
+    EXPECT_EQ(result.fault, CargoSafetyFault::NONE);
+}
+
+TEST(CargoSafetyEvaluator, H1ResolvedLevel2WithPotentialLevel2KeepsLevel2) {
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(
+        input, {h1Cluster(4.0F, 1.20F, 0.50F, 1.0F),   // resolved 18
+                h1Cluster(4.5F, 1.20F, 0.50F, 0.30F)}); // unresolved 18
+    EXPECT_TRUE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kLevel2Code);
+    EXPECT_EQ(result.fault, CargoSafetyFault::NONE);
+}
+
+TEST(CargoSafetyEvaluator, H1ResolvedLevel2WithPotentialLevel1FailsClosed) {
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(
+        input, {h1Cluster(4.0F, 1.20F, 0.50F, 1.0F),   // resolved 18
+                h1Cluster(2.0F, 1.20F, 0.50F, 0.30F)}); // unresolved 17
+    EXPECT_FALSE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, 0U);
+    EXPECT_EQ(result.fault, CargoSafetyFault::OBSTACLE_EVIDENCE_INVALID);
+    EXPECT_EQ(result.evidence_state, CargoSafetyEvidenceState::SOURCE_UNRESOLVED);
+    EXPECT_EQ(result.reason, "vertical_continuity_insufficient_low_clearance");
+    EXPECT_EQ(result.most_dangerous_cluster.potential_warning_code,
+              CargoSafetyEvaluator::kLevel1Code);
+}
+
+TEST(CargoSafetyEvaluator, H1NoExternalObstacleStillClears) {
+    CargoSafetyInput input = baseInput();
+    const CargoSafetyResult result = evaluateH1(input, {});
+    EXPECT_TRUE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, CargoSafetyEvaluator::kSafeCode);
+    EXPECT_EQ(result.fault, CargoSafetyFault::NONE);
+    EXPECT_EQ(result.reason, "clear_no_external_obstacle");
+}
+
+TEST(CargoSafetyEvaluator, H1NonFiniteGeometryKeepsInternalError) {
+    // NaN geometry must keep the original INTERNAL_ERROR path, never H1's 34.
+    CargoSafetyInput input = baseInput();
+    ObstaclePerceptionCluster bad = h1Cluster(2.0F, 1.20F, 0.50F, 0.30F);
+    bad.top_z95_m = std::numeric_limits<float>::quiet_NaN();
+    const CargoSafetyResult result = evaluateH1(input, {bad});
+    EXPECT_FALSE(result.warning_valid);
+    EXPECT_EQ(result.warning_code, 0U);
+    EXPECT_EQ(result.fault, CargoSafetyFault::INTERNAL_ERROR);
+    EXPECT_NE(result.reason, "vertical_continuity_insufficient_low_clearance");
+}
+
 }  // namespace
 }  // namespace ndt_slam

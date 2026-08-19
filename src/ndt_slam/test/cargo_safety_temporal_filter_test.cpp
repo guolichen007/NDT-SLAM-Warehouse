@@ -184,5 +184,44 @@ TEST(CargoSafetyTemporalFilter, UnconfirmedHazardNeverFallsBackToClear) {
   EXPECT_TRUE(first_robust.pending);
 }
 
+TEST(CargoSafetyTemporalFilter, H1UnresolvedEvidenceNeverConfirmsClear) {
+  CargoSafetyTemporalFilter filter;
+  filter.update(clear(1.0));
+  ASSERT_EQ(filter.update(clear(1.2)).code, 14U);
+
+  // H1 fail-closed raw evidence (raw_valid=false, non-protocol code) must not
+  // enter CLEAR confirmation.
+  CargoSafetyTemporalInput unresolved;
+  unresolved.stamp_sec = 1.4;
+  unresolved.raw_valid = false;
+  unresolved.raw_code = 0U;
+  const CargoSafetyTemporalDecision invalid = filter.update(unresolved);
+  EXPECT_FALSE(invalid.stable);
+  EXPECT_TRUE(invalid.pending);
+  EXPECT_EQ(invalid.code, 0U);
+  EXPECT_EQ(invalid.reason, "invalid_raw_evidence");
+
+  // A subsequent CLEAR must re-confirm from scratch, not resume the prior one.
+  EXPECT_FALSE(filter.update(clear(1.6)).stable);
+  EXPECT_TRUE(filter.update(clear(1.8)).stable);
+}
+
+TEST(CargoSafetyTemporalFilter, H1UnresolvedFrameDoesNotLockOutRecovery) {
+  CargoSafetyTemporalFilter filter;
+  CargoSafetyTemporalInput unresolved;
+  unresolved.stamp_sec = 1.0;
+  unresolved.raw_valid = false;
+  unresolved.raw_code = 0U;
+  EXPECT_FALSE(filter.update(unresolved).stable);
+
+  // The immediately following valid hazard frames confirm normally.
+  EXPECT_FALSE(filter.update(hazard(1.2, 0.00F)).stable);
+  EXPECT_FALSE(filter.update(hazard(1.4, 0.05F)).stable);
+  const CargoSafetyTemporalDecision confirmed =
+      filter.update(hazard(1.6, 0.08F));
+  EXPECT_TRUE(confirmed.stable);
+  EXPECT_EQ(confirmed.code, 17U);
+}
+
 }  // namespace
 }  // namespace ndt_slam

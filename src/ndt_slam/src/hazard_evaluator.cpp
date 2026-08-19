@@ -42,6 +42,10 @@ HazardEvaluationResult HazardEvaluator::evaluate(
       result.vertically_continuous;
   result.assessment.valid =
       std::isfinite(result.assessment.conservative_clearance_m);
+  result.vertical_geometry_unresolved =
+      result.assessment.valid &&
+      !result.entirely_above_cargo &&
+      !result.vertically_continuous;
   result.reason = result.assessment.valid
       ? (result.low_clearance ? "low_clearance_geometry" :
          (result.entirely_above_cargo ? "overhead_geometry" :
