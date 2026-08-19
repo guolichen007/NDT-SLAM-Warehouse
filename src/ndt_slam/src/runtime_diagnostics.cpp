@@ -151,7 +151,21 @@ void RuntimeDiagnostics::configure(const RuntimeDiagnosticsConfig& cfg,
                << "locked_length_m,locked_width_m,locked_height_m,locked_yaw_deg,"
                << "raw_bottom_z,filtered_bottom_z,conservative_bottom_z,"
                << "top_z,height_m,bottom_valid,height_valid,filter_accepted,filter_reason,"
-               << "lost_frames,odom_x,odom_y,odom_z\n";
+               << "lost_frames,odom_x,odom_y,odom_z,"
+               << "raw_safety_input_valid,raw_safety_warning_valid,"
+               << "raw_safety_fault,raw_safety_evidence_state,raw_safety_reason,"
+               << "raw_cluster_present,raw_cluster_index,raw_cluster_point_count,"
+               << "raw_cluster_warning_code,raw_cluster_potential_warning_code,"
+               << "raw_cluster_distance_m,raw_cluster_top_z95_m,"
+               << "raw_cluster_bottom_z05_m,raw_cluster_vertical_span_m,"
+               << "raw_cluster_vertical_continuity_ratio,"
+               << "raw_cluster_vertical_continuity_threshold,"
+               << "raw_cluster_entirely_above_cargo,"
+               << "raw_cluster_vertical_geometry_unresolved,"
+               << "raw_cluster_obstacle_uncertainty_m,"
+               << "raw_cluster_conservative_clearance_m,"
+               << "candidate_top1_rank,candidate_top2_rank,"
+               << "candidate_rank_margin,selected_suspension_confidence\n";
 
     static_evidence_csv_.open(output_dir_ + "/static_evidence.csv");
     static_evidence_csv_
@@ -630,7 +644,31 @@ void RuntimeDiagnostics::writeCargoFrame(const CargoFrameRecord& rec) {
                << (rec.bottom_valid ? 1 : 0) << "," << (rec.height_valid ? 1 : 0) << ","
                << (rec.filter_accepted ? 1 : 0) << "," << rec.filter_reason << ","
                << rec.lost_frames << "," << rec.odom_x << "," << rec.odom_y
-               << "," << rec.odom_z << "\n";
+               << "," << rec.odom_z << ","
+               << (rec.raw_safety_input_valid ? 1 : 0) << ","
+               << (rec.raw_safety_warning_valid ? 1 : 0) << ","
+               << rec.raw_safety_fault << ","
+               << rec.raw_safety_evidence_state << ","
+               << rec.raw_safety_reason << ","
+               << (rec.raw_cluster_present ? 1 : 0) << ","
+               << rec.raw_cluster_index << ","
+               << rec.raw_cluster_point_count << ","
+               << rec.raw_cluster_warning_code << ","
+               << rec.raw_cluster_potential_warning_code << ","
+               << rec.raw_cluster_distance_m << ","
+               << rec.raw_cluster_top_z95_m << ","
+               << rec.raw_cluster_bottom_z05_m << ","
+               << rec.raw_cluster_vertical_span_m << ","
+               << rec.raw_cluster_vertical_continuity_ratio << ","
+               << rec.raw_cluster_vertical_continuity_threshold << ","
+               << (rec.raw_cluster_entirely_above_cargo ? 1 : 0) << ","
+               << (rec.raw_cluster_vertical_geometry_unresolved ? 1 : 0) << ","
+               << rec.raw_cluster_obstacle_uncertainty_m << ","
+               << rec.raw_cluster_conservative_clearance_m << ","
+               << rec.candidate_top1_rank << ","
+               << rec.candidate_top2_rank << ","
+               << rec.candidate_rank_margin << ","
+               << rec.selected_suspension_confidence << "\n";
   }
   if (static_evidence_csv_.is_open()) {
     static_evidence_csv_

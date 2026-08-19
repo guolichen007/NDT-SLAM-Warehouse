@@ -2536,6 +2536,13 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
                      odom_anchor_config_.use_dynamic_history_eraser ? 1 : 0);
         }
 
+        // Startup-visible anchor configuration (once, low noise). anchor=(0,0)
+        // is never treated as invalid here — this only records what is loaded.
+        ROS_INFO("[CargoAnchorConfig] enabled=%d anchor=(%.2f,%.2f) detect_rate=%.1f",
+                 odom_anchor_config_.enabled ? 1 : 0,
+                 odom_anchor_config_.anchor_x, odom_anchor_config_.anchor_y,
+                 odom_anchor_config_.detect_rate_hz);
+
         // ConfigFinal 日志
         ROS_DEBUG("[ConfigFinal] hook_cargo_removal=%d source=config",
                  hook_lock_config_.enable_hook_cargo_removal ? 1 : 0);
@@ -3011,6 +3018,10 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             cargo_topic_hook_anchor_z_authoritative_ =
                 swing["topic_hook_anchor_z_authoritative"]
                     .as<bool>(true);
+            ROS_INFO("[CargoHookAnchorConfig] source=%s configured_xy=%d topic_xy=%d",
+                     cargo_swing_hook_anchor_source_.c_str(),
+                     cargo_configured_hook_anchor_xy_authoritative_ ? 1 : 0,
+                     cargo_topic_hook_anchor_xy_authoritative_ ? 1 : 0);
             cargo_hoist_state_topic_ =
                 swing["hoist_state_topic"].as<std::string>(
                     "/crane/hoist_motion_state");
@@ -3992,6 +4003,7 @@ void NdtSlamNode::resetCargoForHookState(
     cargo_origin_height_track_id_ = 0U;
     last_cargo_bottom_result_ = CargoBottomResult{};
     last_cargo_safety_result_ = CargoSafetyResult{};
+    last_raw_cargo_safety_result_ = CargoSafetyResult{};
     confirmed_cargo_safety_result_ = CargoSafetyResult{};
     cargo_safety_temporal_filter_.reset();
     physical_obstacle_track_store_.reset();
@@ -10815,6 +10827,7 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
         current_rigid_cargo_geometry_ = RigidCargoGeometry{};
         last_cargo_bottom_result_ = CargoBottomResult{};
         last_cargo_safety_result_ = CargoSafetyResult{};
+        last_raw_cargo_safety_result_ = CargoSafetyResult{};
         confirmed_cargo_safety_result_ = CargoSafetyResult{};
         cargo_safety_temporal_filter_.reset();
         physical_obstacle_track_store_.reset();
@@ -21779,6 +21792,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_safety_evaluator_.evaluate(
             safety_input, formal_obstacle_perception);
     CargoSafetyResult raw_cargo_safety_result = radial_safety_result;
+    last_raw_cargo_safety_result_ = radial_safety_result;
     cargo_corridor_eligible_clusters_ = 0U;
     cargo_corridor_rejected_clusters_ = 0U;
     const float cargo_map_speed = cargo_velocity_map_.norm();
@@ -26743,6 +26757,49 @@ void NdtSlamNode::logCargoHealthPeriodic() {
             cargo_residual_unknown_clusters_,
             static_cast<std::size_t>(std::numeric_limits<int>::max())));
     rec.safety_reason = cargo_last_safety_reason_;
+    // H1 raw evaluator snapshot (observability only).
+    rec.raw_safety_input_valid = last_raw_cargo_safety_result_.input_valid;
+    rec.raw_safety_warning_valid = last_raw_cargo_safety_result_.warning_valid;
+    rec.raw_safety_fault =
+        static_cast<int>(last_raw_cargo_safety_result_.fault);
+    rec.raw_safety_evidence_state =
+        static_cast<int>(last_raw_cargo_safety_result_.evidence_state);
+    rec.raw_safety_reason = last_raw_cargo_safety_result_.reason;
+    rec.raw_cluster_present = last_raw_cargo_safety_result_.has_cluster_evidence;
+    if (last_raw_cargo_safety_result_.has_cluster_evidence) {
+        const CargoSafetyClusterEvidence& raw_cluster =
+            last_raw_cargo_safety_result_.most_dangerous_cluster;
+        rec.raw_cluster_index = raw_cluster.cluster_index;
+        rec.raw_cluster_point_count = raw_cluster.point_count;
+        rec.raw_cluster_warning_code =
+            static_cast<int>(raw_cluster.warning_code);
+        rec.raw_cluster_potential_warning_code =
+            static_cast<int>(raw_cluster.potential_warning_code);
+        rec.raw_cluster_distance_m = raw_cluster.footprint_distance_m;
+        rec.raw_cluster_top_z95_m = raw_cluster.obstacle_top_z95_m;
+        rec.raw_cluster_bottom_z05_m = raw_cluster.obstacle_bottom_z05_m;
+        rec.raw_cluster_vertical_span_m = raw_cluster.obstacle_vertical_span_m;
+        rec.raw_cluster_vertical_continuity_ratio =
+            raw_cluster.vertical_continuity_ratio;
+        rec.raw_cluster_entirely_above_cargo =
+            raw_cluster.entirely_above_cargo;
+        rec.raw_cluster_vertical_geometry_unresolved =
+            raw_cluster.vertical_geometry_unresolved;
+        rec.raw_cluster_obstacle_uncertainty_m =
+            raw_cluster.obstacle_uncertainty_m;
+        rec.raw_cluster_conservative_clearance_m =
+            raw_cluster.conservative_clearance_m;
+    }
+    rec.raw_cluster_vertical_continuity_threshold =
+        cargo_safety_evaluator_.config()
+            .obstacle_min_vertical_continuity_ratio;
+    // Prelock identity ranking snapshot (observability only; already computed
+    // during candidate selection, never re-derived for the CSV).
+    rec.candidate_top1_rank = hook_fixed_cargo_.candidate_top1_score;
+    rec.candidate_top2_rank = hook_fixed_cargo_.candidate_top2_score;
+    rec.candidate_rank_margin = hook_fixed_cargo_.candidate_score_margin;
+    rec.selected_suspension_confidence =
+        hook_fixed_cargo_.suspension_confidence;
     rec.support_points = static_cast<int>(std::min<std::size_t>(
         last_cargo_bottom_result_.selected_stats.bottom_band_points,
         static_cast<std::size_t>(std::numeric_limits<int>::max())));

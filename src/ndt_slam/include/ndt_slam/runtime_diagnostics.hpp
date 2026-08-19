@@ -394,6 +394,40 @@ struct CargoFrameRecord {
   std::string filter_reason;
   int lost_frames = 0;
   double odom_x = 0.0, odom_y = 0.0, odom_z = 0.0;
+  // H1 raw evaluator snapshot (observability only). Captured before obstacle
+  // tracking / temporal / avoidance fusion mutate the raw safety result.
+  bool raw_safety_input_valid = false;
+  bool raw_safety_warning_valid = false;
+  int raw_safety_fault = 0;
+  int raw_safety_evidence_state = 0;
+  std::string raw_safety_reason;
+  bool raw_cluster_present = false;
+  std::size_t raw_cluster_index = 0U;
+  std::size_t raw_cluster_point_count = 0U;
+  int raw_cluster_warning_code = 0;
+  int raw_cluster_potential_warning_code = 0;
+  double raw_cluster_distance_m =
+      std::numeric_limits<double>::quiet_NaN();
+  double raw_cluster_top_z95_m =
+      std::numeric_limits<double>::quiet_NaN();
+  double raw_cluster_bottom_z05_m =
+      std::numeric_limits<double>::quiet_NaN();
+  double raw_cluster_vertical_span_m =
+      std::numeric_limits<double>::quiet_NaN();
+  double raw_cluster_vertical_continuity_ratio = 0.0;
+  double raw_cluster_vertical_continuity_threshold = 0.0;
+  bool raw_cluster_entirely_above_cargo = false;
+  bool raw_cluster_vertical_geometry_unresolved = false;
+  double raw_cluster_obstacle_uncertainty_m =
+      std::numeric_limits<double>::quiet_NaN();
+  double raw_cluster_conservative_clearance_m =
+      std::numeric_limits<double>::quiet_NaN();
+  // Prelock identity ranking snapshot (observability only). Already computed
+  // during candidate selection; recorded verbatim, never re-derived.
+  double candidate_top1_rank = 0.0;
+  double candidate_top2_rank = 0.0;
+  double candidate_rank_margin = 0.0;
+  double selected_suspension_confidence = 0.0;
 };
 
 class RuntimeDiagnostics {

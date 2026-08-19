@@ -1,6 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstdio>
+#include <fstream>
 #include <string>
+
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include "ndt_slam/runtime_diagnostics.hpp"
 
@@ -92,6 +98,57 @@ TEST(RuntimeDiagnosticsTest, NonPipelineRiskEmitsOnceUntilRecovery) {
       3, 1.2, 2.2, 20, "active", 3000, 3000, 42.0, 62.0);
   const std::string reentered = testing::internal::GetCapturedStdout();
   EXPECT_NE(reentered.find("frame=3"), std::string::npos);
+}
+
+TEST(RuntimeDiagnosticsTest, CargoCsvSchemaColumnCountsMatch) {
+  const std::string dir = "/tmp/ndt_slam_csv_schema_test";
+  ::mkdir(dir.c_str(), 0755);
+  const std::string cargo_path = dir + "/cargo_frames.csv";
+  const std::string static_path = dir + "/static_evidence.csv";
+  const std::string ndt_path = dir + "/runtime_frames.csv";
+  std::remove(cargo_path.c_str());
+  std::remove(static_path.c_str());
+  std::remove(ndt_path.c_str());
+
+  RuntimeDiagnostics diagnostics;
+  RuntimeDiagnosticsConfig config;
+  config.enabled = true;
+  config.csv_enabled = true;
+  diagnostics.configure(config, dir);
+
+  CargoFrameRecord rec;
+  rec.stamp = 1.0;
+  rec.raw_safety_reason = "vertical_continuity_insufficient_low_clearance";
+  rec.raw_cluster_present = true;
+  rec.raw_cluster_distance_m = 2.0;
+  rec.raw_cluster_top_z95_m = 1.2;
+  rec.raw_cluster_bottom_z05_m = 0.5;
+  rec.raw_cluster_vertical_span_m = 0.7;
+  rec.raw_cluster_vertical_continuity_ratio = 0.3;
+  rec.raw_cluster_vertical_continuity_threshold = 0.45;
+  rec.raw_cluster_conservative_clearance_m = 0.55;
+  rec.candidate_top1_rank = 1.0;
+  rec.candidate_top2_rank = 2.0;
+  rec.candidate_rank_margin = 0.3;
+  diagnostics.writeCargoFrame(rec);
+  diagnostics.flushCsv();
+
+  std::ifstream in(cargo_path);
+  ASSERT_TRUE(in.is_open());
+  std::string header;
+  std::string row;
+  ASSERT_TRUE(std::getline(in, header));
+  ASSERT_TRUE(std::getline(in, row));
+
+  const auto columns = [](const std::string& line) {
+    return std::count(line.begin(), line.end(), ',') + 1;
+  };
+  EXPECT_EQ(columns(header), columns(row));
+  EXPECT_GT(columns(header), 0);
+
+  std::remove(cargo_path.c_str());
+  std::remove(static_path.c_str());
+  std::remove(ndt_path.c_str());
 }
 
 }  // namespace

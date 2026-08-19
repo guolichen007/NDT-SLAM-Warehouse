@@ -2254,6 +2254,10 @@ private:
     AvoidanceDecisionOwner avoidance_decision_owner_;
     AvoidanceDiagnosticsStore avoidance_diagnostics_;
     CargoSafetyResult last_cargo_safety_result_;
+    // Raw CargoSafetyEvaluator output snapshot, captured before obstacle
+    // tracking / temporal / avoidance fusion mutate the result. Observability
+    // only - never participates in any authority decision.
+    CargoSafetyResult last_raw_cargo_safety_result_;
     CargoSafetyResult confirmed_cargo_safety_result_;
     std::size_t cargo_self_removed_points_ = 0U;
     std::size_t cargo_pending_self_removed_points_ = 0U;
