@@ -183,7 +183,8 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
     const StaticEvidenceCellKeySet& observed_free_cells,
     double stamp_sec,
     std::uint64_t map_generation,
-    std::uint64_t objects_version) {
+    std::uint64_t objects_version,
+    const StaticEvidenceObservationContext& context) {
   if (!std::isfinite(stamp_sec) || stamp_sec <= 0.0) return false;
   std::lock_guard<std::mutex> lock(mutex_);
   if (working_generation_ != map_generation) {
@@ -202,10 +203,17 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
     }
     return false;
   }
+  const double previous_observation_stamp_sec =
+      last_observation_stamp_sec_;
+  const bool observation_time_gap_event =
+      previous_observation_stamp_sec > 0.0 &&
+      stamp_sec - previous_observation_stamp_sec >
+          config_.maximum_observation_gap_sec;
   last_observation_stamp_sec_ = stamp_sec;
   ++latest_observation_sequence_;
   if (latest_observation_sequence_ == 0U) ++latest_observation_sequence_;
   bool snapshot_changed = false;
+  std::uint64_t time_gap_affected_cells = 0U;
 
   // NOT_IN_VIEW deliberately preserves pending streaks. Only an explicitly
   // visible free cell is negative evidence.
@@ -274,6 +282,7 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
         cell.min_z = geometry.min_z;
         cell.max_z = geometry.max_z;
         ++diagnostics_totals_.reset_by_time_gap;
+        ++time_gap_affected_cells;
       } else if (sequence_gap == 0U && !cell.temporally_mature) {
         cell.consecutive_observation_count = 0U;
         cell.consecutive_stable_duration_sec = 0.0;
@@ -298,6 +307,19 @@ bool StaticObstacleEvidenceIndex::observeCleanBuildCells(
       cell.temporally_mature = true;
       snapshot_changed = true;
     }
+  }
+  if (observation_time_gap_event) {
+    ++diagnostics_totals_.time_gap_event_count;
+    diagnostics_totals_.affected_cells_total += time_gap_affected_cells;
+    diagnostics_totals_.affected_cells_last = time_gap_affected_cells;
+    diagnostics_totals_.previous_stamp = previous_observation_stamp_sec;
+    diagnostics_totals_.current_stamp = stamp_sec;
+    diagnostics_totals_.gap_sec =
+        previous_observation_stamp_sec > 0.0
+            ? stamp_sec - previous_observation_stamp_sec
+            : 0.0;
+    diagnostics_totals_.stamp_source = context.stamp_source;
+    diagnostics_totals_.gap_event_stationary = context.crane_stationary;
   }
   if (snapshot_changed || !occupied_cells.empty() ||
       !observed_free_cells.empty()) {

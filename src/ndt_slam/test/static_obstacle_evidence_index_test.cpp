@@ -134,6 +134,31 @@ TEST(StaticObstacleEvidenceIndexTest,
 }
 
 TEST(StaticObstacleEvidenceIndexTest,
+     TimeGapEventCountsOnceWhileCellCounterRemainsPerCell) {
+  auto config = testConfig();
+  config.maximum_observation_gap_sec = 0.5;
+  StaticObstacleEvidenceIndex index(config);
+  index.reset(81U);
+  index.observeCleanBuildCells(
+      twoCells(), {}, {}, 1.0, 81U, 1U,
+      {"merged", false});
+  index.observeCleanBuildCells(
+      twoCells(), {}, {}, 2.0, 81U, 2U,
+      {"merged", true});
+
+  const auto diagnostics = index.diagnostics();
+  EXPECT_EQ(diagnostics.reset_by_time_gap, 2U);
+  EXPECT_EQ(diagnostics.time_gap_event_count, 1U);
+  EXPECT_EQ(diagnostics.affected_cells_total, 2U);
+  EXPECT_EQ(diagnostics.affected_cells_last, 2U);
+  EXPECT_DOUBLE_EQ(diagnostics.previous_stamp, 1.0);
+  EXPECT_DOUBLE_EQ(diagnostics.current_stamp, 2.0);
+  EXPECT_DOUBLE_EQ(diagnostics.gap_sec, 1.0);
+  EXPECT_EQ(diagnostics.stamp_source, "merged");
+  EXPECT_TRUE(diagnostics.gap_event_stationary);
+}
+
+TEST(StaticObstacleEvidenceIndexTest,
      MissingSequenceResetsStableDuration) {
   auto config = testConfig();
   config.minimum_matched_cells = 1U;

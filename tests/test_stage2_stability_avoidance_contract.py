@@ -41,12 +41,28 @@ class Stage2StabilityAvoidanceContractTest(unittest.TestCase):
             "src/ndt_slam/include/ndt_slam/time_epoch_contract.hpp",
             "src/ndt_slam/src/persistent_registration_loader.cpp",
             "src/ndt_slam/include/ndt_slam/persistent_registration_loader.hpp",
-            "src/ndt_slam/src/PointCloudMerger.cpp",
             "src/ndt_slam/scripts/ops/ndt_recovery_watchdog.py",
         )
         for path in protected:
             with self.subTest(path=path):
                 self.assertEqual((ROOT / path).read_bytes(), git_show(path))
+
+    def test_pointcloud_merger_phase1_delta_is_diagnostics_only(self) -> None:
+        diff = subprocess.check_output(
+            ["git", "diff", STAGE1, "--",
+             "src/ndt_slam/src/PointCloudMerger.cpp"],
+            cwd=ROOT, text=True, encoding="utf-8")
+        changed = "\n".join(
+            line for line in diff.splitlines()
+            if line.startswith(("+", "-")) and
+            not line.startswith(("+++", "---")))
+        for required in ("stamp_a", "stamp_b", "merged_stamp"):
+            self.assertIn(required, changed)
+        self.assertNotRegex(
+            changed,
+            re.compile(
+                r"selectPublishWork|queue\.pop|pair_dt_sec\s*=|"
+                r"setInput|transformPointCloud|pub_merged_\.publish"))
 
     def test_no_forbidden_threshold_policy_was_imported(self) -> None:
         diff = subprocess.check_output(

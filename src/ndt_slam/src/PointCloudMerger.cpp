@@ -383,16 +383,23 @@ private:
         diag << std::fixed << std::setprecision(3)
              << "mode=" << work.mode
              << " lidar_a=" << work.frames[0].lidar_name
+             << " stamp_a=" << work.frames[0].frame.stamp.toSec()
+             << " " << work.frames[0].lidar_name << "_stamp="
+             << work.frames[0].frame.stamp.toSec()
              << " seq_a=" << work.frames[0].frame.sequence
              << " ros_seq_a=" << work.frames[0].frame.ros_sequence;
         if (work.frames.size() == 2U) {
             diag << " lidar_b=" << work.frames[1].lidar_name
+                 << " stamp_b=" << work.frames[1].frame.stamp.toSec()
+                 << " " << work.frames[1].lidar_name << "_stamp="
+                 << work.frames[1].frame.stamp.toSec()
                  << " seq_b=" << work.frames[1].frame.sequence
                  << " ros_seq_b=" << work.frames[1].frame.ros_sequence;
         } else {
-            diag << " lidar_b=none seq_b=0 ros_seq_b=0";
+            diag << " lidar_b=none stamp_b=0 seq_b=0 ros_seq_b=0";
         }
-        diag << " pair_dt_ms=" << (work.pair_dt_sec < 0.0 ? -1.0 : work.pair_dt_sec * 1000.0)
+        diag << " merged_stamp=" << latest_stamp.toSec()
+             << " pair_dt_ms=" << (work.pair_dt_sec < 0.0 ? -1.0 : work.pair_dt_sec * 1000.0)
              << " age_ms=" << work.oldest_age_sec * 1000.0
              << " reuse=0"
              << " points_a=" << input_points[0]

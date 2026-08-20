@@ -98,6 +98,14 @@ struct StaticEvidenceDiagnostics {
   std::size_t pending_observation_count = 0U;
   std::size_t pending_stable_duration = 0U;
   std::uint64_t reset_by_time_gap = 0U;
+  std::uint64_t time_gap_event_count = 0U;
+  std::uint64_t affected_cells_total = 0U;
+  std::uint64_t affected_cells_last = 0U;
+  double previous_stamp = 0.0;
+  double current_stamp = 0.0;
+  double gap_sec = 0.0;
+  std::string stamp_source = "unknown";
+  bool gap_event_stationary = false;
   std::uint64_t reset_by_sequence_gap = 0U;
   std::uint64_t invalidated_by_tombstone = 0U;
   std::uint64_t generation_mismatch = 0U;
@@ -106,6 +114,11 @@ struct StaticEvidenceDiagnostics {
   std::uint64_t observed_free = 0U;
   std::uint64_t observed_occupied = 0U;
   std::map<std::uint32_t, std::size_t> streak_histogram;
+};
+
+struct StaticEvidenceObservationContext {
+  std::string stamp_source = "internal_static_evidence_observation_stamp";
+  bool crane_stationary = false;
 };
 
 struct StaticProvenanceQuery {
@@ -198,7 +211,8 @@ class StaticObstacleEvidenceIndex {
       const StaticEvidenceCellKeySet& observed_free_cells,
       double stamp_sec,
       std::uint64_t map_generation,
-      std::uint64_t objects_version = 0U);
+      std::uint64_t objects_version = 0U,
+      const StaticEvidenceObservationContext& context = {});
   StaticEvidenceMutationResult invalidateCells(
       const StaticEvidenceCellKeySet& invalidated_cells,
       std::uint64_t clean_build_version,
