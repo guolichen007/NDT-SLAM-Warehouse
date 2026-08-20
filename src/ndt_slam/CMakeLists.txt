@@ -126,7 +126,10 @@ set(LIBRARY_SOURCES
   src/stationary_motion_policy.cpp
   src/registration_cloud_builder.cpp
   src/ndt_observability.cpp
+  src/se2_observability_proxy.cpp
   src/crane_pose_constraint.cpp
+  src/crane_yaw_authority.cpp
+  src/rail_constrained_translation_refiner.cpp
   src/rigid_transform_conversion.cpp
   # Asynchronous local/global NDT relocalization
   src/ndt_relocalizer.cpp
@@ -589,6 +592,27 @@ if(CATKIN_ENABLE_TESTING)
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 
+  catkin_add_gtest(se2_observability_proxy_test
+    test/se2_observability_proxy_test.cpp)
+  if(TARGET se2_observability_proxy_test)
+    target_link_libraries(se2_observability_proxy_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(crane_yaw_authority_test
+    test/crane_yaw_authority_test.cpp)
+  if(TARGET crane_yaw_authority_test)
+    target_link_libraries(crane_yaw_authority_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(rail_constrained_translation_refiner_test
+    test/rail_constrained_translation_refiner_test.cpp)
+  if(TARGET rail_constrained_translation_refiner_test)
+    target_link_libraries(rail_constrained_translation_refiner_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
   catkin_add_gtest(runtime_diagnostics_test
     test/runtime_diagnostics_test.cpp)
   if(TARGET runtime_diagnostics_test)
@@ -622,6 +646,9 @@ catkin_install_python(PROGRAMS
   scripts/ops/ndt_recovery_watchdog.py
   scripts/ops/server_runtime_monitor.py
   scripts/ops/summarize_server_run.py
+  scripts/analysis/record_site_yaw_reference.py
+  scripts/analysis/analyze_yaw_authority_shadow.py
+  scripts/analysis/analyze_dual_lidar_incident.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
