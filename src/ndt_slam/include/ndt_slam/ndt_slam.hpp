@@ -2065,6 +2065,11 @@ private:
     ros::Publisher cargo_fused_box_marker_pub_;
     ros::Publisher cargo_static_evidence_debug_pub_;
     ros::Publisher cargo_geometry_debug_pub_;
+    // Paired-avoidance forensic trace. Diagnostics only: writes per-frame
+    // cargo causal-chain evidence; never reads back into a product decision.
+    std::ofstream cargo_forensic_csv_;
+    bool cargo_forensic_csv_init_ = false;
+    std::uint64_t cargo_forensic_frame_seq_ = 0U;
     ros::Publisher cargo_operational_status_pub_;
     ros::Publisher cargo_pending_avoidance_pub_;
     ros::Publisher cargo_pending_envelope_marker_pub_;
@@ -2486,6 +2491,8 @@ private:
                                   bool localization_valid = true);
     void publishCargoGeometryDebug(const CargoBottomResult& bottom,
                                    const ros::Time& stamp);
+    void writeCargoForensicTrace(const CargoBottomResult& bottom,
+                                 const ros::Time& stamp);
     void publishOperationalStatus(
         const lidar_slam2_msgs::CargoSafetyStatus& raw,
         const ros::Time& stamp);

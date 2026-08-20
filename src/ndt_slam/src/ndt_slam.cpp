@@ -10900,6 +10900,7 @@ void NdtSlamNode::publishRelocalizationSafetyInvalid(
     publishCargoFusionMarker(
         CargoBottomResult{}, stamp, false, false);
     publishCargoGeometryDebug(CargoBottomResult{}, stamp);
+    writeCargoForensicTrace(CargoBottomResult{}, stamp);
     publishOperationalStatus(status, stamp);
 }
 
@@ -16741,6 +16742,205 @@ void NdtSlamNode::publishCargoGeometryDebug(
     cargo_geometry_debug_pub_.publish(message);
 }
 
+void NdtSlamNode::writeCargoForensicTrace(const CargoBottomResult& bottom,
+                                          const ros::Time& stamp) {
+    // Forensic-only diagnostics. Never reads back into a product decision.
+    const bool detection_is_current = hook_fixed_cargo_.valid &&
+        hook_observation_associated_current_ &&
+        hook_observation_association_stamp_ == stamp &&
+        !last_anchor_detect_stamp_.isZero() &&
+        std::abs((last_anchor_detect_stamp_ - stamp).toSec()) <= 1.0e-4;
+
+    const bool current_top_valid = detection_is_current &&
+        std::isfinite(hook_fixed_cargo_.z95);
+    const bool current_top_support_valid =
+        hook_fixed_cargo_.top_support_points >=
+            static_cast<std::size_t>(
+                hook_lock_config_.formal_top_min_support_points) &&
+        hook_fixed_cargo_.top_surface_coverage_ratio >=
+            hook_lock_config_.formal_top_min_coverage_ratio &&
+        hook_lock_.locked_obb_support.valid;
+    const float current_top_z_base = hook_fixed_cargo_.z95;
+
+    const bool fused_geometry_frozen = cargo_frozen_geometry_.valid &&
+        cargo_frozen_geometry_.frozen &&
+        cargo_frozen_geometry_.cargo_lifecycle_id == cargo_lifecycle_id_;
+    const float frozen_thickness = fused_geometry_frozen
+        ? cargo_frozen_geometry_.height_m
+        : hook_lock_.locked_shape.height_m;
+    const bool frozen_thickness_valid =
+        hook_lock_.locked_shape.valid &&
+        std::isfinite(frozen_thickness) &&
+        frozen_thickness >= cargo_bottom_fusion_.config().minimum_prior_height &&
+        frozen_thickness <= cargo_bottom_fusion_.config().maximum_prior_height;
+    const float frozen_thickness_confidence = std::clamp(
+        hook_lock_.locked_shape.orientation_confidence, 0.0F, 1.0F);
+
+    // Frame/transform audit from the box bottom-face corners (indices 0..3).
+    float tz = std::numeric_limits<float>::quiet_NaN();
+    float yaw_deg = std::numeric_limits<float>::quiet_NaN();
+    if (bottom.geometry.valid) {
+        const Eigen::Vector3f& b0 = bottom.geometry.corners_base[0];
+        const Eigen::Vector3f& b1 = bottom.geometry.corners_base[1];
+        const Eigen::Vector3f& m0 = bottom.geometry.corners_map[0];
+        const Eigen::Vector3f& m1 = bottom.geometry.corners_map[1];
+        tz = m0.z() - b0.z();
+        const double base_yaw = std::atan2(
+            static_cast<double>(b1.y() - b0.y()),
+            static_cast<double>(b1.x() - b0.x()));
+        const double map_yaw = std::atan2(
+            static_cast<double>(m1.y() - m0.y()),
+            static_cast<double>(m1.x() - m0.x()));
+        yaw_deg = static_cast<float>((map_yaw - base_yaw) * 180.0 / M_PI);
+    }
+
+    const float direct_expected_bottom =
+        (current_top_valid && frozen_thickness_valid)
+            ? current_top_z_base - frozen_thickness
+            : std::numeric_limits<float>::quiet_NaN();
+    const float delta_expected_vs_candidate =
+        std::isfinite(direct_expected_bottom)
+            ? direct_expected_bottom - bottom.direct_top_frozen_stats.z05
+            : std::numeric_limits<float>::quiet_NaN();
+    const float delta_candidate_vs_final = bottom.geometry.valid
+        ? bottom.direct_top_frozen_stats.z05 - bottom.geometry.bottom_z_base
+        : std::numeric_limits<float>::quiet_NaN();
+    const bool recent_stable_used =
+        bottom.source == CargoBottomSource::RECENT_STABLE;
+
+    if (!cargo_forensic_csv_init_) {
+        cargo_forensic_csv_.open("/tmp/cargo_forensic/frame_causal_trace.csv",
+                                 std::ios::out | std::ios::trunc);
+        if (cargo_forensic_csv_.is_open()) {
+            cargo_forensic_csv_
+                << "seq,stamp,track_id,lifecycle_id,segment_id,"
+                << "track_state,lock_state,hook_state,gravity_voltage,"
+                << "det_valid,det_outcome,det_z05,det_z50,det_z95,"
+                << "det_cx,det_cy,det_cz,det_cand_count,det_sel_id,"
+                << "det_top1,det_top2,det_margin,det_identity_conf,det_shape_conf,"
+                << "det_top_support_pts,det_top_coverage,det_roi_pts,"
+                << "det_ground_z,det_ground_valid,det_reject,det_is_current,"
+                << "ct_valid,ct_support_valid,ct_z_base,"
+                << "ft_valid,ft_m,ft_conf,ft_geom_valid,ft_geom_frozen,"
+                << "ft_geom_h,ft_geom_formal,ft_locked_valid,ft_locked_h,"
+                << "ft_locked_orient_conf,md_m,ms_m,oh_m,"
+                << "pts_valid,pts_support,pts_z05,pts_z95,pts_reject,"
+                << "mdiff_valid,mdiff_support,mdiff_z05,mdiff_z95,mdiff_reject,"
+                << "dtf_valid,dtf_support,dtf_z05,dtf_z95,dtf_reject,"
+                << "mstat_valid,mstat_support,mstat_z05,mstat_z95,mstat_reject,"
+                << "orig_valid,orig_support,orig_z05,orig_z95,orig_reject,"
+                << "recent_stable_used,sel_source,sel_bottom,sel_top,sel_reason,"
+                << "final_valid,final_height,"
+                << "geo_bottom_z_base,geo_top_z_base,geo_bottom_z_map,geo_top_z_map,"
+                << "direct_expected_bottom,delta_expected_vs_candidate,"
+                << "delta_candidate_vs_final,tz,yaw_deg,"
+                << "track_center_valid,track_center_z\n";
+        }
+        cargo_forensic_csv_init_ = true;
+    }
+    if (!cargo_forensic_csv_.is_open()) return;
+
+    const HookLoadSnapshot hook = currentHookLoadSnapshot();
+    std::ostringstream s;
+    s << std::fixed << std::setprecision(6);
+    const auto num = [&s](double v) {
+        if (std::isfinite(v)) s << v; else s << "nan";
+    };
+    const auto str = [&s](const std::string& v) {
+        s << '"';
+        for (char c : v) {
+            if (c == '"' || c == '\n' || c == '\r') s << ' ';
+            else s << c;
+        }
+        s << '"';
+    };
+    const auto stat = [&](const CargoVerticalStats& st) {
+        num(st.valid ? 1.0 : 0.0); s << ',';
+        num(st.support_strong ? 1.0 : 0.0); s << ',';
+        num(st.z05); s << ',';
+        num(st.z95); s << ',';
+        str(st.reject_reason);
+    };
+
+    s << cargo_forensic_frame_seq_++ << ',';
+    num(stamp.toSec()); s << ',';
+    s << bottom.track_id << ',';
+    s << cargo_lifecycle_id_ << ',' << cargo_track_segment_id_ << ',';
+    s << static_cast<int>(cargo_state_.state) << ',';
+    s << static_cast<int>(hook_lock_.state) << ',';
+    s << static_cast<int>(hook.state) << ',';
+    num(hook.voltage); s << ',';
+    s << (hook_fixed_cargo_.valid ? 1 : 0) << ',';
+    s << static_cast<int>(hook_fixed_cargo_.outcome) << ',';
+    num(hook_fixed_cargo_.z05); s << ',';
+    num(hook_fixed_cargo_.z50); s << ',';
+    num(hook_fixed_cargo_.z95); s << ',';
+    num(hook_fixed_cargo_.center_base.x()); s << ',';
+    num(hook_fixed_cargo_.center_base.y()); s << ',';
+    num(hook_fixed_cargo_.center_base.z()); s << ',';
+    s << hook_fixed_cargo_.candidate_count << ',';
+    s << hook_fixed_cargo_.selected_candidate_id << ',';
+    num(hook_fixed_cargo_.candidate_top1_score); s << ',';
+    num(hook_fixed_cargo_.candidate_top2_score); s << ',';
+    num(hook_fixed_cargo_.candidate_score_margin); s << ',';
+    num(hook_fixed_cargo_.identity_confidence); s << ',';
+    num(hook_fixed_cargo_.shape_confidence); s << ',';
+    s << hook_fixed_cargo_.top_support_points << ',';
+    num(hook_fixed_cargo_.top_surface_coverage_ratio); s << ',';
+    s << hook_fixed_cargo_.roi_finite_points << ',';
+    num(hook_fixed_cargo_.ground_z); s << ',';
+    s << (hook_fixed_cargo_.ground_reference_valid ? 1 : 0) << ',';
+    str(hook_fixed_cargo_.reject_reason); s << ',';
+    s << (detection_is_current ? 1 : 0) << ',';
+    s << (current_top_valid ? 1 : 0) << ',';
+    s << (current_top_support_valid ? 1 : 0) << ',';
+    num(current_top_z_base); s << ',';
+    s << (frozen_thickness_valid ? 1 : 0) << ',';
+    num(frozen_thickness); s << ',';
+    num(frozen_thickness_confidence); s << ',';
+    s << (cargo_frozen_geometry_.valid ? 1 : 0) << ',';
+    s << (cargo_frozen_geometry_.frozen ? 1 : 0) << ',';
+    num(cargo_frozen_geometry_.height_m); s << ',';
+    s << (cargo_frozen_geometry_.formal_authorized ? 1 : 0) << ',';
+    s << (hook_lock_.locked_shape.valid ? 1 : 0) << ',';
+    num(hook_lock_.locked_shape.height_m); s << ',';
+    num(hook_lock_.locked_shape.orientation_confidence); s << ',';
+    num(cargo_lift_origin_result_.revealed_thickness_m); s << ',';
+    num(cargo_lift_origin_result_.static_thickness_m); s << ',';
+    num(cargo_origin_height_m_); s << ',';
+    stat(bottom.points_stats); s << ',';
+    stat(bottom.map_diff_stats); s << ',';
+    stat(bottom.direct_top_frozen_stats); s << ',';
+    stat(bottom.map_static_stats); s << ',';
+    stat(bottom.origin_height_stats); s << ',';
+    s << (recent_stable_used ? 1 : 0) << ',';
+    str(bottom.source_name); s << ',';
+    num(bottom.geometry_valid ? bottom.geometry.bottom_z_base
+                              : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    num(bottom.geometry_valid ? bottom.geometry.top_z_base
+                              : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    str(bottom.reason); s << ',';
+    s << (bottom.valid ? 1 : 0) << ',';
+    num(bottom.height); s << ',';
+    num(bottom.geometry_valid ? bottom.geometry.bottom_z_base
+                              : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    num(bottom.geometry_valid ? bottom.geometry.top_z_base
+                              : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    num(bottom.geometry_valid ? bottom.geometry.bottom_z_map
+                              : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    num(bottom.geometry_valid ? bottom.geometry.top_z_map
+                              : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    num(direct_expected_bottom); s << ',';
+    num(delta_expected_vs_candidate); s << ',';
+    num(delta_candidate_vs_final); s << ',';
+    num(tz); s << ',';
+    num(yaw_deg); s << ',';
+    s << (hook_lock_.live_pose.valid ? 1 : 0) << ',';
+    num(hook_lock_.live_pose.center_base.z());
+    s << '\n';
+    cargo_forensic_csv_ << s.str();
+}
+
 void NdtSlamNode::publishOperationalStatus(
     const lidar_slam2_msgs::CargoSafetyStatus& raw,
     const ros::Time& stamp) {
@@ -17269,6 +17469,7 @@ void NdtSlamNode::publishHookOnlySafetyStatus(
         CargoBottomResult{}, stamp, safe_empty, localization_valid);
     publishPayloadTrackInfoInvalid(status.reason);
     publishCargoGeometryDebug(CargoBottomResult{}, stamp);
+    writeCargoForensicTrace(CargoBottomResult{}, stamp);
     AvoidanceDiagnosticsSnapshot hook_only_diagnostics;
     hook_only_diagnostics.source_stamp_sec = stamp.toSec();
     hook_only_diagnostics.perception_phase = "NONE";
@@ -23511,6 +23712,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     logCargoSafetyStatus(safety_msg);
     publishPayloadTrackInfoFromFusion(last_cargo_bottom_result_, stamp);
     publishCargoGeometryDebug(last_cargo_bottom_result_, stamp);
+    writeCargoForensicTrace(last_cargo_bottom_result_, stamp);
     publishOperationalStatus(safety_msg, stamp);
 }
 
