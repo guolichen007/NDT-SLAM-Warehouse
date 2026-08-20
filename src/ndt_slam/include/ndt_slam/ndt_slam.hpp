@@ -48,6 +48,7 @@
 // P0.5: 货物框估计器
 #include <ndt_slam/cargo_box_estimator.hpp>
 #include <ndt_slam/cargo_bottom_fusion.hpp>
+#include <ndt_slam/cargo_vertical_evidence.hpp>
 #include <ndt_slam/cargo_marker_lifecycle.hpp>
 #include <ndt_slam/cargo_oriented_footprint.hpp>
 #include <ndt_slam/cargo_rigid_geometry.hpp>
@@ -1485,6 +1486,13 @@ private:
         float hag_filtered_min_z = std::numeric_limits<float>::quiet_NaN();
         float ground_z = std::numeric_limits<float>::quiet_NaN();
         bool ground_reference_valid = false;
+        std::size_t ground_reference_cells = 0U;
+        std::size_t ground_reference_points = 0U;
+        int ground_reference_quadrants = 0;
+        bool ground_reference_opposite_sides = false;
+        float ground_reference_range_m =
+            std::numeric_limits<float>::infinity();
+        std::string ground_reference_reason = "not_evaluated";
         float score = 0.0f;
         std::string reject_reason;
     };
@@ -2086,6 +2094,15 @@ private:
     ros::Publisher static_evidence_streak_histogram_pub_;
 
     CargoBottomFusion cargo_bottom_fusion_;
+    // Phase B1 shadow path. These values are diagnostics-only and are never
+    // read by product geometry, safety, tracking, or map mutation.
+    bool cargo_vertical_evidence_v2_enabled_ = false;
+    bool cargo_vertical_evidence_v2_shadow_only_ = true;
+    CargoVerticalEvidenceConfig cargo_vertical_evidence_v2_config_;
+    CargoVerticalEvidence last_shadow_vertical_evidence_;
+    CargoBottomFusion cargo_bottom_shadow_fusion_;
+    CargoBottomResult last_shadow_bottom_result_;
+    ros::Time last_shadow_vertical_stamp_;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
     StaticHeightFieldConfig static_height_field_config_;

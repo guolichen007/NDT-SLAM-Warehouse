@@ -507,6 +507,39 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
 NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHandle& nh)
     : nh_(nh) {
     initializeParameters(config_file_path);
+    std::string cargo_vertical_evidence_config_file;
+    ros::NodeHandle private_nh("~");
+    private_nh.param<std::string>(
+        "cargo_vertical_evidence_config_file",
+        cargo_vertical_evidence_config_file, std::string());
+    if (!cargo_vertical_evidence_config_file.empty()) {
+        const YAML::Node shadow_config =
+            YAML::LoadFile(cargo_vertical_evidence_config_file);
+        const int schema_version =
+            shadow_config["schema_version"].as<int>(0);
+        if (schema_version != 1) {
+            throw std::runtime_error(
+                "cargo_vertical_evidence_v2 schema_version must be 1");
+        }
+        const YAML::Node vertical =
+            shadow_config["cargo_vertical_evidence_v2"];
+        if (!vertical || !vertical.IsMap()) {
+            throw std::runtime_error(
+                "cargo_vertical_evidence_v2 config section missing");
+        }
+        cargo_vertical_evidence_v2_enabled_ =
+            vertical["enabled"].as<bool>(false);
+        cargo_vertical_evidence_v2_shadow_only_ =
+            vertical["shadow_only"].as<bool>(true);
+        if (!cargo_vertical_evidence_v2_shadow_only_) {
+            throw std::runtime_error(
+                "PRODUCT_MODE_NOT_IMPLEMENTED_IN_SHADOW_BUILD");
+        }
+        ROS_INFO(
+            "[CargoVerticalEvidenceV2] enabled=%d shadow_only=1 config=%s",
+            cargo_vertical_evidence_v2_enabled_ ? 1 : 0,
+            cargo_vertical_evidence_config_file.c_str());
+    }
     last_pointcloud_wall_sec_.store(
         ros::WallTime::now().toSec(), std::memory_order_release);
     ROS_INFO("[StartupMap] PROCESS_START persistent=%d root=%s",
@@ -2680,6 +2713,29 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         bottom_fusion_config.xy_cell_size =
             std::max(0.05F, hook_fixed_config_.bottom_xy_cell_size);
         cargo_bottom_fusion_.setConfig(bottom_fusion_config);
+        cargo_bottom_shadow_fusion_.setConfig(bottom_fusion_config);
+        cargo_vertical_evidence_v2_config_.surface_band_height_m =
+            std::max(0.05F, hook_fixed_config_.bottom_band_height);
+        cargo_vertical_evidence_v2_config_.xy_cell_size_m =
+            std::max(0.05F, hook_fixed_config_.bottom_xy_cell_size);
+        cargo_vertical_evidence_v2_config_.minimum_surface_points =
+            static_cast<std::size_t>(std::max(
+                1, hook_lock_config_.formal_top_min_support_points));
+        cargo_vertical_evidence_v2_config_.minimum_surface_cells =
+            static_cast<std::size_t>(std::max(
+                2, hook_fixed_config_.bottom_band_min_xy_cells));
+        cargo_vertical_evidence_v2_config_
+            .minimum_surface_coverage_ratio = std::clamp(
+                hook_lock_config_.formal_top_min_coverage_ratio,
+                0.0F, 1.0F);
+        cargo_vertical_evidence_v2_config_.footprint_margin_m =
+            cargo_bottom_fusion_.config().footprint_margin;
+        cargo_vertical_evidence_v2_config_.thickness_slab_margin_m =
+            std::max(0.05F, hook_fixed_config_.bottom_band_height);
+        cargo_vertical_evidence_v2_config_.ground_hag_min_m =
+            odom_anchor_config_.tight_box.hag_min_m;
+        cargo_vertical_evidence_v2_config_.ground_hag_max_m =
+            odom_anchor_config_.tight_box.hag_max_m;
 
         if (config["static_origin_component"]) {
             const YAML::Node component = config["static_origin_component"];
@@ -3992,6 +4048,10 @@ void NdtSlamNode::resetCargoForHookState(
     hook_fixed_bottom_ = HookCargoBottomEstimate{};
     hook_observation_associated_current_ = false;
     cargo_bottom_fusion_.reset();
+    cargo_bottom_shadow_fusion_.reset();
+    last_shadow_vertical_evidence_ = CargoVerticalEvidence{};
+    last_shadow_bottom_result_ = CargoBottomResult{};
+    last_shadow_vertical_stamp_ = ros::Time();
     cargo_fusion_track_active_ = false;
     cargo_static_evidence_track_start_sequence_ = 0U;
     cargo_static_evidence_lifecycle_boundary_valid_ = false;
@@ -10824,6 +10884,10 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
         // transform. Reset only transform-dependent evidence; the same track
         // is reprojected with the recovered T_map_base.
         cargo_bottom_fusion_.reset();
+        cargo_bottom_shadow_fusion_.reset();
+        last_shadow_vertical_evidence_ = CargoVerticalEvidence{};
+        last_shadow_bottom_result_ = CargoBottomResult{};
+        last_shadow_vertical_stamp_ = ros::Time();
         current_rigid_cargo_geometry_ = RigidCargoGeometry{};
         last_cargo_bottom_result_ = CargoBottomResult{};
         last_cargo_safety_result_ = CargoSafetyResult{};
@@ -13383,6 +13447,33 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         result.ground_z = ground.z_m;
         result.ground_reference_valid = ground.valid;
         result.roi_coverage_valid = ground.valid;
+        result.ground_reference_cells = ground.cells;
+        result.ground_reference_points = ground.points;
+        result.ground_reference_quadrants = ground.quadrants;
+        result.ground_reference_opposite_sides =
+            ground.has_opposite_sides;
+        result.ground_reference_range_m = ground.range_m;
+        if (ground.valid) {
+            result.ground_reference_reason = "valid";
+        } else if (ground.cells < static_cast<std::size_t>(
+                       std::max(1, ground_config.minimum_cells))) {
+            result.ground_reference_reason = "insufficient_cells";
+        } else if (ground.quadrants <
+                       std::max(1, ground_config.minimum_quadrants) &&
+                   !(ground_config.allow_opposite_sides &&
+                     ground.has_opposite_sides)) {
+            result.ground_reference_reason =
+                "insufficient_spatial_distribution";
+        } else if (!std::isfinite(ground.range_m) ||
+                   ground.range_m > ground_config.maximum_range_m) {
+            result.ground_reference_reason = "ground_range_unstable";
+        } else if (ground_config.expected_height_enabled &&
+                   !std::isfinite(ground.z_m)) {
+            result.ground_reference_reason =
+                "expected_height_mismatch";
+        } else {
+            result.ground_reference_reason = "invalid_unspecified";
+        }
     }
 
     const auto classify_outcome = [&result, &tight](bool cargo_detected) {
@@ -16807,6 +16898,42 @@ void NdtSlamNode::writeCargoForensicTrace(const CargoBottomResult& bottom,
         : std::numeric_limits<float>::quiet_NaN();
     const bool recent_stable_used =
         bottom.source == CargoBottomSource::RECENT_STABLE;
+    const bool shadow_is_current = !last_shadow_vertical_stamp_.isZero() &&
+        std::abs((last_shadow_vertical_stamp_ - stamp).toSec()) <= 1.0e-4;
+    const CargoSafetyClusterEvidence& baseline_obstacle =
+        last_raw_cargo_safety_result_.most_dangerous_cluster;
+    const bool shadow_obstacle_valid =
+        last_raw_cargo_safety_result_.has_cluster_evidence &&
+        baseline_obstacle.valid &&
+        std::isfinite(baseline_obstacle.obstacle_top_z95_m) &&
+        std::isfinite(baseline_obstacle.obstacle_uncertainty_m) &&
+        std::isfinite(baseline_obstacle.footprint_distance_m);
+    float shadow_clearance = std::numeric_limits<float>::quiet_NaN();
+    int shadow_hazard_code = CargoSafetyProtocol::kSystemNotReady;
+    if (shadow_is_current && last_shadow_bottom_result_.geometry_valid &&
+        shadow_obstacle_valid) {
+        const CargoSafetyConfig& safety_config =
+            cargo_safety_evaluator_.config();
+        const float conservative_shadow_bottom =
+            last_shadow_bottom_result_.geometry.bottom_z_base -
+            last_shadow_bottom_result_.uncertainty -
+            safety_config.cargo_bottom_extra_margin_m;
+        shadow_clearance = conservative_shadow_bottom -
+            (baseline_obstacle.obstacle_top_z95_m +
+             baseline_obstacle.obstacle_uncertainty_m);
+        const bool low_clearance = shadow_clearance <
+            safety_config.minimum_vertical_clearance_m;
+        if (low_clearance && baseline_obstacle.footprint_distance_m <=
+                safety_config.level1_distance_m) {
+            shadow_hazard_code = CargoSafetyEvaluator::kLevel1Code;
+        } else if (low_clearance &&
+                   baseline_obstacle.footprint_distance_m <=
+                       safety_config.level2_distance_m) {
+            shadow_hazard_code = CargoSafetyEvaluator::kLevel2Code;
+        } else {
+            shadow_hazard_code = CargoSafetyEvaluator::kSafeCode;
+        }
+    }
 
     if (!cargo_forensic_csv_init_) {
         cargo_forensic_csv_.open("/tmp/cargo_forensic/frame_causal_trace.csv",
@@ -16819,7 +16946,10 @@ void NdtSlamNode::writeCargoForensicTrace(const CargoBottomResult& bottom,
                 << "det_cx,det_cy,det_cz,det_cand_count,det_sel_id,"
                 << "det_top1,det_top2,det_margin,det_identity_conf,det_shape_conf,"
                 << "det_top_support_pts,det_top_coverage,det_roi_pts,"
-                << "det_ground_z,det_ground_valid,det_reject,det_is_current,"
+                << "det_ground_z,det_ground_valid,det_ground_cells,"
+                << "det_ground_points,det_ground_quadrants,"
+                << "det_ground_opposite_sides,det_ground_range,"
+                << "det_ground_reason,det_reject,det_is_current,"
                 << "ct_valid,ct_support_valid,ct_z_base,"
                 << "ft_valid,ft_m,ft_conf,ft_geom_valid,ft_geom_frozen,"
                 << "ft_geom_h,ft_geom_formal,ft_locked_valid,ft_locked_h,"
@@ -16834,7 +16964,15 @@ void NdtSlamNode::writeCargoForensicTrace(const CargoBottomResult& bottom,
                 << "geo_bottom_z_base,geo_top_z_base,geo_bottom_z_map,geo_top_z_map,"
                 << "direct_expected_bottom,delta_expected_vs_candidate,"
                 << "delta_candidate_vs_final,tz,yaw_deg,"
-                << "track_center_valid,track_center_z\n";
+                << "track_center_valid,track_center_z,"
+                << "baseline_det_z95,shadow_top_valid,shadow_top_z,"
+                << "shadow_top_support_points,shadow_top_coverage,"
+                << "shadow_removed_low_points,shadow_vertical_point_count,"
+                << "shadow_ground_filter_used,shadow_thickness_slab_used,"
+                << "shadow_points_bottom,shadow_direct_bottom,"
+                << "shadow_bottom_selected,shadow_obstacle_top,"
+                << "shadow_clearance,shadow_hazard_code,"
+                << "shadow_reject_reason\n";
         }
         cargo_forensic_csv_init_ = true;
     }
@@ -16890,6 +17028,13 @@ void NdtSlamNode::writeCargoForensicTrace(const CargoBottomResult& bottom,
     s << hook_fixed_cargo_.roi_finite_points << ',';
     num(hook_fixed_cargo_.ground_z); s << ',';
     s << (hook_fixed_cargo_.ground_reference_valid ? 1 : 0) << ',';
+    s << hook_fixed_cargo_.ground_reference_cells << ',';
+    s << hook_fixed_cargo_.ground_reference_points << ',';
+    s << hook_fixed_cargo_.ground_reference_quadrants << ',';
+    s << (hook_fixed_cargo_.ground_reference_opposite_sides ? 1 : 0)
+      << ',';
+    num(hook_fixed_cargo_.ground_reference_range_m); s << ',';
+    str(hook_fixed_cargo_.ground_reference_reason); s << ',';
     str(hook_fixed_cargo_.reject_reason); s << ',';
     s << (detection_is_current ? 1 : 0) << ',';
     s << (current_top_valid ? 1 : 0) << ',';
@@ -16936,7 +17081,48 @@ void NdtSlamNode::writeCargoForensicTrace(const CargoBottomResult& bottom,
     num(tz); s << ',';
     num(yaw_deg); s << ',';
     s << (hook_lock_.live_pose.valid ? 1 : 0) << ',';
-    num(hook_lock_.live_pose.center_base.z());
+    num(hook_lock_.live_pose.center_base.z()); s << ',';
+    num(hook_fixed_cargo_.z95); s << ',';
+    s << (shadow_is_current && last_shadow_vertical_evidence_.valid ? 1 : 0)
+      << ',';
+    num(shadow_is_current
+            ? last_shadow_vertical_evidence_.top_z_base
+            : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    s << (shadow_is_current
+            ? last_shadow_vertical_evidence_.top_support_points : 0U) << ',';
+    num(shadow_is_current
+            ? last_shadow_vertical_evidence_.top_surface_coverage
+            : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    s << (shadow_is_current
+            ? last_shadow_vertical_evidence_.removed_low_points : 0U) << ',';
+    s << (shadow_is_current
+            ? last_shadow_vertical_evidence_.clean_vertical_points_base.size()
+            : 0U)
+      << ',';
+    s << (shadow_is_current &&
+            last_shadow_vertical_evidence_.ground_filter_used ? 1 : 0)
+      << ',';
+    s << (shadow_is_current &&
+            last_shadow_vertical_evidence_.thickness_slab_used ? 1 : 0)
+      << ',';
+    num(shadow_is_current && last_shadow_bottom_result_.points_stats.valid
+            ? last_shadow_bottom_result_.points_stats.z05
+            : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    num(shadow_is_current &&
+            last_shadow_bottom_result_.direct_top_frozen_stats.valid
+            ? last_shadow_bottom_result_.direct_top_frozen_stats.z05
+            : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    num(shadow_is_current && last_shadow_bottom_result_.geometry_valid
+            ? last_shadow_bottom_result_.geometry.bottom_z_base
+            : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    num(shadow_obstacle_valid
+            ? baseline_obstacle.obstacle_top_z95_m
+            : std::numeric_limits<double>::quiet_NaN()); s << ',';
+    num(shadow_clearance); s << ',';
+    s << shadow_hazard_code << ',';
+    str(shadow_is_current
+            ? last_shadow_vertical_evidence_.reject_reason
+            : "shadow_not_evaluated_for_stamp");
     s << '\n';
     cargo_forensic_csv_ << s.str();
 }
@@ -21119,11 +21305,19 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             cargo_static_evidence_lifecycle_boundary_valid_ = true;
         }
         cargo_bottom_fusion_.reset();
+        cargo_bottom_shadow_fusion_.reset();
+        last_shadow_vertical_evidence_ = CargoVerticalEvidence{};
+        last_shadow_bottom_result_ = CargoBottomResult{};
+        last_shadow_vertical_stamp_ = ros::Time();
         cargo_origin_height_valid_ = false;
         cargo_origin_height_m_ = 0.0F;
         cargo_origin_height_track_id_ = cargo_fusion_track_id_;
     } else if (!active_track && cargo_fusion_track_active_) {
         cargo_bottom_fusion_.reset();
+        cargo_bottom_shadow_fusion_.reset();
+        last_shadow_vertical_evidence_ = CargoVerticalEvidence{};
+        last_shadow_bottom_result_ = CargoBottomResult{};
+        last_shadow_vertical_stamp_ = ros::Time();
         cargo_origin_height_valid_ = false;
         formal_cargo_removal_authorized_ = false;
     }
@@ -21420,6 +21614,59 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             std::isfinite(cargo_lift_origin_result_.revealed_thickness_m);
         observation.map_diff_height_m =
             cargo_lift_origin_result_.revealed_thickness_m;
+    }
+
+    // Phase B1 SHADOW: evaluate the already-selected physical Cargo with an
+    // independent vertical-evidence path. The product observation above is
+    // intentionally left untouched.
+    last_shadow_vertical_evidence_ = CargoVerticalEvidence{};
+    last_shadow_bottom_result_ = CargoBottomResult{};
+    last_shadow_vertical_stamp_ = stamp;
+    if (cargo_vertical_evidence_v2_enabled_) {
+        CargoVerticalEvidenceInput shadow_input;
+        shadow_input.selected_points_base = observation.points_base;
+        shadow_input.footprint_valid = observation.footprint_valid;
+        shadow_input.footprint_center_base =
+            observation.footprint_center_base;
+        shadow_input.footprint_size_xy = observation.footprint_size_xy;
+        shadow_input.footprint_yaw_base_rad =
+            observation.footprint_yaw_base_rad;
+        if (!shadow_input.footprint_valid && detection_is_current &&
+            hook_fixed_cargo_.oriented_footprint_valid) {
+            shadow_input.footprint_valid = true;
+            shadow_input.footprint_center_base =
+                hook_fixed_cargo_.footprint_center_base;
+            shadow_input.footprint_size_xy =
+                hook_fixed_cargo_.footprint_length_width;
+            shadow_input.footprint_yaw_base_rad =
+                hook_fixed_cargo_.footprint_yaw_base_rad;
+        }
+        shadow_input.ground_reference_valid = detection_is_current &&
+            hook_fixed_cargo_.ground_reference_valid;
+        shadow_input.ground_z_base = hook_fixed_cargo_.ground_z;
+        shadow_input.frozen_thickness_valid =
+            observation.frozen_thickness_valid;
+        shadow_input.frozen_thickness_matches_lifecycle = active_track;
+        shadow_input.frozen_thickness_m =
+            observation.frozen_thickness_m;
+        last_shadow_vertical_evidence_ = extractCargoVerticalEvidence(
+            shadow_input, cargo_vertical_evidence_v2_config_);
+
+        CargoBottomObservation shadow_observation = observation;
+        shadow_observation.points_base.clear();
+        shadow_observation.current_top_valid = false;
+        shadow_observation.current_top_support_valid = false;
+        shadow_observation.current_top_z_base = 0.0F;
+        if (last_shadow_vertical_evidence_.valid) {
+            shadow_observation.points_base =
+                last_shadow_vertical_evidence_.clean_vertical_points_base;
+            shadow_observation.current_top_valid = true;
+            shadow_observation.current_top_support_valid = true;
+            shadow_observation.current_top_z_base =
+                last_shadow_vertical_evidence_.top_z_base;
+        }
+        last_shadow_bottom_result_ =
+            cargo_bottom_shadow_fusion_.update(shadow_observation);
     }
 
     last_cargo_bottom_result_ = cargo_bottom_fusion_.update(observation);

@@ -135,6 +135,7 @@ set(LIBRARY_SOURCES
   src/runtime_diagnostics.cpp
   # Formal cargo bottom and structured safety-status pipeline
   src/cargo_bottom_fusion.cpp
+  src/cargo_vertical_evidence.cpp
   src/clean_map_builder.cpp
   src/cargo_oriented_footprint.cpp
   src/cargo_track_policy.cpp
@@ -261,6 +262,13 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_bottom_fusion_test.cpp)
   if(TARGET cargo_bottom_fusion_test)
     target_link_libraries(cargo_bottom_fusion_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_vertical_evidence_test
+    test/cargo_vertical_evidence_test.cpp)
+  if(TARGET cargo_vertical_evidence_test)
+    target_link_libraries(cargo_vertical_evidence_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 

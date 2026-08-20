@@ -1,0 +1,5 @@
+schema_version: 1
+
+cargo_vertical_evidence_v2:
+  enabled: true
+  shadow_only: true
