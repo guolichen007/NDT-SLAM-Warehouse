@@ -1,0 +1,127 @@
+schema: ndt_slam_rail_yaw_authority_audit
+schema_version: 1
+baseline:
+  branch: fix/cargo-formal-geometry-lock-v1
+  sha: df45c397cf02dbd3dfbf4d7f7549929f58482366
+  work_branch: fix/localization-yaw-authority-v1
+root_cause: MISSING_PHYSICAL_YAW_AUTHORITY_FOR_RAIL_CRANE
+phase: PHASE_1_SHADOW_ONLY
+product_activation: BLOCKED_PENDING_UBUNTU_SHADOW_PASS
+
+pose_ownership:
+  raw_ndt:
+    frame: map_T_base_link_proposal
+    translation_source: free_yaw_ndt_joint_optimization
+    yaw_source: free_yaw_ndt_joint_optimization
+    map_mutation_authority: false
+  soft_yaw:
+    frame: map_T_base_link_runtime_output
+    translation_source: existing_xy_ekf
+    yaw_source: filtered_raw_ndt_yaw
+    map_mutation_authority: existing_product_behavior_unchanged_in_phase_1
+  xy_ekf:
+    frame: map
+    state: [x, y, vx, vy]
+    translation_source: raw_ndt_measurement_or_prediction
+    yaw_state_present: false
+    map_mutation_authority: indirect_through_existing_runtime_pose
+  current_pose:
+    frame: map_T_base_link
+    translation_source: existing_xy_ekf_or_prediction
+    yaw_source: existing_crane_constraint_and_soft_yaw_path
+    map_mutation_authority: existing_product_behavior_unchanged_in_phase_1
+  published_pose:
+    frame: map_T_base_link
+    translation_source: current_runtime_pose_selector
+    yaw_source: current_runtime_pose_selector
+    consumers: [odom, tf, runtime_path, cargo_map_frame]
+    map_mutation_authority: existing_product_behavior_unchanged_in_phase_1
+  local_map:
+    frame: map
+    pose_source: pre_publish_runtime_pose
+    mutation: synchronous_registration_cloud_transform
+    phase_1_change: none
+  localization_target:
+    frame: map
+    pose_source: committed_keyframes_and_active_map
+    mutation: owner_thread_and_async_map_maintenance
+    phase_1_change: none
+  map_commit:
+    frame: map
+    pose_source: final_published_pose
+    mutation: bounded_async_worker
+    phase_1_change: none
+  loop_closure:
+    frame: map
+    proposal: jointly_optimized_se3_keyframe_graph
+    current_application: correction_times_current_pose
+    phase_1_change: telemetry_only
+  relocalization:
+    frame: map
+    proposal: jointly_optimized_se3_ndt_result
+    current_application: confirmed_result_plus_motion_since_job
+    phase_1_change: telemetry_only
+
+shadow_contract:
+  free_ndt_xy_plus_config_yaw_direct_composition: forbidden
+  rail_translation_refinement:
+    yaw: configured_base_yaw_in_map
+    optimized_degrees_of_freedom: [x, y]
+    objective: active_ndt_target_calculateScore
+    authority_in_phase_1: diagnostic_only
+  raw_yaw_innovation_alone_blocks_mapping: false
+  apply_to_runtime_pose: false
+
+version_ownership:
+  local_map_version:
+    owner: localization_owner_thread
+    protects: [ndt_target_binding, async_icp_result]
+    suitable_for_phase_2_map_commit_fence: false
+  keyframe_pose_version:
+    owner: pose_graph_lifecycle
+    increments_on: [loop_application, reset, runtime_map_replacement]
+    protects: [loop_worker, relocalization_worker]
+    phase_2_candidate: true
+  map_rebuild_generation:
+    owner: map_lifecycle
+    increments_on: [reset, load, rebuild, time_epoch_lifecycle_change]
+    protects: [map_commit, map_rebuild, relocalization]
+    phase_2_candidate: true
+  map_layer_generation:
+    owner: coherent_map_bundle_publisher
+    protects: [map_layer_bundle_visibility]
+    phase_2_candidate: false
+  lifecycle_epoch:
+    representation: map_commit_job_snapshot_of_map_rebuild_generation
+    protects: [map_commit_execution, completion_application]
+  time_epoch_id:
+    owner: lidar_source_time_epoch
+    map_commit_role: diagnostic_tag_not_authority_fence
+  static_evidence_epoch:
+    owner: static_evidence_lifecycle
+    protects: [static_provenance_install_and_query]
+  loaded_map_session_generation:
+    owner: verified_map_session_install
+    protects: [loaded_session_identity]
+  avoidance_pose_generation:
+    owner: cargo_avoidance_pose_discontinuity_lifecycle
+    p0_yaw_role: regression_only
+  cargo_origin_generation:
+    owner: cargo_origin_async_attempt_lifecycle
+    p0_yaw_role: out_of_scope
+  phase_2_reuse_assessment:
+    expected_combination: [map_rebuild_generation, keyframe_pose_version]
+    final_decision: DEFER_UNTIL_PHASE_2_AFTER_SHADOW_GATE
+    new_generation_added_in_phase_1: false
+
+static_gap:
+  reset_by_time_gap_semantics: per_cell_reset_count
+  event_counter_required: true
+  reset_policy_change: forbidden
+  sanitize_dt_change: forbidden_without_correlated_pose_evidence
+
+non_goals:
+  cargo_identity_fixed: false
+  obstacle_fragmentation_fixed: false
+  code17_18_29_full_field_validated: false
+  field_ready: false
