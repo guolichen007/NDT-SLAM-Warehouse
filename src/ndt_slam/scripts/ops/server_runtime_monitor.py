@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -42,12 +43,25 @@ RUNTIME_SAMPLE_FIELDS = (
     "runtime_status_stale", "odom_age_sec", "odom_hz", "x", "y", "z",
     "yaw_deg", "speed_mps", "pose_step_p50_m", "pose_step_p95_m",
     "pose_step_max_m", "manifest_state", "active_manifest_present",
+    "merger_rs201_stamp", "merger_rs203_stamp", "merger_merged_stamp",
+    "static_gap_vs_merged_stamp_sec", "static_gap_matches_merged_stamp",
     "last_good_manifest_present", "suspension_marker_present",
     "persistent_tmp_files", "persistent_tile_files",
     "persistent_newest_tile_mtime", "persistent_size_mb",
     "manifest_generation", "manifest_revision", "manifest_total_cells",
     "manifest_mature_cells",
     "runtime_total_frames", "runtime_total_keyframes",
+    "runtime_current_pose_x", "runtime_current_pose_y",
+    "runtime_current_pose_yaw_deg", "runtime_published_pose_x",
+    "runtime_published_pose_y", "runtime_published_pose_yaw_deg",
+    "runtime_map_rebuild_generation", "runtime_keyframe_pose_version",
+    "runtime_local_map_version", "runtime_ndt_target_version",
+    "runtime_map_commit_submitted_count", "runtime_map_commit_completed_count",
+    "runtime_map_commit_stale_count", "runtime_map_commit_queue_depth",
+    "runtime_map_commit_job_sequence", "runtime_map_commit_job_lifecycle_epoch",
+    "runtime_map_commit_job_pose_x", "runtime_map_commit_job_pose_y",
+    "runtime_map_commit_job_pose_yaw_deg", "runtime_loop_closure_running",
+    "runtime_loop_closure_result_ready",
     "runtime_active_keyframes", "runtime_is_stationary",
     "runtime_stationary_frame_count", "runtime_global_map_points",
     "runtime_display_map_points", "runtime_ground_map_points",
@@ -59,9 +73,29 @@ RUNTIME_SAMPLE_FIELDS = (
     "runtime_disk_guard_triggered", "runtime_pointcloud_timeout_sec",
     "runtime_pointcloud_stale", "runtime_last_ndt_fitness",
     "runtime_average_process_time_ms", "runtime_average_ndt_time_ms",
+    "runtime_last_ndt_time_ms", "runtime_crane_yaw_shadow_build",
+    "runtime_crane_yaw_config_loaded", "runtime_crane_yaw_state",
+    "runtime_raw_ndt_yaw_deg", "runtime_configured_base_yaw_in_map_deg",
+    "runtime_soft_yaw_deg", "runtime_proposed_yaw_deg",
+    "runtime_raw_ndt_yaw_unwrapped_deg",
+    "runtime_proposed_yaw_unwrapped_deg",
+    "runtime_raw_config_yaw_innovation_deg",
+    "runtime_raw_config_yaw_innovation_unwrapped_deg",
+    "runtime_rail_registration_valid", "runtime_rail_registration_reason",
+    "runtime_free_ndt_reported_fitness", "runtime_free_fitness",
+    "runtime_rail_fitness", "runtime_free_vs_rail_translation_delta_m",
+    "runtime_free_vs_rail_fitness_delta", "runtime_rail_refine_evaluations",
+    "runtime_rail_refine_time_ms", "runtime_yaw_observability_strong",
     "runtime_static_evidence_epoch", "runtime_static_evidence_revision",
     "runtime_static_evidence_cells", "runtime_static_evidence_mature_cells",
     "runtime_static_evidence_latest_sequence", "runtime_static_query_reason",
+    "runtime_static_evidence_time_gap_event_count",
+    "runtime_static_evidence_affected_cells_total",
+    "runtime_static_evidence_affected_cells_last",
+    "runtime_static_evidence_previous_stamp",
+    "runtime_static_evidence_current_stamp", "runtime_static_evidence_gap_sec",
+    "runtime_static_evidence_stamp_source",
+    "runtime_static_evidence_gap_motion_bucket",
     "runtime_static_query_authorized", "runtime_static_clean_build_started",
     "runtime_static_clean_build_applied",
     "runtime_static_clean_build_snapshot_only",
@@ -71,6 +105,69 @@ RUNTIME_SAMPLE_FIELDS = (
     "cpu_some_avg10", "memory_some_avg10", "memory_full_avg10",
     "io_some_avg10", "io_full_avg10",
 )
+
+
+def summarize_yaw_shadow_samples(
+        samples: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Summarize SHADOW evidence without assigning product PASS thresholds."""
+    rows = list(samples)
+    buckets = {
+        "ALL_TIME": rows,
+        "CRANE_STATIONARY": [
+            row for row in rows
+            if _as_bool(row.get("runtime_is_stationary", False))],
+        "CRANE_MOVING": [
+            row for row in rows
+            if not _as_bool(row.get("runtime_is_stationary", False))],
+    }
+    output: Dict[str, Any] = {}
+    metrics = (
+        "runtime_raw_config_yaw_innovation_deg",
+        "runtime_free_vs_rail_translation_delta_m",
+        "runtime_free_vs_rail_fitness_delta",
+    )
+    for bucket, bucket_rows in buckets.items():
+        summary: Dict[str, Any] = {"samples": len(bucket_rows)}
+        valid_values = [
+            _as_bool(row.get("runtime_rail_registration_valid", False))
+            for row in bucket_rows]
+        summary["rail_refinement_valid_ratio"] = (
+            sum(valid_values) / len(valid_values) if valid_values else None)
+        for metric in metrics:
+            values = [_finite(row.get(metric)) for row in bucket_rows]
+            values = [value for value in values if math.isfinite(value)]
+            trend = None
+            if len(values) >= 2:
+                trend = (values[-1] - values[0]) / (len(values) - 1)
+            summary[metric[len("runtime_"):]] = {
+                "count": len(values),
+                "p50": _percentile(values, 0.50),
+                "p95": _percentile(values, 0.95),
+                "maximum_abs": max((abs(value) for value in values),
+                                   default=None),
+                "trend_per_sample": trend,
+            }
+        output[bucket] = summary
+    return output
+
+
+def file_sha256(path: Path) -> Optional[str]:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def recognition_hook_bucket(hook_signal_valid: Any,
+                            hook_loaded: Any) -> Optional[str]:
+    """UNKNOWN hook evidence is excluded from loaded/empty denominators."""
+    if not _as_bool(hook_signal_valid):
+        return None
+    return "HOOK_LOADED" if _as_bool(hook_loaded) else "HOOK_EMPTY"
 
 
 def _finite(value: Any, default: float = float("nan")) -> float:
@@ -1137,6 +1234,8 @@ class RosRuntimeMonitor:
         self.current_pose: Optional[Dict[str, float]] = None
         self.latest_static_debug: Dict[str, Any] = {}
         self.latest_runtime: Dict[str, Any] = {}
+        self.latest_merger: Dict[str, Any] = {}
+        self._yaw_shadow_samples: Deque[Dict[str, Any]] = deque(maxlen=200_000)
         self.last_runtime_mtime: Optional[float] = None
         self.last_summary_wall = 0.0
         self.last_safety_repeat_wall = 0.0
@@ -1187,6 +1286,12 @@ class RosRuntimeMonitor:
         # Typed recognition and suspended-motion observability. These values
         # are read-only mirrors; they never feed ROS parameters or control.
         self._recognition_state_counts: Counter[int] = Counter()
+        self._recognition_state_by_hook: Dict[str, Counter[int]] = {
+            "ALL_TIME": Counter(),
+            "HOOK_LOADED": Counter(),
+            "HOOK_EMPTY": Counter(),
+        }
+        self._cargo_locked_state_value: Optional[int] = None
         self._sway_state_counts: Counter[int] = Counter()
         self._skew_state_counts: Counter[int] = Counter()
         self._torsion_state_counts: Counter[int] = Counter()
@@ -1265,6 +1370,8 @@ class RosRuntimeMonitor:
                          queue_size=50)
         rospy.Subscriber("/cargo_avoidance/static_evidence_debug", String,
                          self._static_callback, queue_size=20)
+        rospy.Subscriber("/pointcloud_merger/diagnostics", String,
+                         self._merger_callback, queue_size=100)
         rospy.Subscriber("/cargo_avoidance/cargo_geometry_debug", String,
                          self._cargo_geometry_callback, queue_size=50)
         rospy.Subscriber("/cargo_avoidance/recognition_status",
@@ -1312,6 +1419,23 @@ class RosRuntimeMonitor:
         payload = dict(event)
         payload.setdefault("wall_time", time.time())
         self.writer.submit("jsonl", (relative, payload))
+
+    def _merger_callback(self, message: Any) -> None:
+        parsed: Dict[str, Any] = {"wall_time": time.time()}
+        for token in str(message.data).split():
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            if key in ("rs201_stamp", "rs203_stamp", "merged_stamp"):
+                parsed[key] = _finite(value)
+            elif key in ("mode", "lidar_a", "lidar_b"):
+                parsed[key] = value
+        with self._state_lock:
+            self.latest_merger = parsed
+        self.writer.submit("csv", (
+            "samples/pointcloud_merger_samples.csv",
+            ("wall_time", "mode", "lidar_a", "lidar_b", "rs201_stamp",
+             "rs203_stamp", "merged_stamp"), parsed))
 
     def _gravity_callback(self, message: Any) -> None:
         wall = time.time()
@@ -1519,11 +1643,6 @@ class RosRuntimeMonitor:
         return True
 
     def _recognition_callback(self, message: Any) -> None:
-        with self._state_lock:
-            if not self.cargo_gate.active:
-                return
-            episode_id = self.cargo_gate.episode_id
-            self.recognition_sample_seen_during_loaded = True
         wall = time.time()
         source_stamp = float(message.header.stamp.to_sec())
         if not self._accept_recognition_source_stamp(source_stamp, wall):
@@ -1531,12 +1650,25 @@ class RosRuntimeMonitor:
         self.last_recognition_wall = wall
         self.recognition_status_message_count += 1
         state = int(message.state)
+        self._cargo_locked_state_value = int(message.STATE_CARGO_LOCKED)
+        self._recognition_state_by_hook["ALL_TIME"][state] += 1
+        hook_bucket = recognition_hook_bucket(
+            message.hook_signal_valid, message.hook_loaded)
+        if hook_bucket is not None:
+            self._recognition_state_by_hook[hook_bucket][state] += 1
+        with self._state_lock:
+            if not self.cargo_gate.active:
+                return
+            episode_id = self.cargo_gate.episode_id
+            self.recognition_sample_seen_during_loaded = True
         row = {
             "wall_time": wall,
             "source_stamp": source_stamp,
             "source_epoch": self._recognition_epoch,
             "state": state,
             "valid": bool(message.valid),
+            "hook_signal_valid": bool(message.hook_signal_valid),
+            "hook_load_state": int(message.hook_load_state),
             "hook_loaded": bool(message.hook_loaded),
             "lock_state": int(message.lock_state),
             "cargo_lifecycle_id": int(message.cargo_lifecycle_id),
@@ -2546,6 +2678,33 @@ class RosRuntimeMonitor:
             row.update(self.current_pose)
         row.update({"runtime_" + key: value for key, value in self.latest_runtime.items()
                     if isinstance(value, (str, int, float, bool))})
+        with self._state_lock:
+            merger = dict(self.latest_merger)
+        row["merger_rs201_stamp"] = merger.get("rs201_stamp")
+        row["merger_rs203_stamp"] = merger.get("rs203_stamp")
+        row["merger_merged_stamp"] = merger.get("merged_stamp")
+        gap_stamp = _finite(row.get("runtime_static_evidence_current_stamp"))
+        merged_stamp = _finite(row.get("merger_merged_stamp"))
+        if math.isfinite(gap_stamp) and math.isfinite(merged_stamp):
+            row["static_gap_vs_merged_stamp_sec"] = gap_stamp - merged_stamp
+            row["static_gap_matches_merged_stamp"] = (
+                abs(gap_stamp - merged_stamp) <= 1.0e-3)
+        else:
+            row["static_gap_vs_merged_stamp_sec"] = None
+            row["static_gap_matches_merged_stamp"] = False
+        if _as_bool(row.get("runtime_crane_yaw_shadow_build", False)):
+            self._yaw_shadow_samples.append({
+                "wall_time": now,
+                "runtime_is_stationary": row.get("runtime_is_stationary"),
+                "runtime_raw_config_yaw_innovation_deg": row.get(
+                    "runtime_raw_config_yaw_innovation_deg"),
+                "runtime_free_vs_rail_translation_delta_m": row.get(
+                    "runtime_free_vs_rail_translation_delta_m"),
+                "runtime_free_vs_rail_fitness_delta": row.get(
+                    "runtime_free_vs_rail_fitness_delta"),
+                "runtime_rail_registration_valid": row.get(
+                    "runtime_rail_registration_valid"),
+            })
         row.update(self.filesystem_cache)
         # ── PSI (Pressure Stall Information) ──
         psi = read_psi()
@@ -2940,12 +3099,24 @@ class RosRuntimeMonitor:
         yaw_error_values = list(self._swing_yaw_errors)
         summary.update({
             "runtime": runtime,
+            "yaw_authority_shadow": summarize_yaw_shadow_samples(
+                self._yaw_shadow_samples),
             "writer_dropped": self.writer.dropped,
             "restart_count": self.restart_count,
             "recognition_state_counts": {
                 str(key): value
                 for key, value in self._recognition_state_counts.items()
             },
+            "recognition_state_by_hook": {
+                bucket: {str(key): value for key, value in counts.items()}
+                for bucket, counts in self._recognition_state_by_hook.items()
+            },
+            "locked_while_hook_empty_ratio": (
+                self._recognition_state_by_hook["HOOK_EMPTY"].get(
+                    self._cargo_locked_state_value, 0) /
+                max(1, sum(self._recognition_state_by_hook[
+                    "HOOK_EMPTY"].values()))
+                if self._cargo_locked_state_value is not None else None),
             "recognition_failure_count": self._recognition_failure_count,
             "recognition_source_epoch": self._recognition_epoch,
             "recognition_duplicate_source_stamps":
@@ -3293,11 +3464,32 @@ def create_run_manifest(run_dir: Path, args: argparse.Namespace) -> None:
             stderr=subprocess.DEVNULL, text=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         actual_sha = "unknown"
+    workspace = Path(args.workspace).expanduser().resolve()
+    main_config = (Path(args.main_config).expanduser().resolve()
+                   if args.main_config else
+                   workspace / "src" / "ndt_slam" / "config" /
+                   "live_longterm_mapping.yaml")
+    yaw_config = (Path(args.yaw_config).expanduser().resolve()
+                  if args.yaw_config else
+                  workspace / "src" / "ndt_slam" / "config" /
+                  "crane_yaw_authority.yaml")
+    binary = (Path(args.binary).expanduser().resolve()
+              if args.binary else
+              workspace / "devel" / "lib" / "ndt_slam" /
+              "ndt_slam_node")
     payload = {
         "run_id": args.run_id,
+        "RUN_ID": args.run_id,
         "created_at": time.time(),
         "expected_sha": args.expected_sha,
         "actual_sha": actual_sha,
+        "SOURCE_SHA": actual_sha,
+        "BINARY_SHA": file_sha256(binary),
+        "MAIN_CONFIG_SHA256": file_sha256(main_config),
+        "YAW_CONFIG_SHA256": file_sha256(yaw_config),
+        "main_config": str(main_config),
+        "yaw_config": str(yaw_config),
+        "binary": str(binary),
         "workspace": str(Path(args.workspace).expanduser().resolve()),
         "persistent_root": str(Path(args.persistent_root).expanduser().resolve()),
         "monitor_read_only": True,
@@ -3325,6 +3517,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--run-dir", default="")
     parser.add_argument("--run-id", default=time.strftime("%Y%m%d_%H%M%S"))
     parser.add_argument("--config", default="")
+    parser.add_argument("--main-config", default="")
+    parser.add_argument("--yaw-config", default="")
+    parser.add_argument("--binary", default="")
     parser.add_argument("--expected-sha", default="")
     parser.add_argument("--lock-file", default="")
     parser.add_argument("--replay", default="")

@@ -21,6 +21,8 @@ from server_runtime_monitor import (  # noqa: E402
     classify_cargo_geometry,
     cargo_monitor_ready,
     select_static_status,
+    summarize_yaw_shadow_samples,
+    recognition_hook_bucket,
 )
 from summarize_server_run import summarize  # noqa: E402
 
@@ -35,6 +37,38 @@ def sample(code, reason="ok", track=0, **extra):
     }
     value.update(extra)
     return value
+
+
+class YawAuthorityShadowSummaryTest(unittest.TestCase):
+    def test_splits_stationary_and_moving_without_product_thresholds(self):
+        rows = [
+            {
+                "runtime_is_stationary": True,
+                "runtime_raw_config_yaw_innovation_deg": 8.0,
+                "runtime_free_vs_rail_translation_delta_m": 0.2,
+                "runtime_free_vs_rail_fitness_delta": 0.1,
+                "runtime_rail_registration_valid": True,
+            },
+            {
+                "runtime_is_stationary": False,
+                "runtime_raw_config_yaw_innovation_deg": 10.0,
+                "runtime_free_vs_rail_translation_delta_m": 0.4,
+                "runtime_free_vs_rail_fitness_delta": 0.2,
+                "runtime_rail_registration_valid": False,
+            },
+        ]
+        summary = summarize_yaw_shadow_samples(rows)
+        self.assertEqual(summary["ALL_TIME"]["samples"], 2)
+        self.assertEqual(summary["CRANE_STATIONARY"]["samples"], 1)
+        self.assertEqual(summary["CRANE_MOVING"]["samples"], 1)
+        self.assertEqual(
+            summary["ALL_TIME"]["rail_refinement_valid_ratio"], 0.5)
+        self.assertNotIn("pass", summary["ALL_TIME"])
+
+    def test_unknown_hook_is_not_loaded_or_empty(self):
+        self.assertIsNone(recognition_hook_bucket(False, False))
+        self.assertEqual(recognition_hook_bucket(True, False), "HOOK_EMPTY")
+        self.assertEqual(recognition_hook_bucket(True, True), "HOOK_LOADED")
 
 
 class SafetyAggregatorTest(unittest.TestCase):
