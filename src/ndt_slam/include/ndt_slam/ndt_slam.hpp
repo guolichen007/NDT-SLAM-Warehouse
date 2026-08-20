@@ -86,6 +86,9 @@
 #include <ndt_slam/crane_motion_ekf.hpp>
 #include <ndt_slam/ndt_fitness_circuit_breaker.hpp>
 #include <ndt_slam/crane_pose_constraint.hpp>
+#include <ndt_slam/crane_yaw_authority.hpp>
+#include <ndt_slam/rail_constrained_translation_refiner.hpp>
+#include <ndt_slam/se2_observability_proxy.hpp>
 #include <ndt_slam/clean_map_builder.hpp>
 #include <ndt_slam/ndt_relocalizer.hpp>
 #include <ndt_slam/stationary_motion_policy.hpp>
@@ -549,6 +552,20 @@ private:
     std::string last_registration_console_mode_;
     NdtObservabilityConfig ndt_observability_config_;
     NdtObservability last_ndt_observability_;
+    NdtObservability last_config_rotated_ndt_observability_;
+    Se2ObservabilityProxyConfig se2_observability_proxy_config_;
+    Se2ObservabilityProxy last_se2_observability_proxy_;
+    CraneYawAuthorityConfig crane_yaw_authority_config_;
+    CraneYawAuthority crane_yaw_authority_;
+    CraneYawAuthorityDecision last_crane_yaw_decision_;
+    RailTranslationRefinerConfig rail_refiner_config_;
+    RailConstrainedTranslationRefiner rail_translation_refiner_;
+    RailTranslationRefinerResult last_rail_refinement_;
+    std::string crane_yaw_config_file_;
+    std::string crane_yaw_config_sha256_;
+    bool crane_yaw_config_loaded_ = false;
+    bool yaw_shadow_csv_initialized_ = false;
+    std::ofstream yaw_shadow_csv_;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr sampleCloudByRatio(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, double ratio);

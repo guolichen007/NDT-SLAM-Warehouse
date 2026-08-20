@@ -722,6 +722,41 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         logStartupConfig();
         logBuildId();
     }
+    if (crane_yaw_config_loaded_ &&
+        (crane_yaw_authority_config_.enabled ||
+         rail_refiner_config_.enabled)) {
+        try {
+            const std::string shadow_output_dir = diag_output_dir_.empty()
+                ? "/tmp/ndt_slam_runtime_data"
+                : diag_output_dir_;
+            std::filesystem::create_directories(shadow_output_dir);
+            yaw_shadow_csv_.open(
+                shadow_output_dir + "/yaw_authority_shadow.csv");
+            if (yaw_shadow_csv_.is_open()) {
+                yaw_shadow_csv_
+                    << "frame,stamp,motion_bucket,authority_state,"
+                    << "authority_reason,free_ndt_x,free_ndt_y,"
+                    << "free_ndt_yaw_deg,soft_yaw_deg,config_yaw_deg,"
+                    << "raw_config_innovation_deg,"
+                    << "raw_config_innovation_unwrapped_deg,"
+                    << "raw_yaw_unwrapped_deg,proposed_yaw_unwrapped_deg,"
+                    << "free_ndt_reported_fitness,"
+                    << "free_fitness,rail_x,rail_y,rail_yaw_deg,"
+                    << "rail_fitness,translation_delta_m,fitness_delta,"
+                    << "rail_registration_valid,rail_registration_reason,"
+                    << "rail_refine_evaluations,rail_refine_time_ms,"
+                    << "se2_proxy_valid,yaw_observability_strong,"
+                    << "se2_eigenvalue_ratio,se2_direction_coverage,"
+                    << "product_application_allowed\n";
+                yaw_shadow_csv_initialized_ = true;
+            } else {
+                ROS_ERROR("[CraneYawShadow] unable to open evidence CSV");
+            }
+        } catch (const std::exception& error) {
+            ROS_ERROR("[CraneYawShadow] CSV initialization failed: %s",
+                      error.what());
+        }
+    }
 
     // Start callbacks only after all publishers, maps, algorithms and
     // diagnostics are fully configured.
@@ -758,6 +793,10 @@ NdtSlamNode::~NdtSlamNode() {
     hook_load_state_sub_.shutdown();
     timer_.stop();
     memory_guard_timer_.stop();
+    if (yaw_shadow_csv_.is_open()) {
+        yaw_shadow_csv_.flush();
+        yaw_shadow_csv_.close();
+    }
     shutdown_ = true;
     queue_cv_.notify_all();
     tracking_cv_.notify_all();
@@ -3636,6 +3675,117 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             "cargo_warning_enabled",
             odom_anchor_config_.cargo_warning.enabled);
 
+        const std::filesystem::path default_yaw_config =
+            std::filesystem::path(config_file_path).parent_path() /
+            "crane_yaw_authority.yaml";
+        private_nh.param<std::string>(
+            "crane_yaw_config_file", crane_yaw_config_file_,
+            default_yaw_config.string());
+        crane_yaw_config_loaded_ = false;
+        try {
+            const YAML::Node yaw_config =
+                YAML::LoadFile(crane_yaw_config_file_);
+            const YAML::Node authority =
+                yaw_config["crane_yaw_authority"];
+            crane_yaw_authority_config_.enabled =
+                authority["enabled"].as<bool>(false);
+            crane_yaw_authority_config_.apply_to_runtime_pose =
+                authority["apply_to_runtime_pose"].as<bool>(false);
+            crane_yaw_authority_config_.reference_source =
+                authority["reference_source"].as<std::string>("CONFIG");
+            if (authority["configured_base_yaw_in_map_deg"] &&
+                !authority["configured_base_yaw_in_map_deg"].IsNull()) {
+                crane_yaw_authority_config_
+                    .configured_base_yaw_in_map_rad =
+                    authority["configured_base_yaw_in_map_deg"]
+                        .as<double>() * M_PI / 180.0;
+            }
+            if (authority["map_frame_convention_id"] &&
+                !authority["map_frame_convention_id"].IsNull()) {
+                crane_yaw_authority_config_.map_frame_convention_id =
+                    authority["map_frame_convention_id"].as<std::string>();
+            }
+            if (authority["map_frame_convention_description"] &&
+                !authority["map_frame_convention_description"].IsNull()) {
+                crane_yaw_authority_config_
+                    .map_frame_convention_description =
+                    authority["map_frame_convention_description"]
+                        .as<std::string>();
+            }
+            crane_yaw_authority_config_.allow_first_reliable_fallback =
+                authority["allow_first_reliable_fallback"].as<bool>(false);
+            crane_yaw_authority_config_.fallback_required_reliable_frames =
+                authority["fallback_required_reliable_frames"]
+                    .as<std::size_t>(0U);
+
+            const YAML::Node refinement =
+                yaw_config["rail_translation_refinement"];
+            rail_refiner_config_.enabled =
+                refinement["enabled"].as<bool>(false);
+            rail_refiner_config_.shadow_only =
+                refinement["shadow_only"].as<bool>(true);
+            rail_refiner_config_.configured_yaw_rad =
+                crane_yaw_authority_config_
+                    .configured_base_yaw_in_map_rad;
+
+            const YAML::Node conflict = yaw_config["physical_conflict"];
+            if (conflict["raw_yaw_threshold_deg"] &&
+                !conflict["raw_yaw_threshold_deg"].IsNull()) {
+                crane_yaw_authority_config_.raw_yaw_threshold_rad =
+                    conflict["raw_yaw_threshold_deg"].as<double>() *
+                    M_PI / 180.0;
+            }
+            if (conflict["rail_fitness_delta_threshold"] &&
+                !conflict["rail_fitness_delta_threshold"].IsNull()) {
+                crane_yaw_authority_config_
+                    .rail_fitness_delta_threshold =
+                    conflict["rail_fitness_delta_threshold"].as<double>();
+            }
+            if (conflict["rail_translation_delta_threshold_m"] &&
+                !conflict["rail_translation_delta_threshold_m"].IsNull()) {
+                crane_yaw_authority_config_
+                    .rail_translation_delta_threshold_m =
+                    conflict["rail_translation_delta_threshold_m"]
+                        .as<double>();
+            }
+            if (conflict["required_consecutive_frames"] &&
+                !conflict["required_consecutive_frames"].IsNull()) {
+                crane_yaw_authority_config_.required_consecutive_frames =
+                    conflict["required_consecutive_frames"]
+                        .as<std::size_t>();
+            }
+            crane_yaw_authority_.configure(crane_yaw_authority_config_);
+            rail_translation_refiner_.configure(rail_refiner_config_);
+            crane_yaw_config_loaded_ = true;
+            CraneYawEvidence startup_evidence;
+            // Startup validation is not a registration frame and must not
+            // advance consecutive rail-failure evidence.
+            startup_evidence.rail_registration_valid = true;
+            const CraneYawAuthorityDecision startup_decision =
+                crane_yaw_authority_.observe(startup_evidence);
+            if (startup_decision.state == CraneYawAuthorityState::INVALID) {
+                ROS_ERROR("[CraneYawShadow] rejected config reason=%s file=%s",
+                          startup_decision.reason.c_str(),
+                          crane_yaw_config_file_.c_str());
+            } else {
+                ROS_INFO("[CraneYawShadow] loaded=1 enabled=%d "
+                         "apply_to_runtime_pose=0 rail_enabled=%d state=%s "
+                         "file=%s",
+                         crane_yaw_authority_config_.enabled ? 1 : 0,
+                         rail_refiner_config_.enabled ? 1 : 0,
+                         CraneYawAuthority::stateName(
+                             startup_decision.state),
+                         crane_yaw_config_file_.c_str());
+            }
+        } catch (const YAML::Exception& error) {
+            crane_yaw_authority_config_.enabled = false;
+            rail_refiner_config_.enabled = false;
+            crane_yaw_authority_.configure(crane_yaw_authority_config_);
+            rail_translation_refiner_.configure(rail_refiner_config_);
+            ROS_ERROR("[CraneYawShadow] config load failed file=%s reason=%s",
+                      crane_yaw_config_file_.c_str(), error.what());
+        }
+
         static_obstacle_evidence_index_.reset(
             static_evidence_epoch_.load(std::memory_order_acquire));
         if (persistent_map_enabled_) {
@@ -4710,7 +4860,10 @@ void NdtSlamNode::consumeCleanMapRebuildResult(const ros::Time& stamp) {
             result.static_observable_cells,
             result.static_free_cells,
             evidence_stamp, result.static_evidence_epoch,
-            result.source_objects_version);
+            result.source_objects_version,
+            StaticEvidenceObservationContext{
+                "internal_static_evidence_observation_stamp",
+                is_stationary_});
         StaticEvidenceCellKeySet build_invalidated_cells =
             result.static_invalidated_cells;
         build_invalidated_cells.insert(
@@ -5044,6 +5197,7 @@ void NdtSlamNode::processCloudThread() {
         double diag_output_step = 0.0;
         double diag_output_yaw_step_deg = 0.0;
         double diag_output_speed_mps = 0.0;
+        last_rail_refinement_ = RailTranslationRefinerResult{};
 
         // 保存消息时间戳，供 publishCurrentCloud 使用
         last_stamp_ = msg->header.stamp;
@@ -5703,10 +5857,29 @@ void NdtSlamNode::processCloudThread() {
                     point.x, point.y);
             }
         }
-        NdtObservability frame_ndt_observability =
+        const NdtObservability registration_frame_ndt_observability =
             estimateNdtObservabilityFromStructure(
                 observability_structure_points,
                 ndt_observability_config_);
+        NdtObservability frame_ndt_observability =
+            registration_frame_ndt_observability;
+        last_se2_observability_proxy_ = estimateSe2ObservabilityProxy(
+            observability_structure_points, se2_observability_proxy_config_);
+        if (std::isfinite(crane_yaw_authority_config_
+                              .configured_base_yaw_in_map_rad)) {
+            // Positive yaw rotates registration/base-frame structure axes
+            // into the map/XY-EKF frame. This is SHADOW-only; the product
+            // observability input below remains unchanged in Phase 1.
+            last_config_rotated_ndt_observability_ = rotateNdtObservability(
+                registration_frame_ndt_observability,
+                crane_yaw_authority_config_
+                    .configured_base_yaw_in_map_rad);
+        } else {
+            last_config_rotated_ndt_observability_ =
+                registration_frame_ndt_observability;
+            last_config_rotated_ndt_observability_.reason =
+                "config_yaw_unconfigured";
+        }
         // The structure proxy is estimated in the registration source/base
         // frame, while the EKF state and NDT translation measurement live in
         // the map frame. Rotate with the same predicted pose used to seed NDT.
@@ -6045,6 +6218,13 @@ void NdtSlamNode::processCloudThread() {
                 double ndt_time_ms = std::chrono::duration<double, std::milli>(ndt_end - ndt_start).count();
                 diag_stage.ndt_ms = ndt_time_ms;
                 last_ndt_time_ms_ = ndt_time_ms;
+                const std::uint64_t ndt_attempts =
+                    ndt_attempt_count_.load(std::memory_order_relaxed);
+                if (ndt_attempts > 0U && std::isfinite(ndt_time_ms)) {
+                    average_ndt_time_ms_ +=
+                        (ndt_time_ms - average_ndt_time_ms_) /
+                        static_cast<double>(ndt_attempts);
+                }
                 last_ndt_converged_ = ndt_->hasConverged();
                 if (last_ndt_converged_) {
                     ndt_converged_count_.fetch_add(1, std::memory_order_relaxed);
@@ -6172,6 +6352,107 @@ void NdtSlamNode::processCloudThread() {
                         diag_raw_ndt_pose = new_pose;
                         diag_have_raw_ndt_pose = true;
                         frame_raw_ndt_pose = new_pose;
+                        const CranePoseRpy raw_ndt_rpy =
+                            cranePoseRpy(frame_raw_ndt_pose.so3());
+                        last_rail_refinement_.free_pose = frame_raw_ndt_pose;
+                        last_rail_refinement_.free_ndt_reported_fitness =
+                            fitness_score;
+                        if (!rail_refiner_config_.enabled) {
+                            last_rail_refinement_.reason = "disabled";
+                        }
+                        const bool yaw_reference_complete =
+                            std::isfinite(crane_yaw_authority_config_
+                                              .configured_base_yaw_in_map_rad) &&
+                            !crane_yaw_authority_config_
+                                 .map_frame_convention_id.empty() &&
+                            !crane_yaw_authority_config_
+                                 .map_frame_convention_description.empty();
+                        if (rail_refiner_config_.enabled &&
+                            !yaw_reference_complete) {
+                            last_rail_refinement_.reason =
+                                "site_yaw_or_map_convention_unconfigured";
+                        }
+                        if (rail_refiner_config_.enabled &&
+                            yaw_reference_complete &&
+                            raw_ndt_rpy.valid) {
+                            RailTranslationRefinerConfig frame_refiner_config =
+                                rail_refiner_config_;
+                            frame_refiner_config.configured_yaw_rad =
+                                crane_yaw_authority_config_
+                                    .configured_base_yaw_in_map_rad;
+                            const double physical_trust_radius = std::max(
+                                1.0e-6,
+                                crane_motion_ekf_enabled_ &&
+                                        crane_motion_ekf_.initialized()
+                                    ? crane_motion_ekf_.status()
+                                          .max_allowed_step
+                                    : crane_motion_ekf_cfg_
+                                          .max_step_max_m);
+                            frame_refiner_config.trust_radius_m =
+                                physical_trust_radius;
+                            frame_refiner_config.initial_step_m = std::max(
+                                ndt_transformation_epsilon_,
+                                std::min(
+                                    0.5 * ndt_resolution_,
+                                    physical_trust_radius));
+                            frame_refiner_config.minimum_step_m = std::max(
+                                1.0e-6, ndt_transformation_epsilon_);
+                            rail_translation_refiner_.configure(
+                                frame_refiner_config);
+                            RailTranslationRefinerInput shadow_input;
+                            shadow_input.free_pose = frame_raw_ndt_pose;
+                            shadow_input.predicted_pose =
+                                diag_initial_guess_pose;
+                            shadow_input.free_ndt_reported_fitness =
+                                fitness_score;
+                            shadow_input.captured_target_version =
+                                last_bound_ndt_target_version_;
+                            shadow_input.current_target_version =
+                                last_bound_ndt_target_version_;
+                            try {
+                                last_rail_refinement_ =
+                                    rail_translation_refiner_.refine(
+                                        shadow_input,
+                                        [this, &registration_cloud](
+                                            const Sophus::SE3d& pose) {
+                                            pcl::PointCloud<pcl::PointXYZ>
+                                                transformed;
+                                            pcl::transformPointCloud(
+                                                *registration_cloud,
+                                                transformed,
+                                                pose.matrix().cast<float>());
+                                            return ndt_->calculateScore(
+                                                transformed);
+                                        });
+                            } catch (const std::exception& error) {
+                                last_rail_refinement_ =
+                                    RailTranslationRefinerResult{};
+                                last_rail_refinement_.reason =
+                                    std::string("shadow_exception:") +
+                                    error.what();
+                                ROS_ERROR_THROTTLE(
+                                    5.0,
+                                    "[CraneYawShadow] rail refiner failed "
+                                    "without affecting runtime pose: %s",
+                                    error.what());
+                            }
+                        }
+                        CraneYawEvidence yaw_evidence;
+                        yaw_evidence.raw_ndt_yaw_rad = raw_ndt_rpy.valid
+                            ? raw_ndt_rpy.yaw
+                            : std::numeric_limits<double>::quiet_NaN();
+                        yaw_evidence.yaw_observability_strong =
+                            last_se2_observability_proxy_.valid &&
+                            last_se2_observability_proxy_
+                                .yaw_observability_strong;
+                        yaw_evidence.rail_registration_valid =
+                            last_rail_refinement_.valid;
+                        yaw_evidence.rail_fitness_delta =
+                            last_rail_refinement_.fitness_delta;
+                        yaw_evidence.rail_translation_delta_m =
+                            last_rail_refinement_.translation_delta_m;
+                        last_crane_yaw_decision_ =
+                            crane_yaw_authority_.observe(yaw_evidence);
                         if (diag_have_previous_raw_ndt_pose) {
                             diag_raw_ndt_step_from_previous =
                                 (new_pose.translation().head<2>() -
@@ -6528,6 +6809,93 @@ void NdtSlamNode::processCloudThread() {
                 speed_xy < motion_gate_moving_min_velocity_;
             constrained_pose = applyCraneOutputConstraint(
                 new_pose, runtime_low_motion, speed_xy);
+        }
+
+        if (yaw_shadow_csv_initialized_ && ndt_safe_pose_valid_this_frame) {
+            const CranePoseRpy free_rpy =
+                cranePoseRpy(frame_raw_ndt_pose.so3());
+            const CranePoseRpy soft_rpy =
+                cranePoseRpy(constrained_pose.so3());
+            const CranePoseRpy rail_rpy = last_rail_refinement_.valid
+                ? cranePoseRpy(last_rail_refinement_.rail_pose.so3())
+                : CranePoseRpy{};
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            yaw_shadow_csv_ << std::setprecision(17)
+                << processing_frame_index << ','
+                << msg->header.stamp.toSec() << ','
+                << (is_stationary_ ? "CRANE_STATIONARY" : "CRANE_MOVING")
+                << ','
+                << CraneYawAuthority::stateName(
+                       last_crane_yaw_decision_.state) << ','
+                << last_crane_yaw_decision_.reason << ','
+                << frame_raw_ndt_pose.translation().x() << ','
+                << frame_raw_ndt_pose.translation().y() << ','
+                << (free_rpy.valid ? free_rpy.yaw * 180.0 / M_PI : nan)
+                << ','
+                << (soft_rpy.valid ? soft_rpy.yaw * 180.0 / M_PI : nan)
+                << ','
+                << (std::isfinite(crane_yaw_authority_config_
+                                      .configured_base_yaw_in_map_rad)
+                        ? crane_yaw_authority_config_
+                              .configured_base_yaw_in_map_rad *
+                              180.0 / M_PI
+                        : nan)
+                << ','
+                << (last_crane_yaw_decision_.raw_innovation_valid
+                        ? last_crane_yaw_decision_
+                              .raw_minus_authoritative_yaw_rad *
+                              180.0 / M_PI
+                        : nan)
+                << ','
+                << (last_crane_yaw_decision_.raw_innovation_valid
+                        ? (last_crane_yaw_decision_.raw_yaw_unwrapped_rad -
+                           last_crane_yaw_decision_
+                               .authoritative_yaw_unwrapped_rad) *
+                              180.0 / M_PI
+                        : nan)
+                << ','
+                << (last_crane_yaw_decision_.raw_innovation_valid
+                        ? last_crane_yaw_decision_.raw_yaw_unwrapped_rad *
+                              180.0 / M_PI
+                        : nan)
+                << ','
+                << (last_crane_yaw_decision_.proposal_valid
+                        ? last_crane_yaw_decision_
+                              .authoritative_yaw_unwrapped_rad *
+                              180.0 / M_PI
+                        : nan)
+                << ','
+                << last_rail_refinement_.free_ndt_reported_fitness << ','
+                << last_rail_refinement_.free_fitness << ','
+                << (last_rail_refinement_.valid
+                        ? last_rail_refinement_.rail_pose.translation().x()
+                        : nan)
+                << ','
+                << (last_rail_refinement_.valid
+                        ? last_rail_refinement_.rail_pose.translation().y()
+                        : nan)
+                << ','
+                << (rail_rpy.valid ? rail_rpy.yaw * 180.0 / M_PI : nan)
+                << ',' << last_rail_refinement_.rail_fitness
+                << ',' << last_rail_refinement_.translation_delta_m
+                << ',' << last_rail_refinement_.fitness_delta
+                << ',' << (last_rail_refinement_.valid ? 1 : 0)
+                << ',' << last_rail_refinement_.reason
+                << ',' << last_rail_refinement_.evaluations
+                << ',' << last_rail_refinement_.elapsed_ms
+                << ',' << (last_se2_observability_proxy_.valid ? 1 : 0)
+                << ','
+                << (last_se2_observability_proxy_.yaw_observability_strong
+                        ? 1 : 0)
+                << ',' << last_se2_observability_proxy_.eigenvalue_ratio
+                << ',' << last_se2_observability_proxy_.direction_coverage
+                << ','
+                << (last_crane_yaw_decision_.product_application_allowed
+                        ? 1 : 0)
+                << '\n';
+            if (processing_frame_index % 10U == 0U) {
+                yaw_shadow_csv_.flush();
+            }
         }
 
         if (registration_success) {
@@ -12621,6 +12989,9 @@ void NdtSlamNode::writeRuntimeStatus() {
     std::size_t objects_clean_pts = 0U;
     std::size_t local_pts = 0U;
     std::uint64_t display_generation = 0U;
+    MapCommitJob newest_map_commit_job;
+    bool newest_map_commit_job_valid = false;
+    std::size_t map_commit_queue_depth = 0U;
     {
         std::lock_guard<std::mutex> lock(map_mutex_);
         global_pts = global_map_ ? global_map_->size() : 0U;
@@ -12632,6 +13003,20 @@ void NdtSlamNode::writeRuntimeStatus() {
         display_generation = latest_completed_map_bundle_.valid
             ? latest_completed_map_bundle_.generation : 0U;
     }
+    {
+        std::lock_guard<std::mutex> lock(map_commit_queue_mutex_);
+        map_commit_queue_depth = map_commit_queue_.size();
+        if (!map_commit_queue_.empty()) {
+            newest_map_commit_job = map_commit_queue_.back();
+            newest_map_commit_job_valid = true;
+        }
+    }
+    const CranePoseRpy runtime_current_rpy = cranePoseRpy(current_pose_.so3());
+    const CranePoseRpy runtime_published_rpy =
+        cranePoseRpy(published_pose_.so3());
+    const CranePoseRpy runtime_commit_rpy = newest_map_commit_job_valid
+        ? cranePoseRpy(newest_map_commit_job.pose.so3())
+        : CranePoseRpy{};
 
     f << std::fixed << std::setprecision(2);
     f << "{\n";
@@ -12649,6 +13034,42 @@ void NdtSlamNode::writeRuntimeStatus() {
       << keyframe_count_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"map_commit_completed_count\": "
       << map_commit_completed_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"map_commit_submitted_count\": "
+      << map_commit_submitted_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"map_commit_stale_count\": "
+      << map_commit_stale_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"map_commit_queue_depth\": " << map_commit_queue_depth
+      << ",\n";
+    f << "  \"map_commit_job_sequence\": "
+      << (newest_map_commit_job_valid ? newest_map_commit_job.sequence : 0U)
+      << ",\n";
+    f << "  \"map_commit_job_lifecycle_epoch\": "
+      << (newest_map_commit_job_valid
+              ? newest_map_commit_job.lifecycle_epoch : 0U) << ",\n";
+    f << "  \"map_commit_job_pose_x\": "
+      << (newest_map_commit_job_valid
+              ? newest_map_commit_job.pose.translation().x() : 0.0)
+      << ",\n";
+    f << "  \"map_commit_job_pose_y\": "
+      << (newest_map_commit_job_valid
+              ? newest_map_commit_job.pose.translation().y() : 0.0)
+      << ",\n";
+    f << "  \"map_commit_job_pose_yaw_deg\": "
+      << (runtime_commit_rpy.valid
+              ? runtime_commit_rpy.yaw * 180.0 / M_PI : 0.0) << ",\n";
+    f << "  \"map_rebuild_generation\": "
+      << map_rebuild_generation_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"keyframe_pose_version\": "
+      << keyframe_pose_version_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"local_map_version\": " << local_map_version_ << ",\n";
+    f << "  \"ndt_target_version\": "
+      << last_bound_ndt_target_version_ << ",\n";
+    f << "  \"loop_closure_running\": "
+      << (loop_closure_running_.load(std::memory_order_relaxed)
+              ? "true" : "false") << ",\n";
+    f << "  \"loop_closure_result_ready\": "
+      << (loop_closure_result_ready_.load(std::memory_order_relaxed)
+              ? "true" : "false") << ",\n";
     f << "  \"tile_flush_completed_count\": "
       << flushed_tile_count_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"time_epoch_reset_count\": "
@@ -12662,6 +13083,20 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"stationary_frame_count\": " << stationary_frame_count_ << ",\n";
     f << "  \"delta_translation_m\": " << delta_translation_ << ",\n";
     f << "  \"delta_yaw_deg\": " << delta_yaw_ << ",\n";
+    f << "  \"current_pose_x\": " << current_pose_.translation().x()
+      << ",\n";
+    f << "  \"current_pose_y\": " << current_pose_.translation().y()
+      << ",\n";
+    f << "  \"current_pose_yaw_deg\": "
+      << (runtime_current_rpy.valid
+              ? runtime_current_rpy.yaw * 180.0 / M_PI : 0.0) << ",\n";
+    f << "  \"published_pose_x\": " << published_pose_.translation().x()
+      << ",\n";
+    f << "  \"published_pose_y\": " << published_pose_.translation().y()
+      << ",\n";
+    f << "  \"published_pose_yaw_deg\": "
+      << (runtime_published_rpy.valid
+              ? runtime_published_rpy.yaw * 180.0 / M_PI : 0.0) << ",\n";
     f << "  \"global_map_points\": " << global_pts << ",\n";
     f << "  \"display_map_points\": " << display_pts << ",\n";
     f << "  \"display_map_scope\": \""
@@ -12732,7 +13167,116 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"ndt_fitness_warning\": " << (consecutive_high_fitness_ > fitness_warning_count_ ? "true" : "false") << ",\n";
     f << "  \"consecutive_high_fitness\": " << consecutive_high_fitness_ << ",\n";
     f << "  \"average_process_time_ms\": " << average_process_time_ms_ << ",\n";
+    f << "  \"last_ndt_time_ms\": " << last_ndt_time_ms_ << ",\n";
     f << "  \"average_ndt_time_ms\": " << average_ndt_time_ms_ << ",\n";
+    const auto finite_json_number = [](double value) {
+        if (!std::isfinite(value)) return std::string("null");
+        std::ostringstream stream;
+        stream << std::setprecision(17) << value;
+        return stream.str();
+    };
+    const CranePoseRpy runtime_free_rpy =
+        cranePoseRpy(last_rail_refinement_.free_pose.so3());
+    const CranePoseRpy runtime_rail_rpy =
+        cranePoseRpy(last_rail_refinement_.rail_pose.so3());
+    f << "  \"crane_yaw_shadow_build\": true,\n";
+    f << "  \"crane_yaw_config_loaded\": "
+      << (crane_yaw_config_loaded_ ? "true" : "false") << ",\n";
+    f << "  \"crane_yaw_apply_to_runtime_pose\": false,\n";
+    f << "  \"crane_yaw_state\": \""
+      << CraneYawAuthority::stateName(last_crane_yaw_decision_.state)
+      << "\",\n";
+    f << "  \"crane_yaw_reason\": \""
+      << escapeJsonString(last_crane_yaw_decision_.reason) << "\",\n";
+    f << "  \"configured_base_yaw_in_map_deg\": "
+      << finite_json_number(
+             crane_yaw_authority_config_.configured_base_yaw_in_map_rad *
+             180.0 / M_PI) << ",\n";
+    f << "  \"raw_config_yaw_innovation_deg\": "
+      << finite_json_number(
+             last_crane_yaw_decision_.raw_minus_authoritative_yaw_rad *
+             180.0 / M_PI) << ",\n";
+    f << "  \"raw_config_yaw_innovation_unwrapped_deg\": "
+      << finite_json_number(
+             (last_crane_yaw_decision_.raw_yaw_unwrapped_rad -
+              last_crane_yaw_decision_.authoritative_yaw_unwrapped_rad) *
+             180.0 / M_PI) << ",\n";
+    f << "  \"raw_ndt_yaw_unwrapped_deg\": "
+      << finite_json_number(
+             last_crane_yaw_decision_.raw_yaw_unwrapped_rad *
+             180.0 / M_PI) << ",\n";
+    f << "  \"proposed_yaw_deg\": "
+      << finite_json_number(
+             last_crane_yaw_decision_.authoritative_yaw_rad *
+             180.0 / M_PI) << ",\n";
+    f << "  \"proposed_yaw_unwrapped_deg\": "
+      << finite_json_number(
+             last_crane_yaw_decision_.authoritative_yaw_unwrapped_rad *
+             180.0 / M_PI) << ",\n";
+    f << "  \"soft_yaw_deg\": "
+      << finite_json_number(filtered_yaw_initialized_
+             ? filtered_yaw_rad_ * 180.0 / M_PI
+             : std::numeric_limits<double>::quiet_NaN()) << ",\n";
+    f << "  \"raw_ndt_yaw_deg\": "
+      << finite_json_number(runtime_free_rpy.valid
+             ? runtime_free_rpy.yaw * 180.0 / M_PI
+             : std::numeric_limits<double>::quiet_NaN()) << ",\n";
+    f << "  \"rail_registration_valid\": "
+      << (last_rail_refinement_.valid ? "true" : "false") << ",\n";
+    f << "  \"rail_registration_reason\": \""
+      << escapeJsonString(last_rail_refinement_.reason) << "\",\n";
+    f << "  \"free_ndt_x\": "
+      << finite_json_number(last_rail_refinement_.free_pose.translation().x())
+      << ",\n";
+    f << "  \"free_ndt_y\": "
+      << finite_json_number(last_rail_refinement_.free_pose.translation().y())
+      << ",\n";
+    f << "  \"free_ndt_reported_fitness\": "
+      << finite_json_number(last_rail_refinement_.free_ndt_reported_fitness)
+      << ",\n";
+    f << "  \"free_fitness\": "
+      << finite_json_number(last_rail_refinement_.free_fitness) << ",\n";
+    f << "  \"rail_constrained_x\": "
+      << finite_json_number(last_rail_refinement_.rail_pose.translation().x())
+      << ",\n";
+    f << "  \"rail_constrained_y\": "
+      << finite_json_number(last_rail_refinement_.rail_pose.translation().y())
+      << ",\n";
+    f << "  \"rail_constrained_yaw_deg\": "
+      << finite_json_number(runtime_rail_rpy.valid
+             ? runtime_rail_rpy.yaw * 180.0 / M_PI
+             : std::numeric_limits<double>::quiet_NaN()) << ",\n";
+    f << "  \"rail_fitness\": "
+      << finite_json_number(last_rail_refinement_.rail_fitness) << ",\n";
+    f << "  \"free_vs_rail_translation_delta_m\": "
+      << finite_json_number(last_rail_refinement_.translation_delta_m)
+      << ",\n";
+    f << "  \"free_vs_rail_fitness_delta\": "
+      << finite_json_number(last_rail_refinement_.fitness_delta) << ",\n";
+    f << "  \"rail_refine_evaluations\": "
+      << last_rail_refinement_.evaluations << ",\n";
+    f << "  \"rail_refine_time_ms\": "
+      << last_rail_refinement_.elapsed_ms << ",\n";
+    f << "  \"se2_proxy_valid\": "
+      << (last_se2_observability_proxy_.valid ? "true" : "false")
+      << ",\n";
+    f << "  \"yaw_observability_strong\": "
+      << (last_se2_observability_proxy_.yaw_observability_strong
+              ? "true" : "false") << ",\n";
+    f << "  \"se2_proxy_eigenvalue_ratio\": "
+      << finite_json_number(last_se2_observability_proxy_.eigenvalue_ratio)
+      << ",\n";
+    f << "  \"se2_proxy_direction_coverage\": "
+      << finite_json_number(last_se2_observability_proxy_.direction_coverage)
+      << ",\n";
+    f << "  \"config_observability_weak_direction_x\": "
+      << finite_json_number(
+             last_config_rotated_ndt_observability_.weak_direction.x())
+      << ",\n";
+    f << "  \"config_observability_weak_direction_y\": "
+      << finite_json_number(
+             last_config_rotated_ndt_observability_.weak_direction.y())
+      << ",\n";
     f << "  \"last_flush_time\": \"" << last_flush_time_local_ << "\",\n";
     f << "  \"last_active_map_rebuild_sec\": "
       << last_active_map_rebuild_time_sec_.load(std::memory_order_relaxed)
@@ -12770,6 +13314,24 @@ void NdtSlamNode::writeRuntimeStatus() {
         static_obstacle_evidence_index_.diagnostics();
     f << "  \"static_evidence_reset_by_time_gap\": "
       << static_diagnostics.reset_by_time_gap << ",\n";
+    f << "  \"static_evidence_time_gap_event_count\": "
+      << static_diagnostics.time_gap_event_count << ",\n";
+    f << "  \"static_evidence_affected_cells_total\": "
+      << static_diagnostics.affected_cells_total << ",\n";
+    f << "  \"static_evidence_affected_cells_last\": "
+      << static_diagnostics.affected_cells_last << ",\n";
+    f << "  \"static_evidence_previous_stamp\": "
+      << static_diagnostics.previous_stamp << ",\n";
+    f << "  \"static_evidence_current_stamp\": "
+      << static_diagnostics.current_stamp << ",\n";
+    f << "  \"static_evidence_gap_sec\": "
+      << static_diagnostics.gap_sec << ",\n";
+    f << "  \"static_evidence_stamp_source\": \""
+      << escapeJsonString(static_diagnostics.stamp_source) << "\",\n";
+    f << "  \"static_evidence_gap_motion_bucket\": \""
+      << (static_diagnostics.gap_event_stationary
+              ? "CRANE_STATIONARY" : "CRANE_MOVING")
+      << "\",\n";
     f << "  \"static_evidence_reset_by_sequence_gap\": "
       << static_diagnostics.reset_by_sequence_gap << ",\n";
     f << "  \"static_evidence_pending_observation_count\": "

@@ -20,6 +20,8 @@
     <!-- Optional override for all nodes that read live_longterm_mapping.yaml.
          Default keeps the original path; bag harness passes a sandbox copy. -->
     <arg name="config_file" default="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
+    <arg name="crane_yaw_config_file"
+         default="$(find ndt_slam)/config/crane_yaw_authority.yaml"/>
 
     <!-- Debounce and classify the hook load-cell voltage before SLAM uses it. -->
     <node name="hook_load_state"
@@ -35,6 +37,8 @@
     <!-- SLAM 节点（主节点：建图、定位、动态过滤） -->
     <node name="ndt_slam_node" pkg="ndt_slam" type="ndt_slam_node" output="screen">
         <param name="config_file" value="$(arg config_file)"/>
+        <param name="crane_yaw_config_file"
+               value="$(arg crane_yaw_config_file)"/>
         <param name="ndt_publish_cargo_markers" value="$(arg ndt_publish_cargo_markers)"/>
         <!-- YAML supplies conservative defaults; these launch arguments are
              explicit production overrides and must be visible in ~params. -->

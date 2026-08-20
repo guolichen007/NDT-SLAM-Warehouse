@@ -1,0 +1,19 @@
+crane_yaw_authority:
+  enabled: false
+  apply_to_runtime_pose: false
+  reference_source: CONFIG
+  configured_base_yaw_in_map_deg: null
+  map_frame_convention_id: null
+  map_frame_convention_description: null
+  allow_first_reliable_fallback: false
+  fallback_required_reliable_frames: 0
+
+rail_translation_refinement:
+  enabled: false
+  shadow_only: true
+
+physical_conflict:
+  raw_yaw_threshold_deg: null
+  rail_fitness_delta_threshold: null
+  rail_translation_delta_threshold_m: null
+  required_consecutive_frames: null
