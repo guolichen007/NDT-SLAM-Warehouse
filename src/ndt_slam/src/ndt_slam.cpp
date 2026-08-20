@@ -124,6 +124,40 @@ std::string escapeJsonString(const std::string& value) {
     return escaped.str();
 }
 
+// B2 detection-pipeline point-cloud vertical statistics (diagnostics only).
+float cloudZPercentile(const pcl::PointCloud<pcl::PointXYZ>& cloud, float q) {
+    std::vector<float> zs;
+    zs.reserve(cloud.size());
+    for (const auto& p : cloud.points) {
+        if (std::isfinite(p.z)) zs.push_back(p.z);
+    }
+    if (zs.empty()) return 0.0F;
+    std::sort(zs.begin(), zs.end());
+    const float pos = std::clamp(q, 0.0F, 1.0F) *
+                      static_cast<float>(zs.size() - 1U);
+    const std::size_t low = static_cast<std::size_t>(std::floor(pos));
+    const std::size_t high = static_cast<std::size_t>(std::ceil(pos));
+    const float frac = pos - static_cast<float>(low);
+    return zs[low] * (1.0F - frac) + zs[high] * frac;
+}
+
+float cloudZMax(const pcl::PointCloud<pcl::PointXYZ>& cloud) {
+    float m = -std::numeric_limits<float>::infinity();
+    for (const auto& p : cloud.points) {
+        if (std::isfinite(p.z)) m = std::max(m, p.z);
+    }
+    return std::isfinite(m) ? m : 0.0F;
+}
+
+std::size_t countHighPoints(const pcl::PointCloud<pcl::PointXYZ>& cloud,
+                            float threshold) {
+    std::size_t count = 0U;
+    for (const auto& p : cloud.points) {
+        if (std::isfinite(p.z) && p.z >= threshold) ++count;
+    }
+    return count;
+}
+
 struct RotationStageMetrics {
     bool finite = false;
     double orthogonality_error_max =
@@ -5179,6 +5213,11 @@ void NdtSlamNode::processCloudThread() {
 
         // ========== 阶段 1.5：近场过滤（去除起重机抓臂、吊具等固定结构）==========
         const auto near_filter_start = DiagClock::now();
+        // B2 diagnostic: capture merged (pre-near-field) vertical statistics.
+        const std::size_t b2_merged_points = input_cloud->size();
+        const float b2_merged_z95 = cloudZPercentile(*input_cloud, 0.95F);
+        const float b2_merged_zmax = cloudZMax(*input_cloud);
+        const std::size_t b2_merged_high = countHighPoints(*input_cloud, 1.3F);
         pcl::PointCloud<pcl::PointXYZ>::Ptr near_filtered(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr near_removed(new pcl::PointCloud<pcl::PointXYZ>);
         for (const auto& p : input_cloud->points) {
@@ -5191,6 +5230,10 @@ void NdtSlamNode::processCloudThread() {
             }
         }
         input_cloud = near_filtered;
+        const std::size_t b2_near_removed = near_removed->size();
+        const float b2_near_removed_zmax = cloudZMax(*near_removed);
+        const std::size_t b2_near_removed_high =
+            countHighPoints(*near_removed, 1.3F);
 
         // 每 50 帧发布一次被删除的点云（用于 RViz 可视化抓臂/吊具）
         static int near_field_log_count = 0;
@@ -5225,6 +5268,12 @@ void NdtSlamNode::processCloudThread() {
                 }
             }
         }
+
+        // B2 diagnostic: range-filtered detector input statistics.
+        const std::size_t b2_range_points = hook_input_cloud->size();
+        const float b2_range_z95 = cloudZPercentile(*hook_input_cloud, 0.95F);
+        const float b2_range_zmax = cloudZMax(*hook_input_cloud);
+        const std::size_t b2_range_high = countHighPoints(*hook_input_cloud, 1.3F);
 
         // Keep the due-frame input unvoxelized here. The detector crops its ROI
         // first and performs the single 0.05 m voxel pass on the much smaller ROI.
@@ -5306,6 +5355,63 @@ void NdtSlamNode::processCloudThread() {
             hook_allows_tracking &&
             hook_input_cloud && !hook_input_cloud->empty()) {
             hook_fixed_cargo_ = detectCargoAroundOdomAnchor(hook_input_cloud, msg->header.stamp);
+                last_detection_pipeline_trace_.merged_points = b2_merged_points;
+                last_detection_pipeline_trace_.merged_z95 = b2_merged_z95;
+                last_detection_pipeline_trace_.merged_zmax = b2_merged_zmax;
+                last_detection_pipeline_trace_.merged_high = b2_merged_high;
+                last_detection_pipeline_trace_.near_removed = b2_near_removed;
+                last_detection_pipeline_trace_.near_removed_zmax = b2_near_removed_zmax;
+                last_detection_pipeline_trace_.near_removed_high = b2_near_removed_high;
+                last_detection_pipeline_trace_.range_points = b2_range_points;
+                last_detection_pipeline_trace_.range_z95 = b2_range_z95;
+                last_detection_pipeline_trace_.range_zmax = b2_range_zmax;
+                last_detection_pipeline_trace_.range_high = b2_range_high;
+                {
+                    const DetectionPipelineTrace& t = last_detection_pipeline_trace_;
+                    if (!detection_pipeline_csv_init_) {
+                        detection_pipeline_csv_.open(
+                            "/tmp/cargo_forensic/detection_pipeline_trace.csv",
+                            std::ios::out | std::ios::trunc);
+                        if (detection_pipeline_csv_.is_open()) {
+                            detection_pipeline_csv_
+                                << "stamp,merged_points,merged_z95,merged_zmax,merged_high,"
+                                << "near_removed,near_removed_zmax,near_removed_high,"
+                                << "range_points,range_z95,range_zmax,range_high,"
+                                << "roi_points,roi_z95,roi_zmax,roi_high,"
+                                << "hag_points,hag_z95,hag_zmax,hag_high,hag_bypassed,"
+                                << "voxel_points,voxel_z95,voxel_zmax,voxel_high,"
+                                << "component_count,high_component_id,high_component_z95,"
+                                << "high_component_zmax,high_component_points,high_component_high,"
+                                << "hypothesis_count,selected_id,selected_z95,selected_zmax,"
+                                << "selected_points,selected_high,selected_score,top1_score,"
+                                << "score_margin,core_points,core_z95,core_zmax,core_high,"
+                                << "anchor_x,anchor_y,adaptive_cx,adaptive_cy,"
+                                << "search_z_min,search_z_max,rejected_below_zmin,"
+                                << "rejected_above_zmax,rejected_xy,ground_valid,ground_z\n";
+                        }
+                        detection_pipeline_csv_init_ = true;
+                    }
+                    if (detection_pipeline_csv_.is_open()) {
+                        detection_pipeline_csv_ << std::fixed << std::setprecision(4)
+                            << t.stamp_sec << ',' << t.merged_points << ',' << t.merged_z95 << ','
+                            << t.merged_zmax << ',' << t.merged_high << ','
+                            << t.near_removed << ',' << t.near_removed_zmax << ',' << t.near_removed_high << ','
+                            << t.range_points << ',' << t.range_z95 << ',' << t.range_zmax << ',' << t.range_high << ','
+                            << t.roi_points << ',' << t.roi_z95 << ',' << t.roi_zmax << ',' << t.roi_high << ','
+                            << t.hag_points << ',' << t.hag_z95 << ',' << t.hag_zmax << ',' << t.hag_high << ','
+                            << (t.hag_bypassed ? 1 : 0) << ','
+                            << t.voxel_points << ',' << t.voxel_z95 << ',' << t.voxel_zmax << ',' << t.voxel_high << ','
+                            << t.component_count << ',' << t.high_component_id << ',' << t.high_component_z95 << ','
+                            << t.high_component_zmax << ',' << t.high_component_points << ',' << t.high_component_high << ','
+                            << t.hypothesis_count << ',' << t.selected_id << ',' << t.selected_z95 << ',' << t.selected_zmax << ','
+                            << t.selected_points << ',' << t.selected_high << ',' << t.selected_score << ',' << t.top1_score << ','
+                            << t.score_margin << ',' << t.core_points << ',' << t.core_z95 << ',' << t.core_zmax << ',' << t.core_high << ','
+                            << t.anchor_x << ',' << t.anchor_y << ',' << t.adaptive_cx << ',' << t.adaptive_cy << ','
+                            << t.search_z_min << ',' << t.search_z_max << ',' << t.rejected_below_zmin << ','
+                            << t.rejected_above_zmax << ',' << t.rejected_xy << ','
+                            << (t.ground_valid ? 1 : 0) << ',' << t.ground_z << '\n';
+                    }
+                }
                 hook_fixed_bottom_ = estimateCargoBottom(hook_fixed_cargo_);
                 hook_fixed_cargo_.lidar_lift_evidence =
                     hook_fixed_cargo_.valid &&
@@ -13360,6 +13466,13 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     float cx = anchor.x();
     float cy = anchor.y();
 
+    // B2 diagnostic: reset and stamp the per-stage survival trace.
+    last_detection_pipeline_trace_ = DetectionPipelineTrace{};
+    last_detection_pipeline_trace_.valid = true;
+    last_detection_pipeline_trace_.stamp_sec = stamp.toSec();
+    last_detection_pipeline_trace_.anchor_x = cx;
+    last_detection_pipeline_trace_.anchor_y = cy;
+
     // 围绕 anchor 裁剪
     float x_min = cx - odom_anchor_config_.search_half_x;
     float x_max = cx + odom_anchor_config_.search_half_x;
@@ -13367,6 +13480,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     float y_max = cy + odom_anchor_config_.search_half_y;
     float z_min = odom_anchor_config_.search_z_min;
     float z_max = odom_anchor_config_.search_z_max;
+    last_detection_pipeline_trace_.search_z_min = z_min;
+    last_detection_pipeline_trace_.search_z_max = z_max;
 
     bool adaptive_search_valid = false;
     Eigen::Vector2f adaptive_center(cx, cy);
@@ -13414,12 +13529,27 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             inside_adaptive = std::abs(local_long) <= adaptive_half_long &&
                 std::abs(local_short) <= adaptive_half_short;
         }
-        if ((inside_fixed || inside_adaptive) &&
-            p.z >= z_min && p.z <= z_max) {
+        const bool inside_xy = inside_fixed || inside_adaptive;
+        if (inside_xy && p.z >= z_min && p.z <= z_max) {
             crop_cloud->push_back(p);
+        }
+        // B2 diagnostic: count elevated (>=1.3m) cargo returns rejected by
+        // this ROI crop. 1.3m is the paired SAFE_OVER_OBSTACLE forensics
+        // criterion, not a production threshold.
+        if (p.z >= 1.3F) {
+            if (inside_xy) {
+                if (p.z < z_min) ++last_detection_pipeline_trace_.rejected_below_zmin;
+                else if (p.z > z_max) ++last_detection_pipeline_trace_.rejected_above_zmax;
+            } else {
+                ++last_detection_pipeline_trace_.rejected_xy;
+            }
         }
     }
     result.roi_finite_points = crop_cloud->size();
+    last_detection_pipeline_trace_.roi_points = crop_cloud->size();
+    last_detection_pipeline_trace_.roi_z95 = cloudZPercentile(*crop_cloud, 0.95F);
+    last_detection_pipeline_trace_.roi_zmax = cloudZMax(*crop_cloud);
+    last_detection_pipeline_trace_.roi_high = countHighPoints(*crop_cloud, 1.3F);
 
     // A negative cargo observation is accepted only when the external ring
     // proves that the LiDAR actually observed the ROI surroundings. Detector
@@ -13525,6 +13655,14 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         filtered_cloud = crop_cloud;
     }
     result.hag_candidate_points = filtered_cloud->size();
+    last_detection_pipeline_trace_.hag_points = filtered_cloud->size();
+    last_detection_pipeline_trace_.hag_z95 = cloudZPercentile(*filtered_cloud, 0.95F);
+    last_detection_pipeline_trace_.hag_zmax = cloudZMax(*filtered_cloud);
+    last_detection_pipeline_trace_.hag_high = countHighPoints(*filtered_cloud, 1.3F);
+    last_detection_pipeline_trace_.hag_bypassed =
+        tight.hag_filter_enabled && !result.ground_reference_valid;
+    last_detection_pipeline_trace_.ground_valid = result.ground_reference_valid;
+    last_detection_pipeline_trace_.ground_z = result.ground_z;
     classify_outcome(false);
 
     if (!filtered_cloud->empty()) {
@@ -13574,6 +13712,10 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         result.reject_reason = "voxel_filter_failed:unknown";
         return result;
     }
+    last_detection_pipeline_trace_.voxel_points = voxel_cloud->size();
+    last_detection_pipeline_trace_.voxel_z95 = cloudZPercentile(*voxel_cloud, 0.95F);
+    last_detection_pipeline_trace_.voxel_zmax = cloudZMax(*voxel_cloud);
+    last_detection_pipeline_trace_.voxel_high = countHighPoints(*voxel_cloud, 1.3F);
 
     if (voxel_cloud->size() < static_cast<size_t>(odom_anchor_config_.weak_min_points)) {
         result.reject_reason = "too_few_points";
@@ -13785,6 +13927,29 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         component.indices = cluster_indices[component_index];
         component.min_z = z_low;
         component.max_z = z_high;
+        // B2 diagnostic: track the component with the strongest elevated
+        // (>=1.3m) support, so a "high cargo component exists but was not
+        // selected" outcome is directly observable.
+        {
+            std::size_t component_high = 0U;
+            for (const float z : component_z) {
+                if (z >= 1.3F) ++component_high;
+            }
+            if (component_high > 0U &&
+                (last_detection_pipeline_trace_.high_component_id < 0 ||
+                 component_z.back() >
+                     last_detection_pipeline_trace_.high_component_zmax)) {
+                last_detection_pipeline_trace_.high_component_id =
+                    static_cast<int>(components.size());
+                last_detection_pipeline_trace_.high_component_z95 = z_high;
+                last_detection_pipeline_trace_.high_component_zmax =
+                    component_z.back();
+                last_detection_pipeline_trace_.high_component_points =
+                    component_z.size();
+                last_detection_pipeline_trace_.high_component_high =
+                    component_high;
+            }
+        }
         component.descriptor.component_id =
             static_cast<int>(components.size());
         component.descriptor.center = Eigen::Vector3f(
@@ -13808,6 +13973,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         result.reject_reason = "no_identity_valid_component";
         return result;
     }
+    last_detection_pipeline_trace_.component_count = components.size();
 
     std::vector<CargoComponentFragment> fragments;
     fragments.reserve(components.size());
@@ -13847,6 +14013,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         odom_anchor_config_.tight_box.component_merge_max_components);
     const std::vector<CargoComponentHypothesis> component_hypotheses =
         buildCargoComponentHypotheses(fragments, fusion_config);
+    last_detection_pipeline_trace_.hypothesis_count =
+        component_hypotheses.size();
 
     std::vector<CargoCandidateIdentityScore> component_scores;
     std::vector<pcl::PointIndices> hypothesis_point_indices;
@@ -13965,11 +14133,32 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         selected_identity.overall_lock_confidence;
     const pcl::PointIndices& best_cluster =
         hypothesis_point_indices[selected_hypothesis_index];
+    last_detection_pipeline_trace_.selected_id = result.selected_candidate_id;
+    last_detection_pipeline_trace_.selected_score =
+        selected_identity.overall_lock_confidence;
+    last_detection_pipeline_trace_.top1_score = candidate_ranking.top1_rank;
+    last_detection_pipeline_trace_.score_margin = candidate_ranking.margin;
 
     // 构建结果点云
     for (int idx : best_cluster.indices) {
         result.core_points_base->push_back(voxel_cloud->points[idx]);
     }
+    last_detection_pipeline_trace_.selected_points =
+        result.core_points_base->size();
+    last_detection_pipeline_trace_.selected_z95 =
+        cloudZPercentile(*result.core_points_base, 0.95F);
+    last_detection_pipeline_trace_.selected_zmax =
+        cloudZMax(*result.core_points_base);
+    last_detection_pipeline_trace_.selected_high =
+        countHighPoints(*result.core_points_base, 1.3F);
+    last_detection_pipeline_trace_.core_points =
+        result.core_points_base->size();
+    last_detection_pipeline_trace_.core_z95 =
+        last_detection_pipeline_trace_.selected_z95;
+    last_detection_pipeline_trace_.core_zmax =
+        last_detection_pipeline_trace_.selected_zmax;
+    last_detection_pipeline_trace_.core_high =
+        last_detection_pipeline_trace_.selected_high;
 
     // Geometry must consume the exact component selected by identity ranking.
     // A second nearest-anchor subcluster pass used to replace long cargo with

@@ -2103,6 +2103,36 @@ private:
     CargoBottomFusion cargo_bottom_shadow_fusion_;
     CargoBottomResult last_shadow_bottom_result_;
     ros::Time last_shadow_vertical_stamp_;
+
+    // Phase B2 detection point-cloud survival trace. Diagnostics-only.
+    // Records per-stage vertical statistics to locate where the physical
+    // cargo's high (elevated) returns first disappear. Never read by product.
+    struct DetectionPipelineTrace {
+        bool valid = false;
+        double stamp_sec = 0.0;
+        std::size_t merged_points = 0U; float merged_z95 = 0.0F; float merged_zmax = 0.0F; std::size_t merged_high = 0U;
+        std::size_t near_removed = 0U; float near_removed_zmax = 0.0F; std::size_t near_removed_high = 0U;
+        std::size_t range_points = 0U; float range_z95 = 0.0F; float range_zmax = 0.0F; std::size_t range_high = 0U;
+        std::size_t roi_points = 0U; float roi_z95 = 0.0F; float roi_zmax = 0.0F; std::size_t roi_high = 0U;
+        std::size_t hag_points = 0U; float hag_z95 = 0.0F; float hag_zmax = 0.0F; std::size_t hag_high = 0U; bool hag_bypassed = false;
+        std::size_t voxel_points = 0U; float voxel_z95 = 0.0F; float voxel_zmax = 0.0F; std::size_t voxel_high = 0U;
+        std::size_t component_count = 0U;
+        int high_component_id = -1; float high_component_z95 = 0.0F; float high_component_zmax = 0.0F;
+        std::size_t high_component_points = 0U; std::size_t high_component_high = 0U;
+        std::size_t hypothesis_count = 0U;
+        int selected_id = -1; float selected_z95 = 0.0F; float selected_zmax = 0.0F;
+        std::size_t selected_points = 0U; std::size_t selected_high = 0U;
+        float selected_score = 0.0F; float top1_score = 0.0F; float score_margin = 0.0F;
+        std::size_t core_points = 0U; float core_z95 = 0.0F; float core_zmax = 0.0F; std::size_t core_high = 0U;
+        float anchor_x = 0.0F; float anchor_y = 0.0F;
+        float adaptive_cx = 0.0F; float adaptive_cy = 0.0F;
+        float search_z_min = 0.0F; float search_z_max = 0.0F;
+        std::size_t rejected_below_zmin = 0U; std::size_t rejected_above_zmax = 0U; std::size_t rejected_xy = 0U;
+        bool ground_valid = false; float ground_z = 0.0F;
+    };
+    std::ofstream detection_pipeline_csv_;
+    bool detection_pipeline_csv_init_ = false;
+    DetectionPipelineTrace last_detection_pipeline_trace_;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
     StaticHeightFieldConfig static_height_field_config_;

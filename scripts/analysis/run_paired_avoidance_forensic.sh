@@ -13,7 +13,7 @@ CONFIG="${WS}/maps/test_config_diskguard10.yaml"
 source /opt/ros/noetic/setup.bash
 source "${WS}/devel/setup.bash"
 
-BASE="/home/ydkj/avoidance_forensics/20260820_paired_v1/instrumented"
+BASE="/home/ydkj/avoidance_forensics/20260820_detection_pipeline_v1"
 OUT="${BASE}/${TAG}"
 mkdir -p "${OUT}" /tmp/cargo_forensic
 LOG="${OUT}/launch.log"
@@ -22,10 +22,12 @@ SAFETY="${OUT}/safety_status.csv"
 OPS="${OUT}/operational_status.csv"
 GEO="${OUT}/cargo_geometry_debug.txt"
 TRACE="${OUT}/frame_causal_trace.csv"
+DETTRACE="${OUT}/detection_pipeline_trace.csv"
 MANIFEST="${OUT}/manifest.txt"
 
-rm -f "${LOG}" "${RAW}" "${SAFETY}" "${OPS}" "${GEO}" "${TRACE}"
+rm -f "${LOG}" "${RAW}" "${SAFETY}" "${OPS}" "${GEO}" "${TRACE}" "${DETTRACE}"
 rm -f /tmp/cargo_forensic/frame_causal_trace.csv
+rm -f /tmp/cargo_forensic/detection_pipeline_trace.csv
 rm -rf /tmp/ndt_slam_runtime_data
 
 {
@@ -94,6 +96,9 @@ sleep 3
 
 if [ -f /tmp/cargo_forensic/frame_causal_trace.csv ]; then
   cp /tmp/cargo_forensic/frame_causal_trace.csv "${TRACE}"
+fi
+if [ -f /tmp/cargo_forensic/detection_pipeline_trace.csv ]; then
+  cp /tmp/cargo_forensic/detection_pipeline_trace.csv "${DETTRACE}"
 fi
 echo "end_time=$(date '+%Y-%m-%d %H:%M:%S')" >> "${MANIFEST}"
 
