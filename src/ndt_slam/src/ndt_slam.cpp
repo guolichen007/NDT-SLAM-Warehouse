@@ -13760,6 +13760,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     // then report perfect yaw concentration for the wrong physical object.
     result.candidate_count = cluster_indices.size();
     CargoCandidateIdentityContext identity_context;
+    int b3a_predicted_source = 0;  // 0=none 1=locked 2=provisional 3=retired
     identity_context.hook_center = anchor;
     identity_context.hook_region_radius_m = std::hypot(
         odom_anchor_config_.search_half_x,
@@ -13771,6 +13772,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     if (cargoTrackRetained() && hook_lock_.live_pose.valid &&
         hook_lock_.locked_shape.valid) {
         identity_context.predicted_track_valid = true;
+        b3a_predicted_source = 1;  // LOCKED
         const double dt = std::min(
             static_cast<double>(
                 hook_lock_config_.formal_xy_evidence_hold_sec),
@@ -13817,6 +13819,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         const CargoCandidateDescriptor& previous =
             hook_lock_.provisional_observations.back();
         identity_context.predicted_track_valid = true;
+        b3a_predicted_source = 2;  // PROVISIONAL
         identity_context.predicted_center = previous.center;
         identity_context.predicted_size = previous.size;
         identity_context.predicted_yaw_rad = previous.yaw_rad;
@@ -13829,6 +13832,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
                (stamp - retired_cargo_stamp_).toSec() <=
                    hook_lock_config_.lost_clear_sec) {
         identity_context.predicted_track_valid = true;
+        b3a_predicted_source = 3;  // RETIRED
         identity_context.predicted_center = retired_cargo_center_base_;
         identity_context.predicted_size = Eigen::Vector3f(
             retired_cargo_shape_.length_m,
@@ -14017,6 +14021,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         component_hypotheses.size();
 
     std::vector<CargoCandidateIdentityScore> component_scores;
+    std::vector<CargoCandidateDescriptor> b3a_scored_descriptors;
     std::vector<pcl::PointIndices> hypothesis_point_indices;
     std::vector<std::size_t> hypothesis_component_counts;
     component_scores.reserve(component_hypotheses.size());
@@ -14083,6 +14088,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         const CargoCandidateIdentityScore identity =
             scoreCargoCandidateIdentity(descriptor, identity_context);
         component_scores.push_back(identity);
+        b3a_scored_descriptors.push_back(descriptor);
         hypothesis_point_indices.push_back(std::move(combined_indices));
         hypothesis_component_counts.push_back(
             hypothesis.component_indices.size());
@@ -14131,6 +14137,56 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     result.suspension_confidence = selected_identity.suspension_confidence;
     result.overall_lock_confidence =
         selected_identity.overall_lock_confidence;
+    // B3A diagnostic: per-candidate score-term + reference lineage.
+    {
+        const int sel_id = result.selected_candidate_id;
+        if (!rank_score_csv_init_) {
+            rank_score_csv_.open("/tmp/cargo_forensic/rank_score_lineage.csv",
+                                 std::ios::out | std::ios::trunc);
+            if (rank_score_csv_.is_open()) {
+                rank_score_csv_
+                    << "stamp,candidate_id,rank,selected,predicted_source,predicted_track_valid,"
+                    << "center_x,center_y,center_z,point_count,"
+                    << "hook_distance_score,hook_association_residual,hook_normalized_offset,"
+                    << "predicted_center_score,overlap_score,shape_confidence,"
+                    << "motion_confidence,suspension_confidence,point_support_confidence,"
+                    << "identity_confidence,overall_lock_confidence,"
+                    << "predicted_cx,predicted_cy,predicted_cz,"
+                    << "candidate_predicted_xy_delta\n";
+            }
+            rank_score_csv_init_ = true;
+        }
+        if (rank_score_csv_.is_open()) {
+            rank_score_csv_ << std::fixed << std::setprecision(5);
+            for (std::size_t i = 0U; i < component_scores.size(); ++i) {
+                const CargoCandidateIdentityScore& sc = component_scores[i];
+                const CargoCandidateDescriptor& d = b3a_scored_descriptors[i];
+                const float pred_xy_delta =
+                    (d.center.head<2>() -
+                     identity_context.predicted_center.head<2>()).norm();
+                rank_score_csv_
+                    << stamp.toSec() << ',' << d.component_id << ',' << i << ','
+                    << (static_cast<int>(d.component_id) == sel_id ? 1 : 0) << ','
+                    << b3a_predicted_source << ','
+                    << (identity_context.predicted_track_valid ? 1 : 0) << ','
+                    << d.center.x() << ',' << d.center.y() << ',' << d.center.z()
+                    << ',' << d.point_count << ','
+                    << sc.hook_distance_score << ','
+                    << sc.hook_association_residual_m << ','
+                    << sc.hook_normalized_offset << ','
+                    << sc.predicted_center_score << ',' << sc.overlap_score
+                    << ',' << sc.shape_confidence << ','
+                    << sc.motion_confidence << ',' << sc.suspension_confidence
+                    << ',' << sc.point_support_confidence << ','
+                    << sc.identity_confidence << ',' << sc.overall_lock_confidence
+                    << ','
+                    << identity_context.predicted_center.x() << ','
+                    << identity_context.predicted_center.y() << ','
+                    << identity_context.predicted_center.z() << ','
+                    << pred_xy_delta << '\n';
+            }
+        }
+    }
     const pcl::PointIndices& best_cluster =
         hypothesis_point_indices[selected_hypothesis_index];
     last_detection_pipeline_trace_.selected_id = result.selected_candidate_id;

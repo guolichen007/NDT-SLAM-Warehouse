@@ -2133,6 +2133,8 @@ private:
     std::ofstream detection_pipeline_csv_;
     bool detection_pipeline_csv_init_ = false;
     DetectionPipelineTrace last_detection_pipeline_trace_;
+    std::ofstream rank_score_csv_;
+    bool rank_score_csv_init_ = false;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
     StaticHeightFieldConfig static_height_field_config_;
