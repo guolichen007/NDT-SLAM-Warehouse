@@ -98,6 +98,14 @@ using lidar_slam2::utils::GetTimestamps;
 
 namespace {
 
+using IntegratedShadowDiagClock = std::chrono::steady_clock;
+
+double integratedShadowElapsedMs(
+    const IntegratedShadowDiagClock::time_point& begin) {
+    return std::chrono::duration<double, std::milli>(
+        IntegratedShadowDiagClock::now() - begin).count();
+}
+
 std::string escapeJsonString(const std::string& value) {
     std::ostringstream escaped;
     for (const unsigned char character : value) {
@@ -13575,7 +13583,7 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
     const HookLoadSnapshot& hook,
     const ros::Time& stamp) {
     if (!integrated_cargo_identity_shadow_enabled_ || stamp.isZero()) return;
-    const auto identity_start = DiagClock::now();
+    const auto identity_start = IntegratedShadowDiagClock::now();
     std::vector<CargoPhysicalCandidateObservation> observations;
     observations.reserve(detection.shadow_candidates.size());
     for (const auto& candidate : detection.shadow_candidates) {
@@ -13633,7 +13641,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
         integrated_shadow_vertical_evidence_ = CargoVerticalEvidence{};
         integrated_shadow_fusion_result_ = CargoAvoidanceFusionResult{};
     }
-    integrated_shadow_identity_compute_ms_ = elapsedMs(identity_start);
+    integrated_shadow_identity_compute_ms_ =
+        integratedShadowElapsedMs(identity_start);
 
     bool candidate_observed_this_update = false;
     if (integrated_identity_decision_.identity ==
@@ -13665,7 +13674,7 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
     if (candidate_observed_this_update ||
         integrated_identity_decision_.identity !=
             CargoPhysicalIdentityState::VALIDATED) {
-        const auto geometry_start = DiagClock::now();
+        const auto geometry_start = IntegratedShadowDiagClock::now();
         CargoShadowGeometryInput geometry_input;
         geometry_input.stamp_sec = stamp.toSec();
         geometry_input.identity = integrated_identity_decision_;
@@ -13674,7 +13683,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
         }
         integrated_geometry_decision_ =
             integrated_geometry_authority_.update(geometry_input);
-        integrated_shadow_geometry_compute_ms_ = elapsedMs(geometry_start);
+        integrated_shadow_geometry_compute_ms_ =
+            integratedShadowElapsedMs(geometry_start);
     } else {
         integrated_shadow_geometry_compute_ms_ = 0.0;
     }
@@ -21757,8 +21767,8 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
     const ros::Time& obstacle_cloud_stamp,
     double processing_age_sec) {
     if (!integrated_cargo_identity_shadow_enabled_ || stamp.isZero()) return;
-    const auto total_start = DiagClock::now();
-    const auto safety_start = DiagClock::now();
+    const auto total_start = IntegratedShadowDiagClock::now();
+    const auto safety_start = IntegratedShadowDiagClock::now();
     if (integrated_shadow_authority_stamp_ != stamp) {
         updateIntegratedCargoIdentityShadow(
             HookCargoDetection{}, hook, stamp);
@@ -22070,8 +22080,10 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
         !canonical_track->provenance_valid &&
         integrated_identity_decision_.identity ==
             CargoPhysicalIdentityState::VALIDATED;
-    integrated_shadow_safety_compute_ms_ = elapsedMs(safety_start);
-    integrated_shadow_total_compute_ms_ = elapsedMs(total_start) +
+    integrated_shadow_safety_compute_ms_ =
+        integratedShadowElapsedMs(safety_start);
+    integrated_shadow_total_compute_ms_ =
+        integratedShadowElapsedMs(total_start) +
         integrated_shadow_identity_compute_ms_ +
         integrated_shadow_geometry_compute_ms_;
     const PipelineRateSnapshot shadow_pipeline_rate =
