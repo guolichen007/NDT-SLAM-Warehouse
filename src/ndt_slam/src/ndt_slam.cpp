@@ -643,9 +643,13 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         integrated_geometry_config_.maximum_observation_gap_sec =
             geometry["maximum_observation_gap_sec"].as<double>(
                 cargo_lift_origin_config_.maximum_observation_gap_sec);
-        integrated_geometry_config_.maximum_center_step_m =
+        integrated_geometry_config_.maximum_xy_step_m =
             geometry["maximum_center_step_m"].as<double>(
                 hook_lock_config_.lock_max_center_step_m);
+        integrated_geometry_config_.maximum_z_speed_mps =
+            integrated_identity_config_.maximum_z_speed_mps;
+        integrated_geometry_config_.z_step_margin_m =
+            integrated_identity_config_.z_step_margin_m;
         integrated_geometry_config_.minimum_length_m =
             odom_anchor_config_.min_size_x;
         integrated_geometry_config_.maximum_length_m =
@@ -13636,8 +13640,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
             CargoPhysicalIdentityState::VALIDATED &&
         integrated_identity_decision_.geometry_resolved) {
         for (const auto& candidate : detection.shadow_candidates) {
-            if (candidate.identity.candidate_id ==
-                integrated_identity_decision_.resolved_candidate_id) {
+            if (matchesResolvedPhysicalHypothesis(
+                    candidate.identity, integrated_identity_decision_)) {
                 integrated_candidate_ = candidate;
                 integrated_candidate_valid_ = true;
                 candidate_observed_this_update = true;
@@ -13646,8 +13650,9 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
         }
         if (!candidate_observed_this_update &&
             (!integrated_candidate_valid_ ||
-             integrated_candidate_.identity.candidate_id !=
-                 integrated_identity_decision_.resolved_candidate_id)) {
+             !matchesResolvedPhysicalHypothesis(
+                 integrated_candidate_.identity,
+                 integrated_identity_decision_))) {
             integrated_candidate_valid_ = false;
             integrated_candidate_ =
                 HookCargoDetection::ShadowCandidateSnapshot{};
@@ -14325,8 +14330,10 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         // snapshot keeps product score terms for diagnostics only; the
         // authority input type cannot consume them.
         HookCargoDetection::ShadowCandidateSnapshot shadow_candidate;
+        // This id is unique among hypotheses in this frame. Component ids are
+        // retained separately in the canonical member set below.
         shadow_candidate.identity.candidate_id =
-            static_cast<std::uint64_t>(descriptor.component_id);
+            static_cast<std::uint64_t>(result.shadow_candidates.size() + 1U);
         shadow_candidate.identity.stamp_sec = stamp.toSec();
         shadow_candidate.identity.center = descriptor.center.cast<double>();
         shadow_candidate.identity.size = descriptor.size.cast<double>();
@@ -14345,6 +14352,8 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             shadow_candidate.identity.member_component_ids.push_back(
                 static_cast<std::uint64_t>(member));
         }
+        std::sort(shadow_candidate.identity.member_component_ids.begin(),
+                  shadow_candidate.identity.member_component_ids.end());
         shadow_candidate.points_base.reset(
             new pcl::PointCloud<pcl::PointXYZ>);
         shadow_candidate.points_base->reserve(
@@ -21851,34 +21860,25 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             integrated_shadow_bottom_fusion_.update(bottom_input);
     }
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr shadow_external(
-        new pcl::PointCloud<pcl::PointXYZ>);
     bool raw_obstacle_inside_shadow = false;
+    std::size_t finite_obstacle_points = 0U;
     if (obstacle_cloud_base) {
-        shadow_external->reserve(obstacle_cloud_base->size());
         for (const pcl::PointXYZ& point : obstacle_cloud_base->points) {
             if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
                 !std::isfinite(point.z)) {
                 continue;
             }
+            ++finite_obstacle_points;
             const bool inside = shadow_footprint.valid &&
                 containsPointInCargoObbBase(
                     point.getVector3fMap(), shadow_footprint,
                     hook_fixed_config_.voxel_leaf, 0.0F);
             raw_obstacle_inside_shadow = raw_obstacle_inside_shadow || inside;
-            if (!inside) shadow_external->push_back(point);
         }
     }
-    bool shadow_external_overlaps = false;
-    if (shadow_footprint.valid) {
-        for (const pcl::PointXYZ& point : shadow_external->points) {
-            if (containsPointInCargoObbBase(
-                    point.getVector3fMap(), shadow_footprint)) {
-                shadow_external_overlaps = true;
-                break;
-            }
-        }
-    }
+    // Overlap is diagnostic-only. The canonical obstacle cloud is immutable:
+    // genuine penetration in the positive bag must remain visible to safety.
+    const bool shadow_external_overlaps = raw_obstacle_inside_shadow;
 
     CargoSafetyInput safety_input;
     safety_input.source_stamp_sec = stamp.toSec();
@@ -21895,7 +21895,7 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
     safety_input.height.stamp_sec =
         integrated_shadow_bottom_result_.evidence_stamp_sec;
     safety_input.footprint_base = shadow_footprint;
-    safety_input.obstacle_cloud_base = shadow_external;
+    safety_input.obstacle_cloud_base = obstacle_cloud_base;
     safety_input.obstacle_observation_valid =
         static_cast<bool>(obstacle_cloud_base) && shadow_footprint.valid;
     const double stamp_delta = (stamp - obstacle_cloud_stamp).toSec();
@@ -21904,36 +21904,23 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
         std::isfinite(processing_age_sec) && processing_age_sec >= 0.0
             ? std::max(std::max(0.0, stamp_delta), processing_age_sec)
             : std::numeric_limits<double>::infinity();
-    safety_input.obstacle_roi_finite_points = shadow_external->size();
+    safety_input.obstacle_roi_finite_points = finite_obstacle_points;
     safety_input.obstacle_roi_coverage_ratio = obstacle_cloud_base &&
         !obstacle_cloud_base->empty()
-            ? static_cast<float>(shadow_external->size()) /
+            ? static_cast<float>(finite_obstacle_points) /
                 static_cast<float>(obstacle_cloud_base->size())
             : 0.0F;
     const CargoSafetyResult safety =
         cargo_safety_evaluator_.evaluate(safety_input);
 
-    const double canonical_snapshot_age_sec =
-        integrated_canonical_fusion_snapshot_stamp_.isZero()
-            ? std::numeric_limits<double>::infinity()
-            : (stamp - integrated_canonical_fusion_snapshot_stamp_).toSec();
     const bool canonical_snapshot_current =
         integrated_canonical_fusion_snapshot_valid_ &&
-        std::isfinite(canonical_snapshot_age_sec) &&
-        canonical_snapshot_age_sec >= 0.0 &&
-        canonical_snapshot_age_sec <=
-            integrated_identity_config_.maximum_observation_gap_sec;
+        integrated_canonical_fusion_snapshot_stamp_ == stamp;
     CargoAvoidanceFusionInput canonical = canonical_snapshot_current
         ? integrated_canonical_fusion_snapshot_
         : CargoAvoidanceFusionInput{};
-    canonical.localization_valid =
-        relocalization_pose_reliable_ && !tracking_lost_;
-    canonical.warning_motion_authorized =
-        cargo_physical_motion_result_.valid &&
-        cargo_physical_motion_result_.state ==
-            CargoPhysicalMotionState::MOVING;
-    canonical.live.available = safety.input_valid;
-    canonical.live.reliable = safety.input_valid &&
+    canonical.live.available = canonical_snapshot_current && safety.input_valid;
+    canonical.live.reliable = canonical_snapshot_current && safety.input_valid &&
         safety.fault == CargoSafetyFault::NONE;
     canonical.live.hazard = safety.warning_valid &&
         (safety.warning_code == CargoSafetyEvaluator::kLevel1Code ||
@@ -21951,41 +21938,17 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             safety.most_dangerous_cluster.obstacle_uncertainty_m;
     }
 
-    // Read-only reuse of the existing obstacle identity/history authority.
-    // No tracker update occurs on the Shadow path.
+    // Exact-id lookup is diagnostic-only. Missing current-frame canonical
+    // authority fails closed; no nearest track may synthesize identity,
+    // provenance, confirmation, or far-history authority.
     const CargoObstacleTrack* canonical_track = nullptr;
-    for (const CargoObstacleTrack& track :
-         physical_obstacle_track_store_.tracks()) {
-        if (!canonical_track || track.footprint_distance_m <
-                canonical_track->footprint_distance_m) {
-            canonical_track = &track;
-        }
-    }
-    if (canonical_track != nullptr) {
-        if (!canonical_snapshot_current) {
-            canonical.live.obstacle_track_id = canonical_track->track_id;
-            canonical.live.far_field_history_valid =
-                canonical_track->far_field_history_valid;
-            canonical.live.provenance_valid =
-                canonical_track->provenance_valid;
-            canonical.live.certified_static_provenance =
-                canonical_track->certified_static_provenance;
-            canonical.live.validated_streak =
-                canonical_track->validated_consecutive_observations;
-            canonical.live_near_field_history_authorized =
-                canonical_track->far_field_history_valid;
-            canonical.pending_external_obstacle_authorized =
-                canonical_track->confirmed;
-            canonical.pending_external_obstacle_track_id =
-                canonical_track->track_id;
-            canonical.pending_external_obstacle_confirmations =
-                canonical_track->validated_consecutive_observations;
-            canonical.pending_external_provenance_valid =
-                canonical_track->provenance_valid;
-            canonical.pending_external_geometry_valid =
-                canonical_track->current_hazard_geometry_valid;
-            canonical.pending_external_separation_valid =
-                canonical_track->separated_obstacle_history_valid;
+    if (canonical_snapshot_current && canonical.live.obstacle_track_id != 0U) {
+        for (const CargoObstacleTrack& track :
+             physical_obstacle_track_store_.tracks()) {
+            if (track.track_id == canonical.live.obstacle_track_id) {
+                canonical_track = &track;
+                break;
+            }
         }
     }
     canonical.pending_self_evidence_valid =
@@ -21994,12 +21957,9 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
     canonical.pending_authority_confidence =
         canonical.pending_self_evidence_valid ? 1.0F : 0.0F;
     canonical.pending_external_obstacle_authorized =
+        canonical_snapshot_current &&
         canonical.pending_external_obstacle_authorized &&
         canonical.live.hazard;
-    canonical.live_obstacle_origin_resolved =
-        !shadow_external_overlaps ||
-        canonical.pending_external_separation_valid ||
-        canonical.pending_external_provenance_valid;
     if (canonical_snapshot_current &&
         integrated_shadow_bottom_result_.valid &&
         integrated_candidate_valid_ &&
@@ -22117,6 +22077,16 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
     const PipelineRateSnapshot shadow_pipeline_rate =
         runtime_diag_.pipelineRateSnapshot(
             queue_overwrite_drop_count_.load(std::memory_order_relaxed));
+    std::ostringstream shadow_member_ids;
+    for (std::size_t member_index = 0U;
+         member_index <
+             integrated_identity_decision_.resolved_member_component_ids.size();
+         ++member_index) {
+        if (member_index > 0U) shadow_member_ids << '|';
+        shadow_member_ids <<
+            integrated_identity_decision_.resolved_member_component_ids[
+                member_index];
+    }
     if (!integrated_shadow_csv_init_) {
         try {
             boost::filesystem::create_directories("/tmp/cargo_forensic");
@@ -22132,7 +22102,8 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             integrated_shadow_csv_
                 << "frame_seq,pipeline_stamp,baseline_selected_candidate_id,"
                 << "shadow_association,shadow_identity,shadow_history_id,"
-                << "shadow_group_id,shadow_candidate_id,baseline_source,"
+                << "shadow_group_id,shadow_candidate_id,"
+                << "shadow_member_component_ids,baseline_source,"
                 << "product_predicted_center_score,product_overlap_score,"
                 << "product_identity_confidence,product_overall_lock_confidence,"
                 << "lift_delta_m,lift_threshold_m,lift_confirm_count,"
@@ -22176,6 +22147,7 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             << integrated_identity_decision_.physical_history_id << ','
             << integrated_identity_decision_.frame_group_id << ','
             << integrated_identity_decision_.resolved_candidate_id << ','
+            << shadow_member_ids.str() << ','
             << cargoLiftBaselineSourceName(
                    integrated_identity_decision_.baseline_source) << ','
             << integrated_candidate_.product_predicted_center_score << ','
@@ -22246,9 +22218,6 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     cargo_pending_external_shell_points_ = 0U;
     cargo_origin_exclusion_active_ = false;
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
-    evaluateIntegratedCargoIdentityShadow(
-        hook, obstacle_cloud_base, pose_map_base, stamp,
-        obstacle_cloud_stamp, processing_age_sec);
     const bool visual_conflict = hook_fixed_cargo_.valid;
     const bool required_role =
         hook_load_signal_role_ == HookLoadSignalRole::REQUIRED;
@@ -24679,6 +24648,12 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         integrated_canonical_fusion_snapshot_ = avoidance_input;
         integrated_canonical_fusion_snapshot_stamp_ = stamp;
         integrated_canonical_fusion_snapshot_valid_ = true;
+        // Identity/geometry is updated at detection time. Safety projection
+        // runs only after this frame's complete canonical input exists, so
+        // obstacle identity/history/provenance cannot be one frame stale.
+        evaluateIntegratedCargoIdentityShadow(
+            hook, external_obstacle_cloud, pose_map_base, stamp,
+            obstacle_cloud_stamp, processing_age_sec);
     }
     CargoAvoidanceFusionResult fused_avoidance =
         fuseCargoAvoidanceRisk(

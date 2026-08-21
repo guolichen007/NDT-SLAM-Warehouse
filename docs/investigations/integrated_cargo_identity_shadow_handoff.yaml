@@ -1,5 +1,6 @@
 schema_version: 1
 parent_sha: 1fc36dc4b8341a2b0b73c928ce6f05a11793cffd
+pre_ubuntu_review_base_sha: 152f2c8d6711b872b3d67c7d8680309ec1bc62f7
 branch: codex/integrated-cargo-identity-shadow-v1
 mode: SHADOW_ONLY
 product_mode_rejection: PRODUCT_MODE_NOT_IMPLEMENTED_IN_INVESTIGATION_BUILD
@@ -19,6 +20,19 @@ ubuntu_validation:
   clean_build: catkin_make clean && catkin_make --pkg ndt_slam
   full_gtest: catkin_make run_tests_ndt_slam
   four_bag_entry: src/ndt_slam/scripts/analysis/run_integrated_cargo_identity_shadow_four_bags.sh
+  bag_local_oracle_argument: optional final ORACLE_DIR containing 无.json, 有.json, 长件.json, 大件.json
+  missing_or_incomplete_oracle_verdict: ORACLE_INCONCLUSIVE
+  oracle_schema:
+    required:
+      - role
+      - window_start_stamp_sec
+      - window_end_stamp_sec
+      - true_member_sets or wrong_member_sets
+    roles:
+      - negative_safe_over
+      - positive_collision
+      - long_geometry
+      - positive_control
   bags:
     - 无.bag
     - 有.bag

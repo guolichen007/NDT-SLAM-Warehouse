@@ -156,6 +156,15 @@ std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
   return groups;
 }
 
+bool matchesResolvedPhysicalHypothesis(
+    const CargoPhysicalCandidateObservation& candidate,
+    const CargoPhysicalIdentityDecision& decision) {
+  return decision.geometry_resolved && decision.resolved_candidate_id != 0U &&
+      candidate.candidate_id == decision.resolved_candidate_id &&
+      canonicalMembers(candidate.member_component_ids) ==
+          canonicalMembers(decision.resolved_member_component_ids);
+}
+
 CargoPhysicalIdentityAuthority::CargoPhysicalIdentityAuthority(
     const CargoPhysicalIdentityConfig& config) {
   setConfig(config);
@@ -237,6 +246,16 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         std::none_of(histories_.begin(), histories_.end(),
                      [](const History& history) { return history.has_preload; });
     for (History& history : histories_) {
+      // Candidate-specific lift proof belongs to exactly one load epoch.
+      // Preserve only the current EMPTY-phase preload observation; never let
+      // confirmation, validation, or a prior frozen baseline cross the edge.
+      history.lift_confirm_count = 0;
+      history.lift_confirmed = false;
+      history.validation_stamp_sec = 0.0;
+      history.last_consumed_evidence_stamp_sec = 0.0;
+      history.baseline_frozen = false;
+      history.baseline_z95 = std::numeric_limits<double>::quiet_NaN();
+      history.baseline_stamp_sec = 0.0;
       if (history.has_preload) {
         history.baseline_frozen = true;
         history.baseline_source =
@@ -244,6 +263,9 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         history.baseline_z95 = history.preload_z95;
         history.baseline_uncertainty_m = history.preload_uncertainty_m;
         history.baseline_stamp_sec = history.preload_stamp_sec;
+        // Consume the EMPTY-phase baseline exactly once. A later load edge
+        // without a new EMPTY observation must not reuse this Cargo's origin.
+        history.has_preload = false;
       }
     }
   }
@@ -432,7 +454,19 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             history->lift_confirmed = true;
             history->validation_stamp_sec = input.pipeline_stamp_sec;
           }
-        } else if (delta < -threshold) {
+        } else if (!history->lift_confirmed) {
+          // Pending confirmation may tolerate uncertainty-sized jitter near
+          // the significant-change threshold, but a clear return toward the
+          // frozen baseline breaks the consecutive evidence sequence.
+          const double retention_margin = config_.significance_sigma *
+              input.groups[gi].representative.vertical_uncertainty_m;
+          const double retention_floor =
+              std::max(0.0, threshold - retention_margin);
+          if (delta < retention_floor) {
+            history->lift_confirm_count = 0;
+          }
+        }
+        if (delta < -threshold) {
           history->lift_confirm_count = 0;
           history->lift_confirmed = false;
           history->validation_stamp_sec = 0.0;
@@ -501,6 +535,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
           !group.group_ambiguous;
       decision_.resolved_candidate_id = decision_.geometry_resolved
           ? group.representative.candidate_id : 0U;
+      decision_.resolved_member_component_ids = decision_.geometry_resolved
+          ? group.member_component_ids : std::vector<std::uint64_t>{};
       decision_.baseline_source = selected->baseline_source;
       decision_.current_candidate_fresh = true;
       decision_.lift_confirmed = selected->lift_confirmed;

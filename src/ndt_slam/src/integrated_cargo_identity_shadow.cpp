@@ -41,9 +41,13 @@ void CargoShadowGeometryAuthority::setConfig(
   if (!(config_.maximum_observation_gap_sec > 0.0)) {
     config_.maximum_observation_gap_sec = 0.50;
   }
-  if (!(config_.maximum_center_step_m > 0.0)) {
-    config_.maximum_center_step_m = 0.30;
+  if (!(config_.maximum_xy_step_m > 0.0)) {
+    config_.maximum_xy_step_m = 0.30;
   }
+  if (!(config_.maximum_z_speed_mps > 0.0)) {
+    config_.maximum_z_speed_mps = 1.50;
+  }
+  if (!(config_.z_step_margin_m >= 0.0)) config_.z_step_margin_m = 0.05;
   reset("config_changed");
 }
 
@@ -108,10 +112,20 @@ CargoShadowGeometryDecision CargoShadowGeometryAuthority::update(
            config_.maximum_observation_gap_sec)) {
     window_.clear();
   }
-  if (!window_.empty() &&
-      (input.candidate.center - window_.back().center).norm() >
-          config_.maximum_center_step_m) {
-    window_.clear();
+  if (!window_.empty()) {
+    const auto& previous = window_.back();
+    const double dt = input.candidate.stamp_sec - previous.stamp_sec;
+    const double xy_step = (input.candidate.center.head<2>() -
+                            previous.center.head<2>()).norm();
+    const double z_limit = config_.maximum_z_speed_mps * std::max(0.0, dt) +
+        config_.z_step_margin_m + input.candidate.vertical_uncertainty_m +
+        previous.vertical_uncertainty_m;
+    const double z_step =
+        std::abs(input.candidate.center.z() - previous.center.z());
+    if (!(dt > 0.0) || xy_step > config_.maximum_xy_step_m ||
+        z_step > z_limit) {
+      window_.clear();
+    }
   }
   if (window_.empty()) {
     decision_.window_start_stamp_sec = input.stamp_sec;

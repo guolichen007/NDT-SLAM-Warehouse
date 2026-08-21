@@ -116,6 +116,64 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
+     LiftConfirmationCannotAccumulateAcrossLongSubThresholdPlateau) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  authority.update(input(1.1, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.0, 0.4));
+  const auto first_lift = authority.update(input(
+      1.2, HookLoadSignalRole::REQUIRED, true,
+      HookLoadState::LOADED, 0.0, 0.7));
+  EXPECT_NE(first_lift.identity, CargoPhysicalIdentityState::VALIDATED);
+  authority.update(input(1.3, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.0, 0.4));
+  authority.update(input(1.4, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.0, 0.4));
+  const auto second_lift = authority.update(input(
+      1.5, HookLoadSignalRole::REQUIRED, true,
+      HookLoadState::LOADED, 0.0, 0.7));
+  EXPECT_NE(second_lift.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PreviousLoadConfirmedIdentityCannotValidateNewLoadEpoch) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto first_load = validateRequired(&authority);
+  ASSERT_EQ(first_load.identity, CargoPhysicalIdentityState::VALIDATED);
+  const std::uint64_t first_epoch = first_load.load_epoch;
+
+  authority.update(input(1.4, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.7));
+  const auto new_load = authority.update(input(
+      1.5, HookLoadSignalRole::REQUIRED, true,
+      HookLoadState::LOADED, 0.0, 0.7));
+  EXPECT_GT(new_load.load_epoch, first_epoch);
+  EXPECT_FALSE(new_load.lift_confirmed);
+  EXPECT_EQ(new_load.lift_confirm_count, 0);
+  EXPECT_EQ(new_load.identity, CargoPhysicalIdentityState::UNKNOWN);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     NewLoadEpochRequiresFreshCandidateSpecificLift) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  ASSERT_EQ(validateRequired(&authority).identity,
+            CargoPhysicalIdentityState::VALIDATED);
+  authority.update(input(1.4, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.7));
+  authority.update(input(1.5, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.0, 0.7));
+  EXPECT_EQ(authority.update(input(
+      1.6, HookLoadSignalRole::REQUIRED, true,
+      HookLoadState::LOADED, 0.0, 1.0)).identity,
+      CargoPhysicalIdentityState::UNKNOWN);
+  EXPECT_EQ(authority.update(input(
+      1.7, HookLoadSignalRole::REQUIRED, true,
+      HookLoadState::LOADED, 0.0, 1.0)).identity,
+      CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
      LargeReverseMotionDoesNotCountAsLift) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   validateRequired(&authority);
@@ -263,6 +321,20 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   const auto result = authority.update(ambiguous);
   EXPECT_EQ(result.association, CargoCandidateAssociationState::AMBIGUOUS);
   EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ResolvedHypothesisRequiresFrameIdAndCanonicalMemberSet) {
+  CargoPhysicalIdentityDecision decision;
+  decision.geometry_resolved = true;
+  decision.resolved_candidate_id = 7U;
+  decision.resolved_member_component_ids = {3U, 9U};
+  auto correct = candidate(7U, 1.0, 0.0, 0.5, {9U, 3U});
+  auto colliding = candidate(7U, 1.0, 0.0, 0.5, {4U, 8U});
+  auto wrong_frame_id = candidate(8U, 1.0, 0.0, 0.5, {3U, 9U});
+  EXPECT_TRUE(matchesResolvedPhysicalHypothesis(correct, decision));
+  EXPECT_FALSE(matchesResolvedPhysicalHypothesis(colliding, decision));
+  EXPECT_FALSE(matchesResolvedPhysicalHypothesis(wrong_frame_id, decision));
 }
 
 }  // namespace

@@ -11,6 +11,7 @@ CargoPhysicalIdentityDecision validatedIdentity() {
   identity.identity = CargoPhysicalIdentityState::VALIDATED;
   identity.physical_history_id = 7U;
   identity.resolved_candidate_id = 3U;
+  identity.resolved_member_component_ids = {9U};
   identity.load_epoch = 2U;
   identity.geometry_resolved = true;
   identity.current_candidate_fresh = true;
@@ -67,6 +68,28 @@ TEST(IntegratedCargoIdentityShadowTest,
   EXPECT_TRUE(formal.formal_geometry_valid);
   EXPECT_TRUE(formal.formal_clear_authorized);
   EXPECT_EQ(formal.physical_history_id, pending.physical_history_id);
+}
+
+TEST(IntegratedCargoIdentityShadowTest,
+     VerticalLiftDoesNotBreakFormalGeometryContinuity) {
+  CargoShadowGeometryConfig config;
+  config.formal_confirm_frames = 2;
+  config.maximum_xy_step_m = 0.30;
+  config.maximum_z_speed_mps = 2.0;
+  config.z_step_margin_m = 0.05;
+  CargoShadowGeometryAuthority authority(config);
+  CargoShadowGeometryInput input;
+  input.identity = validatedIdentity();
+  input.stamp_sec = 1.0;
+  input.candidate = candidate(1.0);
+  EXPECT_EQ(authority.update(input).confirm_count, 1);
+  input.stamp_sec = 1.2;
+  input.candidate = candidate(1.2);
+  input.candidate.center.z() += 0.35;
+  input.candidate.z95 += 0.35;
+  const auto formal = authority.update(input);
+  EXPECT_EQ(formal.confirm_count, 2);
+  EXPECT_TRUE(formal.formal_geometry_valid);
 }
 
 TEST(IntegratedCargoIdentityShadowTest,

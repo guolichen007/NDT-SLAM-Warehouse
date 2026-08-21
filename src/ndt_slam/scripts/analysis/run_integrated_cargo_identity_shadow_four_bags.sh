@@ -3,7 +3,7 @@
 set -u
 
 if [[ $# -lt 7 ]]; then
-  echo "Usage: $0 WORKSPACE MAP_SOURCE OUTPUT_DIR 无.bag 有.bag 长件.bag 大件.bag [DURATION]" >&2
+  echo "Usage: $0 WORKSPACE MAP_SOURCE OUTPUT_DIR 无.bag 有.bag 长件.bag 大件.bag [DURATION] [ORACLE_DIR]" >&2
   exit 2
 fi
 
@@ -14,6 +14,7 @@ shift 3
 bags=("$1" "$2" "$3" "$4")
 names=("无" "有" "长件" "大件")
 duration="${5:-1200}"
+oracle_dir="${6:-}"
 expected_sha="$(git -C "$workspace" rev-parse HEAD)"
 runner="$workspace/src/ndt_slam/scripts/ops/server_monitor_bag_validate.sh"
 analyzer="$workspace/src/ndt_slam/scripts/analysis/analyze_integrated_cargo_identity_shadow.py"
@@ -34,6 +35,7 @@ fi
 
 trace_args=()
 runtime_args=()
+oracle_args=()
 run_rc=0
 for index in 0 1 2 3; do
   name="${names[$index]}"
@@ -69,10 +71,18 @@ for index in 0 1 2 3; do
     cp "$runtime_csv" "$runtime_copy"
     runtime_args+=(--runtime "$name=$runtime_copy")
   fi
+  oracle_file="$oracle_dir/${name}.json"
+  if [[ -n "$oracle_dir" && -f "$oracle_file" ]]; then
+    oracle_args+=(--oracle "$name=$oracle_file")
+  else
+    echo "ORACLE_INCONCLUSIVE bag=$name reason=bag_local_oracle_missing" \
+      >>"$run_log"
+  fi
 done
 
 set +e
 python3 "$analyzer" "${trace_args[@]}" "${runtime_args[@]}" \
+  "${oracle_args[@]}" \
   --output "$output_dir/integrated_shadow_report.json"
 analysis_rc=$?
 set -e

@@ -113,6 +113,7 @@ struct CargoPhysicalIdentityDecision {
   std::uint64_t physical_history_id = 0U;
   std::uint64_t frame_group_id = 0U;
   std::uint64_t resolved_candidate_id = 0U;
+  std::vector<std::uint64_t> resolved_member_component_ids;
   bool geometry_resolved = false;
   bool current_candidate_fresh = false;
   bool lift_confirmed = false;
@@ -126,6 +127,12 @@ struct CargoPhysicalIdentityDecision {
   double identity_validation_stamp_sec = 0.0;
   std::string reason = "uninitialized";
 };
+
+// A frame-local hypothesis id is not sufficient when legacy component ids
+// collide. Authoritative point lookup must also match the canonical member set.
+bool matchesResolvedPhysicalHypothesis(
+    const CargoPhysicalCandidateObservation& candidate,
+    const CargoPhysicalIdentityDecision& decision);
 
 class CargoPhysicalIdentityAuthority {
  public:

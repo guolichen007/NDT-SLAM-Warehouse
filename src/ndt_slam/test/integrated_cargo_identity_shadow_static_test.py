@@ -41,6 +41,33 @@ class IntegratedCargoIdentityShadowStaticTest(unittest.TestCase):
         self.assertNotIn("physical_obstacle_track_store_.update", body)
         self.assertNotIn("hook_lock_ =", body)
 
+    def test_shadow_obstacle_input_is_immutable_and_authority_is_exact_frame(self) -> None:
+        body = function_body(
+            "void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(",
+            "void NdtSlamNode::updateAndPublishCargoSafetyPipeline(",
+        )
+        self.assertIn(
+            "safety_input.obstacle_cloud_base = obstacle_cloud_base", body
+        )
+        self.assertNotIn("if (!inside)", body)
+        self.assertIn("integrated_canonical_fusion_snapshot_stamp_ == stamp", body)
+        self.assertNotIn("canonical_snapshot_age_sec", body)
+        self.assertNotIn("track.footprint_distance_m <", body)
+
+    def test_shadow_fusion_runs_after_current_canonical_snapshot(self) -> None:
+        pipeline = function_body(
+            "void NdtSlamNode::updateAndPublishCargoSafetyPipeline(",
+            "void NdtSlamNode::publishPayloadTrackInfoFromFusion(",
+        )
+        snapshot = pipeline.index(
+            "integrated_canonical_fusion_snapshot_ = avoidance_input"
+        )
+        shadow = pipeline.index("evaluateIntegratedCargoIdentityShadow(")
+        product_fusion = pipeline.index("fuseCargoAvoidanceRisk(")
+        self.assertLess(snapshot, shadow)
+        self.assertLess(shadow, product_fusion)
+        self.assertIn("hook, external_obstacle_cloud, pose_map_base", pipeline)
+
     def test_shadow_bottom_has_no_product_pose_or_thickness(self) -> None:
         body = function_body(
             "void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(",

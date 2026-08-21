@@ -17,7 +17,9 @@ struct CargoShadowGeometryConfig {
   std::size_t minimum_point_support = 20U;
   int formal_confirm_frames = 3;
   double maximum_observation_gap_sec = 0.50;
-  double maximum_center_step_m = 0.30;
+  double maximum_xy_step_m = 0.30;
+  double maximum_z_speed_mps = 1.50;
+  double z_step_margin_m = 0.05;
   double minimum_length_m = 0.10;
   double maximum_length_m = 20.0;
   double minimum_width_m = 0.10;
