@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import math
+from collections import Counter
 from pathlib import Path
 from statistics import median
 from typing import Any, Iterable
@@ -88,8 +89,145 @@ def oracle_window(
     ]
 
 
+def group_oracle_window(
+    rows: list[dict[str, str]], oracle: dict[str, Any]
+) -> list[dict[str, str]] | None:
+    start = oracle.get("window_start_stamp_sec")
+    end = oracle.get("window_end_stamp_sec")
+    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        return None
+    if not math.isfinite(float(start)) or not math.isfinite(float(end)) or end < start:
+        return None
+    return [row for row in rows if start <= number(row, "stamp") <= end]
+
+
+def group_matches_members(
+    row: dict[str, str], member_sets: set[tuple[int, ...]]
+) -> bool:
+    return normalized_member_set(row.get("canonical_member_ids", "")) in member_sets
+
+
+def analyze_group_trace(
+    path: Path, oracle: dict[str, Any] | None,
+    baseline_path: Path | None = None,
+) -> dict[str, Any]:
+    with path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    window_rows = group_oracle_window(rows, oracle) if oracle else None
+    judged = window_rows if window_rows is not None else rows
+    _, true_members = oracle_identity_sets(oracle or {}, "true")
+    _, wrong_members = oracle_identity_sets(oracle or {}, "wrong")
+    true_rows = [row for row in judged if group_matches_members(row, true_members)]
+    wrong_rows = [row for row in judged if group_matches_members(row, wrong_members)]
+    new_rows = [
+        row for row in judged if row.get("association_state") == "NEW_HISTORY"
+    ]
+    history_lengths = Counter(
+        row.get("matched_history_id", "") for row in judged
+        if row.get("matched_history_id", "") not in ("", "0")
+    )
+    vertical_modes = Counter(
+        row.get("vertical_mode", "INVALID") or "INVALID" for row in judged
+    )
+    reject_reasons = Counter(
+        row.get("association_reject_reason", "UNKNOWN") or "UNKNOWN"
+        for row in judged
+    )
+    true_validated = any(
+        row.get("identity_state") == "VALIDATED" for row in true_rows
+    )
+    wrong_validated = any(
+        row.get("identity_state") == "VALIDATED" for row in wrong_rows
+    )
+    max_confirm = max(
+        (int(number(row, "lift_confirm_count", 0.0)) for row in true_rows),
+        default=0,
+    )
+    required = max(
+        (int(number(row, "lift_confirm_required", 0.0)) for row in true_rows),
+        default=0,
+    )
+    result: dict[str, Any] = {
+        "group_trace": str(path),
+        "group_rows": len(rows),
+        "oracle_group_rows": len(true_rows),
+        "true_validated": true_validated,
+        "wrong_low_validated": wrong_validated,
+        "raw_representative_xy_step_p95": percentile(
+            (number(row, "raw_representative_xy_step") for row in judged),
+            0.95,
+        ),
+        "stable_anchor_xy_step_p95": percentile(
+            (number(row, "stable_anchor_xy_step") for row in judged), 0.95
+        ),
+        "new_history_rate_after": (
+            len(new_rows) / len(judged) if judged else math.nan
+        ),
+        "association_reject_reason_distribution": dict(reject_reasons),
+        "vertical_mode_distribution": dict(vertical_modes),
+        "longest_physical_history": max(history_lengths.values(), default=0),
+        "max_lift_confirm_count": max_confirm,
+        "lift_confirm_required": required,
+    }
+    if baseline_path is None:
+        result["baseline_comparison"] = "BASELINE_COMPARISON_UNAVAILABLE"
+        result["new_history_rate_before"] = math.nan
+    else:
+        with baseline_path.open(newline="", encoding="utf-8") as stream:
+            baseline_rows = list(csv.DictReader(stream))
+        baseline_window = (
+            group_oracle_window(baseline_rows, oracle) if oracle else None
+        )
+        baseline_judged = (
+            baseline_window if baseline_window is not None else baseline_rows
+        )
+        baseline_new = sum(
+            row.get("association_state") == "NEW_HISTORY"
+            for row in baseline_judged
+        )
+        result["baseline_comparison"] = "AVAILABLE"
+        result["new_history_rate_before"] = (
+            baseline_new / len(baseline_judged)
+            if baseline_judged else math.nan
+        )
+
+    if not true_members or window_rows is None:
+        result["yes_bag_exit_classification"] = "ORACLE_INCONCLUSIVE"
+    elif true_validated:
+        result["yes_bag_exit_classification"] = "TRUE_VALIDATED"
+    elif required > 0 and max_confirm >= required:
+        result["yes_bag_exit_classification"] = (
+            "IDENTITY_LIFT_IMPLEMENTATION_FAIL"
+        )
+    elif required > 0 and len(true_rows) >= required:
+        result["yes_bag_exit_classification"] = (
+            "VERTICAL_EVIDENCE_AVAILABILITY_BLOCKING"
+        )
+    else:
+        result["yes_bag_exit_classification"] = (
+            "DETECTOR_AVAILABILITY_BLOCKING"
+        )
+    result.update({
+        "RAW_REPRESENTATIVE_XY_STEP_P95":
+            result["raw_representative_xy_step_p95"],
+        "STABLE_ANCHOR_XY_STEP_P95":
+            result["stable_anchor_xy_step_p95"],
+        "ASSOCIATION_REJECT_REASON_DISTRIBUTION":
+            result["association_reject_reason_distribution"],
+        "VERTICAL_MODE_DISTRIBUTION": result["vertical_mode_distribution"],
+        "LONGEST_PHYSICAL_HISTORY": result["longest_physical_history"],
+        "MAX_LIFT_CONFIRM_COUNT": result["max_lift_confirm_count"],
+        "TRUE_VALIDATED": result["true_validated"],
+        "WRONG_LOW_VALIDATED": result["wrong_low_validated"],
+    })
+    return result
+
+
 def analyze_trace(
-    name: str, path: Path, oracle: dict[str, Any] | None = None
+    name: str, path: Path, oracle: dict[str, Any] | None = None,
+    group_path: Path | None = None,
+    baseline_group_path: Path | None = None,
+    baseline_trace_path: Path | None = None,
 ) -> dict[str, Any]:
     with path.open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
@@ -184,7 +322,44 @@ def analyze_trace(
                  for value in processed_hz) else math.nan,
         "dropped_frame_count": max(dropped, default=0.0),
         "large_gap_count": max(large_gaps, default=0.0),
+        "new_history_rate_after": (
+            sum(row.get("shadow_association") == "NEW_HISTORY"
+                for row in judged_rows) / len(judged_rows)
+            if judged_rows else math.nan
+        ),
     }
+    if baseline_trace_path is None:
+        result["new_history_rate_before"] = math.nan
+        result["baseline_trace_comparison"] = (
+            "BASELINE_COMPARISON_UNAVAILABLE"
+        )
+    else:
+        with baseline_trace_path.open(newline="", encoding="utf-8") as stream:
+            baseline_rows = list(csv.DictReader(stream))
+        baseline_window = (
+            oracle_window(baseline_rows, oracle) if oracle else None
+        )
+        baseline_judged = (
+            baseline_window if baseline_window is not None else baseline_rows
+        )
+        result["new_history_rate_before"] = (
+            sum(row.get("shadow_association") == "NEW_HISTORY"
+                for row in baseline_judged) / len(baseline_judged)
+            if baseline_judged else math.nan
+        )
+        result["baseline_trace_comparison"] = "AVAILABLE"
+    result["NEW_HISTORY_RATE_BEFORE"] = result["new_history_rate_before"]
+    result["NEW_HISTORY_RATE_AFTER"] = result["new_history_rate_after"]
+    if group_path is not None:
+        result["continuity_v2"] = analyze_group_trace(
+            group_path, oracle, baseline_group_path
+        )
+    else:
+        result["continuity_v2"] = {
+            "group_trace": "MISSING",
+            "baseline_comparison": "BASELINE_COMPARISON_UNAVAILABLE",
+            "yes_bag_exit_classification": "ORACLE_INCONCLUSIVE",
+        }
     if not oracle_conclusive or not identity_oracle_available:
         result["identity_verdict"] = "ORACLE_INCONCLUSIVE"
         result["vertical_geometry_verdict"] = "ORACLE_INCONCLUSIVE"
@@ -279,6 +454,18 @@ def main() -> int:
         help="NAME=/path/to/runtime_samples.csv",
     )
     parser.add_argument(
+        "--groups", action="append", default=[],
+        help="NAME=/path/to/integrated_identity_groups.csv",
+    )
+    parser.add_argument(
+        "--baseline-groups", action="append", default=[],
+        help="NAME=/path/to/baseline_integrated_identity_groups.csv",
+    )
+    parser.add_argument(
+        "--baseline", action="append", default=[],
+        help="NAME=/path/to/baseline_integrated_avoidance_shadow.csv",
+    )
+    parser.add_argument(
         "--oracle", action="append", default=[],
         help="NAME=/path/to/bag_local_oracle.json",
     )
@@ -287,6 +474,9 @@ def main() -> int:
     reports: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     runtime_paths: dict[str, Path] = {}
+    group_paths: dict[str, Path] = {}
+    baseline_group_paths: dict[str, Path] = {}
+    baseline_trace_paths: dict[str, Path] = {}
     oracle_paths: dict[str, Path] = {}
     for item in args.runtime:
         try:
@@ -300,13 +490,36 @@ def main() -> int:
             oracle_paths[oracle_name] = Path(oracle_path)
         except ValueError:
             errors.append({"bag": item, "error": "invalid oracle NAME=PATH"})
+    for item in args.groups:
+        try:
+            group_name, group_path = item.split("=", 1)
+            group_paths[group_name] = Path(group_path)
+        except ValueError:
+            errors.append({"bag": item, "error": "invalid groups NAME=PATH"})
+    for item in args.baseline_groups:
+        try:
+            baseline_name, baseline_path = item.split("=", 1)
+            baseline_group_paths[baseline_name] = Path(baseline_path)
+        except ValueError:
+            errors.append({
+                "bag": item, "error": "invalid baseline-groups NAME=PATH"
+            })
+    for item in args.baseline:
+        try:
+            baseline_name, baseline_path = item.split("=", 1)
+            baseline_trace_paths[baseline_name] = Path(baseline_path)
+        except ValueError:
+            errors.append({"bag": item, "error": "invalid baseline NAME=PATH"})
     for item in args.bag:
         try:
             name, raw_path = item.split("=", 1)
             oracle = None
             if name in oracle_paths:
                 oracle = json.loads(oracle_paths[name].read_text(encoding="utf-8"))
-            report = analyze_trace(name, Path(raw_path), oracle)
+            report = analyze_trace(
+                name, Path(raw_path), oracle, group_paths.get(name),
+                baseline_group_paths.get(name), baseline_trace_paths.get(name),
+            )
             if name in runtime_paths:
                 report["runtime"] = analyze_runtime(runtime_paths[name])
             reports.append(report)
@@ -364,6 +577,12 @@ def main() -> int:
         ),
         "PRODUCT_BEHAVIOR_CHANGED": "NO",
         "FIELD_READY": "NO",
+    }
+    summary["CONTINUITY_V2_BAG_CLASSIFICATIONS"] = {
+        report["bag"]: report["continuity_v2"].get(
+            "yes_bag_exit_classification", "ORACLE_INCONCLUSIVE"
+        )
+        for report in reports
     }
     pass_values = (
         summary["CARGO_IDENTITY_CORRECTNESS"],

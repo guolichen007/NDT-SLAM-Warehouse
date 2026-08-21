@@ -3,7 +3,7 @@
 set -u
 
 if [[ $# -lt 7 ]]; then
-  echo "Usage: $0 WORKSPACE MAP_SOURCE OUTPUT_DIR 无.bag 有.bag 长件.bag 大件.bag [DURATION] [ORACLE_DIR]" >&2
+  echo "Usage: $0 WORKSPACE MAP_SOURCE OUTPUT_DIR 无.bag 有.bag 长件.bag 大件.bag [DURATION] [ORACLE_DIR] [BASELINE_TRACE_DIR]" >&2
   exit 2
 fi
 
@@ -15,6 +15,7 @@ bags=("$1" "$2" "$3" "$4")
 names=("无" "有" "长件" "大件")
 duration="${5:-1200}"
 oracle_dir="${6:-}"
+baseline_trace_dir="${7:-}"
 expected_sha="$(git -C "$workspace" rev-parse HEAD)"
 runner="$workspace/src/ndt_slam/scripts/ops/server_monitor_bag_validate.sh"
 analyzer="$workspace/src/ndt_slam/scripts/analysis/analyze_integrated_cargo_identity_shadow.py"
@@ -34,6 +35,9 @@ if [[ $build_rc -ne 0 || $test_rc -ne 0 ]]; then
 fi
 
 trace_args=()
+group_args=()
+baseline_group_args=()
+baseline_args=()
 runtime_args=()
 oracle_args=()
 run_rc=0
@@ -64,6 +68,22 @@ for index in 0 1 2 3; do
     echo "TRACE_MISSING bag=$name" >>"$run_log"
     run_rc=1
   fi
+  group_trace="$output_dir/${name}_integrated_identity_groups.csv"
+  if [[ -f /tmp/cargo_forensic/integrated_identity_groups.csv ]]; then
+    cp /tmp/cargo_forensic/integrated_identity_groups.csv "$group_trace"
+    group_args+=(--groups "$name=$group_trace")
+  else
+    echo "GROUP_TRACE_MISSING bag=$name" >>"$run_log"
+    run_rc=1
+  fi
+  baseline_group="$baseline_trace_dir/${name}_integrated_identity_groups.csv"
+  if [[ -n "$baseline_trace_dir" && -f "$baseline_group" ]]; then
+    baseline_group_args+=(--baseline-groups "$name=$baseline_group")
+  fi
+  baseline_trace="$baseline_trace_dir/${name}_integrated_avoidance_shadow.csv"
+  if [[ -n "$baseline_trace_dir" && -f "$baseline_trace" ]]; then
+    baseline_args+=(--baseline "$name=$baseline_trace")
+  fi
   run_dir="$(sed -n 's/^run_dir:[[:space:]]*//p' "$run_log" | tail -n 1)"
   runtime_csv="$run_dir/samples/runtime_samples.csv"
   if [[ -n "$run_dir" && -f "$runtime_csv" ]]; then
@@ -82,6 +102,7 @@ done
 
 set +e
 python3 "$analyzer" "${trace_args[@]}" "${runtime_args[@]}" \
+  "${group_args[@]}" "${baseline_group_args[@]}" "${baseline_args[@]}" \
   "${oracle_args[@]}" \
   --output "$output_dir/integrated_shadow_report.json"
 analysis_rc=$?

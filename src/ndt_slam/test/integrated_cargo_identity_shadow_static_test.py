@@ -13,6 +13,9 @@ HEADER = (PACKAGE / "include" / "ndt_slam" / "ndt_slam.hpp").read_text(
 CONFIG = (
     PACKAGE / "config" / "integrated_cargo_identity_shadow_v1.yaml"
 ).read_text(encoding="utf-8")
+AUTHORITY = (
+    PACKAGE / "src" / "cargo_physical_identity_authority.cpp"
+).read_text(encoding="utf-8")
 
 
 def function_body(signature: str, next_signature: str) -> str:
@@ -95,6 +98,38 @@ class IntegratedCargoIdentityShadowStaticTest(unittest.TestCase):
         self.assertIn("CargoPhysicalIdentityAuthority", HEADER)
         self.assertNotIn("apply_to_product", HEADER)
         self.assertNotIn("product_pose", HEADER)
+
+    def test_association_uses_descriptor_not_frame_local_member_ids(self) -> None:
+        pair_start = AUTHORITY.index("struct Pair {")
+        pair_end = AUTHORITY.index(
+            "std::vector<int> group_match", pair_start
+        )
+        association_costs = AUTHORITY[pair_start:pair_end]
+        self.assertIn("stable_anchor", association_costs)
+        self.assertIn("physical_vertical_z", association_costs)
+        self.assertIn("aggregate_extent", association_costs)
+        self.assertNotIn("member_component_ids", association_costs)
+        self.assertNotIn("candidate_id", association_costs)
+
+    def test_group_vertical_is_robust_across_all_hypotheses(self) -> None:
+        self.assertIn(
+            "for (const auto& hypothesis : group.hypotheses)", AUTHORITY
+        )
+        self.assertIn("physical_vertical_z = median(supported_tops)", AUTHORITY)
+        self.assertIn("CONFLICTING_HYPOTHESIS_SUPPORTED_TOPS", AUTHORITY)
+
+    def test_exactly_two_integrated_shadow_trace_files(self) -> None:
+        self.assertIn("integrated_avoidance_shadow.csv", NODE)
+        self.assertIn("integrated_identity_groups.csv", NODE)
+        self.assertEqual(NODE.count("integrated_avoidance_shadow.csv"), 1)
+        self.assertEqual(NODE.count("integrated_identity_groups.csv"), 1)
+
+    def test_continuity_v2_does_not_change_parameters(self) -> None:
+        self.assertIn("maximum_xy_step_m: 0.30", CONFIG)
+        self.assertIn("maximum_observation_gap_sec: 0.50", CONFIG)
+        self.assertIn("minimum_significant_change_m: 0.15", CONFIG)
+        self.assertIn("significance_sigma: 3.0", CONFIG)
+        self.assertIn("confirm_frames: 4", CONFIG)
 
 
 if __name__ == "__main__":
