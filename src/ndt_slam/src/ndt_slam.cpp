@@ -16437,6 +16437,69 @@ void NdtSlamNode::updateHookCargoLock(
     }
     }
 
+    // B3B diagnostic: per-frame lock state / authority snapshot.
+    {
+        if (!lock_state_csv_init_) {
+            lock_state_csv_.open("/tmp/cargo_forensic/lock_state_trace.csv",
+                                 std::ios::out | std::ios::trunc);
+            if (lock_state_csv_.is_open()) {
+                lock_state_csv_
+                    << "stamp,state,state_name,provisional_track_id,lifecycle_id,track_retained,"
+                    << "selected_candidate_id,candidate_count,top1_rank,top2_rank,score_margin,"
+                    << "authority_source,authority_source_name,"
+                    << "gravity_valid,gravity_state,hook_loaded,signal_role,"
+                    << "suspension_confirm_count,lidar_lift_evidence,"
+                    << "lift_confirm_count,lift_from_origin_m,ground_clearance_m,"
+                    << "lift_delta_m,lift_origin_state,"
+                    << "formal_lock_allowed,allow_candidate,allow_lock,"
+                    << "identity_confidence,shape_confidence,overall_lock_confidence,"
+                    << "selected_center_x,selected_center_y,selected_center_z,"
+                    << "selected_size_x,selected_size_y,selected_size_z,selected_point_count\n";
+            }
+            lock_state_csv_init_ = true;
+        }
+        if (lock_state_csv_.is_open()) {
+            const char* b3b_state_name = "UNKNOWN";
+            switch (hook_lock_.state) {
+                case HookCargoLockState::EMPTY: b3b_state_name = "EMPTY"; break;
+                case HookCargoLockState::CANDIDATE: b3b_state_name = "CANDIDATE"; break;
+                case HookCargoLockState::GEOMETRY_CONFIRMING: b3b_state_name = "GEOMETRY_CONFIRMING"; break;
+                case HookCargoLockState::LOCKED: b3b_state_name = "LOCKED"; break;
+                case HookCargoLockState::LOST_HOLD: b3b_state_name = "LOST_HOLD"; break;
+                case HookCargoLockState::CLEAR_WAIT_REARM: b3b_state_name = "CLEAR_WAIT_REARM"; break;
+                case HookCargoLockState::LOADED_REACQUIRE: b3b_state_name = "LOADED_REACQUIRE"; break;
+            }
+            const auto b3b_finite = [](float v) {
+                return std::isfinite(v) ? v : 0.0F;
+            };
+            lock_state_csv_ << std::fixed << std::setprecision(5)
+                << stamp.toSec() << ','
+                << static_cast<int>(hook_lock_.state) << ',' << b3b_state_name << ','
+                << hook_lock_.provisional_track_id << ',' << cargo_lifecycle_id_ << ','
+                << (cargoTrackRetained() ? 1 : 0) << ','
+                << det.selected_candidate_id << ',' << det.candidate_count << ','
+                << det.candidate_top1_score << ',' << det.candidate_top2_score << ','
+                << det.candidate_score_margin << ','
+                << static_cast<int>(hook_lock_.lock_authority_source) << ','
+                << cargoLockAuthoritySourceName(hook_lock_.lock_authority_source) << ','
+                << (hook.valid ? 1 : 0) << ',' << static_cast<int>(gravity_state) << ','
+                << (gravity_state == HookLoadState::LOADED ? 1 : 0) << ','
+                << static_cast<int>(hook_load_signal_role_) << ','
+                << hook_lock_.suspension_confirm_count << ',' << (det.lidar_lift_evidence ? 1 : 0) << ','
+                << hook_lock_.lift_confirm_count << ',' << b3b_finite(hook_lock_.lift_from_origin_m) << ','
+                << b3b_finite(hook_lock_.ground_clearance_m) << ','
+                << b3b_finite(cargo_lift_origin_result_.lift_delta_m) << ','
+                << cargoLiftEventStateName(cargo_lift_origin_result_.state) << ','
+                << (hook_lock_.provisional_summary.formal_lock_allowed ? 1 : 0) << ','
+                << (candidate_policy.allow_candidate ? 1 : 0) << ',' << (candidate_policy.allow_lock ? 1 : 0) << ','
+                << det.identity_confidence << ',' << det.shape_confidence << ','
+                << det.overall_lock_confidence << ','
+                << det.center_base.x() << ',' << det.center_base.y() << ',' << det.center_base.z() << ','
+                << det.size_visible.x() << ',' << det.size_visible.y() << ',' << det.size_visible.z() << ','
+                << (det.core_points_base ? det.core_points_base->size() : 0U) << '\n';
+        }
+    }
+
     // ========== 更新 CargoState ==========
     // 将 HookCargoLock 状态同步到统一的 CargoState
     hook_observation_associated_current_ = observation_associated;

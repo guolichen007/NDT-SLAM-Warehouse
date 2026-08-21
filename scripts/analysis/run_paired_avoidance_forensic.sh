@@ -24,12 +24,14 @@ GEO="${OUT}/cargo_geometry_debug.txt"
 TRACE="${OUT}/frame_causal_trace.csv"
 DETTRACE="${OUT}/detection_pipeline_trace.csv"
 RANK="${OUT}/rank_score_lineage.csv"
+LOCKSTATE="${OUT}/lock_state_trace.csv"
 MANIFEST="${OUT}/manifest.txt"
 
-rm -f "${LOG}" "${RAW}" "${SAFETY}" "${OPS}" "${GEO}" "${TRACE}" "${DETTRACE}" "${RANK}"
+rm -f "${LOG}" "${RAW}" "${SAFETY}" "${OPS}" "${GEO}" "${TRACE}" "${DETTRACE}" "${RANK}" "${LOCKSTATE}"
 rm -f /tmp/cargo_forensic/frame_causal_trace.csv
 rm -f /tmp/cargo_forensic/detection_pipeline_trace.csv
 rm -f /tmp/cargo_forensic/rank_score_lineage.csv
+rm -f /tmp/cargo_forensic/lock_state_trace.csv
 rm -rf /tmp/ndt_slam_runtime_data
 
 {
@@ -104,6 +106,9 @@ if [ -f /tmp/cargo_forensic/detection_pipeline_trace.csv ]; then
 fi
 if [ -f /tmp/cargo_forensic/rank_score_lineage.csv ]; then
   cp /tmp/cargo_forensic/rank_score_lineage.csv "${RANK}"
+fi
+if [ -f /tmp/cargo_forensic/lock_state_trace.csv ]; then
+  cp /tmp/cargo_forensic/lock_state_trace.csv "${LOCKSTATE}"
 fi
 echo "end_time=$(date '+%Y-%m-%d %H:%M:%S')" >> "${MANIFEST}"
 
