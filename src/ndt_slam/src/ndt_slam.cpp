@@ -13584,17 +13584,6 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
     const ros::Time& stamp) {
     if (!integrated_cargo_identity_shadow_enabled_ || stamp.isZero()) return;
     const auto identity_start = IntegratedShadowDiagClock::now();
-    std::vector<CargoPhysicalCandidateObservation> observations;
-    observations.reserve(detection.shadow_candidates.size());
-    for (const auto& candidate : detection.shadow_candidates) {
-        observations.push_back(candidate.identity);
-    }
-    const double equivalent_center_tolerance_m = std::max(
-        0.01, static_cast<double>(
-            odom_anchor_config_.tight_box.margin_xy_m));
-    const double equivalent_size_tolerance = std::max(
-        0.01, static_cast<double>(
-            hook_lock_config_.maximum_provisional_shape_cv));
     CargoPhysicalIdentityInput input;
     input.pipeline_stamp_sec = stamp.toSec();
     // The shadow authority owns its load epoch. Product lifecycle counters
@@ -13625,14 +13614,99 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
             input.gravity_state = HookLoadState::UNKNOWN;
             break;
     }
-    input.groups = groupCargoPhysicalCandidates(
-        observations, equivalent_center_tolerance_m,
-        equivalent_size_tolerance);
+    input.groups = detection.shadow_physical_groups;
     const std::uint64_t previous_shadow_history_id =
         integrated_identity_decision_.physical_history_id;
     integrated_identity_decision_ =
         integrated_identity_authority_.update(input);
     integrated_shadow_authority_stamp_ = stamp;
+    if (!integrated_identity_groups_csv_init_) {
+        try {
+            boost::filesystem::create_directories("/tmp/cargo_forensic");
+            integrated_identity_groups_csv_.open(
+                "/tmp/cargo_forensic/integrated_identity_groups.csv",
+                std::ios::out | std::ios::trunc);
+        } catch (const std::exception& error) {
+            ROS_ERROR_THROTTLE(
+                5.0,
+                "[IntegratedCargoIdentityShadow] group_trace_open_failed=%s",
+                error.what());
+        }
+        if (integrated_identity_groups_csv_.is_open()) {
+            integrated_identity_groups_csv_
+                << "stamp,frame_group_id,canonical_member_ids,"
+                << "raw_representative_x,raw_representative_y,"
+                << "raw_representative_z,stable_anchor_x,stable_anchor_y,"
+                << "stable_anchor_z,aggregate_extent_x,aggregate_extent_y,"
+                << "aggregate_extent_z,aggregate_point_support,"
+                << "vertical_mode,physical_vertical_z,vertical_uncertainty,"
+                << "vertical_reject_reason,valid_hypothesis_top_count,"
+                << "hypothesis_top_min,hypothesis_top_max,"
+                << "hypothesis_top_spread,matched_history_id,"
+                << "association_state,raw_representative_xy_step,"
+                << "stable_anchor_xy_step,z_step,extent_step,xy_cost,"
+                << "z_cost,extent_cost,association_reject_reason,"
+                << "new_history_reason,lift_baseline_source,baseline_z,"
+                << "lift_delta,lift_threshold,last_supported_evidence_stamp,"
+                << "lift_confirm_count,lift_confirm_required,lift_confirmed,"
+                << "identity_state\n";
+        }
+        integrated_identity_groups_csv_init_ = true;
+    }
+    if (integrated_identity_groups_csv_.is_open()) {
+        for (const CargoPhysicalGroupDiagnostic& diagnostic :
+             integrated_identity_decision_.group_diagnostics) {
+            std::ostringstream member_ids;
+            for (std::size_t index = 0U;
+                 index < diagnostic.member_component_ids.size(); ++index) {
+                if (index > 0U) member_ids << '|';
+                member_ids << diagnostic.member_component_ids[index];
+            }
+            const CargoPhysicalGroupDescriptor& descriptor =
+                diagnostic.descriptor;
+            integrated_identity_groups_csv_
+                << std::fixed << std::setprecision(6)
+                << stamp.toSec() << ',' << diagnostic.frame_group_id << ','
+                << member_ids.str() << ','
+                << diagnostic.raw_representative.x() << ','
+                << diagnostic.raw_representative.y() << ','
+                << diagnostic.raw_representative.z() << ','
+                << descriptor.stable_anchor.x() << ','
+                << descriptor.stable_anchor.y() << ','
+                << descriptor.stable_anchor.z() << ','
+                << descriptor.aggregate_extent.x() << ','
+                << descriptor.aggregate_extent.y() << ','
+                << descriptor.aggregate_extent.z() << ','
+                << descriptor.aggregate_point_support << ','
+                << cargoGroupVerticalModeName(descriptor.vertical_mode) << ','
+                << descriptor.physical_vertical_z << ','
+                << descriptor.vertical_uncertainty_m << ','
+                << descriptor.vertical_reject_reason << ','
+                << descriptor.valid_hypothesis_top_count << ','
+                << descriptor.hypothesis_top_min << ','
+                << descriptor.hypothesis_top_max << ','
+                << descriptor.hypothesis_top_spread << ','
+                << diagnostic.matched_history_id << ','
+                << cargoCandidateAssociationStateName(
+                       diagnostic.association) << ','
+                << diagnostic.raw_representative_xy_step_m << ','
+                << diagnostic.xy_step_m << ',' << diagnostic.z_step_m << ','
+                << diagnostic.extent_step << ',' << diagnostic.xy_cost << ','
+                << diagnostic.z_cost << ',' << diagnostic.extent_cost << ','
+                << diagnostic.association_reject_reason << ','
+                << diagnostic.new_history_reason << ','
+                << cargoLiftBaselineSourceName(
+                       diagnostic.baseline_source) << ','
+                << diagnostic.baseline_z << ',' << diagnostic.lift_delta_m
+                << ',' << diagnostic.lift_threshold_m << ','
+                << diagnostic.last_supported_evidence_stamp << ','
+                << diagnostic.lift_confirm_count << ','
+                << diagnostic.lift_confirm_required << ','
+                << (diagnostic.lift_confirmed ? 1 : 0) << ','
+                << cargoPhysicalIdentityStateName(diagnostic.identity)
+                << '\n';
+        }
+    }
     if (previous_shadow_history_id != 0U &&
         previous_shadow_history_id !=
             integrated_identity_decision_.physical_history_id) {
@@ -13642,6 +13716,7 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
         integrated_shadow_fusion_result_ = CargoAvoidanceFusionResult{};
     }
     integrated_shadow_identity_compute_ms_ =
+        detection.shadow_physical_group_compute_ms +
         integratedShadowElapsedMs(identity_start);
 
     bool candidate_observed_this_update = false;
@@ -13673,7 +13748,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
     }
     if (candidate_observed_this_update ||
         integrated_identity_decision_.identity !=
-            CargoPhysicalIdentityState::VALIDATED) {
+            CargoPhysicalIdentityState::VALIDATED ||
+        !integrated_identity_decision_.geometry_resolved) {
         const auto geometry_start = IntegratedShadowDiagClock::now();
         CargoShadowGeometryInput geometry_input;
         geometry_input.stamp_sec = stamp.toSec();
@@ -14404,6 +14480,45 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             identity.shape_confidence, identity.motion_confidence,
             identity.suspension_confidence, identity.identity_confidence,
             identity.overall_lock_confidence);
+    }
+    if (integrated_cargo_identity_shadow_enabled_) {
+        const auto physical_group_start = IntegratedShadowDiagClock::now();
+        std::vector<CargoPhysicalCandidateObservation> observations;
+        observations.reserve(result.shadow_candidates.size());
+        for (const auto& candidate : result.shadow_candidates) {
+            observations.push_back(candidate.identity);
+        }
+        std::vector<CargoPhysicalComponentObservation> component_observations;
+        component_observations.reserve(components.size());
+        for (std::size_t component_id = 0U;
+             component_id < components.size(); ++component_id) {
+            CargoPhysicalComponentObservation observation;
+            observation.component_id =
+                static_cast<std::uint64_t>(component_id);
+            observation.points_base.reserve(
+                components[component_id].indices.indices.size());
+            for (int point_index :
+                 components[component_id].indices.indices) {
+                const pcl::PointXYZ& point = voxel_cloud->points[point_index];
+                observation.points_base.emplace_back(
+                    point.x, point.y, point.z);
+            }
+            component_observations.push_back(std::move(observation));
+        }
+        const double equivalent_center_tolerance_m = std::max(
+            0.01, static_cast<double>(
+                odom_anchor_config_.tight_box.margin_xy_m));
+        const double equivalent_size_tolerance = std::max(
+            0.01, static_cast<double>(
+                hook_lock_config_.maximum_provisional_shape_cv));
+        result.shadow_physical_groups = groupCargoPhysicalCandidates(
+            observations, component_observations,
+            result.ground_reference_valid, result.ground_z,
+            cargo_vertical_evidence_v2_config_,
+            equivalent_center_tolerance_m,
+            equivalent_size_tolerance);
+        result.shadow_physical_group_compute_ms =
+            integratedShadowElapsedMs(physical_group_start);
     }
     const CargoCandidateRanking candidate_ranking =
         rankCargoCandidateIdentityScores(component_scores);

@@ -2,16 +2,26 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <iterator>
 #include <limits>
 #include <map>
-#include <iterator>
+#include <numeric>
 #include <set>
+#include <tuple>
 #include <utility>
 
 namespace ndt_slam {
 namespace {
 
 constexpr double kEpsilon = 1.0e-9;
+
+std::vector<std::uint64_t> canonicalMembers(
+    std::vector<std::uint64_t> members) {
+  std::sort(members.begin(), members.end());
+  members.erase(std::unique(members.begin(), members.end()), members.end());
+  return members;
+}
 
 bool finiteCandidate(const CargoPhysicalCandidateObservation& candidate) {
   return candidate.stamp_sec > 0.0 && std::isfinite(candidate.stamp_sec) &&
@@ -23,11 +33,17 @@ bool finiteCandidate(const CargoPhysicalCandidateObservation& candidate) {
       !candidate.member_component_ids.empty() && candidate.point_support > 0U;
 }
 
-std::vector<std::uint64_t> canonicalMembers(
-    std::vector<std::uint64_t> members) {
-  std::sort(members.begin(), members.end());
-  members.erase(std::unique(members.begin(), members.end()), members.end());
-  return members;
+bool finiteDescriptor(const CargoPhysicalGroupDescriptor& descriptor) {
+  return descriptor.valid && descriptor.stamp_sec > 0.0 &&
+      std::isfinite(descriptor.stamp_sec) &&
+      descriptor.stable_anchor.allFinite() &&
+      descriptor.aggregate_extent.allFinite() &&
+      (descriptor.aggregate_extent.array() > 0.0).all() &&
+      descriptor.aggregate_point_support > 0U &&
+      descriptor.vertical_mode != CargoGroupVerticalMode::INVALID &&
+      std::isfinite(descriptor.physical_vertical_z) &&
+      std::isfinite(descriptor.vertical_uncertainty_m) &&
+      descriptor.vertical_uncertainty_m >= 0.0;
 }
 
 bool overlaps(const std::vector<std::uint64_t>& lhs,
@@ -36,6 +52,12 @@ bool overlaps(const std::vector<std::uint64_t>& lhs,
   std::set_intersection(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
                         std::back_inserter(intersection));
   return !intersection.empty();
+}
+
+bool containsAll(const std::vector<std::uint64_t>& container,
+                 const std::vector<std::uint64_t>& contents) {
+  return std::includes(container.begin(), container.end(),
+                       contents.begin(), contents.end());
 }
 
 bool equivalentGeometry(const CargoPhysicalCandidateObservation& lhs,
@@ -52,6 +74,26 @@ bool equivalentGeometry(const CargoPhysicalCandidateObservation& lhs,
     }
   }
   return true;
+}
+
+bool canonicalCandidateLess(const CargoPhysicalCandidateObservation& lhs,
+                            const CargoPhysicalCandidateObservation& rhs) {
+  return std::make_tuple(
+             lhs.member_component_ids, lhs.center.x(), lhs.center.y(),
+             lhs.center.z(), lhs.size.x(), lhs.size.y(), lhs.size.z(),
+             lhs.yaw_rad, lhs.candidate_id) <
+      std::make_tuple(
+             rhs.member_component_ids, rhs.center.x(), rhs.center.y(),
+             rhs.center.z(), rhs.size.x(), rhs.size.y(), rhs.size.z(),
+             rhs.yaw_rad, rhs.candidate_id);
+}
+
+double median(std::vector<double> values) {
+  std::sort(values.begin(), values.end());
+  const std::size_t middle = values.size() / 2U;
+  return values.size() % 2U == 0U
+      ? 0.5 * (values[middle - 1U] + values[middle])
+      : values[middle];
 }
 
 int requiredFrames(HookLoadSignalRole role, bool gravity_valid,
@@ -110,48 +152,227 @@ const char* cargoExistenceSourceName(CargoExistenceSource source) noexcept {
   return "INVALID";
 }
 
+const char* cargoGroupVerticalModeName(CargoGroupVerticalMode mode) noexcept {
+  switch (mode) {
+    case CargoGroupVerticalMode::SUPPORTED_EVIDENCE:
+      return "SUPPORTED_EVIDENCE";
+    case CargoGroupVerticalMode::CONTINUITY_ONLY:
+      return "CONTINUITY_ONLY";
+    case CargoGroupVerticalMode::INVALID: return "INVALID";
+  }
+  return "INVALID";
+}
+
 std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
     const std::vector<CargoPhysicalCandidateObservation>& candidates,
+    const std::vector<CargoPhysicalComponentObservation>& components,
+    bool ground_reference_valid,
+    double ground_z_base,
+    const CargoVerticalEvidenceConfig& vertical_config,
     double equivalent_center_tolerance_m,
     double equivalent_size_relative_tolerance) {
-  std::map<std::vector<std::uint64_t>, CargoPhysicalGroupObservation> exact;
+  std::vector<CargoPhysicalCandidateObservation> valid;
+  valid.reserve(candidates.size());
   for (CargoPhysicalCandidateObservation candidate : candidates) {
     candidate.member_component_ids =
         canonicalMembers(std::move(candidate.member_component_ids));
-    if (!finiteCandidate(candidate)) continue;
-    auto& group = exact[candidate.member_component_ids];
-    group.member_component_ids = candidate.member_component_ids;
-    group.hypotheses.push_back(candidate);
+    if (finiteCandidate(candidate)) valid.push_back(std::move(candidate));
+  }
+  std::sort(valid.begin(), valid.end(), canonicalCandidateLess);
+
+  std::vector<std::size_t> parent(valid.size());
+  std::iota(parent.begin(), parent.end(), 0U);
+  std::function<std::size_t(std::size_t)> root = [&](std::size_t index) {
+    if (parent[index] != index) parent[index] = root(parent[index]);
+    return parent[index];
+  };
+  const auto join = [&](std::size_t lhs, std::size_t rhs) {
+    lhs = root(lhs);
+    rhs = root(rhs);
+    if (lhs != rhs) parent[rhs] = lhs;
+  };
+  for (std::size_t i = 0; i < valid.size(); ++i) {
+    for (std::size_t j = i + 1U; j < valid.size(); ++j) {
+      if (overlaps(valid[i].member_component_ids,
+                   valid[j].member_component_ids)) {
+        join(i, j);
+      }
+    }
+  }
+
+  std::map<std::size_t, std::vector<CargoPhysicalCandidateObservation>>
+      hypothesis_groups;
+  for (std::size_t index = 0; index < valid.size(); ++index) {
+    hypothesis_groups[root(index)].push_back(valid[index]);
+  }
+  std::map<std::uint64_t, std::vector<Eigen::Vector3f>> component_points;
+  for (const CargoPhysicalComponentObservation& component : components) {
+    component_points.emplace(component.component_id, component.points_base);
   }
 
   std::vector<CargoPhysicalGroupObservation> groups;
-  groups.reserve(exact.size());
-  std::uint64_t next_group_id = 1U;
-  for (auto& entry : exact) {
-    auto& group = entry.second;
-    group.frame_group_id = next_group_id++;
-    group.representative = group.hypotheses.front();
+  groups.reserve(hypothesis_groups.size());
+  for (auto& entry : hypothesis_groups) {
+    CargoPhysicalGroupObservation group;
+    group.hypotheses = std::move(entry.second);
+    std::sort(group.hypotheses.begin(), group.hypotheses.end(),
+              canonicalCandidateLess);
+    group.representative = *std::min_element(
+        group.hypotheses.begin(), group.hypotheses.end(),
+        canonicalCandidateLess);
+    for (const auto& hypothesis : group.hypotheses) {
+      group.member_component_ids.insert(group.member_component_ids.end(),
+          hypothesis.member_component_ids.begin(),
+          hypothesis.member_component_ids.end());
+    }
+    group.member_component_ids =
+        canonicalMembers(std::move(group.member_component_ids));
+
     group.geometry_resolved = true;
-    for (std::size_t i = 1; i < group.hypotheses.size(); ++i) {
+    for (std::size_t i = 1U; i < group.hypotheses.size(); ++i) {
       if (!equivalentGeometry(group.representative, group.hypotheses[i],
                               equivalent_center_tolerance_m,
                               equivalent_size_relative_tolerance)) {
         group.geometry_resolved = false;
       }
     }
-    groups.push_back(group);
-  }
-
-  for (std::size_t i = 0; i < groups.size(); ++i) {
-    for (std::size_t j = i + 1; j < groups.size(); ++j) {
-      if (overlaps(groups[i].member_component_ids,
-                   groups[j].member_component_ids)) {
-        groups[i].group_ambiguous = true;
-        groups[j].group_ambiguous = true;
-        groups[i].geometry_resolved = false;
-        groups[j].geometry_resolved = false;
+    for (std::size_t i = 0; i < group.hypotheses.size(); ++i) {
+      for (std::size_t j = i + 1U; j < group.hypotheses.size(); ++j) {
+        if (!overlaps(group.hypotheses[i].member_component_ids,
+                      group.hypotheses[j].member_component_ids)) {
+          group.group_ambiguous = true;
+        } else if (!containsAll(
+                       group.hypotheses[i].member_component_ids,
+                       group.hypotheses[j].member_component_ids) &&
+                   !containsAll(
+                       group.hypotheses[j].member_component_ids,
+                       group.hypotheses[i].member_component_ids)) {
+          group.group_ambiguous = true;
+        }
       }
     }
+
+    std::vector<Eigen::Vector3f> union_points;
+    bool component_lookup_complete = true;
+    for (std::uint64_t member : group.member_component_ids) {
+      const auto found = component_points.find(member);
+      if (found == component_points.end()) {
+        component_lookup_complete = false;
+        continue;
+      }
+      union_points.insert(union_points.end(), found->second.begin(),
+                          found->second.end());
+    }
+    std::vector<double> xs;
+    std::vector<double> ys;
+    std::vector<double> zs;
+    xs.reserve(union_points.size());
+    ys.reserve(union_points.size());
+    zs.reserve(union_points.size());
+    Eigen::Vector3d minimum = Eigen::Vector3d::Constant(
+        std::numeric_limits<double>::infinity());
+    Eigen::Vector3d maximum = Eigen::Vector3d::Constant(
+        -std::numeric_limits<double>::infinity());
+    for (const Eigen::Vector3f& point : union_points) {
+      if (!point.allFinite()) continue;
+      const Eigen::Vector3d value = point.cast<double>();
+      minimum = minimum.cwiseMin(value);
+      maximum = maximum.cwiseMax(value);
+      xs.push_back(value.x());
+      ys.push_back(value.y());
+      zs.push_back(value.z());
+    }
+
+    CargoPhysicalGroupDescriptor& descriptor = group.descriptor;
+    descriptor.stamp_sec = group.representative.stamp_sec;
+    descriptor.aggregate_point_support = zs.size();
+    double maximum_uncertainty = 0.0;
+    for (const auto& hypothesis : group.hypotheses) {
+      maximum_uncertainty = std::max(
+          maximum_uncertainty, hypothesis.vertical_uncertainty_m);
+    }
+    descriptor.vertical_uncertainty_m = maximum_uncertainty;
+    const std::size_t minimum_points =
+        std::max<std::size_t>(1U, vertical_config.minimum_surface_points);
+    const bool continuity_available = component_lookup_complete &&
+        !group.group_ambiguous && zs.size() >= minimum_points;
+    if (continuity_available) {
+      descriptor.stable_anchor =
+          Eigen::Vector3d(median(xs), median(ys), median(zs));
+      descriptor.aggregate_extent = maximum - minimum;
+    }
+
+    std::vector<double> supported_tops;
+    if (continuity_available) {
+      for (const auto& hypothesis : group.hypotheses) {
+        CargoVerticalEvidenceInput evidence_input;
+        evidence_input.selected_points_base = union_points;
+        evidence_input.footprint_valid = true;
+        evidence_input.footprint_center_base =
+            hypothesis.center.head<2>().cast<float>();
+        evidence_input.footprint_size_xy =
+            hypothesis.size.head<2>().cast<float>();
+        evidence_input.footprint_yaw_base_rad =
+            static_cast<float>(hypothesis.yaw_rad);
+        evidence_input.ground_reference_valid = ground_reference_valid;
+        evidence_input.ground_z_base = static_cast<float>(ground_z_base);
+        const CargoVerticalEvidence evidence =
+            extractCargoVerticalEvidence(evidence_input, vertical_config);
+        if (evidence.valid && std::isfinite(evidence.top_z_base)) {
+          supported_tops.push_back(evidence.top_z_base);
+        }
+      }
+    }
+
+    descriptor.valid_hypothesis_top_count = supported_tops.size();
+    if (!supported_tops.empty()) {
+      const auto bounds = std::minmax_element(supported_tops.begin(),
+                                               supported_tops.end());
+      descriptor.hypothesis_top_min = *bounds.first;
+      descriptor.hypothesis_top_max = *bounds.second;
+      descriptor.hypothesis_top_spread = *bounds.second - *bounds.first;
+      const double consistency_limit =
+          static_cast<double>(vertical_config.surface_band_height_m) +
+          maximum_uncertainty;
+      if (descriptor.hypothesis_top_spread <= consistency_limit + kEpsilon) {
+        descriptor.vertical_mode =
+            CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
+        descriptor.physical_vertical_z = median(supported_tops);
+        descriptor.vertical_reject_reason = "SUPPORTED_HYPOTHESIS_TOP_MEDIAN";
+      } else {
+        descriptor.vertical_mode = CargoGroupVerticalMode::CONTINUITY_ONLY;
+        descriptor.physical_vertical_z = descriptor.stable_anchor.z();
+        descriptor.vertical_reject_reason =
+            "CONFLICTING_HYPOTHESIS_SUPPORTED_TOPS";
+      }
+    } else if (continuity_available) {
+      descriptor.vertical_mode = CargoGroupVerticalMode::CONTINUITY_ONLY;
+      descriptor.physical_vertical_z = descriptor.stable_anchor.z();
+      descriptor.vertical_reject_reason = "NO_SUPPORTED_HYPOTHESIS_TOP";
+    } else {
+      descriptor.vertical_mode = CargoGroupVerticalMode::INVALID;
+      descriptor.vertical_reject_reason = group.group_ambiguous
+          ? "PHYSICAL_GROUP_AMBIGUOUS"
+          : component_lookup_complete ? "INSUFFICIENT_FINITE_GROUP_POINTS"
+                                      : "COMPONENT_POINTS_UNAVAILABLE";
+    }
+    descriptor.valid = descriptor.vertical_mode !=
+            CargoGroupVerticalMode::INVALID &&
+        descriptor.stable_anchor.allFinite() &&
+        descriptor.aggregate_extent.allFinite() &&
+        (descriptor.aggregate_extent.array() > 0.0).all() &&
+        std::isfinite(descriptor.physical_vertical_z) &&
+        std::isfinite(descriptor.vertical_uncertainty_m);
+    groups.push_back(std::move(group));
+  }
+
+  std::sort(groups.begin(), groups.end(),
+            [](const CargoPhysicalGroupObservation& lhs,
+               const CargoPhysicalGroupObservation& rhs) {
+              return lhs.member_component_ids < rhs.member_component_ids;
+            });
+  for (std::size_t index = 0; index < groups.size(); ++index) {
+    groups[index].frame_group_id = static_cast<std::uint64_t>(index + 1U);
   }
   return groups;
 }
@@ -246,13 +467,10 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         std::none_of(histories_.begin(), histories_.end(),
                      [](const History& history) { return history.has_preload; });
     for (History& history : histories_) {
-      // Candidate-specific lift proof belongs to exactly one load epoch.
-      // Preserve only the current EMPTY-phase preload observation; never let
-      // confirmation, validation, or a prior frozen baseline cross the edge.
       history.lift_confirm_count = 0;
       history.lift_confirmed = false;
       history.validation_stamp_sec = 0.0;
-      history.last_consumed_evidence_stamp_sec = 0.0;
+      history.last_supported_evidence_stamp_sec = 0.0;
       history.baseline_frozen = false;
       history.baseline_z95 = std::numeric_limits<double>::quiet_NaN();
       history.baseline_stamp_sec = 0.0;
@@ -263,50 +481,116 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         history.baseline_z95 = history.preload_z95;
         history.baseline_uncertainty_m = history.preload_uncertainty_m;
         history.baseline_stamp_sec = history.preload_stamp_sec;
-        // Consume the EMPTY-phase baseline exactly once. A later load edge
-        // without a new EMPTY observation must not reuse this Cargo's origin.
         history.has_preload = false;
       }
     }
   }
 
+  decision_.group_diagnostics.reserve(input.groups.size());
+  for (const auto& group : input.groups) {
+    CargoPhysicalGroupDiagnostic diagnostic;
+    diagnostic.frame_group_id = group.frame_group_id;
+    diagnostic.member_component_ids = group.member_component_ids;
+    diagnostic.raw_representative = group.representative.center;
+    diagnostic.descriptor = group.descriptor;
+    decision_.group_diagnostics.push_back(std::move(diagnostic));
+  }
+
   struct Pair {
     std::size_t group = 0U;
     std::size_t history = 0U;
-    double cost = 0.0;
+    bool feasible = false;
+    double cost = std::numeric_limits<double>::infinity();
+    double raw_xy = std::numeric_limits<double>::quiet_NaN();
+    double xy = std::numeric_limits<double>::quiet_NaN();
+    double dz = std::numeric_limits<double>::quiet_NaN();
+    double extent_step = std::numeric_limits<double>::quiet_NaN();
+    double xy_cost = std::numeric_limits<double>::quiet_NaN();
+    double z_cost = std::numeric_limits<double>::quiet_NaN();
+    double extent_cost = std::numeric_limits<double>::quiet_NaN();
+    std::string reject_reason = "NO_HISTORY";
   };
-  std::vector<Pair> feasible;
+  std::vector<Pair> pairs;
   for (std::size_t gi = 0; gi < input.groups.size(); ++gi) {
-    const auto& observation = input.groups[gi].representative;
-    if (!finiteCandidate(observation)) continue;
+    const auto& group = input.groups[gi];
+    if (group.group_ambiguous || !finiteDescriptor(group.descriptor)) {
+      decision_.group_diagnostics[gi].association_reject_reason =
+          group.group_ambiguous ? "PHYSICAL_GROUP_AMBIGUOUS"
+                                : "VERTICAL_INVALID";
+      decision_.group_diagnostics[gi].new_history_reason =
+          decision_.group_diagnostics[gi].association_reject_reason;
+      continue;
+    }
     for (std::size_t hi = 0; hi < histories_.size(); ++hi) {
       const History& history = histories_[hi];
-      const double dt = input.pipeline_stamp_sec - history.last_stamp_sec;
-      if (!(dt > 0.0) || dt > config_.maximum_observation_gap_sec) continue;
-      const auto& previous = history.last_group.representative;
-      const double xy = (observation.center.head<2>() -
-                         previous.center.head<2>()).norm();
+      Pair pair;
+      pair.group = gi;
+      pair.history = hi;
+      const double dt = group.descriptor.stamp_sec - history.last_stamp_sec;
+      if (!(dt > 0.0) || dt > config_.maximum_observation_gap_sec) {
+        pair.reject_reason = "GAP";
+        pairs.push_back(pair);
+        continue;
+      }
+      const auto& previous = history.last_group.descriptor;
+      pair.raw_xy = (group.representative.center.head<2>() -
+                     history.last_group.representative.center.head<2>()).norm();
+      pair.xy = (group.descriptor.stable_anchor.head<2>() -
+                 previous.stable_anchor.head<2>()).norm();
       const double z_limit = config_.maximum_z_speed_mps * dt +
-          config_.z_step_margin_m + observation.vertical_uncertainty_m +
+          config_.z_step_margin_m + group.descriptor.vertical_uncertainty_m +
           previous.vertical_uncertainty_m;
-      const double dz = std::abs(observation.z95 - previous.z95);
-      double size_cost = 0.0;
-      bool size_ok = true;
+      pair.dz = std::abs(group.descriptor.physical_vertical_z -
+                         previous.physical_vertical_z);
+      pair.extent_step = 0.0;
+      pair.extent_cost = 0.0;
+      bool extent_ok = true;
       for (int axis = 0; axis < 3; ++axis) {
         const double denominator = std::max(
-            std::max(std::abs(observation.size[axis]),
-                     std::abs(previous.size[axis])), kEpsilon);
-        const double relative =
-            std::abs(observation.size[axis] - previous.size[axis]) /
-            denominator;
-        size_cost += relative;
-        size_ok = size_ok && relative <= config_.maximum_size_relative_step;
+            std::max(std::abs(group.descriptor.aggregate_extent[axis]),
+                     std::abs(previous.aggregate_extent[axis])), kEpsilon);
+        const double relative = std::abs(
+            group.descriptor.aggregate_extent[axis] -
+            previous.aggregate_extent[axis]) / denominator;
+        pair.extent_step = std::max(pair.extent_step, relative);
+        pair.extent_cost += relative;
+        extent_ok = extent_ok &&
+            relative <= config_.maximum_size_relative_step;
       }
-      if (xy <= config_.maximum_xy_step_m && dz <= z_limit && size_ok) {
-        feasible.push_back({gi, hi, xy / config_.maximum_xy_step_m +
-            dz / std::max(z_limit, kEpsilon) + size_cost});
+      pair.xy_cost = pair.xy / config_.maximum_xy_step_m;
+      pair.z_cost = pair.dz / std::max(z_limit, kEpsilon);
+      pair.cost = pair.xy_cost + pair.z_cost + pair.extent_cost;
+      if (pair.xy > config_.maximum_xy_step_m) {
+        pair.reject_reason = "XY_GATE";
+      } else if (pair.dz > z_limit) {
+        pair.reject_reason = "Z_GATE";
+      } else if (!extent_ok) {
+        pair.reject_reason = "EXTENT_GATE";
+      } else {
+        pair.feasible = true;
+        pair.reject_reason = "NONE";
       }
+      pairs.push_back(pair);
     }
+  }
+
+  for (std::size_t gi = 0; gi < input.groups.size(); ++gi) {
+    Pair* best = nullptr;
+    for (Pair& pair : pairs) {
+      if (pair.group != gi) continue;
+      if (!best || pair.cost < best->cost) best = &pair;
+    }
+    if (!best) continue;
+    auto& diagnostic = decision_.group_diagnostics[gi];
+    diagnostic.raw_representative_xy_step_m = best->raw_xy;
+    diagnostic.xy_step_m = best->xy;
+    diagnostic.z_step_m = best->dz;
+    diagnostic.extent_step = best->extent_step;
+    diagnostic.xy_cost = best->xy_cost;
+    diagnostic.z_cost = best->z_cost;
+    diagnostic.extent_cost = best->extent_cost;
+    diagnostic.association_reject_reason = best->reject_reason;
+    diagnostic.new_history_reason = best->reject_reason;
   }
 
   std::vector<int> group_match(input.groups.size(), -1);
@@ -314,17 +598,16 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   for (std::size_t gi = 0; gi < input.groups.size(); ++gi) {
     double best = std::numeric_limits<double>::infinity();
     int best_hi = -1;
-    for (const Pair& pair : feasible) {
-      if (pair.group != gi) continue;
-      if (pair.cost + kEpsilon < best) {
+    for (const Pair& pair : pairs) {
+      if (pair.group == gi && pair.feasible && pair.cost + kEpsilon < best) {
         best = pair.cost;
         best_hi = static_cast<int>(pair.history);
       }
     }
     const int competitive_history_count = static_cast<int>(std::count_if(
-        feasible.begin(), feasible.end(), [&](const Pair& pair) {
-          return pair.group == gi && pair.cost <=
-              best + config_.ambiguity_cost_margin;
+        pairs.begin(), pairs.end(), [&](const Pair& pair) {
+          return pair.group == gi && pair.feasible &&
+              pair.cost <= best + config_.ambiguity_cost_margin;
         }));
     if (competitive_history_count > 1) {
       group_ambiguous[gi] = true;
@@ -333,17 +616,18 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     if (best_hi < 0) continue;
     int history_best_group = -1;
     double history_best = std::numeric_limits<double>::infinity();
-    for (const Pair& pair : feasible) {
-      if (pair.history != static_cast<std::size_t>(best_hi)) continue;
-      if (pair.cost + kEpsilon < history_best) {
+    for (const Pair& pair : pairs) {
+      if (pair.history == static_cast<std::size_t>(best_hi) && pair.feasible &&
+          pair.cost + kEpsilon < history_best) {
         history_best = pair.cost;
         history_best_group = static_cast<int>(pair.group);
       }
     }
     const int competitive_group_count = static_cast<int>(std::count_if(
-        feasible.begin(), feasible.end(), [&](const Pair& pair) {
+        pairs.begin(), pairs.end(), [&](const Pair& pair) {
           return pair.history == static_cast<std::size_t>(best_hi) &&
-              pair.cost <= history_best + config_.ambiguity_cost_margin;
+              pair.feasible && pair.cost <=
+                  history_best + config_.ambiguity_cost_margin;
         }));
     if (competitive_group_count == 1 && history_best_group ==
         static_cast<int>(gi)) {
@@ -355,131 +639,144 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
 
   CargoCandidateAssociationState frame_association =
       CargoCandidateAssociationState::NEW_HISTORY;
+  std::vector<std::uint64_t> group_history_ids(input.groups.size(), 0U);
   for (std::size_t gi = 0; gi < input.groups.size(); ++gi) {
-    if (input.groups[gi].group_ambiguous || group_ambiguous[gi]) {
+    const auto& group = input.groups[gi];
+    auto& diagnostic = decision_.group_diagnostics[gi];
+    if (group.group_ambiguous || group_ambiguous[gi]) {
       frame_association = CargoCandidateAssociationState::AMBIGUOUS;
-      if (group_match[gi] >= 0) {
-        histories_[static_cast<std::size_t>(group_match[gi])]
-            .association_ambiguous = true;
-      }
+      diagnostic.association = CargoCandidateAssociationState::AMBIGUOUS;
+      diagnostic.association_reject_reason = "AMBIGUOUS";
+      diagnostic.new_history_reason = "AMBIGUOUS";
       continue;
     }
+    if (!finiteDescriptor(group.descriptor)) continue;
 
     History* history = nullptr;
     if (group_match[gi] >= 0) {
       history = &histories_[static_cast<std::size_t>(group_match[gi])];
-      frame_association = CargoCandidateAssociationState::MATCHED;
+      if (frame_association != CargoCandidateAssociationState::AMBIGUOUS) {
+        frame_association = CargoCandidateAssociationState::MATCHED;
+      }
+      diagnostic.association = CargoCandidateAssociationState::MATCHED;
+      diagnostic.association_reject_reason = "NONE";
+      diagnostic.new_history_reason = "NONE";
     } else {
       histories_.push_back(History{});
       history = &histories_.back();
       history->id = next_history_id_++;
-      if (gravity_loaded && !started_loaded_without_baseline_) {
-        history->baseline_frozen = true;
-        history->baseline_source =
-            CargoLiftBaselineSource::POST_LOAD_FIRST_FRESH_OBSERVATION;
-        history->baseline_z95 = input.groups[gi].representative.z95;
-        history->baseline_uncertainty_m =
-            input.groups[gi].representative.vertical_uncertainty_m;
-        history->baseline_stamp_sec =
-            input.groups[gi].representative.stamp_sec;
-      } else if (input.hook_role != HookLoadSignalRole::REQUIRED &&
-                 !started_loaded_without_baseline_) {
-        // AUXILIARY gravity-conflict and DISABLED lidar-only operation must
-        // retain the existing strict-lidar existence path. Freeze the first
-        // independently associated observation; do not keep rewriting it.
-        history->baseline_frozen = true;
-        history->baseline_source =
-            CargoLiftBaselineSource::POST_LOAD_FIRST_FRESH_OBSERVATION;
-        history->baseline_z95 = input.groups[gi].representative.z95;
-        history->baseline_uncertainty_m =
-            input.groups[gi].representative.vertical_uncertainty_m;
-        history->baseline_stamp_sec =
-            input.groups[gi].representative.stamp_sec;
+      diagnostic.association = CargoCandidateAssociationState::NEW_HISTORY;
+      if (histories_.size() == 1U) {
+        diagnostic.association_reject_reason = "NO_HISTORY";
+        diagnostic.new_history_reason = "NO_HISTORY";
       }
     }
+    group_history_ids[gi] = history->id;
+    diagnostic.matched_history_id = history->id;
     history->association_ambiguous = false;
-    history->last_group = input.groups[gi];
-    history->last_stamp_sec = input.groups[gi].representative.stamp_sec;
-    if (pre_load_phase) {
+    history->last_group = group;
+    history->last_stamp_sec = group.descriptor.stamp_sec;
+
+    const bool supported = group.descriptor.vertical_mode ==
+        CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
+    if (pre_load_phase && supported) {
       history->has_preload = true;
-      history->preload_z95 = input.groups[gi].representative.z95;
+      history->preload_z95 = group.descriptor.physical_vertical_z;
       history->preload_uncertainty_m =
-          input.groups[gi].representative.vertical_uncertainty_m;
-      history->preload_stamp_sec = input.groups[gi].representative.stamp_sec;
+          group.descriptor.vertical_uncertainty_m;
+      history->preload_stamp_sec = group.descriptor.stamp_sec;
     }
-    if (!history->baseline_frozen && !pre_load_phase &&
-        !started_loaded_without_baseline_) {
+    const bool strict_lidar_existence_path =
+        input.hook_role != HookLoadSignalRole::REQUIRED;
+    if (!history->baseline_frozen &&
+        (!pre_load_phase || strict_lidar_existence_path) &&
+        !started_loaded_without_baseline_ && supported) {
       history->baseline_frozen = true;
-      history->baseline_source = history->has_preload
+      history->baseline_source = history->has_preload &&
+              !strict_lidar_existence_path
           ? CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE
           : CargoLiftBaselineSource::POST_LOAD_FIRST_FRESH_OBSERVATION;
-      history->baseline_z95 = history->has_preload
-          ? history->preload_z95 : input.groups[gi].representative.z95;
-      history->baseline_uncertainty_m = history->has_preload
+      history->baseline_z95 = history->has_preload &&
+              !strict_lidar_existence_path
+          ? history->preload_z95 : group.descriptor.physical_vertical_z;
+      history->baseline_uncertainty_m = history->has_preload &&
+              !strict_lidar_existence_path
           ? history->preload_uncertainty_m
-          : input.groups[gi].representative.vertical_uncertainty_m;
-      history->baseline_stamp_sec = history->has_preload
-          ? history->preload_stamp_sec
-          : input.groups[gi].representative.stamp_sec;
+          : group.descriptor.vertical_uncertainty_m;
+      history->baseline_stamp_sec = history->has_preload &&
+              !strict_lidar_existence_path
+          ? history->preload_stamp_sec : group.descriptor.stamp_sec;
     }
 
-    if (history->baseline_frozen) {
-      const double gap = input.groups[gi].representative.stamp_sec -
-          history->last_consumed_evidence_stamp_sec;
-      if (!history->lift_confirmed &&
-          history->last_consumed_evidence_stamp_sec > 0.0 &&
-          gap > config_.maximum_observation_gap_sec) {
+    if (!supported) {
+      if (history->last_supported_evidence_stamp_sec > 0.0 &&
+          group.descriptor.stamp_sec -
+              history->last_supported_evidence_stamp_sec >
+                  config_.maximum_observation_gap_sec) {
         history->lift_confirm_count = 0;
+        history->lift_confirmed = false;
+        history->validation_stamp_sec = 0.0;
       }
-      const double threshold = std::max(
-          config_.minimum_significant_change_m,
-          config_.significance_sigma * std::hypot(
-              history->baseline_uncertainty_m,
-              input.groups[gi].representative.vertical_uncertainty_m));
-      const double delta = input.groups[gi].representative.z95 -
-          history->baseline_z95;
-      const bool evidence_advanced =
-          input.groups[gi].representative.stamp_sec >
-              history->last_consumed_evidence_stamp_sec + kEpsilon;
-      if (evidence_advanced) {
-        history->last_consumed_evidence_stamp_sec =
-            input.groups[gi].representative.stamp_sec;
-        if (delta >= threshold) {
-          ++history->lift_confirm_count;
-          const int required = requiredFrames(
-              input.hook_role, input.gravity_valid, input.gravity_state,
-              config_.lift_confirm_frames);
-          if (history->lift_confirm_count >= required &&
-              !history->lift_confirmed) {
-            history->lift_confirmed = true;
-            history->validation_stamp_sec = input.pipeline_stamp_sec;
-          }
-        } else if (!history->lift_confirmed) {
-          // Pending confirmation may tolerate uncertainty-sized jitter near
-          // the significant-change threshold, but a clear return toward the
-          // frozen baseline breaks the consecutive evidence sequence.
-          const double retention_margin = config_.significance_sigma *
-              input.groups[gi].representative.vertical_uncertainty_m;
-          const double retention_floor =
-              std::max(0.0, threshold - retention_margin);
-          if (delta < retention_floor) {
-            history->lift_confirm_count = 0;
-          }
+      continue;
+    }
+
+    const double supported_gap = group.descriptor.stamp_sec -
+        history->last_supported_evidence_stamp_sec;
+    if (history->last_supported_evidence_stamp_sec > 0.0 &&
+        supported_gap > config_.maximum_observation_gap_sec) {
+      history->lift_confirm_count = 0;
+      history->lift_confirmed = false;
+      history->validation_stamp_sec = 0.0;
+    }
+    if (!history->baseline_frozen) continue;
+    const double threshold = std::max(
+        config_.minimum_significant_change_m,
+        config_.significance_sigma * std::hypot(
+            history->baseline_uncertainty_m,
+            group.descriptor.vertical_uncertainty_m));
+    const double delta = group.descriptor.physical_vertical_z -
+        history->baseline_z95;
+    const bool evidence_advanced = group.descriptor.stamp_sec >
+        history->last_supported_evidence_stamp_sec + kEpsilon;
+    if (evidence_advanced) {
+      history->last_supported_evidence_stamp_sec =
+          group.descriptor.stamp_sec;
+      if (delta >= threshold) {
+        ++history->lift_confirm_count;
+        const int required = requiredFrames(
+            input.hook_role, input.gravity_valid, input.gravity_state,
+            config_.lift_confirm_frames);
+        if (history->lift_confirm_count >= required &&
+            !history->lift_confirmed) {
+          history->lift_confirmed = true;
+          history->validation_stamp_sec = input.pipeline_stamp_sec;
         }
-        if (delta < -threshold) {
-          history->lift_confirm_count = 0;
-          history->lift_confirmed = false;
-          history->validation_stamp_sec = 0.0;
-        }
+      } else if (!history->lift_confirmed) {
+        const double retention_margin = config_.significance_sigma *
+            group.descriptor.vertical_uncertainty_m;
+        const double retention_floor =
+            std::max(0.0, threshold - retention_margin);
+        if (delta < retention_floor) history->lift_confirm_count = 0;
+      }
+      if (delta < -threshold) {
+        history->lift_confirm_count = 0;
+        history->lift_confirmed = false;
+        history->validation_stamp_sec = 0.0;
       }
     }
   }
 
   std::vector<History*> fresh_confirmed;
   for (History& history : histories_) {
-    const double age = input.pipeline_stamp_sec - history.last_stamp_sec;
-    const bool fresh = age >= -kEpsilon &&
-        age <= config_.maximum_source_age_sec;
+    const double association_age =
+        input.pipeline_stamp_sec - history.last_stamp_sec;
+    const double supported_age = history.last_supported_evidence_stamp_sec > 0.0
+        ? input.pipeline_stamp_sec - history.last_supported_evidence_stamp_sec
+        : std::numeric_limits<double>::infinity();
+    const bool fresh = association_age >= -kEpsilon &&
+        association_age <= config_.maximum_source_age_sec &&
+        supported_age >= -kEpsilon &&
+        supported_age <= config_.maximum_observation_gap_sec;
     if (history.lift_confirmed && fresh && !history.association_ambiguous) {
       fresh_confirmed.push_back(&history);
     }
@@ -527,44 +824,104 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       if (history.id == validated_history_id_) selected = &history;
     }
     if (selected) {
-      const auto& group = selected->last_group;
+      const CargoPhysicalGroupObservation* current_group = nullptr;
+      for (std::size_t gi = 0; gi < input.groups.size(); ++gi) {
+        if (group_history_ids[gi] == selected->id) {
+          current_group = &input.groups[gi];
+          break;
+        }
+      }
       decision_.identity = CargoPhysicalIdentityState::VALIDATED;
       decision_.physical_history_id = selected->id;
-      decision_.frame_group_id = group.frame_group_id;
-      decision_.geometry_resolved = group.geometry_resolved &&
-          !group.group_ambiguous;
+      decision_.frame_group_id = current_group
+          ? current_group->frame_group_id : 0U;
+      decision_.current_vertical_mode = current_group
+          ? current_group->descriptor.vertical_mode
+          : CargoGroupVerticalMode::INVALID;
+      decision_.current_vertical_evidence_valid = current_group &&
+          current_group->descriptor.vertical_mode ==
+              CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
+      decision_.geometry_resolved = current_group &&
+          current_group->geometry_resolved && !current_group->group_ambiguous &&
+          decision_.current_vertical_evidence_valid;
       decision_.resolved_candidate_id = decision_.geometry_resolved
-          ? group.representative.candidate_id : 0U;
+          ? current_group->representative.candidate_id : 0U;
       decision_.resolved_member_component_ids = decision_.geometry_resolved
-          ? group.member_component_ids : std::vector<std::uint64_t>{};
+          ? current_group->representative.member_component_ids
+          : std::vector<std::uint64_t>{};
       decision_.baseline_source = selected->baseline_source;
-      decision_.current_candidate_fresh = true;
+      decision_.current_candidate_fresh = current_group != nullptr;
       decision_.lift_confirmed = selected->lift_confirmed;
       decision_.lift_confirm_count = selected->lift_confirm_count;
       decision_.required_lift_confirm_frames = requiredFrames(
           input.hook_role, input.gravity_valid, input.gravity_state,
           config_.lift_confirm_frames);
       decision_.baseline_z95 = selected->baseline_z95;
-      decision_.current_z95 = group.representative.z95;
-      decision_.lift_delta_m = decision_.current_z95 - decision_.baseline_z95;
-      decision_.lift_threshold_m = std::max(
-          config_.minimum_significant_change_m,
-          config_.significance_sigma * std::hypot(
-              selected->baseline_uncertainty_m,
-              group.representative.vertical_uncertainty_m));
-      decision_.evidence_age_sec =
-          input.pipeline_stamp_sec - selected->last_stamp_sec;
+      decision_.current_z95 = current_group
+          ? current_group->descriptor.physical_vertical_z
+          : std::numeric_limits<double>::quiet_NaN();
+      if (decision_.current_vertical_evidence_valid) {
+        decision_.lift_delta_m =
+            decision_.current_z95 - decision_.baseline_z95;
+        decision_.lift_threshold_m = std::max(
+            config_.minimum_significant_change_m,
+            config_.significance_sigma * std::hypot(
+                selected->baseline_uncertainty_m,
+                current_group->descriptor.vertical_uncertainty_m));
+      }
+      decision_.evidence_age_sec = input.pipeline_stamp_sec -
+          selected->last_supported_evidence_stamp_sec;
+      decision_.last_supported_evidence_stamp =
+          selected->last_supported_evidence_stamp_sec;
       decision_.identity_validation_stamp_sec =
           selected->validation_stamp_sec;
       decision_.reason = decision_.geometry_resolved
           ? "candidate_specific_lift_validated"
-          : "physical_identity_validated_geometry_ambiguous";
+          : decision_.current_vertical_evidence_valid
+              ? "physical_identity_validated_geometry_ambiguous"
+              : "physical_identity_retained_vertical_continuity_only";
     }
   } else {
     decision_.identity = CargoPhysicalIdentityState::UNKNOWN;
     decision_.reason = decision_.cargo_exists
         ? "existence_without_candidate_identity"
         : "cargo_existence_not_proven";
+  }
+
+  for (std::size_t gi = 0; gi < input.groups.size(); ++gi) {
+    auto& diagnostic = decision_.group_diagnostics[gi];
+    if (diagnostic.association == CargoCandidateAssociationState::AMBIGUOUS) {
+      diagnostic.identity = CargoPhysicalIdentityState::AMBIGUOUS;
+      continue;
+    }
+    for (const History& history : histories_) {
+      if (history.id != group_history_ids[gi]) continue;
+      diagnostic.baseline_source = history.baseline_source;
+      diagnostic.baseline_z = history.baseline_z95;
+      diagnostic.last_supported_evidence_stamp =
+          history.last_supported_evidence_stamp_sec;
+      diagnostic.lift_confirm_count = history.lift_confirm_count;
+      diagnostic.lift_confirm_required = requiredFrames(
+          input.hook_role, input.gravity_valid, input.gravity_state,
+          config_.lift_confirm_frames);
+      diagnostic.lift_confirmed = history.lift_confirmed;
+      if (history.baseline_frozen &&
+          input.groups[gi].descriptor.vertical_mode ==
+              CargoGroupVerticalMode::SUPPORTED_EVIDENCE) {
+        diagnostic.lift_delta_m =
+            input.groups[gi].descriptor.physical_vertical_z -
+            history.baseline_z95;
+        diagnostic.lift_threshold_m = std::max(
+            config_.minimum_significant_change_m,
+            config_.significance_sigma * std::hypot(
+                history.baseline_uncertainty_m,
+                input.groups[gi].descriptor.vertical_uncertainty_m));
+      }
+      diagnostic.identity = history.id == validated_history_id_
+          ? CargoPhysicalIdentityState::VALIDATED
+          : CargoPhysicalIdentityState::UNKNOWN;
+      break;
+    }
   }
 
   previous_existence_phase_ = gravity_loaded || decision_.cargo_exists;

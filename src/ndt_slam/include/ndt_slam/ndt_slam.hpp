@@ -1508,6 +1508,8 @@ private:
         float score = 0.0f;
         std::string reject_reason;
         std::vector<ShadowCandidateSnapshot> shadow_candidates;
+        std::vector<CargoPhysicalGroupObservation> shadow_physical_groups;
+        double shadow_physical_group_compute_ms = 0.0;
     };
 
     struct HookCargoBottomEstimate {
@@ -2145,6 +2147,8 @@ private:
     double integrated_shadow_total_compute_ms_ = 0.0;
     std::ofstream integrated_shadow_csv_;
     bool integrated_shadow_csv_init_ = false;
+    std::ofstream integrated_identity_groups_csv_;
+    bool integrated_identity_groups_csv_init_ = false;
     std::uint64_t integrated_shadow_frame_sequence_ = 0U;
 
     // Phase B2 detection point-cloud survival trace. Diagnostics-only.
