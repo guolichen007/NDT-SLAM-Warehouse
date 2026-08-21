@@ -22,6 +22,8 @@
     <arg name="config_file" default="$(find ndt_slam)/config/live_longterm_mapping.yaml"/>
     <arg name="cargo_vertical_evidence_config_file"
          default="$(find ndt_slam)/config/cargo_vertical_evidence_v2.yaml"/>
+    <arg name="integrated_cargo_identity_shadow_config_file"
+         default="$(find ndt_slam)/config/integrated_cargo_identity_shadow_v1.yaml"/>
 
     <!-- Debounce and classify the hook load-cell voltage before SLAM uses it. -->
     <node name="hook_load_state"
@@ -39,6 +41,8 @@
         <param name="config_file" value="$(arg config_file)"/>
         <param name="cargo_vertical_evidence_config_file"
                value="$(arg cargo_vertical_evidence_config_file)"/>
+        <param name="integrated_cargo_identity_shadow_config_file"
+               value="$(arg integrated_cargo_identity_shadow_config_file)"/>
         <param name="ndt_publish_cargo_markers" value="$(arg ndt_publish_cargo_markers)"/>
         <!-- YAML supplies conservative defaults; these launch arguments are
              explicit production overrides and must be visible in ~params. -->

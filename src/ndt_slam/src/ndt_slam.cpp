@@ -542,6 +542,7 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
     : nh_(nh) {
     initializeParameters(config_file_path);
     std::string cargo_vertical_evidence_config_file;
+    std::string integrated_cargo_identity_shadow_config_file;
     ros::NodeHandle private_nh("~");
     private_nh.param<std::string>(
         "cargo_vertical_evidence_config_file",
@@ -573,6 +574,103 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
             "[CargoVerticalEvidenceV2] enabled=%d shadow_only=1 config=%s",
             cargo_vertical_evidence_v2_enabled_ ? 1 : 0,
             cargo_vertical_evidence_config_file.c_str());
+    }
+    private_nh.param<std::string>(
+        "integrated_cargo_identity_shadow_config_file",
+        integrated_cargo_identity_shadow_config_file, std::string());
+    if (!integrated_cargo_identity_shadow_config_file.empty()) {
+        const YAML::Node shadow_config = YAML::LoadFile(
+            integrated_cargo_identity_shadow_config_file);
+        if (shadow_config["schema_version"].as<int>(0) != 1) {
+            throw std::runtime_error(
+                "integrated_cargo_identity_shadow schema_version must be 1");
+        }
+        const YAML::Node authority =
+            shadow_config["integrated_cargo_physical_identity_shadow"];
+        if (!authority || !authority.IsMap()) {
+            throw std::runtime_error(
+                "integrated_cargo_physical_identity_shadow section missing");
+        }
+        integrated_cargo_identity_shadow_enabled_ =
+            authority["enabled"].as<bool>(false);
+        integrated_cargo_identity_shadow_only_ =
+            authority["shadow_only"].as<bool>(true);
+        if (!integrated_cargo_identity_shadow_enabled_ ||
+            !integrated_cargo_identity_shadow_only_) {
+            throw std::runtime_error(
+                "PRODUCT_MODE_NOT_IMPLEMENTED_IN_INVESTIGATION_BUILD");
+        }
+        const YAML::Node association = authority["association"];
+        integrated_identity_config_.maximum_xy_step_m =
+            association["maximum_xy_step_m"].as<double>(
+                hook_lock_config_.lock_max_center_step_m);
+        integrated_identity_config_.maximum_z_speed_mps =
+            association["maximum_z_speed_mps"].as<double>(
+                hook_lock_config_.live_pose_max_z_speed_mps);
+        integrated_identity_config_.z_step_margin_m =
+            association["z_step_margin_m"].as<double>(
+                hook_lock_config_.live_pose_step_margin_m);
+        integrated_identity_config_.maximum_size_relative_step =
+            association["maximum_size_relative_step"].as<double>(
+                hook_lock_config_.size_change_max_ratio);
+        integrated_identity_config_.ambiguity_cost_margin =
+            association["ambiguity_cost_margin"].as<double>(
+                hook_lock_config_.candidate_switch_margin);
+        const YAML::Node lift = authority["lift"];
+        integrated_identity_config_.minimum_significant_change_m =
+            lift["minimum_significant_change_m"].as<double>(
+                cargo_lift_origin_config_.minimum_significant_change_m);
+        integrated_identity_config_.significance_sigma =
+            lift["significance_sigma"].as<double>(
+                cargo_lift_origin_config_.significance_sigma);
+        integrated_identity_config_.maximum_observation_gap_sec =
+            lift["maximum_observation_gap_sec"].as<double>(
+                cargo_lift_origin_config_.maximum_observation_gap_sec);
+        integrated_identity_config_.maximum_source_age_sec =
+            lift["maximum_source_age_sec"].as<double>(
+                cargo_lift_origin_config_.maximum_source_age_sec);
+        integrated_identity_config_.lift_confirm_frames =
+            lift["confirm_frames"].as<int>(
+                cargo_lift_origin_config_.lift_confirm_frames);
+        const YAML::Node geometry = authority["geometry"];
+        integrated_geometry_config_.minimum_point_support =
+            geometry["minimum_point_support"].as<std::size_t>(
+                static_cast<std::size_t>(std::max(
+                    1, hook_lock_config_.formal_top_min_support_points)));
+        integrated_geometry_config_.formal_confirm_frames =
+            geometry["formal_confirm_frames"].as<int>(
+                hook_lock_config_.candidate_required_consistent_frames);
+        integrated_geometry_config_.maximum_observation_gap_sec =
+            geometry["maximum_observation_gap_sec"].as<double>(
+                cargo_lift_origin_config_.maximum_observation_gap_sec);
+        integrated_geometry_config_.maximum_center_step_m =
+            geometry["maximum_center_step_m"].as<double>(
+                hook_lock_config_.lock_max_center_step_m);
+        integrated_geometry_config_.minimum_length_m =
+            odom_anchor_config_.min_size_x;
+        integrated_geometry_config_.maximum_length_m =
+            odom_anchor_config_.max_size_x;
+        integrated_geometry_config_.minimum_width_m =
+            odom_anchor_config_.min_size_y;
+        integrated_geometry_config_.maximum_width_m =
+            odom_anchor_config_.max_size_y;
+        integrated_geometry_config_.minimum_height_m =
+            odom_anchor_config_.min_size_z;
+        integrated_geometry_config_.maximum_height_m =
+            odom_anchor_config_.max_size_z;
+        integrated_geometry_config_.maximum_size_cv =
+            geometry["maximum_size_cv"].as<double>(
+                hook_lock_config_.maximum_provisional_shape_cv);
+        integrated_geometry_config_.minimum_axial_orientation_concentration =
+            geometry["minimum_axial_orientation_concentration"].as<double>(
+                odom_anchor_config_.tight_box.orientation_min_concentration);
+        integrated_identity_authority_.setConfig(
+            integrated_identity_config_);
+        integrated_geometry_authority_.setConfig(
+            integrated_geometry_config_);
+        ROS_INFO(
+            "[IntegratedCargoIdentityShadow] enabled=1 shadow_only=1 config=%s",
+            integrated_cargo_identity_shadow_config_file.c_str());
     }
     last_pointcloud_wall_sec_.store(
         ros::WallTime::now().toSec(), std::memory_order_release);
@@ -5350,11 +5448,38 @@ void NdtSlamNode::processCloudThread() {
             }
         }
 
+        // SHADOW preload enumeration is allowed while REQUIRED gravity is
+        // EMPTY. Keep the result local so product detection/lock state is not
+        // touched by this investigation-only pass.
+        const bool integrated_shadow_empty_detection_due =
+            integrated_shadow_last_detection_stamp_.isZero() ||
+            (msg->header.stamp -
+             integrated_shadow_last_detection_stamp_).toSec() >=
+                1.0 / odom_anchor_config_.detect_rate_hz;
+        if (integrated_cargo_identity_shadow_enabled_ &&
+            !skip_hook_this_frame && hook_detection_due &&
+            integrated_shadow_empty_detection_due &&
+            !hook_allows_tracking && hook_is_empty && hook_input_cloud &&
+            !hook_input_cloud->empty()) {
+            const HookCargoDetection preload_shadow_detection =
+                detectCargoAroundOdomAnchor(
+                    hook_input_cloud, msg->header.stamp);
+            updateIntegratedCargoIdentityShadow(
+                preload_shadow_detection, hook_load, msg->header.stamp);
+            integrated_shadow_last_detection_stamp_ = msg->header.stamp;
+        }
+
         // OdomAnchorBox 检测（降频执行）
         if (!skip_hook_this_frame && hook_detection_due &&
             hook_allows_tracking &&
             hook_input_cloud && !hook_input_cloud->empty()) {
             hook_fixed_cargo_ = detectCargoAroundOdomAnchor(hook_input_cloud, msg->header.stamp);
+                if (integrated_cargo_identity_shadow_enabled_) {
+                    updateIntegratedCargoIdentityShadow(
+                        hook_fixed_cargo_, hook_load, msg->header.stamp);
+                    integrated_shadow_last_detection_stamp_ =
+                        msg->header.stamp;
+                }
                 last_detection_pipeline_trace_.merged_points = b2_merged_points;
                 last_detection_pipeline_trace_.merged_z95 = b2_merged_z95;
                 last_detection_pipeline_trace_.merged_zmax = b2_merged_zmax;
@@ -13441,6 +13566,115 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
 
 // ========== OdomAnchorBox 检测函数 ==========
 
+void NdtSlamNode::updateIntegratedCargoIdentityShadow(
+    const HookCargoDetection& detection,
+    const HookLoadSnapshot& hook,
+    const ros::Time& stamp) {
+    if (!integrated_cargo_identity_shadow_enabled_ || stamp.isZero()) return;
+    const auto identity_start = DiagClock::now();
+    std::vector<CargoPhysicalCandidateObservation> observations;
+    observations.reserve(detection.shadow_candidates.size());
+    for (const auto& candidate : detection.shadow_candidates) {
+        observations.push_back(candidate.identity);
+    }
+    const double equivalent_center_tolerance_m = std::max(
+        0.01, static_cast<double>(
+            odom_anchor_config_.tight_box.margin_xy_m));
+    const double equivalent_size_tolerance = std::max(
+        0.01, static_cast<double>(
+            hook_lock_config_.maximum_provisional_shape_cv));
+    CargoPhysicalIdentityInput input;
+    input.pipeline_stamp_sec = stamp.toSec();
+    // The shadow authority owns its load epoch. Product lifecycle counters
+    // are diagnostic-only here and must not erase a valid preload history.
+    input.lifecycle_id = 0U;
+    input.node_started_loaded = !integrated_shadow_seen_empty_ &&
+        hook.valid && hook.state ==
+            lidar_slam2_msgs::HookLoadState::STATE_LOADED;
+    input.hook_role = hook_load_signal_role_;
+    input.gravity_valid = hook.valid;
+    switch (hook.state) {
+        case lidar_slam2_msgs::HookLoadState::STATE_EMPTY:
+            input.gravity_state = HookLoadState::EMPTY;
+            integrated_shadow_timing_ =
+                CargoShadowPhysicalDistanceTiming{};
+            integrated_shadow_seen_empty_ = true;
+            break;
+        case lidar_slam2_msgs::HookLoadState::STATE_LOADED:
+            input.gravity_state = HookLoadState::LOADED;
+            if (integrated_shadow_timing_.load_edge_stamp_sec <= 0.0) {
+                integrated_shadow_timing_.load_edge_stamp_sec = stamp.toSec();
+            }
+            break;
+        case lidar_slam2_msgs::HookLoadState::STATE_INHIBIT:
+            input.gravity_state = HookLoadState::INHIBIT;
+            break;
+        default:
+            input.gravity_state = HookLoadState::UNKNOWN;
+            break;
+    }
+    input.groups = groupCargoPhysicalCandidates(
+        observations, equivalent_center_tolerance_m,
+        equivalent_size_tolerance);
+    const std::uint64_t previous_shadow_history_id =
+        integrated_identity_decision_.physical_history_id;
+    integrated_identity_decision_ =
+        integrated_identity_authority_.update(input);
+    integrated_shadow_authority_stamp_ = stamp;
+    if (previous_shadow_history_id != 0U &&
+        previous_shadow_history_id !=
+            integrated_identity_decision_.physical_history_id) {
+        integrated_shadow_bottom_fusion_.reset();
+        integrated_shadow_bottom_result_ = CargoBottomResult{};
+        integrated_shadow_vertical_evidence_ = CargoVerticalEvidence{};
+        integrated_shadow_fusion_result_ = CargoAvoidanceFusionResult{};
+    }
+    integrated_shadow_identity_compute_ms_ = elapsedMs(identity_start);
+
+    bool candidate_observed_this_update = false;
+    if (integrated_identity_decision_.identity ==
+            CargoPhysicalIdentityState::VALIDATED &&
+        integrated_identity_decision_.geometry_resolved) {
+        for (const auto& candidate : detection.shadow_candidates) {
+            if (candidate.identity.candidate_id ==
+                integrated_identity_decision_.resolved_candidate_id) {
+                integrated_candidate_ = candidate;
+                integrated_candidate_valid_ = true;
+                candidate_observed_this_update = true;
+                break;
+            }
+        }
+        if (!candidate_observed_this_update &&
+            (!integrated_candidate_valid_ ||
+             integrated_candidate_.identity.candidate_id !=
+                 integrated_identity_decision_.resolved_candidate_id)) {
+            integrated_candidate_valid_ = false;
+            integrated_candidate_ =
+                HookCargoDetection::ShadowCandidateSnapshot{};
+        }
+    } else {
+        integrated_candidate_valid_ = false;
+        integrated_candidate_ =
+            HookCargoDetection::ShadowCandidateSnapshot{};
+    }
+    if (candidate_observed_this_update ||
+        integrated_identity_decision_.identity !=
+            CargoPhysicalIdentityState::VALIDATED) {
+        const auto geometry_start = DiagClock::now();
+        CargoShadowGeometryInput geometry_input;
+        geometry_input.stamp_sec = stamp.toSec();
+        geometry_input.identity = integrated_identity_decision_;
+        if (candidate_observed_this_update) {
+            geometry_input.candidate = integrated_candidate_.identity;
+        }
+        integrated_geometry_decision_ =
+            integrated_geometry_authority_.update(geometry_input);
+        integrated_shadow_geometry_compute_ms_ = elapsedMs(geometry_start);
+    } else {
+        integrated_shadow_geometry_compute_ms_ = 0.0;
+    }
+}
+
 NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
     const ros::Time& stamp) {
@@ -14087,6 +14321,49 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
                 hook_lock_config_.suspended_min_ground_clearance_m;
         const CargoCandidateIdentityScore identity =
             scoreCargoCandidateIdentity(descriptor, identity_context);
+        // Export every legal hypothesis before product top-1 collapse. This
+        // snapshot keeps product score terms for diagnostics only; the
+        // authority input type cannot consume them.
+        HookCargoDetection::ShadowCandidateSnapshot shadow_candidate;
+        shadow_candidate.identity.candidate_id =
+            static_cast<std::uint64_t>(descriptor.component_id);
+        shadow_candidate.identity.stamp_sec = stamp.toSec();
+        shadow_candidate.identity.center = descriptor.center.cast<double>();
+        shadow_candidate.identity.size = descriptor.size.cast<double>();
+        shadow_candidate.identity.yaw_rad = descriptor.yaw_rad;
+        shadow_candidate.identity.z05 = z_low;
+        shadow_candidate.identity.z50 = component_z[component_z.size() / 2U];
+        shadow_candidate.identity.z95 = z_high;
+        shadow_candidate.identity.vertical_uncertainty_m =
+            std::max(0.01, static_cast<double>(
+                cargo_vertical_evidence_v2_config_.surface_band_height_m));
+        shadow_candidate.identity.point_support =
+            descriptor.point_count;
+        shadow_candidate.identity.member_component_ids.reserve(
+            hypothesis.component_indices.size());
+        for (std::size_t member : hypothesis.component_indices) {
+            shadow_candidate.identity.member_component_ids.push_back(
+                static_cast<std::uint64_t>(member));
+        }
+        shadow_candidate.points_base.reset(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        shadow_candidate.points_base->reserve(
+            combined_indices.indices.size());
+        for (int point_index : combined_indices.indices) {
+            shadow_candidate.points_base->push_back(
+                voxel_cloud->points[point_index]);
+        }
+        shadow_candidate.ground_reference_valid =
+            result.ground_reference_valid;
+        shadow_candidate.ground_z_base = result.ground_z;
+        shadow_candidate.product_predicted_center_score =
+            identity.predicted_center_score;
+        shadow_candidate.product_overlap_score = identity.overlap_score;
+        shadow_candidate.product_identity_confidence =
+            identity.identity_confidence;
+        shadow_candidate.product_overall_lock_confidence =
+            identity.overall_lock_confidence;
+        result.shadow_candidates.push_back(std::move(shadow_candidate));
         component_scores.push_back(identity);
         b3a_scored_descriptors.push_back(descriptor);
         hypothesis_point_indices.push_back(std::move(combined_indices));
@@ -20512,6 +20789,11 @@ void NdtSlamNode::runPendingCargoAvoidance(
         fusion_input.pending_static_provenance_valid;
     fusion_input.static_map.validated_streak =
         pending_static_decision.confirmations;
+    if (integrated_cargo_identity_shadow_enabled_) {
+        integrated_canonical_fusion_snapshot_ = fusion_input;
+        integrated_canonical_fusion_snapshot_stamp_ = stamp;
+        integrated_canonical_fusion_snapshot_valid_ = true;
+    }
     CargoAvoidanceFusionResult fused = fuseCargoAvoidanceRisk(
         fusion_input, cargo_avoidance_fusion_config_);
     CargoFrameDecision pending_frame_decision;
@@ -21458,6 +21740,498 @@ void NdtSlamNode::updateAndPublishCargoSwing(
     cargo_swing_text_marker_pub_.publish(text_marker);
 }
 
+void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
+    const HookLoadSnapshot& hook,
+    const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
+    const Sophus::SE3d& pose_map_base,
+    const ros::Time& stamp,
+    const ros::Time& obstacle_cloud_stamp,
+    double processing_age_sec) {
+    if (!integrated_cargo_identity_shadow_enabled_ || stamp.isZero()) return;
+    const auto total_start = DiagClock::now();
+    const auto safety_start = DiagClock::now();
+    if (integrated_shadow_authority_stamp_ != stamp) {
+        updateIntegratedCargoIdentityShadow(
+            HookCargoDetection{}, hook, stamp);
+    }
+    const double candidate_age_sec = integrated_candidate_valid_
+        ? stamp.toSec() - integrated_candidate_.identity.stamp_sec
+        : std::numeric_limits<double>::infinity();
+    const bool candidate_current = integrated_candidate_valid_ &&
+        std::isfinite(candidate_age_sec) && candidate_age_sec >= 0.0 &&
+        candidate_age_sec <= integrated_identity_config_.maximum_source_age_sec;
+
+    CargoObbFootprint shadow_footprint;
+    if (candidate_current && integrated_geometry_decision_.geometry_resolved) {
+        shadow_footprint.valid = true;
+        shadow_footprint.center_base =
+            integrated_candidate_.identity.center.head<2>().cast<float>();
+        shadow_footprint.length_m = static_cast<float>(
+            integrated_candidate_.identity.size.x());
+        shadow_footprint.width_m = static_cast<float>(
+            integrated_candidate_.identity.size.y());
+        shadow_footprint.yaw_base_rad = static_cast<float>(
+            integrated_candidate_.identity.yaw_rad);
+        shadow_footprint.min_z = static_cast<float>(
+            integrated_candidate_.identity.z05);
+        shadow_footprint.max_z = static_cast<float>(
+            integrated_candidate_.identity.z95);
+    }
+
+    if (candidate_current &&
+        (integrated_shadow_bottom_result_.track_id !=
+             integrated_identity_decision_.physical_history_id ||
+         std::abs(integrated_shadow_bottom_result_.stamp_sec -
+                  integrated_candidate_.identity.stamp_sec) > 1.0e-6)) {
+        CargoVerticalEvidenceInput vertical_input;
+        if (integrated_candidate_.points_base) {
+            vertical_input.selected_points_base.reserve(
+                integrated_candidate_.points_base->size());
+            for (const pcl::PointXYZ& point :
+                 integrated_candidate_.points_base->points) {
+                if (std::isfinite(point.x) && std::isfinite(point.y) &&
+                    std::isfinite(point.z)) {
+                    vertical_input.selected_points_base.emplace_back(
+                        point.x, point.y, point.z);
+                }
+            }
+        }
+        vertical_input.footprint_valid = shadow_footprint.valid;
+        vertical_input.footprint_center_base = shadow_footprint.center_base;
+        vertical_input.footprint_size_xy = Eigen::Vector2f(
+            shadow_footprint.length_m, shadow_footprint.width_m);
+        vertical_input.footprint_yaw_base_rad =
+            shadow_footprint.yaw_base_rad;
+        vertical_input.ground_reference_valid =
+            integrated_candidate_.ground_reference_valid;
+        vertical_input.ground_z_base =
+            integrated_candidate_.ground_z_base;
+        // No independent thickness owner exists in Phase SHADOW. Lifecycle
+        // equality alone is forbidden from authorizing product thickness.
+        vertical_input.frozen_thickness_valid = false;
+        vertical_input.frozen_thickness_matches_lifecycle = false;
+        integrated_shadow_vertical_evidence_ =
+            extractCargoVerticalEvidence(
+                vertical_input, cargo_vertical_evidence_v2_config_);
+
+        CargoBottomObservation bottom_input;
+        bottom_input.track_valid = integrated_identity_decision_.identity ==
+            CargoPhysicalIdentityState::VALIDATED;
+        bottom_input.track_id =
+            integrated_identity_decision_.physical_history_id;
+        bottom_input.stamp_sec = integrated_candidate_.identity.stamp_sec;
+        bottom_input.transform_stamp_sec =
+            integrated_candidate_.identity.stamp_sec;
+        bottom_input.T_map_base = Eigen::Isometry3f::Identity();
+        bottom_input.T_map_base.matrix() = pose_map_base.matrix().cast<float>();
+        bottom_input.points_base =
+            integrated_shadow_vertical_evidence_.clean_vertical_points_base;
+        bottom_input.current_top_valid =
+            integrated_shadow_vertical_evidence_.valid;
+        bottom_input.current_top_support_valid =
+            integrated_shadow_vertical_evidence_.valid;
+        bottom_input.current_top_z_base =
+            integrated_shadow_vertical_evidence_.top_z_base;
+        bottom_input.footprint_valid = shadow_footprint.valid;
+        bottom_input.footprint_center_base = shadow_footprint.center_base;
+        bottom_input.footprint_size_xy = Eigen::Vector2f(
+            shadow_footprint.length_m, shadow_footprint.width_m);
+        bottom_input.footprint_yaw_base_rad =
+            shadow_footprint.yaw_base_rad;
+        bottom_input.track_center_valid =
+            integrated_candidate_.identity.center.allFinite();
+        bottom_input.track_center_base =
+            integrated_candidate_.identity.center.cast<float>();
+        bottom_input.frozen_thickness_valid = false;
+        bottom_input.prior_height_valid = false;
+        bottom_input.origin_height_valid = false;
+        bottom_input.map_diff_height_valid = false;
+        bottom_input.map_static_height_valid = false;
+        integrated_shadow_bottom_result_ =
+            integrated_shadow_bottom_fusion_.update(bottom_input);
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr shadow_external(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    bool raw_obstacle_inside_shadow = false;
+    if (obstacle_cloud_base) {
+        shadow_external->reserve(obstacle_cloud_base->size());
+        for (const pcl::PointXYZ& point : obstacle_cloud_base->points) {
+            if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+                !std::isfinite(point.z)) {
+                continue;
+            }
+            const bool inside = shadow_footprint.valid &&
+                containsPointInCargoObbBase(
+                    point.getVector3fMap(), shadow_footprint,
+                    hook_fixed_config_.voxel_leaf, 0.0F);
+            raw_obstacle_inside_shadow = raw_obstacle_inside_shadow || inside;
+            if (!inside) shadow_external->push_back(point);
+        }
+    }
+    bool shadow_external_overlaps = false;
+    if (shadow_footprint.valid) {
+        for (const pcl::PointXYZ& point : shadow_external->points) {
+            if (containsPointInCargoObbBase(
+                    point.getVector3fMap(), shadow_footprint)) {
+                shadow_external_overlaps = true;
+                break;
+            }
+        }
+    }
+
+    CargoSafetyInput safety_input;
+    safety_input.source_stamp_sec = stamp.toSec();
+    safety_input.source_sequence =
+        cloud_callback_count_.load(std::memory_order_relaxed);
+    safety_input.frame_id = base_frame_;
+    safety_input.evaluation_time_sec = stamp.toSec();
+    safety_input.height.valid = integrated_shadow_bottom_result_.valid;
+    safety_input.height.stale = !candidate_current;
+    safety_input.height.bottom_z =
+        integrated_shadow_bottom_result_.geometry.bottom_z_base;
+    safety_input.height.bottom_uncertainty_m =
+        integrated_shadow_bottom_result_.uncertainty;
+    safety_input.height.stamp_sec =
+        integrated_shadow_bottom_result_.evidence_stamp_sec;
+    safety_input.footprint_base = shadow_footprint;
+    safety_input.obstacle_cloud_base = shadow_external;
+    safety_input.obstacle_observation_valid =
+        static_cast<bool>(obstacle_cloud_base) && shadow_footprint.valid;
+    const double stamp_delta = (stamp - obstacle_cloud_stamp).toSec();
+    safety_input.obstacle_cloud_age_sec =
+        std::isfinite(stamp_delta) && stamp_delta >= -0.05 &&
+        std::isfinite(processing_age_sec) && processing_age_sec >= 0.0
+            ? std::max(std::max(0.0, stamp_delta), processing_age_sec)
+            : std::numeric_limits<double>::infinity();
+    safety_input.obstacle_roi_finite_points = shadow_external->size();
+    safety_input.obstacle_roi_coverage_ratio = obstacle_cloud_base &&
+        !obstacle_cloud_base->empty()
+            ? static_cast<float>(shadow_external->size()) /
+                static_cast<float>(obstacle_cloud_base->size())
+            : 0.0F;
+    const CargoSafetyResult safety =
+        cargo_safety_evaluator_.evaluate(safety_input);
+
+    const double canonical_snapshot_age_sec =
+        integrated_canonical_fusion_snapshot_stamp_.isZero()
+            ? std::numeric_limits<double>::infinity()
+            : (stamp - integrated_canonical_fusion_snapshot_stamp_).toSec();
+    const bool canonical_snapshot_current =
+        integrated_canonical_fusion_snapshot_valid_ &&
+        std::isfinite(canonical_snapshot_age_sec) &&
+        canonical_snapshot_age_sec >= 0.0 &&
+        canonical_snapshot_age_sec <=
+            integrated_identity_config_.maximum_observation_gap_sec;
+    CargoAvoidanceFusionInput canonical = canonical_snapshot_current
+        ? integrated_canonical_fusion_snapshot_
+        : CargoAvoidanceFusionInput{};
+    canonical.localization_valid =
+        relocalization_pose_reliable_ && !tracking_lost_;
+    canonical.warning_motion_authorized =
+        cargo_physical_motion_result_.valid &&
+        cargo_physical_motion_result_.state ==
+            CargoPhysicalMotionState::MOVING;
+    canonical.live.available = safety.input_valid;
+    canonical.live.reliable = safety.input_valid &&
+        safety.fault == CargoSafetyFault::NONE;
+    canonical.live.hazard = safety.warning_valid &&
+        (safety.warning_code == CargoSafetyEvaluator::kLevel1Code ||
+         safety.warning_code == CargoSafetyEvaluator::kLevel2Code);
+    canonical.live.warning_code = safety.warning_code;
+    canonical.live.coverage = safety_input.obstacle_roi_coverage_ratio;
+    canonical.warning_candidate_present = canonical.live.hazard;
+    canonical.warning_candidate_code = safety.warning_code;
+    if (safety.has_cluster_evidence) {
+        canonical.live.distance_m =
+            safety.most_dangerous_cluster.footprint_distance_m;
+        canonical.live.clearance_m =
+            safety.most_dangerous_cluster.conservative_clearance_m;
+        canonical.live.uncertainty_m =
+            safety.most_dangerous_cluster.obstacle_uncertainty_m;
+    }
+
+    // Read-only reuse of the existing obstacle identity/history authority.
+    // No tracker update occurs on the Shadow path.
+    const CargoObstacleTrack* canonical_track = nullptr;
+    for (const CargoObstacleTrack& track :
+         physical_obstacle_track_store_.tracks()) {
+        if (!canonical_track || track.footprint_distance_m <
+                canonical_track->footprint_distance_m) {
+            canonical_track = &track;
+        }
+    }
+    if (canonical_track != nullptr) {
+        if (!canonical_snapshot_current) {
+            canonical.live.obstacle_track_id = canonical_track->track_id;
+            canonical.live.far_field_history_valid =
+                canonical_track->far_field_history_valid;
+            canonical.live.provenance_valid =
+                canonical_track->provenance_valid;
+            canonical.live.certified_static_provenance =
+                canonical_track->certified_static_provenance;
+            canonical.live.validated_streak =
+                canonical_track->validated_consecutive_observations;
+            canonical.live_near_field_history_authorized =
+                canonical_track->far_field_history_valid;
+            canonical.pending_external_obstacle_authorized =
+                canonical_track->confirmed;
+            canonical.pending_external_obstacle_track_id =
+                canonical_track->track_id;
+            canonical.pending_external_obstacle_confirmations =
+                canonical_track->validated_consecutive_observations;
+            canonical.pending_external_provenance_valid =
+                canonical_track->provenance_valid;
+            canonical.pending_external_geometry_valid =
+                canonical_track->current_hazard_geometry_valid;
+            canonical.pending_external_separation_valid =
+                canonical_track->separated_obstacle_history_valid;
+        }
+    }
+    canonical.pending_self_evidence_valid =
+        integrated_identity_decision_.identity ==
+            CargoPhysicalIdentityState::VALIDATED;
+    canonical.pending_authority_confidence =
+        canonical.pending_self_evidence_valid ? 1.0F : 0.0F;
+    canonical.pending_external_obstacle_authorized =
+        canonical.pending_external_obstacle_authorized &&
+        canonical.live.hazard;
+    canonical.live_obstacle_origin_resolved =
+        !shadow_external_overlaps ||
+        canonical.pending_external_separation_valid ||
+        canonical.pending_external_provenance_valid;
+    if (canonical_snapshot_current &&
+        integrated_shadow_bottom_result_.valid &&
+        integrated_candidate_valid_ &&
+        canonical.static_map.available &&
+        std::isfinite(canonical.static_map.obstacle_top_z_map) &&
+        std::isfinite(canonical.static_map.distance_m)) {
+        const Eigen::Vector3d shadow_bottom_map = pose_map_base *
+            Eigen::Vector3d(
+                integrated_candidate_.identity.center.x(),
+                integrated_candidate_.identity.center.y(),
+                integrated_shadow_bottom_result_.geometry.bottom_z_base);
+        const float conservative_bottom =
+            static_cast<float>(shadow_bottom_map.z()) -
+            integrated_shadow_bottom_result_.uncertainty -
+            cargo_safety_evaluator_.config().cargo_bottom_extra_margin_m;
+        canonical.static_map.clearance_m = conservative_bottom -
+            canonical.static_map.obstacle_top_z_map -
+            canonical.static_map.uncertainty_m;
+        canonical.static_map.hazard =
+            canonical.static_map.clearance_m <
+                cargo_safety_evaluator_.config()
+                    .minimum_vertical_clearance_m &&
+            canonical.static_map.distance_m <=
+                cargo_safety_evaluator_.config().level2_distance_m;
+        canonical.static_map.warning_code = canonical.static_map.hazard
+            ? (canonical.static_map.distance_m <=
+                       cargo_safety_evaluator_.config().level1_distance_m
+                   ? CargoSafetyEvaluator::kLevel1Code
+                   : CargoSafetyEvaluator::kLevel2Code)
+            : CargoSafetyEvaluator::kSafeCode;
+    }
+    canonical.anomaly_review_candidate = false;
+    canonical.anomaly_review_live = false;
+    canonical.anomaly_review_static = false;
+    canonical.anomaly_review_reason.clear();
+    const bool shadow_live_review_ready = canonical.live.hazard &&
+        canonical.live.validated_streak >=
+            physical_obstacle_track_store_.config().confirm_frames;
+    canonical.anomaly_review_live = shadow_live_review_ready &&
+        (canonical.live.distance_m <=
+             cargo_motion_corridor_config_.immediate_near_field_m ||
+         (canonical.live.warning_code ==
+              CargoSafetyEvaluator::kLevel1Code &&
+          !canonical.live.far_field_history_valid));
+    canonical.anomaly_review_static = canonical.static_map.hazard &&
+        canonical.static_map.validated_streak >=
+            physical_obstacle_track_store_.config().confirm_frames &&
+        (canonical.static_map.distance_m <=
+             cargo_motion_corridor_config_.immediate_near_field_m ||
+         (canonical.static_map.warning_code ==
+              CargoSafetyEvaluator::kLevel1Code &&
+          !canonical.static_map.far_field_history_valid &&
+          !canonical.static_risk_contract_valid));
+    canonical.anomaly_review_candidate =
+        canonical.anomaly_review_live || canonical.anomaly_review_static;
+    if (canonical.anomaly_review_candidate) {
+        canonical.anomaly_review_reason =
+            "shadow_recomputed_review_candidate";
+        if (canonical.anomaly_review_live) {
+            canonical.anomaly_review_distance_m =
+                canonical.live.distance_m;
+            canonical.anomaly_review_clearance_m =
+                canonical.live.clearance_m;
+        } else {
+            canonical.anomaly_review_distance_m =
+                canonical.static_map.distance_m;
+            canonical.anomaly_review_clearance_m =
+                canonical.static_map.clearance_m;
+        }
+    }
+
+    CargoShadowFusionProjection projection;
+    projection.pending = candidate_current &&
+        integrated_geometry_decision_.pending_envelope_valid;
+    projection.formal = candidate_current &&
+        integrated_geometry_decision_.formal_geometry_valid;
+    projection.bottom_valid = integrated_shadow_bottom_result_.valid;
+    projection.clear_authorized =
+        integrated_geometry_decision_.formal_clear_authorized;
+    projection.cargo_lifecycle_id =
+        integrated_identity_decision_.load_epoch;
+    projection.cargo_track_id =
+        integrated_identity_decision_.physical_history_id;
+    projection.live = canonical.live;
+    projection.static_map = canonical.static_map;
+    const CargoAvoidanceFusionInput shadow_fusion_input =
+        projectShadowCargoOntoCanonicalFusion(canonical, projection);
+    integrated_shadow_fusion_result_ = fuseCargoAvoidanceRisk(
+        shadow_fusion_input, cargo_avoidance_fusion_config_);
+
+    const double physical_distance_m = safety.has_cluster_evidence
+        ? safety.most_dangerous_cluster.footprint_distance_m
+        : std::numeric_limits<double>::infinity();
+    updateShadowPhysicalDistanceTiming(
+        stamp.toSec(), physical_distance_m,
+        cargo_safety_evaluator_.config().level2_distance_m,
+        physical_obstacle_track_store_.config().acquisition_distance_m,
+        integrated_identity_decision_.identity ==
+            CargoPhysicalIdentityState::VALIDATED,
+        integrated_geometry_decision_.pending_envelope_valid,
+        integrated_geometry_decision_.formal_geometry_valid,
+        &integrated_shadow_timing_);
+
+    const bool obstacle_self_contamination_blocking =
+        raw_obstacle_inside_shadow && canonical_track != nullptr &&
+        canonical_track->current_embedded &&
+        !canonical_track->separated_obstacle_history_valid &&
+        !canonical_track->provenance_valid &&
+        integrated_identity_decision_.identity ==
+            CargoPhysicalIdentityState::VALIDATED;
+    integrated_shadow_safety_compute_ms_ = elapsedMs(safety_start);
+    integrated_shadow_total_compute_ms_ = elapsedMs(total_start) +
+        integrated_shadow_identity_compute_ms_ +
+        integrated_shadow_geometry_compute_ms_;
+    const PipelineRateSnapshot shadow_pipeline_rate =
+        runtime_diag_.pipelineRateSnapshot(
+            queue_overwrite_drop_count_.load(std::memory_order_relaxed));
+    if (!integrated_shadow_csv_init_) {
+        try {
+            boost::filesystem::create_directories("/tmp/cargo_forensic");
+            integrated_shadow_csv_.open(
+                "/tmp/cargo_forensic/integrated_avoidance_shadow.csv",
+                std::ios::out | std::ios::trunc);
+        } catch (const std::exception& error) {
+            ROS_ERROR_THROTTLE(
+                5.0, "[IntegratedCargoIdentityShadow] trace_open_failed=%s",
+                error.what());
+        }
+        if (integrated_shadow_csv_.is_open()) {
+            integrated_shadow_csv_
+                << "frame_seq,pipeline_stamp,baseline_selected_candidate_id,"
+                << "shadow_association,shadow_identity,shadow_history_id,"
+                << "shadow_group_id,shadow_candidate_id,baseline_source,"
+                << "product_predicted_center_score,product_overlap_score,"
+                << "product_identity_confidence,product_overall_lock_confidence,"
+                << "lift_delta_m,lift_threshold_m,lift_confirm_count,"
+                << "lift_confirm_required,evidence_age_sec,geometry_resolved,"
+                << "geometry_gate,geometry_reject_reason,pending,formal_lock,"
+                << "load_edge_stamp,identity_validation_stamp,pending_ready_stamp,"
+                << "formal_ready_stamp,thickness_valid,thickness_owner_history_id,"
+                << "thickness_source,"
+                << "shadow_top,shadow_bottom,bottom_valid,obstacle_distance,"
+                << "clearance,shadow_code,shadow_official_valid,"
+                << "shadow_hazard_computed_this_frame,shadow_geometry_valid_this_frame,"
+                << "shadow_code_held_from_previous,first_obstacle_8m_stamp,"
+                << "first_obstacle_5m_stamp,identity_before_8m,ready_before_5m,"
+                << "canonical_obstacle_track_id,canonical_pose_generation,"
+                << "canonical_map_generation,canonical_far_history_valid,"
+                << "shadow_obstacle_overlaps_shadow_cargo_envelope,"
+                << "baseline_obstacle_inside_shadow_cargo_shell,"
+                << "obstacle_self_contamination_blocking,"
+                << "shadow_identity_compute_ms,shadow_geometry_compute_ms,"
+                << "shadow_safety_compute_ms,shadow_total_compute_ms,"
+                << "pointcloud_callback_hz,ndt_processing_hz,"
+                << "dropped_frame_count,large_gap_count\n";
+        }
+        integrated_shadow_csv_init_ = true;
+    }
+    if (integrated_shadow_csv_.is_open()) {
+        const bool hazard_computed = integrated_shadow_fusion_result_.official_valid &&
+            (integrated_shadow_fusion_result_.official_code ==
+                 CargoSafetyEvaluator::kLevel1Code ||
+             integrated_shadow_fusion_result_.official_code ==
+                 CargoSafetyEvaluator::kLevel2Code ||
+             integrated_shadow_fusion_result_.official_code ==
+                 CargoSafetyEvaluator::kReviewCode);
+        integrated_shadow_csv_ << std::fixed << std::setprecision(6)
+            << integrated_shadow_frame_sequence_++ << ',' << stamp.toSec() << ','
+            << hook_fixed_cargo_.selected_candidate_id << ','
+            << cargoCandidateAssociationStateName(
+                   integrated_identity_decision_.association) << ','
+            << cargoPhysicalIdentityStateName(
+                   integrated_identity_decision_.identity) << ','
+            << integrated_identity_decision_.physical_history_id << ','
+            << integrated_identity_decision_.frame_group_id << ','
+            << integrated_identity_decision_.resolved_candidate_id << ','
+            << cargoLiftBaselineSourceName(
+                   integrated_identity_decision_.baseline_source) << ','
+            << integrated_candidate_.product_predicted_center_score << ','
+            << integrated_candidate_.product_overlap_score << ','
+            << integrated_candidate_.product_identity_confidence << ','
+            << integrated_candidate_.product_overall_lock_confidence << ','
+            << integrated_identity_decision_.lift_delta_m << ','
+            << integrated_identity_decision_.lift_threshold_m << ','
+            << integrated_identity_decision_.lift_confirm_count << ','
+            << integrated_identity_decision_.required_lift_confirm_frames << ','
+            << integrated_identity_decision_.evidence_age_sec << ','
+            << (integrated_geometry_decision_.geometry_resolved ? 1 : 0) << ','
+            << (integrated_geometry_decision_.formal_geometry_valid ? 1 : 0) << ','
+            << integrated_geometry_decision_.reject_reason << ','
+            << (integrated_geometry_decision_.pending_envelope_valid ? 1 : 0) << ','
+            << (integrated_geometry_decision_.formal_geometry_valid ? 1 : 0) << ','
+            << integrated_shadow_timing_.load_edge_stamp_sec << ','
+            << integrated_identity_decision_.identity_validation_stamp_sec << ','
+            << integrated_shadow_timing_.pending_ready_stamp_sec << ','
+            << integrated_shadow_timing_.formal_ready_stamp_sec << ','
+            << 0 << ',' << 0 << ',' << "UNAVAILABLE_SHADOW_OWNER" << ','
+            << integrated_shadow_vertical_evidence_.top_z_base << ','
+            << integrated_shadow_bottom_result_.geometry.bottom_z_base << ','
+            << (integrated_shadow_bottom_result_.valid ? 1 : 0) << ','
+            << physical_distance_m << ','
+            << integrated_shadow_fusion_result_.clearance_m << ','
+            << integrated_shadow_fusion_result_.official_code << ','
+            << (integrated_shadow_fusion_result_.official_valid ? 1 : 0) << ','
+            << (hazard_computed ? 1 : 0) << ','
+            << (candidate_current && integrated_shadow_bottom_result_.valid &&
+                integrated_geometry_decision_.geometry_resolved ? 1 : 0) << ','
+            << 0 << ','
+            << integrated_shadow_timing_.first_obstacle_8m_stamp_sec << ','
+            << integrated_shadow_timing_.first_obstacle_5m_stamp_sec << ','
+            << (integrated_shadow_timing_.identity_validated_before_8m ? 1 : 0) << ','
+            << (integrated_shadow_timing_.pending_or_lock_ready_before_5m ? 1 : 0) << ','
+            << canonical.live.obstacle_track_id << ','
+            << canonical.live.pose_generation << ','
+            << canonical.live.map_generation << ','
+            << (canonical.live.far_field_history_valid ? 1 : 0) << ','
+            << (shadow_external_overlaps ? 1 : 0) << ','
+            << (raw_obstacle_inside_shadow ? 1 : 0) << ','
+            << (obstacle_self_contamination_blocking ? 1 : 0) << ','
+            << integrated_shadow_identity_compute_ms_ << ','
+            << integrated_shadow_geometry_compute_ms_ << ','
+            << integrated_shadow_safety_compute_ms_ << ','
+            << integrated_shadow_total_compute_ms_ << ','
+            << shadow_pipeline_rate.callback_hz << ','
+            << shadow_pipeline_rate.processed_hz << ','
+            << queue_overwrite_drop_count_.load(
+                   std::memory_order_relaxed) << ','
+            << invalid_sensor_dt_count_.load(
+                   std::memory_order_relaxed) << '\n';
+    }
+}
+
 void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
@@ -21472,6 +22246,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     cargo_pending_external_shell_points_ = 0U;
     cargo_origin_exclusion_active_ = false;
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
+    evaluateIntegratedCargoIdentityShadow(
+        hook, obstacle_cloud_base, pose_map_base, stamp,
+        obstacle_cloud_stamp, processing_age_sec);
     const bool visual_conflict = hook_fixed_cargo_.valid;
     const bool required_role =
         hook_load_signal_role_ == HookLoadSignalRole::REQUIRED;
@@ -23898,6 +24675,11 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     avoidance_input.static_map.validated_streak =
         formal_static_hazard_decision.confirmations;
 
+    if (integrated_cargo_identity_shadow_enabled_) {
+        integrated_canonical_fusion_snapshot_ = avoidance_input;
+        integrated_canonical_fusion_snapshot_stamp_ = stamp;
+        integrated_canonical_fusion_snapshot_valid_ = true;
+    }
     CargoAvoidanceFusionResult fused_avoidance =
         fuseCargoAvoidanceRisk(
             avoidance_input, cargo_avoidance_fusion_config_);

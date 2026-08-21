@@ -1,0 +1,37 @@
+schema_version: 1
+parent_sha: 1fc36dc4b8341a2b0b73c928ce6f05a11793cffd
+branch: codex/integrated-cargo-identity-shadow-v1
+mode: SHADOW_ONLY
+product_mode_rejection: PRODUCT_MODE_NOT_IMPLEMENTED_IN_INVESTIGATION_BUILD
+product_behavior_changed: false
+field_ready: false
+
+configuration:
+  launch_parameter: integrated_cargo_identity_shadow_config_file
+  default_file: src/ndt_slam/config/integrated_cargo_identity_shadow_v1.yaml
+
+trace:
+  runtime_path: /tmp/cargo_forensic/integrated_avoidance_shadow.csv
+  held_code_allowed: false
+  one_row_per_pipeline_stamp: true
+
+ubuntu_validation:
+  clean_build: catkin_make clean && catkin_make --pkg ndt_slam
+  full_gtest: catkin_make run_tests_ndt_slam
+  four_bag_entry: src/ndt_slam/scripts/analysis/run_integrated_cargo_identity_shadow_four_bags.sh
+  bags:
+    - 无.bag
+    - 有.bag
+    - 长件.bag
+    - 大件.bag
+  stop_on_single_bag_failure: false
+
+sha_verification:
+  local: git rev-parse HEAD
+  remote: git ls-remote origin refs/heads/codex/integrated-cargo-identity-shadow-v1
+
+hard_stop_after_push:
+  product_pose_or_lock_takeover: false
+  obstacle_g11_2: false
+  threshold_tuning: false
+  clean_product_branch: false

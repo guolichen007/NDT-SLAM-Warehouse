@@ -153,6 +153,8 @@ set(LIBRARY_SOURCES
   src/static_height_field.cpp
   src/static_height_component_extractor.cpp
   src/cargo_lift_origin_binder.cpp
+  src/cargo_physical_identity_authority.cpp
+  src/integrated_cargo_identity_shadow.cpp
   src/revealed_support_observer.cpp
   src/cargo_preload_baseline_tracker.cpp
   src/cargo_geometry_fusion.cpp
@@ -377,6 +379,20 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_lift_origin_binder_test.cpp)
   if(TARGET cargo_lift_origin_binder_test)
     target_link_libraries(cargo_lift_origin_binder_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_physical_identity_authority_test
+    test/cargo_physical_identity_authority_test.cpp)
+  if(TARGET cargo_physical_identity_authority_test)
+    target_link_libraries(cargo_physical_identity_authority_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(integrated_cargo_identity_shadow_test
+    test/integrated_cargo_identity_shadow_test.cpp)
+  if(TARGET integrated_cargo_identity_shadow_test)
+    target_link_libraries(integrated_cargo_identity_shadow_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
 

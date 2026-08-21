@@ -1,0 +1,29 @@
+schema_version: 1
+
+integrated_cargo_physical_identity_shadow:
+  enabled: true
+  shadow_only: true
+
+  # Defaults deliberately mirror existing acquisition/lift contracts. Site
+  # replay may override them only through an audited investigation config.
+  association:
+    maximum_xy_step_m: 0.30
+    maximum_z_speed_mps: 1.50
+    z_step_margin_m: 0.05
+    maximum_size_relative_step: 0.60
+    ambiguity_cost_margin: 0.08
+
+  lift:
+    minimum_significant_change_m: 0.15
+    significance_sigma: 3.0
+    maximum_observation_gap_sec: 0.50
+    maximum_source_age_sec: 0.50
+    confirm_frames: 4
+
+  geometry:
+    minimum_point_support: 20
+    formal_confirm_frames: 3
+    maximum_observation_gap_sec: 0.50
+    maximum_center_step_m: 0.30
+    maximum_size_cv: 0.25
+    minimum_axial_orientation_concentration: 0.70

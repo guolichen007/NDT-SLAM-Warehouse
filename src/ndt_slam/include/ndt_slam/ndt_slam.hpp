@@ -64,6 +64,8 @@
 #include <ndt_slam/cargo_presence_state_machine.hpp>
 #include <ndt_slam/cargo_physical_motion_estimator.hpp>
 #include <ndt_slam/cargo_lift_origin_binder.hpp>
+#include <ndt_slam/cargo_physical_identity_authority.hpp>
+#include <ndt_slam/integrated_cargo_identity_shadow.hpp>
 #include <ndt_slam/cargo_geometry_fusion.hpp>
 #include <ndt_slam/cargo_preload_baseline_tracker.hpp>
 #include <ndt_slam/pending_cargo_envelope.hpp>
@@ -1442,6 +1444,16 @@ private:
 
     // ========== HookFixedCargoDetector ==========
     struct HookCargoDetection {
+        struct ShadowCandidateSnapshot {
+            CargoPhysicalCandidateObservation identity;
+            pcl::PointCloud<pcl::PointXYZ>::Ptr points_base;
+            bool ground_reference_valid = false;
+            float ground_z_base = std::numeric_limits<float>::quiet_NaN();
+            float product_predicted_center_score = 0.0F;
+            float product_overlap_score = 0.0F;
+            float product_identity_confidence = 0.0F;
+            float product_overall_lock_confidence = 0.0F;
+        };
         bool valid = false;
         CargoObservationOutcome outcome = CargoObservationOutcome::UNKNOWN;
         bool roi_coverage_valid = false;
@@ -1495,6 +1507,7 @@ private:
         std::string ground_reference_reason = "not_evaluated";
         float score = 0.0f;
         std::string reject_reason;
+        std::vector<ShadowCandidateSnapshot> shadow_candidates;
     };
 
     struct HookCargoBottomEstimate {
@@ -2103,6 +2116,36 @@ private:
     CargoBottomFusion cargo_bottom_shadow_fusion_;
     CargoBottomResult last_shadow_bottom_result_;
     ros::Time last_shadow_vertical_stamp_;
+    // P0 Integrated Cargo Physical Identity investigation. This path owns no
+    // product mutation authority and is never consumed by hook_lock_.
+    bool integrated_cargo_identity_shadow_enabled_ = false;
+    bool integrated_cargo_identity_shadow_only_ = true;
+    CargoPhysicalIdentityConfig integrated_identity_config_;
+    CargoPhysicalIdentityAuthority integrated_identity_authority_;
+    CargoPhysicalIdentityDecision integrated_identity_decision_;
+    CargoShadowGeometryConfig integrated_geometry_config_;
+    CargoShadowGeometryAuthority integrated_geometry_authority_;
+    CargoShadowGeometryDecision integrated_geometry_decision_;
+    HookCargoDetection::ShadowCandidateSnapshot integrated_candidate_;
+    bool integrated_candidate_valid_ = false;
+    bool integrated_shadow_seen_empty_ = false;
+    ros::Time integrated_shadow_authority_stamp_;
+    ros::Time integrated_shadow_last_detection_stamp_;
+    CargoShadowPhysicalDistanceTiming integrated_shadow_timing_;
+    CargoAvoidanceFusionResult integrated_shadow_fusion_result_;
+    CargoAvoidanceFusionInput integrated_canonical_fusion_snapshot_;
+    ros::Time integrated_canonical_fusion_snapshot_stamp_;
+    bool integrated_canonical_fusion_snapshot_valid_ = false;
+    CargoVerticalEvidence integrated_shadow_vertical_evidence_;
+    CargoBottomFusion integrated_shadow_bottom_fusion_;
+    CargoBottomResult integrated_shadow_bottom_result_;
+    double integrated_shadow_identity_compute_ms_ = 0.0;
+    double integrated_shadow_geometry_compute_ms_ = 0.0;
+    double integrated_shadow_safety_compute_ms_ = 0.0;
+    double integrated_shadow_total_compute_ms_ = 0.0;
+    std::ofstream integrated_shadow_csv_;
+    bool integrated_shadow_csv_init_ = false;
+    std::uint64_t integrated_shadow_frame_sequence_ = 0U;
 
     // Phase B2 detection point-cloud survival trace. Diagnostics-only.
     // Records per-stage vertical statistics to locate where the physical
@@ -2444,6 +2487,17 @@ private:
     HookCargoDetection detectCargoAroundOdomAnchor(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
         const ros::Time& stamp);
+    void updateIntegratedCargoIdentityShadow(
+        const HookCargoDetection& detection,
+        const HookLoadSnapshot& hook,
+        const ros::Time& stamp);
+    void evaluateIntegratedCargoIdentityShadow(
+        const HookLoadSnapshot& hook,
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
+        const Sophus::SE3d& pose_map_base,
+        const ros::Time& stamp,
+        const ros::Time& obstacle_cloud_stamp,
+        double processing_age_sec);
     void publishPayloadTrackInfoFromFusion(
         const CargoBottomResult& bottom,
         const ros::Time& stamp);
