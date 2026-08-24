@@ -328,6 +328,31 @@ def analyze_trace(
             if judged_rows else math.nan
         ),
     }
+    owned_top_rows = [
+        row for row in judged_rows
+        if row.get("downstream_top_source") ==
+        "GROUP_SUPPORTED_VERTICAL_EVIDENCE"
+    ]
+    owned_bottom_rows = [row for row in owned_top_rows if flag(row, "bottom_valid")]
+    if role == "positive_collision" and owned_top_rows and not owned_bottom_rows:
+        if any(flag(row, "shadow_thickness_valid") for row in owned_top_rows):
+            result["downstream_bottom_blocker"] = (
+                "POINTS_BOTTOM_OBSERVABILITY_BLOCKING"
+            )
+        elif any(flag(row, "formal_lock") for row in owned_top_rows):
+            result["downstream_bottom_blocker"] = (
+                "FORMAL_THICKNESS_NOT_AVAILABLE"
+            )
+        else:
+            result["downstream_bottom_blocker"] = (
+                "FORMAL_THICKNESS_NOT_AVAILABLE"
+            )
+    else:
+        result["downstream_bottom_blocker"] = "NONE"
+    result["no_bag_upstream_identity_blocking"] = (
+        role == "negative_safe_over" and bool(judged_rows) and
+        not bool(true_validated)
+    )
     if baseline_trace_path is None:
         result["new_history_rate_before"] = math.nan
         result["baseline_trace_comparison"] = (

@@ -30,6 +30,8 @@ def trace_row(code: int, clearance: float) -> dict[str, object]:
         "formal_lock": 1,
         "shadow_geometry_valid_this_frame": 1,
         "bottom_valid": 1,
+        "downstream_top_source": "GROUP_SUPPORTED_VERTICAL_EVIDENCE",
+        "shadow_thickness_valid": 1,
         "shadow_official_valid": 1,
         "shadow_code": code,
         "clearance": clearance,
@@ -102,6 +104,34 @@ class IntegratedCargoIdentityShadowAnalyzerTest(unittest.TestCase):
         result = self.analyze(trace_row(17, 0.2), oracle)
         self.assertEqual(result["identity_verdict"], "PASS")
         self.assertEqual(result["avoidance_cargo_side_verdict"], "PASS")
+
+    def test_group_top_without_bottom_reports_terminal_bottom_blocker(self):
+        oracle = {
+            "role": "positive_collision",
+            "window_start_stamp_sec": 9.0,
+            "window_end_stamp_sec": 11.0,
+            "true_member_sets": [[7, 9]],
+        }
+        row = trace_row(33, 1.0)
+        row["bottom_valid"] = 0
+        row["shadow_geometry_valid_this_frame"] = 0
+        result = self.analyze(row, oracle)
+        self.assertEqual(
+            result["downstream_bottom_blocker"],
+            "POINTS_BOTTOM_OBSERVABILITY_BLOCKING",
+        )
+
+    def test_negative_bag_missing_identity_is_upstream_blocking(self):
+        oracle = {
+            "role": "negative_safe_over",
+            "window_start_stamp_sec": 9.0,
+            "window_end_stamp_sec": 11.0,
+            "true_member_sets": [[7, 9]],
+        }
+        row = trace_row(33, 1.0)
+        row["shadow_identity"] = "UNKNOWN"
+        result = self.analyze(row, oracle)
+        self.assertTrue(result["no_bag_upstream_identity_blocking"])
 
     def analyze_groups(self, rows, oracle, baseline_rows=None):
         with tempfile.TemporaryDirectory() as directory:

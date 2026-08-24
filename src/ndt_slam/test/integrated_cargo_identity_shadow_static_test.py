@@ -71,16 +71,44 @@ class IntegratedCargoIdentityShadowStaticTest(unittest.TestCase):
         self.assertLess(shadow, product_fusion)
         self.assertIn("hook, external_obstacle_cloud, pose_map_base", pipeline)
 
-    def test_shadow_bottom_has_no_product_pose_or_thickness(self) -> None:
+    def test_shadow_bottom_uses_group_owned_points_top_and_track_center(self) -> None:
         body = function_body(
             "void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(",
             "void NdtSlamNode::updateAndPublishCargoSafetyPipeline(",
         )
         self.assertIn("bottom_input.track_center_base", body)
-        self.assertIn("integrated_candidate_.identity.center", body)
-        self.assertIn("bottom_input.frozen_thickness_valid = false", body)
+        self.assertIn("integrated_group_evidence_.stable_anchor", body)
+        self.assertIn(
+            "integrated_group_evidence_.union_points_base", body
+        )
+        self.assertIn(
+            "integrated_group_evidence_.supported_top_z", body
+        )
+        self.assertNotIn("integrated_candidate_.points_base", body)
+        self.assertNotIn("clean_vertical_points_base", body)
+        self.assertNotIn("extractCargoVerticalEvidence(", body)
         self.assertNotIn("hook_lock_.live_pose", body)
         self.assertNotIn("cargo_frozen_geometry_", body)
+
+    def test_group_geometry_does_not_depend_on_candidate_lookup(self) -> None:
+        body = function_body(
+            "void NdtSlamNode::updateIntegratedCargoIdentityShadow(",
+            "NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(",
+        )
+        self.assertIn("bindCargoPhysicalGroupEvidence(", body)
+        self.assertIn("resolved_geometry", body)
+        self.assertNotIn("matchesResolvedPhysicalHypothesis(", body)
+        self.assertNotIn("detection.shadow_candidates", body)
+
+    def test_shadow_thickness_has_only_reference_independent_owner(self) -> None:
+        body = function_body(
+            "void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(",
+            "void NdtSlamNode::updateAndPublishCargoSafetyPipeline(",
+        )
+        self.assertIn("freezeFromFormalGeometry(", body)
+        self.assertIn("shadowThicknessAuthorized(", body)
+        self.assertNotIn("hook_lock_.locked_shape", body)
+        self.assertNotIn("product frozen thickness", body.lower())
 
     def test_preload_pass_does_not_write_product_detection(self) -> None:
         marker = "SHADOW preload enumeration"
@@ -123,6 +151,26 @@ class IntegratedCargoIdentityShadowStaticTest(unittest.TestCase):
         self.assertIn("integrated_identity_groups.csv", NODE)
         self.assertEqual(NODE.count("integrated_avoidance_shadow.csv"), 1)
         self.assertEqual(NODE.count("integrated_identity_groups.csv"), 1)
+
+    def test_v3_trace_exposes_physical_evidence_lineage(self) -> None:
+        for field in (
+            "group_evidence_owner_valid",
+            "group_evidence_source_stamp",
+            "group_union_point_count",
+            "downstream_points_source",
+            "downstream_top_source",
+            "shadow_thickness_valid",
+            "shadow_thickness_m",
+            "shadow_thickness_owner_history_id",
+            "shadow_thickness_source",
+            "bottom_source",
+            "bottom_reason",
+            "bottom_points_finite",
+            "bottom_points_visible_height",
+            "bottom_points_support_strong",
+            "resolved_candidate_points_used_for_bottom",
+        ):
+            self.assertIn(field, NODE)
 
     def test_continuity_v2_does_not_change_parameters(self) -> None:
         self.assertIn("maximum_xy_step_m: 0.30", CONFIG)
