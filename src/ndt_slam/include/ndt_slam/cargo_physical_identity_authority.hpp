@@ -19,6 +19,12 @@ enum class CargoCandidateAssociationState : std::uint8_t {
   NEW_HISTORY,
 };
 
+enum class CargoPhysicalAssociationMode : std::uint8_t {
+  ANCHOR_CONTINUITY = 0,
+  SUPPORT_OVERLAP_CONTINUITY,
+  NEW_HISTORY,
+};
+
 enum class CargoPhysicalIdentityState : std::uint8_t {
   UNKNOWN = 0,
   AMBIGUOUS,
@@ -45,6 +51,8 @@ enum class CargoGroupVerticalMode : std::uint8_t {
 
 const char* cargoCandidateAssociationStateName(
     CargoCandidateAssociationState state) noexcept;
+const char* cargoPhysicalAssociationModeName(
+    CargoPhysicalAssociationMode mode) noexcept;
 const char* cargoPhysicalIdentityStateName(
     CargoPhysicalIdentityState state) noexcept;
 const char* cargoLiftBaselineSourceName(
@@ -93,6 +101,12 @@ struct CargoPhysicalGroupDescriptor {
   double stamp_sec = 0.0;
   Eigen::Vector3d stable_anchor = Eigen::Vector3d::Zero();
   Eigen::Vector3d aggregate_extent = Eigen::Vector3d::Zero();
+  double robust_x05 = std::numeric_limits<double>::quiet_NaN();
+  double robust_x95 = std::numeric_limits<double>::quiet_NaN();
+  double robust_y05 = std::numeric_limits<double>::quiet_NaN();
+  double robust_y95 = std::numeric_limits<double>::quiet_NaN();
+  Eigen::Vector2d robust_xy_center = Eigen::Vector2d::Zero();
+  Eigen::Vector2d robust_xy_extent = Eigen::Vector2d::Zero();
   std::size_t aggregate_point_support = 0U;
   CargoGroupVerticalMode vertical_mode = CargoGroupVerticalMode::INVALID;
   double physical_vertical_z = std::numeric_limits<double>::quiet_NaN();
@@ -138,9 +152,13 @@ struct CargoPhysicalGroupDiagnostic {
   std::uint64_t matched_history_id = 0U;
   CargoCandidateAssociationState association =
       CargoCandidateAssociationState::NEW_HISTORY;
+  CargoPhysicalAssociationMode association_mode =
+      CargoPhysicalAssociationMode::NEW_HISTORY;
   double raw_representative_xy_step_m =
       std::numeric_limits<double>::quiet_NaN();
   double xy_step_m = std::numeric_limits<double>::quiet_NaN();
+  double support_xy_separation_m =
+      std::numeric_limits<double>::quiet_NaN();
   double z_step_m = std::numeric_limits<double>::quiet_NaN();
   double extent_step = std::numeric_limits<double>::quiet_NaN();
   double xy_cost = std::numeric_limits<double>::quiet_NaN();
@@ -148,6 +166,9 @@ struct CargoPhysicalGroupDiagnostic {
   double extent_cost = std::numeric_limits<double>::quiet_NaN();
   std::string association_reject_reason = "NO_HISTORY";
   std::string new_history_reason = "NO_HISTORY";
+  bool validated_history_conflict = false;
+  std::uint64_t conflicting_history_id = 0U;
+  bool frame_has_unrelated_ambiguity = false;
   CargoLiftBaselineSource baseline_source =
       CargoLiftBaselineSource::POST_LOAD_FIRST_FRESH_OBSERVATION;
   double baseline_z = std::numeric_limits<double>::quiet_NaN();

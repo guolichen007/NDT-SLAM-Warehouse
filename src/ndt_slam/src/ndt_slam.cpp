@@ -13636,16 +13636,22 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "stamp,frame_group_id,canonical_member_ids,"
                 << "raw_representative_x,raw_representative_y,"
                 << "raw_representative_z,stable_anchor_x,stable_anchor_y,"
-                << "stable_anchor_z,aggregate_extent_x,aggregate_extent_y,"
+                << "stable_anchor_z,robust_x05,robust_x95,robust_y05,"
+                << "robust_y95,robust_xy_center_x,robust_xy_center_y,"
+                << "robust_xy_extent_x,robust_xy_extent_y,"
+                << "aggregate_extent_x,aggregate_extent_y,"
                 << "aggregate_extent_z,aggregate_point_support,"
                 << "vertical_mode,physical_vertical_z,vertical_uncertainty,"
                 << "vertical_reject_reason,valid_hypothesis_top_count,"
                 << "hypothesis_top_min,hypothesis_top_max,"
                 << "hypothesis_top_spread,matched_history_id,"
-                << "association_state,raw_representative_xy_step,"
-                << "stable_anchor_xy_step,z_step,extent_step,xy_cost,"
+                << "association_state,association_mode,"
+                << "raw_representative_xy_step,stable_anchor_xy_step,"
+                << "support_xy_separation,z_step,extent_step,xy_cost,"
                 << "z_cost,extent_cost,association_reject_reason,"
-                << "new_history_reason,lift_baseline_source,baseline_z,"
+                << "new_history_reason,validated_history_conflict,"
+                << "conflicting_history_id,frame_has_unrelated_ambiguity,"
+                << "lift_baseline_source,baseline_z,"
                 << "lift_delta,lift_threshold,last_supported_evidence_stamp,"
                 << "lift_confirm_count,lift_confirm_required,lift_confirmed,"
                 << "identity_state\n";
@@ -13673,6 +13679,14 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << descriptor.stable_anchor.x() << ','
                 << descriptor.stable_anchor.y() << ','
                 << descriptor.stable_anchor.z() << ','
+                << descriptor.robust_x05 << ','
+                << descriptor.robust_x95 << ','
+                << descriptor.robust_y05 << ','
+                << descriptor.robust_y95 << ','
+                << descriptor.robust_xy_center.x() << ','
+                << descriptor.robust_xy_center.y() << ','
+                << descriptor.robust_xy_extent.x() << ','
+                << descriptor.robust_xy_extent.y() << ','
                 << descriptor.aggregate_extent.x() << ','
                 << descriptor.aggregate_extent.y() << ','
                 << descriptor.aggregate_extent.z() << ','
@@ -13688,12 +13702,19 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << diagnostic.matched_history_id << ','
                 << cargoCandidateAssociationStateName(
                        diagnostic.association) << ','
+                << cargoPhysicalAssociationModeName(
+                       diagnostic.association_mode) << ','
                 << diagnostic.raw_representative_xy_step_m << ','
-                << diagnostic.xy_step_m << ',' << diagnostic.z_step_m << ','
+                << diagnostic.xy_step_m << ','
+                << diagnostic.support_xy_separation_m << ','
+                << diagnostic.z_step_m << ','
                 << diagnostic.extent_step << ',' << diagnostic.xy_cost << ','
                 << diagnostic.z_cost << ',' << diagnostic.extent_cost << ','
                 << diagnostic.association_reject_reason << ','
                 << diagnostic.new_history_reason << ','
+                << (diagnostic.validated_history_conflict ? 1 : 0) << ','
+                << diagnostic.conflicting_history_id << ','
+                << (diagnostic.frame_has_unrelated_ambiguity ? 1 : 0) << ','
                 << cargoLiftBaselineSourceName(
                        diagnostic.baseline_source) << ','
                 << diagnostic.baseline_z << ',' << diagnostic.lift_delta_m

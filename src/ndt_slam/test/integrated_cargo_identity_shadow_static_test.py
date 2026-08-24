@@ -151,11 +151,30 @@ class IntegratedCargoIdentityShadowStaticTest(unittest.TestCase):
             "std::vector<int> group_match", pair_start
         )
         association_costs = AUTHORITY[pair_start:pair_end]
-        self.assertIn("stable_anchor", association_costs)
+        self.assertIn("robust_xy_center", association_costs)
+        self.assertIn("support_xy_separation", association_costs)
         self.assertIn("physical_vertical_z", association_costs)
-        self.assertIn("aggregate_extent", association_costs)
+        self.assertIn("robust_xy_extent", association_costs)
         self.assertNotIn("member_component_ids", association_costs)
         self.assertNotIn("candidate_id", association_costs)
+
+    def test_support_continuity_reuses_existing_xy_limit(self) -> None:
+        self.assertIn(
+            "pair.support_xy_separation <=\n"
+            "                 config_.maximum_xy_step_m",
+            AUTHORITY,
+        )
+        self.assertIn("SUPPORT_OVERLAP_CONTINUITY", AUTHORITY)
+        self.assertNotIn("support_overlap_threshold", AUTHORITY)
+
+    def test_ambiguity_revocation_is_history_local(self) -> None:
+        self.assertIn("validated_history_conflict", AUTHORITY)
+        self.assertIn("frame_has_unrelated_ambiguity", AUTHORITY)
+        self.assertNotIn(
+            "if (frame_association == CargoCandidateAssociationState::AMBIGUOUS) {\n"
+            "    validated_history_id_ = 0U;",
+            AUTHORITY,
+        )
 
     def test_group_vertical_is_robust_across_all_hypotheses(self) -> None:
         self.assertIn(
@@ -196,6 +215,22 @@ class IntegratedCargoIdentityShadowStaticTest(unittest.TestCase):
         self.assertIn("minimum_significant_change_m: 0.15", CONFIG)
         self.assertIn("significance_sigma: 3.0", CONFIG)
         self.assertIn("confirm_frames: 4", CONFIG)
+
+    def test_v4_group_trace_extends_existing_file_only(self) -> None:
+        for field in (
+            "robust_x05",
+            "robust_x95",
+            "robust_y05",
+            "robust_y95",
+            "robust_xy_center_x",
+            "robust_xy_extent_x",
+            "association_mode",
+            "support_xy_separation",
+            "validated_history_conflict",
+            "conflicting_history_id",
+            "frame_has_unrelated_ambiguity",
+        ):
+            self.assertIn(field, NODE)
 
 
 if __name__ == "__main__":

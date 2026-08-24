@@ -39,6 +39,13 @@ bool finiteDescriptor(const CargoPhysicalGroupDescriptor& descriptor) {
       descriptor.stable_anchor.allFinite() &&
       descriptor.aggregate_extent.allFinite() &&
       (descriptor.aggregate_extent.array() > 0.0).all() &&
+      std::isfinite(descriptor.robust_x05) &&
+      std::isfinite(descriptor.robust_x95) &&
+      std::isfinite(descriptor.robust_y05) &&
+      std::isfinite(descriptor.robust_y95) &&
+      descriptor.robust_xy_center.allFinite() &&
+      descriptor.robust_xy_extent.allFinite() &&
+      (descriptor.robust_xy_extent.array() > 0.0).all() &&
       descriptor.aggregate_point_support > 0U &&
       descriptor.vertical_mode != CargoGroupVerticalMode::INVALID &&
       std::isfinite(descriptor.physical_vertical_z) &&
@@ -96,6 +103,23 @@ double median(std::vector<double> values) {
       : values[middle];
 }
 
+double quantile(std::vector<double> values, double probability) {
+  std::sort(values.begin(), values.end());
+  if (values.size() == 1U) return values.front();
+  const double position = probability *
+      static_cast<double>(values.size() - 1U);
+  const std::size_t lower = static_cast<std::size_t>(std::floor(position));
+  const std::size_t upper = static_cast<std::size_t>(std::ceil(position));
+  const double fraction = position - static_cast<double>(lower);
+  return values[lower] + fraction * (values[upper] - values[lower]);
+}
+
+double intervalSeparation(double lhs_low, double lhs_high,
+                          double rhs_low, double rhs_high) {
+  return std::max(0.0, std::max(lhs_low, rhs_low) -
+                           std::min(lhs_high, rhs_high));
+}
+
 int requiredFrames(HookLoadSignalRole role, bool gravity_valid,
                    HookLoadState gravity_state, int base) {
   if (role != HookLoadSignalRole::AUXILIARY) return std::max(1, base);
@@ -116,6 +140,18 @@ const char* cargoCandidateAssociationStateName(
     case CargoCandidateAssociationState::MATCHED: return "MATCHED";
     case CargoCandidateAssociationState::AMBIGUOUS: return "AMBIGUOUS";
     case CargoCandidateAssociationState::NEW_HISTORY: return "NEW_HISTORY";
+  }
+  return "INVALID";
+}
+
+const char* cargoPhysicalAssociationModeName(
+    CargoPhysicalAssociationMode mode) noexcept {
+  switch (mode) {
+    case CargoPhysicalAssociationMode::ANCHOR_CONTINUITY:
+      return "ANCHOR_CONTINUITY";
+    case CargoPhysicalAssociationMode::SUPPORT_OVERLAP_CONTINUITY:
+      return "SUPPORT_OVERLAP_CONTINUITY";
+    case CargoPhysicalAssociationMode::NEW_HISTORY: return "NEW_HISTORY";
   }
   return "INVALID";
 }
@@ -295,13 +331,25 @@ std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
     descriptor.vertical_uncertainty_m = maximum_uncertainty;
     const std::size_t minimum_points =
         std::max<std::size_t>(1U, vertical_config.minimum_surface_points);
-    const bool continuity_available = component_lookup_complete &&
-        !group.group_ambiguous && zs.size() >= minimum_points;
-    if (continuity_available) {
+    const bool physical_support_available = component_lookup_complete &&
+        zs.size() >= minimum_points;
+    if (physical_support_available) {
       descriptor.stable_anchor =
           Eigen::Vector3d(median(xs), median(ys), median(zs));
       descriptor.aggregate_extent = maximum - minimum;
+      descriptor.robust_x05 = quantile(xs, 0.05);
+      descriptor.robust_x95 = quantile(xs, 0.95);
+      descriptor.robust_y05 = quantile(ys, 0.05);
+      descriptor.robust_y95 = quantile(ys, 0.95);
+      descriptor.robust_xy_center = Eigen::Vector2d(
+          0.5 * (descriptor.robust_x05 + descriptor.robust_x95),
+          0.5 * (descriptor.robust_y05 + descriptor.robust_y95));
+      descriptor.robust_xy_extent = Eigen::Vector2d(
+          descriptor.robust_x95 - descriptor.robust_x05,
+          descriptor.robust_y95 - descriptor.robust_y05);
     }
+    const bool continuity_available = physical_support_available &&
+        !group.group_ambiguous;
 
     std::vector<double> supported_tops;
     if (continuity_available) {
@@ -362,6 +410,9 @@ std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
         descriptor.stable_anchor.allFinite() &&
         descriptor.aggregate_extent.allFinite() &&
         (descriptor.aggregate_extent.array() > 0.0).all() &&
+        descriptor.robust_xy_center.allFinite() &&
+        descriptor.robust_xy_extent.allFinite() &&
+        (descriptor.robust_xy_extent.array() > 0.0).all() &&
         std::isfinite(descriptor.physical_vertical_z) &&
         std::isfinite(descriptor.vertical_uncertainty_m);
     groups.push_back(std::move(group));
@@ -504,11 +555,15 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     double cost = std::numeric_limits<double>::infinity();
     double raw_xy = std::numeric_limits<double>::quiet_NaN();
     double xy = std::numeric_limits<double>::quiet_NaN();
+    double support_xy_separation =
+        std::numeric_limits<double>::quiet_NaN();
     double dz = std::numeric_limits<double>::quiet_NaN();
     double extent_step = std::numeric_limits<double>::quiet_NaN();
     double xy_cost = std::numeric_limits<double>::quiet_NaN();
     double z_cost = std::numeric_limits<double>::quiet_NaN();
     double extent_cost = std::numeric_limits<double>::quiet_NaN();
+    CargoPhysicalAssociationMode association_mode =
+        CargoPhysicalAssociationMode::NEW_HISTORY;
     std::string reject_reason = "NO_HISTORY";
   };
   std::vector<Pair> pairs;
@@ -536,8 +591,24 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       const auto& previous = history.last_group.descriptor;
       pair.raw_xy = (group.representative.center.head<2>() -
                      history.last_group.representative.center.head<2>()).norm();
-      pair.xy = (group.descriptor.stable_anchor.head<2>() -
-                 previous.stable_anchor.head<2>()).norm();
+      pair.xy = (group.descriptor.robust_xy_center -
+                 previous.robust_xy_center).norm();
+      const double support_x_separation = intervalSeparation(
+          group.descriptor.robust_x05, group.descriptor.robust_x95,
+          previous.robust_x05, previous.robust_x95);
+      const double support_y_separation = intervalSeparation(
+          group.descriptor.robust_y05, group.descriptor.robust_y95,
+          previous.robust_y05, previous.robust_y95);
+      pair.support_xy_separation = std::hypot(
+          support_x_separation, support_y_separation);
+      if (pair.xy <= config_.maximum_xy_step_m) {
+        pair.association_mode =
+            CargoPhysicalAssociationMode::ANCHOR_CONTINUITY;
+      } else if (pair.support_xy_separation <=
+                 config_.maximum_xy_step_m) {
+        pair.association_mode =
+            CargoPhysicalAssociationMode::SUPPORT_OVERLAP_CONTINUITY;
+      }
       const double z_limit = config_.maximum_z_speed_mps * dt +
           config_.z_step_margin_m + group.descriptor.vertical_uncertainty_m +
           previous.vertical_uncertainty_m;
@@ -547,21 +618,30 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       pair.extent_cost = 0.0;
       bool extent_ok = true;
       for (int axis = 0; axis < 3; ++axis) {
+        const double current_extent = axis < 2
+            ? group.descriptor.robust_xy_extent[axis]
+            : group.descriptor.aggregate_extent[axis];
+        const double previous_extent = axis < 2
+            ? previous.robust_xy_extent[axis]
+            : previous.aggregate_extent[axis];
         const double denominator = std::max(
-            std::max(std::abs(group.descriptor.aggregate_extent[axis]),
-                     std::abs(previous.aggregate_extent[axis])), kEpsilon);
+            std::max(std::abs(current_extent),
+                     std::abs(previous_extent)), kEpsilon);
         const double relative = std::abs(
-            group.descriptor.aggregate_extent[axis] -
-            previous.aggregate_extent[axis]) / denominator;
+            current_extent - previous_extent) / denominator;
         pair.extent_step = std::max(pair.extent_step, relative);
         pair.extent_cost += relative;
         extent_ok = extent_ok &&
             relative <= config_.maximum_size_relative_step;
       }
-      pair.xy_cost = pair.xy / config_.maximum_xy_step_m;
+      const double association_xy = pair.association_mode ==
+              CargoPhysicalAssociationMode::ANCHOR_CONTINUITY
+          ? pair.xy : pair.support_xy_separation;
+      pair.xy_cost = association_xy / config_.maximum_xy_step_m;
       pair.z_cost = pair.dz / std::max(z_limit, kEpsilon);
       pair.cost = pair.xy_cost + pair.z_cost + pair.extent_cost;
-      if (pair.xy > config_.maximum_xy_step_m) {
+      if (pair.association_mode ==
+          CargoPhysicalAssociationMode::NEW_HISTORY) {
         pair.reject_reason = "XY_GATE";
       } else if (pair.dz > z_limit) {
         pair.reject_reason = "Z_GATE";
@@ -585,11 +665,13 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     auto& diagnostic = decision_.group_diagnostics[gi];
     diagnostic.raw_representative_xy_step_m = best->raw_xy;
     diagnostic.xy_step_m = best->xy;
+    diagnostic.support_xy_separation_m = best->support_xy_separation;
     diagnostic.z_step_m = best->dz;
     diagnostic.extent_step = best->extent_step;
     diagnostic.xy_cost = best->xy_cost;
     diagnostic.z_cost = best->z_cost;
     diagnostic.extent_cost = best->extent_cost;
+    diagnostic.association_mode = best->association_mode;
     diagnostic.association_reject_reason = best->reject_reason;
     diagnostic.new_history_reason = best->reject_reason;
   }
@@ -640,13 +722,17 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
 
   CargoCandidateAssociationState frame_association =
       CargoCandidateAssociationState::NEW_HISTORY;
+  bool frame_has_any_ambiguity = false;
   std::vector<std::uint64_t> group_history_ids(input.groups.size(), 0U);
   for (std::size_t gi = 0; gi < input.groups.size(); ++gi) {
     const auto& group = input.groups[gi];
     auto& diagnostic = decision_.group_diagnostics[gi];
     if (group.group_ambiguous || group_ambiguous[gi]) {
+      frame_has_any_ambiguity = true;
       frame_association = CargoCandidateAssociationState::AMBIGUOUS;
       diagnostic.association = CargoCandidateAssociationState::AMBIGUOUS;
+      diagnostic.association_mode =
+          CargoPhysicalAssociationMode::NEW_HISTORY;
       diagnostic.association_reject_reason = "AMBIGUOUS";
       diagnostic.new_history_reason = "AMBIGUOUS";
       continue;
@@ -662,11 +748,29 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       diagnostic.association = CargoCandidateAssociationState::MATCHED;
       diagnostic.association_reject_reason = "NONE";
       diagnostic.new_history_reason = "NONE";
+      for (const Pair& pair : pairs) {
+        if (pair.group == gi && pair.history ==
+                static_cast<std::size_t>(group_match[gi]) && pair.feasible) {
+          diagnostic.association_mode = pair.association_mode;
+          diagnostic.raw_representative_xy_step_m = pair.raw_xy;
+          diagnostic.xy_step_m = pair.xy;
+          diagnostic.support_xy_separation_m =
+              pair.support_xy_separation;
+          diagnostic.z_step_m = pair.dz;
+          diagnostic.extent_step = pair.extent_step;
+          diagnostic.xy_cost = pair.xy_cost;
+          diagnostic.z_cost = pair.z_cost;
+          diagnostic.extent_cost = pair.extent_cost;
+          break;
+        }
+      }
     } else {
       histories_.push_back(History{});
       history = &histories_.back();
       history->id = next_history_id_++;
       diagnostic.association = CargoCandidateAssociationState::NEW_HISTORY;
+      diagnostic.association_mode =
+          CargoPhysicalAssociationMode::NEW_HISTORY;
       if (histories_.size() == 1U) {
         diagnostic.association_reject_reason = "NO_HISTORY";
         diagnostic.new_history_reason = "NO_HISTORY";
@@ -786,6 +890,93 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     }
   }
 
+  const std::uint64_t protected_history_id = fresh_confirmed.size() == 1U
+      ? fresh_confirmed.front()->id : validated_history_id_;
+  bool validated_history_conflict = false;
+  bool frame_has_unrelated_ambiguity = false;
+  for (std::size_t gi = 0; gi < input.groups.size(); ++gi) {
+    if (!input.groups[gi].group_ambiguous && !group_ambiguous[gi]) continue;
+    bool conflicts_with_protected_history = false;
+    if (protected_history_id != 0U) {
+      for (const Pair& pair : pairs) {
+        if (pair.group == gi && pair.feasible &&
+            histories_[pair.history].id == protected_history_id) {
+          conflicts_with_protected_history = true;
+          break;
+        }
+      }
+      // A same-frame physical-group ambiguity is forbidden from association,
+      // but its current support can still prove that the ambiguity directly
+      // occupies the protected history's physical gate. This is revocation
+      // evidence only; it never transfers history or lift evidence.
+      if (!conflicts_with_protected_history &&
+          input.groups[gi].group_ambiguous) {
+        const auto& current = input.groups[gi].descriptor;
+        const History* protected_history = nullptr;
+        for (const History& history : histories_) {
+          if (history.id == protected_history_id) {
+            protected_history = &history;
+            break;
+          }
+        }
+        if (protected_history && current.stable_anchor.allFinite() &&
+            current.robust_xy_center.allFinite() &&
+            current.robust_xy_extent.allFinite() &&
+            (current.robust_xy_extent.array() > 0.0).all() &&
+            current.aggregate_extent.allFinite() &&
+            std::isfinite(current.vertical_uncertainty_m)) {
+          const auto& previous = protected_history->last_group.descriptor;
+          const double dt = current.stamp_sec -
+              protected_history->last_stamp_sec;
+          const double center_step = (current.robust_xy_center -
+                                      previous.robust_xy_center).norm();
+          const double separation = std::hypot(
+              intervalSeparation(current.robust_x05, current.robust_x95,
+                                 previous.robust_x05, previous.robust_x95),
+              intervalSeparation(current.robust_y05, current.robust_y95,
+                                 previous.robust_y05, previous.robust_y95));
+          const double z_limit = config_.maximum_z_speed_mps * dt +
+              config_.z_step_margin_m + current.vertical_uncertainty_m +
+              previous.vertical_uncertainty_m;
+          bool extent_ok = true;
+          for (int axis = 0; axis < 3; ++axis) {
+            const double current_extent = axis < 2
+                ? current.robust_xy_extent[axis]
+                : current.aggregate_extent[axis];
+            const double previous_extent = axis < 2
+                ? previous.robust_xy_extent[axis]
+                : previous.aggregate_extent[axis];
+            const double denominator = std::max(
+                std::max(std::abs(current_extent),
+                         std::abs(previous_extent)), kEpsilon);
+            extent_ok = extent_ok &&
+                std::abs(current_extent - previous_extent) / denominator <=
+                    config_.maximum_size_relative_step;
+          }
+          conflicts_with_protected_history = dt > 0.0 &&
+              dt <= config_.maximum_observation_gap_sec &&
+              (center_step <= config_.maximum_xy_step_m ||
+               separation <= config_.maximum_xy_step_m) &&
+              std::abs(current.stable_anchor.z() -
+                       previous.stable_anchor.z()) <= z_limit && extent_ok;
+        }
+      }
+    }
+    auto& diagnostic = decision_.group_diagnostics[gi];
+    diagnostic.validated_history_conflict =
+        conflicts_with_protected_history;
+    diagnostic.conflicting_history_id = conflicts_with_protected_history
+        ? protected_history_id : 0U;
+    validated_history_conflict = validated_history_conflict ||
+        conflicts_with_protected_history;
+    frame_has_unrelated_ambiguity = frame_has_unrelated_ambiguity ||
+        !conflicts_with_protected_history;
+  }
+  for (auto& diagnostic : decision_.group_diagnostics) {
+    diagnostic.frame_has_unrelated_ambiguity =
+        frame_has_unrelated_ambiguity;
+  }
+
   if (input.hook_role == HookLoadSignalRole::REQUIRED) {
     decision_.cargo_exists = gravity_loaded;
     decision_.existence_source = gravity_loaded
@@ -802,13 +993,25 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   if (gravity_empty && input.hook_role == HookLoadSignalRole::REQUIRED) {
     validated_history_id_ = 0U;
   }
-  if (frame_association == CargoCandidateAssociationState::AMBIGUOUS) {
+  if (decision_.cargo_exists && fresh_confirmed.size() == 1U &&
+      !validated_history_conflict) {
+    validated_history_id_ = fresh_confirmed.front()->id;
+  } else if (fresh_confirmed.size() != 1U || validated_history_conflict) {
     validated_history_id_ = 0U;
   }
-  if (decision_.cargo_exists && fresh_confirmed.size() == 1U) {
-    validated_history_id_ = fresh_confirmed.front()->id;
-  } else if (fresh_confirmed.size() != 1U) {
-    validated_history_id_ = 0U;
+
+  if (validated_history_conflict || fresh_confirmed.size() > 1U) {
+    frame_association = CargoCandidateAssociationState::AMBIGUOUS;
+  } else if (validated_history_id_ != 0U) {
+    frame_association = CargoCandidateAssociationState::NEW_HISTORY;
+    for (std::size_t gi = 0; gi < group_history_ids.size(); ++gi) {
+      if (group_history_ids[gi] == validated_history_id_) {
+        frame_association = decision_.group_diagnostics[gi].association;
+        break;
+      }
+    }
+  } else if (frame_has_any_ambiguity) {
+    frame_association = CargoCandidateAssociationState::AMBIGUOUS;
   }
 
   decision_.association = frame_association;
@@ -818,8 +1021,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         CargoLiftBaselineSource::UNAVAILABLE_STARTED_LOADED;
     decision_.identity = CargoPhysicalIdentityState::UNKNOWN;
     decision_.reason = "identity_evidence_unavailable_started_loaded";
-  } else if (fresh_confirmed.size() > 1U ||
-             frame_association == CargoCandidateAssociationState::AMBIGUOUS) {
+  } else if (fresh_confirmed.size() > 1U || validated_history_conflict ||
+             (fresh_confirmed.empty() && frame_has_any_ambiguity)) {
     decision_.identity = CargoPhysicalIdentityState::AMBIGUOUS;
     decision_.reason = "multiple_or_ambiguous_physical_groups";
   } else if (validated_history_id_ != 0U && decision_.cargo_exists) {

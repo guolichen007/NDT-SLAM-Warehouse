@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -55,6 +57,31 @@ std::vector<Eigen::Vector3f> componentPoints(double x, double z) {
   return points;
 }
 
+std::vector<Eigen::Vector3f> supportEnvelopePoints(
+    double x_low, double x_high, double z, bool bias_left = false,
+    bool bias_right = false) {
+  std::vector<Eigen::Vector3f> points;
+  for (int index = 0; index < 10; ++index) {
+    const float y = index % 2 == 0 ? -0.20F : 0.20F;
+    points.emplace_back(static_cast<float>(x_low), y,
+                        static_cast<float>(z));
+    points.emplace_back(static_cast<float>(x_high), y,
+                        static_cast<float>(z));
+  }
+  const double dense_x = bias_left ? x_low + 0.10 :
+      bias_right ? x_high - 0.10 : 0.5 * (x_low + x_high);
+  for (int index = 0; index < 80; ++index) {
+    const float y = index % 2 == 0 ? -0.20F : 0.20F;
+    points.emplace_back(static_cast<float>(dense_x), y,
+                        static_cast<float>(z));
+  }
+  points.emplace_back(static_cast<float>(x_low), -0.20F,
+                      static_cast<float>(z - 0.20));
+  points.emplace_back(static_cast<float>(x_high), 0.20F,
+                      static_cast<float>(z - 0.20));
+  return points;
+}
+
 std::vector<CargoPhysicalGroupObservation> buildGroups(
     const std::vector<CargoPhysicalCandidateObservation>& candidates,
     std::vector<CargoPhysicalComponentObservation> explicit_components = {},
@@ -77,6 +104,20 @@ std::vector<CargoPhysicalGroupObservation> buildGroups(
   for (auto& entry : components) values.push_back(std::move(entry.second));
   return groupCargoPhysicalCandidates(
       candidates, values, false, 0.0, config, 0.05, 0.10);
+}
+
+CargoPhysicalGroupObservation groupWithSupport(
+    std::uint64_t candidate_id, std::uint64_t component_id, double stamp,
+    double x_low, double x_high, double z, bool bias_left = false,
+    bool bias_right = false) {
+  auto observation = candidate(candidate_id, stamp,
+      0.5 * (x_low + x_high), z, {component_id});
+  observation.size.x() = x_high - x_low + 0.20;
+  CargoPhysicalComponentObservation component;
+  component.component_id = component_id;
+  component.points_base = supportEnvelopePoints(
+      x_low, x_high, z, bias_left, bias_right);
+  return buildGroups({observation}, {component}).front();
 }
 
 CargoPhysicalGroupObservation group(
@@ -797,6 +838,211 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_EQ(result.group_diagnostics.front().association_reject_reason,
             "VERTICAL_INVALID");
   EXPECT_EQ(result.group_diagnostics.front().matched_history_id, 0U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     RobustSupportCenterResistsPointDensityShift) {
+  const auto left_biased = groupWithSupport(
+      1U, 1U, 1.0, -0.60, 0.60, 0.70, true, false);
+  const auto right_biased = groupWithSupport(
+      2U, 2U, 1.1, -0.60, 0.60, 0.70, false, true);
+  EXPECT_GT(std::abs(left_biased.descriptor.stable_anchor.x() -
+                     right_biased.descriptor.stable_anchor.x()), 0.50);
+  EXPECT_NEAR(left_biased.descriptor.robust_xy_center.x(),
+              right_biased.descriptor.robust_xy_center.x(), 1.0e-9);
+  EXPECT_NEAR(left_biased.descriptor.robust_xy_extent.x(),
+              right_biased.descriptor.robust_xy_extent.x(), 1.0e-9);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PartialVisibilityOfSameCargoDoesNotCreateNewHistory) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.maximum_xy_step_m = 0.30;
+  CargoPhysicalIdentityAuthority authority(config);
+  auto first = input(1.0, HookLoadSignalRole::REQUIRED, true,
+                     HookLoadState::EMPTY, 0.0, 0.70);
+  first.groups = {groupWithSupport(
+      1U, 1U, 1.0, -0.60, 0.60, 0.70)};
+  authority.update(first);
+  auto partial = input(1.1, HookLoadSignalRole::REQUIRED, true,
+                       HookLoadState::LOADED, 0.0, 0.70);
+  partial.groups = {groupWithSupport(
+      2U, 2U, 1.1, 0.20, 1.00, 0.70)};
+  const auto result = authority.update(partial);
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_EQ(result.group_diagnostics.front().association,
+            CargoCandidateAssociationState::MATCHED);
+  EXPECT_EQ(result.group_diagnostics.front().association_mode,
+            CargoPhysicalAssociationMode::SUPPORT_OVERLAP_CONTINUITY);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     SupportOverlapCanPreserveHistoryWithoutRelaxing030) {
+  CargoPhysicalIdentityConfig config;
+  EXPECT_DOUBLE_EQ(config.maximum_xy_step_m, 0.30);
+  config.maximum_z_speed_mps = 5.0;
+  CargoPhysicalIdentityAuthority authority(config);
+  auto first = input(1.0, HookLoadSignalRole::REQUIRED, true,
+                     HookLoadState::EMPTY, 0.0, 0.70);
+  first.groups = {groupWithSupport(
+      1U, 1U, 1.0, -0.60, 0.60, 0.70)};
+  authority.update(first);
+  auto overlap = input(1.1, HookLoadSignalRole::REQUIRED, true,
+                       HookLoadState::LOADED, 0.0, 0.70);
+  overlap.groups = {groupWithSupport(
+      2U, 2U, 1.1, 0.20, 1.00, 0.70)};
+  const auto result = authority.update(overlap);
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_GT(result.group_diagnostics.front().xy_step_m, 0.30);
+  EXPECT_NEAR(result.group_diagnostics.front().support_xy_separation_m,
+              0.0, 1.0e-9);
+  EXPECT_EQ(result.group_diagnostics.front().association_mode,
+            CargoPhysicalAssociationMode::SUPPORT_OVERLAP_CONTINUITY);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     SeparatedSupportBeyond030CreatesNewHistory) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.maximum_xy_step_m = 0.30;
+  CargoPhysicalIdentityAuthority authority(config);
+  auto first = input(1.0, HookLoadSignalRole::REQUIRED, true,
+                     HookLoadState::EMPTY, 0.0, 0.70);
+  first.groups = {groupWithSupport(
+      1U, 1U, 1.0, -0.60, 0.60, 0.70)};
+  authority.update(first);
+  auto separated = input(1.1, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.0, 0.70);
+  separated.groups = {groupWithSupport(
+      2U, 2U, 1.1, 1.00, 1.80, 0.70)};
+  const auto result = authority.update(separated);
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_EQ(result.group_diagnostics.front().association,
+            CargoCandidateAssociationState::NEW_HISTORY);
+  EXPECT_EQ(result.group_diagnostics.front().association_mode,
+            CargoPhysicalAssociationMode::NEW_HISTORY);
+  EXPECT_GT(result.group_diagnostics.front().support_xy_separation_m, 0.30);
+  EXPECT_EQ(result.group_diagnostics.front().association_reject_reason,
+            "XY_GATE");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     StaticLowAndLiftingCargoDoNotMergeThroughOverlap) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.maximum_xy_step_m = 0.30;
+  config.maximum_z_speed_mps = 1.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  auto first = input(1.0, HookLoadSignalRole::REQUIRED, true,
+                     HookLoadState::EMPTY, 0.0, 0.30);
+  first.groups = {
+      groupWithSupport(1U, 1U, 1.0, -0.60, 0.40, 0.30),
+      groupWithSupport(2U, 2U, 1.0, -0.40, 0.60, 1.10)};
+  authority.update(first);
+  auto second = input(1.1, HookLoadSignalRole::REQUIRED, true,
+                      HookLoadState::LOADED, 0.0, 0.30);
+  second.groups = {
+      groupWithSupport(3U, 3U, 1.1, -0.20, 0.80, 0.30),
+      groupWithSupport(4U, 4U, 1.1, -0.80, 0.20, 1.10)};
+  const auto result = authority.update(second);
+  ASSERT_EQ(result.group_diagnostics.size(), 2U);
+  EXPECT_EQ(result.group_diagnostics[0].association,
+            CargoCandidateAssociationState::MATCHED);
+  EXPECT_EQ(result.group_diagnostics[1].association,
+            CargoCandidateAssociationState::MATCHED);
+  EXPECT_NE(result.group_diagnostics[0].matched_history_id,
+            result.group_diagnostics[1].matched_history_id);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     UnrelatedAmbiguousGroupDoesNotRevokeValidatedCargo) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  auto current = input(1.4, HookLoadSignalRole::REQUIRED, true,
+                       HookLoadState::LOADED, 0.0, 0.70);
+  current.groups = buildGroups({
+      candidate(10U, 1.4, 0.0, 0.70, {1U}),
+      candidate(20U, 1.4, 5.0, 0.70, {20U, 21U}),
+      candidate(21U, 1.4, 5.0, 0.70, {21U, 22U})});
+  const auto result = authority.update(current);
+  EXPECT_EQ(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_EQ(result.physical_history_id, validated.physical_history_id);
+  EXPECT_EQ(result.association, CargoCandidateAssociationState::MATCHED);
+  ASSERT_EQ(result.group_diagnostics.size(), 2U);
+  EXPECT_TRUE(result.group_diagnostics.front().frame_has_unrelated_ambiguity);
+  EXPECT_TRUE(result.group_diagnostics.back().frame_has_unrelated_ambiguity);
+  EXPECT_FALSE(result.group_diagnostics.back().validated_history_conflict);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     AmbiguityCompetingForValidatedHistoryRevokesIdentity) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  validateRequired(&authority);
+  auto current = input(1.4, HookLoadSignalRole::REQUIRED, true,
+                       HookLoadState::LOADED, 0.0, 0.70);
+  current.groups = buildGroups({
+      candidate(20U, 1.4, 0.0, 0.70, {20U, 21U}),
+      candidate(21U, 1.4, 0.0, 0.70, {21U, 22U})});
+  const auto result = authority.update(current);
+  EXPECT_EQ(result.identity, CargoPhysicalIdentityState::AMBIGUOUS);
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_TRUE(result.group_diagnostics.front().validated_history_conflict);
+  EXPECT_NE(result.group_diagnostics.front().conflicting_history_id, 0U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     TwoFreshConfirmedPhysicalHistoriesRemainAmbiguous) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  auto frame = input(1.0, HookLoadSignalRole::REQUIRED, true,
+                     HookLoadState::EMPTY, 0.0, 0.30);
+  frame.groups = buildGroups({
+      candidate(1U, 1.0, -1.0, 0.30, {1U}),
+      candidate(2U, 1.0, 1.0, 0.30, {2U})});
+  authority.update(frame);
+  for (int index = 1; index <= 3; ++index) {
+    const double stamp = 1.0 + 0.1 * index;
+    const double z = index == 1 ? 0.30 : 0.70;
+    frame = input(stamp, HookLoadSignalRole::REQUIRED, true,
+                  HookLoadState::LOADED, 0.0, z);
+    frame.groups = buildGroups({
+        candidate(10U + index, stamp, -1.0, z, {10U}),
+        candidate(20U + index, stamp, 1.0, z, {20U})});
+    const auto result = authority.update(frame);
+    if (index == 3) {
+      EXPECT_EQ(result.identity, CargoPhysicalIdentityState::AMBIGUOUS);
+      EXPECT_EQ(result.association, CargoCandidateAssociationState::AMBIGUOUS);
+    }
+  }
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ValidatedHistorySurvivesUnrelatedNewHistory) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  auto current = input(1.4, HookLoadSignalRole::REQUIRED, true,
+                       HookLoadState::LOADED, 0.0, 0.70);
+  current.groups = buildGroups({
+      candidate(10U, 1.4, 0.0, 0.70, {1U}),
+      candidate(20U, 1.4, 5.0, 0.70, {20U})});
+  const auto result = authority.update(current);
+  EXPECT_EQ(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_EQ(result.physical_history_id, validated.physical_history_id);
+  EXPECT_EQ(result.association, CargoCandidateAssociationState::MATCHED);
+  ASSERT_EQ(result.group_diagnostics.size(), 2U);
+  EXPECT_TRUE(std::any_of(
+      result.group_diagnostics.begin(), result.group_diagnostics.end(),
+      [](const CargoPhysicalGroupDiagnostic& diagnostic) {
+        return diagnostic.association ==
+            CargoCandidateAssociationState::NEW_HISTORY;
+      }));
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ExistingLiftThresholdContractsRemainUnchanged) {
+  const CargoPhysicalIdentityConfig config;
+  EXPECT_DOUBLE_EQ(config.maximum_xy_step_m, 0.30);
+  EXPECT_DOUBLE_EQ(config.maximum_observation_gap_sec, 0.50);
+  EXPECT_EQ(config.lift_confirm_frames, 4);
+  EXPECT_DOUBLE_EQ(config.minimum_significant_change_m, 0.15);
+  EXPECT_DOUBLE_EQ(config.significance_sigma, 3.0);
 }
 
 }  // namespace
