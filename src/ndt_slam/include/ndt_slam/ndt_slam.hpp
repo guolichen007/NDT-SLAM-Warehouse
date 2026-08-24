@@ -2128,8 +2128,8 @@ private:
     CargoShadowGeometryConfig integrated_geometry_config_;
     CargoShadowGeometryAuthority integrated_geometry_authority_;
     CargoShadowGeometryDecision integrated_geometry_decision_;
-    HookCargoDetection::ShadowCandidateSnapshot integrated_candidate_;
-    bool integrated_candidate_valid_ = false;
+    CargoPhysicalGroupEvidenceSnapshot integrated_group_evidence_;
+    CargoShadowThicknessState integrated_shadow_thickness_;
     bool integrated_shadow_seen_empty_ = false;
     ros::Time integrated_shadow_authority_stamp_;
     ros::Time integrated_shadow_last_detection_stamp_;
@@ -2138,7 +2138,6 @@ private:
     CargoAvoidanceFusionInput integrated_canonical_fusion_snapshot_;
     ros::Time integrated_canonical_fusion_snapshot_stamp_;
     bool integrated_canonical_fusion_snapshot_valid_ = false;
-    CargoVerticalEvidence integrated_shadow_vertical_evidence_;
     CargoBottomFusion integrated_shadow_bottom_fusion_;
     CargoBottomResult integrated_shadow_bottom_result_;
     double integrated_shadow_identity_compute_ms_ = 0.0;

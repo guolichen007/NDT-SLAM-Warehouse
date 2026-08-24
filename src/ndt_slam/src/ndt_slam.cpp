@@ -2858,6 +2858,7 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             std::max(0.05F, hook_fixed_config_.bottom_xy_cell_size);
         cargo_bottom_fusion_.setConfig(bottom_fusion_config);
         cargo_bottom_shadow_fusion_.setConfig(bottom_fusion_config);
+        integrated_shadow_bottom_fusion_.setConfig(bottom_fusion_config);
         cargo_vertical_evidence_v2_config_.surface_band_height_m =
             std::max(0.05F, hook_fixed_config_.bottom_band_height);
         cargo_vertical_evidence_v2_config_.xy_cell_size_m =
@@ -13615,8 +13616,6 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
             break;
     }
     input.groups = detection.shadow_physical_groups;
-    const std::uint64_t previous_shadow_history_id =
-        integrated_identity_decision_.physical_history_id;
     integrated_identity_decision_ =
         integrated_identity_authority_.update(input);
     integrated_shadow_authority_stamp_ = stamp;
@@ -13707,56 +13706,72 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << '\n';
         }
     }
-    if (previous_shadow_history_id != 0U &&
-        previous_shadow_history_id !=
-            integrated_identity_decision_.physical_history_id) {
+    const std::uint64_t shadow_lifecycle_id =
+        integrated_identity_decision_.load_epoch;
+    const bool identity_revoked = integrated_identity_decision_.identity !=
+        CargoPhysicalIdentityState::VALIDATED;
+    const bool owner_changed = integrated_group_evidence_.valid &&
+        !cargoPhysicalGroupEvidenceOwnerMatches(
+            integrated_group_evidence_, integrated_identity_decision_,
+            shadow_lifecycle_id);
+    const bool time_rollback = integrated_group_evidence_.valid &&
+        stamp.toSec() + 1.0e-9 <
+            integrated_group_evidence_.source_stamp_sec;
+    if (identity_revoked || owner_changed || time_rollback) {
         integrated_shadow_bottom_fusion_.reset();
         integrated_shadow_bottom_result_ = CargoBottomResult{};
-        integrated_shadow_vertical_evidence_ = CargoVerticalEvidence{};
+        integrated_geometry_authority_.reset(
+            identity_revoked ? "identity_revoked"
+                             : owner_changed ? "evidence_owner_changed"
+                                             : "source_time_rollback");
+        integrated_geometry_decision_ = CargoShadowGeometryDecision{};
+        integrated_shadow_thickness_.reset();
+        integrated_group_evidence_ =
+            CargoPhysicalGroupEvidenceSnapshot{};
         integrated_shadow_fusion_result_ = CargoAvoidanceFusionResult{};
     }
     integrated_shadow_identity_compute_ms_ =
         detection.shadow_physical_group_compute_ms +
         integratedShadowElapsedMs(identity_start);
 
-    bool candidate_observed_this_update = false;
-    if (integrated_identity_decision_.identity ==
-            CargoPhysicalIdentityState::VALIDATED &&
-        integrated_identity_decision_.geometry_resolved) {
-        for (const auto& candidate : detection.shadow_candidates) {
-            if (matchesResolvedPhysicalHypothesis(
-                    candidate.identity, integrated_identity_decision_)) {
-                integrated_candidate_ = candidate;
-                integrated_candidate_valid_ = true;
-                candidate_observed_this_update = true;
-                break;
+    const CargoPhysicalGroupEvidenceSnapshot current_group_evidence =
+        bindCargoPhysicalGroupEvidence(
+            detection.shadow_physical_groups,
+            integrated_identity_decision_, shadow_lifecycle_id);
+    const bool group_observed_this_update = current_group_evidence.valid;
+    if (group_observed_this_update) {
+        const bool new_source = !integrated_group_evidence_.valid ||
+            current_group_evidence.source_stamp_sec >
+                integrated_group_evidence_.source_stamp_sec + 1.0e-9;
+        integrated_group_evidence_ = current_group_evidence;
+        if (new_source) {
+            // A continuity-only group remains the physical owner, but it
+            // cannot advance formal geometry or create current top/bottom.
+            const auto geometry_start = IntegratedShadowDiagClock::now();
+            CargoShadowGeometryInput geometry_input;
+            geometry_input.stamp_sec = stamp.toSec();
+            geometry_input.identity = integrated_identity_decision_;
+            if (integrated_group_evidence_.supported_top_valid &&
+                integrated_group_evidence_.geometry_resolved) {
+                geometry_input.geometry =
+                    integrated_group_evidence_.resolved_geometry;
             }
+            integrated_geometry_decision_ =
+                integrated_geometry_authority_.update(geometry_input);
+            integrated_shadow_geometry_compute_ms_ =
+                integratedShadowElapsedMs(geometry_start);
+            if (!integrated_group_evidence_.supported_top_valid ||
+                !integrated_group_evidence_.geometry_resolved) {
+                integrated_shadow_bottom_result_ = CargoBottomResult{};
+            }
+        } else {
+            integrated_shadow_geometry_compute_ms_ = 0.0;
         }
-        if (!candidate_observed_this_update &&
-            (!integrated_candidate_valid_ ||
-             !matchesResolvedPhysicalHypothesis(
-                 integrated_candidate_.identity,
-                 integrated_identity_decision_))) {
-            integrated_candidate_valid_ = false;
-            integrated_candidate_ =
-                HookCargoDetection::ShadowCandidateSnapshot{};
-        }
-    } else {
-        integrated_candidate_valid_ = false;
-        integrated_candidate_ =
-            HookCargoDetection::ShadowCandidateSnapshot{};
-    }
-    if (candidate_observed_this_update ||
-        integrated_identity_decision_.identity !=
-            CargoPhysicalIdentityState::VALIDATED ||
-        !integrated_identity_decision_.geometry_resolved) {
+    } else if (identity_revoked) {
         const auto geometry_start = IntegratedShadowDiagClock::now();
         CargoShadowGeometryInput geometry_input;
         geometry_input.stamp_sec = stamp.toSec();
         geometry_input.identity = integrated_identity_decision_;
-        if (candidate_observed_this_update) {
-            geometry_input.candidate = integrated_candidate_.identity;
-        }
         integrated_geometry_decision_ =
             integrated_geometry_authority_.update(geometry_input);
         integrated_shadow_geometry_compute_ms_ =
@@ -21888,101 +21903,121 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
         updateIntegratedCargoIdentityShadow(
             HookCargoDetection{}, hook, stamp);
     }
-    const double candidate_age_sec = integrated_candidate_valid_
-        ? stamp.toSec() - integrated_candidate_.identity.stamp_sec
+    const std::uint64_t shadow_lifecycle_id =
+        integrated_identity_decision_.load_epoch;
+    const double group_evidence_age_sec = integrated_group_evidence_.valid
+        ? stamp.toSec() - integrated_group_evidence_.source_stamp_sec
         : std::numeric_limits<double>::infinity();
-    const bool candidate_current = integrated_candidate_valid_ &&
-        std::isfinite(candidate_age_sec) && candidate_age_sec >= 0.0 &&
-        candidate_age_sec <= integrated_identity_config_.maximum_source_age_sec;
+    const bool group_evidence_current =
+        cargoPhysicalGroupEvidenceOwnerMatches(
+            integrated_group_evidence_, integrated_identity_decision_,
+            shadow_lifecycle_id) &&
+        std::isfinite(group_evidence_age_sec) &&
+        group_evidence_age_sec >= 0.0 &&
+        group_evidence_age_sec <=
+            integrated_identity_config_.maximum_source_age_sec;
+    const bool group_supported_top_current = group_evidence_current &&
+        integrated_group_evidence_.supported_top_valid;
+    const bool group_geometry_current = group_evidence_current &&
+        integrated_group_evidence_.geometry_resolved &&
+        integrated_group_evidence_.resolved_geometry.valid;
 
     CargoObbFootprint shadow_footprint;
-    if (candidate_current && integrated_geometry_decision_.geometry_resolved) {
+    if (group_geometry_current) {
         shadow_footprint.valid = true;
         shadow_footprint.center_base =
-            integrated_candidate_.identity.center.head<2>().cast<float>();
+            integrated_group_evidence_.resolved_geometry
+                .footprint_center_base.cast<float>();
         shadow_footprint.length_m = static_cast<float>(
-            integrated_candidate_.identity.size.x());
+            integrated_group_evidence_.resolved_geometry.size.x());
         shadow_footprint.width_m = static_cast<float>(
-            integrated_candidate_.identity.size.y());
+            integrated_group_evidence_.resolved_geometry.size.y());
         shadow_footprint.yaw_base_rad = static_cast<float>(
-            integrated_candidate_.identity.yaw_rad);
-        shadow_footprint.min_z = static_cast<float>(
-            integrated_candidate_.identity.z05);
-        shadow_footprint.max_z = static_cast<float>(
-            integrated_candidate_.identity.z95);
+            integrated_group_evidence_.resolved_geometry.yaw_rad);
+        float raw_min_z = std::numeric_limits<float>::infinity();
+        float raw_max_z = -std::numeric_limits<float>::infinity();
+        for (const Eigen::Vector3f& point :
+             integrated_group_evidence_.union_points_base) {
+            if (!point.allFinite()) continue;
+            raw_min_z = std::min(raw_min_z, point.z());
+            raw_max_z = std::max(raw_max_z, point.z());
+        }
+        shadow_footprint.min_z = raw_min_z;
+        shadow_footprint.max_z = raw_max_z;
+        shadow_footprint.valid = std::isfinite(raw_min_z) &&
+            std::isfinite(raw_max_z) && raw_min_z < raw_max_z;
     }
 
-    if (candidate_current &&
+    if (group_supported_top_current && group_geometry_current) {
+        integrated_shadow_thickness_.freezeFromFormalGeometry(
+            integrated_group_evidence_, integrated_identity_decision_,
+            integrated_geometry_decision_,
+            integrated_shadow_bottom_fusion_.config().minimum_prior_height,
+            integrated_shadow_bottom_fusion_.config().maximum_prior_height);
+    }
+    const bool shadow_thickness_authorized =
+        shadowThicknessAuthorized(
+            integrated_shadow_thickness_.provenance,
+            integrated_identity_decision_, shadow_lifecycle_id);
+
+    if (group_supported_top_current && group_geometry_current &&
         (integrated_shadow_bottom_result_.track_id !=
              integrated_identity_decision_.physical_history_id ||
          std::abs(integrated_shadow_bottom_result_.stamp_sec -
-                  integrated_candidate_.identity.stamp_sec) > 1.0e-6)) {
-        CargoVerticalEvidenceInput vertical_input;
-        if (integrated_candidate_.points_base) {
-            vertical_input.selected_points_base.reserve(
-                integrated_candidate_.points_base->size());
-            for (const pcl::PointXYZ& point :
-                 integrated_candidate_.points_base->points) {
-                if (std::isfinite(point.x) && std::isfinite(point.y) &&
-                    std::isfinite(point.z)) {
-                    vertical_input.selected_points_base.emplace_back(
-                        point.x, point.y, point.z);
-                }
-            }
-        }
-        vertical_input.footprint_valid = shadow_footprint.valid;
-        vertical_input.footprint_center_base = shadow_footprint.center_base;
-        vertical_input.footprint_size_xy = Eigen::Vector2f(
-            shadow_footprint.length_m, shadow_footprint.width_m);
-        vertical_input.footprint_yaw_base_rad =
-            shadow_footprint.yaw_base_rad;
-        vertical_input.ground_reference_valid =
-            integrated_candidate_.ground_reference_valid;
-        vertical_input.ground_z_base =
-            integrated_candidate_.ground_z_base;
-        // No independent thickness owner exists in Phase SHADOW. Lifecycle
-        // equality alone is forbidden from authorizing product thickness.
-        vertical_input.frozen_thickness_valid = false;
-        vertical_input.frozen_thickness_matches_lifecycle = false;
-        integrated_shadow_vertical_evidence_ =
-            extractCargoVerticalEvidence(
-                vertical_input, cargo_vertical_evidence_v2_config_);
-
+                  integrated_group_evidence_.source_stamp_sec) > 1.0e-6)) {
         CargoBottomObservation bottom_input;
-        bottom_input.track_valid = integrated_identity_decision_.identity ==
-            CargoPhysicalIdentityState::VALIDATED;
+        bottom_input.track_valid = true;
         bottom_input.track_id =
             integrated_identity_decision_.physical_history_id;
-        bottom_input.stamp_sec = integrated_candidate_.identity.stamp_sec;
+        bottom_input.stamp_sec =
+            integrated_group_evidence_.source_stamp_sec;
         bottom_input.transform_stamp_sec =
-            integrated_candidate_.identity.stamp_sec;
+            integrated_group_evidence_.source_stamp_sec;
         bottom_input.T_map_base = Eigen::Isometry3f::Identity();
         bottom_input.T_map_base.matrix() = pose_map_base.matrix().cast<float>();
         bottom_input.points_base =
-            integrated_shadow_vertical_evidence_.clean_vertical_points_base;
-        bottom_input.current_top_valid =
-            integrated_shadow_vertical_evidence_.valid;
-        bottom_input.current_top_support_valid =
-            integrated_shadow_vertical_evidence_.valid;
+            integrated_group_evidence_.union_points_base;
+        bottom_input.current_top_valid = true;
+        bottom_input.current_top_support_valid = true;
         bottom_input.current_top_z_base =
-            integrated_shadow_vertical_evidence_.top_z_base;
-        bottom_input.footprint_valid = shadow_footprint.valid;
+            static_cast<float>(integrated_group_evidence_.supported_top_z);
+        // BottomFusion needs only the resolved XY footprint here; its own
+        // vertical evidence determines whether a physical bottom exists.
+        bottom_input.footprint_valid = group_geometry_current;
         bottom_input.footprint_center_base = shadow_footprint.center_base;
         bottom_input.footprint_size_xy = Eigen::Vector2f(
             shadow_footprint.length_m, shadow_footprint.width_m);
         bottom_input.footprint_yaw_base_rad =
             shadow_footprint.yaw_base_rad;
         bottom_input.track_center_valid =
-            integrated_candidate_.identity.center.allFinite();
+            integrated_group_evidence_.stable_anchor.allFinite();
         bottom_input.track_center_base =
-            integrated_candidate_.identity.center.cast<float>();
-        bottom_input.frozen_thickness_valid = false;
+            integrated_group_evidence_.stable_anchor.cast<float>();
+        bottom_input.frozen_thickness_valid =
+            shadow_thickness_authorized;
+        bottom_input.frozen_thickness_m =
+            integrated_shadow_thickness_.frozen_thickness_m;
+        bottom_input.frozen_thickness_stamp_sec =
+            integrated_shadow_thickness_.provenance.source_stamp_sec;
+        bottom_input.frozen_thickness_confidence =
+            shadow_thickness_authorized ? 1.0F : 0.0F;
         bottom_input.prior_height_valid = false;
         bottom_input.origin_height_valid = false;
         bottom_input.map_diff_height_valid = false;
         bottom_input.map_static_height_valid = false;
         integrated_shadow_bottom_result_ =
             integrated_shadow_bottom_fusion_.update(bottom_input);
+    }
+    if (integrated_shadow_bottom_result_.valid &&
+        group_supported_top_current) {
+        shadow_footprint.min_z =
+            integrated_shadow_bottom_result_.geometry.bottom_z_base;
+        shadow_footprint.max_z = static_cast<float>(
+            integrated_group_evidence_.supported_top_z);
+        shadow_footprint.valid = group_geometry_current &&
+            std::isfinite(shadow_footprint.min_z) &&
+            std::isfinite(shadow_footprint.max_z) &&
+            shadow_footprint.min_z < shadow_footprint.max_z;
     }
 
     bool raw_obstacle_inside_shadow = false;
@@ -22012,7 +22047,7 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
     safety_input.frame_id = base_frame_;
     safety_input.evaluation_time_sec = stamp.toSec();
     safety_input.height.valid = integrated_shadow_bottom_result_.valid;
-    safety_input.height.stale = !candidate_current;
+    safety_input.height.stale = !group_supported_top_current;
     safety_input.height.bottom_z =
         integrated_shadow_bottom_result_.geometry.bottom_z_base;
     safety_input.height.bottom_uncertainty_m =
@@ -22087,14 +22122,14 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
         canonical.live.hazard;
     if (canonical_snapshot_current &&
         integrated_shadow_bottom_result_.valid &&
-        integrated_candidate_valid_ &&
+        group_supported_top_current &&
         canonical.static_map.available &&
         std::isfinite(canonical.static_map.obstacle_top_z_map) &&
         std::isfinite(canonical.static_map.distance_m)) {
         const Eigen::Vector3d shadow_bottom_map = pose_map_base *
             Eigen::Vector3d(
-                integrated_candidate_.identity.center.x(),
-                integrated_candidate_.identity.center.y(),
+                integrated_group_evidence_.stable_anchor.x(),
+                integrated_group_evidence_.stable_anchor.y(),
                 integrated_shadow_bottom_result_.geometry.bottom_z_base);
         const float conservative_bottom =
             static_cast<float>(shadow_bottom_map.z()) -
@@ -22157,9 +22192,11 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
     }
 
     CargoShadowFusionProjection projection;
-    projection.pending = candidate_current &&
+    projection.pending = group_supported_top_current &&
+        group_geometry_current &&
         integrated_geometry_decision_.pending_envelope_valid;
-    projection.formal = candidate_current &&
+    projection.formal = group_supported_top_current &&
+        group_geometry_current &&
         integrated_geometry_decision_.formal_geometry_valid;
     projection.bottom_valid = integrated_shadow_bottom_result_.valid;
     projection.clear_authorized =
@@ -22236,10 +22273,17 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                 << "lift_delta_m,lift_threshold_m,lift_confirm_count,"
                 << "lift_confirm_required,evidence_age_sec,geometry_resolved,"
                 << "geometry_gate,geometry_reject_reason,pending,formal_lock,"
+                << "group_evidence_owner_valid,group_evidence_source_stamp,"
+                << "group_union_point_count,downstream_points_source,"
+                << "downstream_top_source,"
                 << "load_edge_stamp,identity_validation_stamp,pending_ready_stamp,"
-                << "formal_ready_stamp,thickness_valid,thickness_owner_history_id,"
-                << "thickness_source,"
-                << "shadow_top,shadow_bottom,bottom_valid,obstacle_distance,"
+                << "formal_ready_stamp,shadow_thickness_valid,"
+                << "shadow_thickness_m,shadow_thickness_owner_history_id,"
+                << "shadow_thickness_source,"
+                << "shadow_top,shadow_bottom,bottom_valid,bottom_source,"
+                << "bottom_reason,bottom_points_finite,"
+                << "bottom_points_visible_height,bottom_points_support_strong,"
+                << "resolved_candidate_points_used_for_bottom,obstacle_distance,"
                 << "clearance,shadow_code,shadow_official_valid,"
                 << "shadow_hazard_computed_this_frame,shadow_geometry_valid_this_frame,"
                 << "shadow_code_held_from_previous,first_obstacle_8m_stamp,"
@@ -22277,10 +22321,10 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             << shadow_member_ids.str() << ','
             << cargoLiftBaselineSourceName(
                    integrated_identity_decision_.baseline_source) << ','
-            << integrated_candidate_.product_predicted_center_score << ','
-            << integrated_candidate_.product_overlap_score << ','
-            << integrated_candidate_.product_identity_confidence << ','
-            << integrated_candidate_.product_overall_lock_confidence << ','
+            << std::numeric_limits<double>::quiet_NaN() << ','
+            << std::numeric_limits<double>::quiet_NaN() << ','
+            << std::numeric_limits<double>::quiet_NaN() << ','
+            << std::numeric_limits<double>::quiet_NaN() << ','
             << integrated_identity_decision_.lift_delta_m << ','
             << integrated_identity_decision_.lift_threshold_m << ','
             << integrated_identity_decision_.lift_confirm_count << ','
@@ -22291,21 +22335,40 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             << integrated_geometry_decision_.reject_reason << ','
             << (integrated_geometry_decision_.pending_envelope_valid ? 1 : 0) << ','
             << (integrated_geometry_decision_.formal_geometry_valid ? 1 : 0) << ','
+            << (group_evidence_current ? 1 : 0) << ','
+            << integrated_group_evidence_.source_stamp_sec << ','
+            << integrated_group_evidence_.union_points_base.size() << ','
+            << (group_supported_top_current && group_geometry_current
+                    ? "GROUP_RAW_UNION_COMPONENT_POINTS" : "NONE") << ','
+            << (group_supported_top_current
+                    ? "GROUP_SUPPORTED_VERTICAL_EVIDENCE" : "NONE") << ','
             << integrated_shadow_timing_.load_edge_stamp_sec << ','
             << integrated_identity_decision_.identity_validation_stamp_sec << ','
             << integrated_shadow_timing_.pending_ready_stamp_sec << ','
             << integrated_shadow_timing_.formal_ready_stamp_sec << ','
-            << 0 << ',' << 0 << ',' << "UNAVAILABLE_SHADOW_OWNER" << ','
-            << integrated_shadow_vertical_evidence_.top_z_base << ','
+            << (shadow_thickness_authorized ? 1 : 0) << ','
+            << integrated_shadow_thickness_.frozen_thickness_m << ','
+            << integrated_shadow_thickness_.provenance.physical_history_id
+            << ',' << integrated_shadow_thickness_.provenance.source << ','
+            << integrated_group_evidence_.supported_top_z << ','
             << integrated_shadow_bottom_result_.geometry.bottom_z_base << ','
             << (integrated_shadow_bottom_result_.valid ? 1 : 0) << ','
+            << integrated_shadow_bottom_result_.source_name << ','
+            << integrated_shadow_bottom_result_.reason << ','
+            << integrated_shadow_bottom_result_.points_stats.finite_points
+            << ','
+            << integrated_shadow_bottom_result_.points_stats.visible_height
+            << ','
+            << (integrated_shadow_bottom_result_.points_stats.support_strong
+                    ? 1 : 0) << ','
+            << 0 << ','
             << physical_distance_m << ','
             << integrated_shadow_fusion_result_.clearance_m << ','
             << integrated_shadow_fusion_result_.official_code << ','
             << (integrated_shadow_fusion_result_.official_valid ? 1 : 0) << ','
             << (hazard_computed ? 1 : 0) << ','
-            << (candidate_current && integrated_shadow_bottom_result_.valid &&
-                integrated_geometry_decision_.geometry_resolved ? 1 : 0) << ','
+            << (group_supported_top_current && group_geometry_current &&
+                integrated_shadow_bottom_result_.valid ? 1 : 0) << ','
             << 0 << ','
             << integrated_shadow_timing_.first_obstacle_8m_stamp_sec << ','
             << integrated_shadow_timing_.first_obstacle_5m_stamp_sec << ','

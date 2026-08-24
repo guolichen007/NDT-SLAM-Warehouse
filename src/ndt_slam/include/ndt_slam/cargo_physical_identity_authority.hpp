@@ -107,6 +107,10 @@ struct CargoPhysicalGroupDescriptor {
 struct CargoPhysicalGroupObservation {
   std::uint64_t frame_group_id = 0U;
   std::vector<std::uint64_t> member_component_ids;
+  // Current-frame physical points assembled directly from the underlying
+  // components. Each component contributes once. These points are never used
+  // by cross-frame association and are not a geometry-hypothesis point cloud.
+  std::vector<Eigen::Vector3f> union_points_base;
   std::vector<CargoPhysicalCandidateObservation> hypotheses;
   bool geometry_resolved = false;
   bool group_ambiguous = false;

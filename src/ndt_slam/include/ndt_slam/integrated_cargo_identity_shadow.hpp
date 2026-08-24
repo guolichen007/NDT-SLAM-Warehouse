@@ -10,6 +10,7 @@
 #include <deque>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace ndt_slam {
 
@@ -30,10 +31,52 @@ struct CargoShadowGeometryConfig {
   double minimum_axial_orientation_concentration = 0.70;
 };
 
+struct CargoShadowResolvedGeometryObservation {
+  bool valid = false;
+  double source_stamp_sec = 0.0;
+  Eigen::Vector2d footprint_center_base = Eigen::Vector2d::Zero();
+  double physical_anchor_z = 0.0;
+  double vertical_uncertainty_m = 0.20;
+  Eigen::Vector3d size = Eigen::Vector3d::Zero();
+  double yaw_rad = 0.0;
+  std::size_t point_support = 0U;
+};
+
+struct CargoPhysicalGroupEvidenceSnapshot {
+  bool valid = false;
+  std::uint64_t physical_history_id = 0U;
+  std::uint64_t frame_group_id = 0U;
+  std::uint64_t load_epoch = 0U;
+  std::uint64_t lifecycle_id = 0U;
+  double source_stamp_sec = 0.0;
+  std::vector<Eigen::Vector3f> union_points_base;
+  Eigen::Vector3d stable_anchor = Eigen::Vector3d::Zero();
+  CargoGroupVerticalMode vertical_mode = CargoGroupVerticalMode::INVALID;
+  bool supported_top_valid = false;
+  double supported_top_z = std::numeric_limits<double>::quiet_NaN();
+  double vertical_uncertainty_m = std::numeric_limits<double>::quiet_NaN();
+  std::string vertical_reject_reason = "not_evaluated";
+  bool geometry_resolved = false;
+  CargoShadowResolvedGeometryObservation resolved_geometry;
+  std::vector<std::uint64_t> member_component_ids;
+};
+
+// Binds a validated identity directly to its current frame-local physical
+// group. Candidate ids are intentionally absent from this ownership boundary.
+CargoPhysicalGroupEvidenceSnapshot bindCargoPhysicalGroupEvidence(
+    const std::vector<CargoPhysicalGroupObservation>& groups,
+    const CargoPhysicalIdentityDecision& identity,
+    std::uint64_t lifecycle_id);
+
+bool cargoPhysicalGroupEvidenceOwnerMatches(
+    const CargoPhysicalGroupEvidenceSnapshot& snapshot,
+    const CargoPhysicalIdentityDecision& identity,
+    std::uint64_t lifecycle_id) noexcept;
+
 struct CargoShadowGeometryInput {
   double stamp_sec = 0.0;
   CargoPhysicalIdentityDecision identity;
-  CargoPhysicalCandidateObservation candidate;
+  CargoShadowResolvedGeometryObservation geometry;
 };
 
 struct CargoShadowGeometryDecision {
@@ -44,8 +87,8 @@ struct CargoShadowGeometryDecision {
   bool reference_independent = true;
   bool geometry_resolved = false;
   std::uint64_t physical_history_id = 0U;
-  std::uint64_t candidate_id = 0U;
   int confirm_count = 0;
+  double source_stamp_sec = 0.0;
   double window_start_stamp_sec = 0.0;
   Eigen::Vector3d median_center = Eigen::Vector3d::Zero();
   Eigen::Vector3d median_size = Eigen::Vector3d::Zero();
@@ -67,9 +110,8 @@ class CargoShadowGeometryAuthority {
  private:
   CargoShadowGeometryConfig config_;
   CargoShadowGeometryDecision decision_;
-  std::deque<CargoPhysicalCandidateObservation> window_;
+  std::deque<CargoShadowResolvedGeometryObservation> window_;
   std::uint64_t history_id_ = 0U;
-  std::uint64_t candidate_id_ = 0U;
   double last_stamp_sec_ = 0.0;
   std::string reset_reason_ = "constructed";
 };
@@ -87,6 +129,19 @@ bool shadowThicknessAuthorized(
     const CargoShadowThicknessProvenance& provenance,
     const CargoPhysicalIdentityDecision& identity,
     std::uint64_t lifecycle_id) noexcept;
+
+struct CargoShadowThicknessState {
+  float frozen_thickness_m = 0.0F;
+  CargoShadowThicknessProvenance provenance;
+
+  void reset() noexcept;
+  bool freezeFromFormalGeometry(
+      const CargoPhysicalGroupEvidenceSnapshot& snapshot,
+      const CargoPhysicalIdentityDecision& identity,
+      const CargoShadowGeometryDecision& geometry,
+      float minimum_height_m,
+      float maximum_height_m);
+};
 
 struct CargoShadowFusionProjection {
   bool pending = false;

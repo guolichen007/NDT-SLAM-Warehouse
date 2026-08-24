@@ -263,6 +263,7 @@ std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
       union_points.insert(union_points.end(), found->second.begin(),
                           found->second.end());
     }
+    group.union_points_base = union_points;
     std::vector<double> xs;
     std::vector<double> ys;
     std::vector<double> zs;
@@ -675,6 +676,9 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     diagnostic.matched_history_id = history->id;
     history->association_ambiguous = false;
     history->last_group = group;
+    // Physical points belong to a current-frame evidence snapshot. Histories
+    // retain only the descriptor required by cross-frame association.
+    history->last_group.union_points_base.clear();
     history->last_stamp_sec = group.descriptor.stamp_sec;
 
     const bool supported = group.descriptor.vertical_mode ==

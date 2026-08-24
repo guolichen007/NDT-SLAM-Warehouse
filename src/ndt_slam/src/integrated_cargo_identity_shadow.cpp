@@ -18,14 +18,97 @@ double median(std::vector<double> values) {
   return 0.5 * (values[middle - 1U] + upper);
 }
 
-bool finiteCandidate(const CargoPhysicalCandidateObservation& candidate) {
-  return candidate.stamp_sec > 0.0 && std::isfinite(candidate.stamp_sec) &&
-      candidate.center.allFinite() && candidate.size.allFinite() &&
-      (candidate.size.array() > 0.0).all() &&
-      std::isfinite(candidate.yaw_rad) && std::isfinite(candidate.z95);
+bool finiteGeometry(
+    const CargoShadowResolvedGeometryObservation& geometry) {
+  return geometry.valid && geometry.source_stamp_sec > 0.0 &&
+      std::isfinite(geometry.source_stamp_sec) &&
+      geometry.footprint_center_base.allFinite() &&
+      std::isfinite(geometry.physical_anchor_z) &&
+      std::isfinite(geometry.vertical_uncertainty_m) &&
+      geometry.vertical_uncertainty_m >= 0.0 &&
+      geometry.size.allFinite() && (geometry.size.array() > 0.0).all() &&
+      std::isfinite(geometry.yaw_rad);
 }
 
 }  // namespace
+
+CargoPhysicalGroupEvidenceSnapshot bindCargoPhysicalGroupEvidence(
+    const std::vector<CargoPhysicalGroupObservation>& groups,
+    const CargoPhysicalIdentityDecision& identity,
+    std::uint64_t lifecycle_id) {
+  CargoPhysicalGroupEvidenceSnapshot snapshot;
+  if (identity.identity != CargoPhysicalIdentityState::VALIDATED ||
+      identity.physical_history_id == 0U || identity.frame_group_id == 0U) {
+    return snapshot;
+  }
+  const CargoPhysicalGroupObservation* selected = nullptr;
+  for (const CargoPhysicalGroupObservation& group : groups) {
+    if (group.frame_group_id != identity.frame_group_id) continue;
+    if (selected != nullptr) return CargoPhysicalGroupEvidenceSnapshot{};
+    selected = &group;
+  }
+  if (selected == nullptr ||
+      !std::isfinite(selected->descriptor.stamp_sec) ||
+      selected->descriptor.stamp_sec <= 0.0 ||
+      !selected->descriptor.stable_anchor.allFinite()) {
+    return snapshot;
+  }
+
+  snapshot.valid = true;
+  snapshot.physical_history_id = identity.physical_history_id;
+  snapshot.frame_group_id = selected->frame_group_id;
+  snapshot.load_epoch = identity.load_epoch;
+  snapshot.lifecycle_id = lifecycle_id;
+  snapshot.source_stamp_sec = selected->descriptor.stamp_sec;
+  snapshot.union_points_base = selected->union_points_base;
+  snapshot.stable_anchor = selected->descriptor.stable_anchor;
+  snapshot.vertical_mode = selected->descriptor.vertical_mode;
+  snapshot.supported_top_valid = selected->descriptor.vertical_mode ==
+          CargoGroupVerticalMode::SUPPORTED_EVIDENCE &&
+      std::isfinite(selected->descriptor.physical_vertical_z);
+  snapshot.supported_top_z = snapshot.supported_top_valid
+      ? selected->descriptor.physical_vertical_z
+      : std::numeric_limits<double>::quiet_NaN();
+  snapshot.vertical_uncertainty_m =
+      selected->descriptor.vertical_uncertainty_m;
+  snapshot.vertical_reject_reason =
+      selected->descriptor.vertical_reject_reason;
+  snapshot.member_component_ids = selected->member_component_ids;
+
+  const CargoPhysicalCandidateObservation& canonical =
+      selected->representative;
+  snapshot.geometry_resolved = selected->geometry_resolved &&
+      !selected->group_ambiguous && canonical.center.allFinite() &&
+      canonical.size.allFinite() && (canonical.size.array() > 0.0).all() &&
+      std::isfinite(canonical.yaw_rad);
+  if (snapshot.geometry_resolved) {
+    snapshot.resolved_geometry.valid = true;
+    snapshot.resolved_geometry.source_stamp_sec = snapshot.source_stamp_sec;
+    snapshot.resolved_geometry.footprint_center_base =
+        canonical.center.head<2>();
+    snapshot.resolved_geometry.physical_anchor_z =
+        snapshot.stable_anchor.z();
+    snapshot.resolved_geometry.vertical_uncertainty_m =
+        snapshot.vertical_uncertainty_m;
+    snapshot.resolved_geometry.size = canonical.size;
+    snapshot.resolved_geometry.yaw_rad = canonical.yaw_rad;
+    snapshot.resolved_geometry.point_support = canonical.point_support;
+  }
+  return snapshot;
+}
+
+bool cargoPhysicalGroupEvidenceOwnerMatches(
+    const CargoPhysicalGroupEvidenceSnapshot& snapshot,
+    const CargoPhysicalIdentityDecision& identity,
+    std::uint64_t lifecycle_id) noexcept {
+  return snapshot.valid &&
+      identity.identity == CargoPhysicalIdentityState::VALIDATED &&
+      snapshot.physical_history_id == identity.physical_history_id &&
+      snapshot.load_epoch == identity.load_epoch &&
+      snapshot.lifecycle_id == lifecycle_id &&
+      std::isfinite(snapshot.source_stamp_sec) &&
+      snapshot.source_stamp_sec > 0.0;
+}
 
 CargoShadowGeometryAuthority::CargoShadowGeometryAuthority(
     const CargoShadowGeometryConfig& config) {
@@ -55,48 +138,64 @@ void CargoShadowGeometryAuthority::reset(const std::string& reason) {
   window_.clear();
   decision_ = CargoShadowGeometryDecision{};
   history_id_ = 0U;
-  candidate_id_ = 0U;
   last_stamp_sec_ = 0.0;
   reset_reason_ = reason;
 }
 
 CargoShadowGeometryDecision CargoShadowGeometryAuthority::update(
     const CargoShadowGeometryInput& input) {
-  decision_ = CargoShadowGeometryDecision{};
-  decision_.reference_independent = true;
-  decision_.identity_validated = input.identity.identity ==
+  const bool identity_validated = input.identity.identity ==
       CargoPhysicalIdentityState::VALIDATED;
-  if (!decision_.identity_validated) {
+  if (!identity_validated) {
     reset("identity_not_validated");
     decision_.reject_reason = "identity_not_validated";
     return decision_;
   }
-  // candidate_id is frame-local. A resolved group may receive a different
-  // local hypothesis index on the next frame; physical_history_id is the
-  // stable identity key, while shape/orientation continuity below detects a
-  // real geometry transition.
   const bool identity_changed = history_id_ != 0U &&
       history_id_ != input.identity.physical_history_id;
   if (identity_changed) reset("validated_identity_changed");
-  decision_.reference_independent = true;
-  decision_.identity_validated = true;
-  history_id_ = input.identity.physical_history_id;
-  candidate_id_ = input.identity.resolved_candidate_id;
-  decision_.physical_history_id = history_id_;
-  decision_.candidate_id = candidate_id_;
-  decision_.geometry_resolved = input.identity.geometry_resolved;
-  if (!input.identity.current_candidate_fresh || !finiteCandidate(input.candidate)) {
-    decision_.reject_reason = "candidate_not_fresh_or_finite";
+
+  CargoShadowGeometryDecision current;
+  current.reference_independent = true;
+  current.identity_validated = true;
+  current.physical_history_id = input.identity.physical_history_id;
+  current.geometry_resolved = input.identity.geometry_resolved;
+  if (!finiteGeometry(input.geometry) ||
+      !input.identity.current_candidate_fresh) {
+    current.reject_reason = "group_geometry_not_fresh_or_finite";
+    decision_ = current;
+    history_id_ = input.identity.physical_history_id;
     return decision_;
   }
+
+  // A repeated pipeline frame may project the latest evidence, but only a
+  // strictly newer detector source stamp may advance formal confirmation.
+  if (last_stamp_sec_ > 0.0 &&
+      std::abs(input.geometry.source_stamp_sec - last_stamp_sec_) <= 1.0e-9) {
+    return decision_;
+  }
+  if (last_stamp_sec_ > 0.0 &&
+      input.geometry.source_stamp_sec < last_stamp_sec_) {
+    reset("geometry_source_time_rollback");
+    current.reject_reason = "geometry_source_time_rollback";
+    decision_ = current;
+    history_id_ = input.identity.physical_history_id;
+    return decision_;
+  }
+
+  decision_ = current;
+  decision_.reference_independent = true;
+  history_id_ = input.identity.physical_history_id;
+  decision_.physical_history_id = history_id_;
+  decision_.source_stamp_sec = input.geometry.source_stamp_sec;
   const bool physical_bounds =
-      input.candidate.point_support >= config_.minimum_point_support &&
-      input.candidate.size.x() >= config_.minimum_length_m &&
-      input.candidate.size.x() <= config_.maximum_length_m &&
-      input.candidate.size.y() >= config_.minimum_width_m &&
-      input.candidate.size.y() <= config_.maximum_width_m &&
-      input.candidate.size.z() >= config_.minimum_height_m &&
-      input.candidate.size.z() <= config_.maximum_height_m;
+      input.geometry.point_support >= config_.minimum_point_support &&
+      input.geometry.size.x() >= config_.minimum_length_m &&
+      input.geometry.size.x() <= config_.maximum_length_m &&
+      input.geometry.size.y() >= config_.minimum_width_m &&
+      input.geometry.size.y() <= config_.maximum_width_m &&
+      input.geometry.size.z() >= config_.minimum_height_m &&
+      input.geometry.size.z() <= config_.maximum_height_m;
   if (!physical_bounds || !input.identity.geometry_resolved) {
     decision_.reject_reason = input.identity.geometry_resolved
         ? "reference_independent_physical_bounds" : "geometry_ambiguous";
@@ -107,45 +206,45 @@ CargoShadowGeometryDecision CargoShadowGeometryAuthority::update(
   // envelope immediately. Formal clear authority requires the full window.
   decision_.pending_envelope_valid = true;
   if (last_stamp_sec_ > 0.0 &&
-      (input.stamp_sec <= last_stamp_sec_ ||
-       input.stamp_sec - last_stamp_sec_ >
+      (input.geometry.source_stamp_sec - last_stamp_sec_ >
            config_.maximum_observation_gap_sec)) {
     window_.clear();
   }
   if (!window_.empty()) {
     const auto& previous = window_.back();
-    const double dt = input.candidate.stamp_sec - previous.stamp_sec;
-    const double xy_step = (input.candidate.center.head<2>() -
-                            previous.center.head<2>()).norm();
+    const double dt = input.geometry.source_stamp_sec -
+        previous.source_stamp_sec;
+    const double xy_step = (input.geometry.footprint_center_base -
+                            previous.footprint_center_base).norm();
     const double z_limit = config_.maximum_z_speed_mps * std::max(0.0, dt) +
-        config_.z_step_margin_m + input.candidate.vertical_uncertainty_m +
+        config_.z_step_margin_m + input.geometry.vertical_uncertainty_m +
         previous.vertical_uncertainty_m;
-    const double z_step =
-        std::abs(input.candidate.center.z() - previous.center.z());
+    const double z_step = std::abs(
+        input.geometry.physical_anchor_z - previous.physical_anchor_z);
     if (!(dt > 0.0) || xy_step > config_.maximum_xy_step_m ||
         z_step > z_limit) {
       window_.clear();
     }
   }
   if (window_.empty()) {
-    decision_.window_start_stamp_sec = input.stamp_sec;
+    decision_.window_start_stamp_sec = input.geometry.source_stamp_sec;
   }
-  window_.push_back(input.candidate);
+  window_.push_back(input.geometry);
   while (window_.size() >
          static_cast<std::size_t>(config_.formal_confirm_frames)) {
     window_.pop_front();
   }
-  last_stamp_sec_ = input.stamp_sec;
+  last_stamp_sec_ = input.geometry.source_stamp_sec;
   decision_.confirm_count = static_cast<int>(window_.size());
-  decision_.window_start_stamp_sec = window_.front().stamp_sec;
+  decision_.window_start_stamp_sec = window_.front().source_stamp_sec;
 
   std::vector<double> xs, ys, zs, lengths, widths, heights;
   double axial_cos = 0.0;
   double axial_sin = 0.0;
   for (const auto& sample : window_) {
-    xs.push_back(sample.center.x());
-    ys.push_back(sample.center.y());
-    zs.push_back(sample.center.z());
+    xs.push_back(sample.footprint_center_base.x());
+    ys.push_back(sample.footprint_center_base.y());
+    zs.push_back(sample.physical_anchor_z);
     lengths.push_back(sample.size.x());
     widths.push_back(sample.size.y());
     heights.push_back(sample.size.z());
@@ -199,7 +298,46 @@ bool shadowThicknessAuthorized(
       provenance.load_epoch == identity.load_epoch &&
       provenance.lifecycle_id == lifecycle_id &&
       std::isfinite(provenance.source_stamp_sec) &&
-      provenance.source_stamp_sec > 0.0 && !provenance.source.empty();
+      provenance.source_stamp_sec > 0.0 &&
+      provenance.source ==
+          "SHADOW_REFERENCE_INDEPENDENT_FORMAL_GEOMETRY";
+}
+
+void CargoShadowThicknessState::reset() noexcept {
+  frozen_thickness_m = 0.0F;
+  provenance = CargoShadowThicknessProvenance{};
+}
+
+bool CargoShadowThicknessState::freezeFromFormalGeometry(
+    const CargoPhysicalGroupEvidenceSnapshot& snapshot,
+    const CargoPhysicalIdentityDecision& identity,
+    const CargoShadowGeometryDecision& geometry,
+    float minimum_height_m,
+    float maximum_height_m) {
+  if (provenance.valid) {
+    return shadowThicknessAuthorized(
+        provenance, identity, snapshot.lifecycle_id);
+  }
+  const double height = geometry.median_size.z();
+  if (!cargoPhysicalGroupEvidenceOwnerMatches(
+          snapshot, identity, snapshot.lifecycle_id) ||
+      !snapshot.geometry_resolved || !geometry.geometry_resolved ||
+      !geometry.formal_geometry_valid ||
+      geometry.physical_history_id != snapshot.physical_history_id ||
+      !std::isfinite(height) || !std::isfinite(minimum_height_m) ||
+      !std::isfinite(maximum_height_m) ||
+      height < minimum_height_m || height > maximum_height_m) {
+    return false;
+  }
+  frozen_thickness_m = static_cast<float>(height);
+  provenance.valid = true;
+  provenance.physical_history_id = snapshot.physical_history_id;
+  provenance.load_epoch = snapshot.load_epoch;
+  provenance.lifecycle_id = snapshot.lifecycle_id;
+  provenance.source =
+      "SHADOW_REFERENCE_INDEPENDENT_FORMAL_GEOMETRY";
+  provenance.source_stamp_sec = geometry.source_stamp_sec;
+  return true;
 }
 
 CargoAvoidanceFusionInput projectShadowCargoOntoCanonicalFusion(
