@@ -13751,6 +13751,11 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
             CargoShadowGeometryInput geometry_input;
             geometry_input.stamp_sec = stamp.toSec();
             geometry_input.identity = integrated_identity_decision_;
+            // Preserve the detector evidence stamp even when the current
+            // geometry is unresolved. The authority uses that new stamp as a
+            // hard break in provisional confirmation continuity.
+            geometry_input.geometry.source_stamp_sec =
+                integrated_group_evidence_.source_stamp_sec;
             if (integrated_group_evidence_.supported_top_valid &&
                 integrated_group_evidence_.geometry_resolved) {
                 geometry_input.geometry =

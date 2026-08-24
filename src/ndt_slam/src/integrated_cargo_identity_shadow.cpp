@@ -160,18 +160,41 @@ CargoShadowGeometryDecision CargoShadowGeometryAuthority::update(
   current.identity_validated = true;
   current.physical_history_id = input.identity.physical_history_id;
   current.geometry_resolved = input.identity.geometry_resolved;
-  if (!finiteGeometry(input.geometry) ||
-      !input.identity.current_candidate_fresh) {
-    current.reject_reason = "group_geometry_not_fresh_or_finite";
-    decision_ = current;
-    history_id_ = input.identity.physical_history_id;
-    return decision_;
+  const bool source_stamp_valid =
+      std::isfinite(input.geometry.source_stamp_sec) &&
+      input.geometry.source_stamp_sec > 0.0;
+  const auto breakProvisionalContinuity =
+      [&](const std::string& reason) {
+        window_.clear();
+        decision_ = current;
+        decision_.source_stamp_sec = source_stamp_valid
+            ? input.geometry.source_stamp_sec : 0.0;
+        decision_.confirm_count = 0;
+        decision_.pending_envelope_valid = false;
+        decision_.formal_geometry_valid = false;
+        decision_.formal_clear_authorized = false;
+        decision_.reject_reason = reason;
+        history_id_ = input.identity.physical_history_id;
+        if (source_stamp_valid) {
+          last_stamp_sec_ = input.geometry.source_stamp_sec;
+        }
+        return decision_;
+      };
+
+  if (!source_stamp_valid) {
+    return breakProvisionalContinuity(
+        "group_geometry_source_stamp_invalid");
   }
 
   // A repeated pipeline frame may project the latest evidence, but only a
   // strictly newer detector source stamp may advance formal confirmation.
   if (last_stamp_sec_ > 0.0 &&
       std::abs(input.geometry.source_stamp_sec - last_stamp_sec_) <= 1.0e-9) {
+    if (!finiteGeometry(input.geometry) ||
+        !input.identity.current_candidate_fresh ||
+        !input.identity.geometry_resolved) {
+      return breakProvisionalContinuity("geometry_ambiguity_break");
+    }
     return decision_;
   }
   if (last_stamp_sec_ > 0.0 &&
@@ -181,6 +204,15 @@ CargoShadowGeometryDecision CargoShadowGeometryAuthority::update(
     decision_ = current;
     history_id_ = input.identity.physical_history_id;
     return decision_;
+  }
+
+  if (!finiteGeometry(input.geometry) ||
+      !input.identity.current_candidate_fresh) {
+    return breakProvisionalContinuity(
+        "group_geometry_not_fresh_or_finite");
+  }
+  if (!input.identity.geometry_resolved) {
+    return breakProvisionalContinuity("geometry_ambiguous");
   }
 
   decision_ = current;
@@ -196,10 +228,9 @@ CargoShadowGeometryDecision CargoShadowGeometryAuthority::update(
       input.geometry.size.y() <= config_.maximum_width_m &&
       input.geometry.size.z() >= config_.minimum_height_m &&
       input.geometry.size.z() <= config_.maximum_height_m;
-  if (!physical_bounds || !input.identity.geometry_resolved) {
-    decision_.reject_reason = input.identity.geometry_resolved
-        ? "reference_independent_physical_bounds" : "geometry_ambiguous";
-    return decision_;
+  if (!physical_bounds) {
+    return breakProvisionalContinuity(
+        "reference_independent_physical_bounds");
   }
 
   // A validated, fresh, plausible candidate is a positive-only Pending

@@ -144,6 +144,95 @@ TEST(IntegratedCargoIdentityShadowTest,
 }
 
 TEST(IntegratedCargoIdentityShadowTest,
+     GeometryAmbiguityBreaksFormalConfirmationWindow) {
+  CargoShadowGeometryConfig config;
+  config.formal_confirm_frames = 2;
+  CargoShadowGeometryAuthority authority(config);
+  CargoShadowGeometryInput input;
+  input.identity = validatedIdentity();
+  input.stamp_sec = 1.0;
+  input.geometry = geometry(1.0);
+  EXPECT_EQ(authority.update(input).confirm_count, 1);
+
+  input.identity.geometry_resolved = false;
+  input.stamp_sec = 1.1;
+  input.geometry = geometry(1.1);
+  const auto ambiguous = authority.update(input);
+  EXPECT_EQ(ambiguous.confirm_count, 0);
+  EXPECT_FALSE(ambiguous.pending_envelope_valid);
+  EXPECT_FALSE(ambiguous.formal_geometry_valid);
+  EXPECT_FALSE(ambiguous.formal_clear_authorized);
+
+  input.identity.geometry_resolved = true;
+  input.stamp_sec = 1.2;
+  input.geometry = geometry(1.2);
+  const auto restarted = authority.update(input);
+  EXPECT_EQ(restarted.confirm_count, 1);
+  EXPECT_FALSE(restarted.formal_geometry_valid);
+}
+
+TEST(IntegratedCargoIdentityShadowTest,
+     GeometryInvalidFrameCannotBridgeFormalConfirmation) {
+  CargoShadowGeometryConfig config;
+  config.formal_confirm_frames = 2;
+  CargoShadowGeometryAuthority authority(config);
+  CargoShadowGeometryInput input;
+  input.identity = validatedIdentity();
+  input.stamp_sec = 1.0;
+  input.geometry = geometry(1.0);
+  EXPECT_EQ(authority.update(input).confirm_count, 1);
+
+  input.stamp_sec = 1.1;
+  input.geometry = geometry(1.1);
+  input.geometry.valid = false;
+  EXPECT_EQ(authority.update(input).confirm_count, 0);
+
+  input.stamp_sec = 1.2;
+  input.geometry = geometry(1.2);
+  const auto restarted = authority.update(input);
+  EXPECT_EQ(restarted.confirm_count, 1);
+  EXPECT_FALSE(restarted.formal_geometry_valid);
+}
+
+TEST(IntegratedCargoIdentityShadowTest,
+     GeometryPhysicalBoundsFailureBreaksFormalConfirmation) {
+  CargoShadowGeometryConfig config;
+  config.formal_confirm_frames = 2;
+  CargoShadowGeometryAuthority authority(config);
+  CargoShadowGeometryInput input;
+  input.identity = validatedIdentity();
+  input.stamp_sec = 1.0;
+  input.geometry = geometry(1.0);
+  EXPECT_EQ(authority.update(input).confirm_count, 1);
+
+  input.stamp_sec = 1.1;
+  input.geometry = geometry(1.1);
+  input.geometry.point_support = 0U;
+  EXPECT_EQ(authority.update(input).confirm_count, 0);
+
+  input.stamp_sec = 1.2;
+  input.geometry = geometry(1.2);
+  EXPECT_EQ(authority.update(input).confirm_count, 1);
+}
+
+TEST(IntegratedCargoIdentityShadowTest,
+     GeometryUnresolvedFrameCannotReuseOldBottomForClear) {
+  CargoAvoidanceFusionInput canonical;
+  canonical.formal_cargo_geometry_valid = true;
+  canonical.formal_cargo_bottom_valid = true;
+  canonical.formal_clear_authorized = true;
+  CargoShadowFusionProjection unresolved;
+  unresolved.formal = false;
+  unresolved.bottom_valid = true;
+  unresolved.clear_authorized = true;
+  const auto projected = projectShadowCargoOntoCanonicalFusion(
+      canonical, unresolved);
+  EXPECT_FALSE(projected.formal_cargo_geometry_valid);
+  EXPECT_FALSE(projected.formal_cargo_bottom_valid);
+  EXPECT_FALSE(projected.formal_clear_authorized);
+}
+
+TEST(IntegratedCargoIdentityShadowTest,
      ValidatedGroupFeedsBottomWithoutResolvedCandidatePoints) {
   const CargoPhysicalGroupObservation group = physicalGroup(1.0, 991U);
   const auto snapshot = bindCargoPhysicalGroupEvidence(

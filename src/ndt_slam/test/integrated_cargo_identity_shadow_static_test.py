@@ -100,6 +100,24 @@ class IntegratedCargoIdentityShadowStaticTest(unittest.TestCase):
         self.assertNotIn("matchesResolvedPhysicalHypothesis(", body)
         self.assertNotIn("detection.shadow_candidates", body)
 
+    def test_geometry_ambiguity_breaks_current_bottom_authority(self) -> None:
+        body = function_body(
+            "void NdtSlamNode::updateIntegratedCargoIdentityShadow(",
+            "NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(",
+        )
+        self.assertIn(
+            "geometry_input.geometry.source_stamp_sec", body
+        )
+        self.assertIn(
+            "!integrated_group_evidence_.geometry_resolved", body
+        )
+        self.assertIn(
+            "integrated_shadow_bottom_result_ = CargoBottomResult{}", body
+        )
+        self.assertNotIn("integrated_shadow_thickness_.reset()", body[body.index(
+            "if (group_observed_this_update)"
+        ):])
+
     def test_shadow_thickness_has_only_reference_independent_owner(self) -> None:
         body = function_body(
             "void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(",
