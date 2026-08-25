@@ -128,5 +128,21 @@ TEST(RelocalizationConfirmationPolicy, NonfiniteQualityNeverConfirms) {
       decision.reason, "nonfinite_relocalization_candidate");
 }
 
+TEST(RelocalizationConfirmationPolicy,
+     RailConfirmationNeverConsumesFreeYawDifference) {
+  const auto first = evaluateRailRelocalizationConfirmation(
+      candidate(10U, 1.0, 1.0, -45.0));
+  ASSERT_EQ(first.outcome,
+            RelocalizationConfirmationOutcome::CONFIRMING);
+  auto second_input = candidate(11U, 1.1, 1.1, 70.0);
+  second_input.last_result_frame = 10U;
+  second_input.previous_confirmation_count = first.confirmation_count;
+  second_input.previous_correction = first.correction;
+  const auto second = evaluateRailRelocalizationConfirmation(second_input);
+  EXPECT_EQ(second.outcome,
+            RelocalizationConfirmationOutcome::CONFIRMED);
+  EXPECT_NEAR(second.correction.so3().log().norm(), 0.0, 1.0e-12);
+}
+
 }  // namespace
 }  // namespace ndt_slam

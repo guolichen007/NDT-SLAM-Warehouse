@@ -106,6 +106,26 @@ double integratedShadowElapsedMs(
         IntegratedShadowDiagClock::now() - begin).count();
 }
 
+YawAuthorityMode parseYawAuthorityMode(const std::string& value) {
+    if (value == "LEGACY") return YawAuthorityMode::LEGACY;
+    if (value == "SHADOW") return YawAuthorityMode::SHADOW;
+    if (value == "RAIL_AUTHORITY") return YawAuthorityMode::RAIL_AUTHORITY;
+    throw std::runtime_error("invalid runtime_yaw_authority.mode: " + value);
+}
+
+YawReferenceSource parseYawReferenceSource(const std::string& value) {
+    if (value == "NEW_MAP_BOOTSTRAP_REFERENCE") {
+        return YawReferenceSource::NEW_MAP_BOOTSTRAP_REFERENCE;
+    }
+    if (value == "CONFIG_SITE_REFERENCE") {
+        return YawReferenceSource::CONFIG_SITE_REFERENCE;
+    }
+    if (value == "VERIFIED_MAP_SESSION") {
+        return YawReferenceSource::VERIFIED_MAP_SESSION;
+    }
+    throw std::runtime_error("invalid runtime yaw reference source: " + value);
+}
+
 std::string escapeJsonString(const std::string& value) {
     std::ostringstream escaped;
     for (const unsigned char character : value) {
@@ -1953,6 +1973,9 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             fitness_circuit_config.minimum_adaptive_threshold + 0.01,
             map_commit_max_fitness_);
         ndt_fitness_circuit_breaker_.setConfig(fitness_circuit_config);
+        // RAIL uses an independent adaptive history, but exactly the same
+        // health contract and thresholds as the legacy free-NDT circuit.
+        rail_fitness_circuit_breaker_.setConfig(fitness_circuit_config);
         ROS_DEBUG(
             "[NDT-FitnessCircuit] enabled=%d window=%zu warmup=%zu "
             "adaptive_min=%.3f hard=%.3f enter=%d recover=%d",
@@ -1963,6 +1986,65 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             fitness_circuit_config.hard_reject_threshold,
             fitness_circuit_config.enter_confirmations,
             fitness_circuit_config.recovery_confirmations);
+
+        if (config["runtime_yaw_authority"]) {
+            const auto rail = config["runtime_yaw_authority"];
+            yaw_authority_mode_ = parseYawAuthorityMode(
+                rail["mode"].as<std::string>("LEGACY"));
+            if (rail["reference"]) {
+                const auto reference = rail["reference"];
+                configured_rail_yaw_reference_.schema_version =
+                    reference["schema_version"].as<std::uint32_t>(1U);
+                configured_rail_yaw_reference_.verified =
+                    reference["verified"].as<bool>(false);
+                configured_rail_yaw_reference_.rail_yaw_in_map_rad =
+                    reference["rail_yaw_in_map_rad"].as<double>(0.0);
+                configured_rail_yaw_reference_.source =
+                    parseYawReferenceSource(reference["source"].as<std::string>(
+                        "CONFIG_SITE_REFERENCE"));
+                configured_rail_yaw_reference_.map_frame_uuid =
+                    reference["map_frame_uuid"].as<std::string>("");
+                configured_rail_yaw_reference_.map_frame_id =
+                    reference["map_frame_id"].as<std::string>("map");
+                configured_rail_yaw_reference_.base_frame_id =
+                    reference["base_frame_id"].as<std::string>("base_link");
+                configured_rail_yaw_reference_.map_frame_convention_id =
+                    reference["map_frame_convention_id"].as<std::string>("");
+                configured_rail_yaw_reference_.sensor_rig_calibration_id =
+                    reference["sensor_rig_calibration_id"].as<std::string>("");
+                configured_rail_yaw_reference_.reference_uuid =
+                    reference["reference_uuid"].as<std::string>("");
+                configured_rail_yaw_reference_.reference_hash =
+                    reference["reference_hash"].as<std::string>("");
+                if (configured_rail_yaw_reference_.reference_hash.empty() &&
+                    configured_rail_yaw_reference_.verified) {
+                    configured_rail_yaw_reference_.reference_hash =
+                        semanticYawReferenceHash(configured_rail_yaw_reference_);
+                }
+            }
+        }
+        if (!yaw_authority_mode_latch_.initialize(
+                yaw_authority_mode_, frame_session_id_)) {
+            throw std::runtime_error(
+                "runtime yaw authority mode changed within a frame session");
+        }
+        if (yaw_authority_mode_ != YawAuthorityMode::LEGACY &&
+            configured_rail_yaw_reference_.verified) {
+            const bool initialized = rail_yaw_authority_.initialize(
+                configured_rail_yaw_reference_,
+                configured_rail_yaw_reference_.source ==
+                        YawReferenceSource::NEW_MAP_BOOTSTRAP_REFERENCE
+                    ? YawAuthorityTransitionReason::INITIALIZE_FRESH_MAP
+                    : YawAuthorityTransitionReason::LOAD_VERIFIED_SESSION);
+            if (!initialized) {
+                ROS_ERROR("[RailYaw] configured reference failed validation");
+            }
+        }
+        ROS_INFO("[RailYaw] mode=%s reference_valid=%d generation=%llu",
+                 yawAuthorityModeName(yaw_authority_mode_),
+                 rail_yaw_authority_.valid() ? 1 : 0,
+                 static_cast<unsigned long long>(
+                     rail_yaw_authority_.generation()));
 
         // v8-stable-r3: SoftYawFilter 参数
         // ICP is disabled in the production profile. Parse every field so
@@ -2095,6 +2177,18 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
         }
         crane_motion_ekf_cfg_.observability = ndt_observability_config_;
         crane_motion_ekf_.setConfig(crane_motion_ekf_cfg_);
+        FixedYawTranslationSolverConfig fixed_yaw_config;
+        fixed_yaw_config.maximum_iterations = std::max(
+            1, std::min(10, ndt_max_iterations_));
+        fixed_yaw_config.target_normal_neighbor_count = std::max(
+            3, ndt_observability_config_.local_neighbor_count);
+        fixed_yaw_config.minimum_inliers = std::max<std::size_t>(
+            3U, ndt_observability_config_.min_local_normals);
+        fixed_yaw_config.maximum_correspondence_distance_m = std::max(
+            0.10, 1.5 * ndt_resolution_);
+        fixed_yaw_config.convergence_translation_m = std::max(
+            1.0e-6, ndt_transformation_epsilon_);
+        fixed_yaw_translation_solver_.setConfig(fixed_yaw_config);
 
         // V3: Localization Target 参数
         if (config["localization_target"]) {
@@ -6192,6 +6286,10 @@ void NdtSlamNode::processCloudThread() {
         bool frame_severe_degeneracy =
             frame_ndt_observability.severely_degenerate;
         NdtFitnessCircuitDecision frame_fitness_decision;
+        NdtFitnessCircuitDecision frame_proposal_fitness_decision;
+        bool frame_fixed_yaw_measurement_valid = false;
+        bool frame_rail_target_identity_valid = false;
+        bool frame_safety_localization_authorized = true;
         Sophus::SE3d frame_raw_ndt_pose = current_pose_;
         double frame_raw_increment_m = 0.0;
         static Sophus::SE3d last_local_map_pose = Sophus::SE3d();
@@ -6415,6 +6513,7 @@ void NdtSlamNode::processCloudThread() {
                     }
                     frame_fitness_decision =
                         ndt_fitness_circuit_breaker_.update(fitness_score);
+                    frame_proposal_fitness_decision = frame_fitness_decision;
                     if (frame_fitness_decision.transitioned_open) {
                         ROS_ERROR(
                             "[NDT-FitnessCircuit] OPEN fitness=%.4f "
@@ -6495,6 +6594,145 @@ void NdtSlamNode::processCloudThread() {
                         }
                         diag_previous_raw_ndt_pose = new_pose;
                         diag_have_previous_raw_ndt_pose = true;
+
+                        // Free NDT owns proposal/basin discovery only in
+                        // SHADOW/RAIL modes.  Both fixed-yaw solves consume
+                        // the exact immutable target snapshot bound above.
+                        if (yaw_authority_mode_ != YawAuthorityMode::LEGACY) {
+                            const auto raw_rpy = cranePoseRpy(new_pose.so3());
+                            if (raw_rpy.valid) {
+                                rail_yaw_authority_.observeProposalYaw(
+                                    raw_rpy.yaw, msg->header.stamp.toSec());
+                            }
+                            frame_rail_target_identity_valid =
+                                current_registration_target_snapshot_.valid();
+                            last_fixed_yaw_predicted_result_ =
+                                FixedYawTranslationResult{};
+                            last_fixed_yaw_free_result_ =
+                                FixedYawTranslationResult{};
+                            last_fixed_yaw_seed_decision_ =
+                                FixedYawDualSeedDecision{};
+                            if (rail_yaw_authority_.valid() &&
+                                frame_rail_target_identity_valid) {
+                                FixedYawTranslationInput predicted_input;
+                                predicted_input.source_cloud_base =
+                                    registration_cloud;
+                                predicted_input.target =
+                                    current_registration_target_snapshot_;
+                                predicted_input.seed_pose_map_base =
+                                    diag_initial_guess_pose;
+                                predicted_input.authoritative_yaw_rad =
+                                    rail_yaw_authority_.yawRad();
+                                predicted_input.seed_source =
+                                    FixedYawSeedSource::EKF_PREDICTION;
+                                last_fixed_yaw_predicted_result_ =
+                                    fixed_yaw_translation_solver_.solve(
+                                        predicted_input);
+
+                                FixedYawTranslationInput free_input =
+                                    predicted_input;
+                                free_input.seed_pose_map_base = new_pose;
+                                free_input.seed_source =
+                                    FixedYawSeedSource::FREE_NDT_BASIN;
+                                last_fixed_yaw_free_result_ =
+                                    fixed_yaw_translation_solver_.solve(
+                                        free_input);
+
+                                const double basin_limit =
+                                    crane_motion_ekf_.initialized()
+                                        ? std::max(
+                                              1.0e-6,
+                                              crane_motion_ekf_.status()
+                                                  .max_allowed_step)
+                                        : std::max(
+                                              1.0e-6,
+                                              crane_motion_ekf_cfg_
+                                                  .max_step_max_m);
+                                last_fixed_yaw_seed_decision_ =
+                                    selectFixedYawDualSeed(
+                                        last_fixed_yaw_predicted_result_,
+                                        last_fixed_yaw_free_result_,
+                                        basin_limit);
+                                last_fixed_yaw_solver_ms_ =
+                                    last_fixed_yaw_predicted_result_.elapsed_ms +
+                                    last_fixed_yaw_free_result_.elapsed_ms;
+                                last_target_normal_cache_build_ms_ =
+                                    last_fixed_yaw_predicted_result_
+                                        .target_normal_cache_build_ms +
+                                    last_fixed_yaw_free_result_
+                                        .target_normal_cache_build_ms;
+                            }
+
+                            if (yaw_authority_mode_ ==
+                                YawAuthorityMode::RAIL_AUTHORITY) {
+                                frame_fixed_yaw_measurement_valid =
+                                    last_fixed_yaw_seed_decision_
+                                        .authoritative_measurement_valid;
+                                if (frame_fixed_yaw_measurement_valid) {
+                                    new_pose = last_fixed_yaw_seed_decision_
+                                                   .selected.pose_map_base;
+                                    fitness_score =
+                                        last_fixed_yaw_seed_decision_
+                                            .selected.fitness;
+                                    last_ndt_fitness_ = fitness_score;
+                                    frame_fitness_decision =
+                                        rail_fitness_circuit_breaker_.update(
+                                            fitness_score);
+                                    last_raw_step_ =
+                                        (new_pose.translation().head<2>() -
+                                         diag_initial_guess_pose.translation()
+                                             .head<2>())
+                                            .norm();
+
+                                    const auto& rail_result =
+                                        last_fixed_yaw_seed_decision_.selected;
+                                    frame_ndt_observability = NdtObservability{};
+                                    frame_ndt_observability.valid =
+                                        std::isfinite(
+                                            rail_result.strong_eigenvalue) &&
+                                        rail_result.strong_eigenvalue > 0.0;
+                                    frame_ndt_observability.strong_eigenvalue =
+                                        rail_result.strong_eigenvalue;
+                                    frame_ndt_observability.weak_eigenvalue =
+                                        rail_result.weak_eigenvalue;
+                                    frame_ndt_observability.eigenvalue_ratio =
+                                        rail_result.strong_eigenvalue > 0.0
+                                            ? rail_result.weak_eigenvalue /
+                                                  rail_result.strong_eigenvalue
+                                            : 0.0;
+                                    frame_ndt_observability.strong_direction =
+                                        rail_result.strong_direction;
+                                    frame_ndt_observability.weak_direction =
+                                        rail_result.weak_direction;
+                                    frame_ndt_observability.local_normals =
+                                        rail_result.inliers;
+                                    frame_ndt_observability.structure_points =
+                                        rail_result.inliers;
+                                    frame_ndt_observability.degenerate =
+                                        frame_ndt_observability
+                                            .eigenvalue_ratio <
+                                        ndt_observability_config_
+                                            .moderate_ratio;
+                                    frame_ndt_observability
+                                        .severely_degenerate =
+                                        frame_ndt_observability
+                                            .eigenvalue_ratio <
+                                        ndt_observability_config_.severe_ratio;
+                                    frame_ndt_observability.reason =
+                                        "fixed_yaw_translation_hessian";
+                                    frame_severe_degeneracy =
+                                        frame_ndt_observability
+                                            .severely_degenerate;
+                                } else {
+                                    frame_fitness_decision =
+                                        NdtFitnessCircuitDecision{};
+                                    frame_fitness_decision.allow_measurement =
+                                        false;
+                                    frame_fitness_decision.reason =
+                                        last_fixed_yaw_seed_decision_.reason;
+                                }
+                            }
+                        }
 
                         // P0-3: 保存 raw pose for MapCommit evidence
                         // Note: This is ONLY used for MapCommit evidence, NOT for odom/TF/runtime_path
@@ -6692,6 +6930,39 @@ void NdtSlamNode::processCloudThread() {
             ROS_ERROR("NDT_OMP exception: %s", e.what());
         }
 
+        const bool raw_proposal_healthy =
+            last_ndt_converged_ && ndt_safe_pose_valid_this_frame &&
+            frame_proposal_fitness_decision.allow_measurement &&
+            std::isfinite(frame_raw_ndt_pose.translation().x());
+        RailLocalizationHealthInput rail_health_input;
+        rail_health_input.mode = yaw_authority_mode_;
+        rail_health_input.raw_ndt_proposal_healthy = raw_proposal_healthy;
+        rail_health_input.yaw_reference_valid =
+            rail_yaw_authority_.valid();
+        rail_health_input.target_identity_valid =
+            frame_rail_target_identity_valid;
+        rail_health_input.fixed_xy_valid =
+            frame_fixed_yaw_measurement_valid;
+        rail_health_input.ekf_measurement_accepted =
+            !crane_motion_ekf_enabled_ ||
+            (crane_motion_ekf_.initialized() &&
+             crane_motion_ekf_.status().ndt_accepted);
+        rail_health_input.rail_fitness_allow_measurement =
+            frame_fitness_decision.allow_measurement;
+        rail_health_input.rail_fitness_baseline_ready =
+            frame_fitness_decision.baseline_ready;
+        rail_health_input.reference_failure_nonrecoverable =
+            yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY &&
+            !rail_yaw_authority_.valid();
+        rail_health_input.prediction_continuity_valid =
+            registration_success && crane_motion_ekf_.initialized();
+        localization_authority_health_ =
+            evaluateRailLocalizationHealth(rail_health_input);
+        frame_safety_localization_authorized =
+            yaw_authority_mode_ != YawAuthorityMode::RAIL_AUTHORITY ||
+            localization_authority_health_
+                .safety_localization_authorized;
+
         if (ndt_attempted_this_frame &&
             !startup_first_ndt_result_logged_.exchange(
                 true, std::memory_order_acq_rel)) {
@@ -6775,6 +7046,17 @@ void NdtSlamNode::processCloudThread() {
             allow_persistent_map_commit_ =
                 stationary_motion_decision_.allow_persistent_map_commit;
         }
+        if (yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY) {
+            allow_runtime_local_map_update_ =
+                allow_runtime_local_map_update_ &&
+                localization_authority_health_.map_mutation_authorized;
+            allow_persistent_map_commit_ =
+                allow_persistent_map_commit_ &&
+                localization_authority_health_.map_mutation_authorized;
+            frame_registration_quality_valid =
+                frame_registration_quality_valid &&
+                localization_authority_health_.authoritative_frame_healthy;
+        }
 
         // Runtime local-map writes are authorized independently from
         // persistent MapCommit. STATIONARY_HOLD, MOVING_CONFIRM, CATCH_UP,
@@ -6835,7 +7117,10 @@ void NdtSlamNode::processCloudThread() {
         // ========== 阶段 6：更新位姿 ==========
         // v8-stable-r3-hotfix-minimal: 统一 final_pose 发布链路
         Sophus::SE3d constrained_pose = new_pose;
-        if (registration_success && crane_constraint_enabled_) {
+        if (registration_success &&
+            yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY) {
+            constrained_pose = applyRailYawAuthorityConstraint(new_pose);
+        } else if (registration_success && crane_constraint_enabled_) {
             const auto& ekf_status = crane_motion_ekf_.status();
             double speed_xy = ekf_status.velocity.norm();
             // Soft-yaw low-motion behavior is derived from the EKF velocity,
@@ -6866,14 +7151,29 @@ void NdtSlamNode::processCloudThread() {
         }
 
         if (ndt_attempted_this_frame) {
-            const bool frame_ndt_healthy =
-                last_ndt_converged_ && ndt_safe_pose_valid_this_frame &&
-                frame_fitness_decision.allow_measurement &&
-                std::isfinite(last_ndt_fitness_) &&
-                (!crane_motion_ekf_enabled_ ||
-                 crane_motion_ekf_.status().ndt_accepted);
-            updateRelocalization(processing_frame_index, msg->header.stamp,
-                                 registration_cloud, frame_ndt_healthy);
+            if (yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY) {
+                if (localization_authority_health_
+                        .authoritative_frame_healthy) {
+                    updateRelocalization(
+                        processing_frame_index, msg->header.stamp,
+                        registration_cloud, true);
+                } else if (localization_authority_health_
+                               .increment_relocalization_bad_frames) {
+                    updateRelocalization(
+                        processing_frame_index, msg->header.stamp,
+                        registration_cloud, false);
+                }
+            } else {
+                const bool frame_ndt_healthy =
+                    last_ndt_converged_ && ndt_safe_pose_valid_this_frame &&
+                    frame_fitness_decision.allow_measurement &&
+                    std::isfinite(last_ndt_fitness_) &&
+                    (!crane_motion_ekf_enabled_ ||
+                     crane_motion_ekf_.status().ndt_accepted);
+                updateRelocalization(
+                    processing_frame_index, msg->header.stamp,
+                    registration_cloud, frame_ndt_healthy);
+            }
         }
 
         // ========== 阶段 7：发布结果（用完整点云建图）==========
@@ -6945,7 +7245,8 @@ void NdtSlamNode::processCloudThread() {
             // Formal cargo chain: same-stamp tracked points + final odometry
             // pose -> fused bottom -> conservative per-cluster safety status.
             // The heartbeat node is the only producer of the PLC alarm topic.
-            if (relocalization_pose_reliable_) {
+            if (relocalization_pose_reliable_ &&
+                frame_safety_localization_authorized) {
                 updateAndPublishCargoSafetyPipeline(
                     feature_cloud, filtered_cloud, final_pose,
                     cargo_raw_physical_pose, publish_time,
@@ -6966,7 +7267,8 @@ void NdtSlamNode::processCloudThread() {
             // is invalidated after one consume attempt.
             const auto icp_prepare_start = DiagClock::now();
             Sophus::SE3d map_pose = constrained_pose;
-            if (icp_refine_cfg_.enabled &&
+            if (yaw_authority_mode_ != YawAuthorityMode::RAIL_AUTHORITY &&
+                icp_refine_cfg_.enabled &&
                 icp_refine_cfg_.run_after_ndt &&
                 runtime_ndt_accepted) {
                 Sophus::SE3d frame_refined_pose;
@@ -7025,7 +7327,10 @@ void NdtSlamNode::processCloudThread() {
                     icp_stale_drop_count_.load(std::memory_order_relaxed)));
 
             const auto current_cloud_start = DiagClock::now();
-            addFrameToMap(filtered_cloud, map_pose, publish_time);
+            if (yaw_authority_mode_ != YawAuthorityMode::RAIL_AUTHORITY ||
+                localization_authority_health_.map_mutation_authorized) {
+                addFrameToMap(filtered_cloud, map_pose, publish_time);
+            }
             diag_stage.current_cloud_ms = elapsedMs(current_cloud_start);
 
             // v8-stable-r3: MapCommit 只允许在 ndt_accepted=true 且 fitness 合格时执行
@@ -7054,7 +7359,9 @@ void NdtSlamNode::processCloudThread() {
             const bool allow_map_commit =
                 commit_accept_ok && commit_fitness_ok &&
                 motion_gate_allows_commit && relocalization_commit_ok &&
-                hook_commit_ok;
+                hook_commit_ok &&
+                (yaw_authority_mode_ != YawAuthorityMode::RAIL_AUTHORITY ||
+                 localization_authority_health_.map_mutation_authorized);
             diag_map_commit_allowed = allow_map_commit;
             diag_motion_gate_blocked =
                 commit_accept_ok && commit_fitness_ok &&
@@ -10751,8 +11058,11 @@ void NdtSlamNode::consumeRelocalizationResult(
     confirmation_input.previous_correction =
         relocalization_confirmation_pose_;
     const RelocalizationConfirmationDecision decision =
-        evaluateRelocalizationConfirmation(
-            confirmation_input, confirmation_config);
+        yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY
+            ? evaluateRailRelocalizationConfirmation(
+                  confirmation_input, confirmation_config)
+            : evaluateRelocalizationConfirmation(
+                  confirmation_input, confirmation_config);
 
     if (decision.update_last_result_frame) {
         relocalization_last_result_frame_ =
@@ -10792,8 +11102,17 @@ void NdtSlamNode::consumeRelocalizationResult(
         // is not pulled backwards to a stale absolute pose.
         const Sophus::SE3d motion_since_job =
             result.reference_pose.inverse() * current_pose_;
-        const Sophus::SE3d recovered_at_current_stamp =
+        Sophus::SE3d recovered_at_current_stamp =
             result.pose * motion_since_job;
+        if (yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY) {
+            Eigen::Vector3d rail_translation = current_pose_.translation();
+            rail_translation.head<2>() =
+                result.pose.translation().head<2>() +
+                (current_pose_.translation().head<2>() -
+                 result.reference_pose.translation().head<2>());
+            recovered_at_current_stamp = applyRailYawAuthorityConstraint(
+                Sophus::SE3d(Sophus::SO3d(), rail_translation));
+        }
         applyRelocalizedPose(recovered_at_current_stamp, stamp, result);
         relocalization_confirmation_count_ = 0;
         relocalization_bad_frames_ = 0;
@@ -11039,8 +11358,12 @@ void NdtSlamNode::updateRelocalization(
 void NdtSlamNode::applyRelocalizedPose(
     const Sophus::SE3d& pose, const ros::Time& stamp,
     const RelocalizationResult& result) {
-    Sophus::SE3d recovered = crane_constraint_enabled_
-        ? applyCraneMotionConstraint(pose, "relocalization") : pose;
+    Sophus::SE3d recovered =
+        yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY
+            ? applyRailYawAuthorityConstraint(pose)
+            : (crane_constraint_enabled_
+                   ? applyCraneMotionConstraint(pose, "relocalization")
+                   : pose);
     {
         std::lock_guard<std::mutex> lock(cloud_mutex_);
         current_pose_ = recovered;
@@ -11051,9 +11374,13 @@ void NdtSlamNode::applyRelocalizedPose(
         crane_motion_ekf_.initialize(recovered, stamp);
     }
     ndt_fitness_circuit_breaker_.reset();
-    const Eigen::Matrix3d rotation = recovered.so3().matrix();
-    filtered_yaw_rad_ = std::atan2(rotation(1, 0), rotation(0, 0));
-    filtered_yaw_initialized_ = true;
+    rail_fitness_circuit_breaker_.reset();
+    if (yaw_authority_mode_ != YawAuthorityMode::RAIL_AUTHORITY) {
+        const Eigen::Matrix3d rotation = recovered.so3().matrix();
+        filtered_yaw_rad_ = std::atan2(rotation(1, 0), rotation(0, 0));
+        filtered_yaw_initialized_ = true;
+    }
+    keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
 
     // Recenter the runtime map without changing the persistent global map.
     {
@@ -11549,10 +11876,16 @@ void NdtSlamNode::handleLidarTimeRollback(
         last_anchor_summary_stamp_ = ros::Time();
 
         crane_motion_ekf_.reset();
+        rail_fitness_circuit_breaker_.reset();
+        fixed_yaw_translation_solver_.resetTargetCache();
+        rail_yaw_authority_.handleTimestampRollback(
+            current_stamp.toSec());
         resetStationaryState("lidar_source_time_rollback");
         has_last_raw_ndt_pose_ = false;
         has_commit_gate_reference_ = false;
-        filtered_yaw_initialized_ = false;
+        if (yaw_authority_mode_ != YawAuthorityMode::RAIL_AUTHORITY) {
+            filtered_yaw_initialized_ = false;
+        }
 
         // Confirmed first false gate: preserve its spatial reference and
         // rebase only the source-time reference into the new epoch.
@@ -13614,7 +13947,10 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
     input.hook_role = hook_load_signal_role_;
     input.hook_role_source = "startup_hook_load_signal.role";
     input.localization_authorized = !tracking_lost_.load() &&
-        relocalization_pose_reliable_;
+        relocalization_pose_reliable_ &&
+        (yaw_authority_mode_ != YawAuthorityMode::RAIL_AUTHORITY ||
+         localization_authority_health_
+             .safety_localization_authorized);
     input.pose_authority_identity_valid = input.localization_authorized;
     input.gravity_valid = hook.valid;
     input.frame_evidence = std::move(frame_evidence);
@@ -25944,6 +26280,24 @@ Sophus::SE3d NdtSlamNode::applyCraneOutputConstraint(
     return result.pose;
 }
 
+Sophus::SE3d NdtSlamNode::applyRailYawAuthorityConstraint(
+    const Sophus::SE3d& pose_in) const {
+    if (!rail_yaw_authority_.valid()) return pose_in;
+    ndt_slam::CranePoseConstraintConfig config;
+    config.enabled = true;
+    config.lock_z = true;
+    config.fixed_z = fixed_z_;
+    config.lock_roll = true;
+    config.fixed_roll_rad = 0.0;
+    config.lock_pitch = true;
+    config.fixed_pitch_rad = 0.0;
+    config.lock_yaw = true;
+    config.fixed_yaw_rad = rail_yaw_authority_.yawRad();
+    const auto result = ndt_slam::applyCranePoseConstraint(
+        pose_in, config, {false, 0.0});
+    return result.valid ? result.pose : pose_in;
+}
+
 // ============================================================================
 // v8-stable-r3: NDT 输入减负函数
 // ============================================================================
@@ -26274,6 +26628,8 @@ void NdtSlamNode::bindNdtInputTarget(
 
     if (changed) {
         ndt_->setInputTarget(target);
+        rail_fitness_circuit_breaker_.reset();
+        fixed_yaw_translation_solver_.resetTargetCache();
         last_bound_ndt_target_ = target;
         last_bound_ndt_target_version_ = content_version;
         last_bound_ndt_target_source_ = source;

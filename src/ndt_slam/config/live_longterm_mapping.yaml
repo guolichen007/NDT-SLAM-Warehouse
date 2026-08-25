@@ -540,6 +540,24 @@ crane_motion_ekf:
     max_step_min_m: 0.05
     max_step_max_m: 0.25
 
+# Startup/session-immutable localization authority.  The production profile
+# remains byte-for-behavior LEGACY until an approved, path-independent map
+# reference is supplied for the combined Ubuntu sandbox acceptance.
+runtime_yaw_authority:
+  mode: "LEGACY"  # LEGACY | SHADOW | RAIL_AUTHORITY
+  reference:
+    schema_version: 1
+    verified: false
+    rail_yaw_in_map_rad: 0.0
+    source: "CONFIG_SITE_REFERENCE"
+    map_frame_uuid: ""
+    map_frame_id: "map"
+    base_frame_id: "base_link"
+    map_frame_convention_id: ""
+    sensor_rig_calibration_id: ""
+    reference_uuid: ""
+    reference_hash: ""
+
 # ========== v8-stable-r3-final: SoftYawFilter ==========
 soft_yaw_filter:
   enabled: true

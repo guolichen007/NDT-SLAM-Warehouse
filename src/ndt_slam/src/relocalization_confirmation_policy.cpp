@@ -126,4 +126,85 @@ RelocalizationConfirmationDecision evaluateRelocalizationConfirmation(
   return decision;
 }
 
+RelocalizationConfirmationDecision evaluateRailRelocalizationConfirmation(
+    const RelocalizationConfirmationInput& input,
+    const RelocalizationConfirmationConfig& config) {
+  RelocalizationConfirmationDecision decision;
+  if (config.required_confirmations < 2 ||
+      config.maximum_age_frames == 0U ||
+      !std::isfinite(config.maximum_age_sec) ||
+      config.maximum_age_sec <= 0.0 ||
+      !std::isfinite(config.maximum_translation_delta_m) ||
+      config.maximum_translation_delta_m <= 0.0 ||
+      !std::isfinite(input.current_stamp_sec) ||
+      input.current_stamp_sec <= 0.0) {
+    decision.reason = "invalid_rail_confirmation_policy_input";
+    return decision;
+  }
+  const RelocalizationResult& result = input.result;
+  if (result.map_generation != input.expected_map_generation ||
+      result.pose_version != input.expected_pose_version) {
+    decision.outcome = RelocalizationConfirmationOutcome::DISCARD_IDENTITY;
+    decision.reason = "stale_rail_map_or_pose_generation_discarded";
+    return decision;
+  }
+  if (result.frame_index <= input.last_result_frame) {
+    decision.outcome = RelocalizationConfirmationOutcome::DISCARD_DUPLICATE;
+    decision.reason = "duplicate_or_out_of_order_rail_result";
+    return decision;
+  }
+  decision.update_last_result_frame = true;
+  decision.last_result_frame = result.frame_index;
+  const double age = input.current_stamp_sec - result.stamp_sec;
+  const bool future = result.frame_index > input.current_frame_index;
+  const bool frame_stale = !future &&
+      input.current_frame_index - result.frame_index >
+          config.maximum_age_frames;
+  if (future || frame_stale || !std::isfinite(age) || age < -0.05 ||
+      age > config.maximum_age_sec) {
+    decision.outcome = RelocalizationConfirmationOutcome::DISCARD_STALE;
+    decision.reason = "stale_rail_result_discarded";
+    return decision;
+  }
+  if (!result.valid || !std::isfinite(result.fitness) ||
+      !poseFinite(result.pose) || !poseFinite(result.reference_pose)) {
+    decision.outcome = RelocalizationConfirmationOutcome::DISCARD_INVALID;
+    decision.reason = "invalid_rail_relocalization_candidate";
+    return decision;
+  }
+  const Eigen::Vector2d correction_xy =
+      result.pose.translation().head<2>() -
+      result.reference_pose.translation().head<2>();
+  if (!correction_xy.allFinite()) {
+    decision.outcome = RelocalizationConfirmationOutcome::DISCARD_INVALID;
+    decision.reason = "nonfinite_rail_xy_correction";
+    return decision;
+  }
+  Eigen::Vector3d correction_translation = Eigen::Vector3d::Zero();
+  correction_translation.head<2>() = correction_xy;
+  decision.correction = Sophus::SE3d(
+      Sophus::SO3d(), correction_translation);
+
+  bool consistent = false;
+  if (input.previous_confirmation_count > 0 &&
+      poseFinite(input.previous_correction)) {
+    consistent =
+        (correction_xy -
+         input.previous_correction.translation().head<2>()).norm() <=
+        config.maximum_translation_delta_m;
+  }
+  decision.confirmation_count = consistent
+      ? input.previous_confirmation_count + 1 : 1;
+  decision.outcome =
+      decision.confirmation_count >= config.required_confirmations
+          ? RelocalizationConfirmationOutcome::CONFIRMED
+          : RelocalizationConfirmationOutcome::CONFIRMING;
+  decision.reason =
+      decision.outcome == RelocalizationConfirmationOutcome::CONFIRMED
+          ? "rail_xy_candidate_confirmed"
+          : (consistent ? "rail_xy_candidate_consistent"
+                        : "rail_xy_confirmation_restarted");
+  return decision;
+}
+
 }  // namespace ndt_slam

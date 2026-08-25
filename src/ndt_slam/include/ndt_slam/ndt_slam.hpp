@@ -69,6 +69,8 @@
 #include <ndt_slam/cargo_geometry_fusion.hpp>
 #include <ndt_slam/cargo_preload_baseline_tracker.hpp>
 #include <ndt_slam/registration_target_snapshot.hpp>
+#include <ndt_slam/rail_localization_authority.hpp>
+#include <ndt_slam/fixed_yaw_translation_solver.hpp>
 #include <ndt_slam/pending_cargo_envelope.hpp>
 #include <ndt_slam/pending_cargo_self_evidence.hpp>
 #include <ndt_slam/revealed_support_observer.hpp>
@@ -547,6 +549,25 @@ private:
     Sophus::SE3d applyCraneOutputConstraint(const Sophus::SE3d& pose_in,
                                             bool is_stationary,
                                             double speed_xy);
+    Sophus::SE3d applyRailYawAuthorityConstraint(
+        const Sophus::SE3d& pose_in) const;
+
+    // Rail mode is startup/session immutable.  Free NDT remains a proposal;
+    // only the fixed-yaw translation result can become an XY measurement.
+    YawAuthorityMode yaw_authority_mode_ = YawAuthorityMode::LEGACY;
+    YawAuthorityModeLatch yaw_authority_mode_latch_;
+    std::uint64_t frame_session_id_ = 1U;
+    RailYawReference configured_rail_yaw_reference_;
+    RailYawAuthority rail_yaw_authority_;
+    FixedYawTranslationSolver fixed_yaw_translation_solver_;
+    NdtFitnessCircuitBreaker rail_fitness_circuit_breaker_;
+    LocalizationAuthorityHealth localization_authority_health_;
+    FixedYawTranslationResult last_fixed_yaw_predicted_result_;
+    FixedYawTranslationResult last_fixed_yaw_free_result_;
+    FixedYawDualSeedDecision last_fixed_yaw_seed_decision_;
+    double last_fixed_yaw_solver_ms_ = 0.0;
+    double last_rail_pose_fitness_ms_ = 0.0;
+    double last_target_normal_cache_build_ms_ = 0.0;
 
     // ========== v8-stable-r3: Registration Input ==========
     RegistrationCloudBuildConfig registration_cloud_config_;

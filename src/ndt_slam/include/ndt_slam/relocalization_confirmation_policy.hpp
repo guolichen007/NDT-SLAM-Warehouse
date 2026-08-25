@@ -50,4 +50,13 @@ RelocalizationConfirmationDecision evaluateRelocalizationConfirmation(
     const RelocalizationConfirmationConfig& config =
         RelocalizationConfirmationConfig{});
 
+// RAIL confirmation deliberately ignores free-search yaw.  The result pose
+// has already identified a basin; only independently repeated XY correction
+// may mature.  This API separation prevents legacy yaw gates/writers from
+// being reintroduced into the rail authority path.
+RelocalizationConfirmationDecision evaluateRailRelocalizationConfirmation(
+    const RelocalizationConfirmationInput& input,
+    const RelocalizationConfirmationConfig& config =
+        RelocalizationConfirmationConfig{});
+
 }  // namespace ndt_slam
