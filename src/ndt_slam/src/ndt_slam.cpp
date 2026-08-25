@@ -6268,6 +6268,7 @@ void NdtSlamNode::processCloudThread() {
                 pcl::PointCloud<pcl::PointXYZ>::ConstPtr selected_target = local_map_;
                 std::string selected_source = "bootstrap_local_map";
                 std::string selected_reason = "target_not_ready";
+                std::string selected_crop_identity = "full_local_map";
                 uint64_t selected_version = local_map_version_;
 
                 if (localization_target_use_for_ndt_ && localization_target_enabled_ && localization_target_ready_) {
@@ -6286,6 +6287,8 @@ void NdtSlamNode::processCloudThread() {
                             selected_source = "cropped_localization_target";
                             selected_reason = "ready";
                             selected_version = cached_target_version_;
+                            selected_crop_identity =
+                                cached_target_crop_identity_;
                         } else {
                             selected_source = "fallback_local_map";
                             selected_reason = last_target_reason_;
@@ -6299,6 +6302,8 @@ void NdtSlamNode::processCloudThread() {
                             selected_source = "localization_target_snapshot";
                             selected_reason = "ready";
                             selected_version = localization_target_snapshot_version_;
+                            selected_crop_identity =
+                                "full_localization_target";
                         } else {
                             selected_source = "fallback_local_map";
                             selected_reason = "snapshot_below_min_points";
@@ -6313,7 +6318,8 @@ void NdtSlamNode::processCloudThread() {
                 }
 
                 bindNdtInputTarget(selected_target, selected_source,
-                                   selected_version, selected_reason);
+                                   selected_version, selected_reason,
+                                   selected_crop_identity);
                 ndt_->setInputSource(registration_cloud);
                 diag_stage.target_bind_ms = elapsedMs(target_bind_start);
 
@@ -26213,6 +26219,17 @@ bool NdtSlamNode::updateCroppedCachedTarget(const Sophus::SE3d& predicted_pose) 
     cached_target_version_ = snapshot_version;
     cached_target_points_ = static_cast<int>(cached_target_->size());
     cached_target_valid_ = true;
+    {
+        std::ostringstream crop_identity;
+        crop_identity << std::fixed << std::setprecision(4)
+                      << "source_version=" << snapshot_version
+                      << ";center_x=" << pred_pos.x()
+                      << ";center_y=" << pred_pos.y()
+                      << ";radius_x=" << crop_radius_x_
+                      << ";radius_y=" << crop_radius_y_
+                      << ";yaw=" << pred_yaw;
+        cached_target_crop_identity_ = crop_identity.str();
+    }
     crop_frames_since_update_ = 0;
     localization_target_state_ = LocalizationTargetState::TARGET_READY;
     last_target_reason_ = "crop_ready";
@@ -26223,7 +26240,8 @@ void NdtSlamNode::bindNdtInputTarget(
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& target,
     const std::string& source,
     uint64_t content_version,
-    const std::string& reason) {
+    const std::string& reason,
+    const std::string& crop_identity) {
     if (!target || target->empty()) {
         last_target_points_ = 0;
         last_actual_target_source_ = "invalid";
@@ -26232,10 +26250,27 @@ void NdtSlamNode::bindNdtInputTarget(
         return;
     }
 
+    const RegistrationTargetSnapshot snapshot =
+        makeRegistrationTargetSnapshot(
+            target, registrationTargetSourceFromName(source),
+            content_version,
+            map_rebuild_generation_.load(std::memory_order_acquire),
+            std::string{}, crop_identity);
+    if (!snapshot.valid()) {
+        last_target_points_ = 0;
+        last_actual_target_source_ = "invalid";
+        last_target_reason_ = "registration_target_snapshot_invalid";
+        ROS_ERROR_THROTTLE(
+            1.0, "[LocTarget] refusing target without snapshot identity");
+        return;
+    }
+
     const bool changed = !last_bound_ndt_target_ ||
         last_bound_ndt_target_.get() != target.get() ||
         last_bound_ndt_target_version_ != content_version ||
-        last_bound_ndt_target_source_ != source;
+        last_bound_ndt_target_source_ != source ||
+        current_registration_target_snapshot_.target_snapshot_id !=
+            snapshot.target_snapshot_id;
 
     if (changed) {
         ndt_->setInputTarget(target);
@@ -26257,6 +26292,8 @@ void NdtSlamNode::bindNdtInputTarget(
                  static_cast<unsigned long long>(content_version),
                  target->size(), reason.c_str(), setInputTarget_count_);
     }
+
+    current_registration_target_snapshot_ = snapshot;
 
     target_version_ = content_version;
     last_target_points_ = static_cast<int>(target->size());

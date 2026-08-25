@@ -68,6 +68,7 @@
 #include <ndt_slam/integrated_cargo_identity_shadow.hpp>
 #include <ndt_slam/cargo_geometry_fusion.hpp>
 #include <ndt_slam/cargo_preload_baseline_tracker.hpp>
+#include <ndt_slam/registration_target_snapshot.hpp>
 #include <ndt_slam/pending_cargo_envelope.hpp>
 #include <ndt_slam/pending_cargo_self_evidence.hpp>
 #include <ndt_slam/revealed_support_observer.hpp>
@@ -238,7 +239,8 @@ private:
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& target,
         const std::string& source,
         uint64_t content_version,
-        const std::string& reason);
+        const std::string& reason,
+        const std::string& crop_identity = "full_target");
 
     void rebuildGlobalMapFromSnapshot(std::uint64_t expected_generation);
 
@@ -655,6 +657,8 @@ private:
     bool bootstrap_local_map_complete_ = false;
     int bootstrap_local_map_frames_ = 0;
     std::string last_bound_ndt_target_source_ = "none";
+    std::string cached_target_crop_identity_ = "none";
+    RegistrationTargetSnapshot current_registration_target_snapshot_;
     std::string last_actual_target_source_ = "bootstrap_local_map";
     std::string last_target_reason_ = "startup";
 

@@ -1,4 +1,5 @@
 #include "ndt_slam/rail_localization_authority.hpp"
+#include "ndt_slam/registration_target_snapshot.hpp"
 
 #include <gtest/gtest.h>
 
@@ -125,6 +126,23 @@ TEST(RegistrationTargetSnapshotTest,
   second.crop_identity = "x0=10;x1=20;y0=0;y1=5";
   EXPECT_NE(makeRegistrationTargetSnapshotId(first),
             makeRegistrationTargetSnapshotId(second));
+}
+
+TEST(RegistrationTargetSnapshotTest,
+     SnapshotOwnsExactImmutableCloudAndCropIdentity) {
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
+      new pcl::PointCloud<pcl::PointXYZ>());
+  cloud->push_back(pcl::PointXYZ(1.0F, 2.0F, 0.0F));
+  const auto first = makeRegistrationTargetSnapshot(
+      cloud, RegistrationTargetSource::CROPPED_ACTIVE_MAP,
+      7U, 3U, "map-frame-1", "crop-a");
+  const auto second = makeRegistrationTargetSnapshot(
+      cloud, RegistrationTargetSource::CROPPED_ACTIVE_MAP,
+      7U, 3U, "map-frame-1", "crop-b");
+  ASSERT_TRUE(first.valid());
+  ASSERT_TRUE(second.valid());
+  EXPECT_EQ(first.cloud.get(), cloud.get());
+  EXPECT_NE(first.target_snapshot_id, second.target_snapshot_id);
 }
 
 TEST(RailYawAuthorityTest, ModeCannotHotSwitchWithinSession) {
