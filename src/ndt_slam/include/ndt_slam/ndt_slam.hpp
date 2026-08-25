@@ -608,6 +608,7 @@ private:
     // threads, so counters are atomic and are diagnostic-only.
     std::atomic<uint64_t> cloud_callback_count_{0};
     std::atomic<uint64_t> queue_overwrite_drop_count_{0};
+    std::atomic<uint64_t> mixed_pose_generation_safety_frame_count_{0};
     std::atomic<uint64_t> cloud_dequeue_count_{0};
     std::atomic<uint64_t> empty_cloud_skip_count_{0};
     std::atomic<uint64_t> too_few_points_skip_count_{0};

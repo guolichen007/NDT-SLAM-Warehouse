@@ -55,4 +55,13 @@ struct FrameAuthorityContext {
   }
 };
 
+inline bool safetyFrameAuthorityMatches(
+    const FrameAuthorityContext& frame,
+    const PoseAuthorityIdentity& cargo_identity,
+    const PoseAuthorityIdentity& obstacle_identity) {
+  return frame.safetyAuthorized() &&
+      samePoseAuthorityIdentity(frame.pose_identity, cargo_identity) &&
+      samePoseAuthorityIdentity(frame.pose_identity, obstacle_identity);
+}
+
 }  // namespace ndt_slam

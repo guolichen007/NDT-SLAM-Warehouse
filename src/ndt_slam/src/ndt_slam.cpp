@@ -13732,6 +13732,10 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"accepted_localization_count\": "
       << accepted_localization_count_.load(std::memory_order_relaxed)
       << ",\n";
+    f << "  \"mixed_pose_generation_safety_frame_count\": "
+      << mixed_pose_generation_safety_frame_count_.load(
+             std::memory_order_relaxed)
+      << ",\n";
     f << "  \"keyframe_count\": "
       << keyframe_count_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"map_commit_completed_count\": "
@@ -23340,8 +23344,18 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const ros::Time& obstacle_cloud_stamp,
     double processing_age_sec) {
     const Sophus::SE3d& pose_map_base = frame_context.runtime_pose;
-    if (!frame_context.safetyAuthorized() ||
+    // Both geometry streams are transformed inside this invocation from the
+    // same immutable frame context. Keep explicit identities so a future
+    // asynchronous producer cannot silently mix pose generations.
+    const PoseAuthorityIdentity cargo_pose_identity =
+        frame_context.pose_identity;
+    const PoseAuthorityIdentity obstacle_pose_identity =
+        frame_context.pose_identity;
+    if (!safetyFrameAuthorityMatches(
+            frame_context, cargo_pose_identity, obstacle_pose_identity) ||
         std::abs(frame_context.source_stamp_sec - stamp.toSec()) > 1.0e-6) {
+        mixed_pose_generation_safety_frame_count_.fetch_add(
+            1U, std::memory_order_relaxed);
         publishRelocalizationSafetyInvalid(
             stamp, "frame_authority_context_invalid");
         return;

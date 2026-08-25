@@ -121,6 +121,38 @@ TEST(FrameAuthorityContextTest,
   EXPECT_FALSE(samePoseAuthorityIdentity(cargo, obstacle));
 }
 
+TEST(FrameAuthorityContextTest,
+     RailLocalizationInvalidCannotAuthorizeSafetyPair) {
+  FrameAuthorityContext context;
+  context.rail_authority_mode = true;
+  context.pose_identity.map_frame_uuid = "map-frame-1";
+  context.pose_identity.yaw_reference_hash = "reference-hash";
+  context.pose_identity.yaw_authority_generation = 2U;
+  context.pose_identity.target_snapshot_id = 3U;
+  context.localization_health.safety_localization_authorized = false;
+  EXPECT_FALSE(safetyFrameAuthorityMatches(
+      context, context.pose_identity, context.pose_identity));
+}
+
+TEST(FrameAuthorityContextTest,
+     CargoAndObstacleMustUseSamePoseAuthorityGeneration) {
+  FrameAuthorityContext context;
+  context.rail_authority_mode = true;
+  context.pose_identity.map_rebuild_generation = 1U;
+  context.pose_identity.keyframe_pose_version = 2U;
+  context.pose_identity.yaw_authority_generation = 3U;
+  context.pose_identity.map_frame_uuid = "map-frame-1";
+  context.pose_identity.yaw_reference_hash = "reference-hash";
+  context.pose_identity.target_snapshot_id = 4U;
+  context.localization_health.safety_localization_authorized = true;
+  PoseAuthorityIdentity obstacle = context.pose_identity;
+  EXPECT_TRUE(safetyFrameAuthorityMatches(
+      context, context.pose_identity, obstacle));
+  ++obstacle.keyframe_pose_version;
+  EXPECT_FALSE(safetyFrameAuthorityMatches(
+      context, context.pose_identity, obstacle));
+}
+
 TEST(RailLocalizationHealthTest,
      RawProposalFailureCannotIncrementAuthoritativeBadFrames) {
   RailLocalizationHealthInput input;
