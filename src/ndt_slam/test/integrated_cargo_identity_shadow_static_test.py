@@ -16,6 +16,13 @@ CONFIG = (
 AUTHORITY = (
     PACKAGE / "src" / "cargo_physical_identity_authority.cpp"
 ).read_text(encoding="utf-8")
+AUTHORITY_HEADER = (
+    PACKAGE / "include" / "ndt_slam" /
+    "cargo_physical_identity_authority.hpp"
+).read_text(encoding="utf-8")
+VERTICAL = (
+    PACKAGE / "src" / "cargo_vertical_evidence.cpp"
+).read_text(encoding="utf-8")
 
 
 def function_body(signature: str, next_signature: str) -> str:
@@ -158,14 +165,61 @@ class IntegratedCargoIdentityShadowStaticTest(unittest.TestCase):
         self.assertNotIn("member_component_ids", association_costs)
         self.assertNotIn("candidate_id", association_costs)
 
-    def test_support_continuity_reuses_existing_xy_limit(self) -> None:
-        self.assertIn(
+    def test_support_continuity_requires_positive_area_overlap(self) -> None:
+        self.assertIn("hasPositiveAreaSupportOverlap", AUTHORITY)
+        self.assertIn("intersection_x > kEpsilon", AUTHORITY)
+        self.assertIn("intersection_y > kEpsilon", AUTHORITY)
+        self.assertNotIn(
             "pair.support_xy_separation <=\n"
-            "                 config_.maximum_xy_step_m",
-            AUTHORITY,
+            "                 config_.maximum_xy_step_m", AUTHORITY
         )
         self.assertIn("SUPPORT_OVERLAP_CONTINUITY", AUTHORITY)
         self.assertNotIn("support_overlap_threshold", AUTHORITY)
+
+    def test_raw_roi_is_frame_owned_and_moved_out_of_product_snapshot(self) -> None:
+        self.assertIn("CargoShadowFrameEvidence shadow_frame_evidence", HEADER)
+        self.assertIn("std::move(hook_fixed_cargo_.shadow_frame_evidence)", NODE)
+        self.assertIn("raw_roi_current_frame = crop_cloud", NODE)
+        history_start = AUTHORITY_HEADER.index("struct History {")
+        history_end = AUTHORITY_HEADER.index("};", history_start)
+        history = AUTHORITY_HEADER[history_start:history_end]
+        self.assertNotIn("PointCloud", history)
+        self.assertNotIn("points_base", history)
+        self.assertNotIn("last_group", history)
+
+    def test_raw_and_component_vertical_share_one_context(self) -> None:
+        self.assertIn("makeVerticalInput", AUTHORITY)
+        self.assertIn("ground_context_matches", AUTHORITY)
+        self.assertIn("frame_stamp_matches", AUTHORITY)
+        self.assertEqual(AUTHORITY.count("extractCargoVerticalEvidence("), 3)
+        self.assertNotIn("estimateExternalGround", AUTHORITY)
+
+    def test_owner_proof_uses_extractor_grid_helpers(self) -> None:
+        self.assertIn("makeCargoFootprintGridIndex", AUTHORITY)
+        self.assertIn("cargoPointInsideFootprint", AUTHORITY)
+        self.assertIn("makeCargoFootprintGridIndex", VERTICAL)
+        self.assertIn("cargoPointInsideFootprint", VERTICAL)
+
+    def test_reacquired_vertical_type_has_no_authority_fields(self) -> None:
+        start = AUTHORITY_HEADER.index(
+            "struct AssociationOnlyReacquiredVerticalEvidence"
+        )
+        end = AUTHORITY_HEADER.index("};", start)
+        value_type = AUTHORITY_HEADER[start:end]
+        for forbidden in (
+            "identity", "lift", "baseline", "formal", "bottom", "clear"
+        ):
+            self.assertNotIn(forbidden, value_type.lower())
+        self.assertIn("Reciprocal", AUTHORITY)
+        self.assertIn("already-unique pair", AUTHORITY)
+
+    def test_diagnostic_percentiles_are_not_association_inputs(self) -> None:
+        pair_start = AUTHORITY.index("struct Pair {")
+        pair_end = AUTHORITY.index("std::vector<int> group_match", pair_start)
+        pair_logic = AUTHORITY[pair_start:pair_end]
+        self.assertNotIn("diagnostic_z05", pair_logic)
+        self.assertNotIn("diagnostic_z95", pair_logic)
+        self.assertNotIn("diagnostic_z_extent", pair_logic)
 
     def test_ambiguity_revocation_is_history_local(self) -> None:
         self.assertIn("validated_history_conflict", AUTHORITY)
@@ -229,6 +283,26 @@ class IntegratedCargoIdentityShadowStaticTest(unittest.TestCase):
             "validated_history_conflict",
             "conflicting_history_id",
             "frame_has_unrelated_ambiguity",
+        ):
+            self.assertIn(field, NODE)
+
+    def test_v5_trace_exposes_ownership_and_runtime_cost(self) -> None:
+        for field in (
+            "vertical_source",
+            "owner_overlap_cell_count",
+            "owner_overlap_coverage",
+            "component_vertical_valid",
+            "component_vertical_z",
+            "raw_roi_vertical_valid",
+            "raw_roi_vertical_z",
+            "diagnostic_z05",
+            "diagnostic_z95",
+            "reacquired_vertical_valid",
+            "v5_raw_roi_vertical_total_ms",
+            "v5_raw_roi_vertical_hypothesis_count",
+            "v5_raw_roi_vertical_points_examined",
+            "integrated_shadow_update_ms",
+            "callback_or_pipeline_total_ms",
         ):
             self.assertIn(field, NODE)
 

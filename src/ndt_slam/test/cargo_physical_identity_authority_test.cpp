@@ -103,7 +103,43 @@ std::vector<CargoPhysicalGroupObservation> buildGroups(
   std::vector<CargoPhysicalComponentObservation> values;
   for (auto& entry : components) values.push_back(std::move(entry.second));
   return groupCargoPhysicalCandidates(
-      candidates, values, false, 0.0, config, 0.05, 0.10);
+      candidates, values, nullptr, false, 0.0, config, 0.05, 0.10,
+      nullptr);
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr cloudFromPoints(
+    const std::vector<Eigen::Vector3f>& points) {
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
+      new pcl::PointCloud<pcl::PointXYZ>());
+  cloud->reserve(points.size());
+  for (const Eigen::Vector3f& point : points) {
+    pcl::PointXYZ pcl_point;
+    pcl_point.x = point.x();
+    pcl_point.y = point.y();
+    pcl_point.z = point.z();
+    cloud->push_back(pcl_point);
+  }
+  return cloud;
+}
+
+std::vector<CargoPhysicalGroupObservation> buildGroupsWithRawRoi(
+    const std::vector<CargoPhysicalCandidateObservation>& candidates,
+    std::vector<CargoPhysicalComponentObservation> components,
+    const std::vector<Eigen::Vector3f>& raw_points,
+    double source_stamp,
+    bool frame_ground_valid = false,
+    double frame_ground_z = 0.0,
+    bool grouping_ground_valid = false,
+    double grouping_ground_z = 0.0,
+    CargoPhysicalGroupingTelemetry* telemetry = nullptr) {
+  CargoShadowFrameEvidence frame;
+  frame.source_stamp_sec = source_stamp;
+  frame.raw_roi_current_frame = cloudFromPoints(raw_points);
+  frame.ground_reference_valid = frame_ground_valid;
+  frame.ground_z_base = static_cast<float>(frame_ground_z);
+  return groupCargoPhysicalCandidates(
+      candidates, components, &frame, grouping_ground_valid,
+      grouping_ground_z, verticalConfig(), 0.05, 0.10, telemetry);
 }
 
 CargoPhysicalGroupObservation groupWithSupport(
@@ -783,6 +819,56 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
+     ContinuityOnlyCollapsedExtentCannotRejectByItself) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  validateRequired(&authority);
+  auto continuity = input(1.4, HookLoadSignalRole::REQUIRED, true,
+                          HookLoadState::LOADED, 0.0, 0.7);
+  continuity.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::CONTINUITY_ONLY;
+  continuity.groups.front().descriptor.aggregate_extent.z() = 0.001;
+  const auto result = authority.update(continuity);
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_EQ(result.group_diagnostics.front().association,
+            CargoCandidateAssociationState::MATCHED);
+  EXPECT_NE(result.group_diagnostics.front().association_reject_reason,
+            "EXTENT_GATE");
+  EXPECT_FALSE(result.current_vertical_evidence_valid);
+  EXPECT_FALSE(result.geometry_resolved);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ReacquiredVerticalIsAssociationOnly) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  auto continuity = input(1.4, HookLoadSignalRole::REQUIRED, true,
+                          HookLoadState::LOADED, 0.0, 2.0);
+  continuity.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::CONTINUITY_ONLY;
+  continuity.groups.front().descriptor.physical_vertical_z = 2.0;
+  continuity.groups.front().descriptor.stable_anchor.z() = 2.0;
+  continuity.vertical_config = verticalConfig();
+  continuity.frame_evidence.source_stamp_sec = 1.4;
+  continuity.frame_evidence.raw_roi_current_frame = cloudFromPoints(
+      componentPoints(0.0, 0.70));
+  continuity.frame_evidence.ground_reference_valid = false;
+  continuity.frame_evidence.ground_z_base = 0.0F;
+  const auto result = authority.update(continuity);
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  const auto& diagnostic = result.group_diagnostics.front();
+  EXPECT_TRUE(diagnostic.reacquired_vertical_attempted);
+  EXPECT_TRUE(diagnostic.reacquired_vertical.valid)
+      << diagnostic.reacquired_vertical.reason;
+  EXPECT_EQ(diagnostic.association,
+            CargoCandidateAssociationState::MATCHED);
+  EXPECT_EQ(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_EQ(result.physical_history_id, validated.physical_history_id);
+  EXPECT_EQ(result.lift_confirm_count, validated.lift_confirm_count);
+  EXPECT_FALSE(result.current_vertical_evidence_valid);
+  EXPECT_FALSE(result.geometry_resolved);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
      MissingCurrentGroupCannotReuseValidatedGeometry) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   validateRequired(&authority);
@@ -1043,6 +1129,165 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_EQ(config.lift_confirm_frames, 4);
   EXPECT_DOUBLE_EQ(config.minimum_significant_change_m, 0.15);
   EXPECT_DOUBLE_EQ(config.significance_sigma, 3.0);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     DegenerateEdgeTouchCannotUseSupportOverlapContinuity) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.maximum_xy_step_m = 0.30;
+  CargoPhysicalIdentityAuthority authority(config);
+  auto first = input(1.0, HookLoadSignalRole::REQUIRED, true,
+                     HookLoadState::EMPTY, 0.0, 0.70);
+  first.groups = {groupWithSupport(
+      1U, 1U, 1.0, -0.50, 0.50, 0.70)};
+  first.groups.front().descriptor.robust_x05 = -0.50;
+  first.groups.front().descriptor.robust_x95 = 0.50;
+  first.groups.front().descriptor.robust_y05 = -0.50;
+  first.groups.front().descriptor.robust_y95 = 0.50;
+  first.groups.front().descriptor.robust_xy_center = Eigen::Vector2d(0.0, 0.0);
+  authority.update(first);
+
+  auto touching = input(1.1, HookLoadSignalRole::REQUIRED, true,
+                        HookLoadState::LOADED, 1.0, 0.70);
+  touching.groups = {groupWithSupport(
+      2U, 2U, 1.1, 0.50, 1.50, 0.70)};
+  touching.groups.front().descriptor.robust_x05 = 0.50;
+  touching.groups.front().descriptor.robust_x95 = 1.50;
+  touching.groups.front().descriptor.robust_y05 = -0.50;
+  touching.groups.front().descriptor.robust_y95 = 0.50;
+  touching.groups.front().descriptor.robust_xy_center =
+      Eigen::Vector2d(1.0, 0.0);
+  const auto result = authority.update(touching);
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_EQ(result.group_diagnostics.front().association,
+            CargoCandidateAssociationState::NEW_HISTORY);
+  EXPECT_EQ(result.group_diagnostics.front().association_mode,
+            CargoPhysicalAssociationMode::NEW_HISTORY);
+  EXPECT_EQ(result.group_diagnostics.front().association_reject_reason,
+            "XY_GATE");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PositiveSupportGapCannotUseOverlapContinuity) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.maximum_xy_step_m = 0.30;
+  CargoPhysicalIdentityAuthority authority(config);
+  auto first = input(1.0, HookLoadSignalRole::REQUIRED, true,
+                     HookLoadState::EMPTY, 0.0, 0.70);
+  first.groups = {groupWithSupport(
+      1U, 1U, 1.0, -0.50, 0.50, 0.70)};
+  first.groups.front().descriptor.robust_x05 = -0.50;
+  first.groups.front().descriptor.robust_x95 = 0.50;
+  first.groups.front().descriptor.robust_y05 = -0.50;
+  first.groups.front().descriptor.robust_y95 = 0.50;
+  first.groups.front().descriptor.robust_xy_center = Eigen::Vector2d(0.0, 0.0);
+  authority.update(first);
+
+  auto separated = input(1.1, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 1.01, 0.70);
+  separated.groups = {groupWithSupport(
+      2U, 2U, 1.1, 0.51, 1.51, 0.70)};
+  separated.groups.front().descriptor.robust_x05 = 0.51;
+  separated.groups.front().descriptor.robust_x95 = 1.51;
+  separated.groups.front().descriptor.robust_y05 = -0.50;
+  separated.groups.front().descriptor.robust_y95 = 0.50;
+  separated.groups.front().descriptor.robust_xy_center =
+      Eigen::Vector2d(1.01, 0.0);
+  const auto result = authority.update(separated);
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_EQ(result.group_diagnostics.front().association,
+            CargoCandidateAssociationState::NEW_HISTORY);
+  EXPECT_GT(result.group_diagnostics.front().support_xy_separation_m, 0.0);
+  EXPECT_EQ(result.group_diagnostics.front().association_reject_reason,
+            "XY_GATE");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     FragmentedTopCanBeOwnedBySameXYBodySupport) {
+  auto observation = candidate(1U, 1.0, 0.0, 0.40, {1U});
+  CargoPhysicalComponentObservation component;
+  component.component_id = 1U;
+  component.points_base = componentPoints(0.0, 0.40);
+  std::vector<Eigen::Vector3f> raw_points = component.points_base;
+  for (float x : {-0.20F, 0.20F}) {
+    for (float y : {-0.20F, 0.20F}) {
+      raw_points.emplace_back(x, y, 0.90F);
+      raw_points.emplace_back(x, y, 0.90F);
+    }
+  }
+  CargoPhysicalGroupingTelemetry telemetry;
+  const auto groups = buildGroupsWithRawRoi(
+      {observation}, {component}, raw_points, 1.0,
+      false, 0.0, false, 0.0, &telemetry);
+  ASSERT_EQ(groups.size(), 1U);
+  const auto& descriptor = groups.front().descriptor;
+  EXPECT_EQ(descriptor.vertical_source,
+            CargoVerticalEvidenceSource::RAW_ROI_CURRENT_FOOTPRINT);
+  EXPECT_EQ(descriptor.vertical_mode,
+            CargoGroupVerticalMode::SUPPORTED_EVIDENCE);
+  EXPECT_NEAR(descriptor.physical_vertical_z, 0.90, 1.0e-5);
+  EXPECT_GT(descriptor.owner_overlap_cell_count, 0U);
+  EXPECT_GT(telemetry.raw_roi_vertical_hypothesis_count, 0U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     AdjacentHighObjectCannotBeBorrowed) {
+  auto observation = candidate(1U, 1.0, 0.0, 0.40, {1U});
+  CargoPhysicalComponentObservation component;
+  component.component_id = 1U;
+  component.points_base = componentPoints(0.0, 0.40);
+  std::vector<Eigen::Vector3f> raw_points = component.points_base;
+  for (float x : {-0.40F, 0.40F}) {
+    for (float y : {-0.30F, 0.30F}) {
+      raw_points.emplace_back(x, y, 1.20F);
+      raw_points.emplace_back(x, y, 1.20F);
+    }
+  }
+  const auto groups = buildGroupsWithRawRoi(
+      {observation}, {component}, raw_points, 1.0);
+  ASSERT_EQ(groups.size(), 1U);
+  const auto& descriptor = groups.front().descriptor;
+  EXPECT_EQ(descriptor.vertical_source,
+            CargoVerticalEvidenceSource::COMPONENT_UNION);
+  EXPECT_NEAR(descriptor.physical_vertical_z, 0.40, 1.0e-5);
+  EXPECT_EQ(descriptor.raw_roi_supported_hypothesis_count, 0U);
+  EXPECT_GT(descriptor.owner_proof_rejected_hypothesis_count, 0U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     RawRoiSourceStampMustEqualDetectionSourceStamp) {
+  auto observation = candidate(1U, 1.0, 0.0, 0.40, {1U});
+  CargoPhysicalComponentObservation component;
+  component.component_id = 1U;
+  component.points_base = componentPoints(0.0, 0.40);
+  std::vector<Eigen::Vector3f> raw_points = component.points_base;
+  for (float x : {-0.20F, 0.20F}) {
+    for (float y : {-0.20F, 0.20F}) {
+      raw_points.emplace_back(x, y, 0.90F);
+      raw_points.emplace_back(x, y, 0.90F);
+    }
+  }
+  const auto groups = buildGroupsWithRawRoi(
+      {observation}, {component}, raw_points, 2.0);
+  ASSERT_EQ(groups.size(), 1U);
+  EXPECT_EQ(groups.front().descriptor.vertical_source,
+            CargoVerticalEvidenceSource::COMPONENT_UNION);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     RawRoiAndComponentEvidenceShareGroundContext) {
+  auto observation = candidate(1U, 1.0, 0.0, 0.40, {1U});
+  CargoPhysicalComponentObservation component;
+  component.component_id = 1U;
+  component.points_base = componentPoints(0.0, 0.40);
+  std::vector<Eigen::Vector3f> raw_points = component.points_base;
+  const auto groups = buildGroupsWithRawRoi(
+      {observation}, {component}, raw_points, 1.0,
+      true, 0.0, false, 0.0);
+  ASSERT_EQ(groups.size(), 1U);
+  EXPECT_EQ(groups.front().descriptor.vertical_source,
+            CargoVerticalEvidenceSource::COMPONENT_UNION);
+  EXPECT_EQ(groups.front().descriptor.raw_roi_supported_hypothesis_count, 0U);
 }
 
 }  // namespace

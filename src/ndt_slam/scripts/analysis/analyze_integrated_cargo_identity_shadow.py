@@ -77,28 +77,80 @@ def row_matches_identity(
 def oracle_window(
     rows: list[dict[str, str]], oracle: dict[str, Any]
 ) -> list[dict[str, str]] | None:
-    start = oracle.get("window_start_stamp_sec")
-    end = oracle.get("window_end_stamp_sec")
-    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+    bounds = oracle_phase_bounds(oracle)
+    if bounds is None:
         return None
-    if not math.isfinite(float(start)) or not math.isfinite(float(end)) or end < start:
-        return None
+    start, end = bounds
     return [
         row for row in rows
-        if start <= number(row, "pipeline_stamp") <= end
+        if start <= number(row, "pipeline_stamp") < end
     ]
 
 
 def group_oracle_window(
     rows: list[dict[str, str]], oracle: dict[str, Any]
 ) -> list[dict[str, str]] | None:
-    start = oracle.get("window_start_stamp_sec")
-    end = oracle.get("window_end_stamp_sec")
+    bounds = oracle_phase_bounds(oracle)
+    if bounds is None:
+        return None
+    start, end = bounds
+    return [row for row in rows if start <= number(row, "stamp") < end]
+
+
+def oracle_phase_bounds(
+    oracle: dict[str, Any]
+) -> tuple[float, float] | None:
+    """Return the explicitly selected v2 [start,end) truth window."""
+    if oracle.get("oracle_version") != 2:
+        return None
+    if oracle.get("time_base") != "bag_source_stamp":
+        return None
+    phase_name = oracle.get("analysis_phase")
+    phases = oracle.get("phases")
+    if not isinstance(phase_name, str) or not isinstance(phases, dict):
+        return None
+    phase = phases.get(phase_name)
+    if not isinstance(phase, dict) or phase.get("applicable") is not True:
+        return None
+    start = phase.get("start_stamp_sec")
+    end = phase.get("end_stamp_sec")
     if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
         return None
-    if not math.isfinite(float(start)) or not math.isfinite(float(end)) or end < start:
+    start = float(start)
+    end = float(end)
+    if not math.isfinite(start) or not math.isfinite(end) or end <= start:
         return None
-    return [row for row in rows if start <= number(row, "stamp") <= end]
+    return start, end
+
+
+def validate_oracle_v2(oracle: dict[str, Any]) -> tuple[bool, str]:
+    if oracle.get("oracle_version") != 2:
+        return False, "oracle_version_must_be_2"
+    if oracle.get("time_base") != "bag_source_stamp":
+        return False, "time_base_must_be_bag_source_stamp"
+    phases = oracle.get("phases")
+    if not isinstance(phases, dict):
+        return False, "phases_missing"
+    for name in ("pre_lift", "lifted", "safe_over", "terminal_lowering"):
+        phase = phases.get(name)
+        if not isinstance(phase, dict) or not isinstance(
+            phase.get("applicable"), bool
+        ):
+            return False, f"phase_{name}_applicability_missing"
+        if phase["applicable"]:
+            start = phase.get("start_stamp_sec")
+            end = phase.get("end_stamp_sec")
+            if not isinstance(start, (int, float)) or not isinstance(
+                end, (int, float)
+            ) or not math.isfinite(float(start)) or not math.isfinite(
+                float(end)
+            ) or float(end) <= float(start):
+                return False, f"phase_{name}_invalid_half_open_window"
+        elif not str(phase.get("reason", "")).strip():
+            return False, f"phase_{name}_not_applicable_reason_missing"
+    if oracle_phase_bounds(oracle) is None:
+        return False, "analysis_phase_invalid_or_not_applicable"
+    return True, "valid"
 
 
 def group_matches_members(
@@ -143,6 +195,26 @@ def analyze_group_trace(
         (int(number(row, "lift_confirm_count", 0.0)) for row in true_rows),
         default=0,
     )
+    component_invalid_recovered = sum(
+        flag(row, "raw_roi_vertical_valid") and
+        not flag(row, "component_vertical_valid")
+        for row in true_rows
+    )
+    valid_but_low_corrected = sum(
+        flag(row, "raw_roi_vertical_valid") and
+        flag(row, "component_vertical_valid") and
+        number(row, "raw_roi_vertical_z") >
+        number(row, "component_vertical_z") +
+        max(0.0, number(row, "vertical_uncertainty", 0.0))
+        for row in true_rows
+    )
+    owner_proof_rejected = sum(
+        number(row, "owner_proof_rejected_hypothesis_count", 0.0) > 0.0
+        for row in true_rows
+    )
+    raw_current_still_invalid = sum(
+        not flag(row, "raw_roi_vertical_valid") for row in true_rows
+    )
     required = max(
         (int(number(row, "lift_confirm_required", 0.0)) for row in true_rows),
         default=0,
@@ -168,6 +240,10 @@ def analyze_group_trace(
         "longest_physical_history": max(history_lengths.values(), default=0),
         "max_lift_confirm_count": max_confirm,
         "lift_confirm_required": required,
+        "component_invalid_recovered": component_invalid_recovered,
+        "valid_but_low_corrected": valid_but_low_corrected,
+        "owner_proof_rejected": owner_proof_rejected,
+        "raw_current_footprint_still_invalid": raw_current_still_invalid,
     }
     if baseline_path is None:
         result["baseline_comparison"] = "BASELINE_COMPARISON_UNAVAILABLE"
@@ -219,8 +295,35 @@ def analyze_group_trace(
         "MAX_LIFT_CONFIRM_COUNT": result["max_lift_confirm_count"],
         "TRUE_VALIDATED": result["true_validated"],
         "WRONG_LOW_VALIDATED": result["wrong_low_validated"],
+        "COMPONENT_INVALID_RECOVERED": component_invalid_recovered,
+        "VALID_BUT_LOW_CORRECTED": valid_but_low_corrected,
+        "OWNER_PROOF_REJECTED": owner_proof_rejected,
+        "RAW_CURRENT_FOOTPRINT_STILL_INVALID": raw_current_still_invalid,
     })
     return result
+
+
+def determine_earliest_root(result: dict[str, Any]) -> str:
+    """Single root classifier consumed unchanged by JSON and Markdown."""
+    if result.get("oracle_status") != "CONCLUSIVE":
+        return "ORACLE_INCONCLUSIVE"
+    if result.get("wrong_formal_lock_frames", 0) > 0 or result.get(
+        "continuity_v2", {}
+    ).get("wrong_low_validated", False):
+        return "WRONG_OWNER_AUTHORITY_IMPLEMENTATION_FAIL"
+    if not result.get("identity_validated", False):
+        continuity = result.get("continuity_v2", {})
+        if continuity.get("raw_current_footprint_still_invalid", 0) > 0:
+            return "RAW_CURRENT_FOOTPRINT_STILL_INVALID"
+        if continuity.get("owner_proof_rejected", 0) > 0:
+            return "OWNER_PROOF_REJECTED"
+        return "UPSTREAM_IDENTITY_BLOCKING"
+    if result.get("obstacle_self_contamination_blocking", False) or (
+        result.get("bag_role") == "positive_collision" and
+        not result.get("canonical_far_history_valid", False)
+    ):
+        return "OBSTACLE_AUTHORITY_BLOCKING"
+    return "NONE"
 
 
 def analyze_trace(
@@ -232,8 +335,9 @@ def analyze_trace(
     with path.open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
     role = oracle.get("role") if oracle else None
+    oracle_valid, oracle_reason = validate_oracle_v2(oracle or {})
     window_rows = oracle_window(rows, oracle) if oracle else None
-    oracle_conclusive = role in {
+    oracle_conclusive = oracle_valid and role in {
         "negative_safe_over", "positive_collision", "long_geometry",
         "positive_control",
     } and window_rows is not None and bool(window_rows)
@@ -285,6 +389,7 @@ def analyze_trace(
             "CONCLUSIVE" if oracle_conclusive and identity_oracle_available
             else "ORACLE_INCONCLUSIVE"
         ),
+        "oracle_reason": oracle_reason,
         "oracle_window_frames": len(judged_rows),
         "frames": len(rows),
         "identity_validated": bool(true_validated),
@@ -322,6 +427,27 @@ def analyze_trace(
                  for value in processed_hz) else math.nan,
         "dropped_frame_count": max(dropped, default=0.0),
         "large_gap_count": max(large_gaps, default=0.0),
+        "v5_raw_roi_vertical_total_p50_ms": percentile(
+            (number(row, "v5_raw_roi_vertical_total_ms") for row in rows),
+            0.50,
+        ),
+        "v5_raw_roi_vertical_total_p95_ms": percentile(
+            (number(row, "v5_raw_roi_vertical_total_ms") for row in rows),
+            0.95,
+        ),
+        "v5_raw_roi_vertical_total_max_ms": max(
+            (number(row, "v5_raw_roi_vertical_total_ms") for row in rows
+             if math.isfinite(number(row, "v5_raw_roi_vertical_total_ms"))),
+            default=math.nan,
+        ),
+        "v5_raw_roi_vertical_hypothesis_count_max": max(
+            (number(row, "v5_raw_roi_vertical_hypothesis_count")
+             for row in rows), default=0.0,
+        ),
+        "v5_raw_roi_vertical_points_examined_max": max(
+            (number(row, "v5_raw_roi_vertical_points_examined")
+             for row in rows), default=0.0,
+        ),
         "new_history_rate_after": (
             sum(row.get("shadow_association") == "NEW_HISTORY"
                 for row in judged_rows) / len(judged_rows)
@@ -330,8 +456,9 @@ def analyze_trace(
     }
     owned_top_rows = [
         row for row in judged_rows
-        if row.get("downstream_top_source") ==
-        "GROUP_SUPPORTED_VERTICAL_EVIDENCE"
+        if row.get("downstream_top_source") in {
+            "COMPONENT_UNION", "RAW_ROI_CURRENT_FOOTPRINT"
+        }
     ]
     owned_bottom_rows = [row for row in owned_top_rows if flag(row, "bottom_valid")]
     if role == "positive_collision" and owned_top_rows and not owned_bottom_rows:
@@ -358,6 +485,7 @@ def analyze_trace(
         result["baseline_trace_comparison"] = (
             "BASELINE_COMPARISON_UNAVAILABLE"
         )
+        result["runtime_regression"] = "BASELINE_COMPARISON_UNAVAILABLE"
     else:
         with baseline_trace_path.open(newline="", encoding="utf-8") as stream:
             baseline_rows = list(csv.DictReader(stream))
@@ -373,6 +501,49 @@ def analyze_trace(
             if baseline_judged else math.nan
         )
         result["baseline_trace_comparison"] = "AVAILABLE"
+        baseline_callback = [
+            number(row, "pointcloud_callback_hz") for row in baseline_rows
+        ]
+        baseline_processed = [
+            number(row, "ndt_processing_hz") for row in baseline_rows
+        ]
+        baseline_dropped = [
+            number(row, "dropped_frame_count") for row in baseline_rows
+        ]
+        baseline_gaps = [
+            number(row, "large_gap_count") for row in baseline_rows
+        ]
+        baseline_callback_median = median(
+            value for value in baseline_callback
+            if math.isfinite(value) and value > 0.0
+        ) if any(
+            math.isfinite(value) and value > 0.0
+            for value in baseline_callback
+        ) else math.nan
+        baseline_processed_median = median(
+            value for value in baseline_processed
+            if math.isfinite(value) and value > 0.0
+        ) if any(
+            math.isfinite(value) and value > 0.0
+            for value in baseline_processed
+        ) else math.nan
+        result["baseline_pointcloud_callback_hz"] = baseline_callback_median
+        result["baseline_ndt_processing_hz"] = baseline_processed_median
+        comparable = all(math.isfinite(value) for value in (
+            result["pointcloud_callback_hz"], result["ndt_processing_hz"],
+            baseline_callback_median, baseline_processed_median,
+        ))
+        no_counter_regression = (
+            result["dropped_frame_count"] <= max(baseline_dropped, default=0.0)
+            and result["large_gap_count"] <= max(baseline_gaps, default=0.0)
+        )
+        no_rate_regression = comparable and (
+            result["pointcloud_callback_hz"] >= baseline_callback_median and
+            result["ndt_processing_hz"] >= baseline_processed_median
+        )
+        result["runtime_regression"] = (
+            "PASS" if no_counter_regression and no_rate_regression else "FAIL"
+        )
     result["NEW_HISTORY_RATE_BEFORE"] = result["new_history_rate_before"]
     result["NEW_HISTORY_RATE_AFTER"] = result["new_history_rate_after"]
     if group_path is not None:
@@ -390,6 +561,7 @@ def analyze_trace(
         result["vertical_geometry_verdict"] = "ORACLE_INCONCLUSIVE"
         result["timing_verdict"] = "ORACLE_INCONCLUSIVE"
         result["avoidance_cargo_side_verdict"] = "ORACLE_INCONCLUSIVE"
+        result["EARLIEST_ROOT"] = determine_earliest_root(result)
         return result
 
     if true_ids or true_members:
@@ -444,6 +616,7 @@ def analyze_trace(
         result["avoidance_cargo_side_verdict"] = (
             "PASS" if bottom_valid_rows and not unsafe_clear_rows else "FAIL"
         )
+    result["EARLIEST_ROOT"] = determine_earliest_root(result)
     return result
 
 
@@ -466,6 +639,29 @@ def analyze_runtime(path: Path) -> dict[str, float]:
             default=math.nan,
         ),
     }
+
+
+def render_markdown(summary: dict[str, Any]) -> str:
+    """Render only the already-decided AnalysisResult; never reclassify."""
+    lines = [
+        "# Cargo V5 SHADOW analysis",
+        "",
+        f"- `V5_STABLE_SHA={summary.get('V5_STABLE_SHA', '')}`",
+        f"- `V5_IMPLEMENTATION_GATE={summary['V5_IMPLEMENTATION_GATE']}`",
+        f"- `V5_FUNCTION_RESULT={summary['V5_FUNCTION_RESULT']}`",
+        f"- `V5_RUNTIME_REGRESSION={summary['V5_RUNTIME_REGRESSION']}`",
+        f"- `EARLIEST_REMAINING_BLOCKER={summary['EARLIEST_REMAINING_BLOCKER']}`",
+        "",
+        "| Bag | Oracle | Identity | Vertical | Avoidance | EARLIEST_ROOT |",
+        "|---|---|---|---|---|---|",
+    ]
+    for report in summary["bags"]:
+        lines.append(
+            "| {bag} | {oracle_status} | {identity_verdict} | "
+            "{vertical_geometry_verdict} | {avoidance_cargo_side_verdict} | "
+            "{EARLIEST_ROOT} |".format(**report)
+        )
+    return "\n".join(lines) + "\n"
 
 
 def main() -> int:
@@ -495,6 +691,8 @@ def main() -> int:
         help="NAME=/path/to/bag_local_oracle.json",
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--markdown-output", type=Path)
+    parser.add_argument("--source-sha", default="")
     args = parser.parse_args()
     reports: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
@@ -565,6 +763,11 @@ def main() -> int:
     summary = {
         "bags": reports,
         "errors": errors,
+        "V5_FIX_TARGET": (
+            "COMPONENT_VERTICAL_EVIDENCE_FRAGMENTATION+"
+            "TRANSIENT_HYPOTHESIS_FOOTPRINT_SHRINK"
+        ),
+        "ROI_AVAILABILITY_ROOT_CAUSE": "NOT_PROVEN",
         "ORACLE_STATUS": (
             "ORACLE_INCONCLUSIVE" if oracle_inconclusive else "CONCLUSIVE"
         ),
@@ -600,7 +803,9 @@ def main() -> int:
             "PASS" if reports and all(value == "PASS" for value in identity_values)
             else "FAIL"
         ),
-        "PRODUCT_BEHAVIOR_CHANGED": "NO",
+        "PRODUCT_LOGIC_CHANGED": "NO",
+        "PRODUCT_OUTPUT_AUTHORITY_CHANGED": "NO",
+        "CARGO_V5_PRODUCT_TAKEOVER": "NOT_YET",
         "FIELD_READY": "NO",
     }
     summary["CONTINUITY_V2_BAG_CLASSIFICATIONS"] = {
@@ -623,10 +828,57 @@ def main() -> int:
         else "PARTIAL_PASS" if reports and not all(value == "FAIL" for value in pass_values)
         else "FAIL"
     )
+    runtime_values = [
+        report.get("runtime_regression", "BASELINE_COMPARISON_UNAVAILABLE")
+        for report in reports
+    ]
+    summary["V5_STABLE_SHA"] = args.source_sha
+    summary["V5_RUNTIME_REGRESSION"] = (
+        "PASS" if len(runtime_values) == 4 and
+        all(value == "PASS" for value in runtime_values) else "FAIL"
+    )
+    unsafe_implementation = any(
+        report.get("wrong_formal_lock_frames", 0) > 0 or
+        report.get("continuity_v2", {}).get("wrong_low_validated", False)
+        for report in reports
+    )
+    summary["V5_IMPLEMENTATION_GATE"] = (
+        "PASS" if len(reports) == 4 and not errors and not oracle_inconclusive
+        and not unsafe_implementation
+        and summary["V5_RUNTIME_REGRESSION"] == "PASS" else "FAIL"
+    )
+    functional_values = (
+        summary["CARGO_IDENTITY_CORRECTNESS"],
+        summary["CARGO_VERTICAL_GEOMETRY_CORRECTNESS"],
+        summary["AVOIDANCE_CARGO_SIDE_CORRECTNESS"],
+    )
+    summary["V5_FUNCTION_RESULT"] = (
+        "PASS" if all(value == "PASS" for value in functional_values)
+        else "PARTIAL" if any(value == "PASS" for value in functional_values)
+        else "FAIL"
+    )
+    root_priority = (
+        "WRONG_OWNER_AUTHORITY_IMPLEMENTATION_FAIL",
+        "RAW_CURRENT_FOOTPRINT_STILL_INVALID",
+        "OWNER_PROOF_REJECTED",
+        "UPSTREAM_IDENTITY_BLOCKING",
+        "OBSTACLE_AUTHORITY_BLOCKING",
+        "ORACLE_INCONCLUSIVE",
+    )
+    bag_roots = {report.get("EARLIEST_ROOT", "ORACLE_INCONCLUSIVE")
+                 for report in reports}
+    summary["EARLIEST_REMAINING_BLOCKER"] = next(
+        (root for root in root_priority if root in bag_roots), "NONE"
+    )
+    summary["CARGO_V5_HARD_STOP"] = "YES"
     rendered = json.dumps(summary, ensure_ascii=False, indent=2)
     print(rendered)
     if args.output:
         args.output.write_text(rendered + "\n", encoding="utf-8")
+    if args.markdown_output:
+        args.markdown_output.write_text(
+            render_markdown(summary), encoding="utf-8"
+        )
     return 0 if not errors else 2
 
 

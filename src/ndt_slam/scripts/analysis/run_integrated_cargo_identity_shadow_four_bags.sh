@@ -104,7 +104,9 @@ set +e
 python3 "$analyzer" "${trace_args[@]}" "${runtime_args[@]}" \
   "${group_args[@]}" "${baseline_group_args[@]}" "${baseline_args[@]}" \
   "${oracle_args[@]}" \
-  --output "$output_dir/integrated_shadow_report.json"
+  --source-sha "$expected_sha" \
+  --output "$output_dir/integrated_shadow_report.json" \
+  --markdown-output "$output_dir/integrated_shadow_report.md"
 analysis_rc=$?
 set -e
 
@@ -113,7 +115,9 @@ echo "BUILD_RC=$build_rc"
 echo "FULL_GTEST_RC=$test_rc"
 echo "REPLAY_RC=$run_rc"
 echo "ANALYSIS_RC=$analysis_rc"
-echo "PRODUCT_BEHAVIOR_CHANGED=NO"
+echo "CARGO_V5_PRODUCT_TAKEOVER=NOT_YET"
+echo "PRODUCT_LOGIC_CHANGED=NO"
+echo "PRODUCT_OUTPUT_AUTHORITY_CHANGED=NO"
 echo "FIELD_READY=NO"
 
 if [[ $build_rc -ne 0 || $run_rc -ne 0 || $analysis_rc -ne 0 ]]; then

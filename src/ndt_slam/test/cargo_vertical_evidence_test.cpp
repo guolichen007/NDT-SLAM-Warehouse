@@ -173,5 +173,40 @@ TEST(CargoVerticalEvidence, WrongLifecycleThicknessNotUsed) {
   EXPECT_EQ(result.removed_low_points, 1U);
 }
 
+TEST(CargoVerticalEvidence, FrameCloudUsesCanonicalExtractorSemantics) {
+  auto vector_input = baseInput();
+  addSurface(&vector_input.selected_points_base, 1.30F);
+  const auto vector_result = extractCargoVerticalEvidence(
+      vector_input, testConfig());
+  ASSERT_TRUE(vector_result.valid) << vector_result.reject_reason;
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
+      new pcl::PointCloud<pcl::PointXYZ>());
+  for (const Eigen::Vector3f& point : vector_input.selected_points_base) {
+    pcl::PointXYZ cloud_point;
+    cloud_point.x = point.x();
+    cloud_point.y = point.y();
+    cloud_point.z = point.z();
+    cloud->push_back(cloud_point);
+  }
+  auto cloud_input = baseInput();
+  cloud_input.selected_cloud_base = cloud;
+  const auto cloud_result = extractCargoVerticalEvidence(
+      cloud_input, testConfig());
+  ASSERT_TRUE(cloud_result.valid) << cloud_result.reject_reason;
+  EXPECT_NEAR(cloud_result.top_z_base, vector_result.top_z_base, 1.0e-6F);
+  EXPECT_EQ(cloud_result.top_surface_cell_indices,
+            vector_result.top_surface_cell_indices);
+}
+
+TEST(CargoVerticalEvidence, PointSourceMustBeUnique) {
+  auto input = baseInput();
+  addSurface(&input.selected_points_base, 1.30F);
+  input.selected_cloud_base.reset(new pcl::PointCloud<pcl::PointXYZ>());
+  const auto result = extractCargoVerticalEvidence(input, testConfig());
+  EXPECT_FALSE(result.valid);
+  EXPECT_EQ(result.reject_reason, "multiple_point_sources");
+}
+
 }  // namespace
 }  // namespace ndt_slam
