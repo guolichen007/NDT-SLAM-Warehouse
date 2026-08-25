@@ -104,6 +104,14 @@ double median(std::vector<double> values) {
       : values[middle];
 }
 
+double medianAbsoluteDeviation(const std::vector<double>& values,
+                               double center) {
+  std::vector<double> deviations;
+  deviations.reserve(values.size());
+  for (double value : values) deviations.push_back(std::abs(value - center));
+  return median(std::move(deviations));
+}
+
 double quantile(std::vector<double> values, double probability) {
   std::sort(values.begin(), values.end());
   if (values.size() == 1U) return values.front();
@@ -343,6 +351,18 @@ const char* cargoVerticalEvidenceSourceName(
       return "RAW_ROI_CURRENT_FOOTPRINT";
     case CargoVerticalEvidenceSource::RAW_ROI_HISTORY_FOOTPRINT_REACQUIRE:
       return "RAW_ROI_HISTORY_FOOTPRINT_REACQUIRE";
+  }
+  return "INVALID";
+}
+
+const char* cargoPreLiftReferenceStateName(
+    CargoPreLiftReferenceState state) noexcept {
+  switch (state) {
+    case CargoPreLiftReferenceState::UNSEEN: return "UNSEEN";
+    case CargoPreLiftReferenceState::ACQUIRING: return "ACQUIRING";
+    case CargoPreLiftReferenceState::PAUSED: return "PAUSED";
+    case CargoPreLiftReferenceState::FROZEN: return "FROZEN";
+    case CargoPreLiftReferenceState::CLOSED: return "CLOSED";
   }
   return "INVALID";
 }
@@ -725,10 +745,12 @@ void CargoPhysicalIdentityAuthority::reset(const std::string& reason) {
   next_history_id_ = 1U;
   load_epoch_ = 0U;
   lifecycle_id_ = 0U;
+  physical_cargo_epoch_id_ = 0U;
   validated_history_id_ = 0U;
   initialized_ = false;
   previous_existence_phase_ = false;
   started_loaded_without_baseline_ = false;
+  prelift_blocked_until_new_epoch_ = false;
   last_pipeline_stamp_sec_ = 0.0;
   reset_reason_ = reason;
 }
@@ -737,11 +759,39 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     const CargoPhysicalIdentityInput& input) {
   decision_ = CargoPhysicalIdentityDecision{};
   decision_.load_epoch = load_epoch_;
+  decision_.physical_cargo_epoch_id = physical_cargo_epoch_id_;
+  decision_.hook_role_source = input.hook_role_source;
+  decision_.strict_lidar_existence_path =
+      input.hook_role != HookLoadSignalRole::REQUIRED;
+  const bool time_rollback = initialized_ &&
+      std::isfinite(input.pipeline_stamp_sec) &&
+      input.pipeline_stamp_sec + kEpsilon < last_pipeline_stamp_sec_;
+  if (time_rollback) {
+    for (History& history : histories_) {
+      history.prelift_state = CargoPreLiftReferenceState::CLOSED;
+      history.prelift_close_reason = "SOURCE_TIME_ROLLBACK";
+      history.earliest_prelift_samples.clear();
+      history.prelift_reference_frozen = false;
+      history.baseline_frozen = false;
+      history.lift_confirm_count = 0;
+      history.lift_confirmed = false;
+      history.validation_stamp_sec = 0.0;
+    }
+    histories_.clear();
+    validated_history_id_ = 0U;
+    prelift_blocked_until_new_epoch_ = true;
+    decision_.prelift_state = CargoPreLiftReferenceState::CLOSED;
+    decision_.prelift_close_reason = "SOURCE_TIME_ROLLBACK";
+  }
   const bool stamp_valid = std::isfinite(input.pipeline_stamp_sec) &&
       input.pipeline_stamp_sec > 0.0 &&
-      (!initialized_ || input.pipeline_stamp_sec > last_pipeline_stamp_sec_);
+      (!initialized_ || time_rollback || input.rearm ||
+       input.lifecycle_id != lifecycle_id_ ||
+       input.pipeline_stamp_sec > last_pipeline_stamp_sec_);
   if (!stamp_valid) {
-    decision_.reason = "source_time_invalid_or_not_advanced";
+    decision_.reason = time_rollback
+        ? "source_time_rollback_closed_current_cargo_epoch"
+        : "source_time_invalid_or_not_advanced";
     return decision_;
   }
   decision_.valid_input = true;
@@ -751,7 +801,14 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     validated_history_id_ = 0U;
     previous_existence_phase_ = false;
     started_loaded_without_baseline_ = false;
+    prelift_blocked_until_new_epoch_ = false;
     ++load_epoch_;
+    physical_cargo_epoch_id_ = input.lifecycle_id != 0U
+        ? input.lifecycle_id : physical_cargo_epoch_id_ + 1U;
+  }
+  if (!initialized_ && physical_cargo_epoch_id_ == 0U) {
+    physical_cargo_epoch_id_ = input.lifecycle_id != 0U
+        ? input.lifecycle_id : 1U;
   }
   lifecycle_id_ = input.lifecycle_id;
   last_pipeline_stamp_sec_ = input.pipeline_stamp_sec;
@@ -762,31 +819,42 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   const bool gravity_empty = input.gravity_valid &&
       input.gravity_state == HookLoadState::EMPTY;
   const bool pre_load_phase = gravity_empty;
+  if (gravity_empty && previous_existence_phase_ &&
+      input.hook_role == HookLoadSignalRole::REQUIRED) {
+    histories_.clear();
+    validated_history_id_ = 0U;
+    started_loaded_without_baseline_ = false;
+    prelift_blocked_until_new_epoch_ = false;
+    ++load_epoch_;
+    physical_cargo_epoch_id_ = input.lifecycle_id != 0U &&
+            input.lifecycle_id != lifecycle_id_
+        ? input.lifecycle_id : physical_cargo_epoch_id_ + 1U;
+  }
   const bool gravity_load_edge = gravity_loaded && !previous_existence_phase_;
   if (gravity_load_edge) {
     ++load_epoch_;
-    started_loaded_without_baseline_ = input.node_started_loaded &&
-        std::none_of(histories_.begin(), histories_.end(),
-                     [](const History& history) { return history.has_preload; });
-    for (History& history : histories_) {
-      history.lift_confirm_count = 0;
-      history.lift_confirmed = false;
-      history.validation_stamp_sec = 0.0;
-      history.last_supported_evidence_stamp_sec = 0.0;
-      history.baseline_frozen = false;
-      history.baseline_z95 = std::numeric_limits<double>::quiet_NaN();
-      history.baseline_stamp_sec = 0.0;
-      if (history.has_preload) {
-        history.baseline_frozen = true;
-        history.baseline_source =
-            CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE;
-        history.baseline_z95 = history.preload_z95;
-        history.baseline_uncertainty_m = history.preload_uncertainty_m;
-        history.baseline_stamp_sec = history.preload_stamp_sec;
-        history.has_preload = false;
+    if (input.hook_role == HookLoadSignalRole::REQUIRED) {
+      started_loaded_without_baseline_ = input.node_started_loaded &&
+          std::none_of(histories_.begin(), histories_.end(),
+                       [](const History& history) {
+                         return history.prelift_reference_frozen;
+                       });
+      for (History& history : histories_) {
+        history.lift_confirm_count = 0;
+        history.lift_confirmed = false;
+        history.validation_stamp_sec = 0.0;
+        history.last_supported_evidence_stamp_sec = 0.0;
+        if (!history.prelift_reference_frozen) {
+          history.prelift_state = CargoPreLiftReferenceState::CLOSED;
+          history.prelift_close_reason =
+              "LOAD_EDGE_BEFORE_REFERENCE_FROZEN";
+          history.earliest_prelift_samples.clear();
+        }
       }
     }
   }
+  decision_.load_epoch = load_epoch_;
+  decision_.physical_cargo_epoch_id = physical_cargo_epoch_id_;
 
   decision_.group_diagnostics.reserve(input.groups.size());
   for (const auto& group : input.groups) {
@@ -1097,6 +1165,11 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       histories_.push_back(History{});
       history = &histories_.back();
       history->id = next_history_id_++;
+      history->physical_cargo_epoch_id = physical_cargo_epoch_id_;
+      if (prelift_blocked_until_new_epoch_) {
+        history->prelift_state = CargoPreLiftReferenceState::CLOSED;
+        history->prelift_close_reason = "CURRENT_EPOCH_PRELIFT_BLOCKED";
+      }
       diagnostic.association = CargoCandidateAssociationState::NEW_HISTORY;
       diagnostic.association_mode =
           CargoPhysicalAssociationMode::NEW_HISTORY;
@@ -1114,33 +1187,109 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
 
     const bool supported = group.descriptor.vertical_mode ==
         CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
-    if (pre_load_phase && supported) {
-      history->has_preload = true;
-      history->preload_z95 = group.descriptor.physical_vertical_z;
-      history->preload_uncertainty_m =
-          group.descriptor.vertical_uncertainty_m;
-      history->preload_stamp_sec = group.descriptor.stamp_sec;
+    const bool role_allows_reference_acquisition =
+        input.hook_role == HookLoadSignalRole::REQUIRED
+            ? pre_load_phase : !started_loaded_without_baseline_;
+    const bool evidence_authorized = input.localization_authorized &&
+        input.pose_authority_identity_valid && supported &&
+        !group.group_ambiguous && history->physical_cargo_epoch_id ==
+            physical_cargo_epoch_id_;
+    if (!history->prelift_reference_frozen &&
+        history->prelift_state != CargoPreLiftReferenceState::CLOSED &&
+        role_allows_reference_acquisition && evidence_authorized &&
+        !prelift_blocked_until_new_epoch_) {
+      if (!history->earliest_prelift_samples.empty()) {
+        const double gap = group.descriptor.stamp_sec -
+            history->earliest_prelift_samples.back().stamp_sec;
+        if (!(gap > 0.0) || gap > config_.maximum_observation_gap_sec) {
+          history->prelift_state = CargoPreLiftReferenceState::CLOSED;
+          history->prelift_close_reason = "SUPPORTED_EVIDENCE_GAP";
+          history->earliest_prelift_samples.clear();
+        }
+      }
+      if (history->prelift_state != CargoPreLiftReferenceState::CLOSED) {
+        history->prelift_state = CargoPreLiftReferenceState::ACQUIRING;
+        history->prelift_close_reason = "none";
+        history->earliest_prelift_samples.push_back(PreLiftSample{
+            group.descriptor.stamp_sec,
+            group.descriptor.physical_vertical_z,
+            group.descriptor.vertical_uncertainty_m});
+        const std::size_t required_samples = static_cast<std::size_t>(
+            std::max(1, config_.lift_confirm_frames));
+        if (history->earliest_prelift_samples.size() == required_samples) {
+          std::vector<double> z_values;
+          z_values.reserve(required_samples);
+          double maximum_uncertainty = 0.0;
+          bool nondecreasing = true;
+          for (std::size_t sample_index = 0U;
+               sample_index < required_samples; ++sample_index) {
+            const PreLiftSample& sample =
+                history->earliest_prelift_samples[sample_index];
+            z_values.push_back(sample.vertical_z);
+            maximum_uncertainty = std::max(
+                maximum_uncertainty, sample.uncertainty_m);
+            if (sample_index > 0U && sample.vertical_z + kEpsilon <
+                    history->earliest_prelift_samples[
+                        sample_index - 1U].vertical_z) {
+              nondecreasing = false;
+            }
+          }
+          const double reference = median(z_values);
+          const double robust_dispersion =
+              1.4826 * medianAbsoluteDeviation(z_values, reference);
+          const double uncertainty = std::max(
+              maximum_uncertainty, robust_dispersion);
+          const double compatibility = std::max(
+              config_.minimum_significant_change_m,
+              config_.significance_sigma * maximum_uncertainty);
+          const auto extrema = std::minmax_element(
+              z_values.begin(), z_values.end());
+          const double spread = *extrema.second - *extrema.first;
+          const double departure = z_values.back() - z_values.front();
+          const bool monotonic_departure = nondecreasing &&
+              departure > std::max(maximum_uncertainty,
+                                   robust_dispersion + kEpsilon);
+          if (spread <= compatibility && !monotonic_departure) {
+            history->prelift_state = CargoPreLiftReferenceState::FROZEN;
+            history->prelift_reference_frozen = true;
+            history->prelift_reference_z = reference;
+            history->prelift_reference_uncertainty_m = uncertainty;
+            history->prelift_reference_first_stamp =
+                history->earliest_prelift_samples.front().stamp_sec;
+            history->prelift_reference_last_stamp =
+                history->earliest_prelift_samples.back().stamp_sec;
+            history->baseline_frozen = true;
+            history->baseline_source =
+                CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE;
+            history->baseline_z95 = reference;
+            history->baseline_uncertainty_m = uncertainty;
+            history->baseline_stamp_sec =
+                history->prelift_reference_last_stamp;
+          } else {
+            history->prelift_state = CargoPreLiftReferenceState::CLOSED;
+            history->prelift_close_reason = monotonic_departure
+                ? "EARLIEST_PREFIX_MONOTONIC_DEPARTURE"
+                : "EARLIEST_PREFIX_INCOMPATIBLE";
+            history->earliest_prelift_samples.clear();
+          }
+        }
+      }
+    } else if (!history->prelift_reference_frozen &&
+               history->prelift_state ==
+                   CargoPreLiftReferenceState::ACQUIRING &&
+               role_allows_reference_acquisition && !supported) {
+      history->prelift_state = CargoPreLiftReferenceState::PAUSED;
+    } else if (!history->prelift_reference_frozen &&
+               history->prelift_state ==
+                   CargoPreLiftReferenceState::PAUSED &&
+               role_allows_reference_acquisition && evidence_authorized) {
+      history->prelift_state = CargoPreLiftReferenceState::ACQUIRING;
     }
-    const bool strict_lidar_existence_path =
-        input.hook_role != HookLoadSignalRole::REQUIRED;
-    if (!history->baseline_frozen &&
-        (!pre_load_phase || strict_lidar_existence_path) &&
-        !started_loaded_without_baseline_ && supported) {
-      history->baseline_frozen = true;
-      history->baseline_source = history->has_preload &&
-              !strict_lidar_existence_path
-          ? CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE
-          : CargoLiftBaselineSource::POST_LOAD_FIRST_FRESH_OBSERVATION;
-      history->baseline_z95 = history->has_preload &&
-              !strict_lidar_existence_path
-          ? history->preload_z95 : group.descriptor.physical_vertical_z;
-      history->baseline_uncertainty_m = history->has_preload &&
-              !strict_lidar_existence_path
-          ? history->preload_uncertainty_m
-          : group.descriptor.vertical_uncertainty_m;
-      history->baseline_stamp_sec = history->has_preload &&
-              !strict_lidar_existence_path
-          ? history->preload_stamp_sec : group.descriptor.stamp_sec;
+    if (!history->prelift_reference_frozen && gravity_load_edge &&
+        input.hook_role == HookLoadSignalRole::REQUIRED) {
+      history->prelift_state = CargoPreLiftReferenceState::CLOSED;
+      history->prelift_close_reason = "LOAD_EDGE_BEFORE_REFERENCE_FROZEN";
+      history->earliest_prelift_samples.clear();
     }
 
     if (!supported) {
@@ -1351,6 +1500,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
 
   decision_.association = frame_association;
   decision_.load_epoch = load_epoch_;
+  decision_.physical_cargo_epoch_id = physical_cargo_epoch_id_;
   if (started_loaded_without_baseline_) {
     decision_.baseline_source =
         CargoLiftBaselineSource::UNAVAILABLE_STARTED_LOADED;
@@ -1392,6 +1542,16 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
           ? current_group->representative.member_component_ids
           : std::vector<std::uint64_t>{};
       decision_.baseline_source = selected->baseline_source;
+      decision_.prelift_state = selected->prelift_state;
+      decision_.prelift_sample_count =
+          selected->earliest_prelift_samples.size();
+      decision_.prelift_reference_uncertainty_m =
+          selected->prelift_reference_uncertainty_m;
+      decision_.prelift_reference_first_stamp =
+          selected->prelift_reference_first_stamp;
+      decision_.prelift_reference_last_stamp =
+          selected->prelift_reference_last_stamp;
+      decision_.prelift_close_reason = selected->prelift_close_reason;
       decision_.current_candidate_fresh = current_group != nullptr;
       decision_.lift_confirmed = selected->lift_confirmed;
       decision_.lift_confirm_count = selected->lift_confirm_count;
@@ -1439,6 +1599,18 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     for (const History& history : histories_) {
       if (history.id != group_history_ids[gi]) continue;
       diagnostic.baseline_source = history.baseline_source;
+      diagnostic.prelift_state = history.prelift_state;
+      diagnostic.prelift_sample_count =
+          history.earliest_prelift_samples.size();
+      diagnostic.physical_cargo_epoch_id =
+          history.physical_cargo_epoch_id;
+      diagnostic.prelift_reference_uncertainty_m =
+          history.prelift_reference_uncertainty_m;
+      diagnostic.prelift_reference_first_stamp =
+          history.prelift_reference_first_stamp;
+      diagnostic.prelift_reference_last_stamp =
+          history.prelift_reference_last_stamp;
+      diagnostic.prelift_close_reason = history.prelift_close_reason;
       diagnostic.baseline_z = history.baseline_z95;
       diagnostic.last_supported_evidence_stamp =
           history.last_supported_evidence_stamp_sec;
@@ -1464,6 +1636,25 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
           : CargoPhysicalIdentityState::UNKNOWN;
       break;
     }
+  }
+
+  // Before identity validation there is intentionally no selected Cargo, but
+  // a single unambiguous physical group still owns the pre-lift diagnostic.
+  // This copies telemetry only and does not grant identity authority.
+  if (decision_.physical_history_id == 0U &&
+      decision_.group_diagnostics.size() == 1U &&
+      decision_.group_diagnostics.front().association !=
+          CargoCandidateAssociationState::AMBIGUOUS) {
+    const auto& diagnostic = decision_.group_diagnostics.front();
+    decision_.prelift_state = diagnostic.prelift_state;
+    decision_.prelift_sample_count = diagnostic.prelift_sample_count;
+    decision_.prelift_reference_uncertainty_m =
+        diagnostic.prelift_reference_uncertainty_m;
+    decision_.prelift_reference_first_stamp =
+        diagnostic.prelift_reference_first_stamp;
+    decision_.prelift_reference_last_stamp =
+        diagnostic.prelift_reference_last_stamp;
+    decision_.prelift_close_reason = diagnostic.prelift_close_reason;
   }
 
   previous_existence_phase_ = gravity_loaded || decision_.cargo_exists;

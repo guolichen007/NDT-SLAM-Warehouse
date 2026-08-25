@@ -55,6 +55,14 @@ enum class CargoVerticalEvidenceSource : std::uint8_t {
   RAW_ROI_HISTORY_FOOTPRINT_REACQUIRE,
 };
 
+enum class CargoPreLiftReferenceState : std::uint8_t {
+  UNSEEN = 0,
+  ACQUIRING,
+  PAUSED,
+  FROZEN,
+  CLOSED,
+};
+
 const char* cargoCandidateAssociationStateName(
     CargoCandidateAssociationState state) noexcept;
 const char* cargoPhysicalAssociationModeName(
@@ -67,6 +75,8 @@ const char* cargoExistenceSourceName(CargoExistenceSource source) noexcept;
 const char* cargoGroupVerticalModeName(CargoGroupVerticalMode mode) noexcept;
 const char* cargoVerticalEvidenceSourceName(
     CargoVerticalEvidenceSource source) noexcept;
+const char* cargoPreLiftReferenceStateName(
+    CargoPreLiftReferenceState state) noexcept;
 
 struct CargoPhysicalIdentityConfig {
   double maximum_xy_step_m = 0.30;
@@ -232,6 +242,15 @@ struct CargoPhysicalGroupDiagnostic {
   bool frame_has_unrelated_ambiguity = false;
   CargoLiftBaselineSource baseline_source =
       CargoLiftBaselineSource::POST_LOAD_FIRST_FRESH_OBSERVATION;
+  CargoPreLiftReferenceState prelift_state =
+      CargoPreLiftReferenceState::UNSEEN;
+  std::size_t prelift_sample_count = 0U;
+  std::uint64_t physical_cargo_epoch_id = 0U;
+  double prelift_reference_uncertainty_m =
+      std::numeric_limits<double>::quiet_NaN();
+  double prelift_reference_first_stamp = 0.0;
+  double prelift_reference_last_stamp = 0.0;
+  std::string prelift_close_reason = "none";
   double baseline_z = std::numeric_limits<double>::quiet_NaN();
   double lift_delta_m = std::numeric_limits<double>::quiet_NaN();
   double lift_threshold_m = std::numeric_limits<double>::quiet_NaN();
@@ -248,6 +267,9 @@ struct CargoPhysicalIdentityInput {
   bool rearm = false;
   bool node_started_loaded = false;
   HookLoadSignalRole hook_role = HookLoadSignalRole::REQUIRED;
+  std::string hook_role_source = "unspecified";
+  bool localization_authorized = true;
+  bool pose_authority_identity_valid = true;
   bool gravity_valid = false;
   HookLoadState gravity_state = HookLoadState::UNKNOWN;
   std::vector<CargoPhysicalGroupObservation> groups;
@@ -265,6 +287,17 @@ struct CargoPhysicalIdentityDecision {
   CargoLiftBaselineSource baseline_source =
       CargoLiftBaselineSource::POST_LOAD_FIRST_FRESH_OBSERVATION;
   std::uint64_t load_epoch = 0U;
+  std::uint64_t physical_cargo_epoch_id = 0U;
+  CargoPreLiftReferenceState prelift_state =
+      CargoPreLiftReferenceState::UNSEEN;
+  std::size_t prelift_sample_count = 0U;
+  double prelift_reference_uncertainty_m =
+      std::numeric_limits<double>::quiet_NaN();
+  double prelift_reference_first_stamp = 0.0;
+  double prelift_reference_last_stamp = 0.0;
+  std::string prelift_close_reason = "none";
+  std::string hook_role_source = "unspecified";
+  bool strict_lidar_existence_path = false;
   std::uint64_t physical_history_id = 0U;
   std::uint64_t frame_group_id = 0U;
   std::uint64_t resolved_candidate_id = 0U;
@@ -312,15 +345,27 @@ class CargoPhysicalIdentityAuthority {
   }
 
  private:
+  struct PreLiftSample {
+    double stamp_sec = 0.0;
+    double vertical_z = std::numeric_limits<double>::quiet_NaN();
+    double uncertainty_m = std::numeric_limits<double>::quiet_NaN();
+  };
+
   struct History {
     std::uint64_t id = 0U;
     CargoPhysicalGroupDescriptor last_descriptor;
     Eigen::Vector3d last_representative_center = Eigen::Vector3d::Zero();
     double last_stamp_sec = 0.0;
-    bool has_preload = false;
-    double preload_z95 = std::numeric_limits<double>::quiet_NaN();
-    double preload_uncertainty_m = 0.20;
-    double preload_stamp_sec = 0.0;
+    CargoPreLiftReferenceState prelift_state =
+        CargoPreLiftReferenceState::UNSEEN;
+    std::vector<PreLiftSample> earliest_prelift_samples;
+    std::uint64_t physical_cargo_epoch_id = 0U;
+    bool prelift_reference_frozen = false;
+    double prelift_reference_z = std::numeric_limits<double>::quiet_NaN();
+    double prelift_reference_uncertainty_m = 0.20;
+    double prelift_reference_first_stamp = 0.0;
+    double prelift_reference_last_stamp = 0.0;
+    std::string prelift_close_reason = "none";
     bool baseline_frozen = false;
     CargoLiftBaselineSource baseline_source =
         CargoLiftBaselineSource::POST_LOAD_FIRST_FRESH_OBSERVATION;
@@ -343,10 +388,12 @@ class CargoPhysicalIdentityAuthority {
   std::uint64_t next_history_id_ = 1U;
   std::uint64_t load_epoch_ = 0U;
   std::uint64_t lifecycle_id_ = 0U;
+  std::uint64_t physical_cargo_epoch_id_ = 0U;
   std::uint64_t validated_history_id_ = 0U;
   bool initialized_ = false;
   bool previous_existence_phase_ = false;
   bool started_loaded_without_baseline_ = false;
+  bool prelift_blocked_until_new_epoch_ = false;
   double last_pipeline_stamp_sec_ = 0.0;
   std::string reset_reason_ = "constructed";
 };

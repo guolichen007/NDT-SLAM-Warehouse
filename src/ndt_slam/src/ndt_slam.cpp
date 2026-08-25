@@ -13594,13 +13594,22 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
     const auto identity_start = IntegratedShadowDiagClock::now();
     CargoPhysicalIdentityInput input;
     input.pipeline_stamp_sec = stamp.toSec();
-    // The shadow authority owns its load epoch. Product lifecycle counters
-    // are diagnostic-only here and must not erase a valid preload history.
-    input.lifecycle_id = 0U;
+    // Reuse the product lifecycle sequence as the single physical Cargo epoch.
+    // During EMPTY the next sequence is reserved so the pre-lift prefix and
+    // the following load edge retain the same owner id.
+    input.lifecycle_id = hook.valid && hook.state ==
+            lidar_slam2_msgs::HookLoadState::STATE_EMPTY
+        ? cargo_lifecycle_sequence_ + 1U
+        : (cargo_lifecycle_id_ != 0U
+            ? cargo_lifecycle_id_ : cargo_lifecycle_sequence_ + 1U);
     input.node_started_loaded = !integrated_shadow_seen_empty_ &&
         hook.valid && hook.state ==
             lidar_slam2_msgs::HookLoadState::STATE_LOADED;
     input.hook_role = hook_load_signal_role_;
+    input.hook_role_source = "startup_hook_load_signal.role";
+    input.localization_authorized = !tracking_lost_.load() &&
+        relocalization_pose_reliable_;
+    input.pose_authority_identity_valid = input.localization_authorized;
     input.gravity_valid = hook.valid;
     input.frame_evidence = std::move(frame_evidence);
     input.vertical_config = cargo_vertical_evidence_v2_config_;
@@ -13684,6 +13693,11 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "reacquired_vertical_reason,"
                 << "new_history_reason,validated_history_conflict,"
                 << "conflicting_history_id,frame_has_unrelated_ambiguity,"
+                << "hook_role,hook_role_source,strict_lidar_existence_path,"
+                << "physical_cargo_epoch_id,prelift_state,"
+                << "prelift_sample_count,prelift_reference_uncertainty,"
+                << "prelift_reference_first_stamp,"
+                << "prelift_reference_last_stamp,prelift_close_reason,"
                 << "lift_baseline_source,baseline_z,"
                 << "lift_delta,lift_threshold,last_supported_evidence_stamp,"
                 << "maximum_observation_gap_sec,"
@@ -13770,6 +13784,18 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << (diagnostic.validated_history_conflict ? 1 : 0) << ','
                 << diagnostic.conflicting_history_id << ','
                 << (diagnostic.frame_has_unrelated_ambiguity ? 1 : 0) << ','
+                << hookLoadSignalRoleName(input.hook_role) << ','
+                << input.hook_role_source << ','
+                << (integrated_identity_decision_
+                        .strict_lidar_existence_path ? 1 : 0) << ','
+                << diagnostic.physical_cargo_epoch_id << ','
+                << cargoPreLiftReferenceStateName(
+                       diagnostic.prelift_state) << ','
+                << diagnostic.prelift_sample_count << ','
+                << diagnostic.prelift_reference_uncertainty_m << ','
+                << diagnostic.prelift_reference_first_stamp << ','
+                << diagnostic.prelift_reference_last_stamp << ','
+                << diagnostic.prelift_close_reason << ','
                 << cargoLiftBaselineSourceName(
                        diagnostic.baseline_source) << ','
                 << diagnostic.baseline_z << ',' << diagnostic.lift_delta_m
@@ -13785,7 +13811,7 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
         }
     }
     const std::uint64_t shadow_lifecycle_id =
-        integrated_identity_decision_.load_epoch;
+        integrated_identity_decision_.physical_cargo_epoch_id;
     const bool identity_revoked = integrated_identity_decision_.identity !=
         CargoPhysicalIdentityState::VALIDATED;
     const bool owner_changed = integrated_group_evidence_.valid &&
@@ -22359,7 +22385,13 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                 << "frame_seq,pipeline_stamp,baseline_selected_candidate_id,"
                 << "shadow_association,shadow_identity,shadow_history_id,"
                 << "shadow_group_id,shadow_candidate_id,"
-                << "shadow_member_component_ids,baseline_source,"
+                << "shadow_member_component_ids,hook_role,hook_role_source,"
+                << "strict_lidar_existence_path,physical_cargo_epoch_id,"
+                << "prelift_state,prelift_sample_count,"
+                << "prelift_reference_uncertainty,"
+                << "prelift_reference_first_stamp,"
+                << "prelift_reference_last_stamp,prelift_close_reason,"
+                << "baseline_source,"
                 << "product_predicted_center_score,product_overlap_score,"
                 << "product_identity_confidence,product_overall_lock_confidence,"
                 << "lift_delta_m,lift_threshold_m,lift_confirm_count,"
@@ -22419,6 +22451,21 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             << integrated_identity_decision_.frame_group_id << ','
             << integrated_identity_decision_.resolved_candidate_id << ','
             << shadow_member_ids.str() << ','
+            << hookLoadSignalRoleName(hook_load_signal_role_) << ','
+            << integrated_identity_decision_.hook_role_source << ','
+            << (integrated_identity_decision_
+                    .strict_lidar_existence_path ? 1 : 0) << ','
+            << integrated_identity_decision_.physical_cargo_epoch_id << ','
+            << cargoPreLiftReferenceStateName(
+                   integrated_identity_decision_.prelift_state) << ','
+            << integrated_identity_decision_.prelift_sample_count << ','
+            << integrated_identity_decision_
+                   .prelift_reference_uncertainty_m << ','
+            << integrated_identity_decision_
+                   .prelift_reference_first_stamp << ','
+            << integrated_identity_decision_
+                   .prelift_reference_last_stamp << ','
+            << integrated_identity_decision_.prelift_close_reason << ','
             << cargoLiftBaselineSourceName(
                    integrated_identity_decision_.baseline_source) << ','
             << std::numeric_limits<double>::quiet_NaN() << ','
