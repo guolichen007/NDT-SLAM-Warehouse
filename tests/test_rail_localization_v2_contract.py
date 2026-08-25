@@ -107,3 +107,33 @@ def test_rail_loop_apply_never_calls_se3_pose_writer():
     rail_branch = consume.split("if (result.rail_translation_only)", 1)[1]
     rail_branch = rail_branch.split("} else {", 1)[0]
     assert "applyOptimizedPoses" not in rail_branch
+
+
+def test_map_commit_is_fenced_by_pose_yaw_reference_and_target_identity():
+    authority_check = _function_body(
+        NODE,
+        "bool NdtSlamNode::isMapCommitAuthorityCurrent(",
+        "void NdtSlamNode::enqueueMapCommitJob(",
+    )
+    for token in (
+        "job.lifecycle_epoch",
+        "job.keyframe_pose_version",
+        "job.yaw_authority_generation",
+        "job.map_frame_uuid",
+        "job.yaw_reference_hash",
+        "job.target_snapshot_id",
+        "job.localization_map_mutation_authorized",
+    ):
+        assert token in authority_check
+    enqueue = _function_body(
+        NODE,
+        "void NdtSlamNode::enqueueMapCommitJob(",
+        "void NdtSlamNode::mapCommitThread(",
+    )
+    assert "localization_authority_health_.map_mutation_authorized" in enqueue
+    worker = _function_body(
+        NODE,
+        "void NdtSlamNode::mapCommitThread(",
+        "void NdtSlamNode::consumeMapCommitCompletion(",
+    )
+    assert worker.count("isMapCommitAuthorityCurrent(job)") >= 3

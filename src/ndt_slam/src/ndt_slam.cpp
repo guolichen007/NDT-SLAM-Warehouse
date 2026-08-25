@@ -1031,6 +1031,28 @@ NdtSlamNode::~NdtSlamNode() {
     ROS_WARN("[Shutdown] Complete");
 }
 
+bool NdtSlamNode::isMapCommitAuthorityCurrent(
+    const MapCommitJob& job) const {
+    if (!isMapCommitLifecycleCurrent(
+            job.lifecycle_epoch,
+            map_rebuild_generation_.load(std::memory_order_acquire))) {
+        return false;
+    }
+    if (!job.rail_authority_job) return true;
+    return job.localization_map_mutation_authorized &&
+        yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY &&
+        job.keyframe_pose_version ==
+            keyframe_pose_version_.load(std::memory_order_acquire) &&
+        job.yaw_authority_generation == rail_yaw_authority_.generation() &&
+        job.map_frame_uuid == rail_yaw_authority_.reference().map_frame_uuid &&
+        job.yaw_reference_hash ==
+            rail_yaw_authority_.reference().reference_hash &&
+        job.target_snapshot_id != 0U &&
+        job.target_snapshot_id ==
+            current_registration_target_snapshot_id_.load(
+                std::memory_order_acquire);
+}
+
 void NdtSlamNode::enqueueMapCommitJob(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
     const Sophus::SE3d& pose,
@@ -1047,6 +1069,20 @@ void NdtSlamNode::enqueueMapCommitJob(
         current_time_epoch_id_.load(std::memory_order_acquire);
     job.static_evidence_epoch =
         static_evidence_epoch_.load(std::memory_order_acquire);
+    job.rail_authority_job =
+        yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY;
+    job.keyframe_pose_version =
+        keyframe_pose_version_.load(std::memory_order_acquire);
+    job.yaw_authority_generation = rail_yaw_authority_.generation();
+    job.map_frame_uuid = rail_yaw_authority_.reference().map_frame_uuid;
+    job.yaw_reference_hash =
+        rail_yaw_authority_.reference().reference_hash;
+    job.target_snapshot_id =
+        current_registration_target_snapshot_id_.load(
+            std::memory_order_acquire);
+    job.localization_map_mutation_authorized =
+        !job.rail_authority_job ||
+        localization_authority_health_.map_mutation_authorized;
     job.stamp = stamp;
     job.pose = pose;
     job.cloud = cloud;
@@ -1082,7 +1118,8 @@ void NdtSlamNode::enqueueMapCommitJob(
         job.cargo_quarantine_z_max = odom_anchor_config_.search_z_max;
     }
     job.allow_persistent_map_commit =
-        allow_persistent_map_commit_ && canCommit();
+        allow_persistent_map_commit_ && canCommit() &&
+        job.localization_map_mutation_authorized;
     job.has_raw_ndt_pose = has_last_raw_ndt_pose_;
     if (job.has_raw_ndt_pose) {
         job.raw_ndt_pose = last_raw_ndt_pose_;
@@ -1127,7 +1164,8 @@ void NdtSlamNode::mapCommitThread() {
 
         if (!isMapCommitLifecycleCurrent(
                 job.lifecycle_epoch,
-                map_rebuild_generation_.load(std::memory_order_acquire))) {
+                map_rebuild_generation_.load(std::memory_order_acquire)) ||
+            !isMapCommitAuthorityCurrent(job)) {
             map_commit_stale_.fetch_add(1U, std::memory_order_relaxed);
             continue;
         }
@@ -1141,7 +1179,8 @@ void NdtSlamNode::mapCommitThread() {
                 map_commit_lifecycle_mutex_);
             if (isMapCommitLifecycleCurrent(
                     job.lifecycle_epoch,
-                    map_rebuild_generation_.load(std::memory_order_acquire))) {
+                    map_rebuild_generation_.load(std::memory_order_acquire)) &&
+                isMapCommitAuthorityCurrent(job)) {
                 committed = commitKeyFrameWithDynamicFiltering(job);
             } else {
                 lifecycle_stale = true;
@@ -1160,11 +1199,23 @@ void NdtSlamNode::mapCommitThread() {
         {
             std::lock_guard<std::mutex> lock(map_commit_completion_mutex_);
             completion_current = isMapCommitLifecycleCurrent(
-                job.lifecycle_epoch,
-                map_rebuild_generation_.load(std::memory_order_acquire));
+                    job.lifecycle_epoch,
+                    map_rebuild_generation_.load(std::memory_order_acquire)) &&
+                isMapCommitAuthorityCurrent(job);
             if (completion_current) {
                 map_commit_completion_.pending = true;
                 map_commit_completion_.lifecycle_epoch = job.lifecycle_epoch;
+                map_commit_completion_.rail_authority_job =
+                    job.rail_authority_job;
+                map_commit_completion_.keyframe_pose_version =
+                    job.keyframe_pose_version;
+                map_commit_completion_.yaw_authority_generation =
+                    job.yaw_authority_generation;
+                map_commit_completion_.map_frame_uuid = job.map_frame_uuid;
+                map_commit_completion_.yaw_reference_hash =
+                    job.yaw_reference_hash;
+                map_commit_completion_.target_snapshot_id =
+                    job.target_snapshot_id;
                 map_commit_completion_.pose = job.pose;
                 map_commit_completion_.has_raw_ndt_pose = job.has_raw_ndt_pose;
                 map_commit_completion_.raw_ndt_pose = job.raw_ndt_pose;
@@ -1209,6 +1260,20 @@ void NdtSlamNode::consumeMapCommitCompletion() {
     }
     if (completion.lifecycle_epoch !=
         map_rebuild_generation_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (completion.rail_authority_job &&
+        (completion.keyframe_pose_version !=
+             keyframe_pose_version_.load(std::memory_order_acquire) ||
+         completion.yaw_authority_generation !=
+             rail_yaw_authority_.generation() ||
+         completion.map_frame_uuid !=
+             rail_yaw_authority_.reference().map_frame_uuid ||
+         completion.yaw_reference_hash !=
+             rail_yaw_authority_.reference().reference_hash ||
+         completion.target_snapshot_id !=
+             current_registration_target_snapshot_id_.load(
+                 std::memory_order_acquire))) {
         return;
     }
 
@@ -26748,6 +26813,8 @@ void NdtSlamNode::bindNdtInputTarget(
     const std::string& reason,
     const std::string& crop_identity) {
     if (!target || target->empty()) {
+        current_registration_target_snapshot_id_.store(
+            0U, std::memory_order_release);
         last_target_points_ = 0;
         last_actual_target_source_ = "invalid";
         last_target_reason_ = "empty_target";
@@ -26762,6 +26829,8 @@ void NdtSlamNode::bindNdtInputTarget(
             map_rebuild_generation_.load(std::memory_order_acquire),
             std::string{}, crop_identity);
     if (!snapshot.valid()) {
+        current_registration_target_snapshot_id_.store(
+            0U, std::memory_order_release);
         last_target_points_ = 0;
         last_actual_target_source_ = "invalid";
         last_target_reason_ = "registration_target_snapshot_invalid";
@@ -26801,6 +26870,8 @@ void NdtSlamNode::bindNdtInputTarget(
     }
 
     current_registration_target_snapshot_ = snapshot;
+    current_registration_target_snapshot_id_.store(
+        snapshot.target_snapshot_id, std::memory_order_release);
 
     target_version_ = content_version;
     last_target_points_ = static_cast<int>(target->size());

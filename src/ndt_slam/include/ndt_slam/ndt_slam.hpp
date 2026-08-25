@@ -681,6 +681,7 @@ private:
     std::string last_bound_ndt_target_source_ = "none";
     std::string cached_target_crop_identity_ = "none";
     RegistrationTargetSnapshot current_registration_target_snapshot_;
+    std::atomic<std::uint64_t> current_registration_target_snapshot_id_{0U};
     std::string last_actual_target_source_ = "bootstrap_local_map";
     std::string last_target_reason_ = "startup";
 
@@ -740,6 +741,13 @@ private:
         // fence for commit execution.
         std::uint64_t time_epoch_id = 0U;
         std::uint64_t static_evidence_epoch = 0U;
+        bool rail_authority_job = false;
+        std::uint64_t keyframe_pose_version = 0U;
+        std::uint64_t yaw_authority_generation = 0U;
+        std::string map_frame_uuid;
+        std::string yaw_reference_hash;
+        std::uint64_t target_snapshot_id = 0U;
+        bool localization_map_mutation_authorized = false;
         ros::Time stamp;
         Sophus::SE3d pose;
         pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud;
@@ -770,6 +778,12 @@ private:
     struct MapCommitCompletion {
         bool pending = false;
         std::uint64_t lifecycle_epoch = 0U;
+        bool rail_authority_job = false;
+        std::uint64_t keyframe_pose_version = 0U;
+        std::uint64_t yaw_authority_generation = 0U;
+        std::string map_frame_uuid;
+        std::string yaw_reference_hash;
+        std::uint64_t target_snapshot_id = 0U;
         Sophus::SE3d pose;
         bool has_raw_ndt_pose = false;
         Sophus::SE3d raw_ndt_pose;
@@ -801,6 +815,7 @@ private:
         const ros::Time& stamp);
     void mapCommitThread();
     void consumeMapCommitCompletion();
+    bool isMapCommitAuthorityCurrent(const MapCommitJob& job) const;
 
     // NDT_OMP 配准器
     pclomp::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ>::Ptr ndt_;
