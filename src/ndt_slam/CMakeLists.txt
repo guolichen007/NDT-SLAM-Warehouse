@@ -619,6 +619,13 @@ if(CATKIN_ENABLE_TESTING)
     target_link_libraries(runtime_diagnostics_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
   endif()
+
+  catkin_add_gtest(rail_localization_authority_test
+    test/rail_localization_authority_test.cpp)
+  if(TARGET rail_localization_authority_test)
+    target_link_libraries(rail_localization_authority_test
+      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
 endif()
 
 install(TARGETS ndt_slam_lib ndt_slam_node pointcloud_merger cloud_diagnostics
