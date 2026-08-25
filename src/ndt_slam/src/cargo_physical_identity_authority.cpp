@@ -1,6 +1,7 @@
 #include "ndt_slam/cargo_physical_identity_authority.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <iterator>
@@ -120,6 +121,140 @@ double intervalSeparation(double lhs_low, double lhs_high,
                            std::min(lhs_high, rhs_high));
 }
 
+bool hasPositiveAreaSupportOverlap(
+    const CargoPhysicalGroupDescriptor& lhs,
+    const CargoPhysicalGroupDescriptor& rhs) {
+  const double intersection_x =
+      std::min(lhs.robust_x95, rhs.robust_x95) -
+      std::max(lhs.robust_x05, rhs.robust_x05);
+  const double intersection_y =
+      std::min(lhs.robust_y95, rhs.robust_y95) -
+      std::max(lhs.robust_y05, rhs.robust_y05);
+  return intersection_x > kEpsilon && intersection_y > kEpsilon &&
+      intersection_x * intersection_y > kEpsilon;
+}
+
+CargoVerticalEvidenceInput makeVerticalInput(
+    const CargoPhysicalCandidateObservation& hypothesis,
+    bool ground_reference_valid,
+    double ground_z_base) {
+  CargoVerticalEvidenceInput input;
+  input.footprint_valid = true;
+  input.footprint_center_base = hypothesis.center.head<2>().cast<float>();
+  input.footprint_size_xy = hypothesis.size.head<2>().cast<float>();
+  input.footprint_yaw_base_rad = static_cast<float>(hypothesis.yaw_rad);
+  input.ground_reference_valid = ground_reference_valid;
+  input.ground_z_base = static_cast<float>(ground_z_base);
+  return input;
+}
+
+struct VerticalOwnershipResult {
+  bool valid = false;
+  std::size_t overlap_cell_count = 0U;
+  double coverage = 0.0;
+  std::vector<double> owned_filtered_z;
+};
+
+VerticalOwnershipResult proveVerticalOwnership(
+    const CargoVerticalEvidence& evidence,
+    const std::vector<Eigen::Vector3f>& owner_points,
+    const CargoVerticalEvidenceInput& input,
+    const CargoVerticalEvidenceConfig& config) {
+  VerticalOwnershipResult result;
+  if (!evidence.valid || evidence.top_surface_cell_indices.empty()) {
+    return result;
+  }
+  std::set<CargoFootprintGridIndex> owner_cells;
+  for (const Eigen::Vector3f& point : owner_points) {
+    if (!point.allFinite() || !cargoPointInsideFootprint(
+            point, input, config.footprint_margin_m)) {
+      continue;
+    }
+    owner_cells.insert(makeCargoFootprintGridIndex(
+        point, input, config.xy_cell_size_m));
+  }
+  for (const CargoFootprintGridIndex& cell :
+       evidence.top_surface_cell_indices) {
+    if (owner_cells.count(cell) > 0U) ++result.overlap_cell_count;
+  }
+  result.coverage = static_cast<double>(result.overlap_cell_count) /
+      static_cast<double>(evidence.top_surface_cell_indices.size());
+  result.valid = result.overlap_cell_count >= config.minimum_surface_cells &&
+      result.coverage + kEpsilon >= config.minimum_surface_coverage_ratio;
+  if (result.valid) {
+    for (const Eigen::Vector3f& point :
+         evidence.filtered_vertical_points_base) {
+      if (!point.allFinite()) continue;
+      const CargoFootprintGridIndex cell = makeCargoFootprintGridIndex(
+          point, input, config.xy_cell_size_m);
+      if (owner_cells.count(cell) > 0U) {
+        result.owned_filtered_z.push_back(point.z());
+      }
+    }
+  }
+  return result;
+}
+
+CargoFootprintSnapshot footprintSnapshot(
+    const CargoPhysicalCandidateObservation& hypothesis,
+    double source_stamp_sec) {
+  CargoFootprintSnapshot snapshot;
+  snapshot.valid = hypothesis.center.allFinite() &&
+      hypothesis.size.allFinite() &&
+      (hypothesis.size.head<2>().array() > 0.0).all() &&
+      std::isfinite(hypothesis.yaw_rad) &&
+      std::isfinite(source_stamp_sec) && source_stamp_sec > 0.0;
+  snapshot.center_base = hypothesis.center.head<2>().cast<float>();
+  snapshot.size_xy = hypothesis.size.head<2>().cast<float>();
+  snapshot.yaw_base_rad = static_cast<float>(hypothesis.yaw_rad);
+  snapshot.source_stamp_sec = source_stamp_sec;
+  return snapshot;
+}
+
+AssociationOnlyReacquiredVerticalEvidence reacquireAssociationVertical(
+    const CargoShadowFrameEvidence& frame,
+    const CargoFootprintSnapshot& footprint,
+    const std::vector<Eigen::Vector3f>& owner_points,
+    const CargoVerticalEvidenceConfig& config,
+    double uncertainty_m) {
+  AssociationOnlyReacquiredVerticalEvidence result;
+  result.source_stamp_sec = frame.source_stamp_sec;
+  result.uncertainty_m = uncertainty_m;
+  if (!footprint.valid || !frame.raw_roi_current_frame ||
+      !std::isfinite(frame.source_stamp_sec) ||
+      frame.source_stamp_sec <= 0.0) {
+    result.reason = "frame_or_history_footprint_invalid";
+    return result;
+  }
+  CargoVerticalEvidenceInput input;
+  input.selected_cloud_base = frame.raw_roi_current_frame;
+  input.footprint_valid = true;
+  input.footprint_center_base = footprint.center_base;
+  input.footprint_size_xy = footprint.size_xy;
+  input.footprint_yaw_base_rad = footprint.yaw_base_rad;
+  input.ground_reference_valid = frame.ground_reference_valid;
+  input.ground_z_base = frame.ground_z_base;
+  const CargoVerticalEvidence evidence =
+      extractCargoVerticalEvidence(input, config);
+  if (!evidence.valid || !std::isfinite(evidence.top_z_base)) {
+    result.reason = "raw_history_footprint_vertical_invalid:" +
+        evidence.reject_reason;
+    return result;
+  }
+  const VerticalOwnershipResult ownership = proveVerticalOwnership(
+      evidence, owner_points, input, config);
+  result.owner_overlap_cell_count = ownership.overlap_cell_count;
+  result.owner_overlap_coverage = ownership.coverage;
+  if (!ownership.valid) {
+    result.reason = "raw_history_footprint_owner_proof_failed";
+    return result;
+  }
+  result.valid = true;
+  result.top_z_base = evidence.top_z_base;
+  result.reason = "association_only_reacquired_vertical_valid";
+  return result;
+}
+
 int requiredFrames(HookLoadSignalRole role, bool gravity_valid,
                    HookLoadState gravity_state, int base) {
   if (role != HookLoadSignalRole::AUXILIARY) return std::max(1, base);
@@ -199,14 +334,30 @@ const char* cargoGroupVerticalModeName(CargoGroupVerticalMode mode) noexcept {
   return "INVALID";
 }
 
+const char* cargoVerticalEvidenceSourceName(
+    CargoVerticalEvidenceSource source) noexcept {
+  switch (source) {
+    case CargoVerticalEvidenceSource::COMPONENT_UNION:
+      return "COMPONENT_UNION";
+    case CargoVerticalEvidenceSource::RAW_ROI_CURRENT_FOOTPRINT:
+      return "RAW_ROI_CURRENT_FOOTPRINT";
+    case CargoVerticalEvidenceSource::RAW_ROI_HISTORY_FOOTPRINT_REACQUIRE:
+      return "RAW_ROI_HISTORY_FOOTPRINT_REACQUIRE";
+  }
+  return "INVALID";
+}
+
 std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
     const std::vector<CargoPhysicalCandidateObservation>& candidates,
     const std::vector<CargoPhysicalComponentObservation>& components,
+    const CargoShadowFrameEvidence* frame_evidence,
     bool ground_reference_valid,
     double ground_z_base,
     const CargoVerticalEvidenceConfig& vertical_config,
     double equivalent_center_tolerance_m,
-    double equivalent_size_relative_tolerance) {
+    double equivalent_size_relative_tolerance,
+    CargoPhysicalGroupingTelemetry* telemetry) {
+  if (telemetry) *telemetry = CargoPhysicalGroupingTelemetry{};
   std::vector<CargoPhysicalCandidateObservation> valid;
   valid.reserve(candidates.size());
   for (CargoPhysicalCandidateObservation candidate : candidates) {
@@ -351,26 +502,110 @@ std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
     const bool continuity_available = physical_support_available &&
         !group.group_ambiguous;
 
-    std::vector<double> supported_tops;
+    std::vector<double> component_supported_tops;
+    std::vector<double> raw_owned_supported_tops;
+    std::vector<double> diagnostic_owned_z;
+    bool selected_raw_evidence = false;
+    const bool frame_stamp_matches = frame_evidence &&
+        frame_evidence->raw_roi_current_frame &&
+        std::isfinite(frame_evidence->source_stamp_sec) &&
+        std::abs(frame_evidence->source_stamp_sec -
+                 group.representative.stamp_sec) <= kEpsilon;
+    const bool ground_context_matches = frame_evidence &&
+        frame_evidence->ground_reference_valid == ground_reference_valid &&
+        (!ground_reference_valid ||
+         (std::isfinite(frame_evidence->ground_z_base) &&
+          std::isfinite(ground_z_base) &&
+          std::abs(static_cast<double>(frame_evidence->ground_z_base) -
+                   ground_z_base) <= kEpsilon));
     if (continuity_available) {
       for (const auto& hypothesis : group.hypotheses) {
-        CargoVerticalEvidenceInput evidence_input;
-        evidence_input.selected_points_base = union_points;
-        evidence_input.footprint_valid = true;
-        evidence_input.footprint_center_base =
-            hypothesis.center.head<2>().cast<float>();
-        evidence_input.footprint_size_xy =
-            hypothesis.size.head<2>().cast<float>();
-        evidence_input.footprint_yaw_base_rad =
-            static_cast<float>(hypothesis.yaw_rad);
-        evidence_input.ground_reference_valid = ground_reference_valid;
-        evidence_input.ground_z_base = static_cast<float>(ground_z_base);
-        const CargoVerticalEvidence evidence =
-            extractCargoVerticalEvidence(evidence_input, vertical_config);
-        if (evidence.valid && std::isfinite(evidence.top_z_base)) {
-          supported_tops.push_back(evidence.top_z_base);
+        CargoVerticalEvidenceInput component_input = makeVerticalInput(
+            hypothesis, ground_reference_valid, ground_z_base);
+        component_input.selected_points_base = union_points;
+        const CargoVerticalEvidence component_evidence =
+            extractCargoVerticalEvidence(component_input, vertical_config);
+
+        bool raw_owned = false;
+        CargoVerticalEvidence raw_evidence;
+        VerticalOwnershipResult ownership;
+        if (frame_stamp_matches && ground_context_matches) {
+          const auto raw_start = std::chrono::steady_clock::now();
+          CargoVerticalEvidenceInput raw_input = makeVerticalInput(
+              hypothesis, ground_reference_valid, ground_z_base);
+          raw_input.selected_cloud_base =
+              frame_evidence->raw_roi_current_frame;
+          raw_evidence = extractCargoVerticalEvidence(
+              raw_input, vertical_config);
+          ownership = proveVerticalOwnership(
+              raw_evidence, union_points, raw_input, vertical_config);
+          const double raw_ms = std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - raw_start).count();
+          if (telemetry) {
+            telemetry->raw_roi_vertical_total_ms += raw_ms;
+            ++telemetry->raw_roi_vertical_hypothesis_count;
+            telemetry->raw_roi_vertical_points_examined +=
+                frame_evidence->raw_roi_current_frame->size();
+          }
+          raw_owned = raw_evidence.valid && ownership.valid &&
+              std::isfinite(raw_evidence.top_z_base);
+          descriptor.owner_overlap_cell_count = std::max(
+              descriptor.owner_overlap_cell_count,
+              ownership.overlap_cell_count);
+          descriptor.owner_overlap_coverage = std::max(
+              descriptor.owner_overlap_coverage, ownership.coverage);
+          if (raw_evidence.valid && !ownership.valid) {
+            ++descriptor.owner_proof_rejected_hypothesis_count;
+          }
+          diagnostic_owned_z.insert(
+              diagnostic_owned_z.end(), ownership.owned_filtered_z.begin(),
+              ownership.owned_filtered_z.end());
+        }
+
+        if (raw_owned) {
+          raw_owned_supported_tops.push_back(raw_evidence.top_z_base);
+          ++descriptor.raw_roi_supported_hypothesis_count;
+        }
+        if (component_evidence.valid &&
+            std::isfinite(component_evidence.top_z_base)) {
+          component_supported_tops.push_back(component_evidence.top_z_base);
         }
       }
+    }
+
+    // A group aggregate always has one evidence lineage. Mixing component and
+    // RAW tops would make the counterfactual depend on how many hypotheses
+    // happened to pass each path. Prefer owner-proven RAW evidence as a set;
+    // otherwise preserve the existing component-union result.
+    selected_raw_evidence = !raw_owned_supported_tops.empty();
+    const std::vector<double>& supported_tops = selected_raw_evidence
+        ? raw_owned_supported_tops : component_supported_tops;
+    const double consistency_limit =
+        static_cast<double>(vertical_config.surface_band_height_m) +
+        maximum_uncertainty;
+    const auto aggregate_if_consistent = [consistency_limit](
+        const std::vector<double>& values, bool* valid, double* aggregate) {
+      if (values.empty()) return;
+      const auto bounds = std::minmax_element(values.begin(), values.end());
+      if (*bounds.second - *bounds.first <= consistency_limit + kEpsilon) {
+        *valid = true;
+        *aggregate = median(values);
+      }
+    };
+    aggregate_if_consistent(
+        component_supported_tops, &descriptor.component_vertical_valid,
+        &descriptor.component_vertical_z);
+    aggregate_if_consistent(
+        raw_owned_supported_tops, &descriptor.raw_roi_vertical_valid,
+        &descriptor.raw_roi_vertical_z);
+
+    if (!diagnostic_owned_z.empty()) {
+      descriptor.diagnostic_z05 = quantile(diagnostic_owned_z, 0.05);
+      descriptor.diagnostic_z95 = quantile(diagnostic_owned_z, 0.95);
+      descriptor.diagnostic_z_extent = descriptor.diagnostic_z95 -
+          descriptor.diagnostic_z05;
+      descriptor.diagnostic_z_extent_reliable =
+          std::isfinite(descriptor.diagnostic_z_extent);
     }
 
     descriptor.valid_hypothesis_top_count = supported_tops.size();
@@ -380,14 +615,16 @@ std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
       descriptor.hypothesis_top_min = *bounds.first;
       descriptor.hypothesis_top_max = *bounds.second;
       descriptor.hypothesis_top_spread = *bounds.second - *bounds.first;
-      const double consistency_limit =
-          static_cast<double>(vertical_config.surface_band_height_m) +
-          maximum_uncertainty;
       if (descriptor.hypothesis_top_spread <= consistency_limit + kEpsilon) {
         descriptor.vertical_mode =
             CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
         descriptor.physical_vertical_z = median(supported_tops);
-        descriptor.vertical_reject_reason = "SUPPORTED_HYPOTHESIS_TOP_MEDIAN";
+        descriptor.vertical_source = selected_raw_evidence
+            ? CargoVerticalEvidenceSource::RAW_ROI_CURRENT_FOOTPRINT
+            : CargoVerticalEvidenceSource::COMPONENT_UNION;
+        descriptor.vertical_reject_reason = selected_raw_evidence
+            ? "SUPPORTED_RAW_ROI_OWNER_PROVEN_TOP_MEDIAN"
+            : "SUPPORTED_HYPOTHESIS_TOP_MEDIAN";
       } else {
         descriptor.vertical_mode = CargoGroupVerticalMode::CONTINUITY_ONLY;
         descriptor.physical_vertical_z = descriptor.stable_anchor.z();
@@ -552,6 +789,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     std::size_t group = 0U;
     std::size_t history = 0U;
     bool feasible = false;
+    bool requires_post_unique_z = false;
     double cost = std::numeric_limits<double>::infinity();
     double raw_xy = std::numeric_limits<double>::quiet_NaN();
     double xy = std::numeric_limits<double>::quiet_NaN();
@@ -588,9 +826,9 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         pairs.push_back(pair);
         continue;
       }
-      const auto& previous = history.last_group.descriptor;
+      const auto& previous = history.last_descriptor;
       pair.raw_xy = (group.representative.center.head<2>() -
-                     history.last_group.representative.center.head<2>()).norm();
+                     history.last_representative_center.head<2>()).norm();
       pair.xy = (group.descriptor.robust_xy_center -
                  previous.robust_xy_center).norm();
       const double support_x_separation = intervalSeparation(
@@ -604,8 +842,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       if (pair.xy <= config_.maximum_xy_step_m) {
         pair.association_mode =
             CargoPhysicalAssociationMode::ANCHOR_CONTINUITY;
-      } else if (pair.support_xy_separation <=
-                 config_.maximum_xy_step_m) {
+      } else if (hasPositiveAreaSupportOverlap(
+                     group.descriptor, previous)) {
         pair.association_mode =
             CargoPhysicalAssociationMode::SUPPORT_OVERLAP_CONTINUITY;
       }
@@ -614,10 +852,13 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
           previous.vertical_uncertainty_m;
       pair.dz = std::abs(group.descriptor.physical_vertical_z -
                          previous.physical_vertical_z);
+      pair.requires_post_unique_z = group.descriptor.vertical_mode ==
+          CargoGroupVerticalMode::CONTINUITY_ONLY;
       pair.extent_step = 0.0;
       pair.extent_cost = 0.0;
       bool extent_ok = true;
-      for (int axis = 0; axis < 3; ++axis) {
+      const int extent_axis_count = pair.requires_post_unique_z ? 2 : 3;
+      for (int axis = 0; axis < extent_axis_count; ++axis) {
         const double current_extent = axis < 2
             ? group.descriptor.robust_xy_extent[axis]
             : group.descriptor.aggregate_extent[axis];
@@ -638,12 +879,13 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
               CargoPhysicalAssociationMode::ANCHOR_CONTINUITY
           ? pair.xy : pair.support_xy_separation;
       pair.xy_cost = association_xy / config_.maximum_xy_step_m;
-      pair.z_cost = pair.dz / std::max(z_limit, kEpsilon);
+      pair.z_cost = pair.requires_post_unique_z
+          ? 0.0 : pair.dz / std::max(z_limit, kEpsilon);
       pair.cost = pair.xy_cost + pair.z_cost + pair.extent_cost;
       if (pair.association_mode ==
           CargoPhysicalAssociationMode::NEW_HISTORY) {
         pair.reject_reason = "XY_GATE";
-      } else if (pair.dz > z_limit) {
+      } else if (!pair.requires_post_unique_z && pair.dz > z_limit) {
         pair.reject_reason = "Z_GATE";
       } else if (!extent_ok) {
         pair.reject_reason = "EXTENT_GATE";
@@ -720,6 +962,80 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     }
   }
 
+  // CONTINUITY_ONLY never selects a history by recovered Z. Reciprocal
+  // uniqueness is established from current-frame XY/extent evidence first;
+  // only that already-unique pair may use the prior supported footprint to
+  // complete its Z gate from the current RAW ROI.
+  for (std::size_t gi = 0; gi < input.groups.size(); ++gi) {
+    if (group_match[gi] < 0) continue;
+    Pair* matched_pair = nullptr;
+    for (Pair& pair : pairs) {
+      if (pair.group == gi && pair.history ==
+              static_cast<std::size_t>(group_match[gi]) && pair.feasible) {
+        matched_pair = &pair;
+        break;
+      }
+    }
+    if (!matched_pair || !matched_pair->requires_post_unique_z) continue;
+    History& history = histories_[matched_pair->history];
+    const auto& group = input.groups[gi];
+    const double association_dt =
+        group.descriptor.stamp_sec - history.last_stamp_sec;
+    double z_limit = config_.maximum_z_speed_mps * association_dt +
+        config_.z_step_margin_m +
+        group.descriptor.vertical_uncertainty_m +
+        history.last_descriptor.vertical_uncertainty_m;
+    double z_step = std::abs(group.descriptor.physical_vertical_z -
+                             history.last_descriptor.physical_vertical_z);
+
+    auto& diagnostic = decision_.group_diagnostics[gi];
+    const double supported_gap = history.last_supported_evidence_stamp_sec > 0.0
+        ? group.descriptor.stamp_sec -
+              history.last_supported_evidence_stamp_sec
+        : std::numeric_limits<double>::infinity();
+    if (history.last_supported_footprint.valid &&
+        supported_gap > 0.0 &&
+        supported_gap <= config_.maximum_observation_gap_sec &&
+        input.frame_evidence.raw_roi_current_frame &&
+        std::abs(input.frame_evidence.source_stamp_sec -
+                 group.descriptor.stamp_sec) <= kEpsilon) {
+      diagnostic.reacquired_vertical_attempted = true;
+      const auto reacquire_start = std::chrono::steady_clock::now();
+      diagnostic.reacquired_vertical = reacquireAssociationVertical(
+          input.frame_evidence, history.last_supported_footprint,
+          group.union_points_base, input.vertical_config,
+          history.last_supported_vertical_uncertainty_m);
+      const double reacquire_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - reacquire_start).count();
+      decision_.reacquired_vertical_compute_ms += reacquire_ms;
+      ++decision_.reacquired_vertical_attempt_count;
+      decision_.reacquired_vertical_points_examined +=
+          input.frame_evidence.raw_roi_current_frame->size();
+      if (diagnostic.reacquired_vertical.valid &&
+          std::isfinite(history.last_supported_vertical_z)) {
+        z_limit = config_.maximum_z_speed_mps * supported_gap +
+            config_.z_step_margin_m +
+            diagnostic.reacquired_vertical.uncertainty_m +
+            history.last_supported_vertical_uncertainty_m;
+        z_step = std::abs(diagnostic.reacquired_vertical.top_z_base -
+                          history.last_supported_vertical_z);
+      }
+    }
+    matched_pair->dz = z_step;
+    matched_pair->z_cost = z_step / std::max(z_limit, kEpsilon);
+    matched_pair->cost += matched_pair->z_cost;
+    diagnostic.z_step_m = z_step;
+    diagnostic.z_cost = matched_pair->z_cost;
+    if (z_step > z_limit) {
+      matched_pair->feasible = false;
+      matched_pair->reject_reason = "Z_GATE";
+      diagnostic.association_reject_reason = "Z_GATE";
+      diagnostic.new_history_reason = "Z_GATE";
+      group_match[gi] = -1;
+    }
+  }
+
   CargoCandidateAssociationState frame_association =
       CargoCandidateAssociationState::NEW_HISTORY;
   bool frame_has_any_ambiguity = false;
@@ -779,10 +1095,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     group_history_ids[gi] = history->id;
     diagnostic.matched_history_id = history->id;
     history->association_ambiguous = false;
-    history->last_group = group;
-    // Physical points belong to a current-frame evidence snapshot. Histories
-    // retain only the descriptor required by cross-frame association.
-    history->last_group.union_points_base.clear();
+    history->last_descriptor = group.descriptor;
+    history->last_representative_center = group.representative.center;
     history->last_stamp_sec = group.descriptor.stamp_sec;
 
     const bool supported = group.descriptor.vertical_mode ==
@@ -849,6 +1163,14 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     if (evidence_advanced) {
       history->last_supported_evidence_stamp_sec =
           group.descriptor.stamp_sec;
+      history->last_supported_vertical_z =
+          group.descriptor.physical_vertical_z;
+      history->last_supported_vertical_uncertainty_m =
+          group.descriptor.vertical_uncertainty_m;
+      if (group.geometry_resolved && !group.group_ambiguous) {
+        history->last_supported_footprint = footprintSnapshot(
+            group.representative, group.descriptor.stamp_sec);
+      }
       if (delta >= threshold) {
         ++history->lift_confirm_count;
         const int required = requiredFrames(
@@ -925,21 +1247,21 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             (current.robust_xy_extent.array() > 0.0).all() &&
             current.aggregate_extent.allFinite() &&
             std::isfinite(current.vertical_uncertainty_m)) {
-          const auto& previous = protected_history->last_group.descriptor;
+          const auto& previous = protected_history->last_descriptor;
           const double dt = current.stamp_sec -
               protected_history->last_stamp_sec;
           const double center_step = (current.robust_xy_center -
                                       previous.robust_xy_center).norm();
-          const double separation = std::hypot(
-              intervalSeparation(current.robust_x05, current.robust_x95,
-                                 previous.robust_x05, previous.robust_x95),
-              intervalSeparation(current.robust_y05, current.robust_y95,
-                                 previous.robust_y05, previous.robust_y95));
+          const bool positive_area_overlap =
+              hasPositiveAreaSupportOverlap(current, previous);
           const double z_limit = config_.maximum_z_speed_mps * dt +
               config_.z_step_margin_m + current.vertical_uncertainty_m +
               previous.vertical_uncertainty_m;
           bool extent_ok = true;
-          for (int axis = 0; axis < 3; ++axis) {
+          const int extent_axis_count = current.vertical_mode ==
+                  CargoGroupVerticalMode::CONTINUITY_ONLY
+              ? 2 : 3;
+          for (int axis = 0; axis < extent_axis_count; ++axis) {
             const double current_extent = axis < 2
                 ? current.robust_xy_extent[axis]
                 : current.aggregate_extent[axis];
@@ -956,7 +1278,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
           conflicts_with_protected_history = dt > 0.0 &&
               dt <= config_.maximum_observation_gap_sec &&
               (center_step <= config_.maximum_xy_step_m ||
-               separation <= config_.maximum_xy_step_m) &&
+               positive_area_overlap) &&
               std::abs(current.stable_anchor.z() -
                        previous.stable_anchor.z()) <= z_limit && extent_ok;
         }

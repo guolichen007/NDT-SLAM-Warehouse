@@ -52,6 +52,8 @@ struct CargoPhysicalGroupEvidenceSnapshot {
   std::vector<Eigen::Vector3f> union_points_base;
   Eigen::Vector3d stable_anchor = Eigen::Vector3d::Zero();
   CargoGroupVerticalMode vertical_mode = CargoGroupVerticalMode::INVALID;
+  CargoVerticalEvidenceSource vertical_source =
+      CargoVerticalEvidenceSource::COMPONENT_UNION;
   bool supported_top_valid = false;
   double supported_top_z = std::numeric_limits<double>::quiet_NaN();
   double vertical_uncertainty_m = std::numeric_limits<double>::quiet_NaN();

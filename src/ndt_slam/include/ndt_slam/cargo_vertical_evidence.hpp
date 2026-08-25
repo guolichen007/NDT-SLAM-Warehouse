@@ -6,6 +6,8 @@
 #include <vector>
 
 #include <Eigen/Core>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
 
 namespace ndt_slam {
 
@@ -23,6 +25,7 @@ struct CargoVerticalEvidenceConfig {
 
 struct CargoVerticalEvidenceInput {
   std::vector<Eigen::Vector3f> selected_points_base;
+  pcl::PointCloud<pcl::PointXYZ>::ConstPtr selected_cloud_base;
 
   bool footprint_valid = false;
   Eigen::Vector2f footprint_center_base = Eigen::Vector2f::Zero();
@@ -37,9 +40,24 @@ struct CargoVerticalEvidenceInput {
   float frozen_thickness_m = std::numeric_limits<float>::quiet_NaN();
 };
 
+struct CargoFootprintGridIndex {
+  int x = 0;
+  int y = 0;
+
+  bool operator<(const CargoFootprintGridIndex& other) const noexcept {
+    return x < other.x || (x == other.x && y < other.y);
+  }
+  bool operator==(const CargoFootprintGridIndex& other) const noexcept {
+    return x == other.x && y == other.y;
+  }
+};
+
 struct CargoVerticalEvidence {
   bool valid = false;
   float top_z_base = std::numeric_limits<float>::quiet_NaN();
+  std::vector<Eigen::Vector3f> filtered_vertical_points_base;
+  std::vector<Eigen::Vector3f> top_support_points_base;
+  std::vector<CargoFootprintGridIndex> top_surface_cell_indices;
   std::vector<Eigen::Vector3f> clean_vertical_points_base;
   std::size_t footprint_points = 0U;
   std::size_t top_support_points = 0U;
@@ -50,6 +68,17 @@ struct CargoVerticalEvidence {
   bool thickness_slab_used = false;
   std::string reject_reason = "not_evaluated";
 };
+
+// Both the extractor and V5 ownership proof use these helpers so a supported
+// top cell can never be compared against a differently indexed owner cell.
+bool cargoPointInsideFootprint(
+    const Eigen::Vector3f& point,
+    const CargoVerticalEvidenceInput& input,
+    float margin_m);
+CargoFootprintGridIndex makeCargoFootprintGridIndex(
+    const Eigen::Vector3f& point,
+    const CargoVerticalEvidenceInput& input,
+    float cell_size_m);
 
 // Stateless SHADOW extractor. It does not select a cargo identity and never
 // manufactures a ground height or a top surface from frozen thickness.

@@ -49,6 +49,12 @@ enum class CargoGroupVerticalMode : std::uint8_t {
   INVALID,
 };
 
+enum class CargoVerticalEvidenceSource : std::uint8_t {
+  COMPONENT_UNION = 0,
+  RAW_ROI_CURRENT_FOOTPRINT,
+  RAW_ROI_HISTORY_FOOTPRINT_REACQUIRE,
+};
+
 const char* cargoCandidateAssociationStateName(
     CargoCandidateAssociationState state) noexcept;
 const char* cargoPhysicalAssociationModeName(
@@ -59,6 +65,8 @@ const char* cargoLiftBaselineSourceName(
     CargoLiftBaselineSource source) noexcept;
 const char* cargoExistenceSourceName(CargoExistenceSource source) noexcept;
 const char* cargoGroupVerticalModeName(CargoGroupVerticalMode mode) noexcept;
+const char* cargoVerticalEvidenceSourceName(
+    CargoVerticalEvidenceSource source) noexcept;
 
 struct CargoPhysicalIdentityConfig {
   double maximum_xy_step_m = 0.30;
@@ -96,6 +104,41 @@ struct CargoPhysicalComponentObservation {
   std::vector<Eigen::Vector3f> points_base;
 };
 
+// Frame-owned, immutable SHADOW input. The authority may inspect this cloud
+// only during update(); no history or decision type is allowed to retain it.
+struct CargoShadowFrameEvidence {
+  double source_stamp_sec = 0.0;
+  pcl::PointCloud<pcl::PointXYZ>::ConstPtr raw_roi_current_frame;
+  bool ground_reference_valid = false;
+  float ground_z_base = std::numeric_limits<float>::quiet_NaN();
+};
+
+struct CargoFootprintSnapshot {
+  bool valid = false;
+  Eigen::Vector2f center_base = Eigen::Vector2f::Zero();
+  Eigen::Vector2f size_xy = Eigen::Vector2f::Zero();
+  float yaw_base_rad = 0.0F;
+  double source_stamp_sec = 0.0;
+};
+
+// This evidence can only complete the Z check for an already unique XY pair.
+// Its type deliberately exposes no identity, lift, geometry or safety fields.
+struct AssociationOnlyReacquiredVerticalEvidence {
+  bool valid = false;
+  double source_stamp_sec = 0.0;
+  double top_z_base = std::numeric_limits<double>::quiet_NaN();
+  double uncertainty_m = std::numeric_limits<double>::quiet_NaN();
+  std::size_t owner_overlap_cell_count = 0U;
+  double owner_overlap_coverage = 0.0;
+  std::string reason = "not_evaluated";
+};
+
+struct CargoPhysicalGroupingTelemetry {
+  double raw_roi_vertical_total_ms = 0.0;
+  std::size_t raw_roi_vertical_hypothesis_count = 0U;
+  std::size_t raw_roi_vertical_points_examined = 0U;
+};
+
 struct CargoPhysicalGroupDescriptor {
   bool valid = false;
   double stamp_sec = 0.0;
@@ -109,12 +152,26 @@ struct CargoPhysicalGroupDescriptor {
   Eigen::Vector2d robust_xy_extent = Eigen::Vector2d::Zero();
   std::size_t aggregate_point_support = 0U;
   CargoGroupVerticalMode vertical_mode = CargoGroupVerticalMode::INVALID;
+  CargoVerticalEvidenceSource vertical_source =
+      CargoVerticalEvidenceSource::COMPONENT_UNION;
   double physical_vertical_z = std::numeric_limits<double>::quiet_NaN();
   double vertical_uncertainty_m = std::numeric_limits<double>::quiet_NaN();
   std::size_t valid_hypothesis_top_count = 0U;
   double hypothesis_top_min = std::numeric_limits<double>::quiet_NaN();
   double hypothesis_top_max = std::numeric_limits<double>::quiet_NaN();
   double hypothesis_top_spread = std::numeric_limits<double>::quiet_NaN();
+  std::size_t raw_roi_supported_hypothesis_count = 0U;
+  std::size_t owner_proof_rejected_hypothesis_count = 0U;
+  std::size_t owner_overlap_cell_count = 0U;
+  double owner_overlap_coverage = 0.0;
+  bool component_vertical_valid = false;
+  double component_vertical_z = std::numeric_limits<double>::quiet_NaN();
+  bool raw_roi_vertical_valid = false;
+  double raw_roi_vertical_z = std::numeric_limits<double>::quiet_NaN();
+  double diagnostic_z05 = std::numeric_limits<double>::quiet_NaN();
+  double diagnostic_z95 = std::numeric_limits<double>::quiet_NaN();
+  double diagnostic_z_extent = std::numeric_limits<double>::quiet_NaN();
+  bool diagnostic_z_extent_reliable = false;
   std::string vertical_reject_reason = "not_evaluated";
 };
 
@@ -138,11 +195,13 @@ struct CargoPhysicalGroupObservation {
 std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
     const std::vector<CargoPhysicalCandidateObservation>& candidates,
     const std::vector<CargoPhysicalComponentObservation>& components,
+    const CargoShadowFrameEvidence* frame_evidence,
     bool ground_reference_valid,
     double ground_z_base,
     const CargoVerticalEvidenceConfig& vertical_config,
     double equivalent_center_tolerance_m,
-    double equivalent_size_relative_tolerance);
+    double equivalent_size_relative_tolerance,
+    CargoPhysicalGroupingTelemetry* telemetry = nullptr);
 
 struct CargoPhysicalGroupDiagnostic {
   std::uint64_t frame_group_id = 0U;
@@ -164,6 +223,8 @@ struct CargoPhysicalGroupDiagnostic {
   double xy_cost = std::numeric_limits<double>::quiet_NaN();
   double z_cost = std::numeric_limits<double>::quiet_NaN();
   double extent_cost = std::numeric_limits<double>::quiet_NaN();
+  bool reacquired_vertical_attempted = false;
+  AssociationOnlyReacquiredVerticalEvidence reacquired_vertical;
   std::string association_reject_reason = "NO_HISTORY";
   std::string new_history_reason = "NO_HISTORY";
   bool validated_history_conflict = false;
@@ -190,6 +251,8 @@ struct CargoPhysicalIdentityInput {
   bool gravity_valid = false;
   HookLoadState gravity_state = HookLoadState::UNKNOWN;
   std::vector<CargoPhysicalGroupObservation> groups;
+  CargoShadowFrameEvidence frame_evidence;
+  CargoVerticalEvidenceConfig vertical_config;
 };
 
 struct CargoPhysicalIdentityDecision {
@@ -217,6 +280,9 @@ struct CargoPhysicalIdentityDecision {
   double lift_threshold_m = std::numeric_limits<double>::quiet_NaN();
   double evidence_age_sec = std::numeric_limits<double>::quiet_NaN();
   double last_supported_evidence_stamp = 0.0;
+  double reacquired_vertical_compute_ms = 0.0;
+  std::size_t reacquired_vertical_attempt_count = 0U;
+  std::size_t reacquired_vertical_points_examined = 0U;
   CargoGroupVerticalMode current_vertical_mode =
       CargoGroupVerticalMode::INVALID;
   bool current_vertical_evidence_valid = false;
@@ -248,7 +314,8 @@ class CargoPhysicalIdentityAuthority {
  private:
   struct History {
     std::uint64_t id = 0U;
-    CargoPhysicalGroupObservation last_group;
+    CargoPhysicalGroupDescriptor last_descriptor;
+    Eigen::Vector3d last_representative_center = Eigen::Vector3d::Zero();
     double last_stamp_sec = 0.0;
     bool has_preload = false;
     double preload_z95 = std::numeric_limits<double>::quiet_NaN();
@@ -261,6 +328,9 @@ class CargoPhysicalIdentityAuthority {
     double baseline_uncertainty_m = 0.20;
     double baseline_stamp_sec = 0.0;
     double last_supported_evidence_stamp_sec = 0.0;
+    double last_supported_vertical_z = std::numeric_limits<double>::quiet_NaN();
+    double last_supported_vertical_uncertainty_m = 0.20;
+    CargoFootprintSnapshot last_supported_footprint;
     int lift_confirm_count = 0;
     bool lift_confirmed = false;
     double validation_stamp_sec = 0.0;

@@ -5474,11 +5474,14 @@ void NdtSlamNode::processCloudThread() {
             integrated_shadow_empty_detection_due &&
             !hook_allows_tracking && hook_is_empty && hook_input_cloud &&
             !hook_input_cloud->empty()) {
-            const HookCargoDetection preload_shadow_detection =
+            HookCargoDetection preload_shadow_detection =
                 detectCargoAroundOdomAnchor(
                     hook_input_cloud, msg->header.stamp);
+            CargoShadowFrameEvidence preload_shadow_frame =
+                std::move(preload_shadow_detection.shadow_frame_evidence);
             updateIntegratedCargoIdentityShadow(
-                preload_shadow_detection, hook_load, msg->header.stamp);
+                preload_shadow_detection, std::move(preload_shadow_frame),
+                hook_load, msg->header.stamp);
             integrated_shadow_last_detection_stamp_ = msg->header.stamp;
         }
 
@@ -5488,8 +5491,11 @@ void NdtSlamNode::processCloudThread() {
             hook_input_cloud && !hook_input_cloud->empty()) {
             hook_fixed_cargo_ = detectCargoAroundOdomAnchor(hook_input_cloud, msg->header.stamp);
                 if (integrated_cargo_identity_shadow_enabled_) {
+                    CargoShadowFrameEvidence shadow_frame =
+                        std::move(hook_fixed_cargo_.shadow_frame_evidence);
                     updateIntegratedCargoIdentityShadow(
-                        hook_fixed_cargo_, hook_load, msg->header.stamp);
+                        hook_fixed_cargo_, std::move(shadow_frame),
+                        hook_load, msg->header.stamp);
                     integrated_shadow_last_detection_stamp_ =
                         msg->header.stamp;
                 }
@@ -13581,6 +13587,7 @@ void NdtSlamNode::rebuildActiveMapFromRecentKeyframes() {
 
 void NdtSlamNode::updateIntegratedCargoIdentityShadow(
     const HookCargoDetection& detection,
+    CargoShadowFrameEvidence frame_evidence,
     const HookLoadSnapshot& hook,
     const ros::Time& stamp) {
     if (!integrated_cargo_identity_shadow_enabled_ || stamp.isZero()) return;
@@ -13595,6 +13602,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
             lidar_slam2_msgs::HookLoadState::STATE_LOADED;
     input.hook_role = hook_load_signal_role_;
     input.gravity_valid = hook.valid;
+    input.frame_evidence = std::move(frame_evidence);
+    input.vertical_config = cargo_vertical_evidence_v2_config_;
     switch (hook.state) {
         case lidar_slam2_msgs::HookLoadState::STATE_EMPTY:
             input.gravity_state = HookLoadState::EMPTY;
@@ -13618,6 +13627,17 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
     input.groups = detection.shadow_physical_groups;
     integrated_identity_decision_ =
         integrated_identity_authority_.update(input);
+    integrated_v5_raw_roi_vertical_total_ms_ =
+        detection.shadow_grouping_telemetry.raw_roi_vertical_total_ms +
+        integrated_identity_decision_.reacquired_vertical_compute_ms;
+    integrated_v5_raw_roi_vertical_hypothesis_count_ =
+        detection.shadow_grouping_telemetry
+            .raw_roi_vertical_hypothesis_count +
+        integrated_identity_decision_.reacquired_vertical_attempt_count;
+    integrated_v5_raw_roi_vertical_points_examined_ =
+        detection.shadow_grouping_telemetry
+            .raw_roi_vertical_points_examined +
+        integrated_identity_decision_.reacquired_vertical_points_examined;
     integrated_shadow_authority_stamp_ = stamp;
     if (!integrated_identity_groups_csv_init_) {
         try {
@@ -13642,13 +13662,26 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "aggregate_extent_x,aggregate_extent_y,"
                 << "aggregate_extent_z,aggregate_point_support,"
                 << "vertical_mode,physical_vertical_z,vertical_uncertainty,"
-                << "vertical_reject_reason,valid_hypothesis_top_count,"
+                << "vertical_source,vertical_reject_reason,"
+                << "raw_roi_supported_hypothesis_count,"
+                << "owner_proof_rejected_hypothesis_count,"
+                << "owner_overlap_cell_count,owner_overlap_coverage,"
+                << "component_vertical_valid,component_vertical_z,"
+                << "raw_roi_vertical_valid,raw_roi_vertical_z,"
+                << "diagnostic_z05,diagnostic_z95,diagnostic_z_extent,"
+                << "diagnostic_z_extent_reliable,"
+                << "valid_hypothesis_top_count,"
                 << "hypothesis_top_min,hypothesis_top_max,"
                 << "hypothesis_top_spread,matched_history_id,"
                 << "association_state,association_mode,"
                 << "raw_representative_xy_step,stable_anchor_xy_step,"
                 << "support_xy_separation,z_step,extent_step,xy_cost,"
                 << "z_cost,extent_cost,association_reject_reason,"
+                << "reacquired_vertical_attempted,"
+                << "reacquired_vertical_valid,reacquired_vertical_z,"
+                << "reacquired_vertical_owner_overlap_cells,"
+                << "reacquired_vertical_owner_overlap_coverage,"
+                << "reacquired_vertical_reason,"
                 << "new_history_reason,validated_history_conflict,"
                 << "conflicting_history_id,frame_has_unrelated_ambiguity,"
                 << "lift_baseline_source,baseline_z,"
@@ -13694,7 +13727,21 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << cargoGroupVerticalModeName(descriptor.vertical_mode) << ','
                 << descriptor.physical_vertical_z << ','
                 << descriptor.vertical_uncertainty_m << ','
+                << cargoVerticalEvidenceSourceName(
+                       descriptor.vertical_source) << ','
                 << descriptor.vertical_reject_reason << ','
+                << descriptor.raw_roi_supported_hypothesis_count << ','
+                << descriptor.owner_proof_rejected_hypothesis_count << ','
+                << descriptor.owner_overlap_cell_count << ','
+                << descriptor.owner_overlap_coverage << ','
+                << (descriptor.component_vertical_valid ? 1 : 0) << ','
+                << descriptor.component_vertical_z << ','
+                << (descriptor.raw_roi_vertical_valid ? 1 : 0) << ','
+                << descriptor.raw_roi_vertical_z << ','
+                << descriptor.diagnostic_z05 << ','
+                << descriptor.diagnostic_z95 << ','
+                << descriptor.diagnostic_z_extent << ','
+                << (descriptor.diagnostic_z_extent_reliable ? 1 : 0) << ','
                 << descriptor.valid_hypothesis_top_count << ','
                 << descriptor.hypothesis_top_min << ','
                 << descriptor.hypothesis_top_max << ','
@@ -13711,6 +13758,13 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << diagnostic.extent_step << ',' << diagnostic.xy_cost << ','
                 << diagnostic.z_cost << ',' << diagnostic.extent_cost << ','
                 << diagnostic.association_reject_reason << ','
+                << (diagnostic.reacquired_vertical_attempted ? 1 : 0) << ','
+                << (diagnostic.reacquired_vertical.valid ? 1 : 0) << ','
+                << diagnostic.reacquired_vertical.top_z_base << ','
+                << diagnostic.reacquired_vertical.owner_overlap_cell_count
+                << ','
+                << diagnostic.reacquired_vertical.owner_overlap_coverage
+                << ',' << diagnostic.reacquired_vertical.reason << ','
                 << diagnostic.new_history_reason << ','
                 << (diagnostic.validated_history_conflict ? 1 : 0) << ','
                 << diagnostic.conflicting_history_id << ','
@@ -13912,6 +13966,10 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         }
     }
     result.roi_finite_points = crop_cloud->size();
+    if (integrated_cargo_identity_shadow_enabled_) {
+        result.shadow_frame_evidence.source_stamp_sec = stamp.toSec();
+        result.shadow_frame_evidence.raw_roi_current_frame = crop_cloud;
+    }
     last_detection_pipeline_trace_.roi_points = crop_cloud->size();
     last_detection_pipeline_trace_.roi_z95 = cloudZPercentile(*crop_cloud, 0.95F);
     last_detection_pipeline_trace_.roi_zmax = cloudZMax(*crop_cloud);
@@ -14552,12 +14610,17 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         const double equivalent_size_tolerance = std::max(
             0.01, static_cast<double>(
                 hook_lock_config_.maximum_provisional_shape_cv));
+        result.shadow_frame_evidence.ground_reference_valid =
+            result.ground_reference_valid;
+        result.shadow_frame_evidence.ground_z_base = result.ground_z;
         result.shadow_physical_groups = groupCargoPhysicalCandidates(
             observations, component_observations,
+            &result.shadow_frame_evidence,
             result.ground_reference_valid, result.ground_z,
             cargo_vertical_evidence_v2_config_,
             equivalent_center_tolerance_m,
-            equivalent_size_tolerance);
+            equivalent_size_tolerance,
+            &result.shadow_grouping_telemetry);
         result.shadow_physical_group_compute_ms =
             integratedShadowElapsedMs(physical_group_start);
     }
@@ -21927,7 +21990,7 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
     const auto safety_start = IntegratedShadowDiagClock::now();
     if (integrated_shadow_authority_stamp_ != stamp) {
         updateIntegratedCargoIdentityShadow(
-            HookCargoDetection{}, hook, stamp);
+            HookCargoDetection{}, CargoShadowFrameEvidence{}, hook, stamp);
     }
     const std::uint64_t shadow_lifecycle_id =
         integrated_identity_decision_.load_epoch;
@@ -22321,6 +22384,11 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                 << "obstacle_self_contamination_blocking,"
                 << "shadow_identity_compute_ms,shadow_geometry_compute_ms,"
                 << "shadow_safety_compute_ms,shadow_total_compute_ms,"
+                << "v5_raw_roi_vertical_total_ms,"
+                << "v5_raw_roi_vertical_hypothesis_count,"
+                << "v5_raw_roi_vertical_points_examined,"
+                << "integrated_shadow_update_ms,"
+                << "callback_or_pipeline_total_ms,"
                 << "pointcloud_callback_hz,ndt_processing_hz,"
                 << "dropped_frame_count,large_gap_count\n";
         }
@@ -22367,7 +22435,9 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             << (group_supported_top_current && group_geometry_current
                     ? "GROUP_RAW_UNION_COMPONENT_POINTS" : "NONE") << ','
             << (group_supported_top_current
-                    ? "GROUP_SUPPORTED_VERTICAL_EVIDENCE" : "NONE") << ','
+                    ? cargoVerticalEvidenceSourceName(
+                          integrated_group_evidence_.vertical_source)
+                    : "NONE") << ','
             << integrated_shadow_timing_.load_edge_stamp_sec << ','
             << integrated_identity_decision_.identity_validation_stamp_sec << ','
             << integrated_shadow_timing_.pending_ready_stamp_sec << ','
@@ -22411,6 +22481,11 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             << integrated_shadow_geometry_compute_ms_ << ','
             << integrated_shadow_safety_compute_ms_ << ','
             << integrated_shadow_total_compute_ms_ << ','
+            << integrated_v5_raw_roi_vertical_total_ms_ << ','
+            << integrated_v5_raw_roi_vertical_hypothesis_count_ << ','
+            << integrated_v5_raw_roi_vertical_points_examined_ << ','
+            << integrated_shadow_identity_compute_ms_ << ','
+            << processing_age_sec * 1000.0 << ','
             << shadow_pipeline_rate.callback_hz << ','
             << shadow_pipeline_rate.processed_hz << ','
             << queue_overwrite_drop_count_.load(

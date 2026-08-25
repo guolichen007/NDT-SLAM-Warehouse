@@ -1509,7 +1509,9 @@ private:
         std::string reject_reason;
         std::vector<ShadowCandidateSnapshot> shadow_candidates;
         std::vector<CargoPhysicalGroupObservation> shadow_physical_groups;
+        CargoShadowFrameEvidence shadow_frame_evidence;
         double shadow_physical_group_compute_ms = 0.0;
+        CargoPhysicalGroupingTelemetry shadow_grouping_telemetry;
     };
 
     struct HookCargoBottomEstimate {
@@ -2144,6 +2146,9 @@ private:
     double integrated_shadow_geometry_compute_ms_ = 0.0;
     double integrated_shadow_safety_compute_ms_ = 0.0;
     double integrated_shadow_total_compute_ms_ = 0.0;
+    double integrated_v5_raw_roi_vertical_total_ms_ = 0.0;
+    std::size_t integrated_v5_raw_roi_vertical_hypothesis_count_ = 0U;
+    std::size_t integrated_v5_raw_roi_vertical_points_examined_ = 0U;
     std::ofstream integrated_shadow_csv_;
     bool integrated_shadow_csv_init_ = false;
     std::ofstream integrated_identity_groups_csv_;
@@ -2492,6 +2497,7 @@ private:
         const ros::Time& stamp);
     void updateIntegratedCargoIdentityShadow(
         const HookCargoDetection& detection,
+        CargoShadowFrameEvidence frame_evidence,
         const HookLoadSnapshot& hook,
         const ros::Time& stamp);
     void evaluateIntegratedCargoIdentityShadow(

@@ -63,6 +63,7 @@ CargoPhysicalGroupEvidenceSnapshot bindCargoPhysicalGroupEvidence(
   snapshot.union_points_base = selected->union_points_base;
   snapshot.stable_anchor = selected->descriptor.stable_anchor;
   snapshot.vertical_mode = selected->descriptor.vertical_mode;
+  snapshot.vertical_source = selected->descriptor.vertical_source;
   snapshot.supported_top_valid = selected->descriptor.vertical_mode ==
           CargoGroupVerticalMode::SUPPORTED_EVIDENCE &&
       std::isfinite(selected->descriptor.physical_vertical_z);

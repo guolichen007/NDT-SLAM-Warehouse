@@ -25,7 +25,17 @@ Eigen::Vector2f toFootprintFrame(
       -sine * delta.x() + cosine * delta.y());
 }
 
-bool insideFootprint(
+float median(std::vector<float> values) {
+  std::sort(values.begin(), values.end());
+  const std::size_t middle = values.size() / 2U;
+  return values.size() % 2U == 0U
+      ? 0.5F * (values[middle - 1U] + values[middle])
+      : values[middle];
+}
+
+}  // namespace
+
+bool cargoPointInsideFootprint(
     const Eigen::Vector3f& point,
     const CargoVerticalEvidenceInput& input,
     float margin_m) {
@@ -36,7 +46,7 @@ bool insideFootprint(
              0.5F * input.footprint_size_xy.y() + margin_m;
 }
 
-std::pair<int, int> surfaceCell(
+CargoFootprintGridIndex makeCargoFootprintGridIndex(
     const Eigen::Vector3f& point,
     const CargoVerticalEvidenceInput& input,
     float cell_size_m) {
@@ -45,16 +55,6 @@ std::pair<int, int> surfaceCell(
       static_cast<int>(std::floor(local.x() / cell_size_m)),
       static_cast<int>(std::floor(local.y() / cell_size_m))};
 }
-
-float median(std::vector<float> values) {
-  std::sort(values.begin(), values.end());
-  const std::size_t middle = values.size() / 2U;
-  return values.size() % 2U == 0U
-      ? 0.5F * (values[middle - 1U] + values[middle])
-      : values[middle];
-}
-
-}  // namespace
 
 CargoVerticalEvidence extractCargoVerticalEvidence(
     const CargoVerticalEvidenceInput& input,
@@ -84,14 +84,29 @@ CargoVerticalEvidence extractCargoVerticalEvidence(
     return result;
   }
 
+  if (!input.selected_points_base.empty() && input.selected_cloud_base) {
+    result.reject_reason = "multiple_point_sources";
+    return result;
+  }
+  const std::size_t selected_point_count = input.selected_cloud_base
+      ? input.selected_cloud_base->size() : input.selected_points_base.size();
   std::vector<Eigen::Vector3f> footprint_points;
-  footprint_points.reserve(input.selected_points_base.size());
-  for (const Eigen::Vector3f& point : input.selected_points_base) {
-    if (!point.allFinite() ||
-        !insideFootprint(point, input, config.footprint_margin_m)) {
-      continue;
+  footprint_points.reserve(selected_point_count);
+  const auto append_point = [&](const Eigen::Vector3f& point) {
+    if (!point.allFinite() || !cargoPointInsideFootprint(
+            point, input, config.footprint_margin_m)) {
+      return;
     }
     footprint_points.push_back(point);
+  };
+  if (input.selected_cloud_base) {
+    for (const pcl::PointXYZ& point : input.selected_cloud_base->points) {
+      append_point(Eigen::Vector3f(point.x, point.y, point.z));
+    }
+  } else {
+    for (const Eigen::Vector3f& point : input.selected_points_base) {
+      append_point(point);
+    }
   }
   result.footprint_points = footprint_points.size();
   if (footprint_points.empty()) {
@@ -122,6 +137,7 @@ CargoVerticalEvidence extractCargoVerticalEvidence(
     result.reject_reason = "ground_filter_removed_all_points";
     return result;
   }
+  result.filtered_vertical_points_base = candidate_points;
 
   std::vector<float> descending_z;
   descending_z.reserve(candidate_points.size());
@@ -138,7 +154,7 @@ CargoVerticalEvidence extractCargoVerticalEvidence(
           static_cast<double>(input.footprint_size_xy.y() / cell_size))));
 
   std::vector<Eigen::Vector3f> supported_band;
-  std::set<std::pair<int, int>> supported_cells;
+  std::set<CargoFootprintGridIndex> supported_cells;
   for (float band_top : descending_z) {
     supported_band.clear();
     supported_cells.clear();
@@ -148,7 +164,8 @@ CargoVerticalEvidence extractCargoVerticalEvidence(
         continue;
       }
       supported_band.push_back(point);
-      supported_cells.insert(surfaceCell(point, input, cell_size));
+      supported_cells.insert(
+          makeCargoFootprintGridIndex(point, input, cell_size));
     }
     const float coverage = static_cast<float>(supported_cells.size()) /
         static_cast<float>(std::max<std::size_t>(1U, expected_cells));
@@ -158,6 +175,9 @@ CargoVerticalEvidence extractCargoVerticalEvidence(
       result.top_support_points = supported_band.size();
       result.top_surface_cells = supported_cells.size();
       result.top_surface_coverage = std::min(1.0F, coverage);
+      result.top_support_points_base = supported_band;
+      result.top_surface_cell_indices.assign(
+          supported_cells.begin(), supported_cells.end());
       std::vector<float> supported_z;
       supported_z.reserve(supported_band.size());
       for (const Eigen::Vector3f& point : supported_band) {
