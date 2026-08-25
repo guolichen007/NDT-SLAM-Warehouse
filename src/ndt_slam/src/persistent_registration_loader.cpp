@@ -23,7 +23,8 @@ namespace fs = std::filesystem;
 constexpr char kManifestName[] = "persistent_map_manifest.json";
 constexpr char kRegistrationDirectory[] = "tiles_registration";
 constexpr char kManifestSchema[] = "ndt_slam_persistent_tile_catalog";
-constexpr std::uint32_t kManifestSchemaVersion = 1U;
+constexpr std::uint32_t kLegacyManifestSchemaVersion = 1U;
+constexpr std::uint32_t kManifestSchemaVersion = 2U;
 constexpr const char* kLayerDirectories[] = {
     "tiles_registration", "tiles_display", "tiles_ground", "tiles_objects"};
 
@@ -239,14 +240,67 @@ PersistentRegistrationLoadResult loadPersistentRegistrationLayer(
 
   try {
     const YAML::Node manifest = YAML::LoadFile(manifest_path.string());
+    const std::uint32_t schema_version =
+        manifest["schema_version"].as<std::uint32_t>(0U);
     if (!manifest.IsMap() ||
         manifest["schema"].as<std::string>("") != kManifestSchema ||
-        manifest["schema_version"].as<std::uint32_t>(0U) !=
-            kManifestSchemaVersion) {
+        (schema_version != kLegacyManifestSchemaVersion &&
+         schema_version != kManifestSchemaVersion)) {
       return invalidResult("persistent_manifest_schema_invalid");
     }
-    if (manifest["map_uuid"].as<std::string>("") != expected_map_uuid) {
+    // Schema 1 used a root-path-derived catalog identifier. Preserve that
+    // loader contract for old deployments. Schema 2 carries a path-independent
+    // map-frame identity, so moving the exact catalog into a sandbox cannot
+    // change its rail/yaw identity.
+    if (schema_version == kLegacyManifestSchemaVersion &&
+        manifest["map_uuid"].as<std::string>("") != expected_map_uuid) {
       return invalidResult("persistent_manifest_uuid_mismatch");
+    }
+
+    std::string map_frame_uuid;
+    RailYawReference yaw_reference;
+    bool rail_write_authorized = false;
+    if (schema_version == kManifestSchemaVersion) {
+      map_frame_uuid = manifest["map_frame_uuid"].as<std::string>("");
+      if (map_frame_uuid.empty()) {
+        return invalidResult("persistent_manifest_map_frame_uuid_missing");
+      }
+      const YAML::Node reference = manifest["yaw_reference"];
+      if (reference && reference.IsMap()) {
+        yaw_reference.schema_version =
+            reference["schema_version"].as<std::uint32_t>(0U);
+        yaw_reference.verified = reference["verified"].as<bool>(false);
+        yaw_reference.rail_yaw_in_map_rad =
+            reference["rail_yaw_in_map_rad"].as<double>(0.0);
+        if (!yawReferenceSourceFromName(
+                reference["source"].as<std::string>(""),
+                &yaw_reference.source)) {
+          return invalidResult("persistent_manifest_yaw_source_invalid");
+        }
+        yaw_reference.map_frame_uuid =
+            reference["map_frame_uuid"].as<std::string>("");
+        yaw_reference.map_frame_id =
+            reference["map_frame_id"].as<std::string>("");
+        yaw_reference.base_frame_id =
+            reference["base_frame_id"].as<std::string>("");
+        yaw_reference.map_frame_convention_id =
+            reference["map_frame_convention_id"].as<std::string>("");
+        yaw_reference.sensor_rig_calibration_id =
+            reference["sensor_rig_calibration_id"].as<std::string>("");
+        yaw_reference.reference_uuid =
+            reference["reference_uuid"].as<std::string>("");
+        yaw_reference.reference_hash =
+            reference["reference_hash"].as<std::string>("");
+        const std::string canonical_hash =
+            semanticYawReferenceHash(yaw_reference);
+        if (yaw_reference.verified &&
+            (yaw_reference.map_frame_uuid != map_frame_uuid ||
+             yaw_reference.reference_hash.empty() ||
+             yaw_reference.reference_hash != canonical_hash)) {
+          return invalidResult("persistent_manifest_yaw_reference_invalid");
+        }
+        rail_write_authorized = yaw_reference.verified;
+      }
     }
     const double manifest_tile_size =
         manifest["tile_size_m"].as<double>(0.0);
@@ -382,6 +436,9 @@ PersistentRegistrationLoadResult loadPersistentRegistrationLayer(
     result.reason = "persistent_registration_restored";
     result.cloud = std::move(cloud);
     result.tile_count = entries.size();
+    result.map_frame_uuid = std::move(map_frame_uuid);
+    result.yaw_reference = std::move(yaw_reference);
+    result.rail_write_authorized = rail_write_authorized;
     return result;
   } catch (const std::exception& error) {
     return invalidResult(

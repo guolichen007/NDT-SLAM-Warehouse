@@ -68,6 +68,24 @@ const char* yawReferenceSourceName(YawReferenceSource source) noexcept {
   return "INVALID";
 }
 
+bool yawReferenceSourceFromName(
+    const std::string& name, YawReferenceSource* source) noexcept {
+  if (!source) return false;
+  if (name == "NEW_MAP_BOOTSTRAP_REFERENCE") {
+    *source = YawReferenceSource::NEW_MAP_BOOTSTRAP_REFERENCE;
+    return true;
+  }
+  if (name == "CONFIG_SITE_REFERENCE") {
+    *source = YawReferenceSource::CONFIG_SITE_REFERENCE;
+    return true;
+  }
+  if (name == "VERIFIED_MAP_SESSION") {
+    *source = YawReferenceSource::VERIFIED_MAP_SESSION;
+    return true;
+  }
+  return false;
+}
+
 const char* yawAuthorityTransitionReasonName(
     YawAuthorityTransitionReason reason) noexcept {
   switch (reason) {

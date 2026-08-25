@@ -62,6 +62,51 @@ class PersistentRegistrationLoaderTest : public ::testing::Test {
            << "}\n";
   }
 
+  void writeSemanticManifest(const fs::path& tile,
+                             const RailYawReference& reference) {
+    const std::string hash = MapSessionSnapshot::sha256File(tile.string());
+    std::ofstream output(root_ / "persistent_map_manifest.json");
+    output << "{\n"
+           << "  \"schema\": \"ndt_slam_persistent_tile_catalog\",\n"
+           << "  \"schema_version\": 2,\n"
+           << "  \"map_uuid\": \"legacy-path-id\",\n"
+           << "  \"map_frame_uuid\": \"" << reference.map_frame_uuid
+           << "\",\n"
+           << "  \"yaw_reference\": {\n"
+           << "    \"schema_version\": 1,\n"
+           << "    \"verified\": true,\n"
+           << "    \"rail_yaw_in_map_rad\": "
+           << reference.rail_yaw_in_map_rad << ",\n"
+           << "    \"source\": \""
+           << yawReferenceSourceName(reference.source) << "\",\n"
+           << "    \"map_frame_uuid\": \"" << reference.map_frame_uuid
+           << "\",\n"
+           << "    \"map_frame_id\": \"" << reference.map_frame_id
+           << "\",\n"
+           << "    \"base_frame_id\": \"" << reference.base_frame_id
+           << "\",\n"
+           << "    \"map_frame_convention_id\": \""
+           << reference.map_frame_convention_id << "\",\n"
+           << "    \"sensor_rig_calibration_id\": \""
+           << reference.sensor_rig_calibration_id << "\",\n"
+           << "    \"reference_uuid\": \"" << reference.reference_uuid
+           << "\",\n"
+           << "    \"reference_hash\": \"" << reference.reference_hash
+           << "\"\n"
+           << "  },\n"
+           << "  \"tile_size_m\": 20.0,\n"
+           << "  \"layers\": {\n"
+           << "    \"registration\": [{\"path\": \"tiles_registration/"
+           << tile.filename().string() << "\", \"bytes\": "
+           << fs::file_size(tile) << ", \"sha256\": \"" << hash
+           << "\"}],\n"
+           << "    \"display\": [],\n"
+           << "    \"ground\": [],\n"
+           << "    \"objects\": []\n"
+           << "  }\n"
+           << "}\n";
+  }
+
   fs::path root_;
 };
 
@@ -133,6 +178,43 @@ TEST_F(PersistentRegistrationLoaderTest, MapUuidMismatchFailsClosed) {
   EXPECT_EQ(result.status,
             PersistentRegistrationLoadStatus::INVALID_EXISTING_MAP);
   EXPECT_EQ(result.reason, "persistent_manifest_uuid_mismatch");
+}
+
+TEST_F(PersistentRegistrationLoaderTest,
+       SemanticMapFrameIdentitySurvivesSandboxPathChange) {
+  const fs::path tile = writeTile();
+  RailYawReference reference;
+  reference.verified = true;
+  reference.rail_yaw_in_map_rad = 0.125;
+  reference.source = YawReferenceSource::VERIFIED_MAP_SESSION;
+  reference.map_frame_uuid = "stable-map-frame";
+  reference.map_frame_convention_id = "rail-x-positive";
+  reference.sensor_rig_calibration_id = "test-rig";
+  reference.reference_uuid = "stable-yaw-reference";
+  reference.reference_hash = semanticYawReferenceHash(reference);
+  writeSemanticManifest(tile, reference);
+
+  // The expected legacy catalog id deliberately differs, as it would after
+  // copying an identical map root into a replay sandbox.
+  const auto result = loadPersistentRegistrationLayer(
+      root_.string(), "different-sandbox-path-id", 20.0);
+  ASSERT_EQ(result.status, PersistentRegistrationLoadStatus::RESTORED)
+      << result.reason;
+  EXPECT_EQ(result.map_frame_uuid, reference.map_frame_uuid);
+  EXPECT_EQ(result.yaw_reference.reference_hash, reference.reference_hash);
+  EXPECT_TRUE(result.rail_write_authorized);
+}
+
+TEST_F(PersistentRegistrationLoaderTest,
+       LegacyManifestWithoutVerifiedYawReferenceIsRailReadOnly) {
+  const fs::path tile = writeTile();
+  writeManifest(tile);
+  const auto result = loadPersistentRegistrationLayer(
+      root_.string(), "test-map", 20.0);
+  ASSERT_EQ(result.status, PersistentRegistrationLoadStatus::RESTORED)
+      << result.reason;
+  EXPECT_FALSE(result.rail_write_authorized);
+  EXPECT_TRUE(result.map_frame_uuid.empty());
 }
 
 TEST_F(PersistentRegistrationLoaderTest, HashMismatchFailsClosed) {

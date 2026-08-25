@@ -344,6 +344,8 @@ static_assert(
 NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     : nh_(nh) {
     initializeParameters();
+    map_frame_uuid_ = MapSessionSnapshot::generateUuid();
+    rail_map_write_authorized_ = false;
     last_pointcloud_wall_sec_.store(
         ros::WallTime::now().toSec(), std::memory_order_release);
     ROS_INFO("[StartupMap] PROCESS_START persistent=%d root=%s",
@@ -569,6 +571,11 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
 NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHandle& nh)
     : nh_(nh) {
     initializeParameters(config_file_path);
+    map_frame_uuid_ = configured_rail_yaw_reference_.map_frame_uuid.empty()
+        ? MapSessionSnapshot::generateUuid()
+        : configured_rail_yaw_reference_.map_frame_uuid;
+    rail_map_write_authorized_ = rail_yaw_authority_.valid() &&
+        rail_yaw_authority_.reference().map_frame_uuid == map_frame_uuid_;
     std::string cargo_vertical_evidence_config_file;
     std::string integrated_cargo_identity_shadow_config_file;
     ros::NodeHandle private_nh("~");
@@ -7019,6 +7026,9 @@ void NdtSlamNode::processCloudThread() {
         rail_health_input.reference_failure_nonrecoverable =
             yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY &&
             !rail_yaw_authority_.valid();
+        rail_health_input.map_identity_failure_nonrecoverable =
+            yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY &&
+            !rail_map_write_authorized_;
         rail_health_input.prediction_continuity_valid =
             registration_success && crane_motion_ekf_.initialized();
         localization_authority_health_ =
@@ -10465,9 +10475,32 @@ bool NdtSlamNode::installLoadedRuntimeMap(
                 candidate.session.metadata.map_uuid);
             loaded_map_session_generation_ =
                 candidate.session.metadata.map_generation;
+            map_frame_uuid_ = candidate.session.metadata.map_frame_uuid;
+            rail_map_write_authorized_ =
+                candidate.session.metadata.rail_write_authorized;
+            if (yaw_authority_mode_ != YawAuthorityMode::LEGACY &&
+                candidate.session.metadata.rail_write_authorized) {
+                const RailYawReference& loaded_reference =
+                    candidate.session.metadata.yaw_reference;
+                if (!rail_yaw_authority_.valid()) {
+                    rail_map_write_authorized_ =
+                        rail_yaw_authority_.initialize(
+                            loaded_reference,
+                            YawAuthorityTransitionReason::
+                                LOAD_VERIFIED_SESSION);
+                } else if (
+                    rail_yaw_authority_.reference().reference_hash !=
+                        loaded_reference.reference_hash ||
+                    rail_yaw_authority_.reference().map_frame_uuid !=
+                        loaded_reference.map_frame_uuid) {
+                    rail_map_write_authorized_ = false;
+                }
+            }
         } else {
             std::atomic_store(&static_height_field_,
                               std::shared_ptr<const StaticHeightField>{});
+            map_frame_uuid_ = MapSessionSnapshot::generateUuid();
+            rail_map_write_authorized_ = false;
         }
         {
             std::lock_guard<std::mutex> observation_lock(
@@ -10982,7 +11015,29 @@ bool NdtSlamNode::saveMapSessionAtomic(const std::string& session_dir,
         active_window_layers.objects_clean =
             latest_completed_map_bundle_.objects_clean;
         request.metadata.map_uuid = MapSessionSnapshot::generateUuid();
+        request.metadata.map_frame_uuid = map_frame_uuid_;
         request.metadata.frame_id = map_frame_;
+        request.metadata.base_frame_id = base_frame_;
+        request.metadata.map_frame_convention_id =
+            rail_yaw_authority_.valid()
+                ? rail_yaw_authority_.reference()
+                      .map_frame_convention_id
+                : configured_rail_yaw_reference_
+                      .map_frame_convention_id;
+        request.metadata.sensor_rig_calibration_id =
+            rail_yaw_authority_.valid()
+                ? rail_yaw_authority_.reference()
+                      .sensor_rig_calibration_id
+                : configured_rail_yaw_reference_
+                      .sensor_rig_calibration_id;
+        request.metadata.yaw_reference = rail_yaw_authority_.valid()
+            ? rail_yaw_authority_.reference()
+            : RailYawReference{};
+        request.metadata.yaw_reference.map_frame_uuid = map_frame_uuid_;
+        request.metadata.yaw_reference.map_frame_id = map_frame_;
+        request.metadata.yaw_reference.base_frame_id = base_frame_;
+        request.metadata.rail_write_authorized =
+            rail_yaw_authority_.valid();
         request.metadata.source_git_sha = build_info::kGitSha;
         request.metadata.source_git_branch = build_info::kGitBranch;
         request.metadata.map_generation =
@@ -12976,11 +13031,44 @@ bool NdtSlamNode::writePersistentTileManifest() {
     try {
         std::ofstream output(temporary, std::ios::out | std::ios::trunc);
         if (!output.is_open()) return false;
+        const bool verified_reference = rail_yaw_authority_.valid() &&
+            rail_yaw_authority_.reference().verified &&
+            rail_yaw_authority_.reference().map_frame_uuid == map_frame_uuid_;
+        RailYawReference reference = rail_yaw_authority_.reference();
+        if (!verified_reference) {
+            reference = RailYawReference{};
+            reference.map_frame_uuid = map_frame_uuid_;
+            reference.map_frame_id = "map";
+            reference.base_frame_id = "base_link";
+            reference.reference_hash =
+                semanticYawReferenceHash(reference);
+        }
         output << "{\n"
                << "  \"schema\": \"ndt_slam_persistent_tile_catalog\",\n"
-               << "  \"schema_version\": 1,\n"
+               << "  \"schema_version\": 2,\n"
                << "  \"map_uuid\": \""
                << persistentMapUuid(persistent_map_root_dir_) << "\",\n"
+               << "  \"map_frame_uuid\": \"" << map_frame_uuid_ << "\",\n"
+               << "  \"yaw_reference\": {\n"
+               << "    \"schema_version\": " << reference.schema_version << ",\n"
+               << "    \"verified\": "
+               << (verified_reference ? "true" : "false") << ",\n"
+               << "    \"rail_yaw_in_map_rad\": " << std::setprecision(17)
+               << reference.rail_yaw_in_map_rad << ",\n"
+               << "    \"source\": \""
+               << yawReferenceSourceName(reference.source) << "\",\n"
+               << "    \"map_frame_uuid\": \"" << map_frame_uuid_ << "\",\n"
+               << "    \"map_frame_id\": \"" << reference.map_frame_id << "\",\n"
+               << "    \"base_frame_id\": \"" << reference.base_frame_id << "\",\n"
+               << "    \"map_frame_convention_id\": \""
+               << reference.map_frame_convention_id << "\",\n"
+               << "    \"sensor_rig_calibration_id\": \""
+               << reference.sensor_rig_calibration_id << "\",\n"
+               << "    \"reference_uuid\": \"" << reference.reference_uuid
+               << "\",\n"
+               << "    \"reference_hash\": \"" << reference.reference_hash
+               << "\"\n"
+               << "  },\n"
                << "  \"created_at_sec\": " << std::setprecision(17)
                << ros::WallTime::now().toSec() << ",\n"
                << "  \"tile_size_m\": " << tile_size_m_ << ",\n"
@@ -13061,6 +13149,29 @@ bool NdtSlamNode::restorePersistentRegistrationTarget() {
         ROS_INFO("[StartupMap] REGISTRATION_LOAD_END mode=NEW_MAP_BOOTSTRAP "
                  "tiles=0 points=0 reason=%s", result.reason.c_str());
         return false;
+    }
+
+    if (!result.map_frame_uuid.empty()) {
+        map_frame_uuid_ = result.map_frame_uuid;
+    }
+    rail_map_write_authorized_ = result.rail_write_authorized;
+    if (result.rail_write_authorized) {
+        if (!rail_yaw_authority_.valid()) {
+            std::string reference_reason;
+            if (!rail_yaw_authority_.initialize(
+                    result.yaw_reference,
+                    YawAuthorityTransitionReason::LOAD_VERIFIED_SESSION,
+                    &reference_reason)) {
+                rail_map_write_authorized_ = false;
+                ROS_ERROR("[StartupMap] verified yaw reference rejected: %s",
+                          reference_reason.c_str());
+            }
+        } else if (rail_yaw_authority_.reference().reference_hash !=
+                   result.yaw_reference.reference_hash) {
+            rail_map_write_authorized_ = false;
+            ROS_ERROR("[StartupMap] configured/session yaw reference mismatch; "
+                      "RAIL map remains read-only");
+        }
     }
     if (result.status ==
             PersistentRegistrationLoadStatus::INVALID_EXISTING_MAP ||
@@ -26827,7 +26938,7 @@ void NdtSlamNode::bindNdtInputTarget(
             target, registrationTargetSourceFromName(source),
             content_version,
             map_rebuild_generation_.load(std::memory_order_acquire),
-            std::string{}, crop_identity);
+            map_frame_uuid_, crop_identity);
     if (!snapshot.valid()) {
         current_registration_target_snapshot_id_.store(
             0U, std::memory_order_release);

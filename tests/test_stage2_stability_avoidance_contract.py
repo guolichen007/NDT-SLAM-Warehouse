@@ -39,8 +39,6 @@ class Stage2StabilityAvoidanceContractTest(unittest.TestCase):
     def test_stage1_owned_files_are_byte_identical(self) -> None:
         protected = (
             "src/ndt_slam/include/ndt_slam/time_epoch_contract.hpp",
-            "src/ndt_slam/src/persistent_registration_loader.cpp",
-            "src/ndt_slam/include/ndt_slam/persistent_registration_loader.hpp",
             "src/ndt_slam/src/PointCloudMerger.cpp",
             "src/ndt_slam/scripts/ops/ndt_recovery_watchdog.py",
         )

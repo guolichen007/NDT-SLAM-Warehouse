@@ -311,12 +311,47 @@ bool MapSessionSnapshot::saveAtomic(const MapSessionSaveRequest& request,
 
     const std::string map_uuid = request.metadata.map_uuid.empty()
         ? generateUuid() : request.metadata.map_uuid;
+    const std::string map_frame_uuid = request.metadata.map_frame_uuid.empty()
+        ? generateUuid() : request.metadata.map_frame_uuid;
+    RailYawReference yaw_reference = request.metadata.yaw_reference;
+    if (yaw_reference.map_frame_uuid.empty()) {
+      yaw_reference.map_frame_uuid = map_frame_uuid;
+    }
+    if (yaw_reference.map_frame_id.empty()) {
+      yaw_reference.map_frame_id = request.metadata.frame_id;
+    }
+    if (yaw_reference.base_frame_id.empty()) {
+      yaw_reference.base_frame_id = request.metadata.base_frame_id;
+    }
+    if (yaw_reference.map_frame_convention_id.empty()) {
+      yaw_reference.map_frame_convention_id =
+          request.metadata.map_frame_convention_id;
+    }
+    if (yaw_reference.sensor_rig_calibration_id.empty()) {
+      yaw_reference.sensor_rig_calibration_id =
+          request.metadata.sensor_rig_calibration_id;
+    }
+    if (yaw_reference.verified) {
+      yaw_reference.reference_hash = semanticYawReferenceHash(yaw_reference);
+      std::string yaw_reason;
+      if (yaw_reference.map_frame_uuid != map_frame_uuid ||
+          !validateRailYawReference(yaw_reference, &yaw_reason)) {
+        throw std::runtime_error(
+            "yaw_reference_identity_invalid:" + yaw_reason);
+      }
+    }
     YAML::Node manifest;
     manifest["schema"] = "ndt_slam_map_session";
     manifest["schema_version"] = kSchemaVersion;
     manifest["complete"] = true;
     manifest["map_uuid"] = map_uuid;
+    manifest["map_frame_uuid"] = map_frame_uuid;
     manifest["frame_id"] = request.metadata.frame_id;
+    manifest["base_frame_id"] = request.metadata.base_frame_id;
+    manifest["map_frame_convention_id"] =
+        request.metadata.map_frame_convention_id;
+    manifest["sensor_rig_calibration_id"] =
+        request.metadata.sensor_rig_calibration_id;
     manifest["source_git_sha"] = request.metadata.source_git_sha;
     manifest["source_git_branch"] = request.metadata.source_git_branch;
     manifest["source_stamp_sec"] = request.metadata.source_stamp_sec;
@@ -328,6 +363,27 @@ bool MapSessionSnapshot::saveAtomic(const MapSessionSaveRequest& request,
     manifest["active_only"] = request.metadata.active_only;
     manifest["objects_voxel_size_m"] =
         request.metadata.objects_voxel_size_m;
+    manifest["yaw_reference"]["schema_version"] =
+        yaw_reference.schema_version;
+    manifest["yaw_reference"]["verified"] = yaw_reference.verified;
+    manifest["yaw_reference"]["rail_yaw_in_map_rad"] =
+        yaw_reference.rail_yaw_in_map_rad;
+    manifest["yaw_reference"]["source"] =
+        yawReferenceSourceName(yaw_reference.source);
+    manifest["yaw_reference"]["map_frame_uuid"] =
+        yaw_reference.map_frame_uuid;
+    manifest["yaw_reference"]["map_frame_id"] =
+        yaw_reference.map_frame_id;
+    manifest["yaw_reference"]["base_frame_id"] =
+        yaw_reference.base_frame_id;
+    manifest["yaw_reference"]["map_frame_convention_id"] =
+        yaw_reference.map_frame_convention_id;
+    manifest["yaw_reference"]["sensor_rig_calibration_id"] =
+        yaw_reference.sensor_rig_calibration_id;
+    manifest["yaw_reference"]["reference_uuid"] =
+        yaw_reference.reference_uuid;
+    manifest["yaw_reference"]["reference_hash"] =
+        yaw_reference.reference_hash;
     manifest["static_evidence"]["schema_version"] =
         request.static_evidence->schema_version;
     manifest["static_evidence"]["map_generation"] =
@@ -357,6 +413,9 @@ bool MapSessionSnapshot::saveAtomic(const MapSessionSaveRequest& request,
     if (verification.metadata.active_only != request.metadata.active_only ||
         verification.metadata.map_generation !=
             request.metadata.map_generation ||
+        verification.metadata.map_frame_uuid != map_frame_uuid ||
+        verification.metadata.yaw_reference.reference_hash !=
+            yaw_reference.reference_hash ||
         verification.static_evidence_revision !=
             request.static_evidence->revision) {
       throw std::runtime_error("temporary_session_identity_mismatch");
@@ -385,8 +444,11 @@ MapSessionLoadResult MapSessionSnapshot::loadVerified(
       return result;
     }
     const YAML::Node manifest = YAML::LoadFile(manifest_path.string());
+    const std::uint32_t schema_version =
+        manifest["schema_version"].as<std::uint32_t>(0U);
     if (manifest["schema"].as<std::string>("") != "ndt_slam_map_session" ||
-        manifest["schema_version"].as<std::uint32_t>(0U) != kSchemaVersion ||
+        (schema_version != kSchemaVersion &&
+         schema_version != kLegacySchemaVersion) ||
         !manifest["complete"].as<bool>(false)) {
       result.reason = "manifest_schema_or_completeness_invalid";
       return result;
@@ -396,6 +458,63 @@ MapSessionLoadResult MapSessionSnapshot::loadVerified(
     if (result.metadata.map_uuid.empty() || result.metadata.frame_id.empty()) {
       result.reason = "manifest_identity_invalid";
       return result;
+    }
+    result.metadata.map_frame_uuid = schema_version >= kSchemaVersion
+        ? manifest["map_frame_uuid"].as<std::string>("")
+        : result.metadata.map_uuid;
+    result.metadata.base_frame_id =
+        manifest["base_frame_id"].as<std::string>("base_link");
+    result.metadata.map_frame_convention_id =
+        manifest["map_frame_convention_id"].as<std::string>("");
+    result.metadata.sensor_rig_calibration_id =
+        manifest["sensor_rig_calibration_id"].as<std::string>("");
+    if (result.metadata.map_frame_uuid.empty()) {
+      result.reason = "map_frame_identity_missing";
+      return result;
+    }
+    if (schema_version >= kSchemaVersion) {
+      const YAML::Node yaw = manifest["yaw_reference"];
+      RailYawReference reference;
+      reference.schema_version =
+          yaw["schema_version"].as<std::uint32_t>(0U);
+      reference.verified = yaw["verified"].as<bool>(false);
+      reference.rail_yaw_in_map_rad =
+          yaw["rail_yaw_in_map_rad"].as<double>(0.0);
+      const std::string source = yaw["source"].as<std::string>("");
+      if (!yawReferenceSourceFromName(source, &reference.source)) {
+        result.reason = "yaw_reference_source_invalid";
+        return result;
+      }
+      reference.map_frame_uuid =
+          yaw["map_frame_uuid"].as<std::string>("");
+      reference.map_frame_id =
+          yaw["map_frame_id"].as<std::string>("");
+      reference.base_frame_id =
+          yaw["base_frame_id"].as<std::string>("");
+      reference.map_frame_convention_id =
+          yaw["map_frame_convention_id"].as<std::string>("");
+      reference.sensor_rig_calibration_id =
+          yaw["sensor_rig_calibration_id"].as<std::string>("");
+      reference.reference_uuid =
+          yaw["reference_uuid"].as<std::string>("");
+      reference.reference_hash =
+          yaw["reference_hash"].as<std::string>("");
+      result.metadata.yaw_reference = reference;
+      if (reference.verified) {
+        std::string yaw_reason;
+        if (reference.map_frame_uuid != result.metadata.map_frame_uuid ||
+            reference.map_frame_id != result.metadata.frame_id ||
+            reference.base_frame_id != result.metadata.base_frame_id ||
+            reference.map_frame_convention_id !=
+                result.metadata.map_frame_convention_id ||
+            reference.sensor_rig_calibration_id !=
+                result.metadata.sensor_rig_calibration_id ||
+            !validateRailYawReference(reference, &yaw_reason)) {
+          result.reason = "yaw_reference_identity_invalid:" + yaw_reason;
+          return result;
+        }
+        result.metadata.rail_write_authorized = true;
+      }
     }
     result.metadata.source_git_sha =
         manifest["source_git_sha"].as<std::string>("unknown");

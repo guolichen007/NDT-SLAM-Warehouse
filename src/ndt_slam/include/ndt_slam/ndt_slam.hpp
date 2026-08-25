@@ -560,6 +560,8 @@ private:
     std::uint64_t frame_session_id_ = 1U;
     RailYawReference configured_rail_yaw_reference_;
     RailYawAuthority rail_yaw_authority_;
+    std::string map_frame_uuid_;
+    bool rail_map_write_authorized_ = false;
     FixedYawTranslationSolver fixed_yaw_translation_solver_;
     NdtFitnessCircuitBreaker rail_fitness_circuit_breaker_;
     LocalizationAuthorityHealth localization_authority_health_;

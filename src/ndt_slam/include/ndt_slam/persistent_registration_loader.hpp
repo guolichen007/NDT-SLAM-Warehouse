@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <string>
 
+#include "ndt_slam/rail_localization_authority.hpp"
+
 namespace ndt_slam {
 
 enum class PersistentRegistrationLoadStatus {
@@ -20,6 +22,9 @@ struct PersistentRegistrationLoadResult {
   std::string reason;
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
   std::size_t tile_count = 0U;
+  std::string map_frame_uuid;
+  RailYawReference yaw_reference;
+  bool rail_write_authorized = false;
 };
 
 // Loads only the authoritative registration layer. An absent manifest and an

@@ -44,6 +44,8 @@ enum class RegistrationTargetSource : std::uint8_t {
 
 const char* yawAuthorityModeName(YawAuthorityMode mode) noexcept;
 const char* yawReferenceSourceName(YawReferenceSource source) noexcept;
+bool yawReferenceSourceFromName(const std::string& name,
+                                YawReferenceSource* source) noexcept;
 const char* yawAuthorityTransitionReasonName(
     YawAuthorityTransitionReason reason) noexcept;
 const char* localizationFailureClassName(

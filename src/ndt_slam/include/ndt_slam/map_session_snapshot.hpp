@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ndt_slam/static_obstacle_evidence_index.hpp"
+#include "ndt_slam/rail_localization_authority.hpp"
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -23,7 +24,13 @@ struct MapSessionLayers {
 
 struct MapSessionMetadata {
   std::string map_uuid;
+  std::string map_frame_uuid;
   std::string frame_id = "map";
+  std::string base_frame_id = "base_link";
+  std::string map_frame_convention_id;
+  std::string sensor_rig_calibration_id;
+  RailYawReference yaw_reference;
+  bool rail_write_authorized = false;
   std::string source_git_sha = "unknown";
   std::string source_git_branch = "unknown";
   std::uint64_t map_generation = 0U;
@@ -64,7 +71,8 @@ std::vector<Eigen::Vector3f> selectStaticHeightPointsForAuthority(
 
 class MapSessionSnapshot {
  public:
-  static constexpr std::uint32_t kSchemaVersion = 1U;
+  static constexpr std::uint32_t kLegacySchemaVersion = 1U;
+  static constexpr std::uint32_t kSchemaVersion = 2U;
 
   // Atomic for reader visibility through a same-filesystem directory rename.
   // This API does not fsync every file/directory and therefore does not claim
