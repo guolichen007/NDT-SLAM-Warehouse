@@ -1062,7 +1062,7 @@ bool NdtSlamNode::isMapCommitAuthorityCurrent(
 
 void NdtSlamNode::enqueueMapCommitJob(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-    const Sophus::SE3d& pose,
+    const FrameAuthorityContext& frame_context,
     const ros::Time& stamp) {
     if (!cloud || cloud->empty()) {
         map_commit_dropped_.fetch_add(1U, std::memory_order_relaxed);
@@ -1070,8 +1070,7 @@ void NdtSlamNode::enqueueMapCommitJob(
     }
 
     MapCommitJob job;
-    job.lifecycle_epoch =
-        map_rebuild_generation_.load(std::memory_order_acquire);
+    job.lifecycle_epoch = frame_context.pose_identity.map_rebuild_generation;
     job.time_epoch_id =
         current_time_epoch_id_.load(std::memory_order_acquire);
     job.static_evidence_epoch =
@@ -1079,19 +1078,18 @@ void NdtSlamNode::enqueueMapCommitJob(
     job.rail_authority_job =
         yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY;
     job.keyframe_pose_version =
-        keyframe_pose_version_.load(std::memory_order_acquire);
-    job.yaw_authority_generation = rail_yaw_authority_.generation();
-    job.map_frame_uuid = rail_yaw_authority_.reference().map_frame_uuid;
+        frame_context.pose_identity.keyframe_pose_version;
+    job.yaw_authority_generation =
+        frame_context.pose_identity.yaw_authority_generation;
+    job.map_frame_uuid = frame_context.pose_identity.map_frame_uuid;
     job.yaw_reference_hash =
-        rail_yaw_authority_.reference().reference_hash;
-    job.target_snapshot_id =
-        current_registration_target_snapshot_id_.load(
-            std::memory_order_acquire);
+        frame_context.pose_identity.yaw_reference_hash;
+    job.target_snapshot_id = frame_context.pose_identity.target_snapshot_id;
     job.localization_map_mutation_authorized =
         !job.rail_authority_job ||
-        localization_authority_health_.map_mutation_authorized;
+        frame_context.mapMutationAuthorized();
     job.stamp = stamp;
-    job.pose = pose;
+    job.pose = frame_context.runtime_pose;
     job.cloud = cloud;
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
     job.hook_role = hook_load_signal_role_;
@@ -5408,6 +5406,11 @@ void NdtSlamNode::processCloudThread() {
         bool diag_map_commit_allowed = false;
         bool diag_motion_gate_blocked = false;
         std::string diag_map_commit_reason = "registration_not_published";
+        HookCargoDetection preload_shadow_detection;
+        CargoShadowFrameEvidence integrated_shadow_deferred_frame;
+        const HookCargoDetection* integrated_shadow_deferred_detection =
+            nullptr;
+        HookLoadSnapshot integrated_shadow_deferred_hook;
         double diag_transformation_probability = 0.0;
         double diag_raw_ndt_step_from_previous = 0.0;
         double diag_output_dx = 0.0;
@@ -5640,14 +5643,14 @@ void NdtSlamNode::processCloudThread() {
             integrated_shadow_empty_detection_due &&
             !hook_allows_tracking && hook_is_empty && hook_input_cloud &&
             !hook_input_cloud->empty()) {
-            HookCargoDetection preload_shadow_detection =
+            preload_shadow_detection =
                 detectCargoAroundOdomAnchor(
                     hook_input_cloud, msg->header.stamp);
-            CargoShadowFrameEvidence preload_shadow_frame =
-                std::move(preload_shadow_detection.shadow_frame_evidence);
-            updateIntegratedCargoIdentityShadow(
-                preload_shadow_detection, std::move(preload_shadow_frame),
-                hook_load, msg->header.stamp);
+            integrated_shadow_deferred_frame = std::move(
+                preload_shadow_detection.shadow_frame_evidence);
+            integrated_shadow_deferred_detection =
+                &preload_shadow_detection;
+            integrated_shadow_deferred_hook = hook_load;
             integrated_shadow_last_detection_stamp_ = msg->header.stamp;
         }
 
@@ -5657,11 +5660,11 @@ void NdtSlamNode::processCloudThread() {
             hook_input_cloud && !hook_input_cloud->empty()) {
             hook_fixed_cargo_ = detectCargoAroundOdomAnchor(hook_input_cloud, msg->header.stamp);
                 if (integrated_cargo_identity_shadow_enabled_) {
-                    CargoShadowFrameEvidence shadow_frame =
+                    integrated_shadow_deferred_frame =
                         std::move(hook_fixed_cargo_.shadow_frame_evidence);
-                    updateIntegratedCargoIdentityShadow(
-                        hook_fixed_cargo_, std::move(shadow_frame),
-                        hook_load, msg->header.stamp);
+                    integrated_shadow_deferred_detection =
+                        &hook_fixed_cargo_;
+                    integrated_shadow_deferred_hook = hook_load;
                     integrated_shadow_last_detection_stamp_ =
                         msg->header.stamp;
                 }
@@ -6361,7 +6364,6 @@ void NdtSlamNode::processCloudThread() {
         NdtFitnessCircuitDecision frame_proposal_fitness_decision;
         bool frame_fixed_yaw_measurement_valid = false;
         bool frame_rail_target_identity_valid = false;
-        bool frame_safety_localization_authorized = true;
         Sophus::SE3d frame_raw_ndt_pose = current_pose_;
         double frame_raw_increment_m = 0.0;
         static Sophus::SE3d last_local_map_pose = Sophus::SE3d();
@@ -7033,10 +7035,6 @@ void NdtSlamNode::processCloudThread() {
             registration_success && crane_motion_ekf_.initialized();
         localization_authority_health_ =
             evaluateRailLocalizationHealth(rail_health_input);
-        frame_safety_localization_authorized =
-            yaw_authority_mode_ != YawAuthorityMode::RAIL_AUTHORITY ||
-            localization_authority_health_
-                .safety_localization_authorized;
 
         if (ndt_attempted_this_frame &&
             !startup_first_ndt_result_logged_.exchange(
@@ -7278,6 +7276,43 @@ void NdtSlamNode::processCloudThread() {
             }
             logSO3GuardPose(
                 "published_pose", processing_frame_index, final_pose);
+            PoseAuthorityIdentity pose_authority_identity;
+            pose_authority_identity.map_rebuild_generation =
+                map_rebuild_generation_.load(std::memory_order_acquire);
+            pose_authority_identity.keyframe_pose_version =
+                keyframe_pose_version_.load(std::memory_order_acquire);
+            pose_authority_identity.yaw_authority_generation =
+                rail_yaw_authority_.generation();
+            pose_authority_identity.map_frame_uuid = map_frame_uuid_;
+            pose_authority_identity.yaw_reference_hash =
+                rail_yaw_authority_.valid()
+                    ? rail_yaw_authority_.reference().reference_hash
+                    : std::string{};
+            pose_authority_identity.target_snapshot_id =
+                current_registration_target_snapshot_id_.load(
+                    std::memory_order_acquire);
+            FrameAuthorityContext frame_authority_context;
+            frame_authority_context.runtime_pose = final_pose;
+            frame_authority_context.pose_identity =
+                std::move(pose_authority_identity);
+            frame_authority_context.rail_authority_mode =
+                yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY;
+            frame_authority_context.localization_health =
+                frame_authority_context.rail_authority_mode
+                    ? localization_authority_health_
+                    : LocalizationAuthorityHealth{
+                          true, true, true, true, false, false, false,
+                          LocalizationFailureClass::NONE,
+                          "legacy_authorized"};
+            frame_authority_context.failure_class =
+                frame_authority_context.localization_health.failure_class;
+            frame_authority_context.source_stamp_sec = publish_time.toSec();
+            if (integrated_shadow_deferred_detection) {
+                updateIntegratedCargoIdentityShadow(
+                    *integrated_shadow_deferred_detection,
+                    std::move(integrated_shadow_deferred_frame),
+                    integrated_shadow_deferred_hook, publish_time);
+            }
             publishOdometry(publish_time, msg->header.frame_id, final_pose);
             odom_publish_count_.fetch_add(1, std::memory_order_relaxed);
 
@@ -7321,9 +7356,9 @@ void NdtSlamNode::processCloudThread() {
             // pose -> fused bottom -> conservative per-cluster safety status.
             // The heartbeat node is the only producer of the PLC alarm topic.
             if (relocalization_pose_reliable_ &&
-                frame_safety_localization_authorized) {
+                frame_authority_context.safetyAuthorized()) {
                 updateAndPublishCargoSafetyPipeline(
-                    feature_cloud, filtered_cloud, final_pose,
+                    feature_cloud, filtered_cloud, frame_authority_context,
                     cargo_raw_physical_pose, publish_time,
                     msg->header.stamp,
                     diag_queue_age_ms * 0.001 +
@@ -7341,7 +7376,10 @@ void NdtSlamNode::processCloudThread() {
             // job creation or thread activity. A result is frame/map scoped and
             // is invalidated after one consume attempt.
             const auto icp_prepare_start = DiagClock::now();
-            Sophus::SE3d map_pose = constrained_pose;
+            Sophus::SE3d map_pose =
+                frame_authority_context.rail_authority_mode
+                    ? frame_authority_context.runtime_pose
+                    : constrained_pose;
             if (yaw_authority_mode_ != YawAuthorityMode::RAIL_AUTHORITY &&
                 icp_refine_cfg_.enabled &&
                 icp_refine_cfg_.run_after_ndt &&
@@ -7457,7 +7495,8 @@ void NdtSlamNode::processCloudThread() {
 
             if (allow_map_commit) {
                 const auto map_commit_start = DiagClock::now();
-                enqueueMapCommitJob(filtered_cloud, final_pose, publish_time);
+                enqueueMapCommitJob(
+                    filtered_cloud, frame_authority_context, publish_time);
                 diag_stage.map_commit_ms = elapsedMs(map_commit_start);
                 // Filtering and map writes now run on the bounded worker.
                 // Only a completed, current-epoch job advances the owner-side
@@ -11296,6 +11335,63 @@ void NdtSlamNode::consumeRelocalizationResult(
         relocalization_pose_reliable_ &&
         !relocalization_force_global_.load(std::memory_order_acquire)) return;
 
+    // Free-yaw relocalization discovers only a search basin.  RAIL mode must
+    // re-solve XY at the existing map-frame yaw against the exact winning
+    // crop before the result can enter confirmation or pose authority.
+    if (yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY &&
+        result.valid) {
+        if (!rail_yaw_authority_.valid() ||
+            rail_yaw_authority_.reference().map_frame_uuid !=
+                map_frame_uuid_ ||
+            !result.fixed_yaw_source || result.fixed_yaw_source->empty() ||
+            !result.fixed_yaw_target || result.fixed_yaw_target->empty()) {
+            result.valid = false;
+            result.reason = "rail_relocalization_fixed_yaw_input_unavailable";
+        } else {
+            RegistrationTargetSource source =
+                registrationTargetSourceFromName(result.map_source);
+            if (source == RegistrationTargetSource::UNKNOWN) {
+                source = result.mode == RelocalizationMode::GLOBAL
+                    ? RegistrationTargetSource::GLOBAL_MAP
+                    : RegistrationTargetSource::CROPPED_ACTIVE_MAP;
+            }
+            const RegistrationTargetSnapshot target =
+                makeRegistrationTargetSnapshot(
+                    result.fixed_yaw_target, source,
+                    result.map_content_version, result.map_generation,
+                    rail_yaw_authority_.reference().map_frame_uuid,
+                    result.target_crop_identity);
+            FixedYawTranslationInput fixed_input;
+            fixed_input.source_cloud_base = result.fixed_yaw_source;
+            fixed_input.target = target;
+            fixed_input.seed_pose_map_base = result.pose;
+            fixed_input.authoritative_yaw_rad =
+                rail_yaw_authority_.yawRad();
+            fixed_input.seed_source =
+                FixedYawSeedSource::RELOCALIZATION_BASIN;
+            FixedYawTranslationSolver verifier(
+                fixed_yaw_translation_solver_.config());
+            const FixedYawTranslationResult verified =
+                verifier.solve(fixed_input);
+            if (!verified.valid || !std::isfinite(verified.fitness)) {
+                result.valid = false;
+                result.reason =
+                    "rail_relocalization_fixed_yaw_verify_failed:" +
+                    verified.reason;
+            } else {
+                result.pose = verified.pose_map_base;
+                result.fitness = verified.fitness;
+                result.fixed_yaw_verified = true;
+                result.target_snapshot_id = target.target_snapshot_id;
+                result.yaw_authority_generation =
+                    rail_yaw_authority_.generation();
+                result.yaw_reference_hash =
+                    rail_yaw_authority_.reference().reference_hash;
+                result.reason = "rail_relocalization_fixed_yaw_verified";
+            }
+        }
+    }
+
     RelocalizationConfirmationConfig confirmation_config;
     confirmation_config.required_confirmations =
         relocalization_confirm_frames_;
@@ -11322,6 +11418,12 @@ void NdtSlamNode::consumeRelocalizationResult(
         map_rebuild_generation_.load(std::memory_order_acquire);
     confirmation_input.expected_pose_version =
         keyframe_pose_version_.load(std::memory_order_acquire);
+    confirmation_input.expected_yaw_authority_generation =
+        rail_yaw_authority_.generation();
+    confirmation_input.expected_yaw_reference_hash =
+        rail_yaw_authority_.valid()
+            ? rail_yaw_authority_.reference().reference_hash
+            : std::string{};
     confirmation_input.last_result_frame =
         relocalization_last_result_frame_;
     confirmation_input.previous_confirmation_count =
@@ -11480,14 +11582,18 @@ void NdtSlamNode::updateRelocalization(
                 relocalization_cfg_.min_target_points) {
             selected_map = objects_clean_map_;
             job.map_source = "objects_clean_static";
+            job.map_content_version = clean_map_content_version_;
         } else if (global && global_map_ && !global_map_->empty()) {
             selected_map = global_map_;
             job.map_source = "global_registration_fallback";
+            job.map_content_version =
+                map_rebuild_generation_.load(std::memory_order_acquire);
         } else {
             selected_map = local_map_;
             job.map_source = global
                 ? "local_registration_fallback"
                 : "local_registration";
+            job.map_content_version = local_map_version_;
         }
         if (!selected_map || selected_map->empty()) {
             publishRelocalizationStatus("DEGRADED", "map_unavailable");
@@ -22691,7 +22797,7 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             HookCargoDetection{}, CargoShadowFrameEvidence{}, hook, stamp);
     }
     const std::uint64_t shadow_lifecycle_id =
-        integrated_identity_decision_.load_epoch;
+        integrated_identity_decision_.physical_cargo_epoch_id;
     const double group_evidence_age_sec = integrated_group_evidence_.valid
         ? stamp.toSec() - integrated_group_evidence_.source_stamp_sec
         : std::numeric_limits<double>::infinity();
@@ -22989,7 +23095,7 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
     projection.clear_authorized =
         integrated_geometry_decision_.formal_clear_authorized;
     projection.cargo_lifecycle_id =
-        integrated_identity_decision_.load_epoch;
+        integrated_identity_decision_.physical_cargo_epoch_id;
     projection.cargo_track_id =
         integrated_identity_decision_.physical_history_id;
     projection.live = canonical.live;
@@ -23228,11 +23334,18 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
 void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
-    const Sophus::SE3d& pose_map_base,
+    const FrameAuthorityContext& frame_context,
     const Sophus::SE3d& raw_physical_pose,
     const ros::Time& stamp,
     const ros::Time& obstacle_cloud_stamp,
     double processing_age_sec) {
+    const Sophus::SE3d& pose_map_base = frame_context.runtime_pose;
+    if (!frame_context.safetyAuthorized() ||
+        std::abs(frame_context.source_stamp_sec - stamp.toSec()) > 1.0e-6) {
+        publishRelocalizationSafetyInvalid(
+            stamp, "frame_authority_context_invalid");
+        return;
+    }
     last_cargo_pipeline_stamp_ = stamp;
     cargo_pending_self_removed_points_ = 0U;
     cargo_pending_unresolved_inside_points_ = 0U;

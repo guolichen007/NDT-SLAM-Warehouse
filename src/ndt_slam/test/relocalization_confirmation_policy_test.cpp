@@ -18,10 +18,16 @@ RelocalizationConfirmationInput candidate(
   input.current_stamp_sec = stamp + 0.1;
   input.expected_map_generation = 3U;
   input.expected_pose_version = 4U;
+  input.expected_yaw_authority_generation = 5U;
+  input.expected_yaw_reference_hash = "verified-reference";
   input.result.valid = true;
   input.result.frame_index = frame;
   input.result.map_generation = 3U;
   input.result.pose_version = 4U;
+  input.result.fixed_yaw_verified = true;
+  input.result.target_snapshot_id = 6U;
+  input.result.yaw_authority_generation = 5U;
+  input.result.yaw_reference_hash = "verified-reference";
   input.result.stamp_sec = stamp;
   input.result.fitness = 0.1;
   input.result.probability = 0.5;
@@ -142,6 +148,17 @@ TEST(RelocalizationConfirmationPolicy,
   EXPECT_EQ(second.outcome,
             RelocalizationConfirmationOutcome::CONFIRMED);
   EXPECT_NEAR(second.correction.so3().log().norm(), 0.0, 1.0e-12);
+}
+
+TEST(RelocalizationConfirmationPolicy,
+     RailConfirmationRejectsUnverifiedFreeYawBasin) {
+  auto input = candidate(10U, 1.0, 1.0, 25.0);
+  input.result.fixed_yaw_verified = false;
+  const auto decision = evaluateRailRelocalizationConfirmation(input);
+  EXPECT_EQ(decision.outcome,
+            RelocalizationConfirmationOutcome::DISCARD_IDENTITY);
+  EXPECT_EQ(decision.reason,
+            "rail_fixed_yaw_or_reference_identity_unverified");
 }
 
 }  // namespace

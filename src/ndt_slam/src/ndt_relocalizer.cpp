@@ -159,6 +159,7 @@ RelocalizationResult NdtRelocalizer::run(const RelocalizationJob& job) const {
     best.frame_index = job.frame_index;
     best.map_generation = job.map_generation;
     best.pose_version = job.pose_version;
+    best.map_content_version = job.map_content_version;
     best.stamp_sec = job.stamp_sec;
     best.mode = job.mode;
     best.reference_pose = job.reference_pose;
@@ -244,6 +245,14 @@ RelocalizationResult NdtRelocalizer::run(const RelocalizationJob& job) const {
             best.probability = probability;
             best.keyframe_id = seed.keyframe_id;
             best.seed_source = seed.source;
+            best.fixed_yaw_source = source;
+            best.fixed_yaw_target = target;
+            best.target_crop_identity =
+                "relocalization_seed=" + std::to_string(index) +
+                ";source=" + seed.source +
+                ";keyframe=" + std::to_string(seed.keyframe_id) +
+                ";x=" + std::to_string(seed.pose.translation().x()) +
+                ";y=" + std::to_string(seed.pose.translation().y());
             best.reason = "accepted_candidate";
         }
     }

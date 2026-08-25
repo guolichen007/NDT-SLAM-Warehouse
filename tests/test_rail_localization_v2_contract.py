@@ -31,6 +31,9 @@ def test_normal_relocalization_uses_rail_xy_confirmation_interface():
     )
     assert "evaluateRailRelocalizationConfirmation" in consume
     assert "yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY" in consume
+    assert "FixedYawSeedSource::RELOCALIZATION_BASIN" in consume
+    assert "rail_relocalization_fixed_yaw_verified" in consume
+    assert "result.fixed_yaw_verified = true" in consume
 
 
 def test_rail_confirmation_never_uses_free_yaw_delta():
@@ -130,7 +133,8 @@ def test_map_commit_is_fenced_by_pose_yaw_reference_and_target_identity():
         "void NdtSlamNode::enqueueMapCommitJob(",
         "void NdtSlamNode::mapCommitThread(",
     )
-    assert "localization_authority_health_.map_mutation_authorized" in enqueue
+    assert "frame_context.mapMutationAuthorized()" in enqueue
+    assert "frame_context.pose_identity" in enqueue
     worker = _function_body(
         NODE,
         "void NdtSlamNode::mapCommitThread(",

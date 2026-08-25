@@ -1,6 +1,7 @@
 #include "ndt_slam/rail_localization_authority.hpp"
 #include "ndt_slam/registration_target_snapshot.hpp"
 #include "ndt_slam/fixed_yaw_translation_solver.hpp"
+#include "ndt_slam/frame_authority_context.hpp"
 #include "ndt_slam/rail_translation_pose_graph.hpp"
 
 #include <gtest/gtest.h>
@@ -82,6 +83,42 @@ TEST(RailLocalizationHealthTest,
   EXPECT_FALSE(decision.map_mutation_authorized);
   EXPECT_EQ(decision.failure_class,
             LocalizationFailureClass::TEMPORARY_OBSERVABILITY_LOSS);
+}
+
+TEST(FrameAuthorityContextTest,
+     RailSafetyAndMapRequireCompleteSinglePoseIdentity) {
+  FrameAuthorityContext context;
+  context.rail_authority_mode = true;
+  context.source_stamp_sec = 10.0;
+  context.localization_health.safety_localization_authorized = true;
+  context.localization_health.map_mutation_authorized = true;
+  EXPECT_FALSE(context.safetyAuthorized());
+  EXPECT_FALSE(context.mapMutationAuthorized());
+
+  context.pose_identity.map_frame_uuid = "map-frame-1";
+  context.pose_identity.yaw_reference_hash = "reference-hash";
+  context.pose_identity.yaw_authority_generation = 2U;
+  context.pose_identity.target_snapshot_id = 3U;
+  EXPECT_TRUE(context.safetyAuthorized());
+  EXPECT_TRUE(context.mapMutationAuthorized());
+}
+
+TEST(FrameAuthorityContextTest,
+     MixedPoseGenerationCannotCompareAsSameSafetyFrame) {
+  PoseAuthorityIdentity cargo;
+  cargo.map_rebuild_generation = 4U;
+  cargo.keyframe_pose_version = 5U;
+  cargo.yaw_authority_generation = 6U;
+  cargo.map_frame_uuid = "map-frame-1";
+  cargo.yaw_reference_hash = "reference-hash";
+  cargo.target_snapshot_id = 7U;
+  PoseAuthorityIdentity obstacle = cargo;
+  EXPECT_TRUE(samePoseAuthorityIdentity(cargo, obstacle));
+  ++obstacle.yaw_authority_generation;
+  EXPECT_FALSE(samePoseAuthorityIdentity(cargo, obstacle));
+  obstacle = cargo;
+  ++obstacle.keyframe_pose_version;
+  EXPECT_FALSE(samePoseAuthorityIdentity(cargo, obstacle));
 }
 
 TEST(RailLocalizationHealthTest,

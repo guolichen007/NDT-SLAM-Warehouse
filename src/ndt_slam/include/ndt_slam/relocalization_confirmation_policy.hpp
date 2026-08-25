@@ -30,6 +30,8 @@ struct RelocalizationConfirmationInput {
   double current_stamp_sec = 0.0;
   std::uint64_t expected_map_generation = 0U;
   std::uint64_t expected_pose_version = 0U;
+  std::uint64_t expected_yaw_authority_generation = 0U;
+  std::string expected_yaw_reference_hash;
   std::uint64_t last_result_frame = 0U;
   int previous_confirmation_count = 0;
   Sophus::SE3d previous_correction;

@@ -148,6 +148,15 @@ RelocalizationConfirmationDecision evaluateRailRelocalizationConfirmation(
     decision.reason = "stale_rail_map_or_pose_generation_discarded";
     return decision;
   }
+  if (!result.fixed_yaw_verified || result.target_snapshot_id == 0U ||
+      result.yaw_authority_generation !=
+          input.expected_yaw_authority_generation ||
+      result.yaw_reference_hash.empty() ||
+      result.yaw_reference_hash != input.expected_yaw_reference_hash) {
+    decision.outcome = RelocalizationConfirmationOutcome::DISCARD_IDENTITY;
+    decision.reason = "rail_fixed_yaw_or_reference_identity_unverified";
+    return decision;
+  }
   if (result.frame_index <= input.last_result_frame) {
     decision.outcome = RelocalizationConfirmationOutcome::DISCARD_DUPLICATE;
     decision.reason = "duplicate_or_out_of_order_rail_result";

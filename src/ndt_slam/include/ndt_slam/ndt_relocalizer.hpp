@@ -52,6 +52,7 @@ struct RelocalizationJob {
     std::uint64_t frame_index = 0;
     std::uint64_t map_generation = 0;
     std::uint64_t pose_version = 0;
+    std::uint64_t map_content_version = 0;
     double stamp_sec = 0.0;
     RelocalizationMode mode = RelocalizationMode::LOCAL;
     Sophus::SE3d reference_pose;
@@ -67,6 +68,7 @@ struct RelocalizationResult {
     std::uint64_t frame_index = 0;
     std::uint64_t map_generation = 0;
     std::uint64_t pose_version = 0;
+    std::uint64_t map_content_version = 0;
     double stamp_sec = 0.0;
     RelocalizationMode mode = RelocalizationMode::LOCAL;
     Sophus::SE3d reference_pose;
@@ -78,6 +80,13 @@ struct RelocalizationResult {
     int keyframe_id = -1;
     std::string seed_source;
     std::string map_source;
+    pcl::PointCloud<pcl::PointXYZ>::ConstPtr fixed_yaw_source;
+    pcl::PointCloud<pcl::PointXYZ>::ConstPtr fixed_yaw_target;
+    std::string target_crop_identity;
+    bool fixed_yaw_verified = false;
+    std::uint64_t target_snapshot_id = 0;
+    std::uint64_t yaw_authority_generation = 0;
+    std::string yaw_reference_hash;
     std::string reason;
 };
 

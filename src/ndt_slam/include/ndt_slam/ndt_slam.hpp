@@ -71,6 +71,7 @@
 #include <ndt_slam/registration_target_snapshot.hpp>
 #include <ndt_slam/rail_localization_authority.hpp>
 #include <ndt_slam/fixed_yaw_translation_solver.hpp>
+#include <ndt_slam/frame_authority_context.hpp>
 #include <ndt_slam/rail_translation_pose_graph.hpp>
 #include <ndt_slam/pending_cargo_envelope.hpp>
 #include <ndt_slam/pending_cargo_self_evidence.hpp>
@@ -813,7 +814,7 @@ private:
 
     void enqueueMapCommitJob(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-        const Sophus::SE3d& pose,
+        const FrameAuthorityContext& frame_context,
         const ros::Time& stamp);
     void mapCommitThread();
     void consumeMapCommitCompletion();
@@ -2604,7 +2605,7 @@ private:
     void updateAndPublishCargoSafetyPipeline(
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
-        const Sophus::SE3d& pose_map_base,
+        const FrameAuthorityContext& frame_context,
         const Sophus::SE3d& raw_physical_pose,
         const ros::Time& stamp,
         const ros::Time& obstacle_cloud_stamp,
