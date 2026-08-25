@@ -55,6 +55,7 @@ struct FixedYawTranslationResult {
   Eigen::Vector2d weak_direction = Eigen::Vector2d::UnitY();
   int iterations = 0;
   double elapsed_ms = 0.0;
+  double fitness_elapsed_ms = 0.0;
   double target_normal_cache_build_ms = 0.0;
   bool target_normal_cache_rebuilt = false;
   std::uint64_t target_snapshot_id = 0U;

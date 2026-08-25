@@ -6364,6 +6364,9 @@ void NdtSlamNode::processCloudThread() {
         NdtFitnessCircuitDecision frame_proposal_fitness_decision;
         bool frame_fixed_yaw_measurement_valid = false;
         bool frame_rail_target_identity_valid = false;
+        last_fixed_yaw_solver_ms_ = 0.0;
+        last_rail_pose_fitness_ms_ = 0.0;
+        last_target_normal_cache_build_ms_ = 0.0;
         Sophus::SE3d frame_raw_ndt_pose = current_pose_;
         double frame_raw_increment_m = 0.0;
         static Sophus::SE3d last_local_map_pose = Sophus::SE3d();
@@ -6735,6 +6738,17 @@ void NdtSlamNode::processCloudThread() {
                                         .target_normal_cache_build_ms +
                                     last_fixed_yaw_free_result_
                                         .target_normal_cache_build_ms;
+                                last_rail_pose_fitness_ms_ =
+                                    last_fixed_yaw_predicted_result_
+                                        .fitness_elapsed_ms +
+                                    last_fixed_yaw_free_result_
+                                        .fitness_elapsed_ms;
+                                diag_stage.fixed_yaw_solver_ms =
+                                    last_fixed_yaw_solver_ms_;
+                                diag_stage.rail_pose_fitness_ms =
+                                    last_rail_pose_fitness_ms_;
+                                diag_stage.target_normal_cache_build_ms =
+                                    last_target_normal_cache_build_ms_;
                             }
 
                             if (yaw_authority_mode_ ==
@@ -9710,7 +9724,13 @@ void NdtSlamNode::processLoopClosure() {
                                 candidate_it->id_, current_it->id_,
                                 base_to_map * pair_result.xy,
                                 information);
+                            const auto rail_graph_start =
+                                std::chrono::steady_clock::now();
                             const auto graph_result = graph.optimize(10, 1.0);
+                            result.rail_graph_worker_ms =
+                                std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() -
+                                    rail_graph_start).count();
                             if (graph_result.valid) {
                                 const Sophus::SO3d rail_rotation(
                                     Eigen::AngleAxisd(
@@ -9798,6 +9818,7 @@ void NdtSlamNode::consumeLoopClosureResult(const ros::Time& stamp) {
         std::lock_guard<std::mutex> lock(loop_closure_result_mutex_);
         result = std::move(loop_closure_result_);
     }
+    last_rail_graph_worker_ms_ = result.rail_graph_worker_ms;
     if (!result.valid) {
         ROS_DEBUG("[LoopWorker] result=%s", result.reason.c_str());
         return;
@@ -13824,6 +13845,14 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"consecutive_high_fitness\": " << consecutive_high_fitness_ << ",\n";
     f << "  \"average_process_time_ms\": " << average_process_time_ms_ << ",\n";
     f << "  \"average_ndt_time_ms\": " << average_ndt_time_ms_ << ",\n";
+    f << "  \"fixed_yaw_solver_ms\": "
+      << last_fixed_yaw_solver_ms_ << ",\n";
+    f << "  \"rail_pose_fitness_ms\": "
+      << last_rail_pose_fitness_ms_ << ",\n";
+    f << "  \"target_normal_cache_build_ms\": "
+      << last_target_normal_cache_build_ms_ << ",\n";
+    f << "  \"rail_graph_worker_ms\": "
+      << last_rail_graph_worker_ms_ << ",\n";
     f << "  \"last_flush_time\": \"" << last_flush_time_local_ << "\",\n";
     f << "  \"last_active_map_rebuild_sec\": "
       << last_active_map_rebuild_time_sec_.load(std::memory_order_relaxed)

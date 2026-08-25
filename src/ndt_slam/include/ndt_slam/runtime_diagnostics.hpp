@@ -87,6 +87,9 @@ struct RuntimeStageTimes {
   double human_filter_ms = 0.0;
   double registration_build_ms = 0.0;
   double target_bind_ms = 0.0;
+  double fixed_yaw_solver_ms = 0.0;
+  double rail_pose_fitness_ms = 0.0;
+  double target_normal_cache_build_ms = 0.0;
   double ndt_ms = 0.0;
   double ekf_ms = 0.0;
   double publish_odom_ms = 0.0;

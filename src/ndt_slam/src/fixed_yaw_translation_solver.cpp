@@ -235,6 +235,34 @@ FixedYawTranslationResult FixedYawTranslationSolver::solve(
   result.xy = translation.head<2>();
   result.pose_map_base = Sophus::SE3d(
       Sophus::SO3d(rotation), translation);
+  // Evaluate the authoritative rail pose once after optimization. This is a
+  // single health score at the final pose, never an XY grid search.
+  const auto fitness_start = std::chrono::steady_clock::now();
+  double final_squared_distance_sum = 0.0;
+  std::size_t final_correspondences = 0U;
+  for (const pcl::PointXYZ& source : input.source_cloud_base->points) {
+    if (!std::isfinite(source.x) || !std::isfinite(source.y) ||
+        !std::isfinite(source.z)) {
+      continue;
+    }
+    const Eigen::Vector3d transformed = rotation *
+        Eigen::Vector3d(source.x, source.y, source.z) + translation;
+    pcl::PointXYZ query;
+    query.x = static_cast<float>(transformed.x());
+    query.y = static_cast<float>(transformed.y());
+    query.z = static_cast<float>(transformed.z());
+    if (tree.nearestKSearch(query, 1, nearest_index, nearest_distance) == 1 &&
+        nearest_distance.front() <= maximum_distance_squared) {
+      final_squared_distance_sum += nearest_distance.front();
+      ++final_correspondences;
+    }
+  }
+  result.fitness = final_correspondences > 0U
+      ? final_squared_distance_sum /
+            static_cast<double>(final_correspondences)
+      : std::numeric_limits<double>::infinity();
+  result.fitness_elapsed_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - fitness_start).count();
   result.elapsed_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start).count();
   return result;

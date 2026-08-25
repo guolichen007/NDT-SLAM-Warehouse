@@ -572,6 +572,7 @@ private:
     double last_fixed_yaw_solver_ms_ = 0.0;
     double last_rail_pose_fitness_ms_ = 0.0;
     double last_target_normal_cache_build_ms_ = 0.0;
+    double last_rail_graph_worker_ms_ = 0.0;
 
     // ========== v8-stable-r3: Registration Input ==========
     RegistrationCloudBuildConfig registration_cloud_config_;
@@ -1009,6 +1010,7 @@ private:
         Sophus::SE3d optimized_last_pose;
         LoopCandidate candidate;
         std::vector<KeyFrame> optimized_keyframes;
+        double rail_graph_worker_ms = 0.0;
         std::string reason;
     };
     std::thread loop_closure_thread_;
