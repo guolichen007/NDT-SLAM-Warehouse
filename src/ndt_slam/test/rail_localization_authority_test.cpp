@@ -1,6 +1,7 @@
 #include "ndt_slam/rail_localization_authority.hpp"
 #include "ndt_slam/registration_target_snapshot.hpp"
 #include "ndt_slam/fixed_yaw_translation_solver.hpp"
+#include "ndt_slam/rail_translation_pose_graph.hpp"
 
 #include <gtest/gtest.h>
 
@@ -203,6 +204,45 @@ TEST(FixedYawTranslationSolverTest,
   EXPECT_FALSE(decision.authoritative_measurement_valid);
   EXPECT_EQ(decision.outcome,
             FixedYawDualSeedOutcome::SEED_BASIN_AMBIGUOUS);
+}
+
+TEST(RailTranslationPoseGraphTest, OptimizesTranslationsWithFixedOrigin) {
+  RailTranslationPoseGraph graph;
+  ASSERT_TRUE(graph.addNode(0U, Eigen::Vector2d(0.0, 0.0), true));
+  ASSERT_TRUE(graph.addNode(1U, Eigen::Vector2d(1.1, 0.0)));
+  ASSERT_TRUE(graph.addNode(2U, Eigen::Vector2d(2.2, 0.0)));
+  const Eigen::Matrix2d information = 100.0 * Eigen::Matrix2d::Identity();
+  ASSERT_TRUE(graph.addOdometryEdge(
+      0U, 1U, Eigen::Vector2d(1.0, 0.0), information));
+  ASSERT_TRUE(graph.addOdometryEdge(
+      1U, 2U, Eigen::Vector2d(1.0, 0.0), information));
+  ASSERT_TRUE(graph.addLoopEdge(
+      0U, 2U, Eigen::Vector2d(2.0, 0.0), information));
+  const auto result = graph.optimize(10, 1.0);
+  ASSERT_TRUE(result.valid) << result.reason;
+  EXPECT_NEAR(result.optimized_xy.at(0U).x(), 0.0, 1.0e-12);
+  EXPECT_NEAR(result.optimized_xy.at(1U).x(), 1.0, 1.0e-6);
+  EXPECT_NEAR(result.optimized_xy.at(2U).x(), 2.0, 1.0e-6);
+  EXPECT_GE(result.irls_iterations, 1);
+}
+
+TEST(RailTranslationPoseGraphTest, HuberIrlsBoundsFalseLoopEdge) {
+  RailTranslationPoseGraph graph;
+  ASSERT_TRUE(graph.addNode(0U, Eigen::Vector2d(0.0, 0.0), true));
+  ASSERT_TRUE(graph.addNode(1U, Eigen::Vector2d(1.0, 0.0)));
+  ASSERT_TRUE(graph.addNode(2U, Eigen::Vector2d(2.0, 0.0)));
+  const Eigen::Matrix2d odometry = 100.0 * Eigen::Matrix2d::Identity();
+  ASSERT_TRUE(graph.addOdometryEdge(
+      0U, 1U, Eigen::Vector2d(1.0, 0.0), odometry));
+  ASSERT_TRUE(graph.addOdometryEdge(
+      1U, 2U, Eigen::Vector2d(1.0, 0.0), odometry));
+  ASSERT_TRUE(graph.addLoopEdge(
+      0U, 2U, Eigen::Vector2d(20.0, 0.0),
+      Eigen::Matrix2d::Identity()));
+  const auto result = graph.optimize(10, 1.0);
+  ASSERT_TRUE(result.valid) << result.reason;
+  EXPECT_LT(result.optimized_xy.at(2U).x(), 2.1);
+  EXPECT_GE(result.irls_iterations, 2);
 }
 
 }  // namespace

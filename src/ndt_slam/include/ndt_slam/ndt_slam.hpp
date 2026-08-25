@@ -71,6 +71,7 @@
 #include <ndt_slam/registration_target_snapshot.hpp>
 #include <ndt_slam/rail_localization_authority.hpp>
 #include <ndt_slam/fixed_yaw_translation_solver.hpp>
+#include <ndt_slam/rail_translation_pose_graph.hpp>
 #include <ndt_slam/pending_cargo_envelope.hpp>
 #include <ndt_slam/pending_cargo_self_evidence.hpp>
 #include <ndt_slam/revealed_support_observer.hpp>
@@ -979,7 +980,11 @@ private:
 
     struct LoopClosureResult {
         bool valid = false;
+        bool rail_translation_only = false;
+        std::uint64_t map_generation = 0U;
         std::uint64_t pose_version = 0U;
+        std::uint64_t yaw_generation = 0U;
+        std::string yaw_reference_hash;
         std::uint64_t snapshot_last_id = 0U;
         Sophus::SE3d snapshot_last_pose;
         Sophus::SE3d optimized_last_pose;

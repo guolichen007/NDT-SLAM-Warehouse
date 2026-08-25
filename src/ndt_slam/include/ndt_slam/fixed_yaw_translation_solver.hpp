@@ -69,6 +69,9 @@ class FixedYawTranslationSolver {
           FixedYawTranslationSolverConfig{});
 
   void setConfig(const FixedYawTranslationSolverConfig& config);
+  const FixedYawTranslationSolverConfig& config() const noexcept {
+    return config_;
+  }
   void resetTargetCache();
   FixedYawTranslationResult solve(const FixedYawTranslationInput& input);
 

@@ -9499,18 +9499,133 @@ void NdtSlamNode::processLoopClosure() {
     }
     const std::uint64_t pose_version =
         keyframe_pose_version_.load(std::memory_order_acquire);
+    const std::uint64_t map_generation =
+        map_rebuild_generation_.load(std::memory_order_acquire);
+    const YawAuthorityMode loop_mode = yaw_authority_mode_;
+    const std::uint64_t yaw_generation = rail_yaw_authority_.generation();
+    const RailYawReference yaw_reference = rail_yaw_authority_.reference();
+    const FixedYawTranslationSolverConfig rail_solver_config =
+        fixed_yaw_translation_solver_.config();
 
     loop_closure_thread_ = std::thread(
-        [this, snapshot, pose_version]() mutable {
+        [this, snapshot, pose_version, map_generation, loop_mode,
+         yaw_generation, yaw_reference, rail_solver_config]() mutable {
             LoopClosureResult result;
             try {
+                result.map_generation = map_generation;
                 result.pose_version = pose_version;
+                result.yaw_generation = yaw_generation;
+                result.yaw_reference_hash = yaw_reference.reference_hash;
                 result.snapshot_last_id = snapshot.back().id_;
                 result.snapshot_last_pose = snapshot.back().pose_;
                 result.candidate = loop_closure_detector_.detectLoop(snapshot);
                 if (result.candidate.current_keyframe_id < 0 ||
                     result.candidate.candidate_keyframe_id < 0) {
                     result.reason = "no_candidate";
+                } else if (loop_mode == YawAuthorityMode::RAIL_AUTHORITY) {
+                    const auto current_it = std::find_if(
+                        snapshot.begin(), snapshot.end(),
+                        [&result](const KeyFrame& keyframe) {
+                            return static_cast<int>(keyframe.id_) ==
+                                result.candidate.current_keyframe_id;
+                        });
+                    const auto candidate_it = std::find_if(
+                        snapshot.begin(), snapshot.end(),
+                        [&result](const KeyFrame& keyframe) {
+                            return static_cast<int>(keyframe.id_) ==
+                                result.candidate.candidate_keyframe_id;
+                        });
+                    if (current_it == snapshot.end() ||
+                        candidate_it == snapshot.end() ||
+                        !current_it->cloud_ || current_it->cloud_->empty() ||
+                        !candidate_it->cloud_ ||
+                        candidate_it->cloud_->empty()) {
+                        result.reason = "rail_loop_cloud_unavailable";
+                    } else {
+                        const auto target = makeRegistrationTargetSnapshot(
+                            candidate_it->cloud_,
+                            RegistrationTargetSource::GLOBAL_MAP,
+                            candidate_it->id_, map_generation,
+                            yaw_reference.map_frame_uuid,
+                            "rail_loop_candidate=" +
+                                std::to_string(candidate_it->id_));
+                        FixedYawTranslationInput pair_input;
+                        pair_input.source_cloud_base = current_it->cloud_;
+                        pair_input.target = target;
+                        Eigen::Vector3d seed_translation =
+                            result.candidate.relative_pose.translation();
+                        pair_input.seed_pose_map_base = Sophus::SE3d(
+                            Sophus::SO3d(), seed_translation);
+                        pair_input.authoritative_yaw_rad = 0.0;
+                        pair_input.seed_source =
+                            FixedYawSeedSource::LOOP_PAIR;
+                        FixedYawTranslationSolver pair_solver(
+                            rail_solver_config);
+                        const auto pair_result = pair_solver.solve(pair_input);
+                        if (!pair_result.valid) {
+                            result.reason =
+                                "rail_loop_fixed_yaw_verify_failed:" +
+                                pair_result.reason;
+                        } else {
+                            RailTranslationPoseGraph graph;
+                            for (std::size_t i = 0U; i < snapshot.size(); ++i) {
+                                graph.addNode(
+                                    snapshot[i].id_,
+                                    snapshot[i].pose_.translation().head<2>(),
+                                    i == 0U);
+                            }
+                            const Eigen::Matrix2d information =
+                                Eigen::Matrix2d::Identity();
+                            for (std::size_t i = 0U;
+                                 i + 1U < snapshot.size(); ++i) {
+                                graph.addOdometryEdge(
+                                    snapshot[i].id_, snapshot[i + 1U].id_,
+                                    snapshot[i + 1U].pose_.translation()
+                                            .head<2>() -
+                                        snapshot[i].pose_.translation()
+                                            .head<2>(),
+                                    information);
+                            }
+                            const double cosine = std::cos(
+                                yaw_reference.rail_yaw_in_map_rad);
+                            const double sine = std::sin(
+                                yaw_reference.rail_yaw_in_map_rad);
+                            Eigen::Matrix2d base_to_map;
+                            base_to_map << cosine, -sine, sine, cosine;
+                            graph.addLoopEdge(
+                                candidate_it->id_, current_it->id_,
+                                base_to_map * pair_result.xy,
+                                information);
+                            const auto graph_result = graph.optimize(10, 1.0);
+                            if (graph_result.valid) {
+                                const Sophus::SO3d rail_rotation(
+                                    Eigen::AngleAxisd(
+                                        yaw_reference.rail_yaw_in_map_rad,
+                                        Eigen::Vector3d::UnitZ())
+                                        .toRotationMatrix());
+                                result.optimized_keyframes.assign(
+                                    snapshot.begin(), snapshot.end());
+                                for (auto& keyframe :
+                                     result.optimized_keyframes) {
+                                    Eigen::Vector3d translation =
+                                        keyframe.pose_.translation();
+                                    translation.head<2>() =
+                                        graph_result.optimized_xy.at(
+                                            keyframe.id_);
+                                    keyframe.pose_ = Sophus::SE3d(
+                                        rail_rotation, translation);
+                                }
+                                result.optimized_last_pose =
+                                    result.optimized_keyframes.back().pose_;
+                                result.rail_translation_only = true;
+                                result.valid = true;
+                                result.reason =
+                                    "rail_translation_graph_optimized";
+                            } else {
+                                result.reason = graph_result.reason;
+                            }
+                        }
+                    }
                 } else {
                     PoseGraphOptimizer optimizer;
                     for (const auto& keyframe : snapshot) {
@@ -9580,6 +9695,17 @@ void NdtSlamNode::consumeLoopClosureResult(const ros::Time& stamp) {
         map_maintenance_pending_ = true;
         return;
     }
+    if (result.rail_translation_only &&
+        (result.map_generation !=
+             map_rebuild_generation_.load(std::memory_order_acquire) ||
+         result.yaw_generation != rail_yaw_authority_.generation() ||
+         result.yaw_reference_hash !=
+             rail_yaw_authority_.reference().reference_hash)) {
+        ROS_WARN("[LoopWorker] stale map/yaw reference discarded");
+        loop_closure_pending_ = true;
+        map_maintenance_pending_ = true;
+        return;
+    }
     const std::pair<int, int> loop_pair = {
         result.candidate.candidate_keyframe_id,
         result.candidate.current_keyframe_id};
@@ -9588,12 +9714,32 @@ void NdtSlamNode::consumeLoopClosureResult(const ros::Time& stamp) {
         if (!processed_loops_.insert(loop_pair).second) return;
     }
 
-    const Sophus::SE3d correction =
-        result.optimized_last_pose * result.snapshot_last_pose.inverse();
-    loop_closure_detector_.applyOptimizedPoses(
-        result.optimized_keyframes, result.snapshot_last_id, correction);
+    Sophus::SE3d corrected_runtime_pose;
+    if (result.rail_translation_only) {
+        std::map<std::uint64_t, Eigen::Vector2d> optimized_xy;
+        for (const auto& keyframe : result.optimized_keyframes) {
+            optimized_xy.emplace(
+                keyframe.id_, keyframe.pose_.translation().head<2>());
+        }
+        const Eigen::Vector2d correction_xy =
+            result.optimized_last_pose.translation().head<2>() -
+            result.snapshot_last_pose.translation().head<2>();
+        loop_closure_detector_.applyRailOptimizedTranslations(
+            optimized_xy, result.snapshot_last_id, correction_xy,
+            rail_yaw_authority_.yawRad());
+        Eigen::Vector3d runtime_translation = current_pose_.translation();
+        runtime_translation.head<2>() += correction_xy;
+        corrected_runtime_pose = applyRailYawAuthorityConstraint(
+            Sophus::SE3d(Sophus::SO3d(), runtime_translation));
+    } else {
+        const Sophus::SE3d correction =
+            result.optimized_last_pose * result.snapshot_last_pose.inverse();
+        loop_closure_detector_.applyOptimizedPoses(
+            result.optimized_keyframes, result.snapshot_last_id, correction);
+        corrected_runtime_pose = correction * current_pose_;
+    }
     keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
-    updatePoseFromLoopClosure(correction * current_pose_, stamp);
+    updatePoseFromLoopClosure(corrected_runtime_pose, stamp);
     asyncRebuildGlobalMap();
     ROS_WARN("[LoopWorker] applied loop %d<->%d at frame boundary",
              loop_pair.first, loop_pair.second);
@@ -9601,11 +9747,14 @@ void NdtSlamNode::consumeLoopClosureResult(const ros::Time& stamp) {
 
 void NdtSlamNode::updatePoseFromLoopClosure(
     const Sophus::SE3d& new_pose, const ros::Time& stamp) {
+    const Sophus::SE3d authoritative_pose =
+        yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY
+            ? applyRailYawAuthorityConstraint(new_pose) : new_pose;
     Sophus::SE3d previous_pose;
     {
         std::lock_guard<std::mutex> lock(cloud_mutex_);
         previous_pose = current_pose_;
-        current_pose_ = new_pose;
+        current_pose_ = authoritative_pose;
         relocalized_pose_ = current_pose_;
         tracking_lost_ = false;
     }
@@ -9626,7 +9775,9 @@ void NdtSlamNode::updatePoseFromLoopClosure(
             ++local_map_version_;
         }
     }
-    filtered_yaw_initialized_ = false;
+    if (yaw_authority_mode_ != YawAuthorityMode::RAIL_AUTHORITY) {
+        filtered_yaw_initialized_ = false;
+    }
     path_msg_.poses.clear();
     runtime_path_msg_.poses.clear();
     has_last_path_pose_ = false;

@@ -139,6 +139,11 @@ public:
         const std::vector<KeyFrame>& optimized,
         std::uint64_t snapshot_last_id,
         const Sophus::SE3d& correction_for_newer_frames);
+    void applyRailOptimizedTranslations(
+        const std::map<std::uint64_t, Eigen::Vector2d>& optimized_xy,
+        std::uint64_t snapshot_last_id,
+        const Eigen::Vector2d& correction_for_newer_frames,
+        double authoritative_yaw_rad);
     KeyFrameManager& getKeyFrameManager() { return keyframe_manager_; }
     const KeyFrameManager& getKeyFrameManager() const { return keyframe_manager_; }
     void updateKeyFramePoses(const std::vector<KeyFrame>& updated_keyframes);

@@ -746,6 +746,42 @@ void LoopClosureDetector::applyOptimizedPoses(
     }
 }
 
+void LoopClosureDetector::applyRailOptimizedTranslations(
+    const std::map<std::uint64_t, Eigen::Vector2d>& optimized_xy,
+    std::uint64_t snapshot_last_id,
+    const Eigen::Vector2d& correction_for_newer_frames,
+    double authoritative_yaw_rad) {
+    if (!std::isfinite(authoritative_yaw_rad) ||
+        !correction_for_newer_frames.allFinite()) {
+        return;
+    }
+    const Sophus::SO3d rail_rotation(
+        Eigen::AngleAxisd(authoritative_yaw_rad,
+                          Eigen::Vector3d::UnitZ()).toRotationMatrix());
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    auto& keyframes = keyframe_manager_.getKeyFramesNonConst();
+    for (auto& keyframe : keyframes) {
+        Eigen::Vector3d translation = keyframe.pose_.translation();
+        const auto found = optimized_xy.find(keyframe.id_);
+        if (found != optimized_xy.end()) {
+            translation.head<2>() = found->second;
+        } else if (keyframe.id_ > snapshot_last_id) {
+            translation.head<2>() += correction_for_newer_frames;
+        } else {
+            continue;
+        }
+        keyframe.pose_ = Sophus::SE3d(rail_rotation, translation);
+        if (keyframe.has_refined_pose_) {
+            Eigen::Vector3d refined_translation =
+                keyframe.pose_refined_.translation();
+            refined_translation.head<2>() = translation.head<2>();
+            keyframe.pose_refined_ =
+                Sophus::SE3d(rail_rotation, refined_translation);
+        }
+        keyframe.dirty_pose = false;
+    }
+}
+
 // ========== LoopClosureNode implementation ==========
 
 LoopClosureNode::LoopClosureNode(const ros::NodeHandle& nh)

@@ -9,6 +9,12 @@ AUTHORITY = (
 CONFIRMATION = (
     ROOT / "src/ndt_slam/src/relocalization_confirmation_policy.cpp"
 ).read_text(encoding="utf-8")
+RAIL_GRAPH_HEADER = (
+    ROOT / "src/ndt_slam/include/ndt_slam/rail_translation_pose_graph.hpp"
+).read_text(encoding="utf-8")
+RAIL_GRAPH = (
+    ROOT / "src/ndt_slam/src/rail_translation_pose_graph.cpp"
+).read_text(encoding="utf-8")
 
 
 def _function_body(source: str, signature: str, next_signature: str) -> str:
@@ -80,3 +86,24 @@ def test_rail_health_not_raw_proposal_drives_relocalization_bad_frames():
     assert "authoritative_frame_healthy" in rail_branch
     assert "increment_relocalization_bad_frames" in rail_branch
 
+
+def test_rail_graph_has_no_yaw_or_se3_state_and_uses_bounded_irls():
+    assert "Sophus" not in RAIL_GRAPH_HEADER
+    assert "yaw_rad" not in RAIL_GRAPH_HEADER
+    assert "double yaw" not in RAIL_GRAPH_HEADER
+    assert "maximum_irls_iterations" in RAIL_GRAPH
+    assert "huberWeight" in RAIL_GRAPH
+    assert "for (int iteration = 0; iteration < maximum_irls_iterations" in RAIL_GRAPH
+
+
+def test_rail_loop_apply_never_calls_se3_pose_writer():
+    consume = _function_body(
+        NODE,
+        "void NdtSlamNode::consumeLoopClosureResult(",
+        "void NdtSlamNode::updatePoseFromLoopClosure(",
+    )
+    assert "if (result.rail_translation_only)" in consume
+    assert "applyRailOptimizedTranslations" in consume
+    rail_branch = consume.split("if (result.rail_translation_only)", 1)[1]
+    rail_branch = rail_branch.split("} else {", 1)[0]
+    assert "applyOptimizedPoses" not in rail_branch

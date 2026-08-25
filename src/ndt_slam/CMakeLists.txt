@@ -126,6 +126,7 @@ set(LIBRARY_SOURCES
   src/rail_localization_authority.cpp
   src/registration_target_snapshot.cpp
   src/fixed_yaw_translation_solver.cpp
+  src/rail_translation_pose_graph.cpp
   src/stationary_motion_policy.cpp
   src/registration_cloud_builder.cpp
   src/ndt_observability.cpp
