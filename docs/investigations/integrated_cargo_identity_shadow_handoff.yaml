@@ -1,10 +1,11 @@
-schema_version: 1
-parent_sha: 1fc36dc4b8341a2b0b73c928ce6f05a11793cffd
-pre_ubuntu_review_base_sha: 152f2c8d6711b872b3d67c7d8680309ec1bc62f7
-branch: codex/integrated-cargo-identity-shadow-v1
+schema_version: 2
+parent_sha: 695b0739636e11dacfad7e9ba9b8fd427df9e571
+candidate_sha: supplied_as_explicit_EXPECTED_SHA
+branch: fix/cargo-physical-evidence-continuity-v5
 mode: SHADOW_ONLY
 product_mode_rejection: PRODUCT_MODE_NOT_IMPLEMENTED_IN_INVESTIGATION_BUILD
-product_behavior_changed: false
+product_logic_changed: false
+product_output_authority_changed: false
 field_ready: false
 
 configuration:
@@ -13,20 +14,27 @@ configuration:
 
 trace:
   runtime_path: /tmp/cargo_forensic/integrated_avoidance_shadow.csv
+  physical_group_path: /tmp/cargo_forensic/integrated_identity_groups.csv
   held_code_allowed: false
   one_row_per_pipeline_stamp: true
 
 ubuntu_validation:
   clean_build: catkin_make clean && catkin_make --pkg ndt_slam
-  full_gtest: catkin_make run_tests_ndt_slam
+  full_gtest: catkin_make run_tests_ndt_slam && catkin_test_results --all --verbose build/test_results
   four_bag_entry: src/ndt_slam/scripts/analysis/run_integrated_cargo_identity_shadow_four_bags.sh
-  bag_local_oracle_argument: optional final ORACLE_DIR containing 无.json, 有.json, 长件.json, 大件.json
+  invocation_prefix: WORKSPACE EXPECTED_SHA MAP_SOURCE OUTPUT_DIR
+  preflight: exact HEAD equals EXPECTED_SHA and worktree including untracked files is clean
+  bag_local_oracle_argument: required ORACLE_DIR containing 无.json, 有.json, 长件.json, 大件.json
   missing_or_incomplete_oracle_verdict: ORACLE_INCONCLUSIVE
   oracle_schema:
     required:
       - role
-      - window_start_stamp_sec
-      - window_end_stamp_sec
+      - oracle_version=2
+      - time_base=bag_source_stamp
+      - analysis_phase
+      - phases with explicit applicable
+      - applicable phase [start_stamp_sec,end_stamp_sec)
+      - applicable phase cargo_top_range_m
       - true_member_sets or wrong_member_sets
     roles:
       - negative_safe_over
@@ -42,7 +50,7 @@ ubuntu_validation:
 
 sha_verification:
   local: git rev-parse HEAD
-  remote: git ls-remote origin refs/heads/codex/integrated-cargo-identity-shadow-v1
+  remote: git ls-remote origin refs/heads/fix/cargo-physical-evidence-continuity-v5
 
 hard_stop_after_push:
   product_pose_or_lock_takeover: false

@@ -2,23 +2,36 @@
 # Clean-build once, replay all four bags without fail-fast, then aggregate.
 set -u
 
-if [[ $# -lt 7 ]]; then
-  echo "Usage: $0 WORKSPACE MAP_SOURCE OUTPUT_DIR 无.bag 有.bag 长件.bag 大件.bag [DURATION] [ORACLE_DIR] [BASELINE_TRACE_DIR]" >&2
+if [[ $# -lt 8 ]]; then
+  echo "Usage: $0 WORKSPACE EXPECTED_SHA MAP_SOURCE OUTPUT_DIR 无.bag 有.bag 长件.bag 大件.bag [DURATION] [ORACLE_DIR] [BASELINE_TRACE_DIR]" >&2
   exit 2
 fi
 
 workspace="$1"
-map_source="$2"
-output_dir="$3"
-shift 3
+expected_sha="$2"
+map_source="$3"
+output_dir="$4"
+shift 4
 bags=("$1" "$2" "$3" "$4")
 names=("无" "有" "长件" "大件")
 duration="${5:-1200}"
 oracle_dir="${6:-}"
 baseline_trace_dir="${7:-}"
-expected_sha="$(git -C "$workspace" rev-parse HEAD)"
 runner="$workspace/src/ndt_slam/scripts/ops/server_monitor_bag_validate.sh"
 analyzer="$workspace/src/ndt_slam/scripts/analysis/analyze_integrated_cargo_identity_shadow.py"
+
+actual_sha="$(git -C "$workspace" rev-parse HEAD)"
+if [[ "$actual_sha" != "$expected_sha" ]]; then
+  echo "SHA_GATE=FAIL expected=$expected_sha actual=$actual_sha" >&2
+  exit 3
+fi
+if [[ -n "$(git -C "$workspace" status --porcelain --untracked-files=all)" ]]; then
+  echo "WORKTREE_GATE=FAIL reason=not_clean" >&2
+  git -C "$workspace" status --short >&2
+  exit 4
+fi
+echo "SHA_GATE=PASS expected=$expected_sha"
+echo "WORKTREE_GATE=PASS"
 
 mkdir -p "$output_dir"
 source /opt/ros/noetic/setup.bash
@@ -28,9 +41,12 @@ catkin_make --pkg ndt_slam
 build_rc=$?
 catkin_make run_tests_ndt_slam
 test_rc=$?
-if [[ $build_rc -ne 0 || $test_rc -ne 0 ]]; then
+catkin_test_results --all --verbose "$workspace/build/test_results"
+test_results_rc=$?
+if [[ $build_rc -ne 0 || $test_rc -ne 0 || $test_results_rc -ne 0 ]]; then
   echo "BUILD_RC=$build_rc"
   echo "FULL_GTEST_RC=$test_rc"
+  echo "CATKIN_TEST_RESULTS_RC=$test_results_rc"
   exit 1
 fi
 
@@ -46,6 +62,11 @@ for index in 0 1 2 3; do
   bag="${bags[$index]}"
   port=$((11331 + index))
   run_log="$output_dir/${name}_replay.log"
+  rm -f \
+    /tmp/cargo_forensic/integrated_avoidance_shadow.csv \
+    /tmp/cargo_forensic/integrated_identity_groups.csv
+  trace_generation_marker="$output_dir/${name}_trace_generation.marker"
+  touch "$trace_generation_marker"
   set +e
   "$runner" \
     --bag "$bag" \
@@ -61,16 +82,19 @@ for index in 0 1 2 3; do
     run_rc=1
   fi
   trace="$output_dir/${name}_integrated_avoidance_shadow.csv"
-  if [[ -f /tmp/cargo_forensic/integrated_avoidance_shadow.csv ]]; then
-    cp /tmp/cargo_forensic/integrated_avoidance_shadow.csv "$trace"
+  source_trace=/tmp/cargo_forensic/integrated_avoidance_shadow.csv
+  if [[ -f "$source_trace" && "$source_trace" -nt "$trace_generation_marker" ]]; then
+    cp "$source_trace" "$trace"
     trace_args+=(--bag "$name=$trace")
   else
     echo "TRACE_MISSING bag=$name" >>"$run_log"
     run_rc=1
   fi
   group_trace="$output_dir/${name}_integrated_identity_groups.csv"
-  if [[ -f /tmp/cargo_forensic/integrated_identity_groups.csv ]]; then
-    cp /tmp/cargo_forensic/integrated_identity_groups.csv "$group_trace"
+  source_group_trace=/tmp/cargo_forensic/integrated_identity_groups.csv
+  if [[ -f "$source_group_trace" &&
+        "$source_group_trace" -nt "$trace_generation_marker" ]]; then
+    cp "$source_group_trace" "$group_trace"
     group_args+=(--groups "$name=$group_trace")
   else
     echo "GROUP_TRACE_MISSING bag=$name" >>"$run_log"
@@ -111,8 +135,10 @@ analysis_rc=$?
 set -e
 
 echo "SOURCE_SHA=$expected_sha"
+echo "V5_CANDIDATE_SHA=$expected_sha"
 echo "BUILD_RC=$build_rc"
 echo "FULL_GTEST_RC=$test_rc"
+echo "CATKIN_TEST_RESULTS_RC=$test_results_rc"
 echo "REPLAY_RC=$run_rc"
 echo "ANALYSIS_RC=$analysis_rc"
 echo "CARGO_V5_PRODUCT_TAKEOVER=NOT_YET"

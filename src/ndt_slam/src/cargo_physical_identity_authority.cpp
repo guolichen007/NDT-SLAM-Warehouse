@@ -526,6 +526,18 @@ std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
         const CargoVerticalEvidence component_evidence =
             extractCargoVerticalEvidence(component_input, vertical_config);
 
+        // RAW top ownership is hypothesis-local. A nested hypothesis may not
+        // borrow occupied XY cells from components that it does not contain,
+        // even though those components belong to the same physical group.
+        std::vector<Eigen::Vector3f> hypothesis_owner_points;
+        for (std::uint64_t member : hypothesis.member_component_ids) {
+          const auto found = component_points.find(member);
+          if (found == component_points.end()) continue;
+          hypothesis_owner_points.insert(
+              hypothesis_owner_points.end(), found->second.begin(),
+              found->second.end());
+        }
+
         bool raw_owned = false;
         CargoVerticalEvidence raw_evidence;
         VerticalOwnershipResult ownership;
@@ -538,7 +550,8 @@ std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
           raw_evidence = extractCargoVerticalEvidence(
               raw_input, vertical_config);
           ownership = proveVerticalOwnership(
-              raw_evidence, union_points, raw_input, vertical_config);
+              raw_evidence, hypothesis_owner_points, raw_input,
+              vertical_config);
           const double raw_ms = std::chrono::duration<double, std::milli>(
               std::chrono::steady_clock::now() - raw_start).count();
           if (telemetry) {

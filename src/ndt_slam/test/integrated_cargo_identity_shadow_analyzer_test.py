@@ -59,7 +59,10 @@ def group_row(
         "raw_representative_xy_step": 0.70,
         "stable_anchor_xy_step": 0.10,
         "vertical_mode": mode,
+        "vertical_source": "COMPONENT_UNION",
+        "physical_vertical_z": 1.0,
         "association_reject_reason": "NONE",
+        "maximum_observation_gap_sec": 0.50,
         "lift_confirm_count": confirm,
         "lift_confirm_required": required,
         "identity_state": identity,
@@ -74,6 +77,7 @@ def oracle_v2(role="positive_collision", **identity):
         "applicable": True,
         "start_stamp_sec": 9.0,
         "end_stamp_sec": 12.0,
+        "cargo_top_range_m": [0.9, 1.1],
     }
     return {
         "oracle_version": 2,
@@ -109,6 +113,15 @@ class IntegratedCargoIdentityShadowAnalyzerTest(unittest.TestCase):
         })
         self.assertEqual(result["oracle_status"], "ORACLE_INCONCLUSIVE")
         self.assertEqual(result["EARLIEST_ROOT"], "ORACLE_INCONCLUSIVE")
+
+    def test_applicable_phase_requires_cargo_top_range(self):
+        oracle = oracle_v2(true_member_sets=[[7, 9]])
+        del oracle["phases"]["lifted"]["cargo_top_range_m"]
+        result = self.analyze(trace_row(14, 1.2), oracle)
+        self.assertEqual(result["oracle_status"], "ORACLE_INCONCLUSIVE")
+        self.assertEqual(
+            result["oracle_reason"], "phase_lifted_cargo_top_range_missing"
+        )
 
     def test_oracle_windows_are_half_open(self):
         oracle = oracle_v2(true_member_sets=[[7, 9]])
@@ -215,6 +228,60 @@ class IntegratedCargoIdentityShadowAnalyzerTest(unittest.TestCase):
             "IDENTITY_LIFT_IMPLEMENTATION_FAIL",
         )
 
+    def test_valid_but_low_corrected_is_oracle_grounded(self):
+        oracle = oracle_v2(true_member_sets=[[7, 9]])
+        corrected = group_row(10.0, "SUPPORTED_EVIDENCE", 1)
+        corrected.update({
+            "raw_roi_vertical_valid": 1,
+            "raw_roi_vertical_z": 1.0,
+            "component_vertical_valid": 1,
+            "component_vertical_z": 0.4,
+        })
+        still_wrong = group_row(10.1, "SUPPORTED_EVIDENCE", 2)
+        still_wrong.update({
+            "raw_roi_vertical_valid": 1,
+            "raw_roi_vertical_z": 0.7,
+            "component_vertical_valid": 1,
+            "component_vertical_z": 0.4,
+        })
+        result = self.analyze_groups([corrected, still_wrong], oracle)
+        self.assertEqual(result["VALID_BUT_LOW_CORRECTED"], 1)
+        self.assertEqual(result["RAW_RECOVERED_TO_ORACLE_RANGE"], 1)
+
+    def test_single_invalid_frame_cannot_define_earliest_root(self):
+        oracle = oracle_v2(true_member_sets=[[7, 9]])
+        rows = []
+        invalid = group_row(10.0, "CONTINUITY_ONLY", 0)
+        invalid.update({
+            "raw_roi_vertical_valid": 0,
+            "raw_roi_vertical_z": "nan",
+        })
+        rows.append(invalid)
+        for index in range(4):
+            supported = group_row(
+                10.1 + index * 0.1, "SUPPORTED_EVIDENCE", index + 1
+            )
+            supported.update({
+                "raw_roi_vertical_valid": 1,
+                "raw_roi_vertical_z": 1.0,
+            })
+            rows.append(supported)
+        continuity = self.analyze_groups(rows, oracle)
+        self.assertEqual(
+            continuity["LONGEST_ORACLE_CORRECT_SUPPORTED_SEQUENCE"], 4
+        )
+        result = {
+            "oracle_status": "CONCLUSIVE",
+            "wrong_formal_lock_frames": 0,
+            "identity_validated": False,
+            "continuity_v2": continuity,
+            "bag_role": "positive_collision",
+        }
+        self.assertEqual(
+            ANALYZER.determine_earliest_root(result),
+            "IDENTITY_LIFT_IMPLEMENTATION_FAIL",
+        )
+
     def test_yes_bag_missing_true_group_is_detector_blocking(self):
         oracle = oracle_v2(true_member_sets=[[7, 9]])
         rows = [group_row(10.0, "SUPPORTED_EVIDENCE", 0)]
@@ -241,6 +308,33 @@ class IntegratedCargoIdentityShadowAnalyzerTest(unittest.TestCase):
         markdown = ANALYZER.render_markdown(summary)
         self.assertIn(report["EARLIEST_ROOT"], markdown)
         self.assertIn(summary["EARLIEST_REMAINING_BLOCKER"], markdown)
+
+    def test_small_rate_delta_is_reported_not_failed(self):
+        oracle = oracle_v2(
+            "negative_safe_over", true_member_sets=[[7, 9]]
+        )
+        candidate = trace_row(14, 1.2)
+        candidate["pointcloud_callback_hz"] = 9.99
+        candidate["ndt_processing_hz"] = 9.99
+        baseline = trace_row(14, 1.2)
+        baseline["pointcloud_callback_hz"] = 10.01
+        baseline["ndt_processing_hz"] = 10.01
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path = Path(directory) / "candidate.csv"
+            baseline_path = Path(directory) / "baseline.csv"
+            for path, row in (
+                (candidate_path, candidate), (baseline_path, baseline)
+            ):
+                with path.open("w", newline="", encoding="utf-8") as stream:
+                    writer = csv.DictWriter(stream, fieldnames=list(row))
+                    writer.writeheader()
+                    writer.writerow(row)
+            result = ANALYZER.analyze_trace(
+                "test", candidate_path, oracle,
+                baseline_trace_path=baseline_path,
+            )
+        self.assertEqual(result["runtime_regression"], "PASS")
+        self.assertLess(result["callback_hz_delta"], 0.0)
 
 
 if __name__ == "__main__":

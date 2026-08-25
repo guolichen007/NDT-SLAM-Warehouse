@@ -23,6 +23,14 @@ AUTHORITY_HEADER = (
 VERTICAL = (
     PACKAGE / "src" / "cargo_vertical_evidence.cpp"
 ).read_text(encoding="utf-8")
+RUNNER = (
+    PACKAGE / "scripts" / "analysis" /
+    "run_integrated_cargo_identity_shadow_four_bags.sh"
+).read_text(encoding="utf-8")
+ANALYZER = (
+    PACKAGE / "scripts" / "analysis" /
+    "analyze_integrated_cargo_identity_shadow.py"
+).read_text(encoding="utf-8")
 
 
 def function_body(signature: str, next_signature: str) -> str:
@@ -200,6 +208,16 @@ class IntegratedCargoIdentityShadowStaticTest(unittest.TestCase):
         self.assertIn("makeCargoFootprintGridIndex", VERTICAL)
         self.assertIn("cargoPointInsideFootprint", VERTICAL)
 
+    def test_owner_proof_is_hypothesis_member_local(self) -> None:
+        self.assertIn("hypothesis_owner_points", AUTHORITY)
+        self.assertIn(
+            "for (std::uint64_t member : hypothesis.member_component_ids)",
+            AUTHORITY,
+        )
+        self.assertIn(
+            "raw_evidence, hypothesis_owner_points", AUTHORITY
+        )
+
     def test_reacquired_vertical_type_has_no_authority_fields(self) -> None:
         start = AUTHORITY_HEADER.index(
             "struct AssociationOnlyReacquiredVerticalEvidence"
@@ -305,6 +323,36 @@ class IntegratedCargoIdentityShadowStaticTest(unittest.TestCase):
             "callback_or_pipeline_total_ms",
         ):
             self.assertIn(field, NODE)
+
+    def test_one_shot_runner_has_exact_source_and_clean_tree_gates(self) -> None:
+        self.assertIn("EXPECTED_SHA", RUNNER)
+        self.assertIn('actual_sha="$(git -C "$workspace" rev-parse HEAD)"', RUNNER)
+        self.assertIn("status --porcelain --untracked-files=all", RUNNER)
+        self.assertIn("SHA_GATE=FAIL", RUNNER)
+        self.assertIn("WORKTREE_GATE=FAIL", RUNNER)
+
+    def test_each_bag_gets_a_new_trace_generation(self) -> None:
+        self.assertIn("rm -f \\", RUNNER)
+        self.assertIn("trace_generation_marker", RUNNER)
+        self.assertIn("-nt", RUNNER)
+
+    def test_full_test_results_are_machine_gated(self) -> None:
+        self.assertIn("catkin_test_results --all --verbose", RUNNER)
+        self.assertIn("CATKIN_TEST_RESULTS_RC", RUNNER)
+
+    def test_root_classifier_uses_existing_continuity_contract(self) -> None:
+        self.assertIn("longest_oracle_correct_supported_sequence", ANALYZER)
+        self.assertIn("maximum_observation_gap_sec", ANALYZER)
+        root_start = ANALYZER.index("def determine_earliest_root")
+        root_end = ANALYZER.index("def analyze_trace", root_start)
+        root = ANALYZER[root_start:root_end]
+        self.assertNotIn("raw_current_footprint_still_invalid", root)
+        self.assertIn("yes_bag_exit_classification", root)
+
+    def test_runtime_gate_does_not_fail_on_rate_delta_alone(self) -> None:
+        self.assertIn("callback_hz_delta", ANALYZER)
+        self.assertIn("no_counter_regression", ANALYZER)
+        self.assertNotIn("no_rate_regression", ANALYZER)
 
 
 if __name__ == "__main__":

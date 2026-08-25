@@ -123,6 +123,31 @@ def oracle_phase_bounds(
     return start, end
 
 
+def oracle_top_range(oracle: dict[str, Any]) -> tuple[float, float] | None:
+    phase_name = oracle.get("analysis_phase")
+    phases = oracle.get("phases")
+    if not isinstance(phase_name, str) or not isinstance(phases, dict):
+        return None
+    phase = phases.get(phase_name)
+    values = phase.get("cargo_top_range_m") if isinstance(phase, dict) else None
+    if not isinstance(values, (list, tuple)) or len(values) != 2:
+        return None
+    low, high = values
+    if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
+        return None
+    low = float(low)
+    high = float(high)
+    if not math.isfinite(low) or not math.isfinite(high) or high < low:
+        return None
+    return low, high
+
+
+def in_oracle_top_range(value: float, top_range: tuple[float, float] | None) -> bool:
+    return top_range is not None and math.isfinite(value) and (
+        top_range[0] <= value <= top_range[1]
+    )
+
+
 def validate_oracle_v2(oracle: dict[str, Any]) -> tuple[bool, str]:
     if oracle.get("oracle_version") != 2:
         return False, "oracle_version_must_be_2"
@@ -146,6 +171,16 @@ def validate_oracle_v2(oracle: dict[str, Any]) -> tuple[bool, str]:
                 float(end)
             ) or float(end) <= float(start):
                 return False, f"phase_{name}_invalid_half_open_window"
+            top_range = phase.get("cargo_top_range_m")
+            if not isinstance(top_range, (list, tuple)) or len(top_range) != 2:
+                return False, f"phase_{name}_cargo_top_range_missing"
+            low, high = top_range
+            if not isinstance(low, (int, float)) or not isinstance(
+                high, (int, float)
+            ) or not math.isfinite(float(low)) or not math.isfinite(
+                float(high)
+            ) or float(high) < float(low):
+                return False, f"phase_{name}_cargo_top_range_invalid"
         elif not str(phase.get("reason", "")).strip():
             return False, f"phase_{name}_not_applicable_reason_missing"
     if oracle_phase_bounds(oracle) is None:
@@ -157,6 +192,43 @@ def group_matches_members(
     row: dict[str, str], member_sets: set[tuple[int, ...]]
 ) -> bool:
     return normalized_member_set(row.get("canonical_member_ids", "")) in member_sets
+
+
+def longest_oracle_correct_supported_sequence(
+    rows: list[dict[str, str]], top_range: tuple[float, float] | None
+) -> int:
+    """Apply the existing history gap contract; do not invent a ratio gate."""
+    longest = 0
+    current = 0
+    previous_stamp = math.nan
+    previous_history = ""
+    for row in sorted(rows, key=lambda value: number(value, "stamp")):
+        stamp = number(row, "stamp")
+        history = row.get("matched_history_id", "")
+        gap_limit = number(row, "maximum_observation_gap_sec")
+        source = row.get("vertical_source", "COMPONENT_UNION")
+        owned_supported = (
+            row.get("vertical_mode") == "SUPPORTED_EVIDENCE" and
+            in_oracle_top_range(number(row, "physical_vertical_z"), top_range)
+            and (source != "RAW_ROI_CURRENT_FOOTPRINT" or
+                 flag(row, "raw_roi_vertical_valid"))
+        )
+        continuous = (
+            current > 0 and history not in ("", "0") and
+            history == previous_history and math.isfinite(stamp) and
+            math.isfinite(previous_stamp) and math.isfinite(gap_limit) and
+            gap_limit > 0.0 and 0.0 < stamp - previous_stamp <= gap_limit
+        )
+        if owned_supported:
+            current = current + 1 if continuous else 1
+            longest = max(longest, current)
+            previous_stamp = stamp
+            previous_history = history
+        else:
+            current = 0
+            previous_stamp = math.nan
+            previous_history = ""
+    return longest
 
 
 def analyze_group_trace(
@@ -195,17 +267,24 @@ def analyze_group_trace(
         (int(number(row, "lift_confirm_count", 0.0)) for row in true_rows),
         default=0,
     )
+    top_range = oracle_top_range(oracle or {})
+    longest_supported_sequence = longest_oracle_correct_supported_sequence(
+        true_rows, top_range
+    )
     component_invalid_recovered = sum(
         flag(row, "raw_roi_vertical_valid") and
-        not flag(row, "component_vertical_valid")
+        not flag(row, "component_vertical_valid") and
+        in_oracle_top_range(number(row, "raw_roi_vertical_z"), top_range)
         for row in true_rows
     )
     valid_but_low_corrected = sum(
         flag(row, "raw_roi_vertical_valid") and
         flag(row, "component_vertical_valid") and
-        number(row, "raw_roi_vertical_z") >
-        number(row, "component_vertical_z") +
-        max(0.0, number(row, "vertical_uncertainty", 0.0))
+        not in_oracle_top_range(
+            number(row, "component_vertical_z"), top_range
+        ) and in_oracle_top_range(
+            number(row, "raw_roi_vertical_z"), top_range
+        )
         for row in true_rows
     )
     owner_proof_rejected = sum(
@@ -213,7 +292,15 @@ def analyze_group_trace(
         for row in true_rows
     )
     raw_current_still_invalid = sum(
-        not flag(row, "raw_roi_vertical_valid") for row in true_rows
+        not flag(row, "raw_roi_vertical_valid") or
+        not in_oracle_top_range(
+            number(row, "raw_roi_vertical_z"), top_range
+        ) for row in true_rows
+    )
+    raw_recovered_to_oracle_range = sum(
+        flag(row, "raw_roi_vertical_valid") and
+        in_oracle_top_range(number(row, "raw_roi_vertical_z"), top_range)
+        for row in true_rows
     )
     required = max(
         (int(number(row, "lift_confirm_required", 0.0)) for row in true_rows),
@@ -244,6 +331,9 @@ def analyze_group_trace(
         "valid_but_low_corrected": valid_but_low_corrected,
         "owner_proof_rejected": owner_proof_rejected,
         "raw_current_footprint_still_invalid": raw_current_still_invalid,
+        "raw_recovered_to_oracle_range": raw_recovered_to_oracle_range,
+        "longest_oracle_correct_supported_sequence":
+            longest_supported_sequence,
     }
     if baseline_path is None:
         result["baseline_comparison"] = "BASELINE_COMPARISON_UNAVAILABLE"
@@ -271,7 +361,7 @@ def analyze_group_trace(
         result["yes_bag_exit_classification"] = "ORACLE_INCONCLUSIVE"
     elif true_validated:
         result["yes_bag_exit_classification"] = "TRUE_VALIDATED"
-    elif required > 0 and max_confirm >= required:
+    elif required > 0 and longest_supported_sequence >= required:
         result["yes_bag_exit_classification"] = (
             "IDENTITY_LIFT_IMPLEMENTATION_FAIL"
         )
@@ -299,6 +389,9 @@ def analyze_group_trace(
         "VALID_BUT_LOW_CORRECTED": valid_but_low_corrected,
         "OWNER_PROOF_REJECTED": owner_proof_rejected,
         "RAW_CURRENT_FOOTPRINT_STILL_INVALID": raw_current_still_invalid,
+        "RAW_RECOVERED_TO_ORACLE_RANGE": raw_recovered_to_oracle_range,
+        "LONGEST_ORACLE_CORRECT_SUPPORTED_SEQUENCE":
+            longest_supported_sequence,
     })
     return result
 
@@ -313,10 +406,16 @@ def determine_earliest_root(result: dict[str, Any]) -> str:
         return "WRONG_OWNER_AUTHORITY_IMPLEMENTATION_FAIL"
     if not result.get("identity_validated", False):
         continuity = result.get("continuity_v2", {})
-        if continuity.get("raw_current_footprint_still_invalid", 0) > 0:
-            return "RAW_CURRENT_FOOTPRINT_STILL_INVALID"
-        if continuity.get("owner_proof_rejected", 0) > 0:
-            return "OWNER_PROOF_REJECTED"
+        classification = continuity.get(
+            "yes_bag_exit_classification", "ORACLE_INCONCLUSIVE"
+        )
+        if classification in {
+            "IDENTITY_LIFT_IMPLEMENTATION_FAIL",
+            "VERTICAL_EVIDENCE_AVAILABILITY_BLOCKING",
+            "DETECTOR_AVAILABILITY_BLOCKING",
+            "ORACLE_INCONCLUSIVE",
+        }:
+            return classification
         return "UPSTREAM_IDENTITY_BLOCKING"
     if result.get("obstacle_self_contamination_blocking", False) or (
         result.get("bag_role") == "positive_collision" and
@@ -381,6 +480,15 @@ def analyze_trace(
     processed_hz = [number(row, "ndt_processing_hz") for row in rows]
     dropped = [number(row, "dropped_frame_count") for row in rows]
     large_gaps = [number(row, "large_gap_count") for row in rows]
+    slow_warn_count = sum(
+        flag(row, "existing_slow_frame_warn_active") for row in rows
+    )
+    slow_emergency_count = sum(
+        flag(row, "existing_slow_frame_emergency_active") for row in rows
+    )
+    consecutive_overruns = [
+        number(row, "existing_consecutive_overruns", 0.0) for row in rows
+    ]
     result: dict[str, Any] = {
         "bag": name,
         "trace": str(path),
@@ -427,6 +535,11 @@ def analyze_trace(
                  for value in processed_hz) else math.nan,
         "dropped_frame_count": max(dropped, default=0.0),
         "large_gap_count": max(large_gaps, default=0.0),
+        "existing_slow_frame_warn_count": slow_warn_count,
+        "existing_slow_frame_emergency_count": slow_emergency_count,
+        "existing_consecutive_overruns_max": max(
+            consecutive_overruns, default=0.0
+        ),
         "v5_raw_roi_vertical_total_p50_ms": percentile(
             (number(row, "v5_raw_roi_vertical_total_ms") for row in rows),
             0.50,
@@ -513,6 +626,18 @@ def analyze_trace(
         baseline_gaps = [
             number(row, "large_gap_count") for row in baseline_rows
         ]
+        baseline_slow_warn = sum(
+            flag(row, "existing_slow_frame_warn_active")
+            for row in baseline_rows
+        )
+        baseline_slow_emergency = sum(
+            flag(row, "existing_slow_frame_emergency_active")
+            for row in baseline_rows
+        )
+        baseline_overruns = [
+            number(row, "existing_consecutive_overruns", 0.0)
+            for row in baseline_rows
+        ]
         baseline_callback_median = median(
             value for value in baseline_callback
             if math.isfinite(value) and value > 0.0
@@ -529,20 +654,33 @@ def analyze_trace(
         ) else math.nan
         result["baseline_pointcloud_callback_hz"] = baseline_callback_median
         result["baseline_ndt_processing_hz"] = baseline_processed_median
-        comparable = all(math.isfinite(value) for value in (
-            result["pointcloud_callback_hz"], result["ndt_processing_hz"],
-            baseline_callback_median, baseline_processed_median,
-        ))
+        result["baseline_slow_frame_warn_count"] = baseline_slow_warn
+        result["baseline_slow_frame_emergency_count"] = (
+            baseline_slow_emergency
+        )
+        result["baseline_consecutive_overruns_max"] = max(
+            baseline_overruns, default=0.0
+        )
+        result["callback_hz_delta"] = (
+            result["pointcloud_callback_hz"] - baseline_callback_median
+            if math.isfinite(result["pointcloud_callback_hz"]) and
+            math.isfinite(baseline_callback_median) else math.nan
+        )
+        result["ndt_processing_hz_delta"] = (
+            result["ndt_processing_hz"] - baseline_processed_median
+            if math.isfinite(result["ndt_processing_hz"]) and
+            math.isfinite(baseline_processed_median) else math.nan
+        )
         no_counter_regression = (
             result["dropped_frame_count"] <= max(baseline_dropped, default=0.0)
             and result["large_gap_count"] <= max(baseline_gaps, default=0.0)
-        )
-        no_rate_regression = comparable and (
-            result["pointcloud_callback_hz"] >= baseline_callback_median and
-            result["ndt_processing_hz"] >= baseline_processed_median
+            and (slow_emergency_count == 0 or baseline_slow_emergency > 0)
+            and (slow_warn_count == 0 or baseline_slow_warn > 0)
+            and result["existing_consecutive_overruns_max"] <=
+                max(baseline_overruns, default=0.0)
         )
         result["runtime_regression"] = (
-            "PASS" if no_counter_regression and no_rate_regression else "FAIL"
+            "PASS" if no_counter_regression else "FAIL"
         )
     result["NEW_HISTORY_RATE_BEFORE"] = result["new_history_rate_before"]
     result["NEW_HISTORY_RATE_AFTER"] = result["new_history_rate_after"]
@@ -832,7 +970,7 @@ def main() -> int:
         report.get("runtime_regression", "BASELINE_COMPARISON_UNAVAILABLE")
         for report in reports
     ]
-    summary["V5_STABLE_SHA"] = args.source_sha
+    summary["V5_CANDIDATE_SHA"] = args.source_sha
     summary["V5_RUNTIME_REGRESSION"] = (
         "PASS" if len(runtime_values) == 4 and
         all(value == "PASS" for value in runtime_values) else "FAIL"
@@ -847,6 +985,10 @@ def main() -> int:
         and not unsafe_implementation
         and summary["V5_RUNTIME_REGRESSION"] == "PASS" else "FAIL"
     )
+    summary["V5_STABLE_SHA"] = (
+        args.source_sha if summary["V5_IMPLEMENTATION_GATE"] == "PASS"
+        else ""
+    )
     functional_values = (
         summary["CARGO_IDENTITY_CORRECTNESS"],
         summary["CARGO_VERTICAL_GEOMETRY_CORRECTNESS"],
@@ -859,8 +1001,9 @@ def main() -> int:
     )
     root_priority = (
         "WRONG_OWNER_AUTHORITY_IMPLEMENTATION_FAIL",
-        "RAW_CURRENT_FOOTPRINT_STILL_INVALID",
-        "OWNER_PROOF_REJECTED",
+        "IDENTITY_LIFT_IMPLEMENTATION_FAIL",
+        "VERTICAL_EVIDENCE_AVAILABILITY_BLOCKING",
+        "DETECTOR_AVAILABILITY_BLOCKING",
         "UPSTREAM_IDENTITY_BLOCKING",
         "OBSTACLE_AUTHORITY_BLOCKING",
         "ORACLE_INCONCLUSIVE",

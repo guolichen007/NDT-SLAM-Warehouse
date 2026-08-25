@@ -13686,6 +13686,7 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "conflicting_history_id,frame_has_unrelated_ambiguity,"
                 << "lift_baseline_source,baseline_z,"
                 << "lift_delta,lift_threshold,last_supported_evidence_stamp,"
+                << "maximum_observation_gap_sec,"
                 << "lift_confirm_count,lift_confirm_required,lift_confirmed,"
                 << "identity_state\n";
         }
@@ -13774,6 +13775,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << diagnostic.baseline_z << ',' << diagnostic.lift_delta_m
                 << ',' << diagnostic.lift_threshold_m << ','
                 << diagnostic.last_supported_evidence_stamp << ','
+                << integrated_identity_config_.maximum_observation_gap_sec
+                << ','
                 << diagnostic.lift_confirm_count << ','
                 << diagnostic.lift_confirm_required << ','
                 << (diagnostic.lift_confirmed ? 1 : 0) << ','
@@ -22389,6 +22392,9 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                 << "v5_raw_roi_vertical_points_examined,"
                 << "integrated_shadow_update_ms,"
                 << "callback_or_pipeline_total_ms,"
+                << "existing_slow_frame_warn_active,"
+                << "existing_slow_frame_emergency_active,"
+                << "existing_consecutive_overruns,"
                 << "pointcloud_callback_hz,ndt_processing_hz,"
                 << "dropped_frame_count,large_gap_count\n";
         }
@@ -22486,6 +22492,14 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             << integrated_v5_raw_roi_vertical_points_examined_ << ','
             << integrated_shadow_identity_compute_ms_ << ','
             << processing_age_sec * 1000.0 << ','
+            << (crane_motion_ekf_cfg_.slow_frame_guard_enabled &&
+                    last_ndt_time_ms_ >
+                        crane_motion_ekf_cfg_.slow_frame_warn_ms ? 1 : 0)
+            << ','
+            << (crane_motion_ekf_cfg_.slow_frame_guard_enabled &&
+                    last_ndt_time_ms_ >
+                        crane_motion_ekf_cfg_.slow_frame_emergency_ms ? 1 : 0)
+            << ',' << diag_consecutive_overruns_ << ','
             << shadow_pipeline_rate.callback_hz << ','
             << shadow_pipeline_rate.processed_hz << ','
             << queue_overwrite_drop_count_.load(

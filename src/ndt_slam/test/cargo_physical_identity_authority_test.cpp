@@ -1255,6 +1255,39 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
+     NestedHypothesisCannotBorrowOwnerCellsFromNonMemberComponent) {
+  auto member_one = candidate(1U, 1.0, 0.0, 0.40, {1U});
+  auto members_one_two = candidate(2U, 1.0, 0.0, 0.40, {1U, 2U});
+  CargoPhysicalComponentObservation component_one;
+  component_one.component_id = 1U;
+  CargoPhysicalComponentObservation component_two;
+  component_two.component_id = 2U;
+  for (float y : {-0.20F, 0.20F}) {
+    component_one.points_base.emplace_back(-0.20F, y, 0.40F);
+    component_one.points_base.emplace_back(-0.20F, y, 0.40F);
+    component_two.points_base.emplace_back(0.20F, y, 0.40F);
+    component_two.points_base.emplace_back(0.20F, y, 0.40F);
+  }
+  std::vector<Eigen::Vector3f> raw_points = component_one.points_base;
+  raw_points.insert(raw_points.end(), component_two.points_base.begin(),
+                    component_two.points_base.end());
+  for (float y : {-0.20F, 0.20F}) {
+    raw_points.emplace_back(0.20F, y, 0.90F);
+    raw_points.emplace_back(0.20F, y, 0.90F);
+  }
+  const auto groups = buildGroupsWithRawRoi(
+      {member_one, members_one_two}, {component_one, component_two},
+      raw_points, 1.0);
+  ASSERT_EQ(groups.size(), 1U);
+  const auto& descriptor = groups.front().descriptor;
+  EXPECT_EQ(descriptor.raw_roi_supported_hypothesis_count, 1U);
+  EXPECT_EQ(descriptor.owner_proof_rejected_hypothesis_count, 1U);
+  EXPECT_EQ(descriptor.vertical_source,
+            CargoVerticalEvidenceSource::RAW_ROI_CURRENT_FOOTPRINT);
+  EXPECT_NEAR(descriptor.physical_vertical_z, 0.90, 1.0e-5);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
      RawRoiSourceStampMustEqualDetectionSourceStamp) {
   auto observation = candidate(1U, 1.0, 0.0, 0.40, {1U});
   CargoPhysicalComponentObservation component;
