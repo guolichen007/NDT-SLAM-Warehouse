@@ -194,12 +194,97 @@ CargoPhysicalIdentityDecision validateRequired(
     CargoPhysicalIdentityAuthority* authority) {
   authority->update(input(1.0, HookLoadSignalRole::REQUIRED, true,
                           HookLoadState::EMPTY, 0.0, 0.4));
+  authority->update(input(1.05, HookLoadSignalRole::REQUIRED, true,
+                          HookLoadState::EMPTY, 0.0, 0.4));
   authority->update(input(1.1, HookLoadSignalRole::REQUIRED, true,
                           HookLoadState::LOADED, 0.0, 0.4));
   authority->update(input(1.2, HookLoadSignalRole::REQUIRED, true,
                           HookLoadState::LOADED, 0.0, 0.7));
   return authority->update(input(1.3, HookLoadSignalRole::REQUIRED, true,
                                  HookLoadState::LOADED, 0.0, 0.7));
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     DelayedLoadEdgeCannotOverwriteEarliestPreLiftReference) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  const std::vector<double> low = {0.465, 0.470, 0.468, 0.472};
+  double stamp = 1.0;
+  for (double z : low) {
+    authority.update(input(stamp, HookLoadSignalRole::REQUIRED, true,
+                           HookLoadState::EMPTY, 0.0, z));
+    stamp += 0.05;
+  }
+  for (double z : {0.616, 0.702, 0.711}) {
+    authority.update(input(stamp, HookLoadSignalRole::REQUIRED, true,
+                           HookLoadState::EMPTY, 0.0, z));
+    stamp += 0.05;
+  }
+  authority.update(input(stamp, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.0, 0.711));
+  for (int frame = 0; frame < 3; ++frame) {
+    stamp += 0.05;
+    authority.update(input(stamp, HookLoadSignalRole::REQUIRED, true,
+                           HookLoadState::LOADED, 0.0, 0.893));
+  }
+  stamp += 0.05;
+  const auto result = authority.update(input(
+      stamp, HookLoadSignalRole::REQUIRED, true,
+      HookLoadState::LOADED, 0.0, 0.893));
+  EXPECT_EQ(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_EQ(result.prelift_state, CargoPreLiftReferenceState::FROZEN);
+  EXPECT_NEAR(result.baseline_z95, 0.469, 0.005);
+  EXPECT_LT(result.baseline_z95, 0.50);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     EarliestPrefixNeverSlidesToLiftedStableWindow) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  double stamp = 1.0;
+  for (double z : {0.465, 0.616, 0.702, 0.711}) {
+    authority.update(input(stamp, HookLoadSignalRole::REQUIRED, true,
+                           HookLoadState::EMPTY, 0.0, z));
+    stamp += 0.05;
+  }
+  for (int frame = 0; frame < 8; ++frame) {
+    const auto result = authority.update(input(
+        stamp, HookLoadSignalRole::REQUIRED, true,
+        HookLoadState::EMPTY, 0.0, 0.711));
+    ASSERT_EQ(result.group_diagnostics.size(), 1U);
+    EXPECT_EQ(result.group_diagnostics.front().prelift_state,
+              CargoPreLiftReferenceState::CLOSED);
+    stamp += 0.05;
+  }
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     UnsupportedFrameWithinGapPausesWithoutReplacingPrefix) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 3;
+  CargoPhysicalIdentityAuthority authority(config);
+  authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  auto unsupported = input(1.1, HookLoadSignalRole::REQUIRED, true,
+                           HookLoadState::EMPTY, 0.0, 0.4);
+  unsupported.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::CONTINUITY_ONLY;
+  auto paused = authority.update(unsupported);
+  ASSERT_EQ(paused.group_diagnostics.size(), 1U);
+  EXPECT_EQ(paused.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::PAUSED);
+  authority.update(input(1.2, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  const auto frozen = authority.update(input(
+      1.3, HookLoadSignalRole::REQUIRED, true,
+      HookLoadState::EMPTY, 0.0, 0.4));
+  ASSERT_EQ(frozen.group_diagnostics.size(), 1U);
+  EXPECT_EQ(frozen.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::FROZEN);
+  EXPECT_EQ(frozen.group_diagnostics.front().prelift_sample_count, 3U);
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
@@ -250,6 +335,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
                          HookLoadState::EMPTY, 0.0, 0.4));
+  authority.update(input(1.05, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
   authority.update(input(1.1, HookLoadSignalRole::REQUIRED, true,
                          HookLoadState::LOADED, 0.0, 0.4));
   const auto first_lift = authority.update(input(
@@ -290,6 +377,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   ASSERT_EQ(validateRequired(&authority).identity,
             CargoPhysicalIdentityState::VALIDATED);
   authority.update(input(1.4, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.7));
+  authority.update(input(1.45, HookLoadSignalRole::REQUIRED, true,
                          HookLoadState::EMPTY, 0.0, 0.7));
   authority.update(input(1.5, HookLoadSignalRole::REQUIRED, true,
                          HookLoadState::LOADED, 0.0, 0.7));
@@ -356,6 +445,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(input(1.0, HookLoadSignalRole::AUXILIARY, true,
                          HookLoadState::EMPTY, 0.0, 0.4));
+  authority.update(input(1.05, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
   for (int frame = 1; frame <= 3; ++frame) {
     const auto pending = authority.update(input(
         1.0 + frame * 0.1, HookLoadSignalRole::AUXILIARY, true,
@@ -375,6 +466,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(input(1.0, HookLoadSignalRole::AUXILIARY, false,
                          HookLoadState::UNKNOWN, 0.0, 0.4));
+  authority.update(input(1.05, HookLoadSignalRole::AUXILIARY, false,
+                         HookLoadState::UNKNOWN, 0.0, 0.4));
   authority.update(input(1.1, HookLoadSignalRole::AUXILIARY, false,
                          HookLoadState::UNKNOWN, 0.0, 0.7));
   authority.update(input(1.2, HookLoadSignalRole::AUXILIARY, false,
@@ -390,6 +483,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
      DisabledGravityCanUseIndependentLidarExistence) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(input(1.0, HookLoadSignalRole::DISABLED, false,
+                         HookLoadState::UNKNOWN, 0.0, 0.4));
+  authority.update(input(1.05, HookLoadSignalRole::DISABLED, false,
                          HookLoadState::UNKNOWN, 0.0, 0.4));
   authority.update(input(1.1, HookLoadSignalRole::DISABLED, false,
                          HookLoadState::UNKNOWN, 0.0, 0.7));
