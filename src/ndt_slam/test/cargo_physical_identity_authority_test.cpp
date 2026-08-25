@@ -288,6 +288,93 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
+     LocalizationAuthorityIsRequiredForPreLiftEvidence) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  auto unauthorized = input(1.0, HookLoadSignalRole::REQUIRED, true,
+                            HookLoadState::EMPTY, 0.0, 0.4);
+  unauthorized.localization_authorized = false;
+  unauthorized.pose_authority_identity_valid = false;
+  const auto first = authority.update(unauthorized);
+  ASSERT_EQ(first.group_diagnostics.size(), 1U);
+  EXPECT_EQ(first.group_diagnostics.front().prelift_sample_count, 0U);
+  auto authorized = input(1.1, HookLoadSignalRole::REQUIRED, true,
+                          HookLoadState::EMPTY, 0.0, 0.4);
+  authority.update(authorized);
+  authorized.pipeline_stamp_sec = 1.2;
+  authorized.groups = {group(10U, 1.2, 0.0, 0.4)};
+  const auto frozen = authority.update(authorized);
+  ASSERT_EQ(frozen.group_diagnostics.size(), 1U);
+  EXPECT_EQ(frozen.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::FROZEN);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ReferenceCannotCrossPhysicalCargoEpoch) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  auto first = input(1.0, HookLoadSignalRole::REQUIRED, true,
+                     HookLoadState::EMPTY, 0.0, 0.4);
+  first.lifecycle_id = 11U;
+  authority.update(first);
+  first.pipeline_stamp_sec = 1.05;
+  first.groups = {group(10U, 1.05, 0.0, 0.4)};
+  auto frozen = authority.update(first);
+  ASSERT_EQ(frozen.group_diagnostics.size(), 1U);
+  EXPECT_EQ(frozen.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::FROZEN);
+  auto replacement = input(1.1, HookLoadSignalRole::REQUIRED, true,
+                           HookLoadState::LOADED, 0.0, 0.8);
+  replacement.lifecycle_id = 12U;
+  const auto result = authority.update(replacement);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_NE(result.group_diagnostics.front().physical_cargo_epoch_id, 11U);
+  EXPECT_FALSE(std::isfinite(result.group_diagnostics.front().baseline_z));
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     TimestampRollbackClosesCargoPreLiftForCurrentEpoch) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  ASSERT_EQ(validated.identity, CargoPhysicalIdentityState::VALIDATED);
+  const auto rollback = authority.update(input(
+      0.5, HookLoadSignalRole::REQUIRED, true,
+      HookLoadState::LOADED, 0.0, 0.7));
+  EXPECT_EQ(rollback.identity, CargoPhysicalIdentityState::UNKNOWN);
+  ASSERT_EQ(rollback.group_diagnostics.size(), 1U);
+  EXPECT_EQ(rollback.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::CLOSED);
+  EXPECT_EQ(rollback.group_diagnostics.front().prelift_close_reason,
+            "CURRENT_EPOCH_PRELIFT_BLOCKED");
+  const auto still_blocked = authority.update(input(
+      0.6, HookLoadSignalRole::REQUIRED, true,
+      HookLoadState::LOADED, 0.0, 0.4));
+  ASSERT_EQ(still_blocked.group_diagnostics.size(), 1U);
+  EXPECT_EQ(still_blocked.group_diagnostics.front().prelift_sample_count, 0U);
+  EXPECT_EQ(still_blocked.identity, CargoPhysicalIdentityState::UNKNOWN);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     DisabledRoleFreezesEarliestLidarReferenceBeforeLift) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(input(1.0, HookLoadSignalRole::DISABLED, false,
+                         HookLoadState::UNKNOWN, 0.0, 0.4));
+  const auto frozen = authority.update(input(
+      1.05, HookLoadSignalRole::DISABLED, false,
+      HookLoadState::UNKNOWN, 0.0, 0.4));
+  ASSERT_EQ(frozen.group_diagnostics.size(), 1U);
+  EXPECT_EQ(frozen.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::FROZEN);
+  EXPECT_NEAR(frozen.group_diagnostics.front().baseline_z, 0.4, 1.0e-6);
+  authority.update(input(1.1, HookLoadSignalRole::DISABLED, false,
+                         HookLoadState::UNKNOWN, 0.0, 0.7));
+  const auto result = authority.update(input(
+      1.2, HookLoadSignalRole::DISABLED, false,
+      HookLoadState::UNKNOWN, 0.0, 0.7));
+  EXPECT_EQ(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_NEAR(result.baseline_z95, 0.4, 1.0e-6);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
      PreloadBaselineUsedAcrossLoadEdge) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   const auto result = validateRequired(&authority);
@@ -477,6 +564,45 @@ TEST(CargoPhysicalIdentityAuthorityTest,
       HookLoadState::UNKNOWN, 0.0, 0.7));
   EXPECT_TRUE(result.cargo_exists);
   EXPECT_EQ(result.required_lift_confirm_frames, 3);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     AuxiliaryGravityEmptyConflictCannotRetireValidatedLidarHistory) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(input(1.0, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  authority.update(input(1.05, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  CargoPhysicalIdentityDecision validated;
+  for (int frame = 1; frame <= 4; ++frame) {
+    validated = authority.update(input(
+        1.0 + frame * 0.1, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::EMPTY, 0.0, 0.7));
+  }
+  ASSERT_EQ(validated.identity, CargoPhysicalIdentityState::VALIDATED);
+  const std::uint64_t history_id = validated.physical_history_id;
+  const auto retained = authority.update(input(
+      1.5, HookLoadSignalRole::AUXILIARY, true,
+      HookLoadState::EMPTY, 0.0, 0.7));
+  EXPECT_EQ(retained.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_EQ(retained.physical_history_id, history_id);
+  EXPECT_EQ(retained.existence_source, CargoExistenceSource::STRICT_LIDAR);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     AuxiliaryGravityLoadEdgeCannotDiscardIndependentLidarPrefix) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto first = authority.update(input(
+      1.0, HookLoadSignalRole::AUXILIARY, true,
+      HookLoadState::EMPTY, 0.0, 0.4));
+  ASSERT_EQ(first.prelift_sample_count, 1U);
+  const auto frozen = authority.update(input(
+      1.05, HookLoadSignalRole::AUXILIARY, true,
+      HookLoadState::LOADED, 0.0, 0.4));
+  ASSERT_EQ(frozen.group_diagnostics.size(), 1U);
+  EXPECT_EQ(frozen.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::FROZEN);
+  EXPECT_NEAR(frozen.group_diagnostics.front().baseline_z, 0.4, 1.0e-6);
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
@@ -766,6 +892,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
                          HookLoadState::EMPTY, 0.0, 0.27));
+  authority.update(input(1.05, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.27));
   authority.update(input(1.1, HookLoadSignalRole::REQUIRED, true,
                          HookLoadState::LOADED, 0.0, 0.27));
   authority.update(input(1.2, HookLoadSignalRole::REQUIRED, true,
@@ -799,6 +927,12 @@ TEST(CargoPhysicalIdentityAuthorityTest,
       candidate(1U, 1.0, -0.20, 0.30, {1U}),
       candidate(2U, 1.0, 0.20, 0.27, {2U})});
   authority.update(frame);
+  frame.pipeline_stamp_sec = 1.05;
+  for (auto& group_observation : frame.groups) {
+    group_observation.descriptor.stamp_sec = 1.05;
+    group_observation.representative.stamp_sec = 1.05;
+  }
+  authority.update(frame);
   for (int index = 1; index <= 3; ++index) {
     const double stamp = 1.0 + 0.1 * index;
     const double cargo_z = index == 1 ? 0.27 : 0.70;
@@ -825,6 +959,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
      ContinuityOnlyFrameCannotAdvanceLiftConfirmation) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  authority.update(input(1.05, HookLoadSignalRole::REQUIRED, true,
                          HookLoadState::EMPTY, 0.0, 0.4));
   authority.update(input(1.1, HookLoadSignalRole::REQUIRED, true,
                          HookLoadState::LOADED, 0.0, 0.4));
@@ -981,6 +1117,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
      PendingLiftProgressExpiresByLastSupportedEvidenceGap) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  authority.update(input(1.05, HookLoadSignalRole::REQUIRED, true,
                          HookLoadState::EMPTY, 0.0, 0.4));
   authority.update(input(1.1, HookLoadSignalRole::REQUIRED, true,
                          HookLoadState::LOADED, 0.0, 0.4));
@@ -1177,6 +1315,12 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   frame.groups = buildGroups({
       candidate(1U, 1.0, -1.0, 0.30, {1U}),
       candidate(2U, 1.0, 1.0, 0.30, {2U})});
+  authority.update(frame);
+  frame.pipeline_stamp_sec = 1.05;
+  for (auto& group_observation : frame.groups) {
+    group_observation.descriptor.stamp_sec = 1.05;
+    group_observation.representative.stamp_sec = 1.05;
+  }
   authority.update(frame);
   for (int index = 1; index <= 3; ++index) {
     const double stamp = 1.0 + 0.1 * index;
