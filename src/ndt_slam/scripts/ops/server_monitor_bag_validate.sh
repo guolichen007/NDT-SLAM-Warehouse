@@ -24,6 +24,7 @@ WORKSPACE="${NDT_SLAM_WORKSPACE:-$HOME/NDT-slam-ws}"
 DURATION=25
 RATE=1.0
 MAP_SOURCE=""
+YAW_REFERENCE=""
 EXPECTED_SHA=""
 ROS_MASTER_PORT=11321
 START_OFFSET=0
@@ -55,6 +56,7 @@ server_monitor_bag_validate.sh – isolated rosbag validation for server monitor
   --mode MODE            monitor-only | full-chain | partial (required)
   --workspace PATH       NDT-slam-ws root (default: $NDT_SLAM_WORKSPACE)
   --map-source PATH      Source maps directory for sandbox copy
+  --yaw-reference FILE  Frozen verified Rail yaw reference (combined gate)
   --duration SEC         Test duration in seconds (default: 25)
   --rate RATE            rosbag play --rate (default: 1.0)
   --expected-sha SHA     Expected git HEAD (optional)
@@ -85,6 +87,7 @@ while [[ $# -gt 0 ]]; do
     --mode) MODE="$2"; shift 2 ;;
     --workspace) WORKSPACE="$2"; shift 2 ;;
     --map-source) MAP_SOURCE="$2"; shift 2 ;;
+    --yaw-reference) YAW_REFERENCE="$2"; shift 2 ;;
     --duration) DURATION="$2"; shift 2 ;;
     --rate) RATE="$2"; shift 2 ;;
     --expected-sha) EXPECTED_SHA="$2"; shift 2 ;;
@@ -110,6 +113,10 @@ $MODE_VALID || die "Invalid mode: $MODE (must be one of: ${ALLOWED_MODES[*]})"
 # ── resolve paths ──
 BAG="$(realpath "$BAG")"
 WORKSPACE="$(realpath "$WORKSPACE")"
+if [[ -n "$YAW_REFERENCE" ]]; then
+  [[ -f "$YAW_REFERENCE" ]] || die "Yaw reference not found: $YAW_REFERENCE"
+  YAW_REFERENCE="$(realpath "$YAW_REFERENCE")"
+fi
 RUN_DIR="$WORKSPACE/server_runs/$RUN_ID"
 MAP_SANDBOX_ROOT="$RUN_DIR/map_sandbox"
 MAP_SANDBOX="$MAP_SANDBOX_ROOT/current"
@@ -219,13 +226,14 @@ mkdir -p "$DIAG_OUTPUT_DIR"
 
 generate_sandbox_config() {
   echo "=== Generating Sandbox Config ==="
-  python3 - "$CONFIG_SOURCE" "$GENERATED_CONFIG" "$MAP_SANDBOX" "$DIAG_OUTPUT_DIR" <<'PYEOF'
+  python3 - "$CONFIG_SOURCE" "$GENERATED_CONFIG" "$MAP_SANDBOX" "$DIAG_OUTPUT_DIR" "$YAW_REFERENCE" <<'PYEOF'
 import sys, yaml, os
 
 src = sys.argv[1]
 dst = sys.argv[2]
 sandbox = sys.argv[3]
 diag_dir = sys.argv[4]
+yaw_reference_path = sys.argv[5]
 
 with open(src, 'r') as f:
     config = yaml.safe_load(f)
@@ -242,6 +250,26 @@ if 'debug' not in config:
 if 'runtime_diagnostics' not in config['debug']:
     config['debug']['runtime_diagnostics'] = {}
 config['debug']['runtime_diagnostics']['output_dir'] = diag_dir
+
+if yaw_reference_path:
+    with open(yaw_reference_path, 'r') as stream:
+        document = yaml.safe_load(stream)
+    reference = document.get('reference', document)
+    required = {
+        'schema_version', 'verified', 'rail_yaw_in_map_rad', 'source',
+        'map_frame_uuid', 'map_frame_id', 'base_frame_id',
+        'map_frame_convention_id', 'sensor_rig_calibration_id',
+        'reference_uuid', 'reference_hash',
+    }
+    missing = sorted(required - set(reference))
+    if missing or reference.get('verified') is not True:
+        raise SystemExit(
+            'invalid frozen yaw reference; missing=' + ','.join(missing)
+        )
+    config['runtime_yaw_authority'] = {
+        'mode': 'RAIL_AUTHORITY',
+        'reference': reference,
+    }
 
 # Preserve original source path
 config['_generated_from'] = src

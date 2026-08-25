@@ -763,7 +763,7 @@ def analyze_runtime(path: Path) -> dict[str, float]:
         rows = list(csv.DictReader(stream))
     cpu = [number(row, "cpu_percent") for row in rows]
     rss = [number(row, "rss_mb") for row in rows]
-    return {
+    result = {
         "cpu_percent_p50": percentile(cpu, 0.50),
         "cpu_percent_p95": percentile(cpu, 0.95),
         "cpu_percent_max": max(
@@ -777,6 +777,22 @@ def analyze_runtime(path: Path) -> dict[str, float]:
             default=math.nan,
         ),
     }
+    timing_fields = {
+        "fixed_yaw_solver_ms": "runtime_fixed_yaw_solver_ms",
+        "rail_pose_fitness_ms": "runtime_rail_pose_fitness_ms",
+        "target_normal_cache_build_ms": (
+            "runtime_target_normal_cache_build_ms"
+        ),
+        "rail_graph_worker_ms": "runtime_rail_graph_worker_ms",
+        "whole_frame_ms": "runtime_average_process_time_ms",
+    }
+    for output_name, field_name in timing_fields.items():
+        values = [number(row, field_name) for row in rows]
+        finite = [value for value in values if math.isfinite(value)]
+        result[f"{output_name}_p50"] = percentile(finite, 0.50)
+        result[f"{output_name}_p95"] = percentile(finite, 0.95)
+        result[f"{output_name}_max"] = max(finite, default=math.nan)
+    return result
 
 
 def render_markdown(summary: dict[str, Any]) -> str:

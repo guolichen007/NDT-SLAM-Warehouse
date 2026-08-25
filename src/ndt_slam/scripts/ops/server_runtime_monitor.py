@@ -59,6 +59,8 @@ RUNTIME_SAMPLE_FIELDS = (
     "runtime_disk_guard_triggered", "runtime_pointcloud_timeout_sec",
     "runtime_pointcloud_stale", "runtime_last_ndt_fitness",
     "runtime_average_process_time_ms", "runtime_average_ndt_time_ms",
+    "runtime_fixed_yaw_solver_ms", "runtime_rail_pose_fitness_ms",
+    "runtime_target_normal_cache_build_ms", "runtime_rail_graph_worker_ms",
     "runtime_static_evidence_epoch", "runtime_static_evidence_revision",
     "runtime_static_evidence_cells", "runtime_static_evidence_mature_cells",
     "runtime_static_evidence_latest_sequence", "runtime_static_query_reason",

@@ -3,7 +3,7 @@
 set -u
 
 if [[ $# -lt 8 ]]; then
-  echo "Usage: $0 WORKSPACE EXPECTED_SHA MAP_SOURCE OUTPUT_DIR 无.bag 有.bag 长件.bag 大件.bag [DURATION] [ORACLE_DIR] [BASELINE_TRACE_DIR]" >&2
+  echo "Usage: $0 WORKSPACE EXPECTED_SHA MAP_SOURCE OUTPUT_DIR 无.bag 有.bag 长件.bag 大件.bag [DURATION] [ORACLE_DIR] [BASELINE_TRACE_DIR] [YAW_REFERENCE]" >&2
   exit 2
 fi
 
@@ -17,6 +17,7 @@ names=("无" "有" "长件" "大件")
 duration="${5:-1200}"
 oracle_dir="${6:-}"
 baseline_trace_dir="${7:-}"
+yaw_reference="${8:-}"
 runner="$workspace/src/ndt_slam/scripts/ops/server_monitor_bag_validate.sh"
 analyzer="$workspace/src/ndt_slam/scripts/analysis/analyze_integrated_cargo_identity_shadow.py"
 
@@ -68,14 +69,18 @@ for index in 0 1 2 3; do
   trace_generation_marker="$output_dir/${name}_trace_generation.marker"
   touch "$trace_generation_marker"
   set +e
-  "$runner" \
+  runner_args=(
     --bag "$bag" \
     --mode full-chain \
     --workspace "$workspace" \
     --map-source "$map_source" \
     --duration "$duration" \
     --expected-sha "$expected_sha" \
-    --ros-master-port "$port" >"$run_log" 2>&1
+    --ros-master-port "$port")
+  if [[ -n "$yaw_reference" ]]; then
+    runner_args+=(--yaw-reference "$yaw_reference")
+  fi
+  "$runner" "${runner_args[@]}" >"$run_log" 2>&1
   bag_rc=$?
   set -e
   if [[ $bag_rc -ne 0 ]]; then
