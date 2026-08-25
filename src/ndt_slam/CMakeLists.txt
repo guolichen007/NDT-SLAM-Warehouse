@@ -123,6 +123,7 @@ set(LIBRARY_SOURCES
   # v8-stable-r3: CraneMotionEKF
   src/crane_motion_ekf.cpp
   src/ndt_fitness_circuit_breaker.cpp
+  src/rail_localization_authority.cpp
   src/stationary_motion_policy.cpp
   src/registration_cloud_builder.cpp
   src/ndt_observability.cpp
