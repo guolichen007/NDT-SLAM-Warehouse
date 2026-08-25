@@ -7049,6 +7049,10 @@ void NdtSlamNode::processCloudThread() {
             registration_success && crane_motion_ekf_.initialized();
         localization_authority_health_ =
             evaluateRailLocalizationHealth(rail_health_input);
+        localization_failure_class_code_.store(
+            static_cast<unsigned int>(
+                localization_authority_health_.failure_class),
+            std::memory_order_release);
 
         if (ndt_attempted_this_frame &&
             !startup_first_ndt_result_logged_.exchange(
@@ -11907,8 +11911,13 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
 void NdtSlamNode::publishRelocalizationStatus(
     const std::string& state, const std::string& detail) {
     std_msgs::String message;
+    const LocalizationFailureClass failure_class =
+        static_cast<LocalizationFailureClass>(
+            localization_failure_class_code_.load(
+                std::memory_order_acquire));
     message.data = "state=" + state + " detail=" + detail +
-        " bad_frames=" + std::to_string(relocalization_bad_frames_);
+        " bad_frames=" + std::to_string(relocalization_bad_frames_) +
+        " failure_class=" + localizationFailureClassName(failure_class);
     relocalization_status_pub_.publish(message);
     ROS_WARN_THROTTLE(1.0, "[Relocalization] %s", message.data.c_str());
 }
@@ -13753,6 +13762,23 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"accepted_localization_count\": "
       << accepted_localization_count_.load(std::memory_order_relaxed)
       << ",\n";
+    const LocalizationFailureClass runtime_failure_class =
+        static_cast<LocalizationFailureClass>(
+            localization_failure_class_code_.load(
+                std::memory_order_acquire));
+    f << "  \"yaw_authority_mode\": \""
+      << yawAuthorityModeName(yaw_authority_mode_) << "\",\n";
+    f << "  \"localization_failure_class\": \""
+      << localizationFailureClassName(runtime_failure_class) << "\",\n";
+    f << "  \"localization_authority_healthy\": "
+      << (localization_authority_health_.authoritative_frame_healthy
+              ? "true" : "false") << ",\n";
+    f << "  \"safety_localization_authorized\": "
+      << (localization_authority_health_.safety_localization_authorized
+              ? "true" : "false") << ",\n";
+    f << "  \"map_mutation_authorized\": "
+      << (localization_authority_health_.map_mutation_authorized
+              ? "true" : "false") << ",\n";
     f << "  \"mixed_pose_generation_safety_frame_count\": "
       << mixed_pose_generation_safety_frame_count_.load(
              std::memory_order_relaxed)

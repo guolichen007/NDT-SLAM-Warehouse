@@ -566,6 +566,8 @@ private:
     FixedYawTranslationSolver fixed_yaw_translation_solver_;
     NdtFitnessCircuitBreaker rail_fitness_circuit_breaker_;
     LocalizationAuthorityHealth localization_authority_health_;
+    std::atomic<unsigned int> localization_failure_class_code_{
+        static_cast<unsigned int>(LocalizationFailureClass::NONE)};
     FixedYawTranslationResult last_fixed_yaw_predicted_result_;
     FixedYawTranslationResult last_fixed_yaw_free_result_;
     FixedYawDualSeedDecision last_fixed_yaw_seed_decision_;

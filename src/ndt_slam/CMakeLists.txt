@@ -655,6 +655,7 @@ install(DIRECTORY scripts/
 
 catkin_install_python(PROGRAMS
   scripts/ops/ndt_recovery_watchdog.py
+  scripts/ops/ndt_slam_service_supervisor.py
   scripts/ops/server_runtime_monitor.py
   scripts/ops/summarize_server_run.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

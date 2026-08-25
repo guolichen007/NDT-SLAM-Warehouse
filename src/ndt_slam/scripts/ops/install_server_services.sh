@@ -99,16 +99,15 @@ done
 
 require_unit_line "$slam_unit" 'StartLimitIntervalSec=300'
 require_unit_line "$slam_unit" 'StartLimitBurst=5'
-require_unit_line "$slam_unit" 'Restart=always'
+require_unit_line "$slam_unit" 'Restart=on-failure'
+require_unit_line "$slam_unit" 'RestartPreventExitStatus=78'
 require_unit_line "$slam_unit" 'RestartSec=5'
 require_unit_text "$slam_unit" '/usr/bin/flock --no-fork --exclusive --nonblock'
 require_unit_text "$slam_unit" "$data_root/.ndt-slam.lock"
 require_unit_text "$slam_unit" \
-  'exec roslaunch ndt_slam warehouse_live_longterm_mapping.launch'
+  '-- roslaunch ndt_slam warehouse_live_longterm_mapping.launch'
+require_unit_text "$slam_unit" 'ndt_slam_service_supervisor.py'
 require_unit_text "$slam_unit" 'use_ndt_recovery_watchdog:=true'
-if grep -Fq 'Restart=on-failure' "$slam_unit"; then
-  fail_rendered_unit "ndt-slam.service contains obsolete Restart=on-failure"
-fi
 
 require_unit_line "$monitor_unit" 'After=ndt-slam.service'
 require_unit_line "$monitor_unit" 'Wants=ndt-slam.service'
@@ -164,7 +163,8 @@ require_effective_text() {
       "$property does not contain '$expected' (check drop-ins)"
 }
 
-require_effective_exact ndt-slam.service Restart always
+require_effective_exact ndt-slam.service Restart on-failure
+require_effective_exact ndt-slam.service RestartPreventExitStatus 78
 require_effective_exact ndt-slam.service RestartUSec 5s
 require_effective_exact ndt-slam.service StartLimitIntervalUSec 5min
 require_effective_exact ndt-slam.service StartLimitBurst 5
@@ -176,6 +176,8 @@ require_effective_text ndt-slam.service ExecStart \
   "$data_root/.ndt-slam.lock"
 require_effective_text ndt-slam.service ExecStart \
   'warehouse_live_longterm_mapping.launch'
+require_effective_text ndt-slam.service ExecStart \
+  'ndt_slam_service_supervisor.py'
 require_effective_text ndt-slam.service ExecStart \
   'use_ndt_recovery_watchdog:=true'
 
