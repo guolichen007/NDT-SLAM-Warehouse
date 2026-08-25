@@ -125,6 +125,7 @@ set(LIBRARY_SOURCES
   src/ndt_fitness_circuit_breaker.cpp
   src/rail_localization_authority.cpp
   src/registration_target_snapshot.cpp
+  src/fixed_yaw_translation_solver.cpp
   src/stationary_motion_policy.cpp
   src/registration_cloud_builder.cpp
   src/ndt_observability.cpp

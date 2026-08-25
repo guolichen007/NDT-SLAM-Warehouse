@@ -1,5 +1,6 @@
 #include "ndt_slam/rail_localization_authority.hpp"
 #include "ndt_slam/registration_target_snapshot.hpp"
+#include "ndt_slam/fixed_yaw_translation_solver.hpp"
 
 #include <gtest/gtest.h>
 
@@ -150,6 +151,58 @@ TEST(RailYawAuthorityTest, ModeCannotHotSwitchWithinSession) {
   EXPECT_TRUE(latch.initialize(YawAuthorityMode::LEGACY, 1U));
   EXPECT_FALSE(latch.initialize(YawAuthorityMode::RAIL_AUTHORITY, 1U));
   EXPECT_TRUE(latch.initialize(YawAuthorityMode::RAIL_AUTHORITY, 2U));
+}
+
+TEST(FixedYawTranslationSolverTest, SolvesTranslationWithoutChangingYaw) {
+  pcl::PointCloud<pcl::PointXYZ>::Ptr source(
+      new pcl::PointCloud<pcl::PointXYZ>());
+  pcl::PointCloud<pcl::PointXYZ>::Ptr target(
+      new pcl::PointCloud<pcl::PointXYZ>());
+  for (int index = -20; index <= 20; ++index) {
+    const float coordinate = 0.1F * static_cast<float>(index);
+    source->push_back(pcl::PointXYZ(coordinate, -1.0F, 0.0F));
+    source->push_back(pcl::PointXYZ(coordinate, 1.0F, 0.0F));
+    source->push_back(pcl::PointXYZ(-2.0F, 0.05F * index, 0.0F));
+    source->push_back(pcl::PointXYZ(2.0F, 0.05F * index, 0.0F));
+  }
+  for (const auto& point : source->points) {
+    target->push_back(pcl::PointXYZ(
+        point.x + 2.0F, point.y + 3.0F, point.z));
+  }
+  const auto snapshot = makeRegistrationTargetSnapshot(
+      target, RegistrationTargetSource::GLOBAL_MAP,
+      1U, 1U, "map-frame-1", "full");
+  FixedYawTranslationSolverConfig config;
+  config.minimum_inliers = 20U;
+  config.maximum_correspondence_distance_m = 1.0;
+  FixedYawTranslationSolver solver(config);
+  FixedYawTranslationInput input;
+  input.source_cloud_base = source;
+  input.target = snapshot;
+  input.authoritative_yaw_rad = 0.0;
+  input.seed_pose_map_base = Sophus::SE3d(
+      Sophus::SO3d(), Eigen::Vector3d(1.7, 2.7, 0.0));
+  const auto result = solver.solve(input);
+  ASSERT_TRUE(result.valid) << result.reason;
+  EXPECT_NEAR(result.xy.x(), 2.0, 0.05);
+  EXPECT_NEAR(result.xy.y(), 3.0, 0.05);
+  EXPECT_NEAR(result.pose_map_base.so3().log().z(), 0.0, 1.0e-12);
+}
+
+TEST(FixedYawTranslationSolverTest,
+     DualSeedBasinDisagreementCannotAutoSelectLowerResidual) {
+  FixedYawTranslationResult predicted;
+  predicted.valid = true;
+  predicted.xy = Eigen::Vector2d(0.0, 0.0);
+  predicted.fitness = 0.2;
+  FixedYawTranslationResult free;
+  free.valid = true;
+  free.xy = Eigen::Vector2d(4.0, 0.0);
+  free.fitness = 0.01;
+  const auto decision = selectFixedYawDualSeed(predicted, free, 0.5);
+  EXPECT_FALSE(decision.authoritative_measurement_valid);
+  EXPECT_EQ(decision.outcome,
+            FixedYawDualSeedOutcome::SEED_BASIN_AMBIGUOUS);
 }
 
 }  // namespace
