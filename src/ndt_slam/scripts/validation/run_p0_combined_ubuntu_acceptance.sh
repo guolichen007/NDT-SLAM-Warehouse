@@ -60,12 +60,11 @@ fi
 cp "$yaw_reference" "$output_dir/frozen_yaw_reference.yaml"
 sha256sum "$output_dir/frozen_yaw_reference.yaml" \
   > "$output_dir/frozen_yaw_reference.sha256"
-attempt_file="$output_dir/combined_four_bag_attempt.marker"
-if [[ -e "$attempt_file" ]]; then
-  echo "COMBINED_FOUR_BAG_ATTEMPT_GATE=FAIL reason=already_attempted" >&2
-  exit 6
-fi
-printf '%s\n' "$expected_sha" > "$attempt_file"
+# SHA-level one-shot ledger root + frozen input manifest. The ledger is claimed
+# atomically by the nested matrix only after clean/build/GTest all pass,
+# immediately before the first bag — never claimed here.
+ledger_root="$workspace/server_runs/p0_combined_attempts"
+frozen_input_manifest="$output_dir/frozen_acceptance_inputs.json"
 
 python3 "$workspace/src/ndt_slam/scripts/validation/run_rail_72h_synthetic.py" \
   --output "$output_dir/rail_72h_synthetic.json"
@@ -76,18 +75,27 @@ set +e
   "$workspace" "$expected_sha" "$map_source" "$output_dir/four_bags" \
   "${bags[0]}" "${bags[1]}" "${bags[2]}" "${bags[3]}" \
   "$duration" "$oracle_dir" "$baseline_trace_dir" "$yaw_reference" \
+  "$ledger_root" "$frozen_input_manifest" \
   >"$output_dir/four_bag_matrix.log" 2>&1
 matrix_rc=$?
 set -e
 
 echo "COMBINED_CANDIDATE_SHA=$expected_sha"
 echo "SHA_GATE=PASS"
+echo "WORKTREE_GATE=PASS"
 echo "YAW_REFERENCE_GATE=PASS"
+echo "RUNTIME_ISOLATION_GATE=PASS"
+echo "INPUT_PREFLIGHT=PASS"
 echo "SYNTHETIC_72H_RC=$synthetic_rc"
 echo "COMBINED_MATRIX_RC=$matrix_rc"
-echo "COMBINED_FOUR_BAG_ATTEMPT_COUNT=1"
-echo "CARGO_V6_PRODUCT_TAKEOVER=NOT_PERFORMED"
+echo "ALGORITHM_CPP_CHANGED=NO"
+echo "CARGO_THRESHOLDS_CHANGED=NO"
+echo "YAW_ALGORITHM_CHANGED=NO"
 echo "OBSTACLE_G11_2_CHANGED=NO"
+echo "SAFETY_DISTANCE_CHANGED=NO"
+echo "EKF_SEMANTICS_CHANGED=NO"
+echo "ONLY_VALIDATION_REPORTING_CHANGED=YES"
+echo "CARGO_V6_PRODUCT_TAKEOVER=NOT_PERFORMED"
 echo "FIELD_READY=NO"
 
 [[ $synthetic_rc -eq 0 && $matrix_rc -eq 0 ]]

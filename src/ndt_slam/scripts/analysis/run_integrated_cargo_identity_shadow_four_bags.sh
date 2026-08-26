@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Clean-build once, replay all four bags without fail-fast, then aggregate.
+#
+# One-shot contract: the SHA-level attempt ledger is claimed with an atomic
+# mkdir only after clean/build/full-GTest/catkin_test_results all pass, and
+# immediately before the first rosbag play. The per-output marker file is a
+# result copy, not the anti-replay authority.
 set -u
 
 if [[ $# -lt 8 ]]; then
-  echo "Usage: $0 WORKSPACE EXPECTED_SHA MAP_SOURCE OUTPUT_DIR 无.bag 有.bag 长件.bag 大件.bag [DURATION] [ORACLE_DIR] [BASELINE_TRACE_DIR] [YAW_REFERENCE]" >&2
+  echo "Usage: $0 WORKSPACE EXPECTED_SHA MAP_SOURCE OUTPUT_DIR 无.bag 有.bag 长件.bag 大件.bag [DURATION] [ORACLE_DIR] [BASELINE_TRACE_DIR] [YAW_REFERENCE] [LEDGER_ROOT] [FROZEN_INPUT_MANIFEST]" >&2
   exit 2
 fi
 
@@ -18,6 +23,8 @@ duration="${5:-1200}"
 oracle_dir="${6:-}"
 baseline_trace_dir="${7:-}"
 yaw_reference="${8:-}"
+ledger_root="${9:-}"
+frozen_input_manifest="${10:-}"
 runner="$workspace/src/ndt_slam/scripts/ops/server_monitor_bag_validate.sh"
 analyzer="$workspace/src/ndt_slam/scripts/analysis/analyze_integrated_cargo_identity_shadow.py"
 
@@ -37,19 +44,59 @@ echo "WORKTREE_GATE=PASS"
 mkdir -p "$output_dir"
 source /opt/ros/noetic/setup.bash
 cd "$workspace"
+
+# ── Clean-build gates — each RC is tracked independently so a stale build
+#    can never masquerade as a fresh full-chain acceptance. ──
 catkin_make clean
+clean_rc=$?
 catkin_make --pkg ndt_slam
 build_rc=$?
 catkin_make run_tests_ndt_slam
 test_rc=$?
 catkin_test_results --all --verbose "$workspace/build/test_results"
 test_results_rc=$?
-if [[ $build_rc -ne 0 || $test_rc -ne 0 || $test_results_rc -ne 0 ]]; then
+if [[ $clean_rc -ne 0 || $build_rc -ne 0 || $test_rc -ne 0 || $test_results_rc -ne 0 ]]; then
+  echo "CLEAN_RC=$clean_rc"
   echo "BUILD_RC=$build_rc"
   echo "FULL_GTEST_RC=$test_rc"
   echo "CATKIN_TEST_RESULTS_RC=$test_results_rc"
+  echo "COMBINED_FOUR_BAG_ATTEMPT_COUNT=0"
+  echo "COMBINED_FOUR_BAG_ATTEMPT_GATE=NOT_REACHED reason=build_gate_failed"
   exit 1
 fi
+
+# ── Runtime / map / reference preflight before any bag can start ──
+[[ -x "$runner" ]] || { echo "RUNNER_GATE=FAIL reason=not_executable" >&2; exit 5; }
+[[ -d "$map_source" ]] || { echo "MAP_SOURCE_GATE=FAIL reason=missing_dir" >&2; exit 5; }
+if [[ -n "$frozen_input_manifest" ]]; then
+  [[ -f "$frozen_input_manifest" ]] || {
+    echo "FROZEN_INPUT_MANIFEST_GATE=FAIL reason=missing" >&2; exit 5; }
+fi
+
+# ── Atomically claim the SHA-level attempt ledger. This is the single
+#    anti-replay authority: the same candidate SHA can never be attempted
+#    twice regardless of output directory. ──
+if [[ -n "$ledger_root" ]]; then
+  mkdir -p "$ledger_root"
+  ledger_dir="$ledger_root/${expected_sha}.attempt"
+  if mkdir "$ledger_dir" 2>/dev/null; then
+    input_manifest_sha256=""
+    if [[ -n "$frozen_input_manifest" && -f "$frozen_input_manifest" ]]; then
+      input_manifest_sha256="$(sha256sum "$frozen_input_manifest" | awk '{print $1}')"
+    fi
+    printf '%s\n' "$expected_sha" > "$ledger_dir/candidate_sha"
+    printf '%s\n' "$input_manifest_sha256" > "$ledger_dir/input_manifest_sha256"
+    printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ledger_dir/started_at"
+    printf '%s\n' "$output_dir" > "$ledger_dir/output_dir"
+    echo "COMBINED_FOUR_BAG_ATTEMPT_GATE=PASS ledger=$ledger_dir"
+  else
+    echo "COMBINED_FOUR_BAG_ATTEMPT_GATE=FAIL reason=sha_already_attempted ledger=$ledger_dir" >&2
+    exit 6
+  fi
+fi
+
+# Result copy only — the ledger above is the anti-replay authority.
+printf '%s\n' "$expected_sha" > "$output_dir/combined_four_bag_attempt.marker"
 
 trace_args=()
 group_args=()
@@ -58,6 +105,8 @@ baseline_args=()
 runtime_args=()
 oracle_args=()
 run_rc=0
+run_index="$output_dir/four_bag_run_index.json"
+echo '{}' > "$run_index"
 for index in 0 1 2 3; do
   name="${names[$index]}"
   bag="${bags[$index]}"
@@ -114,6 +163,11 @@ for index in 0 1 2 3; do
     baseline_args+=(--baseline "$name=$baseline_trace")
   fi
   run_dir="$(sed -n 's/^run_dir:[[:space:]]*//p' "$run_log" | tail -n 1)"
+  if [[ -n "$run_dir" ]]; then
+    jq --arg name "$name" --arg run_dir "$run_dir" \
+      '. + {($name): $run_dir}' "$run_index" > "$run_index.tmp" &&
+      mv "$run_index.tmp" "$run_index"
+  fi
   runtime_csv="$run_dir/samples/runtime_samples.csv"
   if [[ -n "$run_dir" && -f "$runtime_csv" ]]; then
     runtime_copy="$output_dir/${name}_runtime_samples.csv"
@@ -140,17 +194,19 @@ analysis_rc=$?
 set -e
 
 echo "SOURCE_SHA=$expected_sha"
-echo "V5_CANDIDATE_SHA=$expected_sha"
+echo "COMBINED_CANDIDATE_SHA=$expected_sha"
+echo "CLEAN_RC=$clean_rc"
 echo "BUILD_RC=$build_rc"
 echo "FULL_GTEST_RC=$test_rc"
 echo "CATKIN_TEST_RESULTS_RC=$test_results_rc"
 echo "REPLAY_RC=$run_rc"
 echo "ANALYSIS_RC=$analysis_rc"
-echo "CARGO_V5_PRODUCT_TAKEOVER=NOT_YET"
+echo "COMBINED_FOUR_BAG_ATTEMPT_COUNT=1"
+echo "CARGO_V6_PRODUCT_TAKEOVER=NOT_PERFORMED"
 echo "PRODUCT_LOGIC_CHANGED=NO"
 echo "PRODUCT_OUTPUT_AUTHORITY_CHANGED=NO"
 echo "FIELD_READY=NO"
 
-if [[ $build_rc -ne 0 || $run_rc -ne 0 || $analysis_rc -ne 0 ]]; then
+if [[ $clean_rc -ne 0 || $build_rc -ne 0 || $run_rc -ne 0 || $analysis_rc -ne 0 ]]; then
   exit 1
 fi
