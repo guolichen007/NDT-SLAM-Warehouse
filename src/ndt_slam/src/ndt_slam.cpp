@@ -16509,7 +16509,7 @@ void NdtSlamNode::rememberTrustedCargoPose(const ros::Time& stamp) {
 }
 
 RigidCargoGeometry NdtSlamNode::buildCurrentRigidCargoGeometryForPose(
-    const FrameAuthorityContext& frame_context,
+    const Sophus::SE3d& pose_map_base,
     const ros::Time& stamp) {
     LiveCargoPose live_pose = hook_lock_.live_pose;
     const bool current_association =
