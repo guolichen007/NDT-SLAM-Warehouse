@@ -1137,7 +1137,7 @@ void NdtSlamNode::enqueueMapCommitJob(
     if (job.has_raw_ndt_pose) {
         job.raw_ndt_pose = last_raw_ndt_pose_;
     }
-    job.refined_pose = pose;
+    job.refined_pose = frame_context.runtime_pose;
     job.runtime_pose = current_pose_;
 
     {
