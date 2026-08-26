@@ -80,6 +80,17 @@ set +e
 matrix_rc=$?
 set -e
 
+set +e
+python3 "$workspace/src/ndt_slam/scripts/validation/summarize_p0_combined_acceptance.py" \
+  --output-dir "$output_dir" \
+  --candidate-sha "$expected_sha" \
+  --frozen-input-manifest "$frozen_input_manifest" \
+  --output "$output_dir/p0_combined_acceptance_report.json" \
+  --markdown-output "$output_dir/p0_combined_acceptance_report.md" \
+  >"$output_dir/combined_summary.log" 2>&1
+summary_rc=$?
+set -e
+
 echo "COMBINED_CANDIDATE_SHA=$expected_sha"
 echo "SHA_GATE=PASS"
 echo "WORKTREE_GATE=PASS"
@@ -88,6 +99,7 @@ echo "RUNTIME_ISOLATION_GATE=PASS"
 echo "INPUT_PREFLIGHT=PASS"
 echo "SYNTHETIC_72H_RC=$synthetic_rc"
 echo "COMBINED_MATRIX_RC=$matrix_rc"
+echo "COMBINED_SUMMARY_RC=$summary_rc"
 echo "ALGORITHM_CPP_CHANGED=NO"
 echo "CARGO_THRESHOLDS_CHANGED=NO"
 echo "YAW_ALGORITHM_CHANGED=NO"
@@ -98,4 +110,4 @@ echo "ONLY_VALIDATION_REPORTING_CHANGED=YES"
 echo "CARGO_V6_PRODUCT_TAKEOVER=NOT_PERFORMED"
 echo "FIELD_READY=NO"
 
-[[ $synthetic_rc -eq 0 && $matrix_rc -eq 0 ]]
+[[ $synthetic_rc -eq 0 && $matrix_rc -eq 0 && $summary_rc -eq 0 ]]
