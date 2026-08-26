@@ -52,30 +52,42 @@ src/ndt_slam/scripts/validation/run_p0_combined_ubuntu_acceptance.sh \
   /absolute/path/to/大件.bag
 ```
 
-The harness creates `combined_four_bag_attempt.marker` before any replay and
-refuses a second attempt in the same output directory. A failing bag does not
-stop the other three. Development, tuning, or a Yaw OFF comparison is forbidden
-after the attempt begins.
+The outer gate runs, in order, before any bag can start:
+
+1. SHA + worktree + runtime-isolation gates (a running production
+   `ndt_slam_node` aborts the gate; it is never killed).
+2. Input preflight: every bag, oracle, V5 baseline trace, map tree and the yaw
+   reference are SHA-256 frozen into `frozen_acceptance_inputs.json` (candidate
+   SHA, input hashes, reference hash, map_frame_uuid, ROS/PCL/build env).
+3. The deterministic 72-hour authority soak (contract-level, no bag).
+4. The nested matrix: `catkin_make clean` (own `CLEAN_RC`), build, full package
+   gtests and `catkin_test_results` — each RC gated independently.
+
+Only after every build gate passes does the matrix atomically claim a SHA-level
+one-shot ledger (`server_runs/p0_combined_attempts/<sha>.attempt`) with `mkdir`
+and then replay the first bag. The same candidate SHA can never be attempted
+twice regardless of output directory. `combined_four_bag_attempt.marker` in the
+output directory is only a result copy, not the anti-replay authority. A failing
+bag does not stop the other three. Development, tuning, or a Yaw OFF comparison
+is forbidden after the attempt begins.
 
 The harness copies the immutable reference and records its SHA-256 beside the
-attempt marker. Service supervision code is present for review only: exit 75 is
-restartable, exit 78 is restart-prevented, and this gate never enables or starts
-the systemd unit.
-
-The nested matrix performs a clean package build, full package gtests and
-`catkin_test_results`, then runs all four bags. The outer gate additionally
-runs the deterministic 72-hour authority soak and records the frozen reference
-configuration used by every sandbox run.
+frozen input manifest. Service supervision code is present for review only:
+exit 75 is restartable, exit 78 is restart-prevented, and this gate never
+enables or starts the systemd unit.
 
 ## Separate result gates
 
 The final report must keep these decisions independent:
 
 ```text
+BUILD_GATE=
 CARGO_V6_SHADOW_IMPLEMENTATION_GATE=
 CARGO_V6_SHADOW_FUNCTION_GATE=
 CARGO_V6_SHADOW_RESULT=
-PRODUCT_AVOIDANCE_RESULT=
+REFERENCE_SLID_AFTER_FREEZE=
+WRONG_HISTORY_REFERENCE_BORROW=
+REACQUISITION_REFERENCE_AUTHORITY_LEAK=
 
 YAW_AUTHORITY_SINGLE_WRITER=
 FIXED_YAW_TRANSLATION_VALIDATED=
@@ -83,20 +95,28 @@ RAIL_POSE_FITNESS_VALIDATED=
 YAW_LOCALIZATION_GATE=
 
 SAFETY_LOCALIZATION_AUTHORITY_GATE=
-SAFETY_AVOIDANCE_GATE=
 MIXED_POSE_GENERATION_SAFETY_FRAME_COUNT=
 
 MAP_REFERENCE_GATE=
-MAP_OPS_GATE=
+SEVERE_OBSERVABILITY_MAP_COMMIT_COUNT=
+WRONG_REFERENCE_MAP_COMMIT_COUNT=
 LEGACY_SKEW_MAP_WRITE_ALLOWED=NO
-NONRECOVERABLE_RESTART_LOOP_COUNT=0
+MAP_OPS_GATE=
 
 RUNTIME_REGRESSION=
-COMBINED_FOUR_BAG_ATTEMPT_COUNT=1
+PRODUCT_AVOIDANCE_RESULT=
 AVOIDANCE_PRODUCT_GATE=
 EARLIEST_REMAINING_BLOCKER=
 FIELD_READY=NO
 ```
+
+`YAW_AUTHORITY_SINGLE_WRITER` is a combination of the static writer-contract
+GTest pass, the runtime `RAIL_AUTHORITY` mode and a non-empty reference
+identity — never the runtime mode string alone. `SEVERE_OBSERVABILITY_MAP_COMMIT_COUNT`
+and `WRONG_REFERENCE_MAP_COMMIT_COUNT` are conservative derivations from the
+runtime-status snapshot (the per-frame veto counter is not a snapshot field);
+their observed value must stay `0`. `NONRECOVERABLE_RESTART_LOOP_COUNT` is a
+service-supervision metric and is intentionally out of scope for bag acceptance.
 
 Required performance summaries are P50/P95/MAX for fixed-yaw solver, final
 rail-pose fitness and whole-frame time, plus target normal cache build, Rail
