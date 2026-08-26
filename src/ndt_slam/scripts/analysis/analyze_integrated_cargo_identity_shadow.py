@@ -231,6 +231,88 @@ def longest_oracle_correct_supported_sequence(
     return longest
 
 
+def analyze_prelift_reference(rows: list[dict[str, str]]) -> dict[str, Any]:
+    """Derive per-history prelift reference timelines and the three
+    reference-integrity error gates from the V6 group trace (not by string
+    matching).
+
+    REFERENCE_SLID_AFTER_FREEZE: once a (history, epoch) first reaches FROZEN,
+        its reference first/last stamp, baseline z and baseline source must
+        never change on any later FROZEN frame.
+    WRONG_HISTORY_REFERENCE_BORROW: a PRE_LOAD_FROZEN_BASELINE must belong to
+        a history that actually reached FROZEN.
+    REACQUISITION_REFERENCE_AUTHORITY_LEAK: an association-only reacquire must
+        not be the frame that first freezes the prelift reference.
+    """
+    timelines: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for row in sorted(rows, key=lambda value: number(value, "stamp")):
+        history = row.get("matched_history_id", "")
+        if history in ("", "0"):
+            continue
+        epoch = row.get("physical_cargo_epoch_id", "")
+        timelines.setdefault((history, epoch), []).append(row)
+
+    slid_count = 0
+    borrow_count = 0
+    reacquire_leak_count = 0
+    reference_timelines: list[dict[str, Any]] = []
+
+    for (history, epoch), timeline in timelines.items():
+        frozen_index = -1
+        first: dict[str, str] | None = None
+        for index, row in enumerate(timeline):
+            if row.get("prelift_state") == "FROZEN":
+                frozen_index = index
+                first = row
+                break
+        if first is None:
+            if any(
+                row.get("lift_baseline_source") == "PRE_LOAD_FROZEN_BASELINE"
+                for row in timeline
+            ):
+                borrow_count += 1
+            continue
+
+        first_stamp = first.get("prelift_reference_first_stamp", "")
+        last_stamp = first.get("prelift_reference_last_stamp", "")
+        baseline_z = first.get("baseline_z", "")
+        baseline_source = first.get("lift_baseline_source", "")
+
+        # Every FROZEN frame of this history must keep the identical reference.
+        frozen_frames = [
+            row for row in timeline if row.get("prelift_state") == "FROZEN"
+        ]
+        for row in frozen_frames:
+            if (
+                row.get("prelift_reference_first_stamp", "") != first_stamp
+                or row.get("prelift_reference_last_stamp", "") != last_stamp
+                or row.get("baseline_z", "") != baseline_z
+                or row.get("lift_baseline_source", "") != baseline_source
+            ):
+                slid_count += 1
+                break
+
+        if flag(first, "reacquired_vertical_valid"):
+            reacquire_leak_count += 1
+
+        reference_timelines.append({
+            "history_id": history,
+            "physical_cargo_epoch_id": epoch,
+            "prelift_state": first.get("prelift_state", ""),
+            "prelift_reference_first_stamp": first_stamp,
+            "prelift_reference_last_stamp": last_stamp,
+            "baseline_z": baseline_z,
+            "baseline_source": baseline_source,
+        })
+
+    return {
+        "reference_timelines": reference_timelines,
+        "reference_slid_after_freeze": slid_count,
+        "wrong_history_reference_borrow": borrow_count,
+        "reacquisition_reference_authority_leak": reacquire_leak_count,
+    }
+
+
 def analyze_group_trace(
     path: Path, oracle: dict[str, Any] | None,
     baseline_path: Path | None = None,
@@ -392,6 +474,42 @@ def analyze_group_trace(
         "RAW_RECOVERED_TO_ORACLE_RANGE": raw_recovered_to_oracle_range,
         "LONGEST_ORACLE_CORRECT_SUPPORTED_SEQUENCE":
             longest_supported_sequence,
+    })
+    # Pre-lift reference timeline spans the full trace (the FROZEN event
+    # happens before the Oracle lifted window), so derive it from all rows.
+    prelift = analyze_prelift_reference(rows)
+    timelines = prelift["reference_timelines"]
+    result.update({
+        "PRELIFT_REFERENCE_STATE":
+            ",".join(sorted({t["prelift_state"] for t in timelines}))
+            or "NONE",
+        "PRELIFT_REFERENCE_FIRST_STAMP":
+            ",".join(sorted({t["prelift_reference_first_stamp"]
+                             for t in timelines})) or "NONE",
+        "PRELIFT_REFERENCE_LAST_STAMP":
+            ",".join(sorted({t["prelift_reference_last_stamp"]
+                             for t in timelines})) or "NONE",
+        "PRELIFT_BASELINE_Z":
+            ",".join(sorted({t["baseline_z"] for t in timelines}))
+            or "NONE",
+        "PRELIFT_BASELINE_SOURCE":
+            ",".join(sorted({t["baseline_source"] for t in timelines}))
+            or "NONE",
+        "PHYSICAL_CARGO_EPOCH":
+            ",".join(sorted({t["physical_cargo_epoch_id"]
+                             for t in timelines})) or "NONE",
+        "REFERENCE_SLID_AFTER_FREEZE": prelift["reference_slid_after_freeze"],
+        "WRONG_HISTORY_REFERENCE_BORROW": prelift[
+            "wrong_history_reference_borrow"],
+        "REACQUISITION_REFERENCE_AUTHORITY_LEAK": prelift[
+            "reacquisition_reference_authority_leak"],
+        "LIFT_DELTA_MAX": max(
+            (number(row, "lift_delta") for row in true_rows),
+            default=math.nan),
+        "LIFT_THRESHOLD": max(
+            (number(row, "lift_threshold") for row in true_rows),
+            default=math.nan),
+        "LIFT_CONFIRM_COUNT": result["max_lift_confirm_count"],
     })
     return result
 
@@ -798,12 +916,22 @@ def analyze_runtime(path: Path) -> dict[str, float]:
 def render_markdown(summary: dict[str, Any]) -> str:
     """Render only the already-decided AnalysisResult; never reclassify."""
     lines = [
-        "# Cargo V5 SHADOW analysis",
+        "# Cargo V6 SHADOW analysis",
         "",
-        f"- `V5_STABLE_SHA={summary.get('V5_STABLE_SHA', '')}`",
-        f"- `V5_IMPLEMENTATION_GATE={summary['V5_IMPLEMENTATION_GATE']}`",
-        f"- `V5_FUNCTION_RESULT={summary['V5_FUNCTION_RESULT']}`",
-        f"- `V5_RUNTIME_REGRESSION={summary['V5_RUNTIME_REGRESSION']}`",
+        f"- `CARGO_V6_CANDIDATE_SHA={summary.get('CARGO_V6_CANDIDATE_SHA', '')}`",
+        f"- `CARGO_V6_SHADOW_IMPLEMENTATION_GATE="
+        f"{summary['CARGO_V6_SHADOW_IMPLEMENTATION_GATE']}`",
+        f"- `CARGO_V6_SHADOW_FUNCTION_GATE="
+        f"{summary['CARGO_V6_SHADOW_FUNCTION_GATE']}`",
+        f"- `CARGO_V6_SHADOW_RESULT={summary['CARGO_V6_SHADOW_RESULT']}`",
+        f"- `CARGO_V6_RUNTIME_REGRESSION="
+        f"{summary['CARGO_V6_RUNTIME_REGRESSION']}`",
+        f"- `REFERENCE_SLID_AFTER_FREEZE="
+        f"{summary['REFERENCE_SLID_AFTER_FREEZE']}`",
+        f"- `WRONG_HISTORY_REFERENCE_BORROW="
+        f"{summary['WRONG_HISTORY_REFERENCE_BORROW']}`",
+        f"- `REACQUISITION_REFERENCE_AUTHORITY_LEAK="
+        f"{summary['REACQUISITION_REFERENCE_AUTHORITY_LEAK']}`",
         f"- `EARLIEST_REMAINING_BLOCKER={summary['EARLIEST_REMAINING_BLOCKER']}`",
         "",
         "| Bag | Oracle | Identity | Vertical | Avoidance | EARLIEST_ROOT |",
@@ -917,11 +1045,6 @@ def main() -> int:
     summary = {
         "bags": reports,
         "errors": errors,
-        "V5_FIX_TARGET": (
-            "COMPONENT_VERTICAL_EVIDENCE_FRAGMENTATION+"
-            "TRANSIENT_HYPOTHESIS_FOOTPRINT_SHRINK"
-        ),
-        "ROI_AVAILABILITY_ROOT_CAUSE": "NOT_PROVEN",
         "ORACLE_STATUS": (
             "ORACLE_INCONCLUSIVE" if oracle_inconclusive else "CONCLUSIVE"
         ),
@@ -959,7 +1082,7 @@ def main() -> int:
         ),
         "PRODUCT_LOGIC_CHANGED": "NO",
         "PRODUCT_OUTPUT_AUTHORITY_CHANGED": "NO",
-        "CARGO_V5_PRODUCT_TAKEOVER": "NOT_YET",
+        "CARGO_V6_PRODUCT_TAKEOVER": "NOT_PERFORMED",
         "FIELD_READY": "NO",
     }
     summary["CONTINUITY_V2_BAG_CLASSIFICATIONS"] = {
@@ -986,8 +1109,8 @@ def main() -> int:
         report.get("runtime_regression", "BASELINE_COMPARISON_UNAVAILABLE")
         for report in reports
     ]
-    summary["V5_CANDIDATE_SHA"] = args.source_sha
-    summary["V5_RUNTIME_REGRESSION"] = (
+    summary["CARGO_V6_CANDIDATE_SHA"] = args.source_sha
+    summary["CARGO_V6_RUNTIME_REGRESSION"] = (
         "PASS" if len(runtime_values) == 4 and
         all(value == "PASS" for value in runtime_values) else "FAIL"
     )
@@ -996,25 +1119,59 @@ def main() -> int:
         report.get("continuity_v2", {}).get("wrong_low_validated", False)
         for report in reports
     )
-    summary["V5_IMPLEMENTATION_GATE"] = (
+    summary["CARGO_V6_SHADOW_IMPLEMENTATION_GATE"] = (
         "PASS" if len(reports) == 4 and not errors and not oracle_inconclusive
         and not unsafe_implementation
-        and summary["V5_RUNTIME_REGRESSION"] == "PASS" else "FAIL"
+        and summary["CARGO_V6_RUNTIME_REGRESSION"] == "PASS" else "FAIL"
     )
-    summary["V5_STABLE_SHA"] = (
-        args.source_sha if summary["V5_IMPLEMENTATION_GATE"] == "PASS"
-        else ""
+    summary["CARGO_V6_STABLE_SHA"] = (
+        args.source_sha
+        if summary["CARGO_V6_SHADOW_IMPLEMENTATION_GATE"] == "PASS" else ""
     )
     functional_values = (
         summary["CARGO_IDENTITY_CORRECTNESS"],
         summary["CARGO_VERTICAL_GEOMETRY_CORRECTNESS"],
         summary["AVOIDANCE_CARGO_SIDE_CORRECTNESS"],
     )
-    summary["V5_FUNCTION_RESULT"] = (
+    summary["CARGO_V6_SHADOW_FUNCTION_GATE"] = (
         "PASS" if all(value == "PASS" for value in functional_values)
         else "PARTIAL" if any(value == "PASS" for value in functional_values)
         else "FAIL"
     )
+    summary["CARGO_V6_SHADOW_RESULT"] = summary["INTEGRATED_SHADOW_VERDICT"]
+
+    def reference_gate(name: str) -> int:
+        return sum(
+            report.get("continuity_v2", {}).get(name, 0)
+            for report in reports
+        )
+
+    summary["REFERENCE_SLID_AFTER_FREEZE"] = reference_gate(
+        "REFERENCE_SLID_AFTER_FREEZE"
+    )
+    summary["WRONG_HISTORY_REFERENCE_BORROW"] = reference_gate(
+        "WRONG_HISTORY_REFERENCE_BORROW"
+    )
+    summary["REACQUISITION_REFERENCE_AUTHORITY_LEAK"] = reference_gate(
+        "REACQUISITION_REFERENCE_AUTHORITY_LEAK"
+    )
+    summary["PRELIFT_REFERENCE_BY_BAG"] = {
+        report["bag"]: {
+            key: report.get("continuity_v2", {}).get(key, "N/A")
+            for key in (
+                "PRELIFT_REFERENCE_STATE",
+                "PRELIFT_REFERENCE_FIRST_STAMP",
+                "PRELIFT_REFERENCE_LAST_STAMP",
+                "PRELIFT_BASELINE_Z",
+                "PRELIFT_BASELINE_SOURCE",
+                "PHYSICAL_CARGO_EPOCH",
+                "LIFT_DELTA_MAX",
+                "LIFT_THRESHOLD",
+                "LIFT_CONFIRM_COUNT",
+            )
+        }
+        for report in reports
+    }
     root_priority = (
         "WRONG_OWNER_AUTHORITY_IMPLEMENTATION_FAIL",
         "IDENTITY_LIFT_IMPLEMENTATION_FAIL",
@@ -1029,7 +1186,7 @@ def main() -> int:
     summary["EARLIEST_REMAINING_BLOCKER"] = next(
         (root for root in root_priority if root in bag_roots), "NONE"
     )
-    summary["CARGO_V5_HARD_STOP"] = "YES"
+    summary["CARGO_V6_HARD_STOP"] = "YES"
     rendered = json.dumps(summary, ensure_ascii=False, indent=2)
     print(rendered)
     if args.output:
