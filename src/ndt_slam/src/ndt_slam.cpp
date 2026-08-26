@@ -13311,13 +13311,16 @@ bool NdtSlamNode::restorePersistentRegistrationTarget() {
     if (result.rail_write_authorized) {
         if (!rail_yaw_authority_.valid()) {
             std::string reference_reason;
-            if (!rail_yaw_authority_.initialize(
-                    result.yaw_reference,
-                    YawAuthorityTransitionReason::LOAD_VERIFIED_SESSION,
-                    &reference_reason)) {
+            if (!validateRailYawReference(result.yaw_reference,
+                                          &reference_reason)) {
                 rail_map_write_authorized_ = false;
                 ROS_ERROR("[StartupMap] verified yaw reference rejected: %s",
                           reference_reason.c_str());
+            } else if (!rail_yaw_authority_.initialize(
+                    result.yaw_reference,
+                    YawAuthorityTransitionReason::LOAD_VERIFIED_SESSION)) {
+                rail_map_write_authorized_ = false;
+                ROS_ERROR("[StartupMap] yaw authority initialization failed");
             }
         } else if (rail_yaw_authority_.reference().reference_hash !=
                    result.yaw_reference.reference_hash) {
