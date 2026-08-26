@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "ndt_slam/pose_authority_identity.hpp"
+
 namespace ndt_slam {
 
 // Ordered by neither confidence nor fallback priority. Use
@@ -148,6 +150,7 @@ struct CargoBottomObservation {
     bool track_valid = false;
     std::uint64_t track_id = 0;
     double stamp_sec = 0.0;
+    TemporalEvidenceAuthority pose_authority;
 
     // transform_stamp_sec is deliberately explicit: the fusion rejects a pose
     // that is not time-aligned with points instead of silently creating a motion
@@ -206,6 +209,7 @@ struct CargoBottomResult {
     // Timestamp of the physical height evidence. For RECENT_STABLE and a held
     // large-jump transition this remains the stable sample timestamp.
     double evidence_stamp_sec = 0.0;
+    TemporalEvidenceAuthority pose_authority;
     CargoBottomSource source = CargoBottomSource::INVALID;
     std::string source_name = "INVALID";
     std::string reason = "not_initialized";
@@ -253,6 +257,7 @@ private:
         bool valid = false;
         std::uint64_t track_id = 0;
         double stamp_sec = 0.0;
+        TemporalEvidenceAuthority pose_authority;
         CargoBottomSource original_source = CargoBottomSource::INVALID;
         float bottom_z_base = 0.0F;
         float top_z_base = 0.0F;
@@ -279,6 +284,7 @@ private:
         float uncertainty = 1.0F;
         float confidence = 0.0F;
         double age_sec = 0.0;
+        TemporalEvidenceAuthority pose_authority;
         Eigen::Vector2f memory_center_base = Eigen::Vector2f::Zero();
         Eigen::Vector2f memory_size_xy = Eigen::Vector2f::Zero();
     };
@@ -286,6 +292,7 @@ private:
     CargoBottomFusionConfig config_;
     bool has_track_ = false;
     std::uint64_t track_id_ = 0;
+    TemporalEvidenceAuthority track_pose_authority_;
     double last_stamp_sec_ = 0.0;
     double newest_points_stamp_sec_ = 0.0;
     std::deque<AccumulatedFrame> accumulated_frames_;

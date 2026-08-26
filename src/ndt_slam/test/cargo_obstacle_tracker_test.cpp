@@ -15,6 +15,14 @@ CargoObstacleObservation hazard(
   observation.conservative_clearance_m = 0.30F;
   observation.point_count = 30U;
   observation.warning_code = code;
+  PoseAuthorityIdentity identity;
+  identity.map_rebuild_generation = 1U;
+  identity.keyframe_pose_version = 2U;
+  identity.yaw_authority_generation = 3U;
+  identity.map_frame_uuid = "map-frame";
+  identity.yaw_reference_hash = "yaw-reference";
+  identity.target_snapshot_id = 4U;
+  observation.pose_authority = bindTemporalEvidenceAuthority(identity, 1.0);
   return observation;
 }
 
@@ -47,6 +55,28 @@ CargoObstacleTrackerConfig ordinaryHazardConfig() {
   config.require_static_cargo_for_warning = false;
   config.require_far_field_history_for_warnings = false;
   return config;
+}
+
+TEST(CargoObstacleTracker,
+     AmbiguousTemporalHoldPreservesProducingPoseAuthority) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  CargoObstacleObservation first = hazard(0U, -0.4F, 0.0F);
+  CargoObstacleObservation second = hazard(1U, 0.4F, 0.0F);
+  first.pose_authority.source_stamp_sec = 1.0;
+  second.pose_authority.source_stamp_sec = 1.0;
+  tracker.update(1.0, {first, second});
+  CargoObstacleObservation ambiguous_a = hazard(2U, 0.0F, 0.0F);
+  CargoObstacleObservation ambiguous_b = hazard(3U, 0.0F, 0.0F);
+  ambiguous_a.pose_authority.pose_identity.keyframe_pose_version = 9U;
+  ambiguous_b.pose_authority.pose_identity.keyframe_pose_version = 9U;
+  ambiguous_a.pose_authority.source_stamp_sec = 1.2;
+  ambiguous_b.pose_authority.source_stamp_sec = 1.2;
+  const CargoObstacleTrackerDecision decision = tracker.update(
+      1.2, {ambiguous_a, ambiguous_b});
+  ASSERT_TRUE(decision.selected_pose_authority.valid);
+  EXPECT_EQ(
+      decision.selected_pose_authority.pose_identity.keyframe_pose_version,
+      2U);
 }
 
 TEST(CargoObstacleTracker, DifferentWinnerOrderKeepsIndependentIdentity) {

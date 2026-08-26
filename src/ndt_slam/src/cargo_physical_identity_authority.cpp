@@ -112,6 +112,17 @@ double medianAbsoluteDeviation(const std::vector<double>& values,
   return median(std::move(deviations));
 }
 
+double liftSignificanceThreshold(
+    const CargoPhysicalIdentityConfig& config,
+    double baseline_uncertainty_m,
+    double current_uncertainty_m) {
+  return std::max(
+      config.minimum_significant_change_m,
+      config.significance_sigma * std::hypot(
+          std::max(0.0, baseline_uncertainty_m),
+          std::max(0.0, current_uncertainty_m)));
+}
+
 double quantile(std::vector<double> values, double probability) {
   std::sort(values.begin(), values.end());
   if (values.size() == 1U) return values.front();
@@ -1246,9 +1257,12 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
               z_values.begin(), z_values.end());
           const double spread = *extrema.second - *extrema.first;
           const double departure = z_values.back() - z_values.front();
+          const double departure_significance = liftSignificanceThreshold(
+              config_,
+              history->earliest_prelift_samples.front().uncertainty_m,
+              history->earliest_prelift_samples.back().uncertainty_m);
           const bool monotonic_departure = nondecreasing &&
-              departure > std::max(maximum_uncertainty,
-                                   robust_dispersion + kEpsilon);
+              departure > departure_significance + kEpsilon;
           if (spread <= compatibility && !monotonic_departure) {
             history->prelift_state = CargoPreLiftReferenceState::FROZEN;
             history->prelift_reference_frozen = true;
@@ -1313,11 +1327,9 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       history->validation_stamp_sec = 0.0;
     }
     if (!history->baseline_frozen) continue;
-    const double threshold = std::max(
-        config_.minimum_significant_change_m,
-        config_.significance_sigma * std::hypot(
-            history->baseline_uncertainty_m,
-            group.descriptor.vertical_uncertainty_m));
+    const double threshold = liftSignificanceThreshold(
+        config_, history->baseline_uncertainty_m,
+        group.descriptor.vertical_uncertainty_m);
     const double delta = group.descriptor.physical_vertical_z -
         history->baseline_z95;
     const bool evidence_advanced = group.descriptor.stamp_sec >

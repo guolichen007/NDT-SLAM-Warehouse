@@ -130,8 +130,9 @@ TEST(FrameAuthorityContextTest,
   context.pose_identity.yaw_authority_generation = 2U;
   context.pose_identity.target_snapshot_id = 3U;
   context.localization_health.safety_localization_authorized = false;
-  EXPECT_FALSE(safetyFrameAuthorityMatches(
-      context, context.pose_identity, context.pose_identity));
+  const TemporalEvidenceAuthority evidence =
+      bindTemporalEvidenceAuthority(context.pose_identity, 1.0);
+  EXPECT_FALSE(safetyFrameAuthorityMatches(context, evidence, evidence));
 }
 
 TEST(FrameAuthorityContextTest,
@@ -145,12 +146,53 @@ TEST(FrameAuthorityContextTest,
   context.pose_identity.yaw_reference_hash = "reference-hash";
   context.pose_identity.target_snapshot_id = 4U;
   context.localization_health.safety_localization_authorized = true;
-  PoseAuthorityIdentity obstacle = context.pose_identity;
+  TemporalEvidenceAuthority cargo =
+      bindTemporalEvidenceAuthority(context.pose_identity, 1.0);
+  TemporalEvidenceAuthority obstacle = cargo;
   EXPECT_TRUE(safetyFrameAuthorityMatches(
-      context, context.pose_identity, obstacle));
-  ++obstacle.keyframe_pose_version;
+      context, cargo, obstacle));
+  ++obstacle.pose_identity.keyframe_pose_version;
   EXPECT_FALSE(safetyFrameAuthorityMatches(
-      context, context.pose_identity, obstacle));
+      context, cargo, obstacle));
+}
+
+TEST(FrameAuthorityContextTest,
+     SevereObservabilityVetoesMapMutationWithoutRejectingOdom) {
+  FrameAuthorityContext context;
+  context.rail_authority_mode = true;
+  context.pose_identity.map_frame_uuid = "map-frame-1";
+  context.pose_identity.yaw_reference_hash = "reference-hash";
+  context.pose_identity.yaw_authority_generation = 2U;
+  context.pose_identity.target_snapshot_id = 3U;
+  context.localization_health.odom_continuity_valid = true;
+  context.localization_health.map_mutation_authorized = true;
+  context.observability_map_mutation_authorized = false;
+  EXPECT_TRUE(context.localization_health.odom_continuity_valid);
+  EXPECT_FALSE(context.mapMutationAuthorized());
+}
+
+TEST(FrameAuthorityContextTest,
+     TemporalEvidenceHoldRetainsProducerAndCannotRelabelHistoricalStamp) {
+  PoseAuthorityIdentity first_identity;
+  first_identity.keyframe_pose_version = 10U;
+  const TemporalEvidenceAuthority fresh =
+      advanceTemporalEvidenceAuthority(
+          TemporalEvidenceAuthority{}, 1.0, first_identity, 1.0);
+  ASSERT_TRUE(fresh.valid);
+  PoseAuthorityIdentity next_identity = first_identity;
+  next_identity.keyframe_pose_version = 11U;
+  const TemporalEvidenceAuthority held =
+      advanceTemporalEvidenceAuthority(fresh, 1.0, next_identity, 1.1);
+  ASSERT_TRUE(held.valid);
+  EXPECT_EQ(held.pose_identity.keyframe_pose_version, 10U);
+  const TemporalEvidenceAuthority unbound_historical =
+      advanceTemporalEvidenceAuthority(
+          TemporalEvidenceAuthority{}, 1.0, next_identity, 1.1);
+  EXPECT_FALSE(unbound_historical.valid);
+  const TemporalEvidenceAuthority new_evidence =
+      advanceTemporalEvidenceAuthority(fresh, 1.1, next_identity, 1.1);
+  ASSERT_TRUE(new_evidence.valid);
+  EXPECT_EQ(new_evidence.pose_identity.keyframe_pose_version, 11U);
 }
 
 TEST(RailLocalizationHealthTest,

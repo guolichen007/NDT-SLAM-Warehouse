@@ -552,6 +552,7 @@ CargoBottomFusion::CargoBottomFusion(const CargoBottomFusionConfig& config)
 void CargoBottomFusion::reset() {
     has_track_ = false;
     track_id_ = 0;
+    track_pose_authority_ = TemporalEvidenceAuthority{};
     last_stamp_sec_ = 0.0;
     newest_points_stamp_sec_ = 0.0;
     accumulated_frames_.clear();
@@ -684,6 +685,7 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
     result.track_id = observation.track_id;
     result.stamp_sec = observation.stamp_sec;
     result.evidence_stamp_sec = observation.stamp_sec;
+    result.pose_authority = observation.pose_authority;
     std::string invalid_config_field;
     if (!validConfig(config_, &invalid_config_field)) {
         reset();
@@ -747,6 +749,18 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
         resetTemporalState();
         has_track_ = true;
         track_id_ = observation.track_id;
+        track_pose_authority_ = observation.pose_authority;
+    } else if (!sameTemporalEvidenceAuthority(
+                   track_pose_authority_, observation.pose_authority) &&
+               (!observation.points_base.empty() ||
+                observation.current_top_valid)) {
+        resetTemporalState();
+        track_pose_authority_ = observation.pose_authority;
+        last_stamp_sec_ = observation.stamp_sec;
+        result.reason = "pose_authority_changed_reset";
+        last_result_ = result;
+        last_result_available_ = true;
+        return result;
     } else if (observation.stamp_sec + config_.backwards_tolerance_sec <
                last_stamp_sec_) {
         resetTemporalState();
@@ -880,6 +894,7 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
         selected.top_z_base = stats.z95;
         selected.uncertainty = candidateUncertainty(stats, uncertainty_min, config_);
         selected.confidence = candidateConfidence(stats, confidence_base);
+        selected.pose_authority = observation.pose_authority;
     };
     selectFromPoints(CargoBottomSource::POINTS, points, result.points_stats,
                      config_.points_uncertainty_min,
@@ -887,6 +902,10 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
                      uses_current_frame_points
                          ? "current_points_supported"
                          : "accumulated_points_supported");
+    if (selected.source == CargoBottomSource::POINTS &&
+        !uses_current_frame_points) {
+        selected.pose_authority = track_pose_authority_;
+    }
     auto selectFromHeightPrior = [&](CargoBottomSource source,
                                      const CargoVerticalStats& stats,
                                      float uncertainty,
@@ -905,6 +924,7 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
         selected.top_z_base = stats.z95;
         selected.uncertainty = uncertainty;
         selected.confidence = confidence;
+        selected.pose_authority = observation.pose_authority;
     };
     selectFromHeightPrior(CargoBottomSource::MAP_DIFF, result.map_diff_stats,
                           config_.map_diff_uncertainty_min,
@@ -969,6 +989,7 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
                 stable_.confidence, config_.recent_stable_confidence_base) * decay;
             selected.age_sec = age;
             result.evidence_stamp_sec = stable_.stamp_sec;
+            selected.pose_authority = stable_.pose_authority;
             selected.memory_center_base = observation.track_center_valid
                 ? observation.track_center_base.head<2>()
                 : stable_.center_base;
@@ -1089,6 +1110,7 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
                     selected.age_sec =
                         observation.stamp_sec - stable_.stamp_sec;
                     result.evidence_stamp_sec = stable_.stamp_sec;
+                    selected.pose_authority = stable_.pose_authority;
                 } else {
                     selected.stats = CargoVerticalStats{};
                     selected.confidence = 0.0F;
@@ -1131,6 +1153,7 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
     result.uncertainty = selected.uncertainty;
     result.confidence = selected.confidence;
     result.source_age_sec = selected.age_sec;
+    result.pose_authority = selected.pose_authority;
     result.height = selected.top_z_base - selected.bottom_z_base;
     result.height_valid = std::isfinite(result.height) && result.height > 0.0F;
     result.geometry_valid = result.geometry.valid;
@@ -1141,6 +1164,7 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
         stable_.valid = true;
         stable_.track_id = observation.track_id;
         stable_.stamp_sec = observation.stamp_sec;
+        stable_.pose_authority = observation.pose_authority;
         stable_.original_source = selected.source;
         stable_.bottom_z_base = selected.bottom_z_base;
         stable_.top_z_base = selected.top_z_base;

@@ -126,6 +126,7 @@ def test_map_commit_is_fenced_by_pose_yaw_reference_and_target_identity():
         "job.yaw_reference_hash",
         "job.target_snapshot_id",
         "job.localization_map_mutation_authorized",
+        "job.observability_map_mutation_authorized",
     ):
         assert token in authority_check
     enqueue = _function_body(
@@ -134,6 +135,8 @@ def test_map_commit_is_fenced_by_pose_yaw_reference_and_target_identity():
         "void NdtSlamNode::mapCommitThread(",
     )
     assert "frame_context.mapMutationAuthorized()" in enqueue
+    assert "!frame_context.mapMutationAuthorized()" in enqueue
+    assert "frame_context.observability_map_mutation_authorized" in enqueue
     assert "frame_context.pose_identity" in enqueue
     worker = _function_body(
         NODE,
@@ -141,3 +144,15 @@ def test_map_commit_is_fenced_by_pose_yaw_reference_and_target_identity():
         "void NdtSlamNode::consumeMapCommitCompletion(",
     )
     assert worker.count("isMapCommitAuthorityCurrent(job)") >= 3
+
+
+def test_severe_observability_veto_reaches_actual_map_commit_chain():
+    assert (
+        "frame_authority_context.observability_map_mutation_authorized =\n"
+        "                !frame_severe_degeneracy"
+    ) in NODE
+    assert "severe_observability_map_mutation_veto" in NODE
+    allow_start = NODE.index("const bool allow_map_commit =")
+    allow_end = NODE.index("if (allow_map_commit)", allow_start)
+    allow_body = NODE[allow_start:allow_end]
+    assert "frame_authority_context.mapMutationAuthorized()" in allow_body

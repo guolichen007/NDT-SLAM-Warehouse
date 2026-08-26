@@ -7,6 +7,7 @@
 #include <string>
 
 #include "ndt_slam/cargo_config_validation.hpp"
+#include "ndt_slam/pose_authority_identity.hpp"
 
 namespace ndt_slam {
 
@@ -28,6 +29,8 @@ struct CargoSafetyTemporalInput {
   Eigen::Vector3f cluster_centroid = Eigen::Vector3f::Zero();
   float footprint_distance_m = 0.0F;
   float conservative_clearance_m = 0.0F;
+  TemporalEvidenceAuthority cargo_pose_authority;
+  TemporalEvidenceAuthority obstacle_pose_authority;
 };
 
 struct CargoSafetyTemporalDecision {
@@ -39,6 +42,8 @@ struct CargoSafetyTemporalDecision {
   std::uint16_t candidate_code = 0U;
   std::uint16_t confirmed_code = 0U;
   int evidence_count = 0;
+  TemporalEvidenceAuthority cargo_pose_authority;
+  TemporalEvidenceAuthority obstacle_pose_authority;
   std::string reason = "not_evaluated";
 };
 
@@ -79,9 +84,13 @@ class CargoSafetyTemporalFilter {
   Eigen::Vector3f candidate_centroid_ = Eigen::Vector3f::Zero();
   float candidate_distance_m_ = 0.0F;
   float candidate_clearance_m_ = 0.0F;
+  TemporalEvidenceAuthority candidate_cargo_pose_authority_;
+  TemporalEvidenceAuthority candidate_obstacle_pose_authority_;
 
   bool confirmed_valid_ = false;
   std::uint16_t confirmed_code_ = 0U;
+  TemporalEvidenceAuthority confirmed_cargo_pose_authority_;
+  TemporalEvidenceAuthority confirmed_obstacle_pose_authority_;
 
   CargoSafetyTemporalDecision currentDecision(
       const std::string& reason) const;

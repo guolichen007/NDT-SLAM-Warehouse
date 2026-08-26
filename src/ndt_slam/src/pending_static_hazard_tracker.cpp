@@ -104,6 +104,7 @@ void PendingStaticHazardTracker::reset() {
   far_field_confirmations_ = 0;
   far_field_history_valid_ = false;
   matched_cell_keys_.clear();
+  pose_authority_ = TemporalEvidenceAuthority{};
 }
 
 PendingStaticHazardDecision PendingStaticHazardTracker::update(
@@ -124,7 +125,8 @@ PendingStaticHazardDecision PendingStaticHazardTracker::update(
       observation.map_generation != 0U &&
       observation.authority_valid && observation.query_valid &&
       observation.query_bounded && decision.hazard_observed &&
-      !observation.matched_cell_keys.empty();
+      !observation.matched_cell_keys.empty() &&
+      observation.pose_authority.valid;
   if (!evidence_valid) {
     reset();
     decision.reason = !observation.authority_valid
@@ -150,6 +152,8 @@ PendingStaticHazardDecision PendingStaticHazardTracker::update(
   const bool same_context = active_ &&
       observation.cargo_lifecycle_id == cargo_lifecycle_id_ &&
       observation.map_generation == map_generation_ &&
+      sameTemporalEvidenceAuthority(
+          observation.pose_authority, pose_authority_) &&
       observation.stamp_sec - last_stamp_sec_ <=
           config_.maximum_observation_gap_sec + kStampEpsilonSec &&
       overlap >= config_.minimum_cell_overlap;
@@ -161,6 +165,7 @@ PendingStaticHazardDecision PendingStaticHazardTracker::update(
     decision.confirmations = confirmations_;
     decision.far_field_confirmations = far_field_confirmations_;
     decision.far_field_history_valid = far_field_history_valid_;
+    decision.pose_authority = pose_authority_;
     decision.authorized =
         confirmations_ >= config_.minimum_confirmations;
     decision.reason = decision.authorized
@@ -179,6 +184,7 @@ PendingStaticHazardDecision PendingStaticHazardTracker::update(
     far_field_confirmations_ =
         observation.warning_code == kNear5m ? 1 : 0;
     far_field_history_valid_ = false;
+    pose_authority_ = observation.pose_authority;
   } else {
     ++confirmations_;
     if (observation.warning_code == kNear5m) {
@@ -190,12 +196,14 @@ PendingStaticHazardDecision PendingStaticHazardTracker::update(
   }
   last_stamp_sec_ = observation.stamp_sec;
   matched_cell_keys_ = std::move(observation.matched_cell_keys);
+  pose_authority_ = observation.pose_authority;
 
   decision.warning_code = observation.warning_code;
   decision.obstacle_id = obstacle_id_;
   decision.confirmations = confirmations_;
   decision.far_field_confirmations = far_field_confirmations_;
   decision.far_field_history_valid = far_field_history_valid_;
+  decision.pose_authority = pose_authority_;
   decision.authorized =
       confirmations_ >= config_.minimum_confirmations;
   decision.reason = decision.authorized

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "ndt_slam/cargo_config_validation.hpp"
+#include "ndt_slam/pose_authority_identity.hpp"
 
 namespace ndt_slam {
 
@@ -105,6 +106,7 @@ struct CargoObstacleObservation {
   bool source_validated = true;
   float validation_shell_m = 0.0F;
   ExternalProvenance provenance = ExternalProvenance::NONE;
+  TemporalEvidenceAuthority pose_authority;
   // Reserved interface: this branch provides no baseline producer, therefore
   // runtime observations leave this false and 17/18 use live far history.
   bool certified_static_provenance = false;
@@ -161,6 +163,7 @@ struct CargoObstacleTrack {
   float last_association_cost = 0.0F;
   bool association_ambiguous = false;
   std::string association_reset_reason;
+  TemporalEvidenceAuthority pose_authority;
   bool current_source_validated = false;
   bool current_warning_eligible = false;
   std::size_t current_source_index = 0U;
@@ -201,6 +204,7 @@ struct CargoObstacleTrackerDecision {
   std::uint64_t association_reset_count = 0U;
   std::uint64_t ambiguous_association_count = 0U;
   Eigen::Vector3f selected_track_velocity = Eigen::Vector3f::Zero();
+  TemporalEvidenceAuthority selected_pose_authority;
   std::string reason = "not_evaluated";
 };
 

@@ -60,8 +60,12 @@ void CargoSafetyTemporalFilter::reset() {
   candidate_centroid_.setZero();
   candidate_distance_m_ = 0.0F;
   candidate_clearance_m_ = 0.0F;
+  candidate_cargo_pose_authority_ = TemporalEvidenceAuthority{};
+  candidate_obstacle_pose_authority_ = TemporalEvidenceAuthority{};
   confirmed_valid_ = false;
   confirmed_code_ = 0U;
+  confirmed_cargo_pose_authority_ = TemporalEvidenceAuthority{};
+  confirmed_obstacle_pose_authority_ = TemporalEvidenceAuthority{};
 }
 
 CargoSafetyTemporalDecision CargoSafetyTemporalFilter::currentDecision(
@@ -73,6 +77,12 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::currentDecision(
   decision.candidate_code = candidate_valid_ ? candidate_code_ : 0U;
   decision.confirmed_code = confirmed_valid_ ? confirmed_code_ : 0U;
   decision.evidence_count = candidate_count_;
+  decision.cargo_pose_authority = confirmed_valid_
+      ? confirmed_cargo_pose_authority_
+      : candidate_cargo_pose_authority_;
+  decision.obstacle_pose_authority = confirmed_valid_
+      ? confirmed_obstacle_pose_authority_
+      : candidate_obstacle_pose_authority_;
   decision.reason = reason;
   return decision;
 }
@@ -86,6 +96,8 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::pendingDecision(
   decision.candidate_code = candidate_valid_ ? candidate_code_ : 0U;
   decision.confirmed_code = confirmed_valid_ ? confirmed_code_ : 0U;
   decision.evidence_count = candidate_count_;
+  decision.cargo_pose_authority = candidate_cargo_pose_authority_;
+  decision.obstacle_pose_authority = candidate_obstacle_pose_authority_;
   decision.reason = reason;
   return decision;
 }
@@ -98,6 +110,15 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::update(
     candidate_valid_ = false;
     candidate_count_ = 0;
     return pendingDecision("invalid_raw_evidence");
+  }
+  if (!input.cargo_pose_authority.valid ||
+      !input.obstacle_pose_authority.valid ||
+      !sameTemporalEvidenceAuthority(
+          input.cargo_pose_authority, input.obstacle_pose_authority)) {
+    candidate_valid_ = false;
+    candidate_count_ = 0;
+    confirmed_valid_ = false;
+    return pendingDecision("pose_authority_mismatch");
   }
 
   if (has_source_stamp_ &&
@@ -130,7 +151,12 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::update(
   }
 
   const bool same_candidate = candidate_valid_ &&
-      candidate_code_ == input.raw_code;
+      candidate_code_ == input.raw_code &&
+      sameTemporalEvidenceAuthority(
+          candidate_cargo_pose_authority_, input.cargo_pose_authority) &&
+      sameTemporalEvidenceAuthority(
+          candidate_obstacle_pose_authority_,
+          input.obstacle_pose_authority);
   const bool gap_continuous = same_candidate &&
       input.stamp_sec - candidate_stamp_sec_ <=
           config_.maximum_evidence_gap_sec + kStampEpsilonSec;
@@ -166,6 +192,8 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::update(
     candidate_count_ = 1;
   }
   candidate_stamp_sec_ = input.stamp_sec;
+  candidate_cargo_pose_authority_ = input.cargo_pose_authority;
+  candidate_obstacle_pose_authority_ = input.obstacle_pose_authority;
   if (hazard) {
     candidate_centroid_ = input.cluster_centroid;
     candidate_distance_m_ = input.footprint_distance_m;
@@ -179,6 +207,8 @@ CargoSafetyTemporalDecision CargoSafetyTemporalFilter::update(
         confirmed_code_ != input.raw_code;
     confirmed_valid_ = true;
     confirmed_code_ = input.raw_code;
+    confirmed_cargo_pose_authority_ = input.cargo_pose_authority;
+    confirmed_obstacle_pose_authority_ = input.obstacle_pose_authority;
     CargoSafetyTemporalDecision decision =
         currentDecision(hazard
             ? "hazard_spatiotemporally_confirmed"

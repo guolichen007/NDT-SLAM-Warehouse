@@ -5,6 +5,17 @@
 namespace ndt_slam {
 namespace {
 
+TemporalEvidenceAuthority evidenceAuthority(double stamp) {
+  PoseAuthorityIdentity identity;
+  identity.map_rebuild_generation = 1U;
+  identity.keyframe_pose_version = 2U;
+  identity.yaw_authority_generation = 3U;
+  identity.map_frame_uuid = "map-frame";
+  identity.yaw_reference_hash = "yaw-reference";
+  identity.target_snapshot_id = 4U;
+  return bindTemporalEvidenceAuthority(identity, stamp);
+}
+
 CargoSafetyTemporalInput hazard(
     double stamp, float x, std::size_t points = 30U,
     std::uint16_t code = 17U) {
@@ -16,6 +27,8 @@ CargoSafetyTemporalInput hazard(
   input.cluster_centroid = Eigen::Vector3f(x, 1.0F, 1.0F);
   input.footprint_distance_m = 1.5F + x;
   input.conservative_clearance_m = 0.30F;
+  input.cargo_pose_authority = evidenceAuthority(stamp);
+  input.obstacle_pose_authority = evidenceAuthority(stamp);
   return input;
 }
 
@@ -24,6 +37,8 @@ CargoSafetyTemporalInput clear(double stamp) {
   input.stamp_sec = stamp;
   input.raw_valid = true;
   input.raw_code = 14U;
+  input.cargo_pose_authority = evidenceAuthority(stamp);
+  input.obstacle_pose_authority = evidenceAuthority(stamp);
   return input;
 }
 
@@ -61,6 +76,18 @@ TEST(CargoSafetyTemporalFilter, ThreeContinuousFreshClustersConfirmHazard) {
   EXPECT_TRUE(decision.stable);
   EXPECT_TRUE(decision.newly_confirmed);
   EXPECT_EQ(decision.code, 17U);
+}
+
+TEST(CargoSafetyTemporalFilter,
+     MixedPoseGenerationCannotConfirmOrHoldSafetyDecision) {
+  CargoSafetyTemporalFilter filter;
+  auto first = clear(1.0);
+  EXPECT_FALSE(filter.update(first).stable);
+  auto mixed = clear(1.1);
+  ++mixed.obstacle_pose_authority.pose_identity.keyframe_pose_version;
+  const CargoSafetyTemporalDecision decision = filter.update(mixed);
+  EXPECT_FALSE(decision.stable);
+  EXPECT_EQ(decision.reason, "pose_authority_mismatch");
 }
 
 TEST(CargoSafetyTemporalFilter, RepeatedStampDoesNotAdvanceEvidence) {

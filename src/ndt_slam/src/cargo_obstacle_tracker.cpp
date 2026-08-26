@@ -447,6 +447,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     for (std::size_t track_index = 0U;
          track_index < existing_track_count; ++track_index) {
       const CargoObstacleTrack& track = tracks_[track_index];
+      if (!sameTemporalEvidenceAuthority(
+              observation.pose_authority, track.pose_authority)) {
+        continue;
+      }
       const double gap_sec = stamp_sec - track.last_stamp_sec;
       if (gap_sec < -kStampEpsilonSec ||
           gap_sec > config_.maximum_observation_gap_sec +
@@ -649,6 +653,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
           observation.hazard_geometry_valid &&
           observation.warning_eligible &&
           warningCode(observation.warning_code);
+      track.pose_authority = observation.pose_authority;
       tracks_.push_back(track);
       continue;
     }
@@ -848,6 +853,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         observation.hazard_geometry_valid &&
         observation.warning_eligible &&
         warningCode(observation.warning_code);
+    track.pose_authority = observation.pose_authority;
   }
 
   decision.valid = true;
@@ -931,6 +937,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.selected_association_reset_reason =
         diagnostic->association_reset_reason;
     decision.selected_track_velocity = diagnostic->velocity_map;
+    decision.selected_pose_authority = diagnostic->pose_authority;
   }
   if (selected != nullptr) {
     decision.confirmed_hazard = true;

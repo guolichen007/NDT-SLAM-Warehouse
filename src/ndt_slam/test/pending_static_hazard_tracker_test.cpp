@@ -16,6 +16,15 @@ PendingStaticHazardObservation hazard(double stamp) {
   observation.hazard = true;
   observation.warning_code = 18;
   observation.matched_cell_keys = {10, 11, 12, 13};
+  PoseAuthorityIdentity identity;
+  identity.map_rebuild_generation = 3U;
+  identity.keyframe_pose_version = 2U;
+  identity.yaw_authority_generation = 1U;
+  identity.map_frame_uuid = "map-frame";
+  identity.yaw_reference_hash = "yaw-reference";
+  identity.target_snapshot_id = 4U;
+  observation.pose_authority =
+      bindTemporalEvidenceAuthority(identity, stamp);
   return observation;
 }
 

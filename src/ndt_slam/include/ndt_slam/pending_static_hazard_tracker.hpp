@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "ndt_slam/pose_authority_identity.hpp"
+
 namespace ndt_slam {
 
 struct PendingStaticHazardTrackerConfig {
@@ -22,6 +24,7 @@ struct PendingStaticHazardObservation {
   bool hazard = false;
   std::int32_t warning_code = 0;
   std::vector<std::int64_t> matched_cell_keys;
+  TemporalEvidenceAuthority pose_authority;
 };
 
 struct PendingStaticHazardDecision {
@@ -35,6 +38,7 @@ struct PendingStaticHazardDecision {
   bool far_field_history_valid = false;
   float cell_overlap = 0.0F;
   std::string reason = "not_evaluated";
+  TemporalEvidenceAuthority pose_authority;
 };
 
 // Confirms that a pending-cargo static hazard belongs to one stable map
@@ -65,6 +69,7 @@ class PendingStaticHazardTracker {
   int far_field_confirmations_ = 0;
   bool far_field_history_valid_ = false;
   std::vector<std::int64_t> matched_cell_keys_;
+  TemporalEvidenceAuthority pose_authority_;
 };
 
 }  // namespace ndt_slam

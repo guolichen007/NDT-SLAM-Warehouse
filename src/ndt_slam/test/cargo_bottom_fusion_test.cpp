@@ -37,6 +37,14 @@ CargoBottomObservation observation(std::uint64_t track,
     obs.footprint_valid = true;
     obs.footprint_center_base = Eigen::Vector2f::Zero();
     obs.footprint_size_xy = Eigen::Vector2f(1.2F, 1.0F);
+    PoseAuthorityIdentity identity;
+    identity.map_rebuild_generation = 1U;
+    identity.keyframe_pose_version = 1U;
+    identity.yaw_authority_generation = 1U;
+    identity.map_frame_uuid = "map-frame";
+    identity.yaw_reference_hash = "yaw-reference";
+    identity.target_snapshot_id = 1U;
+    obs.pose_authority = bindTemporalEvidenceAuthority(identity, stamp);
     return obs;
 }
 
@@ -100,6 +108,22 @@ TEST(CargoBottomFusion, HeldPredictionDoesNotRefreshTopEvidence) {
     const CargoBottomResult expired =
         fusion.update(observation(44U, 1.6, {}));
     EXPECT_FALSE(expired.valid);
+}
+
+TEST(CargoBottomFusion, HeldBottomPreservesProducingPoseAuthority) {
+    CargoBottomFusion fusion;
+    CargoBottomObservation initial =
+        supportedTopObservation(144U, 1.0, 2.4F, 0.6F);
+    initial.pose_authority.pose_identity.keyframe_pose_version = 10U;
+    const CargoBottomResult fresh = fusion.update(initial);
+    ASSERT_TRUE(fresh.valid);
+    CargoBottomObservation held_input = observation(144U, 1.3, {});
+    held_input.pose_authority.pose_identity.keyframe_pose_version = 11U;
+    const CargoBottomResult held = fusion.update(held_input);
+    ASSERT_TRUE(held.valid) << held.reason;
+    EXPECT_EQ(held.source, CargoBottomSource::RECENT_STABLE);
+    EXPECT_EQ(held.pose_authority.pose_identity.keyframe_pose_version, 10U);
+    EXPECT_DOUBLE_EQ(held.pose_authority.source_stamp_sec, 1.0);
 }
 
 TEST(CargoBottomFusion, RobustPercentileRejectsSingleLowOutlier) {

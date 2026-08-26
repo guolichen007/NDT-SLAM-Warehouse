@@ -1047,6 +1047,7 @@ bool NdtSlamNode::isMapCommitAuthorityCurrent(
     }
     if (!job.rail_authority_job) return true;
     return job.localization_map_mutation_authorized &&
+        job.observability_map_mutation_authorized &&
         yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY &&
         job.keyframe_pose_version ==
             keyframe_pose_version_.load(std::memory_order_acquire) &&
@@ -1065,6 +1066,11 @@ void NdtSlamNode::enqueueMapCommitJob(
     const FrameAuthorityContext& frame_context,
     const ros::Time& stamp) {
     if (!cloud || cloud->empty()) {
+        map_commit_dropped_.fetch_add(1U, std::memory_order_relaxed);
+        return;
+    }
+    if (yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY &&
+        !frame_context.mapMutationAuthorized()) {
         map_commit_dropped_.fetch_add(1U, std::memory_order_relaxed);
         return;
     }
@@ -1088,6 +1094,8 @@ void NdtSlamNode::enqueueMapCommitJob(
     job.localization_map_mutation_authorized =
         !job.rail_authority_job ||
         frame_context.mapMutationAuthorized();
+    job.observability_map_mutation_authorized =
+        frame_context.observability_map_mutation_authorized;
     job.stamp = stamp;
     job.pose = frame_context.runtime_pose;
     job.cloud = cloud;
@@ -4299,6 +4307,7 @@ void NdtSlamNode::resetCargoForHookState(
     cargo_physical_motion_estimator_.reset();
     cargo_physical_motion_result_ = CargoPhysicalMotionResult{};
     pending_cargo_envelope_ = PendingCargoEnvelope{};
+    pending_cargo_envelope_pose_authority_ = TemporalEvidenceAuthority{};
     effective_cargo_envelope_ = EffectiveCargoEnvelope{};
     pending_cargo_self_evidence_ = PendingCargoSelfEvidence{};
     pending_cargo_shape_continuity_ = PendingCargoShapeContinuity{};
@@ -7315,6 +7324,8 @@ void NdtSlamNode::processCloudThread() {
                 std::move(pose_authority_identity);
             frame_authority_context.rail_authority_mode =
                 yaw_authority_mode_ == YawAuthorityMode::RAIL_AUTHORITY;
+            frame_authority_context.observability_map_mutation_authorized =
+                !frame_severe_degeneracy;
             frame_authority_context.localization_health =
                 frame_authority_context.rail_authority_mode
                     ? localization_authority_health_
@@ -7492,7 +7503,7 @@ void NdtSlamNode::processCloudThread() {
                 motion_gate_allows_commit && relocalization_commit_ok &&
                 hook_commit_ok &&
                 (yaw_authority_mode_ != YawAuthorityMode::RAIL_AUTHORITY ||
-                 localization_authority_health_.map_mutation_authorized);
+                 frame_authority_context.mapMutationAuthorized());
             diag_map_commit_allowed = allow_map_commit;
             diag_motion_gate_blocked =
                 commit_accept_ok && commit_fitness_ok &&
@@ -7507,6 +7518,11 @@ void NdtSlamNode::processCloudThread() {
                 diag_map_commit_reason = "relocalization_guard";
             } else if (!hook_commit_ok) {
                 diag_map_commit_reason = "hook_load_guard";
+            } else if (yaw_authority_mode_ ==
+                           YawAuthorityMode::RAIL_AUTHORITY &&
+                       frame_severe_degeneracy) {
+                diag_map_commit_reason =
+                    "severe_observability_map_mutation_veto";
             } else {
                 diag_map_commit_reason = "motion_gate_blocked";
             }
@@ -11860,6 +11876,7 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
     revealed_support_observer_.reset();
     revealed_support_observation_ = RevealedSupportObservation{};
     pending_cargo_envelope_ = PendingCargoEnvelope{};
+    pending_cargo_envelope_pose_authority_ = TemporalEvidenceAuthority{};
     pending_cargo_self_evidence_ = PendingCargoSelfEvidence{};
     cargo_origin_exclusion_active_ = false;
     cargo_swing_monitor_.reset();
@@ -16489,7 +16506,7 @@ void NdtSlamNode::rememberTrustedCargoPose(const ros::Time& stamp) {
 }
 
 RigidCargoGeometry NdtSlamNode::buildCurrentRigidCargoGeometryForPose(
-    const Sophus::SE3d& pose_map_base,
+    const FrameAuthorityContext& frame_context,
     const ros::Time& stamp) {
     LiveCargoPose live_pose = hook_lock_.live_pose;
     const bool current_association =
@@ -20922,10 +20939,11 @@ void NdtSlamNode::runPendingCargoAvoidance(
     const PendingCargoEnvelope& envelope,
     const HookLoadSnapshot& hook,
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
-    const Sophus::SE3d& pose_map_base,
+    const FrameAuthorityContext& frame_context,
     const ros::Time& stamp,
     const ros::Time& obstacle_cloud_stamp,
     double processing_age_sec) {
+    const Sophus::SE3d& pose_map_base = frame_context.runtime_pose;
     CargoAvoidanceFusionInput fusion_input;
     fusion_input.localization_valid =
         relocalization_pose_reliable_ && !tracking_lost_;
@@ -21372,6 +21390,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
                 continue;
             }
             CargoObstacleObservation observation;
+            observation.pose_authority = bindTemporalEvidenceAuthority(
+                frame_context.pose_identity, stamp.toSec());
             observation.source_index = evidence_index;
             observation.centroid_map = (
                 pose_map_base *
@@ -21511,6 +21531,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
                 continue;
             }
             CargoObstacleObservation observation;
+            observation.pose_authority = bindTemporalEvidenceAuthority(
+                frame_context.pose_identity, stamp.toSec());
             observation.source_index = cluster.cluster_index;
             observation.centroid_map =
                 (pose_map_base *
@@ -21744,6 +21766,9 @@ void NdtSlamNode::runPendingCargoAvoidance(
     const StaticEvidenceAuthorization query_static_authorization =
         authorizeStaticEvidence(static_result.strongest_authority);
     PendingStaticHazardObservation static_hazard_observation;
+    static_hazard_observation.pose_authority =
+        bindTemporalEvidenceAuthority(
+            frame_context.pose_identity, stamp.toSec());
     static_hazard_observation.stamp_sec = stamp.toSec();
     static_hazard_observation.cargo_lifecycle_id =
         cargo_lifecycle_id_;
@@ -21890,6 +21915,33 @@ void NdtSlamNode::runPendingCargoAvoidance(
         fusion_input.pending_static_provenance_valid;
     fusion_input.static_map.validated_streak =
         pending_static_decision.confirmations;
+    TemporalEvidenceAuthority pending_obstacle_pose_authority =
+        bindTemporalEvidenceAuthority(
+            frame_context.pose_identity, stamp.toSec());
+    bool pending_obstacle_authority_conflict = false;
+    if (pending_obstacle_decision.selected_pose_authority.valid) {
+        pending_obstacle_pose_authority =
+            pending_obstacle_decision.selected_pose_authority;
+    }
+    if (pending_static_decision.pose_authority.valid) {
+        pending_obstacle_authority_conflict =
+            pending_obstacle_decision.selected_pose_authority.valid &&
+            !sameTemporalEvidenceAuthority(
+                pending_obstacle_pose_authority,
+                pending_static_decision.pose_authority);
+        pending_obstacle_pose_authority =
+            pending_static_decision.pose_authority;
+    }
+    if (pending_obstacle_authority_conflict ||
+        !safetyFrameAuthorityMatches(
+            frame_context, pending_cargo_envelope_pose_authority_,
+            pending_obstacle_pose_authority)) {
+        mixed_pose_generation_safety_frame_count_.fetch_add(
+            1U, std::memory_order_relaxed);
+        publishRelocalizationSafetyInvalid(
+            stamp, "pending_temporal_evidence_authority_mismatch");
+        return;
+    }
     if (integrated_cargo_identity_shadow_enabled_) {
         integrated_canonical_fusion_snapshot_ = fusion_input;
         integrated_canonical_fusion_snapshot_stamp_ = stamp;
@@ -22844,11 +22896,12 @@ void NdtSlamNode::updateAndPublishCargoSwing(
 void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
     const HookLoadSnapshot& hook,
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
-    const Sophus::SE3d& pose_map_base,
+    const FrameAuthorityContext& frame_context,
     const ros::Time& stamp,
     const ros::Time& obstacle_cloud_stamp,
     double processing_age_sec) {
     if (!integrated_cargo_identity_shadow_enabled_ || stamp.isZero()) return;
+    const Sophus::SE3d& pose_map_base = frame_context.runtime_pose;
     const auto total_start = IntegratedShadowDiagClock::now();
     const auto safety_start = IntegratedShadowDiagClock::now();
     if (integrated_shadow_authority_stamp_ != stamp) {
@@ -22918,6 +22971,9 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
          std::abs(integrated_shadow_bottom_result_.stamp_sec -
                   integrated_group_evidence_.source_stamp_sec) > 1.0e-6)) {
         CargoBottomObservation bottom_input;
+        bottom_input.pose_authority = bindTemporalEvidenceAuthority(
+            frame_context.pose_identity,
+            integrated_group_evidence_.source_stamp_sec);
         bottom_input.track_valid = true;
         bottom_input.track_id =
             integrated_identity_decision_.physical_history_id;
@@ -23399,15 +23455,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const ros::Time& obstacle_cloud_stamp,
     double processing_age_sec) {
     const Sophus::SE3d& pose_map_base = frame_context.runtime_pose;
-    // Both geometry streams are transformed inside this invocation from the
-    // same immutable frame context. Keep explicit identities so a future
-    // asynchronous producer cannot silently mix pose generations.
-    const PoseAuthorityIdentity cargo_pose_identity =
-        frame_context.pose_identity;
-    const PoseAuthorityIdentity obstacle_pose_identity =
-        frame_context.pose_identity;
-    if (!safetyFrameAuthorityMatches(
-            frame_context, cargo_pose_identity, obstacle_pose_identity) ||
+    if (!frame_context.safetyAuthorized() ||
         std::abs(frame_context.source_stamp_sec - stamp.toSec()) > 1.0e-6) {
         mixed_pose_generation_safety_frame_count_.fetch_add(
             1U, std::memory_order_relaxed);
@@ -23463,6 +23511,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             cargo_geometry_fusion_.reset();
             cargo_frozen_geometry_ = CargoFrozenGeometry{};
             pending_cargo_envelope_ = PendingCargoEnvelope{};
+            pending_cargo_envelope_pose_authority_ =
+                TemporalEvidenceAuthority{};
             pending_cargo_self_evidence_ = PendingCargoSelfEvidence{};
             pending_cargo_shape_continuity_ =
                 PendingCargoShapeContinuity{};
@@ -23526,6 +23576,11 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         updateCargoLiftAndGeometryFusion(
             hook, observation_cloud_base, pose_map_base, stamp,
             false, false);
+        pending_cargo_envelope_pose_authority_ =
+            advanceTemporalEvidenceAuthority(
+                pending_cargo_envelope_pose_authority_,
+                pending_cargo_envelope_.evidence_stamp_sec,
+                frame_context.pose_identity, stamp.toSec());
         publishCargoRecognitionStatus(hook, stamp);
         updateAndPublishCargoSwing(hook, stamp);
         publishHookOnlySafetyStatus(
@@ -23581,6 +23636,11 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     updateCargoLiftAndGeometryFusion(
         hook, observation_cloud_base, pose_map_base, stamp, active_track,
         cargo_presence_result_.cargo_present);
+    pending_cargo_envelope_pose_authority_ =
+        advanceTemporalEvidenceAuthority(
+            pending_cargo_envelope_pose_authority_,
+            pending_cargo_envelope_.evidence_stamp_sec,
+            frame_context.pose_identity, stamp.toSec());
     CargoEnvelopeResolverConfig resolver_config;
     resolver_config.configured_length_m =
         pending_cargo_envelope_config_.configured_length_m;
@@ -23641,7 +23701,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         formal_cargo_removal_authorized_ = false;
         runPendingCargoAvoidance(
             pending_cargo_envelope_, hook, obstacle_cloud_base,
-            pose_map_base, stamp, obstacle_cloud_stamp,
+            frame_context, stamp, obstacle_cloud_stamp,
             processing_age_sec);
         return;
     }
@@ -23651,7 +23711,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             formal_cargo_removal_authorized_ = false;
             runPendingCargoAvoidance(
                 pending_cargo_envelope_, hook, obstacle_cloud_base,
-                pose_map_base, stamp, obstacle_cloud_stamp,
+                frame_context, stamp, obstacle_cloud_stamp,
                 processing_age_sec);
             return;
         }
@@ -23781,6 +23841,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     }
 
     CargoBottomObservation observation;
+    observation.pose_authority = bindTemporalEvidenceAuthority(
+        frame_context.pose_identity, stamp.toSec());
     observation.track_valid = active_track;
     observation.track_id = cargo_fusion_track_id_;
     observation.stamp_sec = stamp.toSec();
@@ -24987,6 +25049,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 evidence.centroid_base.x, evidence.centroid_base.y,
                 evidence.obstacle_top_z95_m);
             CargoObstacleObservation observation;
+            observation.pose_authority = bindTemporalEvidenceAuthority(
+                frame_context.pose_identity, stamp.toSec());
             observation.source_index = tracking.source_index;
             observation.centroid_map = centroid_map.cast<float>();
             observation.top_z95_map = static_cast<float>(top_map.z());
@@ -25145,6 +25209,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 continue;
             }
             CargoObstacleObservation observation;
+            observation.pose_authority = bindTemporalEvidenceAuthority(
+                frame_context.pose_identity, stamp.toSec());
             observation.source_index = cluster.cluster_index;
             observation.centroid_map =
                 (pose_map_base *
@@ -25478,6 +25544,13 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         temporal_input.stamp_sec = stamp.toSec();
         temporal_input.raw_valid = true;
         temporal_input.raw_code = CargoSafetyEvaluator::kSafeCode;
+        temporal_input.cargo_pose_authority =
+            last_cargo_bottom_result_.pose_authority;
+        temporal_input.obstacle_pose_authority =
+            obstacle_track_decision.selected_pose_authority.valid
+                ? obstacle_track_decision.selected_pose_authority
+                : bindTemporalEvidenceAuthority(
+                      frame_context.pose_identity, stamp.toSec());
         const CargoSafetyTemporalDecision temporal_decision =
             cargo_safety_temporal_filter_.update(temporal_input);
         cargo_confirmed_warning_code_ = temporal_decision.confirmed_code;
@@ -25717,6 +25790,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
 
     if (static_height_field && static_height_result.valid) {
         PendingStaticHazardObservation static_hazard_observation;
+        static_hazard_observation.pose_authority =
+            bindTemporalEvidenceAuthority(
+                frame_context.pose_identity, stamp.toSec());
         static_hazard_observation.stamp_sec = stamp.toSec();
         static_hazard_observation.cargo_lifecycle_id =
             cargo_lifecycle_id_;
@@ -25847,6 +25923,34 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     avoidance_input.static_map.validated_streak =
         formal_static_hazard_decision.confirmations;
 
+    TemporalEvidenceAuthority formal_obstacle_pose_authority =
+        bindTemporalEvidenceAuthority(
+            frame_context.pose_identity, stamp.toSec());
+    bool formal_obstacle_authority_conflict = false;
+    if (obstacle_track_decision.selected_pose_authority.valid) {
+        formal_obstacle_pose_authority =
+            obstacle_track_decision.selected_pose_authority;
+    }
+    if (formal_static_hazard_decision.pose_authority.valid) {
+        formal_obstacle_authority_conflict =
+            obstacle_track_decision.selected_pose_authority.valid &&
+            !sameTemporalEvidenceAuthority(
+                formal_obstacle_pose_authority,
+                formal_static_hazard_decision.pose_authority);
+        formal_obstacle_pose_authority =
+            formal_static_hazard_decision.pose_authority;
+    }
+    if (formal_obstacle_authority_conflict ||
+        !safetyFrameAuthorityMatches(
+            frame_context, last_cargo_bottom_result_.pose_authority,
+            formal_obstacle_pose_authority)) {
+        mixed_pose_generation_safety_frame_count_.fetch_add(
+            1U, std::memory_order_relaxed);
+        publishRelocalizationSafetyInvalid(
+            stamp, "formal_temporal_evidence_authority_mismatch");
+        return;
+    }
+
     if (integrated_cargo_identity_shadow_enabled_) {
         integrated_canonical_fusion_snapshot_ = avoidance_input;
         integrated_canonical_fusion_snapshot_stamp_ = stamp;
@@ -25855,7 +25959,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         // runs only after this frame's complete canonical input exists, so
         // obstacle identity/history/provenance cannot be one frame stale.
         evaluateIntegratedCargoIdentityShadow(
-            hook, external_obstacle_cloud, pose_map_base, stamp,
+            hook, external_obstacle_cloud, frame_context, stamp,
             obstacle_cloud_stamp, processing_age_sec);
     }
     CargoAvoidanceFusionResult fused_avoidance =

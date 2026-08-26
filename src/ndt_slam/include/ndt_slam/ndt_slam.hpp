@@ -755,6 +755,7 @@ private:
         std::string yaw_reference_hash;
         std::uint64_t target_snapshot_id = 0U;
         bool localization_map_mutation_authorized = false;
+        bool observability_map_mutation_authorized = true;
         ros::Time stamp;
         Sophus::SE3d pose;
         pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud;
@@ -2280,6 +2281,7 @@ private:
     ros::Time cargo_base_motion_state_received_stamp_;
     PendingCargoEnvelopeConfig pending_cargo_envelope_config_;
     PendingCargoEnvelope pending_cargo_envelope_;
+    TemporalEvidenceAuthority pending_cargo_envelope_pose_authority_;
     EffectiveCargoEnvelope effective_cargo_envelope_;
     PendingCargoSelfEvidenceConfig pending_cargo_self_evidence_config_;
     PendingCargoSelfEvidence pending_cargo_self_evidence_;
@@ -2556,7 +2558,7 @@ private:
     void evaluateIntegratedCargoIdentityShadow(
         const HookLoadSnapshot& hook,
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
-        const Sophus::SE3d& pose_map_base,
+        const FrameAuthorityContext& frame_context,
         const ros::Time& stamp,
         const ros::Time& obstacle_cloud_stamp,
         double processing_age_sec);
@@ -2626,7 +2628,7 @@ private:
         const PendingCargoEnvelope& envelope,
         const HookLoadSnapshot& hook,
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
-        const Sophus::SE3d& pose_map_base,
+        const FrameAuthorityContext& frame_context,
         const ros::Time& stamp,
         const ros::Time& obstacle_cloud_stamp,
         double processing_age_sec);

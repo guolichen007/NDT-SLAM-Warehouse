@@ -262,6 +262,28 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
+     SubSignificantMonotonicPreLiftVariationMustNotCloseReference) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.minimum_significant_change_m = 0.15;
+  config.significance_sigma = 3.0;
+  CargoPhysicalIdentityAuthority authority(config);
+  CargoPhysicalIdentityDecision result;
+  double stamp = 1.0;
+  for (double z : {0.465, 0.500, 0.535, 0.565}) {
+    result = authority.update(input(
+        stamp, HookLoadSignalRole::REQUIRED, true,
+        HookLoadState::EMPTY, 0.0, z));
+    stamp += 0.05;
+  }
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_EQ(result.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::FROZEN);
+  EXPECT_TRUE(result.group_diagnostics.front().prelift_reference_frozen);
+  EXPECT_NEAR(result.group_diagnostics.front().baseline_z, 0.5175, 1.0e-6);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
      UnsupportedFrameWithinGapPausesWithoutReplacingPrefix) {
   CargoPhysicalIdentityConfig config = testConfig();
   config.lift_confirm_frames = 3;
