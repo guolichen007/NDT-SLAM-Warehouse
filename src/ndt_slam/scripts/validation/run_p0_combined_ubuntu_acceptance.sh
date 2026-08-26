@@ -28,7 +28,35 @@ actual_sha="$(git -C "$workspace" rev-parse HEAD)"
 }
 [[ -f "$yaw_reference" ]] || { echo "YAW_REFERENCE_GATE=FAIL" >&2; exit 5; }
 
+# ── Runtime isolation gate ──
+# 验收期间若已有生产 ndt_slam_node 实例运行，只报错停止，绝不主动 kill。
+# bag 测试使用独立 ROS master + map sandbox，绝不与现场地图/实例共享状态。
+if pgrep -f "ndt_slam_node" >/dev/null 2>&1; then
+  echo "RUNTIME_ISOLATION_GATE=FAIL reason=production_ndt_slam_node_running" >&2
+  echo "  detected PIDs: $(pgrep -f 'ndt_slam_node' | tr '\n' ' ')" >&2
+  echo "  refusing to proceed; stop the production instance first." >&2
+  exit 7
+fi
+
 mkdir -p "$output_dir"
+
+# ── Input preflight + frozen input manifest ──
+# 冻结本次验收实际消费的每一份输入（SHA256），报告可据此证明被测数据。
+python3 "$workspace/src/ndt_slam/scripts/validation/freeze_acceptance_inputs.py" \
+  --workspace "$workspace" \
+  --candidate-sha "$expected_sha" \
+  --map-source "$map_source" \
+  --yaw-reference "$yaw_reference" \
+  --oracle-dir "$oracle_dir" \
+  --baseline-trace-dir "$baseline_trace_dir" \
+  --output "$output_dir/frozen_acceptance_inputs.json" \
+  --bag-无 "${bags[0]}" --bag-有 "${bags[1]}" \
+  --bag-长件 "${bags[2]}" --bag-大件 "${bags[3]}"
+preflight_rc=$?
+if [[ $preflight_rc -ne 0 ]]; then
+  echo "INPUT_PREFLIGHT=FAIL rc=$preflight_rc" >&2
+  exit 8
+fi
 cp "$yaw_reference" "$output_dir/frozen_yaw_reference.yaml"
 sha256sum "$output_dir/frozen_yaw_reference.yaml" \
   > "$output_dir/frozen_yaw_reference.sha256"
