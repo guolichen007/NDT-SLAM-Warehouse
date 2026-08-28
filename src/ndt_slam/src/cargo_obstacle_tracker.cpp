@@ -211,6 +211,52 @@ bool moreDangerous(const CargoObstacleTrack& candidate,
   return candidate.track_id < current.track_id;
 }
 
+void resetTemporalEvidenceForAuthorityTransition(
+    CargoObstacleTrack* track,
+    const CargoObstacleObservation& observation,
+    double stamp_sec) {
+  if (track == nullptr) return;
+
+  // Spatial ownership is reciprocal and unique before this helper is used,
+  // but temporal safety evidence belongs to the pose authority that produced
+  // it. Preserve the physical track id while restarting every maturity and
+  // provenance contract under the current observation's authority.
+  track->velocity_map.setZero();
+  track->total_consecutive_observations = 0;
+  track->validated_consecutive_observations = 0;
+  track->geometry_validated_consecutive_observations = 0;
+  track->consecutive_observations = 0;
+  track->confirmed = false;
+  track->static_obstacle = false;
+  track->large_cluster_geometry_valid = false;
+
+  track->provenance = ExternalProvenance::NONE;
+  track->provenance_valid = false;
+  track->certified_static_provenance = false;
+  track->static_provenance_consecutive_observations = 0;
+  track->static_provenance_first_stamp_sec = 0.0;
+
+  track->separated_validated_observations = 0;
+  track->separated_obstacle_history_valid = false;
+  track->far_field_validated_observations = 0;
+  track->far_field_first_stamp_sec = 0.0;
+  track->far_field_duration_sec = 0.0;
+  track->far_field_history_valid = false;
+
+  track->identity_anchor_map_cells = observation.occupied_map_cells;
+  track->first_cargo_center_valid = observation.cargo_center_valid &&
+      observation.cargo_center_map.allFinite();
+  if (track->first_cargo_center_valid) {
+    track->first_cargo_center_map = observation.cargo_center_map;
+  } else {
+    track->first_cargo_center_map.setZero();
+  }
+  track->maximum_cargo_displacement_m = 0.0F;
+  track->first_stamp_sec = stamp_sec;
+  track->association_reset_reason =
+      "cross_authority_temporal_evidence_reset";
+}
+
 bool canonicalObservationLess(
     const CargoObstacleObservation& left,
     const CargoObstacleObservation& right) {
@@ -447,10 +493,6 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     for (std::size_t track_index = 0U;
          track_index < existing_track_count; ++track_index) {
       const CargoObstacleTrack& track = tracks_[track_index];
-      if (!sameTemporalEvidenceAuthority(
-              observation.pose_authority, track.pose_authority)) {
-        continue;
-      }
       const double gap_sec = stamp_sec - track.last_stamp_sec;
       if (gap_sec < -kStampEpsilonSec ||
           gap_sec > config_.maximum_observation_gap_sec +
@@ -569,6 +611,27 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         std::abs(match->cost - track_best_cost[best_index]) <=
             kAssociationCostEpsilon;
 
+    if (best_index == no_track &&
+        observation_best_count[observation_index] > 0) {
+      // A physically plausible prior owner exists, but it was consumed by a
+      // better or ambiguous global pairing. This is spatial competition, not
+      // evidence that a brand-new current-authority obstacle appeared.
+      for (const AssociationPair& pair : legal_pairs) {
+        if (pair.observation_index != observation_index) continue;
+        CargoObstacleTrack& competing = tracks_[pair.track_index];
+        competing.association_ambiguous = true;
+        competing.association_reset_reason =
+            "ambiguous_non_reciprocal_authority_frozen";
+        competing.observed_this_cycle = true;
+        competing.current_source_index = observation.source_index;
+        competing.current_source_validated = false;
+        competing.current_warning_eligible = false;
+      }
+      ++ambiguous_association_count_;
+      decision.ambiguous_association_count = ambiguous_association_count_;
+      continue;
+    }
+
     if (best_index == no_track) {
       CargoObstacleTrack track;
       track.track_id = next_track_id_++;
@@ -661,7 +724,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     CargoObstacleTrack& track = tracks_[best_index];
     const double dt_sec = stamp_sec - track.last_stamp_sec;
     const Eigen::Vector3f previous_centroid = track.centroid_map;
-    const bool consecutive =
+    const bool same_authority = sameTemporalEvidenceAuthority(
+        observation.pose_authority, track.pose_authority);
+    const bool consecutive = same_authority &&
         track.last_observation_cycle + 1U == cycle_ &&
         dt_sec <= config_.maximum_observation_gap_sec + kStampEpsilonSec;
     // Pair metrics are diagnostic-only and may be recorded before authority
@@ -674,7 +739,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         observation.occupied_map_cells,
         track.identity_anchor_map_cells);
     track.last_association_cost = best_cost;
-    track.association_reset_reason.clear();
+    if (same_authority) {
+      track.association_reset_reason.clear();
+    }
     track.association_ambiguous = !reciprocal_unique_match;
     if (!reciprocal_unique_match) {
       // Freeze the authoritative predictor as well as safety maturity. Moving
@@ -694,7 +761,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.current_warning_eligible = false;
       continue;
     }
-    if (dt_sec > kStampEpsilonSec) {
+    if (!same_authority) {
+      resetTemporalEvidenceForAuthorityTransition(
+          &track, observation, stamp_sec);
+    } else if (dt_sec > kStampEpsilonSec) {
       track.velocity_map =
           (observation.centroid_map - previous_centroid) /
           static_cast<float>(dt_sec);
