@@ -141,9 +141,20 @@ CleanMapBuildResult buildCleanMapFromSnapshot(
         if (input.use_human_deny &&
             input.human_deny_cells.find(cell) !=
                 input.human_deny_cells.end()) {
-            ++result.denied_cells;
+            // Human occupancy makes this cell unobservable for new static
+            // learning.  Preserve the last coherent static layer instead of
+            // deleting warehouse structure hidden behind the person.
+            const auto previous = previous_clean_indices.find(cell);
+            if (previous != previous_clean_indices.end()) {
+                for (const std::size_t index : previous->second) {
+                    result.clean_points.push_back(
+                        input.previous_clean_points[index]);
+                    ++result.retained_points;
+                }
+                ++result.retained_cells;
+                ++result.passed_cells;
+            }
             ++result.human_denied_cells;
-            result.denied_points += static_cast<int>(item.second.size());
             continue;
         }
 

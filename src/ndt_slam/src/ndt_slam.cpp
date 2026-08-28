@@ -1045,6 +1045,11 @@ bool NdtSlamNode::isMapCommitAuthorityCurrent(
             map_rebuild_generation_.load(std::memory_order_acquire))) {
         return false;
     }
+    if (!job.avoidance_map_mutation.validFor(
+            job.pose_identity, job.stamp.toSec(),
+            job.source_cloud_instance_id)) {
+        return false;
+    }
     if (!job.rail_authority_job) return true;
     return job.localization_map_mutation_authorized &&
         job.observability_map_mutation_authorized &&
@@ -1064,6 +1069,7 @@ bool NdtSlamNode::isMapCommitAuthorityCurrent(
 void NdtSlamNode::enqueueMapCommitJob(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
     const FrameAuthorityContext& frame_context,
+    const AvoidanceMapMutationSnapshot& avoidance_map_mutation,
     const ros::Time& stamp) {
     if (!cloud || cloud->empty()) {
         map_commit_dropped_.fetch_add(1U, std::memory_order_relaxed);
@@ -1099,6 +1105,10 @@ void NdtSlamNode::enqueueMapCommitJob(
     job.stamp = stamp;
     job.pose = frame_context.runtime_pose;
     job.cloud = cloud;
+    job.source_cloud_instance_id =
+        avoidance_map_mutation.source_cloud_instance_id;
+    job.pose_identity = frame_context.pose_identity;
+    job.avoidance_map_mutation = avoidance_map_mutation;
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
     job.hook_role = hook_load_signal_role_;
     job.hook_valid = hook.valid;
@@ -1138,7 +1148,9 @@ void NdtSlamNode::enqueueMapCommitJob(
         job.raw_ndt_pose = last_raw_ndt_pose_;
     }
     job.refined_pose = frame_context.runtime_pose;
-    job.runtime_pose = current_pose_;
+    // Diagnostic lineage must remain frame-local as well.  The worker never
+    // reads the mutable current_pose_ for filtering or map transforms.
+    job.runtime_pose = frame_context.runtime_pose;
 
     {
         std::lock_guard<std::mutex> lock(map_commit_queue_mutex_);
@@ -4661,7 +4673,7 @@ void NdtSlamNode::startCleanMapRebuildJob() {
         clean_map_rebuild_thread_.join();
     }
 
-    constexpr float kCleanCellSize = 0.15F;
+    constexpr float kCleanCellSize = kCleanMapCellSizeM;
     const double current_time = ros::Time::now().toSec();
     CleanMapBuildInput input;
     input.cell_size_m = kCleanCellSize;
@@ -4704,6 +4716,7 @@ void NdtSlamNode::startCleanMapRebuildJob() {
         source_bundle.ground = clone(ground_map_);
         source_bundle.objects = clone(objects_map_);
         source_bundle.objects_clean = clone(objects_clean_map_);
+        input.human_deny_cells = human_static_learning_block_cells_;
     }
     if (source_bundle.objects) {
         input.object_points.reserve(source_bundle.objects->size());
@@ -4754,11 +4767,7 @@ void NdtSlamNode::startCleanMapRebuildJob() {
     }
 
     input.use_human_deny = human_filter_config_.enabled &&
-        dynamic_event_config_.enable_human_history_clean;
-    if (input.use_human_deny) {
-        input.human_deny_cells = human_filter_.getDenyCellsSnapshot(
-            kCleanCellSize, current_time);
-    }
+        !input.human_deny_cells.empty();
 
     input.use_3d_deny = dynamic_event_config_.enabled &&
         !dynamic_deny_volume_map_.empty();
@@ -4808,9 +4817,8 @@ void NdtSlamNode::startCleanMapRebuildJob() {
     appendStaticEvidenceInvalidations(
         input.deny_cells, input.cell_size_m, static_cell_size,
         &source_invalidated_cells);
-    appendStaticEvidenceInvalidations(
-        input.human_deny_cells, input.cell_size_m, static_cell_size,
-        &source_invalidated_cells);
+    // Human occupancy blocks new learning only.  It must never invalidate
+    // existing StaticObstacleEvidence or localization structure.
     std::set<CleanMapCell> deny_range_cells;
     for (const auto& item : input.deny_ranges) {
         deny_range_cells.insert(item.first);
@@ -6021,6 +6029,7 @@ void NdtSlamNode::processCloudThread() {
         pcl::PointCloud<pcl::PointXYZ>::Ptr human_candidates(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr human_dynamic(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr human_pending(new pcl::PointCloud<pcl::PointXYZ>);
+        HumanFrameClassification human_frame_classification;
 
         // Human/dynamic classification must see both channel-safe points and
         // uncertain payload candidates. Channel classification alone cannot
@@ -6032,16 +6041,14 @@ void NdtSlamNode::processCloudThread() {
         }
 
         if (human_filter_config_.enabled) {
-            // 获取 T_map_base（当前位姿）
-            Eigen::Matrix4d T_map_base = current_pose_.matrix();
-
-            // 获取时间戳
-            double timestamp = msg->header.stamp.toSec();
-
-            // 处理人体过滤
-            human_filter_.processFrame(human_filter_input, T_map_base, timestamp,
-                                       human_safe_objects, human_candidates,
-                                       human_dynamic, human_pending);
+            // Classification before registration is deliberately stateless.
+            // Human temporal/map state is advanced exactly once after the
+            // final FrameAuthorityContext pose has been selected.
+            human_frame_classification = human_filter_.classifyFrame(
+                human_filter_input, msg->header.stamp.toSec(),
+                processing_frame_index,
+                static_cast<float>(objects_voxel_size_),
+                human_safe_objects, human_candidates);
 
             // 发布调试话题（每 10 帧一次）
             static int hf_debug_count = 0;
@@ -6063,7 +6070,7 @@ void NdtSlamNode::processCloudThread() {
                     sensor_msgs::PointCloud2 dyn_msg;
                     pcl::toROSMsg(*human_dynamic, dyn_msg);
                     dyn_msg.header.stamp = msg->header.stamp;
-                    dyn_msg.header.frame_id = "map";
+                    dyn_msg.header.frame_id = "base_link";
                     human_dynamic_pub_.publish(dyn_msg);
                 }
 
@@ -6071,7 +6078,7 @@ void NdtSlamNode::processCloudThread() {
                     sensor_msgs::PointCloud2 pend_msg;
                     pcl::toROSMsg(*human_pending, pend_msg);
                     pend_msg.header.stamp = msg->header.stamp;
-                    pend_msg.header.frame_id = "map";
+                    pend_msg.header.frame_id = "base_link";
                     human_pending_pub_.publish(pend_msg);
                 }
             }
@@ -7336,6 +7343,45 @@ void NdtSlamNode::processCloudThread() {
             frame_authority_context.failure_class =
                 frame_authority_context.localization_health.failure_class;
             frame_authority_context.source_stamp_sec = publish_time.toSec();
+            HumanMapFilterSnapshot human_map_snapshot;
+            if (human_filter_config_.enabled) {
+                human_map_snapshot = human_filter_.updateMapTracks(
+                    human_frame_classification,
+                    frame_authority_context.runtime_pose.matrix(),
+                    kCleanMapCellSizeM);
+            } else {
+                human_map_snapshot.valid = true;
+                human_map_snapshot.source_stamp_sec = publish_time.toSec();
+                human_map_snapshot.source_cloud_instance_id =
+                    processing_frame_index;
+                human_map_snapshot.owned_points.valid = true;
+                human_map_snapshot.owned_points.voxel_size_m =
+                    static_cast<float>(objects_voxel_size_);
+                human_map_snapshot.static_learning_blocks.cell_size_m =
+                    kCleanMapCellSizeM;
+            }
+
+            AvoidanceMapMutationSnapshot avoidance_map_mutation;
+            avoidance_map_mutation.source_stamp_sec = publish_time.toSec();
+            avoidance_map_mutation.source_cloud_instance_id =
+                processing_frame_index;
+            avoidance_map_mutation.pose_identity =
+                frame_authority_context.pose_identity;
+            avoidance_map_mutation.human_points =
+                human_map_snapshot.owned_points;
+            avoidance_map_mutation.static_learning_blocks =
+                human_map_snapshot.static_learning_blocks;
+            avoidance_map_mutation.localization_map_write_authorized =
+                frame_authority_context.mapMutationAuthorized() &&
+                human_map_snapshot.valid;
+            avoidance_map_mutation.avoidance_static_write_authorized =
+                frame_authority_context.mapMutationAuthorized() &&
+                human_map_snapshot.valid;
+            avoidance_map_mutation.display_cleanup_authorized = false;
+            avoidance_map_mutation.reason =
+                avoidance_map_mutation.localization_map_write_authorized
+                    ? MapMutationReason::AUTHORIZED
+                    : MapMutationReason::LOCALIZATION_NOT_AUTHORIZED;
             if (integrated_shadow_deferred_detection) {
                 updateIntegratedCargoIdentityShadow(
                     *integrated_shadow_deferred_detection,
@@ -7530,7 +7576,8 @@ void NdtSlamNode::processCloudThread() {
             if (allow_map_commit) {
                 const auto map_commit_start = DiagClock::now();
                 enqueueMapCommitJob(
-                    filtered_cloud, frame_authority_context, publish_time);
+                    filtered_cloud, frame_authority_context,
+                    avoidance_map_mutation, publish_time);
                 diag_stage.map_commit_ms = elapsedMs(map_commit_start);
                 // Filtering and map writes now run on the bounded worker.
                 // Only a completed, current-epoch job advances the owner-side
@@ -28066,102 +28113,27 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     cleanupExpiredSweptVolumes(stamp.toSec());
 
     // ------------------------------------------------------------------------
-    // 5. HumanFilter（必须在 MapCommit 前）
+    // 5. Apply the immutable current-frame Human ownership mask.  The worker
+    // must never advance Human tracks or read mutable Human state.
     // ------------------------------------------------------------------------
     pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_human_base(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointXYZ>::Ptr human_candidates_base(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr human_dynamic_base(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr human_pending_base(new pcl::PointCloud<pcl::PointXYZ>);
-
-    size_t rejected_as_human_count = 0;
-
-    if (human_filter_config_.enabled) {
-        human_filter_.processFrame(
-            objects_after_cargo_base, T_map_base, stamp.toSec(),
-            objects_after_human_base, human_candidates_base,
-            human_dynamic_base, human_pending_base);
-
-        rejected_as_human_count = objects_after_cargo_base->size() - objects_after_human_base->size();
-
-        // DynamicEventManager：人体动态事件（带人形几何约束）
-        if (dynamic_event_config_.enabled && !human_dynamic_base->empty()) {
-            auto dynamic_count = human_filter_.getDynamicHumanCount();
-            if (dynamic_count > 0) {
-                // 计算 bbox
-                float z_min = 1e9, z_max = -1e9;
-                float x_min = 1e9, x_max = -1e9;
-                float y_min = 1e9, y_max = -1e9;
-                for (const auto& pt : human_dynamic_base->points) {
-                    if (pt.z < z_min) z_min = pt.z;
-                    if (pt.z > z_max) z_max = pt.z;
-                    if (pt.x < x_min) x_min = pt.x;
-                    if (pt.x > x_max) x_max = pt.x;
-                    if (pt.y < y_min) y_min = pt.y;
-                    if (pt.y > y_max) y_max = pt.y;
-                }
-
-                float length = x_max - x_min;
-                float width = y_max - y_min;
-                float height = z_max - z_min;
-                size_t points = human_dynamic_base->size();
-
-                // 人形几何约束检查
-                bool valid_human = (length < 1.2f) && (width < 1.2f) &&
-                                   (height > 0.5f) && (height < 2.2f) &&
-                                   (points < 250);
-
-                if (valid_human) {
-                    Eigen::Vector4f centroid_4f;
-                    pcl::compute3DCentroid(*human_dynamic_base, centroid_4f);
-                    Eigen::Vector3d centroid = centroid_4f.head<3>().cast<double>();
-
-                    std::deque<Eigen::Vector3d> history;
-                    history.push_back(centroid);
-
-                    int event_id = dynamic_event_manager_.createHumanEvent(
-                        stamp.toSec(), stamp.toSec(), history, z_min, z_max);
-                    ROS_DEBUG("[DynamicEvent] HumanEvent created: id=%d, points=%zu",
-                             event_id, points);
-                } else {
-                    ROS_DEBUG("[HumanFilter] rejected human event: points=%zu "
-                              "bbox=(%.2f,%.2f,%.2f) - exceeds human geometry limits",
-                              points, length, width, height);
-                }
-            }
+    objects_after_human_base->reserve(objects_after_cargo_base->size());
+    human_candidates_base->reserve(objects_after_cargo_base->size());
+    for (const pcl::PointXYZ& point : objects_after_cargo_base->points) {
+        if (job.avoidance_map_mutation.human_points.owns(point)) {
+            human_candidates_base->push_back(point);
+        } else {
+            objects_after_human_base->push_back(point);
         }
-
-        // [HumanFilter] 日志（DEBUG）
-        ROS_DEBUG("[HumanFilter] seq=%d input=%zu safe=%zu human_dynamic=%zu human_pending=%zu rejected_as_human=%zu",
-                  keyframe_count_ + 1,
-                  objects_after_cargo_base->size(),
-                  objects_after_human_base->size(),
-                  human_dynamic_base->size(),
-                  human_pending_base->size(),
-                  rejected_as_human_count);
-
-        // 发布人体过滤调试话题
-        static int hf_debug_count = 0;
-        hf_debug_count++;
-        if (hf_debug_count % 5 == 1) {
-            if (!human_candidates_base->empty()) {
-                sensor_msgs::PointCloud2 cand_msg;
-                pcl::toROSMsg(*human_candidates_base, cand_msg);
-                cand_msg.header.stamp = stamp;
-                cand_msg.header.frame_id = "base_link";
-                human_candidate_pub_.publish(cand_msg);
-            }
-
-            if (!human_dynamic_base->empty()) {
-                sensor_msgs::PointCloud2 dyn_msg;
-                pcl::toROSMsg(*human_dynamic_base, dyn_msg);
-                dyn_msg.header.stamp = stamp;
-                dyn_msg.header.frame_id = "map";
-                human_dynamic_pub_.publish(dyn_msg);
-            }
-        }
-    } else {
-        objects_after_human_base = objects_after_cargo_base;
     }
+    const size_t rejected_as_human_count = human_candidates_base->size();
+    ROS_DEBUG("[HumanMapMutation] seq=%d input=%zu kept=%zu "
+              "owned_removed=%zu source_cloud=%llu",
+              keyframe_count_ + 1, objects_after_cargo_base->size(),
+              objects_after_human_base->size(), rejected_as_human_count,
+              static_cast<unsigned long long>(
+                  job.source_cloud_instance_id));
 
     // ------------------------------------------------------------------------
     // 6. 组装最终提交点云（ground + filtered objects）
@@ -28180,7 +28152,7 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
              objects_after_human_base->size(),
              commit_cloud_base->size(),
              cargo_removed_base->size(),
-             human_dynamic_base->size());
+             human_candidates_base->size());
 
     // ------------------------------------------------------------------------
     // 7. 最后才 addKeyFrame（MapCommit）
@@ -28207,7 +28179,7 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
              commit_cloud_base->size(),
              objects_after_human_base->size(),
              cargo_removed_base->size(),
-             human_dynamic_base->size());
+             human_candidates_base->size());
 
     // ------------------------------------------------------------------------
     // 8. Map / Tile / Display 更新（只允许使用过滤后的点云）
@@ -28265,6 +28237,12 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         size_t before_objects = objects_map_->size();
         addInRange(objects_transformed, objects_map_);
         objects_added = objects_map_->size() - before_objects;
+        if (job.avoidance_map_mutation.avoidance_static_write_authorized) {
+            human_static_learning_block_cells_ =
+                job.avoidance_map_mutation.static_learning_blocks.human_cells;
+        } else {
+            human_static_learning_block_cells_.clear();
+        }
         if (objects_added > 0U) {
             advanceObjectsMapContentVersionLocked();
         }
@@ -28542,7 +28520,7 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
                  moving, statik, pend,
                  active_cargo_remove_boxes_base.size(),
                  cargo_removed_base->size(),
-                 human_dynamic_base->size(),
+                 human_candidates_base->size(),
                  objects_after_human_base->size(),
                  last_clean_points_);
         }

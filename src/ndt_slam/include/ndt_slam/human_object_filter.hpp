@@ -9,6 +9,8 @@
 #include <mutex>
 #include <set>
 
+#include "ndt_slam/avoidance_map_mutation.hpp"
+
 namespace ndt_slam {
 
 // 人体候选检测配置
@@ -123,6 +125,35 @@ struct TrajectoryCapsule {
     double end_time;
 };
 
+struct HumanClusterObservation {
+    Eigen::Vector3d centroid_base = Eigen::Vector3d::Zero();
+    Eigen::Vector3d bbox_min_base = Eigen::Vector3d::Zero();
+    Eigen::Vector3d bbox_max_base = Eigen::Vector3d::Zero();
+    int point_count = 0;
+    bool strong = false;
+};
+
+// Immutable, base-frame result produced before registration.  It deliberately
+// contains no track state and can therefore be consumed only once by the
+// final-pose owner without advancing temporal state during classification.
+struct HumanFrameClassification {
+    bool valid = false;
+    double source_stamp_sec = 0.0;
+    std::uint64_t source_cloud_instance_id = 0U;
+    HumanCurrentFramePointOwnership owned_points;
+    std::vector<HumanClusterObservation> clusters;
+};
+
+struct HumanMapFilterSnapshot {
+    bool valid = false;
+    double source_stamp_sec = 0.0;
+    std::uint64_t source_cloud_instance_id = 0U;
+    HumanCurrentFramePointOwnership owned_points;
+    StaticLearningBlockCells static_learning_blocks;
+    int active_track_count = 0;
+    int dynamic_track_count = 0;
+};
+
 class HumanObjectDynamicFilter {
 public:
     HumanObjectDynamicFilter() = default;
@@ -132,6 +163,23 @@ public:
                     const HumanEraserConfig& eraser_config);
 
     void reset();
+
+    // Stateless classification for registration filtering.  This function
+    // never updates tracks, deny history or trajectory capsules.
+    HumanFrameClassification classifyFrame(
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud_base,
+        double timestamp,
+        std::uint64_t source_cloud_instance_id,
+        float ownership_voxel_size_m,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& safe_objects_out,
+        pcl::PointCloud<pcl::PointXYZ>::Ptr& human_candidate_out) const;
+
+    // The only product owner of Human temporal/map state.  It is called once
+    // after the final FrameAuthorityContext pose is known.
+    HumanMapFilterSnapshot updateMapTracks(
+        const HumanFrameClassification& classification,
+        const Eigen::Matrix4d& T_map_base,
+        float static_learning_cell_size_m);
 
     // 主处理函数：输入 objects_cloud（base_link），输出 safe_objects
     void processFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud_base,
@@ -174,13 +222,13 @@ private:
 
     // BEV 聚类
     void clusterBEV(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-                    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>& clusters);
+                    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>& clusters) const;
 
     // 判断 cluster 是否符合人体特征
     bool isHumanLikeCluster(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cluster,
                             Eigen::Vector3d& centroid,
                             Eigen::Vector3d& bbox_min,
-                            Eigen::Vector3d& bbox_max);
+                            Eigen::Vector3d& bbox_max) const;
 
     // 更新跟踪
     void updateTracks(const std::vector<HumanTrack>& current_detections,
@@ -222,6 +270,10 @@ private:
     // 清理过期的 deny cells
     void cleanupExpiredDenyCells(double current_time);
 
+    std::set<std::pair<int, int>> buildStaticLearningBlockCells(
+        const std::vector<HumanTrack>& detections,
+        float cell_size_m) const;
+
     HumanObjectFilterConfig filter_config_;
     HumanTrackingConfig tracking_config_;
     HumanEraserConfig eraser_config_;
@@ -233,6 +285,10 @@ private:
     // P1: deny history（持久化）
     std::map<std::pair<int,int>, DenyCellEntry> human_deny_cells_;
     double human_deny_ttl_ = 15.0;  // 默认 15 秒
+
+    bool has_last_map_update_stamp_ = false;
+    double last_map_update_stamp_sec_ = 0.0;
+    std::uint64_t last_map_update_cloud_instance_id_ = 0U;
 
     mutable std::mutex mutex_;
 };

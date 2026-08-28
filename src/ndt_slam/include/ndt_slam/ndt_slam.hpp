@@ -86,6 +86,7 @@
 #include <ndt_slam/cargo_subsystem.hpp>
 #include <ndt_slam/avoidance_decision.hpp>
 #include <ndt_slam/avoidance_diagnostics.hpp>
+#include <ndt_slam/avoidance_map_mutation.hpp>
 #include <ndt_slam/anomaly_review_episode_tracker.hpp>
 #include <ndt_slam/hook_load_evidence_policy.hpp>
 #include <set>
@@ -759,6 +760,9 @@ private:
         ros::Time stamp;
         Sophus::SE3d pose;
         pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud;
+        std::uint64_t source_cloud_instance_id = 0U;
+        PoseAuthorityIdentity pose_identity;
+        AvoidanceMapMutationSnapshot avoidance_map_mutation;
         HookLoadSignalRole hook_role = HookLoadSignalRole::REQUIRED;
         bool hook_valid = false;
         int hook_state = static_cast<int>(HookLoadState::UNKNOWN);
@@ -820,6 +824,7 @@ private:
     void enqueueMapCommitJob(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
         const FrameAuthorityContext& frame_context,
+        const AvoidanceMapMutationSnapshot& avoidance_map_mutation,
         const ros::Time& stamp);
     void mapCommitThread();
     void consumeMapCommitCompletion();
@@ -944,6 +949,7 @@ private:
     std::atomic<std::uint64_t> static_clean_invalidated_cells_{0U};
     std::atomic<std::uint64_t> static_clean_snapshot_cells_{0U};
     std::uint64_t clean_map_content_version_ = 0U;
+    std::set<CleanMapCell> human_static_learning_block_cells_;
     std::uint64_t shadow_target_source_version_ = 0U;
     Sophus::SE3d shadow_target_pose_;
     int map_maintenance_commit_count_ = 0;

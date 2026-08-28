@@ -317,10 +317,19 @@ if(CATKIN_ENABLE_TESTING)
   endif()
 
   catkin_add_gtest(clean_map_builder_test
-    test/clean_map_builder_test.cpp)
+    test/clean_map_builder_test.cpp
+    src/clean_map_builder.cpp)
   if(TARGET clean_map_builder_test)
     target_link_libraries(clean_map_builder_test
-      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+      ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(human_map_authority_test
+    test/human_map_authority_test.cpp
+    src/human_object_filter.cpp)
+  if(TARGET human_map_authority_test)
+    target_link_libraries(human_map_authority_test
+      ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(cargo_safety_evaluator_test

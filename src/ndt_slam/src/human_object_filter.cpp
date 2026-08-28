@@ -23,6 +23,172 @@ void HumanObjectDynamicFilter::reset() {
     trajectory_capsules_.clear();
     human_deny_cells_.clear();
     next_track_id_ = 0;
+    has_last_map_update_stamp_ = false;
+    last_map_update_stamp_sec_ = 0.0;
+    last_map_update_cloud_instance_id_ = 0U;
+}
+
+HumanFrameClassification HumanObjectDynamicFilter::classifyFrame(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud_base,
+    double timestamp,
+    std::uint64_t source_cloud_instance_id,
+    float ownership_voxel_size_m,
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& safe_objects_out,
+    pcl::PointCloud<pcl::PointXYZ>::Ptr& human_candidate_out) const {
+    HumanFrameClassification result;
+    safe_objects_out->clear();
+    human_candidate_out->clear();
+    if (!objects_cloud_base || !std::isfinite(timestamp) || timestamp <= 0.0 ||
+        source_cloud_instance_id == 0U ||
+        !std::isfinite(ownership_voxel_size_m) ||
+        ownership_voxel_size_m <= 0.0F) {
+        return result;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!filter_config_.enabled) {
+        *safe_objects_out = *objects_cloud_base;
+        return result;
+    }
+
+    result.source_stamp_sec = timestamp;
+    result.source_cloud_instance_id = source_cloud_instance_id;
+    result.owned_points.voxel_size_m = ownership_voxel_size_m;
+
+    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusters;
+    clusterBEV(objects_cloud_base, clusters);
+    for (const auto& cluster : clusters) {
+        Eigen::Vector3d centroid;
+        Eigen::Vector3d bbox_min;
+        Eigen::Vector3d bbox_max;
+        if (!isHumanLikeCluster(cluster, centroid, bbox_min, bbox_max)) {
+            continue;
+        }
+        HumanClusterObservation observation;
+        observation.centroid_base = centroid;
+        observation.bbox_min_base = bbox_min;
+        observation.bbox_max_base = bbox_max;
+        observation.point_count = static_cast<int>(cluster->size());
+        observation.strong = cluster->size() >=
+            static_cast<std::size_t>(filter_config_.min_points_strong);
+        result.clusters.push_back(observation);
+        for (const pcl::PointXYZ& point : cluster->points) {
+            PointOwnershipVoxel voxel;
+            if (makePointOwnershipVoxel(
+                    point, ownership_voxel_size_m, &voxel)) {
+                result.owned_points.voxels.insert(voxel);
+            }
+            human_candidate_out->push_back(point);
+        }
+    }
+
+    result.owned_points.valid = true;
+    for (const pcl::PointXYZ& point : objects_cloud_base->points) {
+        if (!result.owned_points.owns(point)) {
+            safe_objects_out->push_back(point);
+        }
+    }
+    result.valid = true;
+    return result;
+}
+
+HumanMapFilterSnapshot HumanObjectDynamicFilter::updateMapTracks(
+    const HumanFrameClassification& classification,
+    const Eigen::Matrix4d& T_map_base,
+    float static_learning_cell_size_m) {
+    HumanMapFilterSnapshot snapshot;
+    if (!classification.valid ||
+        !std::isfinite(classification.source_stamp_sec) ||
+        classification.source_stamp_sec <= 0.0 ||
+        classification.source_cloud_instance_id == 0U ||
+        !T_map_base.allFinite() ||
+        !std::isfinite(static_learning_cell_size_m) ||
+        static_learning_cell_size_m <= 0.0F) {
+        return snapshot;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    constexpr double kStampEpsilonSec = 1.0e-4;
+    if (has_last_map_update_stamp_ &&
+        (classification.source_stamp_sec <=
+             last_map_update_stamp_sec_ + kStampEpsilonSec ||
+         classification.source_cloud_instance_id <=
+             last_map_update_cloud_instance_id_)) {
+        return snapshot;
+    }
+
+    std::vector<HumanTrack> detections;
+    detections.reserve(classification.clusters.size());
+    for (const HumanClusterObservation& cluster : classification.clusters) {
+        HumanTrack detection{};
+        detection.centroid_base = cluster.centroid_base;
+        detection.centroid_map =
+            (T_map_base * cluster.centroid_base.homogeneous()).head<3>();
+
+        Eigen::Vector3d map_min = Eigen::Vector3d::Constant(
+            std::numeric_limits<double>::infinity());
+        Eigen::Vector3d map_max = Eigen::Vector3d::Constant(
+            -std::numeric_limits<double>::infinity());
+        for (int x_index = 0; x_index < 2; ++x_index) {
+            for (int y_index = 0; y_index < 2; ++y_index) {
+                for (int z_index = 0; z_index < 2; ++z_index) {
+                    const Eigen::Vector3d corner(
+                        x_index == 0 ? cluster.bbox_min_base.x()
+                                     : cluster.bbox_max_base.x(),
+                        y_index == 0 ? cluster.bbox_min_base.y()
+                                     : cluster.bbox_max_base.y(),
+                        z_index == 0 ? cluster.bbox_min_base.z()
+                                     : cluster.bbox_max_base.z());
+                    const Eigen::Vector3d transformed =
+                        (T_map_base * corner.homogeneous()).head<3>();
+                    map_min = map_min.cwiseMin(transformed);
+                    map_max = map_max.cwiseMax(transformed);
+                }
+            }
+        }
+        detection.bbox_min = map_min;
+        detection.bbox_max = map_max;
+        detection.point_count = cluster.point_count;
+        detection.height = map_max.z() - map_min.z();
+        detection.area = (map_max.x() - map_min.x()) *
+            (map_max.y() - map_min.y());
+        detections.push_back(detection);
+    }
+
+    updateTracks(detections, classification.source_stamp_sec);
+    for (const HumanTrack& detection : detections) {
+        addDenyCells(detection.bbox_min, detection.bbox_max,
+                     classification.source_stamp_sec, human_deny_ttl_);
+    }
+    cleanupExpiredTracks(classification.source_stamp_sec);
+    cleanupExpiredDenyCells(classification.source_stamp_sec);
+    has_last_map_update_stamp_ = true;
+    last_map_update_stamp_sec_ = classification.source_stamp_sec;
+    last_map_update_cloud_instance_id_ =
+        classification.source_cloud_instance_id;
+
+    snapshot.valid = true;
+    snapshot.source_stamp_sec = classification.source_stamp_sec;
+    snapshot.source_cloud_instance_id =
+        classification.source_cloud_instance_id;
+    snapshot.owned_points = classification.owned_points;
+    snapshot.static_learning_blocks.cell_size_m =
+        static_learning_cell_size_m;
+    std::vector<HumanTrack> live_tracks;
+    live_tracks.reserve(active_tracks_.size());
+    for (const auto& item : active_tracks_) {
+        live_tracks.push_back(item.second);
+    }
+    snapshot.static_learning_blocks.human_cells =
+        buildStaticLearningBlockCells(
+            live_tracks, static_learning_cell_size_m);
+    snapshot.active_track_count = static_cast<int>(active_tracks_.size());
+    for (const auto& item : active_tracks_) {
+        if (item.second.state == HumanTrackState::DYNAMIC_CONFIRMED) {
+            ++snapshot.dynamic_track_count;
+        }
+    }
+    return snapshot;
 }
 
 void HumanObjectDynamicFilter::processFrame(
@@ -216,7 +382,7 @@ void HumanObjectDynamicFilter::processFrame(
 
 void HumanObjectDynamicFilter::clusterBEV(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>& clusters) {
+    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>& clusters) const {
 
     clusters.clear();
 
@@ -282,7 +448,7 @@ bool HumanObjectDynamicFilter::isHumanLikeCluster(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cluster,
     Eigen::Vector3d& centroid,
     Eigen::Vector3d& bbox_min,
-    Eigen::Vector3d& bbox_max) {
+    Eigen::Vector3d& bbox_max) const {
 
     if (cluster->size() < static_cast<size_t>(filter_config_.min_points) ||
         cluster->size() > static_cast<size_t>(filter_config_.max_points)) {
@@ -585,6 +751,32 @@ int HumanObjectDynamicFilter::getDynamicHumanCount() const {
         }
     }
     return count;
+}
+
+std::set<std::pair<int, int>>
+HumanObjectDynamicFilter::buildStaticLearningBlockCells(
+    const std::vector<HumanTrack>& detections,
+    float cell_size_m) const {
+    std::set<std::pair<int, int>> cells;
+    if (!std::isfinite(cell_size_m) || cell_size_m <= 0.0F) {
+        return cells;
+    }
+    for (const HumanTrack& detection : detections) {
+        const int x_min = static_cast<int>(
+            std::floor(detection.bbox_min.x() / cell_size_m));
+        const int x_max = static_cast<int>(
+            std::floor(detection.bbox_max.x() / cell_size_m));
+        const int y_min = static_cast<int>(
+            std::floor(detection.bbox_min.y() / cell_size_m));
+        const int y_max = static_cast<int>(
+            std::floor(detection.bbox_max.y() / cell_size_m));
+        for (int x = x_min; x <= x_max; ++x) {
+            for (int y = y_min; y <= y_max; ++y) {
+                cells.emplace(x, y);
+            }
+        }
+    }
+    return cells;
 }
 
 std::pair<int, int> HumanObjectDynamicFilter::bevKey(double x, double y) const {

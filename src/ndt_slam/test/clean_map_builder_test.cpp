@@ -113,14 +113,19 @@ TEST(CleanMapBuilder, ProtectWinsOverDenyAndRestoresCandidate) {
     EXPECT_EQ(result.protected_cells, 1);
 }
 
-TEST(CleanMapBuilder, HumanAndThreeDimensionalDenyAreApplied) {
+TEST(CleanMapBuilder, HumanDenyBlocksLearningButPreservesExistingStatic) {
     auto human = observableCell();
+    human.previous_clean_points = {
+        {0.04F, 0.04F, 0.1F}, {0.05F, 0.05F, 0.7F}};
     human.use_human_deny = true;
     human.human_deny_cells.insert({0, 0});
     const auto human_result = buildCleanMapFromSnapshot(human);
     ASSERT_TRUE(human_result.valid);
-    EXPECT_TRUE(human_result.clean_points.empty());
+    ASSERT_EQ(human_result.clean_points.size(), 2U);
+    EXPECT_FLOAT_EQ(human_result.clean_points.front().z(), 0.1F);
     EXPECT_EQ(human_result.human_denied_cells, 1);
+    EXPECT_EQ(human_result.retained_cells, 1);
+    EXPECT_EQ(human_result.retained_points, 2);
 
     auto volume = observableCell();
     volume.use_3d_deny = true;

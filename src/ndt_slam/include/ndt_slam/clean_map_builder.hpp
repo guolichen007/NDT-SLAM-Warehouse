@@ -11,6 +11,8 @@
 
 namespace ndt_slam {
 
+inline constexpr float kCleanMapCellSizeM = 0.15F;
+
 using CleanMapCell = std::pair<int, int>;
 
 struct CleanMapDenyRange {
@@ -19,7 +21,7 @@ struct CleanMapDenyRange {
 };
 
 struct CleanMapBuildInput {
-    float cell_size_m = 0.15F;
+    float cell_size_m = kCleanMapCellSizeM;
     std::vector<Eigen::Vector3f> object_points;
     // The last coherent clean layer is a retention baseline, not a synthetic
     // observation. A cell may reuse these exact points while its current raw

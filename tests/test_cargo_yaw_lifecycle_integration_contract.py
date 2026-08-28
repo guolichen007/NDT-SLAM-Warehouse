@@ -11,7 +11,8 @@ def test_frame_authority_context_is_created_once_and_shared() -> None:
     frame_block = source[source.index("FrameAuthorityContext frame_authority_context") :]
     assert frame_block.count("FrameAuthorityContext frame_authority_context") == 1
     assert "feature_cloud, filtered_cloud, frame_authority_context" in frame_block
-    assert "filtered_cloud, frame_authority_context, publish_time" in frame_block
+    assert "filtered_cloud, frame_authority_context," in frame_block
+    assert "avoidance_map_mutation, publish_time" in frame_block
     assert "frame_authority_context.safetyAuthorized()" in frame_block
 
 
