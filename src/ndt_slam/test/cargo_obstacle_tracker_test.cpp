@@ -57,6 +57,43 @@ CargoObstacleTrackerConfig ordinaryHazardConfig() {
   return config;
 }
 
+CargoObstacleObservation withKeyframePoseVersion(
+    CargoObstacleObservation observation, std::uint64_t version,
+    double stamp_sec) {
+  observation.pose_authority.pose_identity.keyframe_pose_version = version;
+  observation.pose_authority.source_stamp_sec = stamp_sec;
+  return observation;
+}
+
+void expectCrossAuthorityUniqueObservationStartsFreshEvidence(
+    const PoseAuthorityIdentity& next_identity) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  CargoObstacleObservation observation = hazard(0U, 0.0F, 0.0F);
+  tracker.update(1.0, {observation});
+  observation.source_index = 1U;
+  observation.pose_authority.source_stamp_sec = 1.2;
+  tracker.update(1.2, {observation});
+  observation.source_index = 2U;
+  observation.pose_authority.source_stamp_sec = 1.4;
+  const CargoObstacleTrackerDecision mature =
+      tracker.update(1.4, {observation});
+  ASSERT_TRUE(mature.confirmed_hazard);
+  ASSERT_EQ(mature.selected_confirm_count, 3);
+  const std::uint64_t physical_track_id = mature.selected_track_id;
+
+  CargoObstacleObservation next = hazard(3U, 0.02F, 0.0F);
+  next.pose_authority = bindTemporalEvidenceAuthority(next_identity, 1.6);
+  const CargoObstacleTrackerDecision fresh = tracker.update(1.6, {next});
+
+  EXPECT_FALSE(fresh.confirmed_hazard);
+  EXPECT_EQ(fresh.selected_track_id, physical_track_id);
+  EXPECT_EQ(fresh.selected_confirm_count, 1);
+  ASSERT_TRUE(fresh.selected_pose_authority.valid);
+  EXPECT_TRUE(samePoseAuthorityIdentity(
+      fresh.selected_pose_authority.pose_identity, next_identity));
+  ASSERT_EQ(tracker.tracks().size(), 1U);
+}
+
 TEST(CargoObstacleTracker,
      AmbiguousTemporalHoldPreservesProducingPoseAuthority) {
   CargoObstacleTracker tracker(ordinaryHazardConfig());
@@ -77,6 +114,95 @@ TEST(CargoObstacleTracker,
   EXPECT_EQ(
       decision.selected_pose_authority.pose_identity.keyframe_pose_version,
       2U);
+}
+
+TEST(CargoObstacleTracker, SameAuthorityUniqueObservationContinuesTrack) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  const CargoObstacleTrackerDecision initial =
+      tracker.update(1.0, {hazard(0U, 0.0F, 0.0F)});
+  CargoObstacleObservation continued = hazard(1U, 0.02F, 0.0F);
+  continued.pose_authority.source_stamp_sec = 1.2;
+  const CargoObstacleTrackerDecision decision =
+      tracker.update(1.2, {continued});
+
+  EXPECT_EQ(decision.selected_track_id, initial.selected_track_id);
+  EXPECT_EQ(decision.selected_confirm_count, 2);
+  ASSERT_EQ(tracker.tracks().size(), 1U);
+}
+
+TEST(CargoObstacleTracker, SameAuthorityAmbiguityStillHolds) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  tracker.update(1.0, {
+      hazard(0U, -0.4F, 0.0F), hazard(1U, 0.4F, 0.0F)});
+  CargoObstacleObservation ambiguous_a = hazard(2U, 0.0F, 0.0F);
+  CargoObstacleObservation ambiguous_b = hazard(3U, 0.0F, 0.0F);
+  ambiguous_a.pose_authority.source_stamp_sec = 1.2;
+  ambiguous_b.pose_authority.source_stamp_sec = 1.2;
+  const CargoObstacleTrackerDecision decision = tracker.update(
+      1.2, {ambiguous_a, ambiguous_b});
+
+  EXPECT_FALSE(decision.confirmed_hazard);
+  EXPECT_EQ(decision.reason,
+            "ambiguous_obstacle_association_authority_frozen");
+  EXPECT_EQ(tracker.tracks().size(), 2U);
+  for (const CargoObstacleTrack& track : tracker.tracks()) {
+    EXPECT_TRUE(track.association_ambiguous);
+    EXPECT_EQ(track.pose_authority.pose_identity.keyframe_pose_version, 2U);
+  }
+}
+
+TEST(CargoObstacleTracker,
+     CrossAuthorityUniqueObservationStartsFreshEvidence) {
+  PoseAuthorityIdentity next =
+      hazard(9U, 0.0F, 0.0F).pose_authority.pose_identity;
+  next.keyframe_pose_version = 9U;
+  expectCrossAuthorityUniqueObservationStartsFreshEvidence(next);
+}
+
+TEST(CargoObstacleTracker,
+     CrossAuthorityAmbiguousObservationCannotCreateFreshAuthoritativeTrack) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  tracker.update(1.0, {
+      hazard(0U, -0.4F, 0.0F), hazard(1U, 0.4F, 0.0F)});
+  CargoObstacleObservation ambiguous_a = withKeyframePoseVersion(
+      hazard(2U, 0.0F, 0.0F), 9U, 1.2);
+  CargoObstacleObservation ambiguous_b = withKeyframePoseVersion(
+      hazard(3U, 0.0F, 0.0F), 9U, 1.2);
+  const CargoObstacleTrackerDecision decision = tracker.update(
+      1.2, {ambiguous_a, ambiguous_b});
+
+  EXPECT_FALSE(decision.confirmed_hazard);
+  EXPECT_EQ(decision.reason,
+            "ambiguous_obstacle_association_authority_frozen");
+  ASSERT_EQ(tracker.tracks().size(), 2U);
+  for (const CargoObstacleTrack& track : tracker.tracks()) {
+    EXPECT_TRUE(track.association_ambiguous);
+    EXPECT_EQ(track.pose_authority.pose_identity.keyframe_pose_version, 2U);
+  }
+}
+
+TEST(CargoObstacleTracker,
+     MapGenerationMismatchCannotTransferTemporalEvidence) {
+  PoseAuthorityIdentity next =
+      hazard(9U, 0.0F, 0.0F).pose_authority.pose_identity;
+  ++next.map_rebuild_generation;
+  expectCrossAuthorityUniqueObservationStartsFreshEvidence(next);
+}
+
+TEST(CargoObstacleTracker,
+     YawAuthorityGenerationMismatchCannotTransferTemporalEvidence) {
+  PoseAuthorityIdentity next =
+      hazard(9U, 0.0F, 0.0F).pose_authority.pose_identity;
+  ++next.yaw_authority_generation;
+  expectCrossAuthorityUniqueObservationStartsFreshEvidence(next);
+}
+
+TEST(CargoObstacleTracker,
+     YawReferenceMismatchCannotTransferTemporalEvidence) {
+  PoseAuthorityIdentity next =
+      hazard(9U, 0.0F, 0.0F).pose_authority.pose_identity;
+  next.yaw_reference_hash = "different-yaw-reference";
+  expectCrossAuthorityUniqueObservationStartsFreshEvidence(next);
 }
 
 TEST(CargoObstacleTracker, DifferentWinnerOrderKeepsIndependentIdentity) {
