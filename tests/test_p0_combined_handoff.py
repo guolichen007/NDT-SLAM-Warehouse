@@ -21,15 +21,32 @@ def _load_analyzer():
 
 
 def test_combined_handoff_enforces_one_four_bag_attempt() -> None:
-    runner = (
+    outer_runner = (
         ROOT
         / "src/ndt_slam/scripts/validation/run_p0_combined_ubuntu_acceptance.sh"
     ).read_text(encoding="utf-8")
-    assert "combined_four_bag_attempt.marker" in runner
-    assert "reason=already_attempted" in runner
-    assert "COMBINED_FOUR_BAG_ATTEMPT_COUNT=1" in runner
-    assert "run_integrated_cargo_identity_shadow_four_bags.sh" in runner
-    assert "--yaw-reference" not in runner or "yaw_reference" in runner
+    matrix_runner = (
+        ROOT
+        / "src/ndt_slam/scripts/analysis/"
+        "run_integrated_cargo_identity_shadow_four_bags.sh"
+    ).read_text(encoding="utf-8")
+
+    # The global SHA ledger is the anti-replay authority. The per-output
+    # marker is deliberately only a result copy after the atomic claim.
+    assert "server_runs/p0_combined_attempts" in outer_runner
+    assert 'ledger_dir="$ledger_root/${expected_sha}.attempt"' in matrix_runner
+    assert 'if mkdir "$ledger_dir"' in matrix_runner
+    assert "reason=sha_already_attempted" in matrix_runner
+    assert "combined_four_bag_attempt.marker" in matrix_runner
+    assert matrix_runner.index('catkin_test_results --all --verbose') < (
+        matrix_runner.index('if mkdir "$ledger_dir"')
+    )
+    assert matrix_runner.index('if mkdir "$ledger_dir"') < (
+        matrix_runner.index("combined_four_bag_attempt.marker")
+    )
+    assert "COMBINED_FOUR_BAG_ATTEMPT_COUNT=1" in matrix_runner
+    assert "run_integrated_cargo_identity_shadow_four_bags.sh" in outer_runner
+    assert "--yaw-reference" not in outer_runner or "yaw_reference" in outer_runner
 
 
 def test_replay_harness_freezes_rail_mode_from_reference() -> None:
