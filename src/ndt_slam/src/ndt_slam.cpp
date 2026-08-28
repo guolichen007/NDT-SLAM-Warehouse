@@ -630,10 +630,36 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
             authority["enabled"].as<bool>(false);
         integrated_cargo_identity_shadow_only_ =
             authority["shadow_only"].as<bool>(true);
-        if (!integrated_cargo_identity_shadow_enabled_ ||
-            !integrated_cargo_identity_shadow_only_) {
+        if (integrated_cargo_identity_shadow_enabled_) {
+            const std::string configured_mode = authority["mode"]
+                ? authority["mode"].as<std::string>()
+                : (integrated_cargo_identity_shadow_only_
+                    ? "V6_SHADOW" : "V6_AUTHORITY");
+            if (!parseCargoAuthorityMode(
+                    configured_mode, &cargo_authority_mode_) ||
+                cargo_authority_mode_ == CargoAuthorityMode::LEGACY) {
+                throw std::runtime_error(
+                    "INVALID_CARGO_AUTHORITY_MODE");
+            }
+            // V6 identity is evaluated after the legacy formal Cargo early
+            // returns in updateAndPublishCargoSafetyPipeline().  Until the
+            // canonical obstacle/fusion input is made independent of that
+            // legacy lifecycle, enabling product authority would silently
+            // preserve a second Cargo authority gate.  Fail closed instead of
+            // exposing a mode whose Safety semantics are not actually V6.
+            if (cargo_authority_mode_ == CargoAuthorityMode::V6_AUTHORITY) {
+                throw std::runtime_error(
+                    "CARGO_V6_PRODUCT_MODE_BLOCKED_BY_LEGACY_FORMAL_PIPELINE");
+            }
+        } else {
+            cargo_authority_mode_ = CargoAuthorityMode::LEGACY;
+        }
+        integrated_cargo_identity_shadow_only_ =
+            cargo_authority_mode_ != CargoAuthorityMode::V6_AUTHORITY;
+        if (!integrated_cargo_identity_shadow_enabled_ &&
+            cargo_authority_mode_ != CargoAuthorityMode::LEGACY) {
             throw std::runtime_error(
-                "PRODUCT_MODE_NOT_IMPLEMENTED_IN_INVESTIGATION_BUILD");
+                "CARGO_AUTHORITY_REQUIRES_V6_ENABLED");
         }
         const YAML::Node association = authority["association"];
         integrated_identity_config_.maximum_xy_step_m =
@@ -708,7 +734,9 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         integrated_geometry_authority_.setConfig(
             integrated_geometry_config_);
         ROS_INFO(
-            "[IntegratedCargoIdentityShadow] enabled=1 shadow_only=1 config=%s",
+            "[IntegratedCargoIdentity] enabled=%d mode=%s config=%s",
+            integrated_cargo_identity_shadow_enabled_ ? 1 : 0,
+            cargoAuthorityModeName(cargo_authority_mode_),
             integrated_cargo_identity_shadow_config_file.c_str());
     }
     last_pointcloud_wall_sec_.store(
@@ -1109,6 +1137,7 @@ void NdtSlamNode::enqueueMapCommitJob(
         avoidance_map_mutation.source_cloud_instance_id;
     job.pose_identity = frame_context.pose_identity;
     job.avoidance_map_mutation = avoidance_map_mutation;
+    job.cargo_authority_mode = cargo_authority_mode_;
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
     job.hook_role = hook_load_signal_role_;
     job.hook_valid = hook.valid;
@@ -1129,7 +1158,11 @@ void NdtSlamNode::enqueueMapCommitJob(
     // configured fallback as a removal geometry.
     const bool hook_loaded = hook.valid &&
         hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED;
-    if (hook_loaded && !job.lidar_removal_authorized &&
+    const bool cargo_map_authorized =
+        cargo_authority_mode_ == CargoAuthorityMode::V6_AUTHORITY
+            ? avoidance_map_mutation.cargo_points.authorized
+            : job.lidar_removal_authorized;
+    if (hook_loaded && !cargo_map_authorized &&
         odom_anchor_config_.enabled) {
         const Eigen::Vector2f anchor = getCargoAnchorXY();
         job.cargo_quarantine_active = true;
@@ -7343,6 +7376,12 @@ void NdtSlamNode::processCloudThread() {
             frame_authority_context.failure_class =
                 frame_authority_context.localization_health.failure_class;
             frame_authority_context.source_stamp_sec = publish_time.toSec();
+            canonical_cargo_authority_snapshot_ =
+                CanonicalCargoAuthoritySnapshot{};
+            canonical_cargo_authority_snapshot_.source_stamp_sec =
+                publish_time.toSec();
+            canonical_cargo_authority_snapshot_.pose_identity =
+                frame_authority_context.pose_identity;
             HumanMapFilterSnapshot human_map_snapshot;
             if (human_filter_config_.enabled) {
                 human_map_snapshot = human_filter_.updateMapTracks(
@@ -7443,6 +7482,16 @@ void NdtSlamNode::processCloudThread() {
                 publishRelocalizationSafetyInvalid(
                     publish_time, "localization_degraded");
                 relocalization_invalid_safety_published_ = true;
+            }
+            if (canonical_cargo_authority_snapshot_.valid_input &&
+                std::abs(
+                    canonical_cargo_authority_snapshot_.source_stamp_sec -
+                    publish_time.toSec()) <= 1.0e-4 &&
+                samePoseAuthorityIdentity(
+                    canonical_cargo_authority_snapshot_.pose_identity,
+                    frame_authority_context.pose_identity)) {
+                avoidance_map_mutation.cargo_points =
+                    canonical_cargo_authority_snapshot_.map_mutation;
             }
 
             // ICP never changes odom/TF. When explicitly enabled, a bounded
@@ -26011,16 +26060,43 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         evaluateIntegratedCargoIdentityShadow(
             hook, external_obstacle_cloud, frame_context, stamp,
             obstacle_cloud_stamp, processing_age_sec);
+        CanonicalCargoAuthorityInput canonical_input;
+        canonical_input.mode = cargo_authority_mode_;
+        canonical_input.source_stamp_sec = stamp.toSec();
+        canonical_input.pose_identity = frame_context.pose_identity;
+        canonical_input.identity = integrated_identity_decision_;
+        canonical_input.group = integrated_group_evidence_;
+        canonical_input.geometry = integrated_geometry_decision_;
+        canonical_input.bottom = integrated_shadow_bottom_result_;
+        canonical_input.owner_voxel_size_m =
+            static_cast<float>(objects_voxel_size_);
+        canonical_input.independent_static_provenance_conflict =
+            cargoGroupOverlapsMatureStaticEvidence(
+                integrated_group_evidence_, pose_map_base,
+                frame_context.pose_identity,
+                static_obstacle_evidence_index_.snapshot());
+        canonical_cargo_authority_snapshot_ =
+            buildCanonicalCargoAuthoritySnapshot(canonical_input);
     }
     CargoAvoidanceFusionResult fused_avoidance =
         fuseCargoAvoidanceRisk(
             avoidance_input, cargo_avoidance_fusion_config_);
+    if (canonical_cargo_authority_snapshot_.cargo_safety_authorized) {
+        fused_avoidance = integrated_shadow_fusion_result_;
+    }
     CargoFrameDecision cargo_frame_decision;
     cargo_frame_decision.stamp_sec = stamp.toSec();
     cargo_frame_decision.cargo_identity_confirmed_this_frame = false;
-    cargo_frame_decision.cargo_identity_authorized = active_track;
-    cargo_frame_decision.cargo_lifecycle_id = cargo_lifecycle_id_;
-    cargo_frame_decision.cargo_track_id = cargo_fusion_track_id_;
+    const bool v6_safety_authorized =
+        canonical_cargo_authority_snapshot_.cargo_safety_authorized;
+    cargo_frame_decision.cargo_identity_authorized =
+        v6_safety_authorized || active_track;
+    cargo_frame_decision.cargo_lifecycle_id = v6_safety_authorized
+        ? integrated_identity_decision_.physical_cargo_epoch_id
+        : cargo_lifecycle_id_;
+    cargo_frame_decision.cargo_track_id = v6_safety_authorized
+        ? integrated_identity_decision_.physical_history_id
+        : cargo_fusion_track_id_;
     cargo_frame_decision.positive_warning_confirmed_this_frame =
         fused_avoidance.official_valid &&
         (fused_avoidance.official_code ==
@@ -27582,7 +27658,10 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     pcl::PointCloud<pcl::PointXYZ>::Ptr cargo_removed_base(new pcl::PointCloud<pcl::PointXYZ>);
 
     // Gate: 旧 global cargo 链路（OdomAnchorBox 模式下默认关闭）
-    bool run_legacy_cargo = payload_tracker_config_.enabled &&
+    const bool v6_authority_mode =
+        job.cargo_authority_mode == CargoAuthorityMode::V6_AUTHORITY;
+    bool run_legacy_cargo = !v6_authority_mode &&
+                            payload_tracker_config_.enabled &&
                             channel_filter_config_.enabled &&
                             payload_candidates && !payload_candidates->empty() &&
                             (!odom_anchor_config_.enabled || odom_anchor_config_.use_global_payload_tracker);
@@ -27978,17 +28057,31 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
             job.lidar_removal_authorized && job.formal_footprint_valid,
             payload_candidates && !payload_candidates->empty()});
     const pcl::PointCloud<pcl::PointXYZ>::Ptr cargo_commit_source =
-        hook_map_policy.exclude_candidate_region
+        v6_authority_mode
+            ? objects_base
+            : hook_map_policy.exclude_candidate_region
             ? objects_channel_safe : objects_base;
 
-    removePointsInsideCargoRemoveBoxesBase(
-        cargo_commit_source,
-        active_cargo_remove_boxes_base,
-        objects_after_cargo_base,
-        cargo_removed_base);
+    if (v6_authority_mode) {
+        objects_after_cargo_base->reserve(cargo_commit_source->size());
+        cargo_removed_base->reserve(cargo_commit_source->size());
+        for (const pcl::PointXYZ& point : cargo_commit_source->points) {
+            if (job.avoidance_map_mutation.cargo_points.owns(point)) {
+                cargo_removed_base->push_back(point);
+            } else {
+                objects_after_cargo_base->push_back(point);
+            }
+        }
+    } else {
+        removePointsInsideCargoRemoveBoxesBase(
+            cargo_commit_source,
+            active_cargo_remove_boxes_base,
+            objects_after_cargo_base,
+            cargo_removed_base);
+    }
 
     // ========== Hook locked box 剔除（必须在 MapCommit 前）==========
-    if (hook_map_policy.use_formal_remove_box) {
+    if (!v6_authority_mode && hook_map_policy.use_formal_remove_box) {
         pcl::PointCloud<pcl::PointXYZ>::Ptr objects_after_hook_base(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr hook_cargo_removed_base(new pcl::PointCloud<pcl::PointXYZ>);
         const CargoObbFootprint& removal_footprint = job.formal_footprint;

@@ -66,6 +66,7 @@
 #include <ndt_slam/cargo_lift_origin_binder.hpp>
 #include <ndt_slam/cargo_physical_identity_authority.hpp>
 #include <ndt_slam/integrated_cargo_identity_shadow.hpp>
+#include <ndt_slam/cargo_v6_authority_adapter.hpp>
 #include <ndt_slam/cargo_geometry_fusion.hpp>
 #include <ndt_slam/cargo_preload_baseline_tracker.hpp>
 #include <ndt_slam/registration_target_snapshot.hpp>
@@ -763,6 +764,7 @@ private:
         std::uint64_t source_cloud_instance_id = 0U;
         PoseAuthorityIdentity pose_identity;
         AvoidanceMapMutationSnapshot avoidance_map_mutation;
+        CargoAuthorityMode cargo_authority_mode = CargoAuthorityMode::LEGACY;
         HookLoadSignalRole hook_role = HookLoadSignalRole::REQUIRED;
         bool hook_valid = false;
         int hook_state = static_cast<int>(HookLoadState::UNKNOWN);
@@ -2184,6 +2186,7 @@ private:
     // product mutation authority and is never consumed by hook_lock_.
     bool integrated_cargo_identity_shadow_enabled_ = false;
     bool integrated_cargo_identity_shadow_only_ = true;
+    CargoAuthorityMode cargo_authority_mode_ = CargoAuthorityMode::LEGACY;
     CargoPhysicalIdentityConfig integrated_identity_config_;
     CargoPhysicalIdentityAuthority integrated_identity_authority_;
     CargoPhysicalIdentityDecision integrated_identity_decision_;
@@ -2202,6 +2205,7 @@ private:
     bool integrated_canonical_fusion_snapshot_valid_ = false;
     CargoBottomFusion integrated_shadow_bottom_fusion_;
     CargoBottomResult integrated_shadow_bottom_result_;
+    CanonicalCargoAuthoritySnapshot canonical_cargo_authority_snapshot_;
     double integrated_shadow_identity_compute_ms_ = 0.0;
     double integrated_shadow_geometry_compute_ms_ = 0.0;
     double integrated_shadow_safety_compute_ms_ = 0.0;

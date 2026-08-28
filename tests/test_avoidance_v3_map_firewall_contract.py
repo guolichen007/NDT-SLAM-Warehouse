@@ -10,6 +10,9 @@ HUMAN_CPP = (ROOT / "src/ndt_slam/src/human_object_filter.cpp").read_text(
 CLEAN_CPP = (ROOT / "src/ndt_slam/src/clean_map_builder.cpp").read_text(
     encoding="utf-8"
 )
+CARGO_ADAPTER_CPP = (
+    ROOT / "src/ndt_slam/src/cargo_v6_authority_adapter.cpp"
+).read_text(encoding="utf-8")
 
 
 def function_body(source: str, signature: str) -> str:
@@ -100,3 +103,61 @@ def test_dynamic_event_human_has_no_active_product_writer():
         "bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(",
     )
     assert "createHumanEvent" not in active_worker
+
+
+def test_cargo_safety_authority_does_not_imply_map_mutation_authority():
+    adapter = function_body(
+        CARGO_ADAPTER_CPP,
+        "CanonicalCargoAuthoritySnapshot buildCanonicalCargoAuthoritySnapshot(",
+    )
+    assert "output.would_authorize_safety = true" in adapter
+    assert "!input.independent_static_provenance_conflict" in adapter
+    assert (
+        "output.cargo_map_mutation_authorized =\n"
+        "      product_mode && output.would_authorize_map_mutation"
+    ) in adapter
+
+
+def test_v6_map_commit_uses_tight_current_owner_mask_only():
+    worker = function_body(
+        NDT_CPP,
+        "bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(",
+    )
+    assert "job.avoidance_map_mutation.cargo_points.owns(point)" in worker
+    branch_start = worker.index("if (v6_authority_mode) {")
+    v6_branch = worker[
+        branch_start : worker.index("    } else {", branch_start)
+    ]
+    assert "removePointsInsideCargoRemoveBoxesBase" not in v6_branch
+    assert "containsPointInCargoObbBase" not in v6_branch
+
+
+def test_v6_map_mode_disables_legacy_boxes_and_historical_sweep_source():
+    worker = function_body(
+        NDT_CPP,
+        "bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(",
+    )
+    assert "bool run_legacy_cargo = !v6_authority_mode" in worker
+    assert "if (!legacy_removal_authorized)" in worker
+    assert "active_cargo_remove_boxes_base.clear()" in worker
+    assert "for (const auto& box_base : active_cargo_remove_boxes_base)" in worker
+
+
+def test_cargo_authority_mode_is_frozen_into_map_commit_job():
+    enqueue = function_body(
+        NDT_CPP,
+        "void NdtSlamNode::enqueueMapCommitJob(",
+    )
+    assert "job.cargo_authority_mode = cargo_authority_mode_" in enqueue
+    assert "avoidance_map_mutation.cargo_points.authorized" in enqueue
+
+
+def test_v6_product_mode_fails_closed_until_legacy_formal_gate_is_removed():
+    constructor = function_body(
+        NDT_CPP,
+        "NdtSlamNode::NdtSlamNode(const std::string& config_file_path",
+    )
+    assert (
+        "CARGO_V6_PRODUCT_MODE_BLOCKED_BY_LEGACY_FORMAL_PIPELINE"
+        in constructor
+    )
