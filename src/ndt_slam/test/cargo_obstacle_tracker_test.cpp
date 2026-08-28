@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "ndt_slam/cargo_obstacle_tracker.hpp"
+#include "ndt_slam/frame_authority_context.hpp"
 
 namespace ndt_slam {
 namespace {
@@ -179,6 +180,32 @@ TEST(CargoObstacleTracker,
     EXPECT_TRUE(track.association_ambiguous);
     EXPECT_EQ(track.pose_authority.pose_identity.keyframe_pose_version, 2U);
   }
+}
+
+TEST(CargoObstacleTracker,
+     HeldOldAuthorityCannotAuthorizeCurrentFrameClear) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  tracker.update(1.0, {
+      hazard(0U, -0.4F, 0.0F), hazard(1U, 0.4F, 0.0F)});
+  CargoObstacleObservation ambiguous_a = withKeyframePoseVersion(
+      hazard(2U, 0.0F, 0.0F), 9U, 1.2);
+  CargoObstacleObservation ambiguous_b = withKeyframePoseVersion(
+      hazard(3U, 0.0F, 0.0F), 9U, 1.2);
+  const CargoObstacleTrackerDecision held = tracker.update(
+      1.2, {ambiguous_a, ambiguous_b});
+  ASSERT_TRUE(held.selected_pose_authority.valid);
+  ASSERT_EQ(
+      held.selected_pose_authority.pose_identity.keyframe_pose_version, 2U);
+
+  FrameAuthorityContext frame;
+  frame.rail_authority_mode = true;
+  frame.pose_identity = ambiguous_a.pose_authority.pose_identity;
+  frame.localization_health.safety_localization_authorized = true;
+  const TemporalEvidenceAuthority current_cargo =
+      bindTemporalEvidenceAuthority(frame.pose_identity, 1.2);
+
+  EXPECT_FALSE(safetyFrameAuthorityMatches(
+      frame, current_cargo, held.selected_pose_authority));
 }
 
 TEST(CargoObstacleTracker,
