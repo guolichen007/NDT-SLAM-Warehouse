@@ -13,6 +13,18 @@
 
 namespace ndt_slam {
 
+enum class ObstacleSupportKind : std::uint8_t {
+  DENSE_CURRENT_FRAME = 0,
+  SPARSE_MULTI_FRAME = 1,
+};
+
+const char* obstacleSupportKindName(ObstacleSupportKind kind) noexcept;
+
+struct SparseObstacleSupportFrame {
+  double stamp_sec = 0.0;
+  std::vector<std::int64_t> occupied_map_cells;
+};
+
 enum class ExternalProvenance : std::uint8_t {
   NONE = 0,
   OUTSIDE_CARGO_SHELL_ONLY = 1,
@@ -167,6 +179,12 @@ struct CargoObstacleTrack {
   bool current_source_validated = false;
   bool current_warning_eligible = false;
   std::size_t current_source_index = 0U;
+  ObstacleSupportKind support_kind =
+      ObstacleSupportKind::DENSE_CURRENT_FRAME;
+  std::size_t real_current_point_count = 0U;
+  std::vector<SparseObstacleSupportFrame> sparse_support_ring;
+  int sparse_independent_frames = 0;
+  bool sparse_to_dense_this_cycle = false;
 };
 
 struct CargoObstacleTrackerDecision {
@@ -205,6 +223,15 @@ struct CargoObstacleTrackerDecision {
   std::uint64_t ambiguous_association_count = 0U;
   Eigen::Vector3f selected_track_velocity = Eigen::Vector3f::Zero();
   TemporalEvidenceAuthority selected_pose_authority;
+  ObstacleSupportKind selected_support_kind =
+      ObstacleSupportKind::DENSE_CURRENT_FRAME;
+  std::size_t selected_real_current_point_count = 0U;
+  int selected_sparse_independent_frames = 0;
+  bool selected_sparse_to_dense = false;
+  std::size_t sparse_track_count = 0U;
+  std::size_t sparse_ring_high_water = 0U;
+  std::uint64_t sparse_ambiguity_reject_count = 0U;
+  std::uint64_t sparse_authority_reset_count = 0U;
   std::string reason = "not_evaluated";
 };
 
@@ -255,6 +282,8 @@ class CargoObstacleTracker {
   std::uint64_t created_track_count_ = 0U;
   std::uint64_t association_reset_count_ = 0U;
   std::uint64_t ambiguous_association_count_ = 0U;
+  std::uint64_t sparse_ambiguity_reject_count_ = 0U;
+  std::uint64_t sparse_authority_reset_count_ = 0U;
 };
 
 using PhysicalObstacleTrackStore = CargoObstacleTracker;

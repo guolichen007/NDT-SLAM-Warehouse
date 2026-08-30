@@ -67,6 +67,7 @@
 #include <ndt_slam/cargo_physical_identity_authority.hpp>
 #include <ndt_slam/integrated_cargo_identity_shadow.hpp>
 #include <ndt_slam/cargo_v6_authority_adapter.hpp>
+#include <ndt_slam/product_cargo_context.hpp>
 #include <ndt_slam/cargo_geometry_fusion.hpp>
 #include <ndt_slam/cargo_preload_baseline_tracker.hpp>
 #include <ndt_slam/registration_target_snapshot.hpp>
@@ -762,6 +763,7 @@ private:
         Sophus::SE3d pose;
         pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud;
         std::uint64_t source_cloud_instance_id = 0U;
+        SourceFrameIdentity source_frame_identity;
         PoseAuthorityIdentity pose_identity;
         AvoidanceMapMutationSnapshot avoidance_map_mutation;
         CargoAuthorityMode cargo_authority_mode = CargoAuthorityMode::LEGACY;
@@ -777,6 +779,9 @@ private:
         // static map authority. This is a local fail-closed region, never a
         // global map clear and never a hook_loaded => skip-all-MapCommit gate.
         bool cargo_quarantine_active = false;
+        // V6 fallback is exact current-frame candidate ownership only. It is
+        // not Cargo identity/map authority and never forms historical state.
+        bool v6_candidate_quarantine_active = false;
         float cargo_quarantine_center_x = 0.0F;
         float cargo_quarantine_center_y = 0.0F;
         float cargo_quarantine_half_x = 0.0F;
@@ -816,6 +821,33 @@ private:
     std::atomic<std::uint64_t> map_commit_coalesced_{0U};
     std::atomic<std::uint64_t> map_commit_stale_{0U};
     std::atomic<std::uint64_t> map_commit_dropped_{0U};
+    // Avoidance-to-SLAM firewall telemetry. Writer counters intentionally
+    // have no mutation sites in Avoidance code; non-zero values are a hard
+    // contract failure in static/runtime validation.
+    std::atomic<std::uint64_t> avoidance_pose_write_count_{0U};
+    std::atomic<std::uint64_t> avoidance_yaw_write_count_{0U};
+    std::atomic<std::uint64_t> avoidance_relocalization_write_count_{0U};
+    std::atomic<std::uint64_t> avoidance_target_direct_write_count_{0U};
+    std::atomic<std::uint64_t> avoidance_map_generation_write_count_{0U};
+    std::atomic<std::uint64_t> sparse_map_mutation_count_{0U};
+    std::atomic<std::uint64_t> stale_avoidance_snapshot_applied_{0U};
+    std::atomic<std::uint64_t> stale_avoidance_snapshot_rejected_{0U};
+    std::atomic<std::uint64_t> map_commit_pose_authority_mismatch_{0U};
+    std::atomic<std::uint64_t> map_removed_without_authority_count_{0U};
+    std::atomic<std::uint64_t>
+        registration_source_removed_without_ownership_count_{0U};
+    std::atomic<std::uint64_t>
+        keyframe_removed_without_ownership_count_{0U};
+    std::atomic<std::uint64_t>
+        mixed_pose_generation_map_filter_count_{0U};
+    std::atomic<std::uint64_t> last_keyframe_commit_cloud_hash_{0U};
+    std::atomic<std::uint64_t> last_map_rebuild_input_hash_{0U};
+    // Read-only loop/rebuild telemetry for the A/B map audit. These counters
+    // do not participate in loop candidate selection or optimization.
+    std::atomic<std::uint64_t> loop_candidate_count_{0U};
+    std::atomic<std::uint64_t> loop_accept_count_{0U};
+    std::atomic<double> last_loop_correction_xy_m_{0.0};
+    std::atomic<double> last_loop_correction_yaw_deg_{0.0};
     // Destructive reset/load/rebuild transitions take this mutex before
     // changing the lifecycle epoch.  The worker therefore cannot publish an
     // old-epoch keyframe after a new map has become authoritative.
@@ -2206,6 +2238,36 @@ private:
     CargoBottomFusion integrated_shadow_bottom_fusion_;
     CargoBottomResult integrated_shadow_bottom_result_;
     CanonicalCargoAuthoritySnapshot canonical_cargo_authority_snapshot_;
+    std::atomic<bool> cargo_v6_last_valid_input_{false};
+    std::atomic<bool> cargo_v6_last_safety_authorized_{false};
+    std::atomic<bool> cargo_v6_last_map_authorized_{false};
+    mutable std::mutex cargo_v6_diagnostics_mutex_;
+    std::string cargo_v6_last_reason_ = "not_evaluated";
+    // Registration remains Legacy-product in V4.  These frame-owner values
+    // preserve that exact path while V6 reports only a current-frame
+    // exact-ownership counterfactual.
+    bool legacy_registration_hygiene_authorized_ = false;
+    CargoObbFootprint legacy_registration_footprint_;
+    ros::Time legacy_registration_hygiene_stamp_;
+    CargoRegistrationHygieneShadow
+        last_cargo_registration_hygiene_shadow_;
+    std::atomic<std::uint64_t> cargo_v6_product_active_count_{0U};
+    std::atomic<std::uint64_t> cargo_v6_reject_count_{0U};
+    std::atomic<std::uint64_t> cargo_v6_safety_authorized_count_{0U};
+    std::atomic<std::uint64_t> cargo_v6_map_authorized_count_{0U};
+    std::atomic<std::uint64_t> cargo_v6_legacy_positive_retained_count_{0U};
+    std::atomic<std::uint64_t> cargo_v6_legacy_clear_rejected_count_{0U};
+    std::atomic<std::uint64_t> cargo_v6_broad_quarantine_product_count_{0U};
+    std::atomic<std::uint64_t>
+        cargo_v6_exact_candidate_quarantine_removed_points_{0U};
+    std::atomic<std::uint64_t> cargo_v6_historical_retro_delete_count_{0U};
+    std::atomic<std::uint64_t> cargo_registration_legacy_removed_points_{0U};
+    std::atomic<std::uint64_t> cargo_registration_v6_proposed_points_{0U};
+    std::atomic<std::uint64_t> cargo_registration_shadow_intersection_{0U};
+    std::atomic<std::uint64_t> cargo_registration_shadow_legacy_only_{0U};
+    std::atomic<std::uint64_t> cargo_registration_shadow_v6_only_{0U};
+    std::atomic<std::uint64_t>
+        cargo_registration_static_conflict_points_{0U};
     double integrated_shadow_identity_compute_ms_ = 0.0;
     double integrated_shadow_geometry_compute_ms_ = 0.0;
     double integrated_shadow_safety_compute_ms_ = 0.0;
@@ -2401,6 +2463,18 @@ private:
     std::uint64_t cargo_static_geometry_rejected_count_ = 0U;
     std::uint64_t cargo_obstacle_track_created_count_ = 0U;
     std::uint64_t cargo_obstacle_track_reset_count_ = 0U;
+    std::atomic<ObstacleSupportKind> cargo_obstacle_support_kind_{
+        ObstacleSupportKind::DENSE_CURRENT_FRAME};
+    std::atomic<std::size_t> cargo_obstacle_real_current_point_count_{0U};
+    std::atomic<int> cargo_obstacle_sparse_independent_frames_{0};
+    std::atomic<bool> cargo_obstacle_sparse_far_history_valid_{false};
+    std::atomic<bool> cargo_obstacle_sparse_source_resolved_{false};
+    std::atomic<std::uint64_t> cargo_obstacle_sparse_ambiguity_reject_count_{0U};
+    std::atomic<std::uint64_t> cargo_obstacle_sparse_to_dense_count_{0U};
+    std::atomic<std::uint64_t> cargo_obstacle_sparse_authority_reset_count_{0U};
+    std::atomic<std::size_t> cargo_obstacle_sparse_track_count_{0U};
+    std::atomic<std::size_t> cargo_obstacle_sparse_track_high_water_{0U};
+    std::atomic<std::size_t> cargo_obstacle_sparse_ring_high_water_{0U};
     ros::WallTime cargo_static_summary_last_wall_;
     std::atomic<std::uint64_t> static_evidence_epoch_{1U};
     // Avoidance-only pose continuity lineage. It advances exactly
@@ -2431,6 +2505,10 @@ private:
     // only - never participates in any authority decision.
     CargoSafetyResult last_raw_cargo_safety_result_;
     CargoSafetyResult confirmed_cargo_safety_result_;
+    // Provenance of the obstacle that produced the currently retained
+    // positive warning.  It is cleared with the existing confirmation and
+    // never authorizes CLEAR or map mutation.
+    TemporalEvidenceAuthority confirmed_positive_obstacle_authority_;
     std::size_t cargo_self_removed_points_ = 0U;
     std::size_t cargo_pending_self_removed_points_ = 0U;
     std::size_t cargo_pending_unresolved_inside_points_ = 0U;
@@ -2572,6 +2650,12 @@ private:
         const ros::Time& stamp,
         const ros::Time& obstacle_cloud_stamp,
         double processing_age_sec);
+    ProductCargoContext prepareV6ProductCargoContext(
+        const FrameAuthorityContext& frame_context,
+        const SourceFrameIdentity& source_frame_identity,
+        const ros::Time& stamp);
+    void recordCargoV6Diagnostics(
+        const CanonicalCargoAuthoritySnapshot& snapshot);
     void publishPayloadTrackInfoFromFusion(
         const CargoBottomResult& bottom,
         const ros::Time& stamp);
@@ -2623,6 +2707,7 @@ private:
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
         const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
         const FrameAuthorityContext& frame_context,
+        const SourceFrameIdentity& source_frame_identity,
         const Sophus::SE3d& raw_physical_pose,
         const ros::Time& stamp,
         const ros::Time& obstacle_cloud_stamp,

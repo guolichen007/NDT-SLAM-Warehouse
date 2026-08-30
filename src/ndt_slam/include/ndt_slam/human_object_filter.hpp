@@ -140,6 +140,7 @@ struct HumanFrameClassification {
     bool valid = false;
     double source_stamp_sec = 0.0;
     std::uint64_t source_cloud_instance_id = 0U;
+    SourceFrameIdentity source_frame_identity;
     HumanCurrentFramePointOwnership owned_points;
     std::vector<HumanClusterObservation> clusters;
 };
@@ -148,10 +149,23 @@ struct HumanMapFilterSnapshot {
     bool valid = false;
     double source_stamp_sec = 0.0;
     std::uint64_t source_cloud_instance_id = 0U;
+    SourceFrameIdentity source_frame_identity;
     HumanCurrentFramePointOwnership owned_points;
     StaticLearningBlockCells static_learning_blocks;
     int active_track_count = 0;
     int dynamic_track_count = 0;
+};
+
+struct HumanMapAuthorityDiagnostics {
+    std::uint64_t classification_count = 0U;
+    std::uint64_t map_track_update_count = 0U;
+    std::uint64_t duplicate_update_reject_count = 0U;
+    std::uint64_t out_of_order_update_reject_count = 0U;
+    std::uint64_t registration_owned_point_count = 0U;
+    std::uint64_t map_owned_point_count = 0U;
+    std::size_t static_learning_block_cell_count = 0U;
+    std::size_t static_learning_block_high_water = 0U;
+    std::size_t track_high_water = 0U;
 };
 
 class HumanObjectDynamicFilter {
@@ -168,8 +182,7 @@ public:
     // never updates tracks, deny history or trajectory capsules.
     HumanFrameClassification classifyFrame(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud_base,
-        double timestamp,
-        std::uint64_t source_cloud_instance_id,
+        const SourceFrameIdentity& source_frame_identity,
         float ownership_voxel_size_m,
         pcl::PointCloud<pcl::PointXYZ>::Ptr& safe_objects_out,
         pcl::PointCloud<pcl::PointXYZ>::Ptr& human_candidate_out) const;
@@ -181,7 +194,8 @@ public:
         const Eigen::Matrix4d& T_map_base,
         float static_learning_cell_size_m);
 
-    // 主处理函数：输入 objects_cloud（base_link），输出 safe_objects
+    // Compatibility-only fail-open stub. Product code must use the split API.
+    [[deprecated("use classifyFrame + updateMapTracks")]]
     void processFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud_base,
                       const Eigen::Matrix4d& T_map_base,
                       double timestamp,
@@ -190,7 +204,8 @@ public:
                       pcl::PointCloud<pcl::PointXYZ>::Ptr& human_dynamic_out,
                       pcl::PointCloud<pcl::PointXYZ>::Ptr& human_pending_out);
 
-    // 历史反删：从地图中删除动态人体的历史残留
+    // Compatibility-only; no product caller may erase localization history.
+    [[deprecated("human historical erase is not a localization authority")]]
     void eraseHumanHistory(pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_map,
                            double current_time);
 
@@ -202,6 +217,8 @@ public:
 
     // 获取确认的动态人体数
     int getDynamicHumanCount() const;
+
+    HumanMapAuthorityDiagnostics diagnostics() const;
 
     // P1: 检查 cell 是否被 deny
     bool isCellDenied(double x, double y, double current_time) const;
@@ -289,6 +306,7 @@ private:
     bool has_last_map_update_stamp_ = false;
     double last_map_update_stamp_sec_ = 0.0;
     std::uint64_t last_map_update_cloud_instance_id_ = 0U;
+    mutable HumanMapAuthorityDiagnostics diagnostics_;
 
     mutable std::mutex mutex_;
 };

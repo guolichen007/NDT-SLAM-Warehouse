@@ -995,5 +995,135 @@ TEST(PhysicalObstacleTrackStore,
   EXPECT_EQ(store.tracks().size(), 1U);
 }
 
+TEST(PhysicalObstacleTrackStore,
+     SparseFarHistoryMaturesInFiveToEightMeterBand) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  config.far_history_confirm_frames = 3;
+  config.far_history_confirm_duration_sec = 0.2;
+  PhysicalObstacleTrackStore store(config);
+
+  CargoObstacleObservation far = directionalPretrack(1U, 0.0F, 0.0F);
+  far.point_count = 8U;
+  far.occupied_map_cells = {10, 11, 12};
+  far.pose_authority.source_stamp_sec = 1.0;
+  store.update(1.0, {far});
+  far.source_index = 2U;
+  far.pose_authority.source_stamp_sec = 1.1;
+  store.update(1.1, {far});
+  far.source_index = 3U;
+  far.pose_authority.source_stamp_sec = 1.2;
+  const CargoObstacleTrackerDecision acquired = store.update(1.2, {far});
+
+  EXPECT_TRUE(acquired.selected_far_field_history_valid);
+  EXPECT_EQ(acquired.selected_support_kind,
+            ObstacleSupportKind::SPARSE_MULTI_FRAME);
+  EXPECT_EQ(acquired.selected_real_current_point_count, 8U);
+  EXPECT_EQ(acquired.selected_sparse_independent_frames, 3);
+  EXPECT_LE(acquired.sparse_ring_high_water, 3U);
+}
+
+TEST(PhysicalObstacleTrackStore,
+     SparseWarningRequiresNearFieldSourceResolution) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  config.far_history_confirm_frames = 3;
+  config.far_history_confirm_duration_sec = 0.2;
+  PhysicalObstacleTrackStore store(config);
+
+  CargoObstacleObservation far = directionalPretrack(1U, 0.0F, 0.0F);
+  far.point_count = 8U;
+  far.occupied_map_cells = {20, 21, 22};
+  for (int index = 0; index < 3; ++index) {
+    far.source_index = static_cast<std::size_t>(index + 1);
+    far.pose_authority.source_stamp_sec = 1.0 + 0.1 * index;
+    store.update(1.0 + 0.1 * index, {far});
+  }
+
+  CargoObstacleObservation unresolved = hazard(10U, 0.02F, 0.0F, 18U);
+  unresolved.point_count = 8U;
+  unresolved.occupied_map_cells = far.occupied_map_cells;
+  unresolved.source_validated = false;
+  unresolved.pose_authority.source_stamp_sec = 1.3;
+  const CargoObstacleTrackerDecision rejected =
+      store.update(1.3, {unresolved});
+  EXPECT_FALSE(rejected.confirmed_hazard);
+  EXPECT_EQ(rejected.reason, "current_source_unvalidated");
+
+  CargoObstacleObservation resolved = unresolved;
+  resolved.source_validated = true;
+  CargoObstacleTrackerDecision accepted;
+  for (int index = 0; index < config.confirm_frames; ++index) {
+    resolved.source_index = static_cast<std::size_t>(11 + index);
+    const double resolved_stamp = 1.4 + 0.1 * index;
+    resolved.pose_authority.source_stamp_sec = resolved_stamp;
+    accepted = store.update(resolved_stamp, {resolved});
+  }
+  EXPECT_TRUE(accepted.confirmed_hazard) << accepted.reason;
+}
+
+TEST(PhysicalObstacleTrackStore,
+     SparseToDenseKeepsPhysicalTrackIdentity) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  PhysicalObstacleTrackStore store(config);
+  CargoObstacleObservation sparse = hazard(1U, 0.0F, 0.0F, 18U);
+  sparse.point_count = 8U;
+  sparse.occupied_map_cells = {30, 31, 32};
+  sparse.pose_authority.source_stamp_sec = 1.0;
+  const CargoObstacleTrackerDecision initial = store.update(1.0, {sparse});
+  sparse.source_index = 2U;
+  sparse.pose_authority.source_stamp_sec = 1.1;
+  store.update(1.1, {sparse});
+
+  CargoObstacleObservation dense = sparse;
+  dense.source_index = 3U;
+  dense.point_count = 30U;
+  dense.pose_authority.source_stamp_sec = 1.2;
+  const CargoObstacleTrackerDecision promoted = store.update(1.2, {dense});
+
+  EXPECT_EQ(promoted.selected_track_id, initial.selected_track_id);
+  EXPECT_EQ(promoted.selected_support_kind,
+            ObstacleSupportKind::DENSE_CURRENT_FRAME);
+  EXPECT_TRUE(promoted.selected_sparse_to_dense);
+  EXPECT_EQ(promoted.selected_real_current_point_count, 30U);
+  EXPECT_EQ(store.tracks().size(), 1U);
+}
+
+TEST(PhysicalObstacleTrackStore,
+     CrossAuthoritySparseCannotReuseSupport) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  PhysicalObstacleTrackStore store(config);
+  CargoObstacleObservation sparse = hazard(1U, 0.0F, 0.0F, 18U);
+  sparse.point_count = 8U;
+  sparse.occupied_map_cells = {40, 41, 42};
+  sparse.pose_authority.source_stamp_sec = 1.0;
+  store.update(1.0, {sparse});
+  sparse.source_index = 2U;
+  sparse.pose_authority.source_stamp_sec = 1.1;
+  store.update(1.1, {sparse});
+
+  sparse.source_index = 3U;
+  ++sparse.pose_authority.pose_identity.yaw_authority_generation;
+  sparse.pose_authority.source_stamp_sec = 1.2;
+  const CargoObstacleTrackerDecision reset = store.update(1.2, {sparse});
+
+  EXPECT_FALSE(reset.confirmed_hazard);
+  EXPECT_EQ(reset.selected_sparse_independent_frames, 1);
+  EXPECT_EQ(reset.selected_support_kind,
+            ObstacleSupportKind::SPARSE_MULTI_FRAME);
+}
+
+TEST(PhysicalObstacleTrackStore, DuplicateStampCannotAdvanceSparseSupport) {
+  CargoObstacleTracker tracker(ordinaryHazardConfig());
+  CargoObstacleObservation sparse = hazard(1U, 0.0F, 0.0F, 18U);
+  sparse.point_count = 8U;
+  sparse.pose_authority.source_stamp_sec = 1.0;
+  tracker.update(1.0, {sparse});
+  const CargoObstacleTrackerDecision duplicate = tracker.update(1.0, {sparse});
+  EXPECT_EQ(duplicate.reason, "repeated_obstacle_track_stamp");
+  ASSERT_EQ(tracker.tracks().size(), 1U);
+  EXPECT_EQ(tracker.tracks().front().sparse_independent_frames, 1);
+}
+
 }  // namespace
 }  // namespace ndt_slam

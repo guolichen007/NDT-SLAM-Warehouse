@@ -39,6 +39,12 @@ CanonicalCargoAuthorityInput validInput() {
   input.group.union_points_base = {
       Eigen::Vector3f(0.5F, 0.25F, 0.6F),
       Eigen::Vector3f(0.6F, 0.25F, 1.5F)};
+  pcl::PointCloud<pcl::PointXYZ> source_cloud;
+  for (const Eigen::Vector3f& point : input.group.union_points_base) {
+    source_cloud.push_back(pcl::PointXYZ(point.x(), point.y(), point.z()));
+  }
+  input.source_frame_identity =
+      makeSourceFrameIdentity(1U, 10.0, 1U, source_cloud);
   input.geometry.formal_geometry_valid = true;
   input.geometry.physical_history_id = 42U;
   input.bottom.valid = true;
@@ -73,7 +79,7 @@ TEST(CargoV6AuthorityAdapter, CargoUnknownCannotExpandMapRemovalMask) {
   EXPECT_TRUE(output.map_mutation.owner_points.voxels.empty());
 }
 
-TEST(CargoV6AuthorityAdapter, CargoMapMutationRequiresCurrentOwnerVoxel) {
+TEST(CargoV6AuthorityAdapter, CargoMapMutationRequiresExactCurrentOwnerPoint) {
   const auto output = buildCanonicalCargoAuthoritySnapshot(validInput());
   ASSERT_TRUE(output.cargo_map_mutation_authorized);
 
@@ -120,6 +126,43 @@ TEST(CargoV6AuthorityAdapter, MatureStaticConflictIsMapOnlyVeto) {
 
   EXPECT_TRUE(cargoGroupOverlapsMatureStaticEvidence(
       input.group, Sophus::SE3d(), input.pose_identity, snapshot));
+}
+
+TEST(CargoV6AuthorityAdapter,
+     RegistrationHygieneShadowNeverGrantsProductAuthority) {
+  const CanonicalCargoAuthoritySnapshot canonical =
+      buildCanonicalCargoAuthoritySnapshot(validInput());
+  pcl::PointCloud<pcl::PointXYZ> registration;
+  registration.push_back(pcl::PointXYZ(0.5F, 0.25F, 0.6F));
+  registration.push_back(pcl::PointXYZ(0.5F, 0.40F, 0.6F));
+  CargoObbFootprint legacy = canonical.safety_geometry.footprint_base;
+
+  const CargoRegistrationHygieneShadow shadow =
+      evaluateCargoRegistrationHygieneShadow(
+          registration, true, legacy, canonical);
+
+  EXPECT_TRUE(shadow.valid_input);
+  EXPECT_TRUE(shadow.legacy_authorized);
+  EXPECT_TRUE(shadow.v6_proposed_authorized);
+  EXPECT_EQ(shadow.source_points, 2U);
+  EXPECT_EQ(shadow.legacy_removed_points, 2U);
+  EXPECT_EQ(shadow.v6_proposed_removed_points, 1U);
+  EXPECT_EQ(shadow.intersection_points, 1U);
+  EXPECT_EQ(shadow.legacy_only_points, 1U);
+  EXPECT_EQ(shadow.v6_only_points, 0U);
+  // This value object exposes a counterfactual only; no product write bit is
+  // part of the contract.
+}
+
+TEST(CargoV6AuthorityAdapter,
+     ExactCargoOwnershipPreservesSameVoxelBackgroundPoint) {
+  const CanonicalCargoAuthoritySnapshot canonical =
+      buildCanonicalCargoAuthoritySnapshot(validInput());
+  ASSERT_TRUE(canonical.cargo_map_mutation_authorized);
+  EXPECT_TRUE(canonical.map_mutation.owns(
+      pcl::PointXYZ(0.5F, 0.25F, 0.6F)));
+  EXPECT_FALSE(canonical.map_mutation.owns(
+      pcl::PointXYZ(0.51F, 0.25F, 0.6F)));
 }
 
 }  // namespace

@@ -210,6 +210,7 @@ public:
 
     // ========== 人体事件管理 ==========
 
+    [[deprecated("HumanMapFilterSnapshot is the sole product human authority")]]
     int createHumanEvent(double start_time, double current_time,
                          const std::deque<Eigen::Vector3d>& centroid_history,
                          double z_min, double z_max);

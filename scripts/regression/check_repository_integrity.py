@@ -317,7 +317,7 @@ def runtime_visualization_contract_failures() -> list[str]:
         "clean_map_rebuild_result_ready_",
         "source_objects_version",
         "objects_map_content_version_",
-        "getDenyCellsSnapshot",
+        "human_static_learning_block_cells_",
         "CleanMapBuildAction::APPLY",
         "CleanMapBuildAction::PUBLISH_SNAPSHOT_ONLY",
         "result.bundle.objects_clean",
@@ -598,7 +598,8 @@ def asynchronous_map_commit_contract_failures() -> list[str]:
     required = (
         "struct MapCommitJob",
         "map_commit_queue_capacity_ = 2U",
-        "filtered_cloud, frame_authority_context, publish_time",
+        "filtered_cloud, frame_authority_context,\n"
+        "                    avoidance_map_mutation, publish_time",
         "std::thread(&NdtSlamNode::mapCommitThread, this)",
         "map_commit_lifecycle_mutex_",
         "job.lifecycle_epoch",

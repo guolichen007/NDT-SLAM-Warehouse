@@ -160,6 +160,7 @@ set(LIBRARY_SOURCES
   src/cargo_physical_identity_authority.cpp
   src/integrated_cargo_identity_shadow.cpp
   src/cargo_v6_authority_adapter.cpp
+  src/product_cargo_context.cpp
   src/revealed_support_observer.cpp
   src/cargo_preload_baseline_tracker.cpp
   src/cargo_geometry_fusion.cpp
@@ -333,6 +334,13 @@ if(CATKIN_ENABLE_TESTING)
       ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
   endif()
 
+  catkin_add_gtest(avoidance_map_mutation_test
+    test/avoidance_map_mutation_test.cpp)
+  if(TARGET avoidance_map_mutation_test)
+    target_link_libraries(avoidance_map_mutation_test
+      ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
   catkin_add_gtest(cargo_safety_evaluator_test
     test/cargo_safety_evaluator_test.cpp)
   if(TARGET cargo_safety_evaluator_test)
@@ -362,10 +370,11 @@ if(CATKIN_ENABLE_TESTING)
   endif()
 
   catkin_add_gtest(cargo_obstacle_tracker_test
-    test/cargo_obstacle_tracker_test.cpp)
+    test/cargo_obstacle_tracker_test.cpp
+    src/cargo_obstacle_tracker.cpp)
   if(TARGET cargo_obstacle_tracker_test)
     target_link_libraries(cargo_obstacle_tracker_test
-      ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+      ${catkin_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(static_obstacle_evidence_index_test
@@ -414,9 +423,22 @@ if(CATKIN_ENABLE_TESTING)
     test/cargo_v6_authority_adapter_test.cpp
     src/cargo_v6_authority_adapter.cpp
     src/integrated_cargo_identity_shadow.cpp
-    src/static_obstacle_evidence_index.cpp)
+    src/static_obstacle_evidence_index.cpp
+    src/pending_cargo_envelope.cpp
+    src/cargo_rigid_geometry.cpp
+    src/cargo_oriented_footprint.cpp)
   if(TARGET cargo_v6_authority_adapter_test)
     target_link_libraries(cargo_v6_authority_adapter_test
+      ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(product_cargo_context_test
+    test/product_cargo_context_test.cpp
+    src/product_cargo_context.cpp
+    src/cargo_rigid_geometry.cpp
+    src/cargo_oriented_footprint.cpp)
+  if(TARGET product_cargo_context_test)
+    target_link_libraries(product_cargo_context_test
       ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
   endif()
 

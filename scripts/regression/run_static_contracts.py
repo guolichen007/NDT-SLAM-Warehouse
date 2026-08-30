@@ -52,6 +52,10 @@ def main() -> int:
              "scripts/regression/check_cargo_vertical_evidence_shadow.py"],
         ),
         (
+            "avoidance_v4_firewall",
+            [python, "scripts/regression/check_avoidance_v4_firewall.py"],
+        ),
+        (
             "compileall",
             [python, "-m", "compileall", "-q", "scripts",
              "src/ndt_slam/scripts", "tests"],

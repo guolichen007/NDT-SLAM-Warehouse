@@ -239,26 +239,15 @@ void DynamicEventManager::updatePlacementDetection(PayloadSession& session, doub
 int DynamicEventManager::createHumanEvent(double start_time, double current_time,
                                            const std::deque<Eigen::Vector3d>& centroid_history,
                                            double z_min, double z_max) {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    HumanEvent event;
-    event.id = next_human_id_++;
-    event.start_time = start_time - config_.human_pre_guard_sec;
-    event.end_time = current_time + config_.human_post_guard_sec;
-    event.active = true;
-
-    event.capsule.centerline = centroid_history;
-    event.capsule.radius = config_.human_capsule_radius;
-    if (config_.human_use_track_height) {
-        event.capsule.z_min = z_min - config_.human_z_margin;
-        event.capsule.z_max = z_max + config_.human_z_margin;
-    } else {
-        event.capsule.z_min = 0.0;
-        event.capsule.z_max = 2.5;
-    }
-
-    human_events_.push_back(event);
-    return event.id;
+    (void)start_time;
+    (void)current_time;
+    (void)centroid_history;
+    (void)z_min;
+    (void)z_max;
+    // HumanMapFilterSnapshot is the only product Human map authority.  Keep
+    // this ABI-compatible diagnostic endpoint fail-closed so legacy callers
+    // cannot recreate a second Human event state machine.
+    return -1;
 }
 
 void DynamicEventManager::endHumanEvent(int event_id, double current_time) {

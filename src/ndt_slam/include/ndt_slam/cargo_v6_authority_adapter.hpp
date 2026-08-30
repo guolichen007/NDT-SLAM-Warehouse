@@ -32,6 +32,7 @@ struct CanonicalCargoGeometry {
 struct CanonicalCargoAuthorityInput {
   CargoAuthorityMode mode = CargoAuthorityMode::LEGACY;
   double source_stamp_sec = 0.0;
+  SourceFrameIdentity source_frame_identity;
   PoseAuthorityIdentity pose_identity;
   CargoPhysicalIdentityDecision identity;
   CargoPhysicalGroupEvidenceSnapshot group;
@@ -55,8 +56,31 @@ struct CanonicalCargoAuthoritySnapshot {
   std::string reason = "not_evaluated";
 };
 
+// Diagnostic-only comparison. Registration continues to use the commissioned
+// Legacy removal path in this release; V6 can only describe its exact-point
+// counterfactual and has no registration write authority.
+struct CargoRegistrationHygieneShadow {
+  bool valid_input = false;
+  bool legacy_authorized = false;
+  bool v6_proposed_authorized = false;
+  std::size_t source_points = 0U;
+  std::size_t legacy_removed_points = 0U;
+  std::size_t v6_proposed_removed_points = 0U;
+  std::size_t intersection_points = 0U;
+  std::size_t legacy_only_points = 0U;
+  std::size_t v6_only_points = 0U;
+  std::size_t static_background_conflict_points = 0U;
+  std::string reason = "not_evaluated";
+};
+
 CanonicalCargoAuthoritySnapshot buildCanonicalCargoAuthoritySnapshot(
     const CanonicalCargoAuthorityInput& input);
+
+CargoRegistrationHygieneShadow evaluateCargoRegistrationHygieneShadow(
+    const pcl::PointCloud<pcl::PointXYZ>& registration_source,
+    bool legacy_authorized,
+    const CargoObbFootprint& legacy_footprint,
+    const CanonicalCargoAuthoritySnapshot& v6);
 
 // Conservative map-only conflict check. A mature cell already present in the
 // immutable StaticEvidence snapshot is independent persistent provenance; V6

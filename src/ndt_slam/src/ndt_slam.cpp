@@ -641,16 +641,6 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
                 throw std::runtime_error(
                     "INVALID_CARGO_AUTHORITY_MODE");
             }
-            // V6 identity is evaluated after the legacy formal Cargo early
-            // returns in updateAndPublishCargoSafetyPipeline().  Until the
-            // canonical obstacle/fusion input is made independent of that
-            // legacy lifecycle, enabling product authority would silently
-            // preserve a second Cargo authority gate.  Fail closed instead of
-            // exposing a mode whose Safety semantics are not actually V6.
-            if (cargo_authority_mode_ == CargoAuthorityMode::V6_AUTHORITY) {
-                throw std::runtime_error(
-                    "CARGO_V6_PRODUCT_MODE_BLOCKED_BY_LEGACY_FORMAL_PIPELINE");
-            }
         } else {
             cargo_authority_mode_ = CargoAuthorityMode::LEGACY;
         }
@@ -1074,8 +1064,14 @@ bool NdtSlamNode::isMapCommitAuthorityCurrent(
         return false;
     }
     if (!job.avoidance_map_mutation.validFor(
-            job.pose_identity, job.stamp.toSec(),
+            job.pose_identity, job.source_frame_identity,
+            job.stamp.toSec(),
             job.source_cloud_instance_id)) {
+        return false;
+    }
+    if (!job.cloud ||
+        !sourceFrameIdentityMatchesCloud(
+            job.source_frame_identity, *job.cloud)) {
         return false;
     }
     if (!job.rail_authority_job) return true;
@@ -1135,6 +1131,8 @@ void NdtSlamNode::enqueueMapCommitJob(
     job.cloud = cloud;
     job.source_cloud_instance_id =
         avoidance_map_mutation.source_cloud_instance_id;
+    job.source_frame_identity =
+        avoidance_map_mutation.source_frame_identity;
     job.pose_identity = frame_context.pose_identity;
     job.avoidance_map_mutation = avoidance_map_mutation;
     job.cargo_authority_mode = cargo_authority_mode_;
@@ -1142,7 +1140,10 @@ void NdtSlamNode::enqueueMapCommitJob(
     job.hook_role = hook_load_signal_role_;
     job.hook_valid = hook.valid;
     job.hook_state = hook.state;
-    job.lidar_removal_authorized = shouldRemoveHookCargo();
+    job.lidar_removal_authorized =
+        cargo_authority_mode_ == CargoAuthorityMode::V6_AUTHORITY
+            ? avoidance_map_mutation.cargo_points.authorized
+            : shouldRemoveHookCargo();
     job.formal_footprint_valid =
         job.lidar_removal_authorized &&
         current_rigid_cargo_geometry_.valid;
@@ -1162,7 +1163,26 @@ void NdtSlamNode::enqueueMapCommitJob(
         cargo_authority_mode_ == CargoAuthorityMode::V6_AUTHORITY
             ? avoidance_map_mutation.cargo_points.authorized
             : job.lidar_removal_authorized;
-    if (hook_loaded && !cargo_map_authorized &&
+    if (shouldDropV6MapCommitWithoutExactCargoOwnership(
+            cargo_authority_mode_ == CargoAuthorityMode::V6_AUTHORITY,
+            hook_loaded,
+            avoidance_map_mutation.cargo_canonical_safety_authorized,
+            avoidance_map_mutation.cargo_points,
+            avoidance_map_mutation.cargo_candidate_points)) {
+        // V6 has no broad odom-anchor quarantine. If current exact ownership
+        // cannot be proved, omit this persistent keyframe instead of carving
+        // an unowned rectangle out of the localization map.
+        map_commit_dropped_.fetch_add(1U, std::memory_order_relaxed);
+        return;
+    }
+    job.v6_candidate_quarantine_active =
+        cargo_authority_mode_ == CargoAuthorityMode::V6_AUTHORITY &&
+        hook_loaded && !cargo_map_authorized &&
+        !avoidance_map_mutation.cargo_canonical_safety_authorized &&
+        avoidance_map_mutation.cargo_candidate_points.valid &&
+        !avoidance_map_mutation.cargo_candidate_points.exact_points.empty();
+    if (cargo_authority_mode_ != CargoAuthorityMode::V6_AUTHORITY &&
+        hook_loaded && !cargo_map_authorized &&
         odom_anchor_config_.enabled) {
         const Eigen::Vector2f anchor = getCargoAnchorXY();
         job.cargo_quarantine_active = true;
@@ -1224,6 +1244,20 @@ void NdtSlamNode::mapCommitThread() {
                 job.lifecycle_epoch,
                 map_rebuild_generation_.load(std::memory_order_acquire)) ||
             !isMapCommitAuthorityCurrent(job)) {
+            if (!samePoseAuthorityIdentity(
+                    job.avoidance_map_mutation.pose_identity,
+                    job.pose_identity)) {
+                map_commit_pose_authority_mismatch_.fetch_add(
+                    1U, std::memory_order_relaxed);
+                mixed_pose_generation_map_filter_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
+            if (!job.avoidance_map_mutation.validFor(
+                    job.pose_identity, job.source_frame_identity,
+                    job.stamp.toSec(), job.source_cloud_instance_id)) {
+                stale_avoidance_snapshot_rejected_.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
             map_commit_stale_.fetch_add(1U, std::memory_order_relaxed);
             continue;
         }
@@ -4419,6 +4453,11 @@ void NdtSlamNode::resetCargoForHookState(
     cargo_static_evidence_track_start_sequence_ = 0U;
     cargo_static_evidence_lifecycle_boundary_valid_ = false;
     formal_cargo_removal_authorized_ = false;
+    legacy_registration_hygiene_authorized_ = false;
+    legacy_registration_footprint_ = CargoObbFootprint{};
+    legacy_registration_hygiene_stamp_ = ros::Time();
+    last_cargo_registration_hygiene_shadow_ =
+        CargoRegistrationHygieneShadow{};
     formal_cargo_removal_track_id_ = 0U;
     formal_cargo_removal_stamp_ = ros::Time();
     cargo_origin_height_valid_ = false;
@@ -4428,6 +4467,8 @@ void NdtSlamNode::resetCargoForHookState(
     last_cargo_safety_result_ = CargoSafetyResult{};
     last_raw_cargo_safety_result_ = CargoSafetyResult{};
     confirmed_cargo_safety_result_ = CargoSafetyResult{};
+    confirmed_positive_obstacle_authority_ =
+        TemporalEvidenceAuthority{};
     cargo_safety_temporal_filter_.reset();
     physical_obstacle_track_store_.reset();
     pending_static_hazard_tracker_.reset();
@@ -6063,6 +6104,26 @@ void NdtSlamNode::processCloudThread() {
         pcl::PointCloud<pcl::PointXYZ>::Ptr human_dynamic(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr human_pending(new pcl::PointCloud<pcl::PointXYZ>);
         HumanFrameClassification human_frame_classification;
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr
+            cargo_registration_shadow_source;
+        const double legacy_registration_age_sec =
+            legacy_registration_hygiene_stamp_.isZero()
+                ? std::numeric_limits<double>::infinity()
+                : (msg->header.stamp -
+                   legacy_registration_hygiene_stamp_).toSec();
+        const bool frame_legacy_registration_authorized =
+            legacy_registration_hygiene_authorized_ &&
+            std::isfinite(legacy_registration_age_sec) &&
+            legacy_registration_age_sec >= 0.0 &&
+            legacy_registration_age_sec <=
+                formal_cargo_removal_max_age_sec_;
+        const CargoObbFootprint frame_legacy_registration_footprint =
+            legacy_registration_footprint_;
+        const SourceFrameIdentity source_frame_identity =
+            makeSourceFrameIdentity(
+                processing_frame_index, msg->header.stamp.toSec(),
+                current_time_epoch_id_.load(std::memory_order_acquire),
+                *filtered_cloud);
 
         // Human/dynamic classification must see both channel-safe points and
         // uncertain payload candidates. Channel classification alone cannot
@@ -6078,8 +6139,7 @@ void NdtSlamNode::processCloudThread() {
             // Human temporal/map state is advanced exactly once after the
             // final FrameAuthorityContext pose has been selected.
             human_frame_classification = human_filter_.classifyFrame(
-                human_filter_input, msg->header.stamp.toSec(),
-                processing_frame_index,
+                human_filter_input, source_frame_identity,
                 static_cast<float>(objects_voxel_size_),
                 human_safe_objects, human_candidates);
 
@@ -6150,15 +6210,16 @@ void NdtSlamNode::processCloudThread() {
                 registration_partition.uncertain_candidates);
         pcl::PointCloud<pcl::PointXYZ>::Ptr registration_cloud =
             registration_build_result.cloud;
+        cargo_registration_shadow_source = registration_cloud;
 
         // ========== Hook locked box 剔除（NDT 输入）==========
-        if (shouldRemoveHookCargo()) {
+        if (frame_legacy_registration_authorized &&
+            frame_legacy_registration_footprint.valid) {
             size_t hook_removed_count = 0;
-            const CargoObbFootprint removal_footprint =
-                toCargoObbFootprint(current_rigid_cargo_geometry_);
             registration_build_result =
                 excludeCargoObbFromRegistrationCloud(
-                    registration_build_result, removal_footprint,
+                    registration_build_result,
+                    frame_legacy_registration_footprint,
                     0.10F, 0.10F, registration_cloud_config_,
                     &hook_removed_count);
             registration_cloud = registration_build_result.cloud;
@@ -7375,13 +7436,16 @@ void NdtSlamNode::processCloudThread() {
                           "legacy_authorized"};
             frame_authority_context.failure_class =
                 frame_authority_context.localization_health.failure_class;
-            frame_authority_context.source_stamp_sec = publish_time.toSec();
+            frame_authority_context.source_stamp_sec =
+                source_frame_identity.sensor_source_stamp_sec;
             canonical_cargo_authority_snapshot_ =
                 CanonicalCargoAuthoritySnapshot{};
             canonical_cargo_authority_snapshot_.source_stamp_sec =
-                publish_time.toSec();
+                source_frame_identity.sensor_source_stamp_sec;
             canonical_cargo_authority_snapshot_.pose_identity =
                 frame_authority_context.pose_identity;
+            recordCargoV6Diagnostics(
+                canonical_cargo_authority_snapshot_);
             HumanMapFilterSnapshot human_map_snapshot;
             if (human_filter_config_.enabled) {
                 human_map_snapshot = human_filter_.updateMapTracks(
@@ -7390,10 +7454,15 @@ void NdtSlamNode::processCloudThread() {
                     kCleanMapCellSizeM);
             } else {
                 human_map_snapshot.valid = true;
-                human_map_snapshot.source_stamp_sec = publish_time.toSec();
+                human_map_snapshot.source_stamp_sec =
+                    source_frame_identity.sensor_source_stamp_sec;
                 human_map_snapshot.source_cloud_instance_id =
                     processing_frame_index;
+                human_map_snapshot.source_frame_identity =
+                    source_frame_identity;
                 human_map_snapshot.owned_points.valid = true;
+                human_map_snapshot.owned_points.source_frame_identity =
+                    source_frame_identity;
                 human_map_snapshot.owned_points.voxel_size_m =
                     static_cast<float>(objects_voxel_size_);
                 human_map_snapshot.static_learning_blocks.cell_size_m =
@@ -7401,13 +7470,38 @@ void NdtSlamNode::processCloudThread() {
             }
 
             AvoidanceMapMutationSnapshot avoidance_map_mutation;
-            avoidance_map_mutation.source_stamp_sec = publish_time.toSec();
+            avoidance_map_mutation.source_stamp_sec =
+                source_frame_identity.sensor_source_stamp_sec;
             avoidance_map_mutation.source_cloud_instance_id =
                 processing_frame_index;
+            avoidance_map_mutation.source_frame_identity =
+                source_frame_identity;
             avoidance_map_mutation.pose_identity =
                 frame_authority_context.pose_identity;
             avoidance_map_mutation.human_points =
                 human_map_snapshot.owned_points;
+            avoidance_map_mutation.cargo_candidate_points.valid = true;
+            avoidance_map_mutation.cargo_candidate_points
+                .source_frame_identity = source_frame_identity;
+            avoidance_map_mutation.cargo_candidate_points.voxel_size_m =
+                static_cast<float>(objects_voxel_size_);
+            if (registration_partition.uncertain_candidates) {
+                for (const pcl::PointXYZ& point :
+                     registration_partition.uncertain_candidates->points) {
+                    SourcePointKey exact_key;
+                    if (makeSourcePointKey(point, &exact_key)) {
+                        avoidance_map_mutation.cargo_candidate_points
+                            .exact_points.insert(exact_key);
+                    }
+                    PointOwnershipVoxel voxel;
+                    if (makePointOwnershipVoxel(
+                            point, static_cast<float>(objects_voxel_size_),
+                            &voxel)) {
+                        avoidance_map_mutation.cargo_candidate_points
+                            .voxels.insert(voxel);
+                    }
+                }
+            }
             avoidance_map_mutation.static_learning_blocks =
                 human_map_snapshot.static_learning_blocks;
             avoidance_map_mutation.localization_map_write_authorized =
@@ -7473,6 +7567,7 @@ void NdtSlamNode::processCloudThread() {
                 frame_authority_context.safetyAuthorized()) {
                 updateAndPublishCargoSafetyPipeline(
                     feature_cloud, filtered_cloud, frame_authority_context,
+                    source_frame_identity,
                     cargo_raw_physical_pose, publish_time,
                     msg->header.stamp,
                     diag_queue_age_ms * 0.001 +
@@ -7492,6 +7587,37 @@ void NdtSlamNode::processCloudThread() {
                     frame_authority_context.pose_identity)) {
                 avoidance_map_mutation.cargo_points =
                     canonical_cargo_authority_snapshot_.map_mutation;
+                avoidance_map_mutation.cargo_canonical_safety_authorized =
+                    canonical_cargo_authority_snapshot_
+                        .cargo_safety_authorized;
+            }
+            if (cargo_registration_shadow_source) {
+                last_cargo_registration_hygiene_shadow_ =
+                    evaluateCargoRegistrationHygieneShadow(
+                        *cargo_registration_shadow_source,
+                        frame_legacy_registration_authorized,
+                        frame_legacy_registration_footprint,
+                        canonical_cargo_authority_snapshot_);
+                const auto& registration_shadow =
+                    last_cargo_registration_hygiene_shadow_;
+                cargo_registration_legacy_removed_points_.fetch_add(
+                    registration_shadow.legacy_removed_points,
+                    std::memory_order_relaxed);
+                cargo_registration_v6_proposed_points_.fetch_add(
+                    registration_shadow.v6_proposed_removed_points,
+                    std::memory_order_relaxed);
+                cargo_registration_shadow_intersection_.fetch_add(
+                    registration_shadow.intersection_points,
+                    std::memory_order_relaxed);
+                cargo_registration_shadow_legacy_only_.fetch_add(
+                    registration_shadow.legacy_only_points,
+                    std::memory_order_relaxed);
+                cargo_registration_shadow_v6_only_.fetch_add(
+                    registration_shadow.v6_only_points,
+                    std::memory_order_relaxed);
+                cargo_registration_static_conflict_points_.fetch_add(
+                    registration_shadow.static_background_conflict_points,
+                    std::memory_order_relaxed);
             }
 
             // ICP never changes odom/TF. When explicitly enabled, a bounded
@@ -9767,6 +9893,8 @@ void NdtSlamNode::processLoopClosure() {
                     result.candidate.candidate_keyframe_id < 0) {
                     result.reason = "no_candidate";
                 } else if (loop_mode == YawAuthorityMode::RAIL_AUTHORITY) {
+                    loop_candidate_count_.fetch_add(
+                        1U, std::memory_order_relaxed);
                     const auto current_it = std::find_if(
                         snapshot.begin(), snapshot.end(),
                         [&result](const KeyFrame& keyframe) {
@@ -9877,6 +10005,8 @@ void NdtSlamNode::processLoopClosure() {
                         }
                     }
                 } else {
+                    loop_candidate_count_.fetch_add(
+                        1U, std::memory_order_relaxed);
                     PoseGraphOptimizer optimizer;
                     for (const auto& keyframe : snapshot) {
                         optimizer.addKeyFrame(keyframe);
@@ -9966,6 +10096,8 @@ void NdtSlamNode::consumeLoopClosureResult(const ros::Time& stamp) {
     }
 
     Sophus::SE3d corrected_runtime_pose;
+    double correction_xy_m = 0.0;
+    double correction_yaw_deg = 0.0;
     if (result.rail_translation_only) {
         std::map<std::uint64_t, Eigen::Vector2d> optimized_xy;
         for (const auto& keyframe : result.optimized_keyframes) {
@@ -9975,6 +10107,7 @@ void NdtSlamNode::consumeLoopClosureResult(const ros::Time& stamp) {
         const Eigen::Vector2d correction_xy =
             result.optimized_last_pose.translation().head<2>() -
             result.snapshot_last_pose.translation().head<2>();
+        correction_xy_m = correction_xy.norm();
         loop_closure_detector_.applyRailOptimizedTranslations(
             optimized_xy, result.snapshot_last_id, correction_xy,
             rail_yaw_authority_.yawRad());
@@ -9985,10 +10118,23 @@ void NdtSlamNode::consumeLoopClosureResult(const ros::Time& stamp) {
     } else {
         const Sophus::SE3d correction =
             result.optimized_last_pose * result.snapshot_last_pose.inverse();
+        correction_xy_m = correction.translation().head<2>().norm();
+        double correction_roll = 0.0;
+        double correction_pitch = 0.0;
+        double correction_yaw = 0.0;
+        so3ToRpy(
+            correction.so3(), correction_roll, correction_pitch,
+            correction_yaw);
+        correction_yaw_deg = correction_yaw * 180.0 / M_PI;
         loop_closure_detector_.applyOptimizedPoses(
             result.optimized_keyframes, result.snapshot_last_id, correction);
         corrected_runtime_pose = correction * current_pose_;
     }
+    loop_accept_count_.fetch_add(1U, std::memory_order_relaxed);
+    last_loop_correction_xy_m_.store(
+        correction_xy_m, std::memory_order_release);
+    last_loop_correction_yaw_deg_.store(
+        correction_yaw_deg, std::memory_order_release);
     keyframe_pose_version_.fetch_add(1U, std::memory_order_acq_rel);
     updatePoseFromLoopClosure(corrected_runtime_pose, stamp);
     asyncRebuildGlobalMap();
@@ -11991,6 +12137,8 @@ void NdtSlamNode::resetCargoAfterPoseDiscontinuity() {
         last_cargo_safety_result_ = CargoSafetyResult{};
         last_raw_cargo_safety_result_ = CargoSafetyResult{};
         confirmed_cargo_safety_result_ = CargoSafetyResult{};
+        confirmed_positive_obstacle_authority_ =
+            TemporalEvidenceAuthority{};
         cargo_safety_temporal_filter_.reset();
         physical_obstacle_track_store_.reset();
         pending_static_hazard_tracker_.reset();
@@ -13976,6 +14124,179 @@ void NdtSlamNode::writeRuntimeStatus() {
       << ",\n";
     f << "  \"formal_box_removed_points\": "
       << formal_box_removed_points_.load(std::memory_order_relaxed) << ",\n";
+    const HumanMapAuthorityDiagnostics human_diagnostics =
+        human_filter_.diagnostics();
+    f << "  \"human_classification_count\": "
+      << human_diagnostics.classification_count << ",\n";
+    f << "  \"human_map_track_update_count\": "
+      << human_diagnostics.map_track_update_count << ",\n";
+    f << "  \"human_duplicate_update_reject_count\": "
+      << human_diagnostics.duplicate_update_reject_count << ",\n";
+    f << "  \"human_out_of_order_update_reject_count\": "
+      << human_diagnostics.out_of_order_update_reject_count << ",\n";
+    f << "  \"human_registration_owned_point_count\": "
+      << human_diagnostics.registration_owned_point_count << ",\n";
+    f << "  \"human_map_owned_point_count\": "
+      << human_diagnostics.map_owned_point_count << ",\n";
+    f << "  \"human_static_learning_block_cell_count\": "
+      << human_diagnostics.static_learning_block_cell_count << ",\n";
+    f << "  \"human_static_learning_block_high_water\": "
+      << human_diagnostics.static_learning_block_high_water << ",\n";
+    f << "  \"human_track_high_water\": "
+      << human_diagnostics.track_high_water << ",\n";
+    f << "  \"cargo_authority_mode\": \""
+      << cargoAuthorityModeName(cargo_authority_mode_) << "\",\n";
+    std::string cargo_v6_last_reason;
+    {
+        std::lock_guard<std::mutex> lock(cargo_v6_diagnostics_mutex_);
+        cargo_v6_last_reason = cargo_v6_last_reason_;
+    }
+    f << "  \"cargo_v6_valid_input\": "
+      << (cargo_v6_last_valid_input_.load(std::memory_order_relaxed)
+              ? "true" : "false") << ",\n";
+    f << "  \"cargo_v6_safety_authorized\": "
+      << (cargo_v6_last_safety_authorized_.load(std::memory_order_relaxed)
+              ? "true" : "false") << ",\n";
+    f << "  \"cargo_v6_map_authorized\": "
+      << (cargo_v6_last_map_authorized_.load(std::memory_order_relaxed)
+              ? "true" : "false") << ",\n";
+    f << "  \"cargo_v6_reject_reason\": \""
+      << escapeJsonString(cargo_v6_last_reason)
+      << "\",\n";
+    f << "  \"cargo_v6_product_active_count\": "
+      << cargo_v6_product_active_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"cargo_v6_reject_count\": "
+      << cargo_v6_reject_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_v6_safety_authorized_count\": "
+      << cargo_v6_safety_authorized_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"cargo_v6_map_authorized_count\": "
+      << cargo_v6_map_authorized_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"cargo_v6_legacy_positive_retained_count\": "
+      << cargo_v6_legacy_positive_retained_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_v6_legacy_clear_rejected_count\": "
+      << cargo_v6_legacy_clear_rejected_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_v6_broad_quarantine_product_usage\": "
+      << cargo_v6_broad_quarantine_product_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_v6_exact_candidate_quarantine_removed_points\": "
+      << cargo_v6_exact_candidate_quarantine_removed_points_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_v6_historical_localization_retro_delete\": "
+      << cargo_v6_historical_retro_delete_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_registration_legacy_removed_points\": "
+      << cargo_registration_legacy_removed_points_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_registration_v6_proposed_points\": "
+      << cargo_registration_v6_proposed_points_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_registration_shadow_intersection\": "
+      << cargo_registration_shadow_intersection_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_registration_shadow_legacy_only\": "
+      << cargo_registration_shadow_legacy_only_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_registration_shadow_v6_only\": "
+      << cargo_registration_shadow_v6_only_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_registration_static_conflict_points\": "
+      << cargo_registration_static_conflict_points_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"sparse_support_kind\": \""
+      << obstacleSupportKindName(cargo_obstacle_support_kind_.load(
+             std::memory_order_relaxed)) << "\",\n";
+    f << "  \"sparse_real_current_point_count\": "
+      << cargo_obstacle_real_current_point_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"sparse_independent_frame_count\": "
+      << cargo_obstacle_sparse_independent_frames_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"sparse_far_history_valid\": "
+      << (cargo_obstacle_sparse_far_history_valid_.load(
+              std::memory_order_relaxed) ? "true" : "false")
+      << ",\n";
+    f << "  \"sparse_source_resolved\": "
+      << (cargo_obstacle_sparse_source_resolved_.load(
+              std::memory_order_relaxed) ? "true" : "false")
+      << ",\n";
+    f << "  \"sparse_ambiguity_reject_count\": "
+      << cargo_obstacle_sparse_ambiguity_reject_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"sparse_track_count\": "
+      << cargo_obstacle_sparse_track_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"sparse_track_high_water\": "
+      << cargo_obstacle_sparse_track_high_water_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"sparse_ring_high_water\": "
+      << cargo_obstacle_sparse_ring_high_water_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"sparse_to_dense_count\": "
+      << cargo_obstacle_sparse_to_dense_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"sparse_authority_reset_count\": "
+      << cargo_obstacle_sparse_authority_reset_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"avoidance_pose_write_count\": "
+      << avoidance_pose_write_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"avoidance_yaw_write_count\": "
+      << avoidance_yaw_write_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"avoidance_relocalization_write_count\": "
+      << avoidance_relocalization_write_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"avoidance_target_direct_write_count\": "
+      << avoidance_target_direct_write_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"avoidance_map_generation_write_count\": "
+      << avoidance_map_generation_write_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"sparse_map_mutation_count\": "
+      << sparse_map_mutation_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"stale_avoidance_snapshot_applied\": "
+      << stale_avoidance_snapshot_applied_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"stale_avoidance_snapshot_rejected\": "
+      << stale_avoidance_snapshot_rejected_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"map_commit_pose_authority_mismatch\": "
+      << map_commit_pose_authority_mismatch_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"map_removed_point_without_authority_count\": "
+      << map_removed_without_authority_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"registration_source_removed_without_ownership_count\": "
+      << registration_source_removed_without_ownership_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"keyframe_removed_without_ownership_count\": "
+      << keyframe_removed_without_ownership_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"mixed_pose_generation_map_filter_count\": "
+      << mixed_pose_generation_map_filter_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"last_keyframe_commit_cloud_hash\": "
+      << last_keyframe_commit_cloud_hash_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"last_map_rebuild_input_hash\": "
+      << last_map_rebuild_input_hash_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"loop_candidate_count\": "
+      << loop_candidate_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"loop_accept_count\": "
+      << loop_accept_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"last_loop_correction_xy_m\": "
+      << last_loop_correction_xy_m_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"last_loop_correction_yaw_deg\": "
+      << last_loop_correction_yaw_deg_.load(std::memory_order_relaxed)
+      << ",\n";
     f << "  \"memory_mb\": " << mem_mb << ",\n";
     f << "  \"memory_guard_triggered\": " << (memory_guard_triggered_ ? "true" : "false") << ",\n";
     f << "  \"disk_free_gb\": " << disk_free_gb << ",\n";
@@ -21624,7 +21945,8 @@ void NdtSlamNode::runPendingCargoAvoidance(
         for (const ObstaclePerceptionCluster& cluster :
              pending_obstacle_perception.clusters) {
             if (cluster.point_count <
-                physical_obstacle_track_store_.config().minimum_points ||
+                cargo_safety_evaluator_.config()
+                    .obstacle_min_cluster_points ||
                 cluster.footprint_distance_m >
                     cargo_collision_tracking_acquisition_distance_m_) {
                 continue;
@@ -22992,6 +23314,144 @@ void NdtSlamNode::updateAndPublishCargoSwing(
     cargo_swing_text_marker_pub_.publish(text_marker);
 }
 
+void NdtSlamNode::recordCargoV6Diagnostics(
+    const CanonicalCargoAuthoritySnapshot& snapshot) {
+    cargo_v6_last_valid_input_.store(
+        snapshot.valid_input, std::memory_order_relaxed);
+    cargo_v6_last_safety_authorized_.store(
+        snapshot.cargo_safety_authorized, std::memory_order_relaxed);
+    cargo_v6_last_map_authorized_.store(
+        snapshot.cargo_map_mutation_authorized,
+        std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(cargo_v6_diagnostics_mutex_);
+    cargo_v6_last_reason_ = snapshot.reason;
+}
+
+ProductCargoContext NdtSlamNode::prepareV6ProductCargoContext(
+    const FrameAuthorityContext& frame_context,
+    const SourceFrameIdentity& source_frame_identity,
+    const ros::Time& stamp) {
+    ProductCargoContext unavailable;
+    unavailable.mode = CargoAuthorityMode::V6_AUTHORITY;
+    unavailable.reason = "v6_not_prepared";
+    if (!integrated_cargo_identity_shadow_enabled_ || stamp.isZero() ||
+        !source_frame_identity.valid()) {
+        unavailable.reason = "v6_source_invalid";
+        return unavailable;
+    }
+    if (integrated_shadow_authority_stamp_ != stamp) {
+        updateIntegratedCargoIdentityShadow(
+            HookCargoDetection{}, CargoShadowFrameEvidence{},
+            currentHookLoadSnapshot(), stamp);
+    }
+    const std::uint64_t lifecycle_id =
+        integrated_identity_decision_.physical_cargo_epoch_id;
+    const double evidence_age_sec = integrated_group_evidence_.valid
+        ? stamp.toSec() - integrated_group_evidence_.source_stamp_sec
+        : std::numeric_limits<double>::infinity();
+    const bool group_current = cargoPhysicalGroupEvidenceOwnerMatches(
+            integrated_group_evidence_, integrated_identity_decision_,
+            lifecycle_id) &&
+        std::isfinite(evidence_age_sec) && evidence_age_sec >= 0.0 &&
+        evidence_age_sec <= integrated_identity_config_.maximum_source_age_sec;
+    const bool group_ready = group_current &&
+        integrated_group_evidence_.supported_top_valid &&
+        integrated_group_evidence_.geometry_resolved &&
+        integrated_group_evidence_.resolved_geometry.valid;
+    if (group_ready) {
+        integrated_shadow_thickness_.freezeFromFormalGeometry(
+            integrated_group_evidence_, integrated_identity_decision_,
+            integrated_geometry_decision_,
+            integrated_shadow_bottom_fusion_.config().minimum_prior_height,
+            integrated_shadow_bottom_fusion_.config().maximum_prior_height);
+    }
+    const bool thickness_authorized = shadowThicknessAuthorized(
+        integrated_shadow_thickness_.provenance,
+        integrated_identity_decision_, lifecycle_id);
+    if (group_ready &&
+        (integrated_shadow_bottom_result_.track_id !=
+             integrated_identity_decision_.physical_history_id ||
+         std::abs(integrated_shadow_bottom_result_.stamp_sec -
+                  integrated_group_evidence_.source_stamp_sec) > 1.0e-6)) {
+        CargoBottomObservation bottom_input;
+        bottom_input.pose_authority = bindTemporalEvidenceAuthority(
+            frame_context.pose_identity,
+            integrated_group_evidence_.source_stamp_sec);
+        bottom_input.track_valid = true;
+        bottom_input.track_id =
+            integrated_identity_decision_.physical_history_id;
+        bottom_input.stamp_sec = integrated_group_evidence_.source_stamp_sec;
+        bottom_input.transform_stamp_sec =
+            integrated_group_evidence_.source_stamp_sec;
+        bottom_input.T_map_base = Eigen::Isometry3f::Identity();
+        bottom_input.T_map_base.matrix() =
+            frame_context.runtime_pose.matrix().cast<float>();
+        bottom_input.points_base =
+            integrated_group_evidence_.union_points_base;
+        bottom_input.current_top_valid = true;
+        bottom_input.current_top_support_valid = true;
+        bottom_input.current_top_z_base = static_cast<float>(
+            integrated_group_evidence_.supported_top_z);
+        bottom_input.footprint_valid = true;
+        bottom_input.footprint_center_base =
+            integrated_group_evidence_.resolved_geometry
+                .footprint_center_base.cast<float>();
+        bottom_input.footprint_size_xy = Eigen::Vector2f(
+            static_cast<float>(
+                integrated_group_evidence_.resolved_geometry.size.x()),
+            static_cast<float>(
+                integrated_group_evidence_.resolved_geometry.size.y()));
+        bottom_input.footprint_yaw_base_rad = static_cast<float>(
+            integrated_group_evidence_.resolved_geometry.yaw_rad);
+        bottom_input.track_center_valid =
+            integrated_group_evidence_.stable_anchor.allFinite();
+        bottom_input.track_center_base =
+            integrated_group_evidence_.stable_anchor.cast<float>();
+        bottom_input.frozen_thickness_valid = thickness_authorized;
+        bottom_input.frozen_thickness_m =
+            integrated_shadow_thickness_.frozen_thickness_m;
+        bottom_input.frozen_thickness_stamp_sec =
+            integrated_shadow_thickness_.provenance.source_stamp_sec;
+        bottom_input.frozen_thickness_confidence =
+            thickness_authorized ? 1.0F : 0.0F;
+        integrated_shadow_bottom_result_ =
+            integrated_shadow_bottom_fusion_.update(bottom_input);
+    }
+
+    CanonicalCargoAuthorityInput canonical_input;
+    canonical_input.mode = cargo_authority_mode_;
+    canonical_input.source_stamp_sec = stamp.toSec();
+    canonical_input.source_frame_identity = source_frame_identity;
+    canonical_input.pose_identity = frame_context.pose_identity;
+    canonical_input.identity = integrated_identity_decision_;
+    canonical_input.group = integrated_group_evidence_;
+    canonical_input.geometry = integrated_geometry_decision_;
+    canonical_input.bottom = integrated_shadow_bottom_result_;
+    canonical_input.owner_voxel_size_m =
+        static_cast<float>(objects_voxel_size_);
+    canonical_input.independent_static_provenance_conflict =
+        cargoGroupOverlapsMatureStaticEvidence(
+            integrated_group_evidence_, frame_context.runtime_pose,
+            frame_context.pose_identity,
+            static_obstacle_evidence_index_.snapshot());
+    canonical_cargo_authority_snapshot_ =
+        buildCanonicalCargoAuthoritySnapshot(canonical_input);
+    recordCargoV6Diagnostics(canonical_cargo_authority_snapshot_);
+
+    V6ProductCargoContextInput product_input;
+    product_input.canonical = canonical_cargo_authority_snapshot_;
+    product_input.geometry_authority = integrated_geometry_decision_;
+    product_input.identity = integrated_identity_decision_;
+    product_input.bottom = integrated_shadow_bottom_result_;
+    product_input.pose_map_base = frame_context.runtime_pose;
+    product_input.evaluation_stamp_sec = stamp.toSec();
+    // Reuse the existing identity association step as a conservative spatial
+    // uncertainty; no V6-only field threshold is introduced.
+    product_input.horizontal_uncertainty_m = static_cast<float>(
+        integrated_identity_config_.maximum_xy_step_m);
+    return buildV6ProductCargoContext(product_input);
+}
+
 void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
     const HookLoadSnapshot& hook,
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
@@ -23549,6 +24009,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& obstacle_cloud_base,
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& observation_cloud_base,
     const FrameAuthorityContext& frame_context,
+    const SourceFrameIdentity& source_frame_identity,
     const Sophus::SE3d& raw_physical_pose,
     const ros::Time& stamp,
     const ros::Time& obstacle_cloud_stamp,
@@ -23792,10 +24253,21 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_physical_motion_estimator_.update(physical_input);
     updateAndPublishCargoSwing(hook, stamp);
     cargo_fusion_track_active_ = active_track;
+    const bool v6_authority_mode =
+        cargo_authority_mode_ == CargoAuthorityMode::V6_AUTHORITY;
+    const ProductCargoContext v6_product_context =
+        prepareV6ProductCargoContext(
+            frame_context, source_frame_identity, stamp);
+    if (v6_authority_mode) {
+        cargo_v6_product_active_count_.fetch_add(
+            1U, std::memory_order_relaxed);
+    }
+    const bool v6_product_invalid =
+        v6_authority_mode && !v6_product_context.safety_authorized;
     const bool frozen_geometry_ready = cargo_frozen_geometry_.valid &&
         cargo_frozen_geometry_.frozen &&
         cargo_frozen_geometry_.cargo_lifecycle_id == cargo_lifecycle_id_;
-    if (cargo_presence_result_.cargo_present &&
+    if (!v6_authority_mode && cargo_presence_result_.cargo_present &&
         !frozen_geometry_ready && pending_cargo_envelope_.valid) {
         formal_cargo_removal_authorized_ = false;
         runPendingCargoAvoidance(
@@ -23804,7 +24276,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             processing_age_sec);
         return;
     }
-    if (!active_track) {
+    if (!v6_authority_mode && !active_track) {
         if (cargo_presence_result_.cargo_present &&
             pending_cargo_envelope_.valid) {
             formal_cargo_removal_authorized_ = false;
@@ -23824,7 +24296,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             false);
         return;
     }
-    if (!frozen_geometry_ready) {
+    if (!v6_authority_mode && !frozen_geometry_ready) {
         formal_cargo_removal_authorized_ = false;
         publishHookOnlySafetyStatus(
             hook, stamp, visual_conflict,
@@ -24087,18 +24559,190 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             cargo_bottom_shadow_fusion_.update(shadow_observation);
     }
 
-    last_cargo_bottom_result_ = cargo_bottom_fusion_.update(observation);
+    const CargoBottomResult legacy_bottom_result =
+        cargo_bottom_fusion_.update(observation);
     last_cargo_pipeline_stamp_ = stamp;
-    RigidCargoGeometry rigid_geometry =
+    const RigidCargoGeometry legacy_rigid_geometry =
         buildCurrentRigidCargoGeometryForPose(pose_map_base, stamp);
     const bool frozen_geometry_envelope = cargo_frozen_geometry_.valid &&
         cargo_frozen_geometry_.frozen &&
         cargo_frozen_geometry_.cargo_lifecycle_id == cargo_lifecycle_id_;
+    const CargoFormalUseDecision legacy_formal_use =
+        evaluateCargoFormalUse(
+            legacy_rigid_geometry.valid,
+            hook_lock_.state == HookCargoLockState::LOST_HOLD,
+            stamp.toSec(), legacy_rigid_geometry.pose_evidence_stamp_sec,
+            legacy_rigid_geometry.height_evidence_stamp_sec,
+            hook_lock_config_.formal_xy_evidence_hold_sec,
+            hook_lock_config_.formal_vertical_evidence_hold_sec,
+            legacy_rigid_geometry.horizontal_uncertainty_m);
+    const CargoFormalHeightDecision legacy_formal_height =
+        evaluateCargoFormalHeight(
+            legacy_bottom_result, legacy_rigid_geometry,
+            legacy_formal_use);
+    const bool legacy_self_removal_authorized =
+        active_track && cargo_frozen_geometry_.formal_authorized &&
+        effective_cargo_envelope_.can_authorize_clear &&
+        legacy_formal_height.valid &&
+        legacy_formal_use.formal_removal_valid;
+    // Registration hygiene remains the commissioned Legacy product path in
+    // every Cargo mode. V6 is evaluated later as shadow-only telemetry.
+    legacy_registration_hygiene_authorized_ =
+        legacy_self_removal_authorized && legacy_rigid_geometry.valid;
+    legacy_registration_hygiene_stamp_ =
+        legacy_registration_hygiene_authorized_
+            ? stamp : ros::Time();
+    legacy_registration_footprint_ =
+        legacy_registration_hygiene_authorized_
+            ? toCargoObbFootprint(
+                  legacy_rigid_geometry,
+                  legacy_formal_use.horizontal_uncertainty_m)
+            : CargoObbFootprint{};
+    LegacyProductCargoContextInput legacy_context_input;
+    legacy_context_input.active_track = active_track;
+    legacy_context_input.frozen_geometry_ready = frozen_geometry_ready;
+    legacy_context_input.clear_authorized =
+        effective_cargo_envelope_.can_authorize_clear;
+    legacy_context_input.self_removal_authorized =
+        legacy_self_removal_authorized;
+    legacy_context_input.cargo_lifecycle_id = cargo_lifecycle_id_;
+    legacy_context_input.cargo_id = cargo_fusion_track_id_;
+    legacy_context_input.geometry = legacy_rigid_geometry;
+    legacy_context_input.bottom = legacy_bottom_result;
+    legacy_context_input.formal_use = legacy_formal_use;
+    const ProductCargoContext legacy_product_context =
+        buildLegacyProductCargoContext(legacy_context_input);
+    const bool retained_legacy_positive_hazard =
+        confirmed_cargo_safety_result_.input_valid &&
+        confirmed_cargo_safety_result_.warning_valid &&
+        confirmed_cargo_safety_result_.fault == CargoSafetyFault::NONE &&
+        confirmed_cargo_safety_result_.has_cluster_evidence &&
+        (confirmed_cargo_safety_result_.warning_code ==
+             CargoSafetyEvaluator::kLevel1Code ||
+         confirmed_cargo_safety_result_.warning_code ==
+             CargoSafetyEvaluator::kLevel2Code);
+    const double retained_obstacle_age_sec =
+        confirmed_positive_obstacle_authority_.valid
+            ? stamp.toSec() -
+                  confirmed_positive_obstacle_authority_.source_stamp_sec
+            : std::numeric_limits<double>::infinity();
+    const bool retained_legacy_hazard_same_authority =
+        retained_legacy_positive_hazard &&
+        legacy_product_context.safety_authorized &&
+        sameTemporalEvidenceAuthority(
+            legacy_bottom_result.pose_authority,
+            confirmed_positive_obstacle_authority_) &&
+        std::isfinite(retained_obstacle_age_sec) &&
+        retained_obstacle_age_sec >= 0.0 &&
+        retained_obstacle_age_sec <=
+            physical_obstacle_track_store_.config()
+                .maximum_observation_gap_sec &&
+        cargo_obstacle_track_id_ != 0U &&
+        cargo_obstacle_provenance_valid_ &&
+        (cargo_obstacle_large_geometry_valid_ ||
+         authorizesStaticObstacle(cargo_obstacle_provenance_));
+    const ProductCargoSelection product_selection =
+        selectProductCargoContext(
+            cargo_authority_mode_, legacy_product_context,
+            v6_product_context, retained_legacy_positive_hazard,
+            retained_legacy_hazard_same_authority);
+    const ProductCargoContext& product_context =
+        product_selection.product;
+    if (v6_product_invalid) {
+        // Legacy evidence above is still evaluated so the commissioned
+        // Registration Hygiene path can remain current. It has no permission
+        // to authorize a V6 product CLEAR or map mutation.
+        formal_cargo_removal_authorized_ = false;
+        cargo_v6_reject_count_.fetch_add(1U, std::memory_order_relaxed);
+        if (product_selection.legacy_clear_rejected) {
+            cargo_v6_legacy_clear_rejected_count_.fetch_add(
+                1U, std::memory_order_relaxed);
+        }
+        if (product_selection.legacy_positive_hazard_retained) {
+            const CargoSafetyClusterEvidence& retained =
+                confirmed_cargo_safety_result_.most_dangerous_cluster;
+            publishHookOnlySafetyStatus(
+                hook, stamp, visual_conflict,
+                std::string("v6_authority_positive_only:") +
+                    v6_product_context.reason,
+                true, confirmed_cargo_safety_result_.warning_code, 1U,
+                retained.footprint_distance_m,
+                retained.obstacle_top_z95_m,
+                retained.obstacle_uncertainty_m,
+                retained.conservative_clearance_m,
+                static_cast<std::uint32_t>(
+                    legacy_product_context.cargo_id),
+                static_cast<std::uint32_t>(cargo_obstacle_track_id_),
+                static_cast<std::uint32_t>(
+                    std::max(1, cargo_obstacle_track_confirm_count_)),
+                static_cast<std::uint8_t>(cargo_obstacle_provenance_),
+                cargo_obstacle_provenance_valid_,
+                cargo_obstacle_large_geometry_valid_,
+                authorizesStaticObstacle(cargo_obstacle_provenance_),
+                std::max(
+                    cargo_avoidance_fusion_config_
+                        .pending_minimum_authority_confidence,
+                    0.0F),
+                legacy_bottom_result.geometry.bottom_z_map,
+                legacy_bottom_result.uncertainty);
+        } else {
+            publishHookOnlySafetyStatus(
+                hook, stamp, visual_conflict,
+                std::string("v6_authority_fail_closed:") +
+                    v6_product_context.reason,
+                false);
+        }
+        return;
+    }
+    if (v6_authority_mode && product_context.safety_authorized) {
+        cargo_v6_safety_authorized_count_.fetch_add(
+            1U, std::memory_order_relaxed);
+    }
+    if (v6_authority_mode && product_context.map_mutation_authorized) {
+        cargo_v6_map_authorized_count_.fetch_add(
+            1U, std::memory_order_relaxed);
+    }
+    if (product_selection.legacy_positive_hazard_retained) {
+        cargo_v6_legacy_positive_retained_count_.fetch_add(
+            1U, std::memory_order_relaxed);
+    }
+    if (product_selection.legacy_clear_rejected) {
+        cargo_v6_legacy_clear_rejected_count_.fetch_add(
+            1U, std::memory_order_relaxed);
+    }
+    last_cargo_bottom_result_ = product_context.bottom;
+    RigidCargoGeometry rigid_geometry = product_context.geometry;
+    const std::uint64_t product_cargo_track_id =
+        product_context.cargo_id;
+    const std::uint64_t product_cargo_lifecycle_id =
+        product_context.cargo_lifecycle_id;
+    CargoPresenceResult product_presence = cargo_presence_result_;
+    if (v6_authority_mode) {
+        // Product V6 identity owns presence for the V6 product path.  Keep the
+        // Legacy presence state machine alive for registration hygiene and
+        // diagnostics, but never let it veto an already selected V6 context.
+        product_presence.cargo_present = product_context.safety_authorized;
+        product_presence.gravity_authoritative =
+            product_context.clear_authorized;
+    }
     effective_cargo_envelope_ = resolveEffectiveCargoEnvelope(
-        cargo_presence_result_,
-        frozen_geometry_envelope ? rigid_geometry : RigidCargoGeometry{},
+        product_presence,
+        (v6_authority_mode
+             ? v6_product_context.geometry_authorized
+             : frozen_geometry_envelope)
+            ? rigid_geometry : RigidCargoGeometry{},
         pending_cargo_envelope_);
-    if (frozen_geometry_envelope &&
+    if (v6_authority_mode && effective_cargo_envelope_.valid) {
+        effective_cargo_envelope_.can_authorize_clear =
+            product_context.clear_authorized;
+        effective_cargo_envelope_.cargo_lifecycle_id =
+            product_cargo_lifecycle_id;
+        effective_cargo_envelope_.reason =
+            product_context.clear_authorized
+                ? "v6_product_geometry_clear_authorized"
+                : "v6_product_geometry_positive_only";
+    }
+    if (!v6_authority_mode && frozen_geometry_envelope &&
         !cargo_frozen_geometry_.formal_authorized) {
         // A live-only frozen shape is stable enough for positive hazard
         // evaluation, but it is not formal static+live evidence. Keep all
@@ -24109,14 +24753,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         effective_cargo_envelope_.reason =
             "degraded_live_only_frozen_geometry";
     }
-    const CargoFormalUseDecision formal_use = evaluateCargoFormalUse(
-        rigid_geometry.valid,
-        hook_lock_.state == HookCargoLockState::LOST_HOLD,
-        stamp.toSec(), rigid_geometry.pose_evidence_stamp_sec,
-        rigid_geometry.height_evidence_stamp_sec,
-        hook_lock_config_.formal_xy_evidence_hold_sec,
-        hook_lock_config_.formal_vertical_evidence_hold_sec,
-        rigid_geometry.horizontal_uncertainty_m);
+    const CargoFormalUseDecision formal_use = product_context.formal_use;
     const CargoFormalHeightDecision formal_height =
         evaluateCargoFormalHeight(
             last_cargo_bottom_result_, rigid_geometry, formal_use);
@@ -24146,7 +24783,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         last_cargo_bottom_result_.height_valid = formal_height.valid;
         last_cargo_bottom_result_.valid = formal_height.valid;
         last_cargo_bottom_result_.height = rigid_geometry.shape.height_m;
-        last_cargo_bottom_result_.track_id = cargo_fusion_track_id_;
+        last_cargo_bottom_result_.track_id = product_cargo_track_id;
         // stamp_sec is the evaluation time for the message. The safety
         // evaluator uses evidence_stamp_sec and must never see a held sample
         // refreshed to the current tick.
@@ -24176,11 +24813,12 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_state_.valid_height = formal_height.valid;
         cargo_state_.source = std::string("rigid:") +
             cargoPoseSourceName(rigid_geometry.pose.source);
-        formal_cargo_removal_authorized_ = active_track &&
-            cargo_frozen_geometry_.formal_authorized &&
-            effective_cargo_envelope_.can_authorize_clear &&
-            formal_height.valid && formal_use.formal_removal_valid;
-        formal_cargo_removal_track_id_ = cargo_fusion_track_id_;
+        formal_cargo_removal_authorized_ = v6_authority_mode
+            ? v6_product_context.self_removal_authorized
+            : active_track && cargo_frozen_geometry_.formal_authorized &&
+                  effective_cargo_envelope_.can_authorize_clear &&
+                  formal_height.valid && formal_use.formal_removal_valid;
+        formal_cargo_removal_track_id_ = product_cargo_track_id;
         formal_cargo_removal_stamp_.fromSec(std::min(
             rigid_geometry.pose_evidence_stamp_sec,
             rigid_geometry.height_evidence_stamp_sec));
@@ -24199,7 +24837,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         lidar_slam2_msgs::CargoBottomEstimate::SCHEMA_VERSION;
     bottom_msg.valid = last_cargo_bottom_result_.valid;
     bottom_msg.track_id = static_cast<std::uint32_t>(
-        std::min<std::uint64_t>(cargo_fusion_track_id_,
+        std::min<std::uint64_t>(product_cargo_track_id,
                                std::numeric_limits<std::uint32_t>::max()));
     bottom_msg.track_state = static_cast<std::uint8_t>(cargo_state_.state);
     bottom_msg.source = static_cast<std::uint8_t>(
@@ -25302,7 +25940,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         for (const ObstaclePerceptionCluster& cluster :
              formal_obstacle_perception.clusters) {
             if (cluster.point_count <
-                physical_obstacle_track_store_.config().minimum_points ||
+                cargo_safety_evaluator_.config()
+                    .obstacle_min_cluster_points ||
                 cluster.footprint_distance_m >
                     cargo_collision_tracking_acquisition_distance_m_) {
                 continue;
@@ -25379,6 +26018,42 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         obstacle_track_decision.created_track_count;
     cargo_obstacle_track_reset_count_ =
         obstacle_track_decision.association_reset_count;
+    cargo_obstacle_support_kind_.store(
+        obstacle_track_decision.selected_support_kind,
+        std::memory_order_relaxed);
+    cargo_obstacle_real_current_point_count_.store(
+        obstacle_track_decision.selected_real_current_point_count,
+        std::memory_order_relaxed);
+    cargo_obstacle_sparse_independent_frames_.store(
+        obstacle_track_decision.selected_sparse_independent_frames,
+        std::memory_order_relaxed);
+    cargo_obstacle_sparse_far_history_valid_.store(
+        obstacle_track_decision.selected_far_field_history_valid,
+        std::memory_order_relaxed);
+    cargo_obstacle_sparse_ambiguity_reject_count_.store(
+        obstacle_track_decision.sparse_ambiguity_reject_count,
+        std::memory_order_relaxed);
+    if (obstacle_track_decision.selected_sparse_to_dense) {
+        ++cargo_obstacle_sparse_to_dense_count_;
+    }
+    cargo_obstacle_sparse_track_count_.store(
+        obstacle_track_decision.sparse_track_count,
+        std::memory_order_relaxed);
+    const std::size_t sparse_track_high_water = std::max(
+        cargo_obstacle_sparse_track_high_water_.load(
+            std::memory_order_relaxed),
+        obstacle_track_decision.sparse_track_count);
+    cargo_obstacle_sparse_track_high_water_.store(
+        sparse_track_high_water, std::memory_order_relaxed);
+    cargo_obstacle_sparse_authority_reset_count_.store(
+        obstacle_track_decision.sparse_authority_reset_count,
+        std::memory_order_relaxed);
+    const std::size_t sparse_ring_high_water = std::max(
+        cargo_obstacle_sparse_ring_high_water_.load(
+            std::memory_order_relaxed),
+        obstacle_track_decision.sparse_ring_high_water);
+    cargo_obstacle_sparse_ring_high_water_.store(
+        sparse_ring_high_water, std::memory_order_relaxed);
     if (obstacle_track_decision.reason ==
         "static_geometry_below_threshold") {
         ++cargo_static_geometry_rejected_count_;
@@ -25387,6 +26062,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     const CargoObstacleObservation* selected_observation = nullptr;
     cargo_diagnostic_source_evidence_valid_ = false;
     cargo_diagnostic_observation_valid_ = false;
+    cargo_obstacle_sparse_source_resolved_.store(
+        false, std::memory_order_relaxed);
     if (obstacle_track_decision.selected_source_index <
         raw_cargo_safety_result.cluster_evidence.size()) {
         selected_source_evidence =
@@ -25394,6 +26071,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 obstacle_track_decision.selected_source_index];
         cargo_diagnostic_source_evidence_ = *selected_source_evidence;
         cargo_diagnostic_source_evidence_valid_ = true;
+        cargo_obstacle_sparse_source_resolved_.store(
+            selected_source_evidence->source_validated,
+            std::memory_order_relaxed);
     }
     const auto selected_observation_it = std::find_if(
         obstacle_track_observations.begin(),
@@ -25406,6 +26086,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         selected_observation = &*selected_observation_it;
         cargo_diagnostic_observation_ = *selected_observation;
         cargo_diagnostic_observation_valid_ = true;
+        cargo_obstacle_sparse_source_resolved_.store(
+            selected_observation->source_validated,
+            std::memory_order_relaxed);
     }
     {
         std_msgs::String debug_message;
@@ -25601,6 +26284,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
              CargoSafetyEvaluator::kLevel2Code)) {
         cargo_safety_temporal_filter_.reset();
         confirmed_cargo_safety_result_ = CargoSafetyResult{};
+        confirmed_positive_obstacle_authority_ =
+            TemporalEvidenceAuthority{};
         cargo_temporal_candidate_code_ =
             raw_cargo_safety_result.warning_code;
         cargo_temporal_candidate_count_ =
@@ -25623,6 +26308,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             cargo_confirmed_warning_code_ =
                 obstacle_track_decision.warning_code;
             confirmed_cargo_safety_result_ = last_cargo_safety_result_;
+            confirmed_positive_obstacle_authority_ =
+                obstacle_track_decision.selected_pose_authority;
         } else {
             cargo_confirmed_warning_code_ = 0;
             const bool sparse_cluster =
@@ -25669,11 +26356,15 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 CargoSafetyEvidenceState::CLEAR;
             last_cargo_safety_result_.reason = temporal_decision.reason;
             confirmed_cargo_safety_result_ = last_cargo_safety_result_;
+            confirmed_positive_obstacle_authority_ =
+                TemporalEvidenceAuthority{};
         }
     } else {
         // Faults remain immediate and cannot be used as temporal evidence.
         cargo_safety_temporal_filter_.reset();
         confirmed_cargo_safety_result_ = CargoSafetyResult{};
+        confirmed_positive_obstacle_authority_ =
+            TemporalEvidenceAuthority{};
         cargo_confirmed_warning_code_ = 0;
         cargo_temporal_candidate_code_ = 0;
         cargo_temporal_candidate_count_ = 0;
@@ -25708,10 +26399,11 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         last_cargo_bottom_result_.geometry_valid &&
         std::isfinite(
             last_cargo_bottom_result_.geometry.bottom_z_map);
-    avoidance_input.formal_clear_authorized =
-        cargo_frozen_geometry_.formal_authorized &&
-        effective_cargo_envelope_.can_authorize_clear &&
-        formal_use.formal_removal_valid;
+    avoidance_input.formal_clear_authorized = v6_authority_mode
+        ? product_context.clear_authorized
+        : cargo_frozen_geometry_.formal_authorized &&
+              effective_cargo_envelope_.can_authorize_clear &&
+              formal_use.formal_removal_valid;
     avoidance_input.pending_envelope_valid = false;
     avoidance_input.live_obstacle_origin_resolved =
         obstacle_track_decision.selected_embedded_authorized;
@@ -25767,10 +26459,13 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         // These cells are also removed from CLEAR coverage, so this suppresses
         // cargo-self false 17/18 without turning the exclusion into code 14.
         static_query.cargo_self_exclusion_authorized =
-            active_track &&
-            cargo_frozen_geometry_.formal_authorized &&
-            formal_use.formal_removal_valid &&
-            rigid_geometry.valid;
+            v6_authority_mode
+                ? v6_product_context.map_mutation_authorized &&
+                      rigid_geometry.valid
+                : active_track &&
+                      cargo_frozen_geometry_.formal_authorized &&
+                      formal_use.formal_removal_valid &&
+                      rigid_geometry.valid;
         if (static_query.cargo_self_exclusion_authorized) {
             const float self_shell =
                 hook_lock_config_.self_cargo_point_match_radius_m;
@@ -25787,9 +26482,10 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             authorizeStaticEvidence(
                 cargo_origin_exclusion_component_.authority);
         static_query.exclusion_authorized =
+            !v6_authority_mode &&
             hook.valid &&
             hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED &&
-            cargo_lifecycle_id_ != 0U &&
+            product_cargo_lifecycle_id != 0U &&
             cargo_origin_exclusion_component_.valid &&
             origin_authorization.formal_origin_authorized &&
             cargo_origin_exclusion_component_.component_id != 0U &&
@@ -25894,7 +26590,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 frame_context.pose_identity, stamp.toSec());
         static_hazard_observation.stamp_sec = stamp.toSec();
         static_hazard_observation.cargo_lifecycle_id =
-            cargo_lifecycle_id_;
+            product_cargo_lifecycle_id;
         static_hazard_observation.map_generation =
             static_height_field->mapGeneration();
         static_hazard_observation.authority_valid =
@@ -25980,8 +26676,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             std::memory_order_acquire);
     const std::uint64_t formal_map_generation =
         static_evidence_epoch_.load(std::memory_order_acquire);
-    avoidance_input.live.cargo_lifecycle_id = cargo_lifecycle_id_;
-    avoidance_input.live.cargo_track_id = cargo_fusion_track_id_;
+    avoidance_input.live.cargo_lifecycle_id =
+        product_cargo_lifecycle_id;
+    avoidance_input.live.cargo_track_id = product_cargo_track_id;
     avoidance_input.live.obstacle_track_id =
         obstacle_track_decision.selected_track_id;
     avoidance_input.live.pose_generation = formal_pose_continuity;
@@ -26006,8 +26703,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         avoidance_input.live.uncertainty_m =
             selected_source_evidence->obstacle_uncertainty_m;
     }
-    avoidance_input.static_map.cargo_lifecycle_id = cargo_lifecycle_id_;
-    avoidance_input.static_map.cargo_track_id = cargo_fusion_track_id_;
+    avoidance_input.static_map.cargo_lifecycle_id =
+        product_cargo_lifecycle_id;
+    avoidance_input.static_map.cargo_track_id = product_cargo_track_id;
     avoidance_input.static_map.obstacle_track_id =
         formal_static_hazard_decision.authorized
             ? formal_static_hazard_decision.obstacle_id : 0U;
@@ -26063,6 +26761,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         CanonicalCargoAuthorityInput canonical_input;
         canonical_input.mode = cargo_authority_mode_;
         canonical_input.source_stamp_sec = stamp.toSec();
+        canonical_input.source_frame_identity = source_frame_identity;
         canonical_input.pose_identity = frame_context.pose_identity;
         canonical_input.identity = integrated_identity_decision_;
         canonical_input.group = integrated_group_evidence_;
@@ -26077,20 +26776,22 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 static_obstacle_evidence_index_.snapshot());
         canonical_cargo_authority_snapshot_ =
             buildCanonicalCargoAuthoritySnapshot(canonical_input);
+        recordCargoV6Diagnostics(canonical_cargo_authority_snapshot_);
     }
     CargoAvoidanceFusionResult fused_avoidance =
         fuseCargoAvoidanceRisk(
             avoidance_input, cargo_avoidance_fusion_config_);
-    if (canonical_cargo_authority_snapshot_.cargo_safety_authorized) {
+    if (v6_authority_mode &&
+        canonical_cargo_authority_snapshot_.cargo_safety_authorized) {
         fused_avoidance = integrated_shadow_fusion_result_;
     }
     CargoFrameDecision cargo_frame_decision;
     cargo_frame_decision.stamp_sec = stamp.toSec();
     cargo_frame_decision.cargo_identity_confirmed_this_frame = false;
-    const bool v6_safety_authorized =
-        canonical_cargo_authority_snapshot_.cargo_safety_authorized;
+    const bool v6_safety_authorized = v6_authority_mode &&
+        product_context.safety_authorized;
     cargo_frame_decision.cargo_identity_authorized =
-        v6_safety_authorized || active_track;
+        v6_authority_mode ? v6_safety_authorized : active_track;
     cargo_frame_decision.cargo_lifecycle_id = v6_safety_authorized
         ? integrated_identity_decision_.physical_cargo_epoch_id
         : cargo_lifecycle_id_;
@@ -26388,9 +27089,11 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         return composeCargoSafetyStatus(
             message, false, result.fault, result.warning_code,
             result.warning_valid, reason, true, false,
-            cargo_frozen_geometry_.formal_authorized &&
-                effective_cargo_envelope_.can_authorize_clear &&
-                formal_use.formal_removal_valid,
+            v6_authority_mode
+                ? product_context.clear_authorized
+                : cargo_frozen_geometry_.formal_authorized &&
+                      effective_cargo_envelope_.can_authorize_clear &&
+                      formal_use.formal_removal_valid,
             apply_review_episode);
     };
 
@@ -27571,6 +28274,13 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
         new pcl::PointCloud<pcl::PointXYZ>(*job.cloud));
     const Sophus::SE3d& pose = job.pose;
     const ros::Time& stamp = job.stamp;
+    if (job.cargo_authority_mode == CargoAuthorityMode::V6_AUTHORITY &&
+        job.cargo_quarantine_active) {
+        cargo_v6_broad_quarantine_product_count_.fetch_add(
+            1U, std::memory_order_relaxed);
+        ROS_ERROR("[MapFirewall] V6 broad quarantine reached product worker");
+        return false;
+    }
     // ------------------------------------------------------------------------
     // 0. 基础准备 + DuplicateFrameGuard（内容指纹）+ MotionGate
     // ------------------------------------------------------------------------
@@ -28065,13 +28775,25 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     if (v6_authority_mode) {
         objects_after_cargo_base->reserve(cargo_commit_source->size());
         cargo_removed_base->reserve(cargo_commit_source->size());
+        std::size_t exact_candidate_removed = 0U;
         for (const pcl::PointXYZ& point : cargo_commit_source->points) {
-            if (job.avoidance_map_mutation.cargo_points.owns(point)) {
+            const bool canonical_owned =
+                job.avoidance_map_mutation.cargo_points.owns(point);
+            const bool candidate_owned =
+                job.v6_candidate_quarantine_active &&
+                job.avoidance_map_mutation.cargo_candidate_points.owns(
+                    job.source_frame_identity, point);
+            if (canonical_owned || candidate_owned) {
                 cargo_removed_base->push_back(point);
+                if (!canonical_owned && candidate_owned) {
+                    ++exact_candidate_removed;
+                }
             } else {
                 objects_after_cargo_base->push_back(point);
             }
         }
+        cargo_v6_exact_candidate_quarantine_removed_points_.fetch_add(
+            exact_candidate_removed, std::memory_order_relaxed);
     } else {
         removePointsInsideCargoRemoveBoxesBase(
             cargo_commit_source,
@@ -28250,6 +28972,23 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     // ------------------------------------------------------------------------
     // 7. 最后才 addKeyFrame（MapCommit）
     // ------------------------------------------------------------------------
+    const std::uint64_t keyframe_cloud_hash =
+        hashSourceCloudExact(*commit_cloud_base);
+    last_keyframe_commit_cloud_hash_.store(
+        keyframe_cloud_hash, std::memory_order_release);
+    const std::uint64_t previous_rebuild_hash =
+        last_map_rebuild_input_hash_.load(std::memory_order_acquire);
+    const std::uint64_t rebuild_input_hash =
+        (previous_rebuild_hash ^
+         (keyframe_cloud_hash + 0x9e3779b97f4a7c15ULL +
+          (previous_rebuild_hash << 6U) +
+          (previous_rebuild_hash >> 2U))) ^
+        job.pose_identity.map_rebuild_generation ^
+        (job.pose_identity.keyframe_pose_version << 1U) ^
+        (job.pose_identity.yaw_authority_generation << 2U);
+    last_map_rebuild_input_hash_.store(
+        rebuild_input_hash == 0U ? 1U : rebuild_input_hash,
+        std::memory_order_release);
     if (!loop_closure_detector_.addKeyFrame(
             pose, commit_cloud_base, stamp)) {
         return false;
@@ -28273,6 +29012,17 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
              objects_after_human_base->size(),
              cargo_removed_base->size(),
              human_candidates_base->size());
+    ROS_DEBUG("[KeyFrameAuthority] cloud_hash=%llu map_gen=%llu "
+              "pose_version=%llu yaw_generation=%llu target_snapshot=%llu",
+              static_cast<unsigned long long>(keyframe_cloud_hash),
+              static_cast<unsigned long long>(
+                  job.pose_identity.map_rebuild_generation),
+              static_cast<unsigned long long>(
+                  job.pose_identity.keyframe_pose_version),
+              static_cast<unsigned long long>(
+                  job.pose_identity.yaw_authority_generation),
+              static_cast<unsigned long long>(
+                  job.pose_identity.target_snapshot_id));
 
     // ------------------------------------------------------------------------
     // 8. Map / Tile / Display 更新（只允许使用过滤后的点云）
@@ -28356,6 +29106,14 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
     }
 
     // v6: DynamicHistoryEraser - 用 swept volume 反删 objects_map/display_map
+    if (v6_authority_mode && !new_cargo_volumes_this_frame_.empty()) {
+        cargo_v6_historical_retro_delete_count_.fetch_add(
+            new_cargo_volumes_this_frame_.size(),
+            std::memory_order_relaxed);
+        ROS_ERROR("[MapFirewall] V6 historical sweep blocked volumes=%zu",
+                  new_cargo_volumes_this_frame_.size());
+        new_cargo_volumes_this_frame_.clear();
+    }
     if (!new_cargo_volumes_this_frame_.empty()) {
         std::size_t erased_objects = 0U;
         std::size_t erased_display = 0U;

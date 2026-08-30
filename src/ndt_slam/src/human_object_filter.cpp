@@ -26,20 +26,19 @@ void HumanObjectDynamicFilter::reset() {
     has_last_map_update_stamp_ = false;
     last_map_update_stamp_sec_ = 0.0;
     last_map_update_cloud_instance_id_ = 0U;
+    diagnostics_ = HumanMapAuthorityDiagnostics{};
 }
 
 HumanFrameClassification HumanObjectDynamicFilter::classifyFrame(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud_base,
-    double timestamp,
-    std::uint64_t source_cloud_instance_id,
+    const SourceFrameIdentity& source_frame_identity,
     float ownership_voxel_size_m,
     pcl::PointCloud<pcl::PointXYZ>::Ptr& safe_objects_out,
     pcl::PointCloud<pcl::PointXYZ>::Ptr& human_candidate_out) const {
     HumanFrameClassification result;
     safe_objects_out->clear();
     human_candidate_out->clear();
-    if (!objects_cloud_base || !std::isfinite(timestamp) || timestamp <= 0.0 ||
-        source_cloud_instance_id == 0U ||
+    if (!objects_cloud_base || !source_frame_identity.valid() ||
         !std::isfinite(ownership_voxel_size_m) ||
         ownership_voxel_size_m <= 0.0F) {
         return result;
@@ -51,8 +50,11 @@ HumanFrameClassification HumanObjectDynamicFilter::classifyFrame(
         return result;
     }
 
-    result.source_stamp_sec = timestamp;
-    result.source_cloud_instance_id = source_cloud_instance_id;
+    result.source_stamp_sec = source_frame_identity.sensor_source_stamp_sec;
+    result.source_cloud_instance_id =
+        source_frame_identity.processing_frame_index;
+    result.source_frame_identity = source_frame_identity;
+    result.owned_points.source_frame_identity = source_frame_identity;
     result.owned_points.voxel_size_m = ownership_voxel_size_m;
 
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusters;
@@ -73,6 +75,10 @@ HumanFrameClassification HumanObjectDynamicFilter::classifyFrame(
             static_cast<std::size_t>(filter_config_.min_points_strong);
         result.clusters.push_back(observation);
         for (const pcl::PointXYZ& point : cluster->points) {
+            SourcePointKey exact_key;
+            if (makeSourcePointKey(point, &exact_key)) {
+                result.owned_points.exact_points.insert(exact_key);
+            }
             PointOwnershipVoxel voxel;
             if (makePointOwnershipVoxel(
                     point, ownership_voxel_size_m, &voxel)) {
@@ -89,6 +95,9 @@ HumanFrameClassification HumanObjectDynamicFilter::classifyFrame(
         }
     }
     result.valid = true;
+    ++diagnostics_.classification_count;
+    diagnostics_.registration_owned_point_count +=
+        result.owned_points.exact_points.size();
     return result;
 }
 
@@ -98,6 +107,15 @@ HumanMapFilterSnapshot HumanObjectDynamicFilter::updateMapTracks(
     float static_learning_cell_size_m) {
     HumanMapFilterSnapshot snapshot;
     if (!classification.valid ||
+        !classification.source_frame_identity.valid() ||
+        classification.source_cloud_instance_id !=
+            classification.source_frame_identity.processing_frame_index ||
+        !sameSourceFrameIdentity(
+            classification.owned_points.source_frame_identity,
+            classification.source_frame_identity) ||
+        std::abs(classification.source_stamp_sec -
+                 classification.source_frame_identity.sensor_source_stamp_sec) >
+            1.0e-6 ||
         !std::isfinite(classification.source_stamp_sec) ||
         classification.source_stamp_sec <= 0.0 ||
         classification.source_cloud_instance_id == 0U ||
@@ -114,6 +132,16 @@ HumanMapFilterSnapshot HumanObjectDynamicFilter::updateMapTracks(
              last_map_update_stamp_sec_ + kStampEpsilonSec ||
          classification.source_cloud_instance_id <=
              last_map_update_cloud_instance_id_)) {
+        const bool duplicate =
+            classification.source_cloud_instance_id ==
+                last_map_update_cloud_instance_id_ &&
+            std::abs(classification.source_stamp_sec -
+                     last_map_update_stamp_sec_) <= kStampEpsilonSec;
+        if (duplicate) {
+            ++diagnostics_.duplicate_update_reject_count;
+        } else {
+            ++diagnostics_.out_of_order_update_reject_count;
+        }
         return snapshot;
     }
 
@@ -156,12 +184,7 @@ HumanMapFilterSnapshot HumanObjectDynamicFilter::updateMapTracks(
     }
 
     updateTracks(detections, classification.source_stamp_sec);
-    for (const HumanTrack& detection : detections) {
-        addDenyCells(detection.bbox_min, detection.bbox_max,
-                     classification.source_stamp_sec, human_deny_ttl_);
-    }
     cleanupExpiredTracks(classification.source_stamp_sec);
-    cleanupExpiredDenyCells(classification.source_stamp_sec);
     has_last_map_update_stamp_ = true;
     last_map_update_stamp_sec_ = classification.source_stamp_sec;
     last_map_update_cloud_instance_id_ =
@@ -171,6 +194,7 @@ HumanMapFilterSnapshot HumanObjectDynamicFilter::updateMapTracks(
     snapshot.source_stamp_sec = classification.source_stamp_sec;
     snapshot.source_cloud_instance_id =
         classification.source_cloud_instance_id;
+    snapshot.source_frame_identity = classification.source_frame_identity;
     snapshot.owned_points = classification.owned_points;
     snapshot.static_learning_blocks.cell_size_m =
         static_learning_cell_size_m;
@@ -188,6 +212,16 @@ HumanMapFilterSnapshot HumanObjectDynamicFilter::updateMapTracks(
             ++snapshot.dynamic_track_count;
         }
     }
+    ++diagnostics_.map_track_update_count;
+    diagnostics_.map_owned_point_count +=
+        snapshot.owned_points.exact_points.size();
+    diagnostics_.static_learning_block_cell_count =
+        snapshot.static_learning_blocks.human_cells.size();
+    diagnostics_.static_learning_block_high_water = std::max(
+        diagnostics_.static_learning_block_high_water,
+        snapshot.static_learning_blocks.human_cells.size());
+    diagnostics_.track_high_water = std::max(
+        diagnostics_.track_high_water, active_tracks_.size());
     return snapshot;
 }
 
@@ -199,7 +233,19 @@ void HumanObjectDynamicFilter::processFrame(
     pcl::PointCloud<pcl::PointXYZ>::Ptr& human_candidate_out,
     pcl::PointCloud<pcl::PointXYZ>::Ptr& human_dynamic_out,
     pcl::PointCloud<pcl::PointXYZ>::Ptr& human_pending_out) {
-
+    (void)T_map_base;
+    (void)timestamp;
+    safe_objects_out->clear();
+    human_candidate_out->clear();
+    human_dynamic_out->clear();
+    human_pending_out->clear();
+    if (objects_cloud_base) *safe_objects_out = *objects_cloud_base;
+    ROS_ERROR_THROTTLE(
+        10.0,
+        "[HumanFilter] legacy processFrame API is product-disabled; "
+        "use classifyFrame + updateMapTracks");
+    return;
+#if 0
     if (!filter_config_.enabled) {
         *safe_objects_out = *objects_cloud_base;
         return;
@@ -378,6 +424,7 @@ void HumanObjectDynamicFilter::processFrame(
         ROS_DEBUG("[HumanFilterV2] strong=%d, weak=%d, removed=%zu, deny_cells=%d",
                   strong_count, weak_count, human_cluster_indices.size(), getDenyCellCount());
     }
+#endif
 }
 
 void HumanObjectDynamicFilter::clusterBEV(
@@ -551,7 +598,6 @@ void HumanObjectDynamicFilter::updateTracks(
                 track.state == HumanTrackState::PENDING) {
                 if (isDynamicHuman(track)) {
                     track.state = HumanTrackState::DYNAMIC_CONFIRMED;
-                    generateTrajectoryCapsule(track);
                 } else if (track.observed_frames >= tracking_config_.confirm_frames) {
                     track.state = HumanTrackState::PENDING;
                 }
@@ -753,6 +799,11 @@ int HumanObjectDynamicFilter::getDynamicHumanCount() const {
     return count;
 }
 
+HumanMapAuthorityDiagnostics HumanObjectDynamicFilter::diagnostics() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return diagnostics_;
+}
+
 std::set<std::pair<int, int>>
 HumanObjectDynamicFilter::buildStaticLearningBlockCells(
     const std::vector<HumanTrack>& detections,
@@ -813,6 +864,10 @@ bool HumanObjectDynamicFilter::isPointInPolygonPrism(
 void HumanObjectDynamicFilter::addDenyCells(
     const Eigen::Vector3d& bbox_min, const Eigen::Vector3d& bbox_max,
     double current_time, double ttl_sec) {
+
+    // The V3 product path keeps deny cells as static-learning blocks only;
+    // retention is owned by the bounded tracker snapshot, not a second TTL.
+    (void)ttl_sec;
 
     double bev_res = filter_config_.bev_resolution;
     int x_min = std::floor(bbox_min.x() / bev_res);

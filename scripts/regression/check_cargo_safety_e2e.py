@@ -589,18 +589,28 @@ def main() -> int:
     require("formal_clear_authorized" in cargo_avoidance and
             "formal_cargo_clear_not_authorized" in cargo_avoidance and
             "effective_cargo_envelope_.can_authorize_clear" in node and
-            "formal_cargo_removal_authorized_ = active_track" in node,
+            "formal_cargo_removal_authorized_ = v6_authority_mode" in node and
+            "v6_product_context.self_removal_authorized" in node and
+            "active_track && cargo_frozen_geometry_.formal_authorized" in node,
             "formal clear/removal does not consume gravity and evidence authority",
             failures)
-    pending_update = node.find("updateCargoLiftAndGeometryFusion(")
-    pending_branch = node.find("if (!active_track)", pending_update)
+    formal_pipeline = node.find(
+        "void NdtSlamNode::updateAndPublishCargoSafetyPipeline(")
+    pending_update = node.find(
+        "updateCargoLiftAndGeometryFusion(", formal_pipeline)
+    pending_branch = node.find(
+        "if (!v6_authority_mode && !active_track)", pending_update)
     pending_run = node.find("runPendingCargoAvoidance(", pending_branch)
-    formal_observation = node.find("CargoBottomObservation observation;")
-    require(pending_update >= 0 and pending_branch > pending_update and
+    formal_observation = node.find(
+        "CargoBottomObservation observation;", pending_branch)
+    require(formal_pipeline >= 0 and pending_update > formal_pipeline and
+            pending_branch > pending_update and
             pending_run > pending_branch and formal_observation > pending_run,
             "LOADED pending avoidance does not run before the formal pipeline",
             failures)
     require("required_role && !cargo_presence_result_.cargo_present" in node and
+            "if (!v6_authority_mode && cargo_presence_result_.cargo_present &&" in
+                node[pending_update:pending_branch] and
             "if (cargo_presence_result_.cargo_present &&" in
                 node[pending_branch:formal_observation],
             "loaded cargo can still exit before pending risk evaluation",

@@ -15,6 +15,8 @@ constexpr std::uint16_t kLevel2 = 18U;
 constexpr std::uint16_t kClear = 14U;
 constexpr double kStampEpsilonSec = 1.0e-4;
 constexpr float kAssociationCostEpsilon = 1.0e-5F;
+constexpr std::size_t kMinimumSparseObservationPoints = 5U;
+constexpr std::size_t kSparseSupportRingCapacity = 3U;
 
 bool warningCode(std::uint16_t code) {
   return code == kLevel1 || code == kLevel2;
@@ -158,8 +160,37 @@ bool validObservation(const CargoObstacleObservation& observation,
        std::isfinite(observation.conservative_clearance_m)) &&
       std::isfinite(observation.horizontal_uncertainty_m) &&
       observation.horizontal_uncertainty_m >= 0.0F &&
-      observation.point_count >= config.minimum_points &&
+      observation.point_count >= kMinimumSparseObservationPoints &&
       decision_code_valid;
+}
+
+bool sparseObservation(const CargoObstacleObservation& observation,
+                       const CargoObstacleTrackerConfig& config) {
+  return observation.point_count >= kMinimumSparseObservationPoints &&
+      observation.point_count < config.minimum_points;
+}
+
+void appendSparseSupport(CargoObstacleTrack* track,
+                         const CargoObstacleObservation& observation,
+                         double stamp_sec,
+                         bool consecutive) {
+  if (track == nullptr) return;
+  if (!consecutive) {
+    track->sparse_support_ring.clear();
+    track->sparse_independent_frames = 0;
+  }
+  SparseObstacleSupportFrame frame;
+  frame.stamp_sec = stamp_sec;
+  frame.occupied_map_cells = observation.occupied_map_cells;
+  if (frame.occupied_map_cells.size() > observation.point_count) {
+    frame.occupied_map_cells.resize(observation.point_count);
+  }
+  track->sparse_support_ring.push_back(std::move(frame));
+  if (track->sparse_support_ring.size() > kSparseSupportRingCapacity) {
+    track->sparse_support_ring.erase(track->sparse_support_ring.begin());
+  }
+  track->sparse_independent_frames = consecutive
+      ? track->sparse_independent_frames + 1 : 1;
 }
 
 bool hasLargeStaticCargoGeometry(
@@ -242,6 +273,9 @@ void resetTemporalEvidenceForAuthorityTransition(
   track->far_field_first_stamp_sec = 0.0;
   track->far_field_duration_sec = 0.0;
   track->far_field_history_valid = false;
+  track->sparse_support_ring.clear();
+  track->sparse_independent_frames = 0;
+  track->sparse_to_dense_this_cycle = false;
 
   track->identity_anchor_map_cells = observation.occupied_map_cells;
   track->first_cargo_center_valid = observation.cargo_center_valid &&
@@ -299,6 +333,16 @@ const char* externalProvenanceName(
     case ExternalProvenance::NONE:
     default:
       return "NONE";
+  }
+}
+
+const char* obstacleSupportKindName(ObstacleSupportKind kind) noexcept {
+  switch (kind) {
+    case ObstacleSupportKind::SPARSE_MULTI_FRAME:
+      return "SPARSE_MULTI_FRAME";
+    case ObstacleSupportKind::DENSE_CURRENT_FRAME:
+    default:
+      return "DENSE_CURRENT_FRAME";
   }
 }
 
@@ -424,6 +468,9 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
   decision.created_track_count = created_track_count_;
   decision.association_reset_count = association_reset_count_;
   decision.ambiguous_association_count = ambiguous_association_count_;
+  decision.sparse_ambiguity_reject_count =
+      sparse_ambiguity_reject_count_;
+  decision.sparse_authority_reset_count = sparse_authority_reset_count_;
   if (!config_validation_.valid || !std::isfinite(stamp_sec) ||
       stamp_sec <= 0.0) {
     decision.reason = config_validation_.valid
@@ -432,9 +479,18 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     return decision;
   }
   if (has_stamp_ && stamp_sec + kStampEpsilonSec < last_stamp_sec_) {
+    sparse_authority_reset_count_ += static_cast<std::uint64_t>(
+        std::count_if(
+            tracks_.begin(), tracks_.end(),
+            [](const CargoObstacleTrack& track) {
+              return !track.sparse_support_ring.empty() ||
+                  track.sparse_independent_frames > 0;
+            }));
     reset();
     decision.created_track_count = created_track_count_;
     decision.association_reset_count = association_reset_count_;
+    decision.sparse_authority_reset_count =
+        sparse_authority_reset_count_;
   } else if (has_stamp_ &&
              stamp_sec <= last_stamp_sec_ + kStampEpsilonSec) {
     decision.valid = true;
@@ -454,6 +510,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       tracks_.end());
   for (CargoObstacleTrack& track : tracks_) {
     track.observed_this_cycle = false;
+    track.sparse_to_dense_this_cycle = false;
   }
 
   std::vector<CargoObstacleObservation> valid_observations;
@@ -629,6 +686,11 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       }
       ++ambiguous_association_count_;
       decision.ambiguous_association_count = ambiguous_association_count_;
+      if (sparseObservation(observation, config_)) {
+        ++sparse_ambiguity_reject_count_;
+        decision.sparse_ambiguity_reject_count =
+            sparse_ambiguity_reject_count_;
+      }
       continue;
     }
 
@@ -648,6 +710,13 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       track.current_hazard_geometry_valid =
           observation.hazard_geometry_valid;
       track.point_count = observation.point_count;
+      track.real_current_point_count = observation.point_count;
+      track.support_kind = sparseObservation(observation, config_)
+          ? ObstacleSupportKind::SPARSE_MULTI_FRAME
+          : ObstacleSupportKind::DENSE_CURRENT_FRAME;
+      if (track.support_kind == ObstacleSupportKind::SPARSE_MULTI_FRAME) {
+        appendSparseSupport(&track, observation, stamp_sec, false);
+      }
       track.warning_code = observation.warning_code;
       track.total_consecutive_observations = 1;
       track.validated_consecutive_observations =
@@ -750,6 +819,11 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       // its far-history on the next unambiguous frame.
       ++ambiguous_association_count_;
       decision.ambiguous_association_count = ambiguous_association_count_;
+      if (sparseObservation(observation, config_)) {
+        ++sparse_ambiguity_reject_count_;
+        decision.sparse_ambiguity_reject_count =
+            sparse_ambiguity_reject_count_;
+      }
       track.association_reset_reason =
           "ambiguous_non_reciprocal_authority_frozen";
       // Expose the ambiguity in this cycle without advancing the physical
@@ -762,6 +836,12 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       continue;
     }
     if (!same_authority) {
+      if (!track.sparse_support_ring.empty() ||
+          track.sparse_independent_frames > 0) {
+        ++sparse_authority_reset_count_;
+        decision.sparse_authority_reset_count =
+            sparse_authority_reset_count_;
+      }
       resetTemporalEvidenceForAuthorityTransition(
           &track, observation, stamp_sec);
     } else if (dt_sec > kStampEpsilonSec) {
@@ -780,6 +860,24 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     track.current_hazard_geometry_valid =
         observation.hazard_geometry_valid;
     track.point_count = observation.point_count;
+    track.real_current_point_count = observation.point_count;
+    const ObstacleSupportKind previous_support_kind = track.support_kind;
+    track.support_kind = sparseObservation(observation, config_)
+        ? ObstacleSupportKind::SPARSE_MULTI_FRAME
+        : ObstacleSupportKind::DENSE_CURRENT_FRAME;
+    track.sparse_to_dense_this_cycle =
+        previous_support_kind == ObstacleSupportKind::SPARSE_MULTI_FRAME &&
+        track.support_kind == ObstacleSupportKind::DENSE_CURRENT_FRAME;
+    if (track.support_kind == ObstacleSupportKind::SPARSE_MULTI_FRAME) {
+      // A sparse run is independent evidence.  A prior dense frame may keep
+      // the same physical track/far history, but cannot be counted as one of
+      // the bounded sparse persistence frames.
+      appendSparseSupport(
+          &track, observation, stamp_sec,
+          consecutive &&
+              previous_support_kind ==
+                  ObstacleSupportKind::SPARSE_MULTI_FRAME);
+    }
     track.warning_code = observation.warning_code;
     track.large_cluster_geometry_valid =
         hasLargeStaticCargoGeometry(observation, config_);
@@ -930,11 +1028,21 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
   const CargoObstacleTrack* selected = nullptr;
   const CargoObstacleTrack* candidate = nullptr;
   for (const CargoObstacleTrack& track : tracks_) {
+    if (track.support_kind == ObstacleSupportKind::SPARSE_MULTI_FRAME) {
+      ++decision.sparse_track_count;
+    }
+    decision.sparse_ring_high_water = std::max(
+        decision.sparse_ring_high_water,
+        track.sparse_support_ring.size());
     if (!track.observed_this_cycle) continue;
     if (candidate == nullptr || moreDangerous(track, *candidate)) {
       candidate = &track;
     }
-    const bool warning_authorized = track.current_warning_eligible &&
+    const bool support_mature =
+        track.support_kind == ObstacleSupportKind::DENSE_CURRENT_FRAME ||
+        track.sparse_independent_frames >= config_.confirm_frames;
+    const bool warning_authorized = support_mature &&
+        track.current_warning_eligible &&
         warningCode(track.warning_code) && track.confirmed &&
         (!config_.require_far_field_history_for_warnings ||
          track.far_field_history_valid ||
@@ -1008,6 +1116,13 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
         diagnostic->association_reset_reason;
     decision.selected_track_velocity = diagnostic->velocity_map;
     decision.selected_pose_authority = diagnostic->pose_authority;
+    decision.selected_support_kind = diagnostic->support_kind;
+    decision.selected_real_current_point_count =
+        diagnostic->real_current_point_count;
+    decision.selected_sparse_independent_frames =
+        diagnostic->sparse_independent_frames;
+    decision.selected_sparse_to_dense =
+        diagnostic->sparse_to_dense_this_cycle;
   }
   if (selected != nullptr) {
     decision.confirmed_hazard = true;
@@ -1020,6 +1135,11 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
       decision.reason = "ambiguous_obstacle_association_authority_frozen";
     } else if (!diagnostic->current_source_validated) {
       decision.reason = "current_source_unvalidated";
+    } else if (diagnostic->support_kind ==
+                   ObstacleSupportKind::SPARSE_MULTI_FRAME &&
+               diagnostic->sparse_independent_frames <
+                   config_.confirm_frames) {
+      decision.reason = "sparse_support_pending";
     } else if (diagnostic->current_embedded &&
                !diagnostic->separated_obstacle_history_valid &&
                !diagnostic->provenance_valid) {

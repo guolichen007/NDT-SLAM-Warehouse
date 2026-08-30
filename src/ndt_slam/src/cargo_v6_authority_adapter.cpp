@@ -67,6 +67,10 @@ CanonicalCargoAuthoritySnapshot buildCanonicalCargoAuthoritySnapshot(
 
   if (!std::isfinite(input.source_stamp_sec) ||
       input.source_stamp_sec <= 0.0 ||
+      !input.source_frame_identity.valid() ||
+      std::abs(input.source_stamp_sec -
+               input.source_frame_identity.sensor_source_stamp_sec) >
+          kStampEpsilonSec ||
       !std::isfinite(input.owner_voxel_size_m) ||
       input.owner_voxel_size_m <= 0.0F) {
     output.reason = "invalid_source";
@@ -133,18 +137,24 @@ CanonicalCargoAuthoritySnapshot buildCanonicalCargoAuthoritySnapshot(
 
   CargoMapMutationSnapshot mutation;
   mutation.owner_points.valid = true;
+  mutation.owner_points.source_frame_identity =
+      input.source_frame_identity;
   mutation.owner_points.voxel_size_m = input.owner_voxel_size_m;
   for (const Eigen::Vector3f& point : input.group.union_points_base) {
     if (!point.allFinite()) continue;
-    PointOwnershipVoxel voxel;
     const pcl::PointXYZ pcl_point(point.x(), point.y(), point.z());
+    SourcePointKey exact_key;
+    if (makeSourcePointKey(pcl_point, &exact_key)) {
+      mutation.owner_points.exact_points.insert(exact_key);
+    }
+    PointOwnershipVoxel voxel;
     if (makePointOwnershipVoxel(
             pcl_point, input.owner_voxel_size_m, &voxel)) {
       mutation.owner_points.voxels.insert(voxel);
     }
   }
   mutation.tight_geometry_valid =
-      !mutation.owner_points.voxels.empty();
+      !mutation.owner_points.exact_points.empty();
   mutation.center_x = output.safety_geometry.footprint_base.center_base.x();
   mutation.center_y = output.safety_geometry.footprint_base.center_base.y();
   mutation.min_z = bottom_z;
@@ -174,6 +184,47 @@ CanonicalCargoAuthoritySnapshot buildCanonicalCargoAuthoritySnapshot(
   } else {
     output.reason = "authorized";
   }
+  return output;
+}
+
+CargoRegistrationHygieneShadow evaluateCargoRegistrationHygieneShadow(
+    const pcl::PointCloud<pcl::PointXYZ>& registration_source,
+    bool legacy_authorized,
+    const CargoObbFootprint& legacy_footprint,
+    const CanonicalCargoAuthoritySnapshot& v6) {
+  CargoRegistrationHygieneShadow output;
+  output.source_points = registration_source.size();
+  output.legacy_authorized = legacy_authorized && legacy_footprint.valid;
+  output.v6_proposed_authorized = v6.would_authorize_safety &&
+      v6.map_mutation.tight_geometry_valid &&
+      v6.map_mutation.owner_points.valid;
+  if ((!output.legacy_authorized && !output.v6_proposed_authorized) ||
+      registration_source.empty()) {
+    output.valid_input = true;
+    output.reason = "no_registration_removal_authority";
+    return output;
+  }
+
+  output.valid_input = true;
+  for (const pcl::PointXYZ& point : registration_source.points) {
+    const bool legacy_owned = output.legacy_authorized &&
+        containsPointInCargoObbBase(
+            Eigen::Vector3f(point.x, point.y, point.z), legacy_footprint,
+            0.10F, 0.10F);
+    const bool v6_owned = output.v6_proposed_authorized &&
+        v6.map_mutation.ownsCurrentPoint(point);
+    if (legacy_owned) ++output.legacy_removed_points;
+    if (v6_owned) ++output.v6_proposed_removed_points;
+    if (legacy_owned && v6_owned) ++output.intersection_points;
+    if (legacy_owned && !v6_owned) ++output.legacy_only_points;
+    if (!legacy_owned && v6_owned) ++output.v6_only_points;
+  }
+  if (v6.would_authorize_safety && !v6.would_authorize_map_mutation) {
+    output.static_background_conflict_points =
+        output.v6_proposed_removed_points;
+  }
+  output.reason = output.v6_proposed_authorized
+      ? "v6_exact_registration_shadow" : "legacy_only_registration";
   return output;
 }
 
