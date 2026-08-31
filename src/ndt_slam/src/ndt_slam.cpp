@@ -349,6 +349,10 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     d5_fragment_forensic_enabled_ =
         d5_env != nullptr &&
         (std::string(d5_env) == "1" || std::string(d5_env) == "true");
+    const char* phase0c_env = std::getenv("NDT_PHASE0C_FORENSIC");
+    phase0c_forensic_enabled_ =
+        phase0c_env != nullptr &&
+        (std::string(phase0c_env) == "1" || std::string(phase0c_env) == "true");
     map_frame_uuid_ = MapSessionSnapshot::generateUuid();
     rail_map_write_authorized_ = false;
     last_pointcloud_wall_sec_.store(
@@ -582,6 +586,13 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         (std::string(d5_env) == "1" || std::string(d5_env) == "true");
     if (d5_fragment_forensic_enabled_) {
         ROS_INFO("[D5FragmentForensic] enabled=1 (diagnostic-only)");
+    }
+    const char* phase0c_env = std::getenv("NDT_PHASE0C_FORENSIC");
+    phase0c_forensic_enabled_ =
+        phase0c_env != nullptr &&
+        (std::string(phase0c_env) == "1" || std::string(phase0c_env) == "true");
+    if (phase0c_forensic_enabled_) {
+        ROS_INFO("[Phase0cForensic] enabled=1 (diagnostic-only)");
     }
     map_frame_uuid_ = configured_rail_yaw_reference_.map_frame_uuid.empty()
         ? MapSessionSnapshot::generateUuid()
@@ -16416,6 +16427,114 @@ void NdtSlamNode::dumpD5FragmentForensic(
     }
 }
 
+void NdtSlamNode::dumpPhase0cPoseSource(
+    const FrameAuthorityContext& frame_context,
+    const SourceFrameIdentity& source_frame_identity,
+    const ros::Time& stamp) {
+    if (!phase0c_forensic_enabled_) return;
+    try {
+        boost::filesystem::create_directories("/tmp/cargo_forensic");
+    } catch (const std::exception& error) {
+        ROS_ERROR_THROTTLE(5.0, "[Phase0cForensic] mkdir_failed=%s",
+                           error.what());
+        return;
+    }
+    if (!phase0c_pose_csv_init_) {
+        phase0c_pose_csv_.open(
+            "/tmp/cargo_forensic/phase0c_pose_source.csv",
+            std::ios::out | std::ios::trunc);
+        if (phase0c_pose_csv_.is_open()) {
+            phase0c_pose_csv_
+                << "stamp,source_stamp,processing_frame_index,"
+                << "source_cloud_size,source_cloud_signature_hash,"
+                << "pose_tx,pose_ty,pose_tz,pose_qx,pose_qy,pose_qz,pose_qw,"
+                << "pose_yaw,map_rebuild_generation,keyframe_pose_version,"
+                << "yaw_authority_generation,target_snapshot_id,"
+                << "static_map_generation,static_revision,static_cell_size,"
+                << "static_mature_cells,lifecycle_id,hook_state,hook_role\n";
+        }
+        phase0c_pose_csv_init_ = true;
+    }
+    if (!phase0c_pose_csv_.is_open()) return;
+    const Sophus::SE3d& pose = frame_context.runtime_pose;
+    const Eigen::Quaterniond q(pose.so3().unit_quaternion());
+    double roll = 0.0, pitch = 0.0, yaw = 0.0;
+    so3ToRpy(pose.so3(), roll, pitch, yaw);
+    const PoseAuthorityIdentity& pid = frame_context.pose_identity;
+    const auto snap_ptr = static_obstacle_evidence_index_.snapshot();
+    std::uint64_t static_gen = 0U;
+    std::uint64_t static_rev = 0U;
+    float static_cell_size = 0.0F;
+    std::size_t static_mature = 0U;
+    if (snap_ptr) {
+        static_gen = snap_ptr->map_generation;
+        static_rev = snap_ptr->revision;
+        static_cell_size = snap_ptr->cell_size_m;
+        for (const auto& kv : snap_ptr->cells) {
+            if (kv.second.clean_map_confirmed &&
+                kv.second.temporally_mature) {
+                ++static_mature;
+            }
+        }
+    }
+    const HookLoadSnapshot hook = currentHookLoadSnapshot();
+    const std::uint64_t lifecycle_id =
+        integrated_identity_decision_.physical_cargo_epoch_id;
+    phase0c_pose_csv_ << std::fixed << std::setprecision(6)
+        << stamp.toSec() << ','
+        << source_frame_identity.sensor_source_stamp_sec << ','
+        << source_frame_identity.processing_frame_index << ','
+        << source_frame_identity.source_cloud_size << ','
+        << source_frame_identity.source_cloud_signature_hash << ','
+        << pose.translation().x() << ',' << pose.translation().y() << ','
+        << pose.translation().z() << ','
+        << q.x() << ',' << q.y() << ',' << q.z() << ',' << q.w() << ','
+        << yaw << ','
+        << pid.map_rebuild_generation << ','
+        << pid.keyframe_pose_version << ','
+        << pid.yaw_authority_generation << ','
+        << pid.target_snapshot_id << ','
+        << static_gen << ',' << static_rev << ',' << static_cell_size << ','
+        << static_mature << ','
+        << lifecycle_id << ','
+        << static_cast<int>(hook.state) << ','
+        << static_cast<int>(hook_load_signal_role_) << '\n';
+}
+
+void NdtSlamNode::dumpPhase0cStaticCells() {
+    if (!phase0c_forensic_enabled_) return;
+    const auto snap_ptr = static_obstacle_evidence_index_.snapshot();
+    if (!snap_ptr) return;
+    const StaticEvidenceSnapshot& snap = *snap_ptr;
+    if (snap.revision == phase0c_last_static_revision_) return;
+    phase0c_last_static_revision_ = snap.revision;
+    try {
+        boost::filesystem::create_directories("/tmp/cargo_forensic");
+    } catch (...) {
+        return;
+    }
+    phase0c_static_csv_.open(
+        "/tmp/cargo_forensic/phase0c_static_cells.csv",
+        std::ios::out | std::ios::trunc);
+    if (!phase0c_static_csv_.is_open()) return;
+    phase0c_static_csv_
+        << "map_generation,revision,cell_key,cell_x,cell_y,min_z,max_z,"
+        << "clean_map_confirmed,temporally_mature\n";
+    for (const auto& kv : snap.cells) {
+        const StaticEvidenceCell& cell = kv.second;
+        if (!cell.clean_map_confirmed && !cell.temporally_mature) continue;
+        const auto cell_xy = unpackStaticEvidenceCell(kv.first);
+        phase0c_static_csv_ << std::fixed << std::setprecision(4)
+            << snap.map_generation << ',' << snap.revision << ','
+            << kv.first << ',' << cell_xy.first << ',' << cell_xy.second << ','
+            << cell.min_z << ',' << cell.max_z << ','
+            << (cell.clean_map_confirmed ? 1 : 0) << ','
+            << (cell.temporally_mature ? 1 : 0) << '\n';
+    }
+    phase0c_static_csv_.close();
+    phase0c_static_csv_init_ = false;
+}
+
 // ========== HookCargoLock 状态机 ==========
 
 uint64_t NdtSlamNode::computeCloudHash(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
@@ -23568,6 +23687,13 @@ ProductCargoContext NdtSlamNode::prepareV6ProductCargoContext(
     canonical_cargo_authority_snapshot_ =
         buildCanonicalCargoAuthoritySnapshot(canonical_input);
     recordCargoV6Diagnostics(canonical_cargo_authority_snapshot_);
+
+    // Phase 0C forensic (diagnostic-only, env-gated): source-frame-aligned
+    // pose + mature Static provenance dump for offline temporal counterfactual.
+    if (phase0c_forensic_enabled_) {
+        dumpPhase0cPoseSource(frame_context, source_frame_identity, stamp);
+        dumpPhase0cStaticCells();
+    }
 
     V6ProductCargoContextInput product_input;
     product_input.canonical = canonical_cargo_authority_snapshot_;

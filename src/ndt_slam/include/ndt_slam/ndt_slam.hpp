@@ -2326,6 +2326,15 @@ private:
     bool d5_voxel_lineage_csv_init_ = false;
     std::ofstream d5_weak_fragment_csv_;
     bool d5_weak_fragment_csv_init_ = false;
+    // Phase 0C temporal+static forensic (diagnostic-only, env-gated). Records
+    // source-frame-aligned pose + mature Static provenance so offline
+    // counterfactuals can separate cargo/static/obstacle via temporal signals.
+    bool phase0c_forensic_enabled_ = false;
+    std::ofstream phase0c_pose_csv_;
+    bool phase0c_pose_csv_init_ = false;
+    std::ofstream phase0c_static_csv_;
+    bool phase0c_static_csv_init_ = false;
+    std::uint64_t phase0c_last_static_revision_ = 0U;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
     StaticHeightFieldConfig static_height_field_config_;
@@ -2673,6 +2682,13 @@ private:
     // /tmp/cargo_forensic. No product decision consumes this output.
     void dumpD5FragmentForensic(
         const D5FragmentForensicResult& forensic, double stamp_sec);
+    // Phase 0C forensic (diagnostic-only, env-gated): source-frame-aligned
+    // pose + mature Static provenance dump for offline temporal counterfactual.
+    void dumpPhase0cPoseSource(
+        const FrameAuthorityContext& frame_context,
+        const SourceFrameIdentity& source_frame_identity,
+        const ros::Time& stamp);
+    void dumpPhase0cStaticCells();
     void publishPayloadTrackInfoFromFusion(
         const CargoBottomResult& bottom,
         const ros::Time& stamp);
