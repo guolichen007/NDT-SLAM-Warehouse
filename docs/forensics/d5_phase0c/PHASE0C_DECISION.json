@@ -1,0 +1,55 @@
+{
+  "phase_0c": "PARTIAL_TEMPORAL_PROVEN_STATIC_NOT_AVAILABLE",
+  "base_sha": "6d1b2d4c8f4a1f129c4c23b8f02c05e503589704",
+  "forensic_head": "08c02a072b199a46c96032f170019570258be240",
+  "replayed_bags": ["无.bag"],
+  "replay_count": 1,
+  "algorithm_changed": "NO",
+  "product_behavior_changed": "NO",
+
+  "none_point_level_complete": "YES",
+  "static_source_aligned": "YES_BUT_TEMPORALLY_MATURE_ZERO",
+  "pose_source_aligned": "YES",
+
+  "mature_static_rates": {
+    "note": "empty_map 冷启动 + 无.bag 200s 内 static temporally_mature=0，mature static provenance 未触发，无法评估逐类 rate",
+    "F1_MATURE_STATIC_RATE": 0,
+    "F2_MATURE_STATIC_RATE": 0,
+    "F3_MATURE_STATIC_RATE": 0,
+    "F4_MATURE_STATIC_RATE": 0,
+    "temporally_mature_cells": 0,
+    "clean_map_confirmed_cells": 2622
+  },
+
+  "temporal_signals": {
+    "BASE_ATTACHED_SIGNAL": "PROVEN",
+    "BASE_ATTACHED_EVIDENCE": "cargo 顶面(z>=1.3 primary point) base 稳定、map 随 pose 移动 14m",
+    "WORLD_STATIC_SIGNAL": "PROVEN",
+    "WORLD_STATIC_EVIDENCE": "static 高点(weak fragment z>=1.3) map 稳定(0.25m spread)，cargo map 移动 14m",
+    "TEMPORAL_COMPOSITE_SIGNAL": "PROVEN_OFFLINE_ONLY",
+    "TEMPORAL_COMPOSITE_NOTE": "离线 map 位移能清楚区分 cargo(14m)/static(0m)，但实时使用需跨帧关联(identity association，当前 blocker)"
+  },
+
+  "support_error_gates": {
+    "WRONG_STATIC_SUPPORT": "NOT_EVALUATED_STATIC_UNAVAILABLE",
+    "WRONG_EXTERNAL_SUPPORT": "NOT_EVALUATED",
+    "UNKNOWN_SUPPORT": "NOT_EVALUATED",
+    "note": "mature static 不可用，无法验证 static/external 错误 support 排除门"
+  },
+
+  "counterfactual": {
+    "D5_COUNTERFACTUAL_GATE_IMPROVEMENT": "NOT_EVALUATED",
+    "note": "需先有可用的实时 signal 才能做 identity gate 反事实；当前 temporal 信号离线可用但实时跨帧关联未验证"
+  },
+
+  "d1_roi": {
+    "D1_ROI_CHANGED": "NO",
+    "SUPPORT_BLOCKED_BY_D1_ROI": "NOT_EVALUATED",
+    "note": "无.bag detection_pipeline_trace.csv 有 rejected_xy/adaptive_cx/anchor，本轮未单独展开 D1 分析"
+  },
+
+  "pure_lidar_safe_identity_support": "INCONCLUSIVE",
+  "pure_lidar_reason": "temporal signal 有物理区分度(cargo map 14m vs static 0m)，但①mature static 不可用(empty_map 冷启动 temporally_mature=0)②实时跨帧关联(identity association)是当前 blocker，两者未满足即不能判 PROVEN",
+
+  "next_action": "RETURN_TO_CODEX_FOR_TEMPORAL_REALTIME_FEASIBILITY_AND_STATIC_NON_EMPTY_CAPTURE"
+}
