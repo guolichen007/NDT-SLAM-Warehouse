@@ -158,3 +158,60 @@ def test_v6_product_mode_has_no_legacy_formal_startup_block():
         "NdtSlamNode::NdtSlamNode(const std::string& config_file_path",
     )
     assert "CARGO_V6_PRODUCT_MODE_BLOCKED_BY_LEGACY_FORMAL_PIPELINE" not in constructor
+
+
+def _v6_hook_gate_branch() -> str:
+    hook_gate = function_body(
+        NDT_CPP,
+        "bool NdtSlamNode::hookAllowsMapCommit() const",
+    )
+    branch_start = hook_gate.index(
+        "if (cargo_authority_mode_ == CargoAuthorityMode::V6_AUTHORITY) {"
+    )
+    branch_end = hook_gate.index(
+        "const HookLoadMapCommitDecision", branch_start
+    )
+    return hook_gate[branch_start:branch_end]
+
+
+def test_v6_hook_gate_does_not_consume_legacy_cargo_authority():
+    v6_branch = _v6_hook_gate_branch()
+    for token in (
+        "shouldRemoveHookCargo()",
+        "cargo_fusion_track_id_",
+        "current_rigid_cargo_geometry_",
+        "formal_cargo_removal_track_id_",
+        "cargo_state_",
+    ):
+        assert token not in v6_branch
+
+
+def test_v6_required_hook_signal_fault_still_fails_closed():
+    v6_branch = _v6_hook_gate_branch()
+    assert "hook_load_signal_role_ == HookLoadSignalRole::REQUIRED" in v6_branch
+    assert "!gravity_loaded && !gravity_empty" in v6_branch
+    assert "return false" in v6_branch
+
+
+def test_legacy_hook_gate_keeps_legacy_removal_authority():
+    hook_gate = function_body(
+        NDT_CPP,
+        "bool NdtSlamNode::hookAllowsMapCommit() const",
+    )
+    assert "evaluateHookLoadMapCommit({" in hook_gate
+    assert "shouldRemoveHookCargo()" in hook_gate
+
+
+def test_v6_downstream_exact_ownership_authority_preserved():
+    enqueue = function_body(
+        NDT_CPP,
+        "void NdtSlamNode::enqueueMapCommitJob(",
+    )
+    assert "avoidance_map_mutation.cargo_points.authorized" in enqueue
+    assert "shouldDropV6MapCommitWithoutExactCargoOwnership(" in enqueue
+    worker = function_body(
+        NDT_CPP,
+        "bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(",
+    )
+    assert "job.avoidance_map_mutation.cargo_points.owns(point)" in worker
+    assert "job.avoidance_map_mutation.cargo_candidate_points.owns(" in worker

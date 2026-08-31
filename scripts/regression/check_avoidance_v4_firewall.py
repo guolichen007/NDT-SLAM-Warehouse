@@ -184,6 +184,31 @@ def main() -> int:
     if not blocked < clear < erase:
         fail("V6 historical sweep is not blocked before localization erase")
 
+    # V6 pre-enqueue hook gate must not consume Legacy cargo removal
+    # authority; the Legacy/Shadow branch must keep its removal authority.
+    hook_gate_start = node.index(
+        "bool NdtSlamNode::hookAllowsMapCommit() const")
+    hook_gate = node[hook_gate_start:]
+    hook_gate_end = hook_gate.index(
+        "void NdtSlamNode::recordEmptyHookOriginHeight(")
+    hook_gate = hook_gate[:hook_gate_end]
+    v6_gate_start = hook_gate.index(
+        "if (cargo_authority_mode_ == CargoAuthorityMode::V6_AUTHORITY) {")
+    v6_gate_end = hook_gate.index("const HookLoadMapCommitDecision",
+                                  v6_gate_start)
+    v6_gate_branch = hook_gate[v6_gate_start:v6_gate_end]
+    for legacy_token in (
+        "shouldRemoveHookCargo()",
+        "cargo_fusion_track_id_",
+        "current_rigid_cargo_geometry_",
+        "formal_cargo_removal_track_id_",
+    ):
+        if legacy_token in v6_gate_branch:
+            fail("V6 pre-enqueue hook gate consumes legacy authority: "
+                 + legacy_token)
+    if "shouldRemoveHookCargo()" not in hook_gate:
+        fail("Legacy hook gate lost its removal authority")
+
     print("PASS: Avoidance V4 static authority firewall")
     return 0
 

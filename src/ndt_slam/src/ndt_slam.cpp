@@ -4335,6 +4335,27 @@ bool NdtSlamNode::shouldRemoveHookCargo() const {
 
 bool NdtSlamNode::hookAllowsMapCommit() const {
     const HookLoadSnapshot hook = currentHookLoadSnapshot();
+
+    if (cargo_authority_mode_ == CargoAuthorityMode::V6_AUTHORITY) {
+        // V6 pre-enqueue hook gate only verifies the REQUIRED Hook signal
+        // itself is valid. Legacy cargo removal authority and identity are
+        // re-checked downstream by the MapCommit job, the mutation snapshot,
+        // and the exact-ownership drop path.
+        const bool gravity_loaded =
+            hook.valid &&
+            hook.state == lidar_slam2_msgs::HookLoadState::STATE_LOADED;
+        const bool gravity_empty =
+            hook.valid &&
+            hook.state == lidar_slam2_msgs::HookLoadState::STATE_EMPTY;
+
+        if (hook_load_signal_role_ == HookLoadSignalRole::REQUIRED &&
+            !gravity_loaded && !gravity_empty) {
+            return false;
+        }
+
+        return true;
+    }
+
     const HookLoadMapCommitDecision decision = evaluateHookLoadMapCommit({
         hook_load_signal_role_, hook.valid,
         static_cast<HookLoadState>(hook.state), shouldRemoveHookCargo(), false});
