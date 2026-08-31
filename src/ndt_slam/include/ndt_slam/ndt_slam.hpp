@@ -2335,6 +2335,14 @@ private:
     std::ofstream phase0c_static_csv_;
     bool phase0c_static_csv_init_ = false;
     std::uint64_t phase0c_last_static_revision_ = 0U;
+    // Phase 0D support lineage forensic (diagnostic-only, env-gated).
+    // Records per-component / per-candidate member sets so the S3 voxel
+    // -> component -> candidate -> group conservation can be audited.
+    bool phase0d_forensic_enabled_ = false;
+    std::ofstream phase0d_component_csv_;
+    bool phase0d_component_csv_init_ = false;
+    std::ofstream phase0d_candidate_csv_;
+    bool phase0d_candidate_csv_init_ = false;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
     StaticHeightFieldConfig static_height_field_config_;

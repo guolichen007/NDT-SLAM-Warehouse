@@ -353,6 +353,10 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     phase0c_forensic_enabled_ =
         phase0c_env != nullptr &&
         (std::string(phase0c_env) == "1" || std::string(phase0c_env) == "true");
+    const char* phase0d_env = std::getenv("NDT_PHASE0D_FORENSIC");
+    phase0d_forensic_enabled_ =
+        phase0d_env != nullptr &&
+        (std::string(phase0d_env) == "1" || std::string(phase0d_env) == "true");
     map_frame_uuid_ = MapSessionSnapshot::generateUuid();
     rail_map_write_authorized_ = false;
     last_pointcloud_wall_sec_.store(
@@ -593,6 +597,13 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
         (std::string(phase0c_env) == "1" || std::string(phase0c_env) == "true");
     if (phase0c_forensic_enabled_) {
         ROS_INFO("[Phase0cForensic] enabled=1 (diagnostic-only)");
+    }
+    const char* phase0d_env = std::getenv("NDT_PHASE0D_FORENSIC");
+    phase0d_forensic_enabled_ =
+        phase0d_env != nullptr &&
+        (std::string(phase0d_env) == "1" || std::string(phase0d_env) == "true");
+    if (phase0d_forensic_enabled_) {
+        ROS_INFO("[Phase0dForensic] enabled=1 (diagnostic-only)");
     }
     map_frame_uuid_ = configured_rail_yaw_reference_.map_frame_uuid.empty()
         ? MapSessionSnapshot::generateUuid()
@@ -15987,6 +15998,54 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         result.shadow_physical_group_compute_ms =
             integratedShadowElapsedMs(physical_group_start);
     }
+    // Phase 0D component lineage (diagnostic-only, env-gated). Every accepted
+    // component's point set + quantiles so S3->component conservation and
+    // high-oracle (z>=1.3) support location can be audited offline.
+    if (phase0d_forensic_enabled_) {
+        if (!phase0d_component_csv_init_) {
+            boost::filesystem::create_directories("/tmp/cargo_forensic");
+            phase0d_component_csv_.open(
+                "/tmp/cargo_forensic/phase0d_component_lineage.csv",
+                std::ios::out | std::ios::trunc);
+            if (phase0d_component_csv_.is_open()) {
+                phase0d_component_csv_
+                    << "stamp,component_id,point_count,"
+                    << "min_x,min_y,min_z,max_x,max_y,max_z,"
+                    << "center_x,center_y,center_z,size_x,size_y,size_z,yaw,"
+                    << "x05,x50,x95,y05,y50,y95,z05,z50,z95,high_oracle_count\n";
+            }
+            phase0d_component_csv_init_ = true;
+        }
+        if (phase0d_component_csv_.is_open()) {
+            for (std::size_t ci = 0U; ci < components.size(); ++ci) {
+                std::vector<float> xs, ys, zs;
+                int high_oracle = 0;
+                for (int pi : components[ci].indices.indices) {
+                    const pcl::PointXYZ& p = voxel_cloud->points[pi];
+                    xs.push_back(p.x); ys.push_back(p.y); zs.push_back(p.z);
+                    if (p.z >= 1.3F) ++high_oracle;
+                }
+                std::sort(xs.begin(), xs.end());
+                std::sort(ys.begin(), ys.end());
+                std::sort(zs.begin(), zs.end());
+                const auto q = [](const std::vector<float>& v, double f) {
+                    return v[static_cast<std::size_t>(f * (v.size() - 1U))];
+                };
+                const CargoCandidateDescriptor& d = components[ci].descriptor;
+                phase0d_component_csv_ << std::fixed << std::setprecision(4)
+                    << stamp.toSec() << ',' << ci << ',' << xs.size() << ','
+                    << xs.front() << ',' << ys.front() << ',' << zs.front() << ','
+                    << xs.back() << ',' << ys.back() << ',' << zs.back() << ','
+                    << d.center.x() << ',' << d.center.y() << ',' << d.center.z()
+                    << ',' << d.size.x() << ',' << d.size.y() << ',' << d.size.z()
+                    << ',' << d.yaw_rad << ','
+                    << q(xs, 0.05) << ',' << q(xs, 0.50) << ',' << q(xs, 0.95)
+                    << ',' << q(ys, 0.05) << ',' << q(ys, 0.50) << ','
+                    << q(ys, 0.95) << ',' << q(zs, 0.05) << ',' << q(zs, 0.50)
+                    << ',' << q(zs, 0.95) << ',' << high_oracle << '\n';
+            }
+        }
+    }
     const CargoCandidateRanking candidate_ranking =
         rankCargoCandidateIdentityScores(component_scores);
     if (!candidate_ranking.valid) {
@@ -16015,6 +16074,46 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     result.suspension_confidence = selected_identity.suspension_confidence;
     result.overall_lock_confidence =
         selected_identity.overall_lock_confidence;
+    // Phase 0D candidate lineage (diagnostic-only, env-gated). Every
+    // hypothesis's member component set + geometry so component->candidate
+    // membership churn can be audited offline.
+    if (phase0d_forensic_enabled_) {
+        if (!phase0d_candidate_csv_init_) {
+            boost::filesystem::create_directories("/tmp/cargo_forensic");
+            phase0d_candidate_csv_.open(
+                "/tmp/cargo_forensic/phase0d_candidate_lineage.csv",
+                std::ios::out | std::ios::trunc);
+            if (phase0d_candidate_csv_.is_open()) {
+                phase0d_candidate_csv_
+                    << "stamp,candidate_id,member_component_ids,"
+                    << "center_x,center_y,center_z,size_x,size_y,size_z,yaw,"
+                    << "z95,point_support,selected\n";
+            }
+            phase0d_candidate_csv_init_ = true;
+        }
+        if (phase0d_candidate_csv_.is_open()) {
+            for (std::size_t hi = 0U;
+                 hi < result.shadow_candidates.size(); ++hi) {
+                const auto& sc = result.shadow_candidates[hi];
+                std::ostringstream member_ids;
+                for (std::size_t m = 0U;
+                     m < sc.identity.member_component_ids.size(); ++m) {
+                    if (m > 0U) member_ids << '|';
+                    member_ids << sc.identity.member_component_ids[m];
+                }
+                phase0d_candidate_csv_ << std::fixed << std::setprecision(4)
+                    << stamp.toSec() << ',' << sc.identity.candidate_id << ','
+                    << member_ids.str() << ','
+                    << sc.identity.center.x() << ',' << sc.identity.center.y()
+                    << ',' << sc.identity.center.z() << ','
+                    << sc.identity.size.x() << ',' << sc.identity.size.y()
+                    << ',' << sc.identity.size.z() << ','
+                    << sc.identity.yaw_rad << ','
+                    << sc.identity.z95 << ',' << sc.identity.point_support << ','
+                    << (hi == selected_hypothesis_index ? 1 : 0) << '\n';
+            }
+        }
+    }
     // B3A diagnostic: per-candidate score-term + reference lineage.
     {
         const int sel_id = result.selected_candidate_id;
