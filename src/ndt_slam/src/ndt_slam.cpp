@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <Eigen/Geometry>
 #include <memory>
 #include <sophus/se3.hpp>
@@ -344,6 +345,10 @@ static_assert(
 NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
     : nh_(nh) {
     initializeParameters();
+    const char* d5_env = std::getenv("NDT_D5_FRAGMENT_FORENSIC");
+    d5_fragment_forensic_enabled_ =
+        d5_env != nullptr &&
+        (std::string(d5_env) == "1" || std::string(d5_env) == "true");
     map_frame_uuid_ = MapSessionSnapshot::generateUuid();
     rail_map_write_authorized_ = false;
     last_pointcloud_wall_sec_.store(
@@ -571,6 +576,13 @@ NdtSlamNode::NdtSlamNode(const ros::NodeHandle& nh)
 NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHandle& nh)
     : nh_(nh) {
     initializeParameters(config_file_path);
+    const char* d5_env = std::getenv("NDT_D5_FRAGMENT_FORENSIC");
+    d5_fragment_forensic_enabled_ =
+        d5_env != nullptr &&
+        (std::string(d5_env) == "1" || std::string(d5_env) == "true");
+    if (d5_fragment_forensic_enabled_) {
+        ROS_INFO("[D5FragmentForensic] enabled=1 (diagnostic-only)");
+    }
     map_frame_uuid_ = configured_rail_yaw_reference_.map_frame_uuid.empty()
         ? MapSessionSnapshot::generateUuid()
         : configured_rail_yaw_reference_.map_frame_uuid;
@@ -15497,6 +15509,20 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         return result;
     }
 
+    // D5 fragment forensic (diagnostic-only, env-gated). The product clusters
+    // above are untouched; this only records their lineage and the weak
+    // fragments the min_cluster_size cutoff discarded.
+    if (d5_fragment_forensic_enabled_) {
+        D5FragmentForensicConfig d5_config;
+        d5_config.cluster_tolerance_m =
+            odom_anchor_config_.tight_box.component_cluster_tolerance_m;
+        d5_config.min_cluster_size = odom_anchor_config_.weak_min_points;
+        d5_config.voxel_leaf_size_m = 0.05F;
+        const D5FragmentForensicResult d5_result = analyzeD5FragmentForensic(
+            *voxel_cloud, cluster_indices, stamp.toSec(), d5_config);
+        dumpD5FragmentForensic(d5_result, stamp.toSec());
+    }
+
     if (cluster_indices.empty()) {
         result.reject_reason = "no_clusters";
         ROS_DEBUG_THROTTLE(1.0, "[OdomAnchorDetect] input=%zu crop=%zu filtered=%zu voxel=%zu clusters=0",
@@ -16309,6 +16335,85 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     }
 
     return result;
+}
+
+void NdtSlamNode::dumpD5FragmentForensic(
+    const D5FragmentForensicResult& forensic, double stamp_sec) {
+    if (!d5_fragment_forensic_enabled_) return;
+    try {
+        boost::filesystem::create_directories("/tmp/cargo_forensic");
+    } catch (const std::exception& error) {
+        ROS_ERROR_THROTTLE(5.0, "[D5FragmentForensic] mkdir_failed=%s",
+                           error.what());
+        return;
+    }
+    if (!d5_voxel_lineage_csv_init_) {
+        d5_voxel_lineage_csv_.open(
+            "/tmp/cargo_forensic/d5_voxel_lineage.csv",
+            std::ios::out | std::ios::trunc);
+        if (d5_voxel_lineage_csv_.is_open()) {
+            d5_voxel_lineage_csv_
+                << "stamp,x,y,z,voxel_ix,voxel_iy,voxel_iz,"
+                << "cluster_label,cluster_size,assignment,fragment_id\n";
+        }
+        d5_voxel_lineage_csv_init_ = true;
+    }
+    if (d5_voxel_lineage_csv_.is_open()) {
+        for (const D5VoxelLineage& lineage : forensic.voxel_lineage) {
+            int assignment = 0;
+            switch (lineage.assignment) {
+                case D5VoxelAssignment::PRIMARY_ACCEPTED: assignment = 0; break;
+                case D5VoxelAssignment::WEAK_REJECTED: assignment = 1; break;
+                case D5VoxelAssignment::UNASSIGNED: assignment = 2; break;
+            }
+            d5_voxel_lineage_csv_ << std::fixed << std::setprecision(4)
+                << stamp_sec << ',' << lineage.x << ',' << lineage.y << ','
+                << lineage.z << ',' << lineage.voxel_ix << ','
+                << lineage.voxel_iy << ',' << lineage.voxel_iz << ','
+                << lineage.cluster_label << ',' << lineage.cluster_size << ','
+                << assignment << ',' << lineage.fragment_id << '\n';
+        }
+    }
+    if (!d5_weak_fragment_csv_init_) {
+        d5_weak_fragment_csv_.open(
+            "/tmp/cargo_forensic/d5_weak_fragments.csv",
+            std::ios::out | std::ios::trunc);
+        if (d5_weak_fragment_csv_.is_open()) {
+            d5_weak_fragment_csv_
+                << "stamp,fragment_id,point_count,"
+                << "center_x,center_y,center_z,"
+                << "min_x,min_y,min_z,max_x,max_y,max_z,"
+                << "z_p05,z_p50,z_p95,"
+                << "nearest_primary_id,nearest_primary_3d_distance,"
+                << "nearest_primary_xy_distance,vertical_separation,"
+                << "xy_projected_overlap,xy_projected_gap,"
+                << "candidate_primary_neighbor_count,oracle_high_surface\n";
+        }
+        d5_weak_fragment_csv_init_ = true;
+    }
+    if (d5_weak_fragment_csv_.is_open()) {
+        for (const D5WeakFragment& fragment : forensic.weak_fragments) {
+            d5_weak_fragment_csv_ << std::fixed << std::setprecision(4)
+                << stamp_sec << ',' << fragment.fragment_id << ','
+                << fragment.point_count << ','
+                << fragment.center.x() << ',' << fragment.center.y() << ','
+                << fragment.center.z() << ','
+                << fragment.min_xyz.x() << ',' << fragment.min_xyz.y() << ','
+                << fragment.min_xyz.z() << ','
+                << fragment.max_xyz.x() << ',' << fragment.max_xyz.y() << ','
+                << fragment.max_xyz.z() << ','
+                << fragment.z_p05 << ',' << fragment.z_p50 << ','
+                << fragment.z_p95 << ','
+                << fragment.nearest_primary_id << ','
+                << fragment.nearest_primary_3d_distance << ','
+                << fragment.nearest_primary_xy_distance << ','
+                << fragment.vertical_separation << ','
+                << fragment.xy_projected_overlap << ','
+                << fragment.xy_projected_gap << ','
+                << fragment.candidate_primary_neighbor_count << ','
+                << fragment.oracle_high_surface << '\n';
+        }
+    }
 }
 
 // ========== HookCargoLock 状态机 ==========

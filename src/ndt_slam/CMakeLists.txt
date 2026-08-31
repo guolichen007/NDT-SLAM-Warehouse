@@ -181,6 +181,7 @@ set(LIBRARY_SOURCES
   src/hook_load_state_filter.cpp
   src/hook_load_evidence_policy.cpp
   src/pending_origin_binding_policy.cpp
+  src/cargo_d5_fragment_forensic.cpp
 )
 
 add_library(ndt_slam_lib SHARED

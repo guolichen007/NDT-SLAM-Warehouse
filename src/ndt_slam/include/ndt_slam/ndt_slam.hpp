@@ -67,6 +67,7 @@
 #include <ndt_slam/cargo_physical_identity_authority.hpp>
 #include <ndt_slam/integrated_cargo_identity_shadow.hpp>
 #include <ndt_slam/cargo_v6_authority_adapter.hpp>
+#include <ndt_slam/cargo_d5_fragment_forensic.hpp>
 #include <ndt_slam/product_cargo_context.hpp>
 #include <ndt_slam/cargo_geometry_fusion.hpp>
 #include <ndt_slam/cargo_preload_baseline_tracker.hpp>
@@ -2317,6 +2318,14 @@ private:
     bool rank_score_csv_init_ = false;
     std::ofstream lock_state_csv_;
     bool lock_state_csv_init_ = false;
+    // D5 fragment forensic (diagnostic-only, env-gated). Never mutates product
+    // decision state; only records the voxel lineage the product clustering
+    // already computed, plus the weak fragments it discarded.
+    bool d5_fragment_forensic_enabled_ = false;
+    std::ofstream d5_voxel_lineage_csv_;
+    bool d5_voxel_lineage_csv_init_ = false;
+    std::ofstream d5_weak_fragment_csv_;
+    bool d5_weak_fragment_csv_init_ = false;
     CargoMarkerLifecycle cargo_marker_lifecycle_;
     CargoSafetyEvaluator cargo_safety_evaluator_;
     StaticHeightFieldConfig static_height_field_config_;
@@ -2659,6 +2668,11 @@ private:
         const ros::Time& stamp);
     void recordCargoV6Diagnostics(
         const CanonicalCargoAuthoritySnapshot& snapshot);
+    // D5 fragment forensic (diagnostic-only, env-gated). Writes the per-voxel
+    // clustering lineage and the discarded weak-fragment geometry to CSVs under
+    // /tmp/cargo_forensic. No product decision consumes this output.
+    void dumpD5FragmentForensic(
+        const D5FragmentForensicResult& forensic, double stamp_sec);
     void publishPayloadTrackInfoFromFusion(
         const CargoBottomResult& bottom,
         const ros::Time& stamp);
