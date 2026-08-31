@@ -1,0 +1,6 @@
+gate,count,dominant_root,stable_anchor_xy_step_p50_m,evidence
+XY_GATE,97,C2_COMPONENT_SPLIT_NOT_GROUPED,1.393,component 0 center 跨帧跳1.7m/high_oracle 0↔11
+EXTENT_GATE,61,C2_COMPONENT_SPLIT_NOT_GROUPED,0.871,same union_points 物理内容切换
+Z_GATE,51,C2_COMPONENT_SPLIT_NOT_GROUPED,0.782,vertical surface 随 component 切换
+GAP,60,n/a,,pre-lift 时间稀疏
+MATCHED,399,n/a,0.059,component 物理内容稳定时 descriptor 稳定

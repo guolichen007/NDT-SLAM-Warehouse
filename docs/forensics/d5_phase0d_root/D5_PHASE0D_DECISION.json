@@ -1,0 +1,42 @@
+{
+  "phase_0d_root_cause": "PASS",
+  "base_sha": "6d1b2d4c8f4a1f129c4c23b8f02c05e503589704",
+  "forensic_head": "34559b79f00f2947d15082258002422f2588a5d6",
+  "replayed_bags": ["大件.bag"],
+  "replay_count": 1,
+
+  "first_bad_substage": "S4 component clustering (connectivity instability)",
+  "first_repairable_root": "C2_COMPONENT_SPLIT_NOT_GROUPED",
+  "secondary_root": "C1_COMPONENT_DROP",
+
+  "s3_true_cargo_survival": "94.8% PRIMARY_ACCEPTED",
+  "s4_selected_component_coverage": "94.0%",
+  "other_accepted_component_coverage": "6.0%",
+  "weak_rejected_coverage": "3.5%",
+  "unassigned_coverage": "1.7%",
+
+  "gate_roots": {
+    "XY_GATE_DOMINANT_ROOT": "C2_COMPONENT_SPLIT_NOT_GROUPED",
+    "EXTENT_X_DOMINANT_ROOT": "C2_COMPONENT_SPLIT_NOT_GROUPED",
+    "EXTENT_Y_DOMINANT_ROOT": "C2_COMPONENT_SPLIT_NOT_GROUPED",
+    "EXTENT_Z_DOMINANT_ROOT": "C2_COMPONENT_SPLIT_NOT_GROUPED",
+    "Z_GATE_DOMINANT_ROOT": "C2_COMPONENT_SPLIT_NOT_GROUPED",
+    "stable_anchor_xy_step": {"MATCHED_p50_m": 0.059, "XY_GATE_p50_m": 1.393}
+  },
+
+  "representative_switch_is_cause": "NO",
+  "representative_switch_note": "member id 不变但 center 跳 1.3m(26.5%) 是 component 物理内容切换的假象(component_id 帧局部)",
+  "group_membership_switch_is_cause": "NO",
+  "group_membership_note": "group membership 变化是 component 物理内容切换的被动结果，不是独立根因",
+
+  "same_root_causes_xy_extent_z": "YES",
+  "none_bag_root_relation": "SAME_ROOT",
+  "none_bag_note": "无.bag EXTENT_GATE86/XY_GATE84/Z_GATE62 与大件 XY97/EXTENT61/Z51 同属 XY+EXTENT+Z 三 gate 同根因",
+
+  "d1_contribution": "大件 ROI 相对干净(ROI high survival 100%)，D1 非大件根因",
+  "mature_static_required_for_root_cause": "NO",
+
+  "product_code_changed": "NO",
+  "next_owner": "CODEX",
+  "next_action": "component-to-candidate membership (S4 sparse-top-surface connectivity continuity)"
+}

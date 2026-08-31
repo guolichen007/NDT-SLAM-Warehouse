@@ -1,0 +1,8 @@
+stage,coverage,count,total,ratio
+S3_high_oracle_total,PRIMARY_ACCEPTED,102924,108585,0.948
+S3_high_oracle_total,WEAK_REJECTED,3777,108585,0.035
+S3_high_oracle_total,UNASSIGNED,1884,108585,0.017
+S4_high_oracle_selected,SELECTED_COMPONENT,34177,36344,0.940
+S4_high_oracle_other,OTHER_COMPONENT,2167,36344,0.060
+member_set_transition,UNCHANGED,287,319,0.900
+member_set_transition,CHANGED,32,319,0.100
