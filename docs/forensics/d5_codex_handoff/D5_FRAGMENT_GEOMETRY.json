@@ -1,0 +1,63 @@
+{
+  "source": "大件 forensic replay（6d1b2d4 + diagnostic-only trace）",
+  "total_weak_fragments": 4528,
+  "oracle_window_lift_sec": [1778303489.58, 1778303538.98],
+  "high_surface_definition": "fragment 内存在 z>=1.3 的点（bag oracle 标记，非产品标准）",
+
+  "global_by_oracle_high_surface": {
+    "HIGH_cargo_top_candidate": {
+      "n": 1298,
+      "center_z_p50": 2.04,
+      "xy_projected_overlap_p50": 1.00,
+      "vertical_separation_p50": 0.61,
+      "nearest_primary_3d_distance_p50": 0.24,
+      "nearest_primary_xy_distance_p50": 0.035
+    },
+    "LOW_ground_or_side": {
+      "n": 3230,
+      "center_z_p50": 0.73,
+      "xy_projected_overlap_p50": 0.26,
+      "vertical_separation_p50": 0.35,
+      "nearest_primary_3d_distance_p50": 0.26,
+      "nearest_primary_xy_distance_p50": 0.081
+    }
+  },
+
+  "within_lift_window": {
+    "HIGH_true_cargo_top": {
+      "n": 488,
+      "center_z_p50": 2.13,
+      "xy_projected_overlap_p50": 1.00,
+      "vertical_separation_p50": 0.52
+    },
+    "LOW_ground": {
+      "n": 1611,
+      "center_z_p50": 0.31,
+      "xy_projected_overlap_p50": 0.00,
+      "vertical_separation_p50": 0.36
+    }
+  },
+
+  "strong_signal_xy_overlap_gt_09_and_vs_ge_045": {
+    "HIGH_hit": 841,
+    "HIGH_total": 1298,
+    "HIGH_recall": 0.648,
+    "LOW_false_hit": 612,
+    "LOW_total": 3230,
+    "LOW_false_positive_rate": 0.189,
+    "verdict": "19% 误判率不可接受，不可作为无条件恢复信号"
+  },
+
+  "f1_f4_classification": {
+    "F1_TRUE_CARGO_SURFACE": 488,
+    "F2_INDEPENDENT_STATIC_HIGH": 810,
+    "F3_EXTERNAL_GROUND_OR_SIDE": 1713,
+    "F4_UNKNOWN": 1517,
+    "note": "F4（贴地 + XY 重叠）无法用 current-frame 区分 cargo 侧面 vs 地面静态"
+  },
+
+  "core_mechanism": {
+    "statement": "cargo 顶面碎片 XY 完全重叠(overlap=1.0) 但 z 差距 0.6m，3D 距离 0.6m > 0.20m tolerance，被 3D 欧氏 clustering 切断",
+    "root": "3D 欧氏 clustering 与「XY 同 footprint 但 Z 大空洞」的结构性失配，非 tolerance 太小"
+  }
+}

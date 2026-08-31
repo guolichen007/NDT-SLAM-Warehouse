@@ -1,0 +1,29 @@
+{
+  "base_sha": "6d1b2d4c8f4a1f129c4c23b8f02c05e503589704",
+  "config_source": "src/ndt_slam/config/live_longterm_mapping.yaml (sandbox 复制，仅改 persistent_map.root_dir + runtime_diagnostics.output_dir)",
+  "cross_confirmation": {
+    "runtime_voxel_leaf_m": {
+      "value": 0.05,
+      "source": "源码硬编码 ndt_slam.cpp:15454 vf.setLeafSize(0.05f,0.05f,0.05f)，无 yaml/launch override",
+      "note": "历史报告『voxel leaf = 0.20m』是笔误，把 component_cluster_tolerance_m 误记为 voxel leaf"
+    },
+    "runtime_component_cluster_tolerance_m": {
+      "value": 0.20,
+      "source": "yaml odom_anchored_cargo_box.tight_box.component_cluster_tolerance_m (live_longterm_mapping.yaml:1381)",
+      "code": "ndt_slam.cpp:15484 ec.setClusterTolerance(...)"
+    },
+    "runtime_min_cluster_size": {
+      "value": 10,
+      "source": "yaml odom_anchored_cargo_box.weak_min_points (live_longterm_mapping.yaml:1328)",
+      "code": "ndt_slam.cpp:15485 ec.setMinClusterSize(odom_anchor_config_.weak_min_points)"
+    },
+    "max_cluster_size": 8000,
+    "hag_filter": "enabled (tight_box.hag_filter_enabled=true, hag_min_m=0.15, hag_max_m=2.50)",
+    "search_z": "odom_anchored_cargo_box.search_z (z_min/z_max)"
+  },
+  "launch_override_check": {
+    "result": "无数值 override",
+    "detail": "launch 只 override odom_anchored_cargo_box_enabled(bool) 和 integrated_cargo_identity_shadow_config_file，不覆盖 tolerance/weak_min_points/voxel_leaf"
+  },
+  "other_detector_note": "hook_fixed_cargo_detector (旧路径) 有独立的 voxel_leaf=0.05/cluster_tolerance=0.30/min_cluster_points=5，但那是另一 detector，不是 D5 的 detectCargoAroundOdomAnchor"
+}
