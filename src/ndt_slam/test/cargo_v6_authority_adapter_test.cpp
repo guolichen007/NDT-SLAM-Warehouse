@@ -155,6 +155,26 @@ TEST(CargoV6AuthorityAdapter,
 }
 
 TEST(CargoV6AuthorityAdapter,
+     RegistrationStaticConflictTelemetryIsExplicitlyFrameLevel) {
+  auto input = validInput();
+  input.independent_static_provenance_conflict = true;
+  const CanonicalCargoAuthoritySnapshot canonical =
+      buildCanonicalCargoAuthoritySnapshot(input);
+  pcl::PointCloud<pcl::PointXYZ> registration;
+  registration.push_back(pcl::PointXYZ(0.5F, 0.25F, 0.6F));
+  registration.push_back(pcl::PointXYZ(0.5F, 0.40F, 0.6F));
+
+  const CargoRegistrationHygieneShadow shadow =
+      evaluateCargoRegistrationHygieneShadow(
+          registration, false, CargoObbFootprint{}, canonical);
+
+  EXPECT_EQ(shadow.v6_proposed_removed_points, 1U);
+  EXPECT_EQ(
+      shadow.v6_proposed_points_on_static_conflict_frame,
+      shadow.v6_proposed_removed_points);
+}
+
+TEST(CargoV6AuthorityAdapter,
      ExactCargoOwnershipPreservesSameVoxelBackgroundPoint) {
   const CanonicalCargoAuthoritySnapshot canonical =
       buildCanonicalCargoAuthoritySnapshot(validInput());

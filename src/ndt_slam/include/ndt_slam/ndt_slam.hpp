@@ -2260,14 +2260,17 @@ private:
     std::atomic<std::uint64_t> cargo_v6_broad_quarantine_product_count_{0U};
     std::atomic<std::uint64_t>
         cargo_v6_exact_candidate_quarantine_removed_points_{0U};
-    std::atomic<std::uint64_t> cargo_v6_historical_retro_delete_count_{0U};
+    std::atomic<std::uint64_t>
+        cargo_v6_historical_sweep_blocked_count_{0U};
+    std::atomic<std::uint64_t>
+        cargo_v6_historical_localization_retro_delete_applied_count_{0U};
     std::atomic<std::uint64_t> cargo_registration_legacy_removed_points_{0U};
     std::atomic<std::uint64_t> cargo_registration_v6_proposed_points_{0U};
     std::atomic<std::uint64_t> cargo_registration_shadow_intersection_{0U};
     std::atomic<std::uint64_t> cargo_registration_shadow_legacy_only_{0U};
     std::atomic<std::uint64_t> cargo_registration_shadow_v6_only_{0U};
     std::atomic<std::uint64_t>
-        cargo_registration_static_conflict_points_{0U};
+        cargo_registration_v6_proposed_points_on_static_conflict_frame_{0U};
     double integrated_shadow_identity_compute_ms_ = 0.0;
     double integrated_shadow_geometry_compute_ms_ = 0.0;
     double integrated_shadow_safety_compute_ms_ = 0.0;

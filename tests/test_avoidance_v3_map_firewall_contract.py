@@ -152,12 +152,9 @@ def test_cargo_authority_mode_is_frozen_into_map_commit_job():
     assert "avoidance_map_mutation.cargo_points.authorized" in enqueue
 
 
-def test_v6_product_mode_fails_closed_until_legacy_formal_gate_is_removed():
+def test_v6_product_mode_has_no_legacy_formal_startup_block():
     constructor = function_body(
         NDT_CPP,
         "NdtSlamNode::NdtSlamNode(const std::string& config_file_path",
     )
-    assert (
-        "CARGO_V6_PRODUCT_MODE_BLOCKED_BY_LEGACY_FORMAL_PIPELINE"
-        in constructor
-    )
+    assert "CARGO_V6_PRODUCT_MODE_BLOCKED_BY_LEGACY_FORMAL_PIPELINE" not in constructor

@@ -21,6 +21,7 @@ struct ProductCargoContext {
   bool clear_authorized = false;
   bool self_removal_authorized = false;
   bool map_mutation_authorized = false;
+  double source_stamp_sec = 0.0;
   std::uint64_t cargo_lifecycle_id = 0U;
   std::uint64_t cargo_id = 0U;
   RigidCargoGeometry geometry;
@@ -71,5 +72,31 @@ ProductCargoSelection selectProductCargoContext(
     const ProductCargoContext& v6,
     bool legacy_positive_hazard,
     bool legacy_hazard_same_authority);
+
+// V6 live Safety self removal is deliberately stricter than Cargo Safety
+// geometry. It accepts only exact points owned by the current canonical
+// physical group; historical/expanded geometry is broad-phase data only and
+// cannot confer self identity.
+bool v6LiveSelfRemovalAuthorityCurrent(
+    const ProductCargoContext& product,
+    const CanonicalCargoAuthoritySnapshot& canonical,
+    const SourceFrameIdentity& source_frame_identity,
+    const PoseAuthorityIdentity& pose_identity,
+    double source_stamp_sec) noexcept;
+
+bool shouldRemoveV6LiveCargoSelfPoint(
+    const ProductCargoContext& product,
+    const CanonicalCargoAuthoritySnapshot& canonical,
+    const SourceFrameIdentity& source_frame_identity,
+    const PoseAuthorityIdentity& pose_identity,
+    double source_stamp_sec,
+    const pcl::PointXYZ& point) noexcept;
+
+float cargoLiveSelfRemovalMargin(
+    CargoAuthorityMode mode,
+    float base_margin,
+    float maximum_margin,
+    float legacy_tracking_residual,
+    float product_uncertainty) noexcept;
 
 }  // namespace ndt_slam

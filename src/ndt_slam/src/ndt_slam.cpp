@@ -7615,8 +7615,10 @@ void NdtSlamNode::processCloudThread() {
                 cargo_registration_shadow_v6_only_.fetch_add(
                     registration_shadow.v6_only_points,
                     std::memory_order_relaxed);
-                cargo_registration_static_conflict_points_.fetch_add(
-                    registration_shadow.static_background_conflict_points,
+                cargo_registration_v6_proposed_points_on_static_conflict_frame_
+                    .fetch_add(
+                    registration_shadow
+                        .v6_proposed_points_on_static_conflict_frame,
                     std::memory_order_relaxed);
             }
 
@@ -14186,8 +14188,11 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"cargo_v6_exact_candidate_quarantine_removed_points\": "
       << cargo_v6_exact_candidate_quarantine_removed_points_.load(
              std::memory_order_relaxed) << ",\n";
-    f << "  \"cargo_v6_historical_localization_retro_delete\": "
-      << cargo_v6_historical_retro_delete_count_.load(
+    f << "  \"cargo_v6_historical_sweep_blocked_count\": "
+      << cargo_v6_historical_sweep_blocked_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"cargo_v6_historical_localization_retro_delete_applied_count\": "
+      << cargo_v6_historical_localization_retro_delete_applied_count_.load(
              std::memory_order_relaxed) << ",\n";
     f << "  \"cargo_registration_legacy_removed_points\": "
       << cargo_registration_legacy_removed_points_.load(
@@ -14204,8 +14209,8 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"cargo_registration_shadow_v6_only\": "
       << cargo_registration_shadow_v6_only_.load(
              std::memory_order_relaxed) << ",\n";
-    f << "  \"cargo_registration_static_conflict_points\": "
-      << cargo_registration_static_conflict_points_.load(
+    f << "  \"cargo_registration_v6_proposed_points_on_static_conflict_frame\": "
+      << cargo_registration_v6_proposed_points_on_static_conflict_frame_.load(
              std::memory_order_relaxed) << ",\n";
     f << "  \"sparse_support_kind\": \""
       << obstacleSupportKindName(cargo_obstacle_support_kind_.load(
@@ -25064,30 +25069,45 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointXYZ>::Ptr external_obstacle_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
-    const CargoObbFootprint predicted_self_footprint =
-        rigid_geometry.valid
+    // Legacy and Shadow retain the commissioned geometric self mask exactly.
+    // V6 must not even read Legacy temporal mask state: its live product self
+    // identity is the current canonical exact-point ownership below.
+    CargoObbFootprint predicted_self_footprint;
+    CargoObbFootprint previous_self_footprint;
+    CargoObbFootprint accepted_self_footprint;
+    if (!v6_authority_mode) {
+        predicted_self_footprint = rigid_geometry.valid
             ? toCargoObbFootprint(rigid_geometry)
             : CargoObbFootprint{};
-    const CargoObbFootprint previous_self_footprint =
-        previous_self_mask_geometry_.valid &&
-                previous_self_mask_geometry_.track_id == rigid_geometry.track_id
-            ? toCargoObbFootprint(previous_self_mask_geometry_)
-            : CargoObbFootprint{};
-    const CargoObbFootprint accepted_self_footprint =
-        accepted_self_mask_geometry_.valid &&
-                accepted_self_mask_geometry_.track_id == rigid_geometry.track_id
-            ? toCargoObbFootprint(accepted_self_mask_geometry_)
-            : CargoObbFootprint{};
-    const float self_margin_xy = std::min(
+        previous_self_footprint =
+            previous_self_mask_geometry_.valid &&
+                    previous_self_mask_geometry_.track_id ==
+                        rigid_geometry.track_id
+                ? toCargoObbFootprint(previous_self_mask_geometry_)
+                : CargoObbFootprint{};
+        accepted_self_footprint =
+            accepted_self_mask_geometry_.valid &&
+                    accepted_self_mask_geometry_.track_id ==
+                        rigid_geometry.track_id
+                ? toCargoObbFootprint(accepted_self_mask_geometry_)
+                : CargoObbFootprint{};
+    }
+    const float legacy_tracking_residual_xy = v6_authority_mode
+        ? 0.0F : hook_lock_.horizontal_tracking_residual_m;
+    const float legacy_tracking_residual_z = v6_authority_mode
+        ? 0.0F : hook_lock_.vertical_tracking_residual_m;
+    const float self_margin_xy = cargoLiveSelfRemovalMargin(
+        cargo_authority_mode_,
+        hook_lock_config_.self_cargo_base_margin_xy_m,
         hook_lock_config_.self_cargo_max_margin_xy_m,
-        hook_lock_config_.self_cargo_base_margin_xy_m +
-            hook_lock_.horizontal_tracking_residual_m +
-            rigid_geometry.horizontal_uncertainty_m);
-    const float self_margin_z = std::min(
+        legacy_tracking_residual_xy,
+        rigid_geometry.horizontal_uncertainty_m);
+    const float self_margin_z = cargoLiveSelfRemovalMargin(
+        cargo_authority_mode_,
+        hook_lock_config_.self_cargo_base_margin_z_m,
         hook_lock_config_.self_cargo_max_margin_z_m,
-        hook_lock_config_.self_cargo_base_margin_z_m +
-            hook_lock_.vertical_tracking_residual_m +
-            0.5F * rigid_geometry.vertical_uncertainty_m);
+        legacy_tracking_residual_z,
+        0.5F * rigid_geometry.vertical_uncertainty_m);
     cargo_obstacle_roi_finite_points_ = roi_finite_points;
     cargo_obstacle_roi_coverage_ratio_ = coverage_ratio;
     cargo_self_margin_xy_m_ = self_margin_xy;
@@ -25099,10 +25119,11 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
 
     pcl::KdTreeFLANN<pcl::PointXYZ> identity_self_tree;
     pcl::PointCloud<pcl::PointXYZ>::Ptr identity_self_reference;
-    if (detection_is_current && hook_fixed_cargo_.core_points_base &&
+    if (!v6_authority_mode && detection_is_current &&
+        hook_fixed_cargo_.core_points_base &&
         !hook_fixed_cargo_.core_points_base->empty()) {
         identity_self_reference = hook_fixed_cargo_.core_points_base;
-    } else if (hook_lock_.has_last_accepted &&
+    } else if (!v6_authority_mode && hook_lock_.has_last_accepted &&
                hook_lock_.last_accepted_core_points &&
                !hook_lock_.last_accepted_core_points->empty() &&
                rigid_geometry.pose.center_base.allFinite()) {
@@ -25132,7 +25153,8 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     }
     std::size_t identity_self_removed = 0U;
     std::size_t rigging_self_removed = 0U;
-    const Eigen::Vector2f hook_anchor = getCargoAnchorXY();
+    const Eigen::Vector2f hook_anchor = v6_authority_mode
+        ? Eigen::Vector2f::Zero() : getCargoAnchorXY();
     const float rigging_lower_z = predicted_self_footprint.valid
         ? predicted_self_footprint.max_z - self_margin_z
         : std::numeric_limits<float>::infinity();
@@ -25150,6 +25172,21 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     self_removed_cloud->reserve(obstacle_roi->size());
     external_obstacle_cloud->reserve(obstacle_roi->size());
     for (const pcl::PointXYZ& point : obstacle_roi->points) {
+        if (v6_authority_mode) {
+            if (shouldRemoveV6LiveCargoSelfPoint(
+                    product_context, canonical_cargo_authority_snapshot_,
+                    source_frame_identity, frame_context.pose_identity,
+                    stamp.toSec(), point)) {
+                self_removed_cloud->push_back(point);
+                ++identity_self_removed;
+            } else {
+                // Unowned returns remain visible to CargoResidualClassifier
+                // and the PhysicalObstacleTrackStore. Expanded, previous and
+                // swept Legacy geometry has no V6 product identity authority.
+                external_obstacle_cloud->push_back(point);
+            }
+            continue;
+        }
         const Eigen::Vector3f point_base = point.getVector3fMap();
         const bool inside_predicted = predicted_self_footprint.valid &&
             containsPointInCargoObbBase(
@@ -25246,7 +25283,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             external_obstacle_cloud->push_back(point);
         }
     }
-    if (rigid_geometry.valid) {
+    if (!v6_authority_mode && rigid_geometry.valid) {
         previous_self_mask_geometry_ = rigid_geometry;
         if (hook_observation_associated_current_) {
             accepted_self_mask_geometry_ = rigid_geometry;
@@ -29107,7 +29144,7 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
 
     // v6: DynamicHistoryEraser - 用 swept volume 反删 objects_map/display_map
     if (v6_authority_mode && !new_cargo_volumes_this_frame_.empty()) {
-        cargo_v6_historical_retro_delete_count_.fetch_add(
+        cargo_v6_historical_sweep_blocked_count_.fetch_add(
             new_cargo_volumes_this_frame_.size(),
             std::memory_order_relaxed);
         ROS_ERROR("[MapFirewall] V6 historical sweep blocked volumes=%zu",
@@ -29133,6 +29170,13 @@ bool NdtSlamNode::commitKeyFrameWithDynamicFiltering(
             }
             objects_left = objects_map_->size();
             display_left = display_map_->size();
+        }
+        if (v6_authority_mode && erased_objects > 0U) {
+            // This counter is a hard product contract and must remain zero.
+            // Keeping the applied path observable prevents a future refactor
+            // from confusing a successfully blocked sweep with map mutation.
+            cargo_v6_historical_localization_retro_delete_applied_count_
+                .fetch_add(erased_objects, std::memory_order_relaxed);
         }
 
         ROS_INFO("[DynamicHistoryEraser] kf=%d new_volumes=%zu erased_objects=%zu erased_display=%zu objects_left=%zu display_left=%zu",

@@ -92,8 +92,6 @@ struct HumanTrack {
     // 历史信息
     std::deque<Eigen::Vector3d> centroid_map_history;
     std::deque<double> timestamp_history;
-    std::deque<Eigen::Vector3d> bbox_min_history;
-    std::deque<Eigen::Vector3d> bbox_max_history;
 
     // 跟踪统计
     int observed_frames;
@@ -103,26 +101,6 @@ struct HumanTrack {
     double velocity;
     double map_displacement;
 
-    // 高度范围（用于 capsule）
-    double track_z_min;
-    double track_z_max;
-    double track_hag_min;
-    double track_hag_max;
-};
-
-// 轨迹胶囊（用于历史反删）
-struct TrajectoryCapsule {
-    int track_id;
-    std::deque<Eigen::Vector3d> centerline;
-    double radius;
-    double z_min;
-    double z_max;
-    double hag_min;
-    double hag_max;
-    double pre_guard_sec;
-    double post_guard_sec;
-    double start_time;
-    double end_time;
 };
 
 struct HumanClusterObservation {
@@ -194,21 +172,6 @@ public:
         const Eigen::Matrix4d& T_map_base,
         float static_learning_cell_size_m);
 
-    // Compatibility-only fail-open stub. Product code must use the split API.
-    [[deprecated("use classifyFrame + updateMapTracks")]]
-    void processFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_cloud_base,
-                      const Eigen::Matrix4d& T_map_base,
-                      double timestamp,
-                      pcl::PointCloud<pcl::PointXYZ>::Ptr& safe_objects_out,
-                      pcl::PointCloud<pcl::PointXYZ>::Ptr& human_candidate_out,
-                      pcl::PointCloud<pcl::PointXYZ>::Ptr& human_dynamic_out,
-                      pcl::PointCloud<pcl::PointXYZ>::Ptr& human_pending_out);
-
-    // Compatibility-only; no product caller may erase localization history.
-    [[deprecated("human historical erase is not a localization authority")]]
-    void eraseHumanHistory(pcl::PointCloud<pcl::PointXYZ>::Ptr& objects_map,
-                           double current_time);
-
     // 清除过期的跟踪记录
     void cleanupExpiredTracks(double current_time);
 
@@ -220,23 +183,7 @@ public:
 
     HumanMapAuthorityDiagnostics diagnostics() const;
 
-    // P1: 检查 cell 是否被 deny
-    bool isCellDenied(double x, double y, double current_time) const;
-
-    // P1: 获取当前 deny cells 数量
-    int getDenyCellCount() const;
-
-    // Return an immutable, resolution-normalized view for background map
-    // maintenance. Expired cells are excluded while holding the filter lock.
-    std::set<std::pair<int, int>> getDenyCellsSnapshot(
-        double target_resolution, double current_time) const;
-
 private:
-    // 候选检测
-    void detectHumanCandidates(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
-                               pcl::PointCloud<pcl::PointXYZ>::Ptr& candidates_out,
-                               pcl::PointCloud<pcl::PointXYZ>::Ptr& safe_out);
-
     // BEV 聚类
     void clusterBEV(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
                     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>& clusters) const;
@@ -257,35 +204,8 @@ private:
     // 判断跟踪是否为动态人体
     bool isDynamicHuman(const HumanTrack& track) const;
 
-    // 生成轨迹胶囊
-    void generateTrajectoryCapsule(const HumanTrack& track);
-
-    // 判断点是否在胶囊内
-    bool isPointInCapsule(const pcl::PointXYZ& point,
-                          const TrajectoryCapsule& capsule,
-                          double current_time) const;
-
-    // 判断点是否在多边形柱体内
-    bool isPointInPolygonPrism(const pcl::PointXYZ& point,
-                               const std::vector<Eigen::Vector2d>& polygon,
-                               double z_min, double z_max) const;
-
     // 计算 BEV 网格键
     std::pair<int, int> bevKey(double x, double y) const;
-
-    // P1: deny history 管理
-    struct DenyCellEntry {
-        double first_seen_time;
-        double last_seen_time;
-        int hit_count;
-    };
-
-    // 添加 deny cells
-    void addDenyCells(const Eigen::Vector3d& bbox_min, const Eigen::Vector3d& bbox_max,
-                      double current_time, double ttl_sec);
-
-    // 清理过期的 deny cells
-    void cleanupExpiredDenyCells(double current_time);
 
     std::set<std::pair<int, int>> buildStaticLearningBlockCells(
         const std::vector<HumanTrack>& detections,
@@ -293,15 +213,8 @@ private:
 
     HumanObjectFilterConfig filter_config_;
     HumanTrackingConfig tracking_config_;
-    HumanEraserConfig eraser_config_;
-
     std::map<int, HumanTrack> active_tracks_;
-    std::vector<TrajectoryCapsule> trajectory_capsules_;
     int next_track_id_ = 0;
-
-    // P1: deny history（持久化）
-    std::map<std::pair<int,int>, DenyCellEntry> human_deny_cells_;
-    double human_deny_ttl_ = 15.0;  // 默认 15 秒
 
     bool has_last_map_update_stamp_ = false;
     double last_map_update_stamp_sec_ = 0.0;

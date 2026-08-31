@@ -64,6 +64,8 @@ CanonicalCargoAuthoritySnapshot buildCanonicalCargoAuthoritySnapshot(
   output.source_stamp_sec = input.source_stamp_sec;
   output.pose_identity = input.pose_identity;
   output.physical_history_id = input.identity.physical_history_id;
+  output.physical_cargo_epoch_id =
+      input.identity.physical_cargo_epoch_id;
 
   if (!std::isfinite(input.source_stamp_sec) ||
       input.source_stamp_sec <= 0.0 ||
@@ -220,7 +222,7 @@ CargoRegistrationHygieneShadow evaluateCargoRegistrationHygieneShadow(
     if (!legacy_owned && v6_owned) ++output.v6_only_points;
   }
   if (v6.would_authorize_safety && !v6.would_authorize_map_mutation) {
-    output.static_background_conflict_points =
+    output.v6_proposed_points_on_static_conflict_frame =
         output.v6_proposed_removed_points;
   }
   output.reason = output.v6_proposed_authorized

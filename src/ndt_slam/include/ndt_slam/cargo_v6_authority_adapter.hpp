@@ -51,6 +51,7 @@ struct CanonicalCargoAuthoritySnapshot {
   double source_stamp_sec = 0.0;
   PoseAuthorityIdentity pose_identity;
   std::uint64_t physical_history_id = 0U;
+  std::uint64_t physical_cargo_epoch_id = 0U;
   CanonicalCargoGeometry safety_geometry;
   CargoMapMutationSnapshot map_mutation;
   std::string reason = "not_evaluated";
@@ -69,7 +70,10 @@ struct CargoRegistrationHygieneShadow {
   std::size_t intersection_points = 0U;
   std::size_t legacy_only_points = 0U;
   std::size_t v6_only_points = 0U;
-  std::size_t static_background_conflict_points = 0U;
+  // Frame-level diagnostic only. The current Static authority API reports a
+  // group conflict, not per-point ownership, so this must not be interpreted
+  // as a point-level Static overlap count.
+  std::size_t v6_proposed_points_on_static_conflict_frame = 0U;
   std::string reason = "not_evaluated";
 };
 

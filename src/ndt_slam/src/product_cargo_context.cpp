@@ -23,6 +23,7 @@ ProductCargoContext buildLegacyProductCargoContext(
   output.self_removal_authorized = output.safety_authorized &&
       input.self_removal_authorized;
   output.map_mutation_authorized = output.self_removal_authorized;
+  output.source_stamp_sec = input.bottom.stamp_sec;
   output.cargo_lifecycle_id = input.cargo_lifecycle_id;
   output.cargo_id = input.cargo_id;
   output.geometry = input.geometry;
@@ -39,6 +40,7 @@ ProductCargoContext buildV6ProductCargoContext(
   ProductCargoContext output;
   output.mode = CargoAuthorityMode::V6_AUTHORITY;
   output.valid_input = input.canonical.valid_input;
+  output.source_stamp_sec = input.canonical.source_stamp_sec;
   output.cargo_lifecycle_id = input.identity.physical_cargo_epoch_id;
   output.cargo_id = input.identity.physical_history_id;
   // The canonical snapshot proves the identity/geometry permissions while
@@ -119,6 +121,7 @@ ProductCargoContext buildV6ProductCargoContext(
       input.horizontal_uncertainty_m;
   output.formal_use.reason = output.safety_authorized
       ? "v6_authorized" : "v6_formal_gate_closed";
+  output.temporal_authority = input.bottom.pose_authority;
   output.reason = output.safety_authorized
       ? "v6_authorized" : output.formal_use.reason;
   return output;
@@ -155,6 +158,74 @@ ProductCargoSelection selectProductCargoContext(
       ? "v6_invalid_legacy_positive_only_retained"
       : "v6_invalid_fail_closed";
   return output;
+}
+
+bool v6LiveSelfRemovalAuthorityCurrent(
+    const ProductCargoContext& product,
+    const CanonicalCargoAuthoritySnapshot& canonical,
+    const SourceFrameIdentity& source_frame_identity,
+    const PoseAuthorityIdentity& pose_identity,
+    double source_stamp_sec) noexcept {
+  constexpr double kStampEpsilonSec = 1.0e-6;
+  return product.mode == CargoAuthorityMode::V6_AUTHORITY &&
+      product.valid_input && product.safety_authorized &&
+      product.self_removal_authorized &&
+      product.map_mutation_authorized &&
+      canonical.valid_input && canonical.cargo_safety_authorized &&
+      canonical.cargo_map_mutation_authorized &&
+      canonical.map_mutation.authorized &&
+      canonical.map_mutation.tight_geometry_valid &&
+      canonical.physical_history_id != 0U &&
+      canonical.physical_history_id == product.cargo_id &&
+      canonical.physical_cargo_epoch_id != 0U &&
+      canonical.physical_cargo_epoch_id == product.cargo_lifecycle_id &&
+      std::isfinite(source_stamp_sec) && source_stamp_sec > 0.0 &&
+      std::abs(product.source_stamp_sec - source_stamp_sec) <=
+          kStampEpsilonSec &&
+      std::abs(canonical.source_stamp_sec - source_stamp_sec) <=
+          kStampEpsilonSec &&
+      source_frame_identity.valid() &&
+      std::abs(source_frame_identity.sensor_source_stamp_sec -
+               source_stamp_sec) <= kStampEpsilonSec &&
+      samePoseAuthorityIdentity(canonical.pose_identity, pose_identity) &&
+      sameSourceFrameIdentity(
+          canonical.map_mutation.owner_points.source_frame_identity,
+          source_frame_identity);
+}
+
+bool shouldRemoveV6LiveCargoSelfPoint(
+    const ProductCargoContext& product,
+    const CanonicalCargoAuthoritySnapshot& canonical,
+    const SourceFrameIdentity& source_frame_identity,
+    const PoseAuthorityIdentity& pose_identity,
+    double source_stamp_sec,
+    const pcl::PointXYZ& point) noexcept {
+  return v6LiveSelfRemovalAuthorityCurrent(
+             product, canonical, source_frame_identity, pose_identity,
+             source_stamp_sec) &&
+      canonical.map_mutation.ownsCurrentPoint(point);
+}
+
+float cargoLiveSelfRemovalMargin(
+    CargoAuthorityMode mode,
+    float base_margin,
+    float maximum_margin,
+    float legacy_tracking_residual,
+    float product_uncertainty) noexcept {
+  const float finite_base = std::isfinite(base_margin)
+      ? std::max(0.0F, base_margin) : 0.0F;
+  const float finite_maximum = std::isfinite(maximum_margin)
+      ? std::max(finite_base, maximum_margin) : finite_base;
+  const float finite_uncertainty = std::isfinite(product_uncertainty)
+      ? std::max(0.0F, product_uncertainty) : 0.0F;
+  const float finite_legacy_residual =
+      mode == CargoAuthorityMode::V6_AUTHORITY
+      ? 0.0F
+      : (std::isfinite(legacy_tracking_residual)
+             ? std::max(0.0F, legacy_tracking_residual) : 0.0F);
+  return std::min(
+      finite_maximum,
+      finite_base + finite_legacy_residual + finite_uncertainty);
 }
 
 }  // namespace ndt_slam
