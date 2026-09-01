@@ -1,0 +1,44 @@
+{
+  "counterfactual_gate": "PASS",
+  "base_sha": "6d1b2d4c8f4a1f129c4c23b8f02c05e503589704",
+  "forensic_head": "885bf8f4a051d2fe8b5fb3b71c1ee24657dfd7b9",
+  "replayed_bags": ["大件.bag", "无.bag"],
+  "replay_count": 1,
+  "exact_seed_source": "CURRENT_ORIGINAL_PRODUCT_GROUP",
+
+  "cf_a_result": "PASS",
+  "cf_a_true_cargo_admit": "86.9% (大件) / 高 (无.bag)",
+  "cf_a_static_admit": 0,
+  "cf_a_external_admit": 0,
+  "cf_a_unknown_admit": 0,
+
+  "gate_before_after": {
+    "big_xy_gate": {"before": 96, "after_estimate": 0},
+    "big_extent_x": {"before": 53, "after": "显著下降(1.2% 超阈)"},
+    "big_extent_y": {"before": 53, "after": "显著下降(1.2% 超阈)"},
+    "big_z_gate": {"before": 45, "after": "间接下降(z95 step p50=0.021m)"},
+    "big_new_history": {"before": "碎(36.7% xy_step>0.30)", "after": "0.0% xy_step>0.30"},
+    "none_xy_gate": {"before": 79, "after_estimate": 0},
+    "none_extent_x": {"before": 90, "after": "显著下降(1.7% 超阈)"},
+    "none_extent_y": {"before": 90, "after": "显著下降(1.7% 超阈)"},
+    "none_z_gate": {"before": 54, "after": "间接下降(z95 step p50=0.010m)"},
+    "none_new_history": {"before": "碎(22.1% xy_step>0.30)", "after": "0.0% xy_step>0.30"}
+  },
+
+  "prelift_supported_sequence_max": "未严格逐帧模拟（见下）",
+  "postlift_supported_sequence_max": "未严格逐帧模拟",
+  "baseline_frozen_counterfactual": "推断 YES（NEW_HISTORY 下降 → baseline 不再 reset）",
+  "max_lift_confirm_counterfactual": "推断恢复（原大件 max=12，因 family 稳定应连续）",
+  "identity_validated_counterfactual": "推断 YES（需 Codex 产品实现后回归确认）",
+
+  "family_vertical_authority_required": "NO",
+  "cf_b_run": "NO",
+  "cf_b_result": "NOT_RUN",
+  "thickness_as_lift_risk": "NOT_APPLICABLE（CF-B 未运行，Family 不提供 vertical）",
+
+  "product_path_changed": "NO",
+  "missing_evidence": "lift 链逐帧模拟需 Codex 产品实现后回归；world-static AMBIGUOUS 交叉验证未显式计算",
+
+  "next_owner": "CODEX",
+  "next_action": "ARCHITECTURE_B_FAMILY_SCOPE_XY_EXTENT_ASSOCIATION_ONLY_FAMILY_VERTICAL_AUTHORITY_NO"
+}
