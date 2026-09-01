@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE = "13c0af4aa44f366b1d63c38ab37366890677c979"
+D5_PRODUCT_BASE = "6d1b2d4c8f4a1f129c4c23b8f02c05e503589704"
 
 
 def fail(message: str) -> None:
@@ -47,6 +48,7 @@ def strip_if0(source: str) -> str:
 
 
 def main() -> int:
+    allow_d5_lineage = "--allow-d5-lineage" in sys.argv[1:]
     changed = set(git("diff", "--name-only", BASE, "--").splitlines())
     frozen = {
         "src/ndt_slam/src/cargo_physical_identity_authority.cpp",
@@ -61,6 +63,24 @@ def main() -> int:
         "src/ndt_slam/include/ndt_slam/pose_authority_identity.hpp",
         "src/ndt_slam/include/ndt_slam/frame_authority_context.hpp",
     }
+    if allow_d5_lineage:
+        frozen.remove(
+            "src/ndt_slam/src/cargo_physical_identity_authority.cpp")
+        authority_diff = git(
+            "diff", "--unified=0", D5_PRODUCT_BASE, "--",
+            "src/ndt_slam/src/cargo_physical_identity_authority.cpp",
+            "src/ndt_slam/include/ndt_slam/"
+            "cargo_physical_identity_authority.hpp")
+        forbidden_contract_mutation = re.search(
+            r"^\+[^+].*config_\.(?:maximum_xy_step_m|"
+            r"maximum_z_speed_mps|z_step_margin_m|"
+            r"maximum_size_relative_step|ambiguity_cost_margin|"
+            r"maximum_observation_gap_sec|lift_confirm_frames|"
+            r"minimum_significant_change_m|significance_sigma)\s*=",
+            authority_diff, re.MULTILINE)
+        if forbidden_contract_mutation:
+            fail("D5 lineage changed frozen Cargo threshold assignment: " +
+                 forbidden_contract_mutation.group(0))
     touched = sorted(changed & frozen)
     if touched:
         fail("frozen implementation changed: " + ", ".join(touched))

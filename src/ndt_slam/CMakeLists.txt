@@ -157,6 +157,7 @@ set(LIBRARY_SOURCES
   src/static_height_field.cpp
   src/static_height_component_extractor.cpp
   src/cargo_lift_origin_binder.cpp
+  src/cargo_identity_component_lineage.cpp
   src/cargo_physical_identity_authority.cpp
   src/integrated_cargo_identity_shadow.cpp
   src/cargo_v6_authority_adapter.cpp
@@ -410,6 +411,13 @@ if(CATKIN_ENABLE_TESTING)
   if(TARGET cargo_physical_identity_authority_test)
     target_link_libraries(cargo_physical_identity_authority_test
       ndt_slam_lib ${catkin_LIBRARIES} gtest_main)
+  endif()
+
+  catkin_add_gtest(cargo_identity_component_lineage_test
+    test/cargo_identity_component_lineage_test.cpp)
+  if(TARGET cargo_identity_component_lineage_test)
+    target_link_libraries(cargo_identity_component_lineage_test
+      ndt_slam_lib ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtest_main)
   endif()
 
   catkin_add_gtest(integrated_cargo_identity_shadow_test

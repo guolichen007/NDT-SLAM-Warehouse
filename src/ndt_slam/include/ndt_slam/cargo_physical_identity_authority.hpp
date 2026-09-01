@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ndt_slam/cargo_vertical_evidence.hpp"
+#include "ndt_slam/cargo_identity_component_lineage.hpp"
 #include "ndt_slam/hook_load_evidence_policy.hpp"
 
 #include <Eigen/Core>
@@ -22,6 +23,7 @@ enum class CargoCandidateAssociationState : std::uint8_t {
 enum class CargoPhysicalAssociationMode : std::uint8_t {
   ANCHOR_CONTINUITY = 0,
   SUPPORT_OVERLAP_CONTINUITY,
+  COMPONENT_LINEAGE_CONTINUITY,
   NEW_HISTORY,
 };
 
@@ -235,6 +237,16 @@ struct CargoPhysicalGroupDiagnostic {
   double extent_cost = std::numeric_limits<double>::quiet_NaN();
   bool reacquired_vertical_attempted = false;
   AssociationOnlyReacquiredVerticalEvidence reacquired_vertical;
+  bool lineage_attempted = false;
+  bool lineage_rescue_used = false;
+  bool lineage_exact_path_won = false;
+  bool lineage_ambiguous = false;
+  double lineage_xy_before_m = std::numeric_limits<double>::quiet_NaN();
+  double lineage_xy_after_m = std::numeric_limits<double>::quiet_NaN();
+  double lineage_extent_before = std::numeric_limits<double>::quiet_NaN();
+  double lineage_extent_after = std::numeric_limits<double>::quiet_NaN();
+  std::uint64_t lineage_previous_component_id = 0U;
+  std::uint64_t lineage_current_component_id = 0U;
   std::string association_reject_reason = "NO_HISTORY";
   std::string new_history_reason = "NO_HISTORY";
   bool validated_history_conflict = false;
@@ -273,6 +285,7 @@ struct CargoPhysicalIdentityInput {
   bool gravity_valid = false;
   HookLoadState gravity_state = HookLoadState::UNKNOWN;
   std::vector<CargoPhysicalGroupObservation> groups;
+  std::vector<CargoIdentitySupportLineageObservation> lineage_observations;
   CargoShadowFrameEvidence frame_evidence;
   CargoVerticalEvidenceConfig vertical_config;
 };
@@ -376,6 +389,10 @@ class CargoPhysicalIdentityAuthority {
     double last_supported_vertical_z = std::numeric_limits<double>::quiet_NaN();
     double last_supported_vertical_uncertainty_m = 0.20;
     CargoFootprintSnapshot last_supported_footprint;
+    // Frame-local component ids are retained for one source transition only.
+    // They are provenance from the exact product group, not a second Cargo id.
+    std::vector<std::uint64_t> last_lineage_component_ids;
+    double last_lineage_source_stamp_sec = 0.0;
     int lift_confirm_count = 0;
     bool lift_confirmed = false;
     double validation_stamp_sec = 0.0;

@@ -721,6 +721,16 @@ NdtSlamNode::NdtSlamNode(const std::string& config_file_path, const ros::NodeHan
                 odom_anchor_config_.tight_box.orientation_min_concentration);
         integrated_identity_authority_.setConfig(
             integrated_identity_config_);
+        CargoIdentityComponentLineageConfig lineage_config;
+        lineage_config.maximum_xy_step_m =
+            integrated_identity_config_.maximum_xy_step_m;
+        lineage_config.maximum_size_relative_step =
+            integrated_identity_config_.maximum_size_relative_step;
+        lineage_config.maximum_observation_gap_sec =
+            integrated_identity_config_.maximum_observation_gap_sec;
+        lineage_config.ambiguity_cost_margin =
+            integrated_identity_config_.ambiguity_cost_margin;
+        cargo_identity_component_lineage_.setConfig(lineage_config);
         integrated_geometry_authority_.setConfig(
             integrated_geometry_config_);
         ROS_INFO(
@@ -7540,7 +7550,9 @@ void NdtSlamNode::processCloudThread() {
                 updateIntegratedCargoIdentityShadow(
                     *integrated_shadow_deferred_detection,
                     std::move(integrated_shadow_deferred_frame),
-                    integrated_shadow_deferred_hook, publish_time);
+                    integrated_shadow_deferred_hook,
+                    &source_frame_identity, &frame_authority_context,
+                    publish_time);
             }
             publishOdometry(publish_time, msg->header.frame_id, final_pose);
             odom_publish_count_.fetch_add(1, std::memory_order_relaxed);
@@ -14883,6 +14895,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
     const HookCargoDetection& detection,
     CargoShadowFrameEvidence frame_evidence,
     const HookLoadSnapshot& hook,
+    const SourceFrameIdentity* source_frame_identity,
+    const FrameAuthorityContext* frame_context,
     const ros::Time& stamp) {
     if (!integrated_cargo_identity_shadow_enabled_ || stamp.isZero()) return;
     const auto identity_start = IntegratedShadowDiagClock::now();
@@ -14931,6 +14945,23 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
             break;
     }
     input.groups = detection.shadow_physical_groups;
+    integrated_identity_lineage_result_ =
+        CargoIdentityComponentLineageResult{};
+    if (detection.identity_lineage_frame_valid &&
+        source_frame_identity && frame_context &&
+        source_frame_identity->valid()) {
+        CargoIdentityComponentLineageFrame lineage_frame;
+        lineage_frame.source_stamp_sec = stamp.toSec();
+        lineage_frame.lifecycle_id = input.lifecycle_id;
+        lineage_frame.source_frame_identity = *source_frame_identity;
+        lineage_frame.pose_identity = frame_context->pose_identity;
+        lineage_frame.pose_map_base = frame_context->runtime_pose.matrix();
+        lineage_frame.components = detection.identity_lineage_components;
+        integrated_identity_lineage_result_ =
+            cargo_identity_component_lineage_.update(lineage_frame);
+        input.lineage_observations =
+            integrated_identity_lineage_result_.observations;
+    }
     integrated_identity_decision_ =
         integrated_identity_authority_.update(input);
     integrated_v5_raw_roi_vertical_total_ms_ =
@@ -14999,6 +15030,14 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "lift_delta,lift_threshold,last_supported_evidence_stamp,"
                 << "maximum_observation_gap_sec,"
                 << "lift_confirm_count,lift_confirm_required,lift_confirmed,"
+                << "lineage_attempted,lineage_rescue_used,"
+                << "lineage_exact_path_won,lineage_ambiguous,"
+                << "lineage_previous_component_id,"
+                << "lineage_current_component_id,lineage_xy_before,"
+                << "lineage_xy_after,lineage_extent_before,"
+                << "lineage_extent_after,lineage_pair_count,"
+                << "lineage_match_count,lineage_ambiguous_count,"
+                << "lineage_world_static_veto_count,lineage_reset_reason,"
                 << "identity_state\n";
         }
         integrated_identity_groups_csv_init_ = true;
@@ -15103,6 +15142,22 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << diagnostic.lift_confirm_count << ','
                 << diagnostic.lift_confirm_required << ','
                 << (diagnostic.lift_confirmed ? 1 : 0) << ','
+                << (diagnostic.lineage_attempted ? 1 : 0) << ','
+                << (diagnostic.lineage_rescue_used ? 1 : 0) << ','
+                << (diagnostic.lineage_exact_path_won ? 1 : 0) << ','
+                << (diagnostic.lineage_ambiguous ? 1 : 0) << ','
+                << diagnostic.lineage_previous_component_id << ','
+                << diagnostic.lineage_current_component_id << ','
+                << diagnostic.lineage_xy_before_m << ','
+                << diagnostic.lineage_xy_after_m << ','
+                << diagnostic.lineage_extent_before << ','
+                << diagnostic.lineage_extent_after << ','
+                << integrated_identity_lineage_result_.pair_count << ','
+                << integrated_identity_lineage_result_.match_count << ','
+                << integrated_identity_lineage_result_.ambiguous_count << ','
+                << integrated_identity_lineage_result_
+                       .world_static_veto_count << ','
+                << integrated_identity_lineage_result_.reset_reason << ','
                 << cargoPhysicalIdentityStateName(diagnostic.identity)
                 << '\n';
         }
@@ -15206,6 +15261,11 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     if (!cloud_base || cloud_base->empty()) {
         result.reject_reason = "empty_cloud";
         return result;
+    }
+
+    if (integrated_cargo_identity_shadow_enabled_ &&
+        !stamp.isZero() && std::isfinite(stamp.toSec())) {
+        result.identity_lineage_frame_valid = true;
     }
 
     auto anchor = getCargoAnchorXY();
@@ -15624,15 +15684,23 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         CargoCandidateDescriptor descriptor;
         float min_z = 0.0F;
         float max_z = 0.0F;
+        float robust_x05 = 0.0F;
+        float robust_x95 = 0.0F;
+        float robust_y05 = 0.0F;
+        float robust_y95 = 0.0F;
     };
     std::vector<CandidateComponentData> components;
     components.reserve(cluster_indices.size());
     for (std::size_t component_index = 0U;
          component_index < cluster_indices.size(); ++component_index) {
         std::vector<Eigen::Vector2f> footprint_points;
+        std::vector<float> component_x;
+        std::vector<float> component_y;
         std::vector<float> component_z;
         footprint_points.reserve(
             cluster_indices[component_index].indices.size());
+        component_x.reserve(cluster_indices[component_index].indices.size());
+        component_y.reserve(cluster_indices[component_index].indices.size());
         component_z.reserve(cluster_indices[component_index].indices.size());
         for (int point_index : cluster_indices[component_index].indices) {
             const pcl::PointXYZ& point = voxel_cloud->points[point_index];
@@ -15640,8 +15708,12 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
                 result.candidate_components_base->push_back(point);
             }
             footprint_points.emplace_back(point.x, point.y);
+            component_x.push_back(point.x);
+            component_y.push_back(point.y);
             component_z.push_back(point.z);
         }
+        std::sort(component_x.begin(), component_x.end());
+        std::sort(component_y.begin(), component_y.end());
         std::sort(component_z.begin(), component_z.end());
         const CargoOrientedFootprint footprint =
             estimateCargoOrientedFootprint(
@@ -15681,6 +15753,20 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         component.indices = cluster_indices[component_index];
         component.min_z = z_low;
         component.max_z = z_high;
+        const auto percentile_index = [&](float percentile) {
+            const std::size_t last = component_x.size() - 1U;
+            const double scaled = static_cast<double>(last) *
+                std::clamp(static_cast<double>(percentile), 0.0, 1.0);
+            return std::min(last, static_cast<std::size_t>(scaled));
+        };
+        // Match CargoPhysicalGroupDescriptor's existing robust XY support
+        // semantics exactly; these are not new configurable thresholds.
+        const std::size_t xy_low_index = percentile_index(0.05F);
+        const std::size_t xy_high_index = percentile_index(0.95F);
+        component.robust_x05 = component_x[xy_low_index];
+        component.robust_x95 = component_x[xy_high_index];
+        component.robust_y05 = component_y[xy_low_index];
+        component.robust_y95 = component_y[xy_high_index];
         // B2 diagnostic: track the component with the strongest elevated
         // (>=1.3m) support, so a "high cargo component exists but was not
         // selected" outcome is directly observable.
@@ -15947,6 +16033,47 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
             equivalent_center_tolerance_m,
             equivalent_size_tolerance,
             &result.shadow_grouping_telemetry);
+        std::vector<std::uint64_t> exact_seed_group_by_component(
+            components.size(), 0U);
+        std::vector<std::size_t> exact_seed_count_by_component(
+            components.size(), 0U);
+        for (const auto& group : result.shadow_physical_groups) {
+            for (const std::uint64_t component_id :
+                 group.member_component_ids) {
+                if (component_id >= components.size()) continue;
+                exact_seed_group_by_component[
+                    static_cast<std::size_t>(component_id)] =
+                        group.frame_group_id;
+                ++exact_seed_count_by_component[
+                    static_cast<std::size_t>(component_id)];
+            }
+        }
+        result.identity_lineage_components.reserve(components.size());
+        for (std::size_t component_index = 0U;
+             component_index < components.size(); ++component_index) {
+            // A component without exactly one original product group is not
+            // allowed to seed identity-only lineage.
+            if (exact_seed_count_by_component[component_index] != 1U) {
+                continue;
+            }
+            const CandidateComponentData& component =
+                components[component_index];
+            CargoIdentityComponentDescriptor compact;
+            compact.component_id = static_cast<std::uint64_t>(component_index);
+            compact.exact_seed_frame_group_id =
+                exact_seed_group_by_component[component_index];
+            compact.source_stamp_sec = stamp.toSec();
+            compact.center_base =
+                component.descriptor.center.head<2>().cast<double>();
+            compact.robust_x05 = component.robust_x05;
+            compact.robust_x95 = component.robust_x95;
+            compact.robust_y05 = component.robust_y05;
+            compact.robust_y95 = component.robust_y95;
+            compact.robust_xy_extent = Eigen::Vector2d(
+                compact.robust_x95 - compact.robust_x05,
+                compact.robust_y95 - compact.robust_y05);
+            result.identity_lineage_components.push_back(std::move(compact));
+        }
         result.shadow_physical_group_compute_ms =
             integratedShadowElapsedMs(physical_group_start);
     }
@@ -23368,7 +23495,8 @@ ProductCargoContext NdtSlamNode::prepareV6ProductCargoContext(
     if (integrated_shadow_authority_stamp_ != stamp) {
         updateIntegratedCargoIdentityShadow(
             HookCargoDetection{}, CargoShadowFrameEvidence{},
-            currentHookLoadSnapshot(), stamp);
+            currentHookLoadSnapshot(), &source_frame_identity,
+            &frame_context, stamp);
     }
     const std::uint64_t lifecycle_id =
         integrated_identity_decision_.physical_cargo_epoch_id;
@@ -23491,7 +23619,8 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
     const auto safety_start = IntegratedShadowDiagClock::now();
     if (integrated_shadow_authority_stamp_ != stamp) {
         updateIntegratedCargoIdentityShadow(
-            HookCargoDetection{}, CargoShadowFrameEvidence{}, hook, stamp);
+            HookCargoDetection{}, CargoShadowFrameEvidence{}, hook,
+            nullptr, nullptr, stamp);
     }
     const std::uint64_t shadow_lifecycle_id =
         integrated_identity_decision_.physical_cargo_epoch_id;

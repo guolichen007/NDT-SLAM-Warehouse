@@ -1603,6 +1603,13 @@ private:
         std::string reject_reason;
         std::vector<ShadowCandidateSnapshot> shadow_candidates;
         std::vector<CargoPhysicalGroupObservation> shadow_physical_groups;
+        // Identity-only compact S4 component descriptors. They contain no
+        // points, vertical authority, ownership, geometry or map authority.
+        // A valid detector source frame advances lineage even when this list
+        // is empty; synthetic/fallback HookCargoDetection values do not.
+        bool identity_lineage_frame_valid = false;
+        std::vector<CargoIdentityComponentDescriptor>
+            identity_lineage_components;
         CargoShadowFrameEvidence shadow_frame_evidence;
         double shadow_physical_group_compute_ms = 0.0;
         CargoPhysicalGroupingTelemetry shadow_grouping_telemetry;
@@ -2221,6 +2228,9 @@ private:
     CargoAuthorityMode cargo_authority_mode_ = CargoAuthorityMode::LEGACY;
     CargoPhysicalIdentityConfig integrated_identity_config_;
     CargoPhysicalIdentityAuthority integrated_identity_authority_;
+    CargoIdentityComponentLineage cargo_identity_component_lineage_;
+    CargoIdentityComponentLineageResult
+        integrated_identity_lineage_result_;
     CargoPhysicalIdentityDecision integrated_identity_decision_;
     CargoShadowGeometryConfig integrated_geometry_config_;
     CargoShadowGeometryAuthority integrated_geometry_authority_;
@@ -2645,6 +2655,8 @@ private:
         const HookCargoDetection& detection,
         CargoShadowFrameEvidence frame_evidence,
         const HookLoadSnapshot& hook,
+        const SourceFrameIdentity* source_frame_identity,
+        const FrameAuthorityContext* frame_context,
         const ros::Time& stamp);
     void evaluateIntegratedCargoIdentityShadow(
         const HookLoadSnapshot& hook,

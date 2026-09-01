@@ -177,6 +177,49 @@ CargoPhysicalIdentityInput input(
   return result;
 }
 
+CargoIdentitySupportLineageObservation lineageObservation(
+    std::uint64_t previous_component_id,
+    std::uint64_t current_component_id,
+    std::uint64_t exact_seed_frame_group_id,
+    double previous_stamp, double stamp, double center_x,
+    double extent_x = 0.40, double extent_y = 0.40) {
+  CargoIdentitySupportLineageObservation observation;
+  observation.valid = true;
+  observation.state = CargoIdentityLineageState::MATCHED;
+  observation.previous_source_stamp_sec = previous_stamp;
+  observation.source_stamp_sec = stamp;
+  observation.previous_component_id = previous_component_id;
+  observation.current_component_id = current_component_id;
+  observation.exact_seed_frame_group_id = exact_seed_frame_group_id;
+  observation.robust_xy_center = Eigen::Vector2d(center_x, 0.0);
+  observation.robust_xy_extent = Eigen::Vector2d(extent_x, extent_y);
+  observation.robust_x05 = center_x - 0.5 * extent_x;
+  observation.robust_x95 = center_x + 0.5 * extent_x;
+  observation.robust_y05 = -0.5 * extent_y;
+  observation.robust_y95 = 0.5 * extent_y;
+  observation.base_step_m = 0.05;
+  observation.map_step_m = 1.0;
+  observation.extent_step = 0.05;
+  return observation;
+}
+
+CargoPhysicalIdentityInput lineageInput(
+    double stamp, HookLoadState gravity_state, double exact_group_x,
+    double exact_vertical_z, std::uint64_t component_id,
+    const CargoIdentitySupportLineageObservation* lineage = nullptr) {
+  CargoPhysicalIdentityInput result;
+  result.pipeline_stamp_sec = stamp;
+  result.lifecycle_id = 7U;
+  result.hook_role = HookLoadSignalRole::REQUIRED;
+  result.gravity_valid = true;
+  result.gravity_state = gravity_state;
+  result.groups = {group(
+      component_id, stamp, exact_group_x, exact_vertical_z,
+      {component_id})};
+  if (lineage) result.lineage_observations.push_back(*lineage);
+  return result;
+}
+
 CargoPhysicalIdentityConfig testConfig() {
   CargoPhysicalIdentityConfig config;
   config.maximum_xy_step_m = 0.35;
@@ -1699,6 +1742,170 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_EQ(groups.front().descriptor.vertical_source,
             CargoVerticalEvidenceSource::COMPONENT_UNION);
   EXPECT_EQ(groups.front().descriptor.raw_roi_supported_hypothesis_count, 0U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     FamilyRescueCannotOverrideExactAssociation) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(lineageInput(
+      1.0, HookLoadState::EMPTY, 0.0, 0.40, 101U));
+  const auto observation = lineageObservation(
+      101U, 202U, 1U, 1.0, 1.1, 0.05);
+  auto next = lineageInput(
+      1.1, HookLoadState::EMPTY, 0.05, 0.40, 202U,
+      &observation);
+  const auto decision = authority.update(next);
+  ASSERT_EQ(decision.group_diagnostics.size(), 1U);
+  EXPECT_EQ(decision.group_diagnostics.front().association_mode,
+            CargoPhysicalAssociationMode::ANCHOR_CONTINUITY);
+  EXPECT_TRUE(decision.group_diagnostics.front().lineage_exact_path_won);
+  EXPECT_FALSE(decision.group_diagnostics.front().lineage_rescue_used);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     FamilyRescueExistingHistoryUsesExactCurrentVertical) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(lineageInput(
+      1.0, HookLoadState::EMPTY, 0.0, 0.40, 101U));
+  auto observation = lineageObservation(
+      101U, 202U, 1U, 1.0, 1.1, 0.05);
+  auto decision = authority.update(lineageInput(
+      1.1, HookLoadState::EMPTY, 2.0, 0.40, 202U,
+      &observation));
+  ASSERT_EQ(decision.group_diagnostics.size(), 1U);
+  EXPECT_EQ(decision.group_diagnostics.front().association_mode,
+            CargoPhysicalAssociationMode::COMPONENT_LINEAGE_CONTINUITY);
+  EXPECT_TRUE(decision.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_EQ(decision.group_diagnostics.front().association,
+            CargoCandidateAssociationState::MATCHED);
+  EXPECT_EQ(decision.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::FROZEN);
+  EXPECT_NEAR(decision.group_diagnostics.front().baseline_z,
+              0.40, 1.0e-5);
+
+  observation = lineageObservation(
+      202U, 303U, 1U, 1.1, 1.2, 0.10);
+  authority.update(lineageInput(
+      1.2, HookLoadState::LOADED, 2.0, 0.40, 303U,
+      &observation));
+  observation = lineageObservation(
+      303U, 404U, 1U, 1.2, 1.3, 0.15);
+  authority.update(lineageInput(
+      1.3, HookLoadState::LOADED, 2.0, 0.70, 404U,
+      &observation));
+  observation = lineageObservation(
+      404U, 505U, 1U, 1.3, 1.4, 0.20);
+  decision = authority.update(lineageInput(
+      1.4, HookLoadState::LOADED, 2.0, 0.70, 505U,
+      &observation));
+  EXPECT_EQ(decision.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_NEAR(decision.current_z95, 0.70, 1.0e-5);
+  EXPECT_NEAR(decision.lift_delta_m, 0.30, 1.0e-5);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     FamilyRescueCannotCreateHistoryOrValidateByItself) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto observation = lineageObservation(
+      11U, 22U, 1U, 0.9, 1.0, 0.0);
+  auto first = lineageInput(
+      1.0, HookLoadState::EMPTY, 2.0, 0.40, 22U,
+      &observation);
+  first.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::CONTINUITY_ONLY;
+  auto decision = authority.update(first);
+  ASSERT_EQ(decision.group_diagnostics.size(), 1U);
+  EXPECT_EQ(decision.group_diagnostics.front().association,
+            CargoCandidateAssociationState::NEW_HISTORY);
+  EXPECT_FALSE(decision.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_NE(decision.identity, CargoPhysicalIdentityState::VALIDATED);
+
+  auto next_observation = lineageObservation(
+      22U, 33U, 1U, 1.0, 1.1, 0.05);
+  auto next = lineageInput(
+      1.1, HookLoadState::LOADED, 4.0, 0.90, 33U,
+      &next_observation);
+  next.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::CONTINUITY_ONLY;
+  decision = authority.update(next);
+  EXPECT_NE(decision.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_FALSE(decision.lift_confirmed);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     FamilyRescueCannotBreakHistoryTie) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  CargoPhysicalIdentityInput first;
+  first.pipeline_stamp_sec = 1.0;
+  first.lifecycle_id = 7U;
+  first.hook_role = HookLoadSignalRole::REQUIRED;
+  first.gravity_valid = true;
+  first.gravity_state = HookLoadState::EMPTY;
+  auto first_group = group(1U, 1.0, -1.0, 0.40, {101U});
+  auto second_group = group(2U, 1.0, 1.0, 0.40, {101U});
+  first_group.frame_group_id = 1U;
+  second_group.frame_group_id = 2U;
+  first.groups = {first_group, second_group};
+  authority.update(first);
+
+  const auto observation = lineageObservation(
+      101U, 202U, 1U, 1.0, 1.1, 0.0);
+  const auto decision = authority.update(lineageInput(
+      1.1, HookLoadState::EMPTY, 4.0, 0.40, 202U,
+      &observation));
+  ASSERT_EQ(decision.group_diagnostics.size(), 1U);
+  EXPECT_TRUE(decision.group_diagnostics.front().lineage_ambiguous);
+  EXPECT_FALSE(decision.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_NE(decision.group_diagnostics.front().association,
+            CargoCandidateAssociationState::MATCHED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     FamilyRescueCannotBypassExactGroupCompetitionForHistory) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(lineageInput(
+      1.0, HookLoadState::EMPTY, 0.0, 0.40, 101U));
+
+  CargoPhysicalIdentityInput current;
+  current.pipeline_stamp_sec = 1.1;
+  current.lifecycle_id = 7U;
+  current.hook_role = HookLoadSignalRole::REQUIRED;
+  current.gravity_valid = true;
+  current.gravity_state = HookLoadState::EMPTY;
+  auto exact_a = group(201U, 1.1, 0.02, 0.40, {201U});
+  auto exact_b = group(301U, 1.1, 0.06, 0.40, {301U});
+  auto lineage_group = group(202U, 1.1, 2.0, 0.40, {202U});
+  exact_a.frame_group_id = 1U;
+  exact_b.frame_group_id = 2U;
+  lineage_group.frame_group_id = 3U;
+  current.groups = {exact_a, exact_b, lineage_group};
+  current.lineage_observations.push_back(lineageObservation(
+      101U, 202U, 3U, 1.0, 1.1, 0.05));
+
+  const auto decision = authority.update(current);
+  ASSERT_EQ(decision.group_diagnostics.size(), 3U);
+  const auto& diagnostic = decision.group_diagnostics[2U];
+  EXPECT_TRUE(diagnostic.lineage_attempted);
+  EXPECT_TRUE(diagnostic.lineage_ambiguous);
+  EXPECT_FALSE(diagnostic.lineage_rescue_used);
+  EXPECT_NE(diagnostic.association,
+            CargoCandidateAssociationState::MATCHED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     FamilyRescueRequiresCurrentComponentInExactSeedGroup) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(lineageInput(
+      1.0, HookLoadState::EMPTY, 0.0, 0.40, 101U));
+  auto observation = lineageObservation(
+      101U, 999U, 1U, 1.0, 1.1, 0.05);
+  const auto decision = authority.update(lineageInput(
+      1.1, HookLoadState::EMPTY, 2.0, 0.40, 202U,
+      &observation));
+  ASSERT_EQ(decision.group_diagnostics.size(), 1U);
+  EXPECT_FALSE(decision.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_NE(decision.group_diagnostics.front().association,
+            CargoCandidateAssociationState::MATCHED);
 }
 
 }  // namespace

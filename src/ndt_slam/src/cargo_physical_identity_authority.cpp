@@ -305,6 +305,8 @@ const char* cargoPhysicalAssociationModeName(
       return "ANCHOR_CONTINUITY";
     case CargoPhysicalAssociationMode::SUPPORT_OVERLAP_CONTINUITY:
       return "SUPPORT_OVERLAP_CONTINUITY";
+    case CargoPhysicalAssociationMode::COMPONENT_LINEAGE_CONTINUITY:
+      return "COMPONENT_LINEAGE_CONTINUITY";
     case CargoPhysicalAssociationMode::NEW_HISTORY: return "NEW_HISTORY";
   }
   return "INVALID";
@@ -1054,6 +1056,220 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     }
   }
 
+  // The exact current-group association above has absolute priority.  A
+  // component-lineage observation may only rescue an otherwise-unmatched
+  // current group to one already-existing history.  It cannot create a
+  // history, rank competing histories, or replace exact product evidence.
+  std::vector<const CargoIdentitySupportLineageObservation*> group_lineage(
+      input.groups.size(), nullptr);
+  std::vector<bool> history_claimed_by_exact(histories_.size(), false);
+  std::vector<bool> history_has_exact_feasible(histories_.size(), false);
+  for (const Pair& pair : pairs) {
+    if (pair.feasible) {
+      history_has_exact_feasible[pair.history] = true;
+    }
+  }
+  for (const int matched_history : group_match) {
+    if (matched_history >= 0) {
+      history_claimed_by_exact[static_cast<std::size_t>(matched_history)] =
+          true;
+    }
+  }
+
+  struct LineageProposal {
+    std::size_t group = 0U;
+    std::size_t history = 0U;
+    Pair* pair = nullptr;
+    const CargoIdentitySupportLineageObservation* observation = nullptr;
+  };
+  std::vector<LineageProposal> lineage_proposals;
+  for (const auto& observation : input.lineage_observations) {
+    if (!observation.valid ||
+        observation.state != CargoIdentityLineageState::MATCHED) {
+      continue;
+    }
+    std::size_t group_index = input.groups.size();
+    for (std::size_t gi = 0U; gi < input.groups.size(); ++gi) {
+      if (input.groups[gi].frame_group_id ==
+          observation.exact_seed_frame_group_id) {
+        if (group_index != input.groups.size()) {
+          group_index = input.groups.size();
+          break;
+        }
+        group_index = gi;
+      }
+    }
+    if (group_index >= input.groups.size()) continue;
+
+    auto& diagnostic = decision_.group_diagnostics[group_index];
+    diagnostic.lineage_attempted = true;
+    diagnostic.lineage_previous_component_id =
+        observation.previous_component_id;
+    diagnostic.lineage_current_component_id = observation.current_component_id;
+    const auto& exact_group = input.groups[group_index];
+    const bool current_component_belongs_to_exact_seed =
+        std::find(exact_group.member_component_ids.begin(),
+                  exact_group.member_component_ids.end(),
+                  observation.current_component_id) !=
+        exact_group.member_component_ids.end();
+    const bool observation_contract_valid =
+        current_component_belongs_to_exact_seed &&
+        std::abs(observation.source_stamp_sec -
+                 exact_group.descriptor.stamp_sec) <= kEpsilon &&
+        observation.robust_xy_center.allFinite() &&
+        observation.robust_xy_extent.allFinite() &&
+        (observation.robust_xy_extent.array() > 0.0).all() &&
+        std::isfinite(observation.base_step_m) &&
+        observation.base_step_m <= config_.maximum_xy_step_m + kEpsilon &&
+        std::isfinite(observation.map_step_m) &&
+        observation.map_step_m > config_.maximum_xy_step_m + kEpsilon &&
+        std::isfinite(observation.extent_step) &&
+        observation.extent_step <=
+            config_.maximum_size_relative_step + kEpsilon;
+    if (!observation_contract_valid) continue;
+    if (group_match[group_index] >= 0) {
+      diagnostic.lineage_exact_path_won = true;
+      continue;
+    }
+    if (input.groups[group_index].group_ambiguous ||
+        group_ambiguous[group_index]) {
+      diagnostic.lineage_ambiguous = true;
+      continue;
+    }
+
+    std::vector<std::size_t> candidate_histories;
+    for (std::size_t hi = 0U; hi < histories_.size(); ++hi) {
+      const History& history = histories_[hi];
+      if (std::abs(history.last_lineage_source_stamp_sec -
+                   observation.previous_source_stamp_sec) > kEpsilon) {
+        continue;
+      }
+      if (std::find(history.last_lineage_component_ids.begin(),
+                    history.last_lineage_component_ids.end(),
+                    observation.previous_component_id) ==
+          history.last_lineage_component_ids.end()) {
+        continue;
+      }
+      // Any exact-feasible current group keeps absolute priority, including
+      // the case where multiple exact groups make the reciprocal result
+      // ambiguous and therefore leave the history formally unclaimed.
+      if (history_claimed_by_exact[hi] ||
+          history_has_exact_feasible[hi]) {
+        diagnostic.lineage_ambiguous = true;
+        continue;
+      }
+      candidate_histories.push_back(hi);
+    }
+    if (candidate_histories.size() != 1U) {
+      if (candidate_histories.size() > 1U) {
+        diagnostic.lineage_ambiguous = true;
+      }
+      continue;
+    }
+
+    const std::size_t history_index = candidate_histories.front();
+    Pair* pair = nullptr;
+    for (Pair& candidate : pairs) {
+      if (candidate.group == group_index &&
+          candidate.history == history_index) {
+        pair = &candidate;
+        break;
+      }
+    }
+    if (!pair || (pair->reject_reason != "XY_GATE" &&
+                  pair->reject_reason != "EXTENT_GATE")) {
+      continue;
+    }
+
+    const auto& group = input.groups[group_index];
+    const auto& previous = histories_[history_index].last_descriptor;
+    const double dt = group.descriptor.stamp_sec -
+        histories_[history_index].last_stamp_sec;
+    if (!(dt > 0.0) || dt > config_.maximum_observation_gap_sec) continue;
+
+    // Family/lineage has no vertical authority.  Any vertical check remains
+    // sourced exclusively from the current exact group and the existing
+    // history.  CONTINUITY_ONLY performs its existing post-unique RAW-ROI Z
+    // check below.
+    const bool requires_post_unique_z =
+        group.descriptor.vertical_mode ==
+            CargoGroupVerticalMode::CONTINUITY_ONLY;
+    const double z_limit = config_.maximum_z_speed_mps * dt +
+        config_.z_step_margin_m +
+        group.descriptor.vertical_uncertainty_m +
+        previous.vertical_uncertainty_m;
+    const double dz = std::abs(group.descriptor.physical_vertical_z -
+                               previous.physical_vertical_z);
+    if (!requires_post_unique_z && dz > z_limit) continue;
+    if (!requires_post_unique_z) {
+      const double current_z_extent = group.descriptor.aggregate_extent.z();
+      const double previous_z_extent = previous.aggregate_extent.z();
+      const double denominator = std::max(
+          std::max(std::abs(current_z_extent),
+                   std::abs(previous_z_extent)), kEpsilon);
+      if (std::abs(current_z_extent - previous_z_extent) / denominator >
+          config_.maximum_size_relative_step) {
+        continue;
+      }
+    }
+
+    diagnostic.lineage_xy_before_m = pair->xy;
+    diagnostic.lineage_extent_before = pair->extent_step;
+    lineage_proposals.push_back(LineageProposal{
+        group_index, history_index, pair, &observation});
+  }
+
+  // Family evidence is rejection-only under competition.  Do not rank or
+  // choose among multiple lineage paths even if one has a lower cost.
+  for (const LineageProposal& proposal : lineage_proposals) {
+    const std::size_t same_group = static_cast<std::size_t>(std::count_if(
+        lineage_proposals.begin(), lineage_proposals.end(),
+        [&](const LineageProposal& other) {
+          return other.group == proposal.group;
+        }));
+    const std::size_t same_history = static_cast<std::size_t>(std::count_if(
+        lineage_proposals.begin(), lineage_proposals.end(),
+        [&](const LineageProposal& other) {
+          return other.history == proposal.history;
+        }));
+    auto& diagnostic = decision_.group_diagnostics[proposal.group];
+    if (same_group != 1U || same_history != 1U) {
+      diagnostic.lineage_ambiguous = true;
+      group_ambiguous[proposal.group] = true;
+      continue;
+    }
+
+    Pair& pair = *proposal.pair;
+    const auto& observation = *proposal.observation;
+    pair.xy = observation.base_step_m;
+    pair.support_xy_separation = observation.base_step_m;
+    pair.extent_step = observation.extent_step;
+    pair.xy_cost = observation.base_step_m /
+        config_.maximum_xy_step_m;
+    pair.extent_cost = observation.extent_step;
+    pair.z_cost = pair.requires_post_unique_z
+        ? 0.0 : pair.dz /
+            std::max(config_.maximum_z_speed_mps *
+                         (input.groups[proposal.group].descriptor.stamp_sec -
+                          histories_[proposal.history].last_stamp_sec) +
+                     config_.z_step_margin_m +
+                     input.groups[proposal.group].descriptor.
+                         vertical_uncertainty_m +
+                     histories_[proposal.history].last_descriptor.
+                         vertical_uncertainty_m,
+                     kEpsilon);
+    pair.cost = pair.xy_cost + pair.extent_cost + pair.z_cost;
+    pair.association_mode =
+        CargoPhysicalAssociationMode::COMPONENT_LINEAGE_CONTINUITY;
+    pair.reject_reason = "NONE";
+    pair.feasible = true;
+    group_match[proposal.group] = static_cast<int>(proposal.history);
+    group_lineage[proposal.group] = proposal.observation;
+    diagnostic.lineage_rescue_used = true;
+    diagnostic.lineage_xy_after_m = pair.xy;
+    diagnostic.lineage_extent_after = pair.extent_step;
+  }
+
   // CONTINUITY_ONLY never selects a history by recovered Z. Reciprocal
   // uniqueness is established from current-frame XY/extent evidence first;
   // only that already-unique pair may use the prior supported footprint to
@@ -1125,6 +1341,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       diagnostic.association_reject_reason = "Z_GATE";
       diagnostic.new_history_reason = "Z_GATE";
       group_match[gi] = -1;
+      group_lineage[gi] = nullptr;
     }
   }
 
@@ -1192,9 +1409,34 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     group_history_ids[gi] = history->id;
     diagnostic.matched_history_id = history->id;
     history->association_ambiguous = false;
-    history->last_descriptor = group.descriptor;
+    CargoPhysicalGroupDescriptor history_descriptor = group.descriptor;
+    if (group_lineage[gi]) {
+      const auto& lineage = *group_lineage[gi];
+      history_descriptor.stable_anchor.x() = lineage.robust_xy_center.x();
+      history_descriptor.stable_anchor.y() = lineage.robust_xy_center.y();
+      history_descriptor.robust_xy_center = lineage.robust_xy_center;
+      history_descriptor.robust_xy_extent = lineage.robust_xy_extent;
+      history_descriptor.robust_x05 = lineage.robust_x05;
+      history_descriptor.robust_x95 = lineage.robust_x95;
+      history_descriptor.robust_y05 = lineage.robust_y05;
+      history_descriptor.robust_y95 = lineage.robust_y95;
+      history_descriptor.aggregate_extent.x() =
+          lineage.robust_xy_extent.x();
+      history_descriptor.aggregate_extent.y() =
+          lineage.robust_xy_extent.y();
+    }
+    history->last_descriptor = history_descriptor;
     history->last_representative_center = group.representative.center;
     history->last_stamp_sec = group.descriptor.stamp_sec;
+    if (group_lineage[gi]) {
+      history->last_lineage_component_ids = {
+          group_lineage[gi]->current_component_id};
+      history->last_lineage_source_stamp_sec =
+          group_lineage[gi]->source_stamp_sec;
+    } else {
+      history->last_lineage_component_ids = group.member_component_ids;
+      history->last_lineage_source_stamp_sec = group.descriptor.stamp_sec;
+    }
 
     const bool supported = group.descriptor.vertical_mode ==
         CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
