@@ -57,7 +57,48 @@ double extentStep(const CargoIdentityComponentDescriptor& previous,
   return maximum;
 }
 
+double egoXyStep(const CargoIdentityComponentLineageFrame& previous,
+                 const CargoIdentityComponentLineageFrame& current) {
+  return (current.pose_map_base.block<2, 1>(0, 3) -
+          previous.pose_map_base.block<2, 1>(0, 3)).norm();
+}
+
+CargoIdentityMotionObservabilityState motionObservability(
+    double ego_xy_step_m, double maximum_xy_step_m,
+    bool gravity_valid, HookLoadState gravity_state) {
+  if (ego_xy_step_m > maximum_xy_step_m + kEpsilon) {
+    return CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE;
+  }
+  if (!gravity_valid) {
+    return CargoIdentityMotionObservabilityState::UNKNOWN_FAIL_CLOSED;
+  }
+  if (gravity_state == HookLoadState::LOADED) {
+    return CargoIdentityMotionObservabilityState::LOAD_PRESENT_UNOBSERVABLE;
+  }
+  if (gravity_state == HookLoadState::EMPTY) {
+    return CargoIdentityMotionObservabilityState::IDLE_ZERO_LOAD;
+  }
+  return CargoIdentityMotionObservabilityState::UNKNOWN_FAIL_CLOSED;
+}
+
 }  // namespace
+
+const char* cargoIdentityMotionObservabilityStateName(
+    CargoIdentityMotionObservabilityState state) noexcept {
+  switch (state) {
+    case CargoIdentityMotionObservabilityState::UNKNOWN_FAIL_CLOSED:
+      return "UNKNOWN_FAIL_CLOSED";
+    case CargoIdentityMotionObservabilityState::IDLE_ZERO_LOAD:
+      return "IDLE_ZERO_LOAD";
+    case CargoIdentityMotionObservabilityState::LOAD_PRESENT_UNOBSERVABLE:
+      return "LOAD_PRESENT_UNOBSERVABLE";
+    case CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE:
+      return "EGO_MOTION_OBSERVABLE";
+    case CargoIdentityMotionObservabilityState::WORLD_STATIC_PROVEN:
+      return "WORLD_STATIC_PROVEN";
+  }
+  return "UNKNOWN_FAIL_CLOSED";
+}
 
 CargoIdentityComponentLineage::CargoIdentityComponentLineage(
     const CargoIdentityComponentLineageConfig& config) {
@@ -92,6 +133,8 @@ void CargoIdentityComponentLineage::reset(const std::string& reason) {
 CargoIdentityComponentLineageResult CargoIdentityComponentLineage::update(
     const CargoIdentityComponentLineageFrame& frame) {
   CargoIdentityComponentLineageResult result;
+  result.gravity_valid = frame.gravity_valid;
+  result.gravity_state = frame.gravity_state;
   if (!finiteFrame(frame)) {
     reset("invalid_current_frame");
     result.reset_reason = reset_reason_;
@@ -139,6 +182,14 @@ CargoIdentityComponentLineageResult CargoIdentityComponentLineage::update(
     return result;
   }
 
+  result.ego_xy_step_m = egoXyStep(previous_, current);
+  result.motion_observability_state = motionObservability(
+      result.ego_xy_step_m, config_.maximum_xy_step_m,
+      current.gravity_valid, current.gravity_state);
+  result.load_present_unobservable =
+      result.motion_observability_state ==
+      CargoIdentityMotionObservabilityState::LOAD_PRESENT_UNOBSERVABLE;
+
   struct Pair {
     std::size_t previous = 0U;
     std::size_t current = 0U;
@@ -181,9 +232,14 @@ CargoIdentityComponentLineageResult CargoIdentityComponentLineage::update(
   std::vector<bool> current_ambiguous(current.components.size(), false);
   std::vector<bool> previous_ambiguous(previous_.components.size(), false);
 
-  const auto eligible = [](const Pair& pair) {
-    return pair.base_feasible && !pair.world_static_feasible &&
-        pair.extent_feasible;
+  const auto eligible = [&](const Pair& pair) {
+    if (!pair.base_feasible || !pair.extent_feasible) return false;
+    if (result.motion_observability_state ==
+        CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE) {
+      return !pair.world_static_feasible;
+    }
+    return result.motion_observability_state ==
+        CargoIdentityMotionObservabilityState::LOAD_PRESENT_UNOBSERVABLE;
   };
   for (std::size_t ci = 0U; ci < current.components.size(); ++ci) {
     double best = std::numeric_limits<double>::infinity();
@@ -224,7 +280,9 @@ CargoIdentityComponentLineageResult CargoIdentityComponentLineage::update(
 
   for (const Pair& pair : pairs) {
     if (!pair.base_feasible || !pair.extent_feasible) continue;
-    if (pair.world_static_feasible) {
+    if (result.motion_observability_state ==
+            CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE &&
+        pair.world_static_feasible) {
       ++result.world_static_veto_count;
       continue;
     }
@@ -259,7 +317,10 @@ CargoIdentityComponentLineageResult CargoIdentityComponentLineage::update(
     observation.robust_y95 = component.robust_y95;
     observation.base_step_m = pair.base_step;
     observation.map_step_m = pair.map_step;
+    observation.ego_xy_step_m = result.ego_xy_step_m;
     observation.extent_step = pair.extent_step;
+    observation.motion_observability_state =
+        result.motion_observability_state;
     result.observations.push_back(std::move(observation));
   }
   result.match_count = result.observations.size();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ndt_slam/avoidance_map_mutation.hpp"
+#include "ndt_slam/hook_load_state_filter.hpp"
 #include "ndt_slam/pose_authority_identity.hpp"
 
 #include <Eigen/Core>
@@ -33,6 +34,20 @@ enum class CargoIdentityLineageState : std::uint8_t {
   WORLD_STATIC_VETO,
 };
 
+// This state describes whether the base/map comparison can distinguish a
+// carried component from a world-static component.  It is not Cargo identity,
+// vertical, ownership, safety or map authority.
+enum class CargoIdentityMotionObservabilityState : std::uint8_t {
+  UNKNOWN_FAIL_CLOSED = 0,
+  IDLE_ZERO_LOAD,
+  LOAD_PRESENT_UNOBSERVABLE,
+  EGO_MOTION_OBSERVABLE,
+  WORLD_STATIC_PROVEN,
+};
+
+const char* cargoIdentityMotionObservabilityStateName(
+    CargoIdentityMotionObservabilityState state) noexcept;
+
 // A temporal correspondence between accepted components in two adjacent
 // source frames.  "Lineage" is not an intra-frame component merge and never
 // carries vertical, point, exact-owner, geometry or safety authority.
@@ -52,7 +67,10 @@ struct CargoIdentitySupportLineageObservation {
   double robust_y95 = 0.0;
   double base_step_m = 0.0;
   double map_step_m = 0.0;
+  double ego_xy_step_m = 0.0;
   double extent_step = 0.0;
+  CargoIdentityMotionObservabilityState motion_observability_state =
+      CargoIdentityMotionObservabilityState::UNKNOWN_FAIL_CLOSED;
 };
 
 struct CargoIdentityComponentLineageConfig {
@@ -68,6 +86,8 @@ struct CargoIdentityComponentLineageFrame {
   SourceFrameIdentity source_frame_identity;
   PoseAuthorityIdentity pose_identity;
   Eigen::Matrix4d pose_map_base = Eigen::Matrix4d::Identity();
+  bool gravity_valid = false;
+  HookLoadState gravity_state = HookLoadState::UNKNOWN;
   std::vector<CargoIdentityComponentDescriptor> components;
 };
 
@@ -77,6 +97,12 @@ struct CargoIdentityComponentLineageResult {
   std::size_t match_count = 0U;
   std::size_t ambiguous_count = 0U;
   std::size_t world_static_veto_count = 0U;
+  double ego_xy_step_m = 0.0;
+  bool gravity_valid = false;
+  HookLoadState gravity_state = HookLoadState::UNKNOWN;
+  CargoIdentityMotionObservabilityState motion_observability_state =
+      CargoIdentityMotionObservabilityState::UNKNOWN_FAIL_CLOSED;
+  bool load_present_unobservable = false;
   std::string reset_reason = "none";
 };
 

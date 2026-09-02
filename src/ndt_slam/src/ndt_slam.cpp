@@ -14956,6 +14956,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
         lineage_frame.source_frame_identity = *source_frame_identity;
         lineage_frame.pose_identity = frame_context->pose_identity;
         lineage_frame.pose_map_base = frame_context->runtime_pose.matrix();
+        lineage_frame.gravity_valid = input.gravity_valid;
+        lineage_frame.gravity_state = input.gravity_state;
         lineage_frame.components = detection.identity_lineage_components;
         integrated_identity_lineage_result_ =
             cargo_identity_component_lineage_.update(lineage_frame);
@@ -15037,6 +15039,10 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "lineage_xy_after,lineage_extent_before,"
                 << "lineage_extent_after,lineage_pair_count,"
                 << "lineage_match_count,lineage_ambiguous_count,"
+                << "lineage_ego_xy_step,lineage_gravity_valid,"
+                << "lineage_gravity_state,"
+                << "lineage_motion_observability_state,"
+                << "lineage_load_present_unobservable,"
                 << "lineage_world_static_veto_count,lineage_reset_reason,"
                 << "identity_state\n";
         }
@@ -15155,6 +15161,17 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << integrated_identity_lineage_result_.pair_count << ','
                 << integrated_identity_lineage_result_.match_count << ','
                 << integrated_identity_lineage_result_.ambiguous_count << ','
+                << integrated_identity_lineage_result_.ego_xy_step_m << ','
+                << (integrated_identity_lineage_result_.gravity_valid
+                        ? 1 : 0) << ','
+                << static_cast<int>(
+                       integrated_identity_lineage_result_.gravity_state)
+                << ','
+                << cargoIdentityMotionObservabilityStateName(
+                       integrated_identity_lineage_result_
+                           .motion_observability_state) << ','
+                << (integrated_identity_lineage_result_
+                        .load_present_unobservable ? 1 : 0) << ','
                 << integrated_identity_lineage_result_
                        .world_static_veto_count << ','
                 << integrated_identity_lineage_result_.reset_reason << ','

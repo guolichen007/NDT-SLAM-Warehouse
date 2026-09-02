@@ -50,7 +50,9 @@ CargoIdentityComponentLineageFrame frame(
     std::vector<CargoIdentityComponentDescriptor> components,
     std::uint64_t lifecycle = 7U,
     std::uint64_t pose_generation = 1U,
-    std::uint64_t time_epoch = 1U) {
+    std::uint64_t time_epoch = 1U,
+    bool gravity_valid = false,
+    HookLoadState gravity_state = HookLoadState::UNKNOWN) {
   CargoIdentityComponentLineageFrame result;
   result.source_stamp_sec = stamp;
   result.lifecycle_id = lifecycle;
@@ -58,6 +60,8 @@ CargoIdentityComponentLineageFrame frame(
       sourceIdentity(index, stamp, time_epoch);
   result.pose_identity = poseIdentity(pose_generation);
   result.pose_map_base(0, 3) = pose_x;
+  result.gravity_valid = gravity_valid;
+  result.gravity_state = gravity_state;
   result.components = std::move(components);
   return result;
 }
@@ -112,14 +116,90 @@ TEST(CargoIdentityComponentLineageTest,
 }
 
 TEST(CargoIdentityComponentLineageTest,
-     WorldStaticAndBaseAttachedBothFeasibleIsAmbiguous) {
+     LowEgoUnknownLoadFailsClosedWithoutClaimingWorldStatic) {
   CargoIdentityComponentLineage lineage;
   lineage.update(frame(
       1U, 1.0, 0.0, {component(1U, 1U, 1.0, 0.0)}));
   const auto result = lineage.update(frame(
       2U, 1.1, 0.05, {component(2U, 1U, 1.1, 0.02)}));
   EXPECT_TRUE(result.observations.empty());
+  EXPECT_EQ(result.world_static_veto_count, 0U);
+  EXPECT_EQ(result.motion_observability_state,
+            CargoIdentityMotionObservabilityState::UNKNOWN_FAIL_CLOSED);
+}
+
+TEST(CargoIdentityComponentLineageTest,
+     LoadedLowEgoIsNotWorldStaticProven) {
+  CargoIdentityComponentLineage lineage;
+  lineage.update(frame(
+      1U, 1.0, 0.0, {component(1U, 1U, 1.0, 0.0)},
+      7U, 1U, 1U, true, HookLoadState::LOADED));
+  const auto result = lineage.update(frame(
+      2U, 1.1, 0.05, {component(2U, 1U, 1.1, 0.02)},
+      7U, 1U, 1U, true, HookLoadState::LOADED));
+  ASSERT_EQ(result.observations.size(), 1U);
+  EXPECT_EQ(result.motion_observability_state,
+            CargoIdentityMotionObservabilityState::
+                LOAD_PRESENT_UNOBSERVABLE);
+  EXPECT_TRUE(result.load_present_unobservable);
+  EXPECT_EQ(result.world_static_veto_count, 0U);
+  EXPECT_EQ(result.observations.front().motion_observability_state,
+            CargoIdentityMotionObservabilityState::
+                LOAD_PRESENT_UNOBSERVABLE);
+}
+
+TEST(CargoIdentityComponentLineageTest,
+     ZeroLoadLowEgoCannotInventLineageCargo) {
+  CargoIdentityComponentLineage lineage;
+  lineage.update(frame(
+      1U, 1.0, 0.0, {component(1U, 1U, 1.0, 0.0)},
+      7U, 1U, 1U, true, HookLoadState::EMPTY));
+  const auto result = lineage.update(frame(
+      2U, 1.1, 0.05, {component(2U, 1U, 1.1, 0.02)},
+      7U, 1U, 1U, true, HookLoadState::EMPTY));
+  EXPECT_TRUE(result.observations.empty());
+  EXPECT_EQ(result.motion_observability_state,
+            CargoIdentityMotionObservabilityState::IDLE_ZERO_LOAD);
+}
+
+TEST(CargoIdentityComponentLineageTest,
+     UnknownLoadLowEgoFailsClosed) {
+  CargoIdentityComponentLineage lineage;
+  lineage.update(frame(
+      1U, 1.0, 0.0, {component(1U, 1U, 1.0, 0.0)}));
+  const auto result = lineage.update(frame(
+      2U, 1.1, 0.05, {component(2U, 1U, 1.1, 0.02)}));
+  EXPECT_TRUE(result.observations.empty());
+  EXPECT_EQ(result.motion_observability_state,
+            CargoIdentityMotionObservabilityState::UNKNOWN_FAIL_CLOSED);
+}
+
+TEST(CargoIdentityComponentLineageTest,
+     ObservableWorldStaticStillVetoed) {
+  CargoIdentityComponentLineage lineage;
+  lineage.update(frame(
+      1U, 1.0, 0.0, {component(1U, 1U, 1.0, 0.0)}));
+  const auto result = lineage.update(frame(
+      2U, 1.1, 0.40, {component(2U, 1U, 1.1, -0.20)}));
+  EXPECT_TRUE(result.observations.empty());
+  EXPECT_EQ(result.motion_observability_state,
+            CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE);
   EXPECT_GT(result.world_static_veto_count, 0U);
+}
+
+TEST(CargoIdentityComponentLineageTest,
+     LoadSignalCannotSelectComponent) {
+  CargoIdentityComponentLineage lineage;
+  lineage.update(frame(
+      1U, 1.0, 0.0,
+      {component(10U, 1U, 1.0, 0.00),
+       component(11U, 2U, 1.0, 0.08)},
+      7U, 1U, 1U, true, HookLoadState::LOADED));
+  const auto result = lineage.update(frame(
+      2U, 1.1, 0.05, {component(20U, 1U, 1.1, 0.04)},
+      7U, 1U, 1U, true, HookLoadState::LOADED));
+  EXPECT_TRUE(result.observations.empty());
+  EXPECT_GT(result.ambiguous_count, 0U);
 }
 
 TEST(CargoIdentityComponentLineageTest,

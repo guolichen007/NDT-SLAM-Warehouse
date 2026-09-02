@@ -1112,6 +1112,23 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
                   exact_group.member_component_ids.end(),
                   observation.current_component_id) !=
         exact_group.member_component_ids.end();
+    const bool observable_ego_contract =
+        observation.motion_observability_state ==
+            CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE &&
+        std::isfinite(observation.ego_xy_step_m) &&
+        observation.ego_xy_step_m >
+            config_.maximum_xy_step_m + kEpsilon &&
+        std::isfinite(observation.map_step_m) &&
+        observation.map_step_m > config_.maximum_xy_step_m + kEpsilon;
+    const bool loaded_low_ego_contract =
+        observation.motion_observability_state ==
+            CargoIdentityMotionObservabilityState::
+                LOAD_PRESENT_UNOBSERVABLE &&
+        std::isfinite(observation.ego_xy_step_m) &&
+        observation.ego_xy_step_m <=
+            config_.maximum_xy_step_m + kEpsilon &&
+        std::isfinite(observation.map_step_m) && input.gravity_valid &&
+        input.gravity_state == HookLoadState::LOADED;
     const bool observation_contract_valid =
         current_component_belongs_to_exact_seed &&
         std::abs(observation.source_stamp_sec -
@@ -1121,8 +1138,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         (observation.robust_xy_extent.array() > 0.0).all() &&
         std::isfinite(observation.base_step_m) &&
         observation.base_step_m <= config_.maximum_xy_step_m + kEpsilon &&
-        std::isfinite(observation.map_step_m) &&
-        observation.map_step_m > config_.maximum_xy_step_m + kEpsilon &&
+        (observable_ego_contract || loaded_low_ego_contract) &&
         std::isfinite(observation.extent_step) &&
         observation.extent_step <=
             config_.maximum_size_relative_step + kEpsilon;
