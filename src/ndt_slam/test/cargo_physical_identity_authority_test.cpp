@@ -1787,6 +1787,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
             CargoPhysicalAssociationMode::ANCHOR_CONTINUITY);
   EXPECT_TRUE(decision.group_diagnostics.front().lineage_exact_path_won);
   EXPECT_FALSE(decision.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_EQ(decision.group_diagnostics.front().lineage_reject_stage,
+            CargoLineageRejectStage::EXACT_PATH_WON);
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
@@ -2106,10 +2108,129 @@ TEST(CargoPhysicalIdentityAuthorityTest,
               0.2, 1.0e-9);
   EXPECT_EQ(bridged.group_diagnostics.front().matched_history_id,
             original_history_id);
+  EXPECT_EQ(bridged.group_diagnostics.front().lineage_reject_stage,
+            CargoLineageRejectStage::SELECTED);
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
-     LineageOlderFallbackCompetitionFailsClosed) {
+     OlderLineageCanBindHistoryAfterInterveningExactUpdate) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto first = authority.update(lineageInput(
+      1.0, HookLoadState::EMPTY, 0.0, 0.40, 101U));
+  ASSERT_EQ(first.group_diagnostics.size(), 1U);
+  const std::uint64_t history_id =
+      first.group_diagnostics.front().matched_history_id;
+
+  const auto intervening = authority.update(lineageInput(
+      1.1, HookLoadState::EMPTY, 0.05, 0.40, 202U));
+  ASSERT_EQ(intervening.group_diagnostics.size(), 1U);
+  ASSERT_EQ(intervening.group_diagnostics.front().matched_history_id,
+            history_id);
+  ASSERT_EQ(intervening.group_diagnostics.front().association,
+            CargoCandidateAssociationState::MATCHED);
+
+  auto older = lineageObservation(
+      101U, 303U, 1U, 1.0, 1.2, 0.10, 0.40, 0.40,
+      CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE,
+      2.0, 2.0);
+  older.source_frame_offset = 2U;
+  const auto rescued = authority.update(lineageInput(
+      1.2, HookLoadState::EMPTY, 2.0, 0.40, 303U, &older));
+  ASSERT_EQ(rescued.group_diagnostics.size(), 1U);
+  const auto& diagnostic = rescued.group_diagnostics.front();
+  EXPECT_EQ(diagnostic.association, CargoCandidateAssociationState::MATCHED);
+  EXPECT_EQ(diagnostic.association_mode,
+            CargoPhysicalAssociationMode::COMPONENT_LINEAGE_CONTINUITY);
+  EXPECT_EQ(diagnostic.matched_history_id, history_id);
+  EXPECT_TRUE(diagnostic.lineage_rescue_used);
+  EXPECT_EQ(diagnostic.lineage_previous_component_id, 101U);
+  EXPECT_EQ(diagnostic.lineage_source_frame_offset, 2U);
+  EXPECT_EQ(diagnostic.lineage_reject_stage,
+            CargoLineageRejectStage::SELECTED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     RecentHistoryProvenanceBoundedToThreeFrames) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(lineageInput(
+      1.0, HookLoadState::EMPTY, 0.00, 0.40, 101U));
+  authority.update(lineageInput(
+      1.1, HookLoadState::EMPTY, 0.05, 0.40, 202U));
+  authority.update(lineageInput(
+      1.2, HookLoadState::EMPTY, 0.10, 0.40, 303U));
+
+  auto oldest_retained = lineageObservation(
+      101U, 404U, 1U, 1.0, 1.3, 0.15, 0.40, 0.40,
+      CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE,
+      3.0, 3.0);
+  oldest_retained.source_frame_offset = 3U;
+  const auto retained = authority.update(lineageInput(
+      1.3, HookLoadState::EMPTY, 2.0, 0.40, 404U,
+      &oldest_retained));
+  ASSERT_TRUE(retained.group_diagnostics.front().lineage_rescue_used);
+
+  auto evicted = lineageObservation(
+      101U, 505U, 1U, 1.0, 1.4, 0.20, 0.40, 0.40,
+      CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE,
+      4.0, 4.0);
+  // Keep the observation contract valid to exercise bounded History storage;
+  // the real matcher never emits an offset greater than three.
+  evicted.source_frame_offset = 3U;
+  const auto rejected = authority.update(lineageInput(
+      1.4, HookLoadState::EMPTY, 4.0, 0.40, 505U, &evicted));
+  ASSERT_EQ(rejected.group_diagnostics.size(), 1U);
+  EXPECT_FALSE(rejected.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_EQ(rejected.group_diagnostics.front().lineage_reject_stage,
+            CargoLineageRejectStage::HISTORY_PROVENANCE_NOT_FOUND);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     RecentHistoryProvenanceExpiresByObservationGap) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  authority.update(lineageInput(
+      1.0, HookLoadState::EMPTY, 0.0, 0.40, 101U));
+  auto expired = lineageObservation(
+      101U, 202U, 1U, 1.0, 1.6, 0.05, 0.40, 0.40,
+      CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE,
+      2.0, 2.0);
+  expired.source_frame_offset = 2U;
+  const auto rejected = authority.update(lineageInput(
+      1.6, HookLoadState::EMPTY, 2.0, 0.40, 202U, &expired));
+  ASSERT_EQ(rejected.group_diagnostics.size(), 1U);
+  EXPECT_FALSE(rejected.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_EQ(rejected.group_diagnostics.front().lineage_reject_stage,
+            CargoLineageRejectStage::OBSERVATION_CONTRACT);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     OlderProvenanceCannotCrossLifecycle) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(lineageInput(
+      1.0, HookLoadState::EMPTY, 0.0, 0.40, 101U));
+  auto next_lifecycle = lineageInput(
+      1.1, HookLoadState::EMPTY, 0.05, 0.40, 202U);
+  next_lifecycle.lifecycle_id = 8U;
+  authority.update(next_lifecycle);
+
+  auto old_lifecycle = lineageObservation(
+      101U, 303U, 1U, 1.0, 1.2, 0.10, 0.40, 0.40,
+      CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE,
+      2.0, 2.0);
+  old_lifecycle.source_frame_offset = 2U;
+  auto current = lineageInput(
+      1.2, HookLoadState::EMPTY, 2.0, 0.40, 303U, &old_lifecycle);
+  current.lifecycle_id = 8U;
+  const auto rejected = authority.update(current);
+  ASSERT_EQ(rejected.group_diagnostics.size(), 1U);
+  EXPECT_FALSE(rejected.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_EQ(rejected.group_diagnostics.front().lineage_reject_stage,
+            CargoLineageRejectStage::HISTORY_PROVENANCE_NOT_FOUND);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     OlderProvenanceCannotBindCompetingHistories) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   CargoPhysicalIdentityInput first;
   first.pipeline_stamp_sec = 1.0;
@@ -2137,6 +2258,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   ASSERT_EQ(decision.group_diagnostics.size(), 1U);
   EXPECT_TRUE(decision.group_diagnostics.front().lineage_ambiguous);
   EXPECT_FALSE(decision.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_EQ(decision.group_diagnostics.front().lineage_reject_stage,
+            CargoLineageRejectStage::HISTORY_COMPETITION);
   EXPECT_NE(decision.group_diagnostics.front().association,
             CargoCandidateAssociationState::MATCHED);
 }
@@ -2157,6 +2280,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_EQ(decision.group_diagnostics.front().association,
             CargoCandidateAssociationState::NEW_HISTORY);
   EXPECT_FALSE(decision.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_EQ(decision.group_diagnostics.front().lineage_reject_stage,
+            CargoLineageRejectStage::HISTORY_PROVENANCE_NOT_FOUND);
   EXPECT_FALSE(decision.lift_confirmed);
 }
 

@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <string>
 #include <vector>
@@ -65,6 +66,18 @@ enum class CargoPreLiftReferenceState : std::uint8_t {
   CLOSED,
 };
 
+enum class CargoLineageRejectStage : std::uint8_t {
+  NOT_ATTEMPTED = 0,
+  OBSERVATION_CONTRACT,
+  EXACT_PATH_WON,
+  GROUP_AMBIGUOUS,
+  HISTORY_PROVENANCE_NOT_FOUND,
+  HISTORY_COMPETITION,
+  PAIR_NOT_XY_EXTENT,
+  VERTICAL_GATE,
+  SELECTED,
+};
+
 const char* cargoCandidateAssociationStateName(
     CargoCandidateAssociationState state) noexcept;
 const char* cargoPhysicalAssociationModeName(
@@ -79,6 +92,8 @@ const char* cargoVerticalEvidenceSourceName(
     CargoVerticalEvidenceSource source) noexcept;
 const char* cargoPreLiftReferenceStateName(
     CargoPreLiftReferenceState state) noexcept;
+const char* cargoLineageRejectStageName(
+    CargoLineageRejectStage stage) noexcept;
 
 struct CargoPhysicalIdentityConfig {
   double maximum_xy_step_m = 0.30;
@@ -250,6 +265,8 @@ struct CargoPhysicalGroupDiagnostic {
   double lineage_source_age_sec =
       std::numeric_limits<double>::quiet_NaN();
   std::uint64_t lineage_source_frame_offset = 0U;
+  CargoLineageRejectStage lineage_reject_stage =
+      CargoLineageRejectStage::NOT_ATTEMPTED;
   std::string association_reject_reason = "NO_HISTORY";
   std::string new_history_reason = "NO_HISTORY";
   bool validated_history_conflict = false;
@@ -367,6 +384,11 @@ class CargoPhysicalIdentityAuthority {
     double uncertainty_m = std::numeric_limits<double>::quiet_NaN();
   };
 
+  struct LineageProvenanceSnapshot {
+    double source_stamp_sec = 0.0;
+    std::vector<std::uint64_t> component_ids;
+  };
+
   struct History {
     std::uint64_t id = 0U;
     CargoPhysicalGroupDescriptor last_descriptor;
@@ -392,15 +414,17 @@ class CargoPhysicalIdentityAuthority {
     double last_supported_vertical_z = std::numeric_limits<double>::quiet_NaN();
     double last_supported_vertical_uncertainty_m = 0.20;
     CargoFootprintSnapshot last_supported_footprint;
-    // Frame-local component ids are retained for one source transition only.
-    // They are provenance from the exact product group, not a second Cargo id.
-    std::vector<std::uint64_t> last_lineage_component_ids;
-    double last_lineage_source_stamp_sec = 0.0;
+    // Bounded exact-component provenance for the same three source frames
+    // inspected by CargoIdentityComponentLineage.  This is not a tracker: it
+    // owns no points, pose, prediction, Cargo id, baseline, lift or geometry.
+    std::deque<LineageProvenanceSnapshot> recent_lineage_provenance;
     int lift_confirm_count = 0;
     bool lift_confirmed = false;
     double validation_stamp_sec = 0.0;
     bool association_ambiguous = false;
   };
+
+  static constexpr std::size_t kMaximumLineageProvenanceFrames = 3U;
 
   CargoPhysicalIdentityConfig config_;
   std::vector<History> histories_;

@@ -380,6 +380,31 @@ const char* cargoPreLiftReferenceStateName(
   return "INVALID";
 }
 
+const char* cargoLineageRejectStageName(
+    CargoLineageRejectStage stage) noexcept {
+  switch (stage) {
+    case CargoLineageRejectStage::NOT_ATTEMPTED:
+      return "NOT_ATTEMPTED";
+    case CargoLineageRejectStage::OBSERVATION_CONTRACT:
+      return "OBSERVATION_CONTRACT";
+    case CargoLineageRejectStage::EXACT_PATH_WON:
+      return "EXACT_PATH_WON";
+    case CargoLineageRejectStage::GROUP_AMBIGUOUS:
+      return "GROUP_AMBIGUOUS";
+    case CargoLineageRejectStage::HISTORY_PROVENANCE_NOT_FOUND:
+      return "HISTORY_PROVENANCE_NOT_FOUND";
+    case CargoLineageRejectStage::HISTORY_COMPETITION:
+      return "HISTORY_COMPETITION";
+    case CargoLineageRejectStage::PAIR_NOT_XY_EXTENT:
+      return "PAIR_NOT_XY_EXTENT";
+    case CargoLineageRejectStage::VERTICAL_GATE:
+      return "VERTICAL_GATE";
+    case CargoLineageRejectStage::SELECTED:
+      return "SELECTED";
+  }
+  return "INVALID";
+}
+
 std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
     const std::vector<CargoPhysicalCandidateObservation>& candidates,
     const std::vector<CargoPhysicalComponentObservation>& components,
@@ -1103,9 +1128,27 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
 
     auto& diagnostic = decision_.group_diagnostics[group_index];
     diagnostic.lineage_attempted = true;
-    diagnostic.lineage_previous_component_id =
-        observation.previous_component_id;
-    diagnostic.lineage_current_component_id = observation.current_component_id;
+    const bool newest_diagnostic_observation =
+        diagnostic.lineage_source_frame_offset == 0U ||
+        observation.source_frame_offset <
+            diagnostic.lineage_source_frame_offset;
+    if (newest_diagnostic_observation) {
+      diagnostic.lineage_previous_component_id =
+          observation.previous_component_id;
+      diagnostic.lineage_current_component_id =
+          observation.current_component_id;
+      diagnostic.lineage_source_age_sec = observation.source_age_sec;
+      diagnostic.lineage_source_frame_offset =
+          observation.source_frame_offset;
+      diagnostic.lineage_reject_stage =
+          CargoLineageRejectStage::OBSERVATION_CONTRACT;
+    }
+    const auto set_observation_reject_stage =
+        [&](CargoLineageRejectStage stage) {
+          if (newest_diagnostic_observation) {
+            diagnostic.lineage_reject_stage = stage;
+          }
+        };
     const auto& exact_group = input.groups[group_index];
     const bool current_component_belongs_to_exact_seed =
         std::find(exact_group.member_component_ids.begin(),
@@ -1154,45 +1197,62 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     if (!observation_contract_valid) continue;
     if (group_match[group_index] >= 0) {
       diagnostic.lineage_exact_path_won = true;
+      set_observation_reject_stage(
+          CargoLineageRejectStage::EXACT_PATH_WON);
       continue;
     }
     if (input.groups[group_index].group_ambiguous ||
         group_ambiguous[group_index]) {
       diagnostic.lineage_ambiguous = true;
+      set_observation_reject_stage(
+          CargoLineageRejectStage::GROUP_AMBIGUOUS);
       continue;
     }
 
-    std::vector<std::size_t> candidate_histories;
+    std::vector<std::size_t> provenance_histories;
     for (std::size_t hi = 0U; hi < histories_.size(); ++hi) {
       const History& history = histories_[hi];
-      if (std::abs(history.last_lineage_source_stamp_sec -
-                   observation.previous_source_stamp_sec) > kEpsilon) {
-        continue;
+      bool provenance_matched = false;
+      for (const LineageProvenanceSnapshot& snapshot :
+           history.recent_lineage_provenance) {
+        if (std::abs(snapshot.source_stamp_sec -
+                     observation.previous_source_stamp_sec) > kEpsilon) {
+          continue;
+        }
+        if (std::find(snapshot.component_ids.begin(),
+                      snapshot.component_ids.end(),
+                      observation.previous_component_id) !=
+            snapshot.component_ids.end()) {
+          provenance_matched = true;
+          break;
+        }
       }
-      if (std::find(history.last_lineage_component_ids.begin(),
-                    history.last_lineage_component_ids.end(),
-                    observation.previous_component_id) ==
-          history.last_lineage_component_ids.end()) {
-        continue;
-      }
-      // Any exact-feasible current group keeps absolute priority, including
-      // the case where multiple exact groups make the reciprocal result
-      // ambiguous and therefore leave the history formally unclaimed.
-      if (history_claimed_by_exact[hi] ||
-          history_has_exact_feasible[hi]) {
-        diagnostic.lineage_ambiguous = true;
-        continue;
-      }
-      candidate_histories.push_back(hi);
+      if (provenance_matched) provenance_histories.push_back(hi);
     }
-    if (candidate_histories.size() != 1U) {
-      if (candidate_histories.size() > 1U) {
-        diagnostic.lineage_ambiguous = true;
-      }
+    if (provenance_histories.empty()) {
+      set_observation_reject_stage(
+          CargoLineageRejectStage::HISTORY_PROVENANCE_NOT_FOUND);
+      continue;
+    }
+    if (provenance_histories.size() > 1U) {
+      diagnostic.lineage_ambiguous = true;
+      set_observation_reject_stage(
+          CargoLineageRejectStage::HISTORY_COMPETITION);
       continue;
     }
 
-    const std::size_t history_index = candidate_histories.front();
+    const std::size_t history_index = provenance_histories.front();
+    // Any exact-feasible current group keeps absolute priority, including
+    // the case where multiple exact groups make the reciprocal result
+    // ambiguous and therefore leave the history formally unclaimed.
+    if (history_claimed_by_exact[history_index] ||
+        history_has_exact_feasible[history_index]) {
+      diagnostic.lineage_ambiguous = true;
+      set_observation_reject_stage(
+          CargoLineageRejectStage::HISTORY_COMPETITION);
+      continue;
+    }
+
     Pair* pair = nullptr;
     for (Pair& candidate : pairs) {
       if (candidate.group == group_index &&
@@ -1203,6 +1263,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     }
     if (!pair || (pair->reject_reason != "XY_GATE" &&
                   pair->reject_reason != "EXTENT_GATE")) {
+      set_observation_reject_stage(
+          CargoLineageRejectStage::PAIR_NOT_XY_EXTENT);
       continue;
     }
 
@@ -1210,7 +1272,11 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     const auto& previous = histories_[history_index].last_descriptor;
     const double dt = group.descriptor.stamp_sec -
         histories_[history_index].last_stamp_sec;
-    if (!(dt > 0.0) || dt > config_.maximum_observation_gap_sec) continue;
+    if (!(dt > 0.0) || dt > config_.maximum_observation_gap_sec) {
+      set_observation_reject_stage(
+          CargoLineageRejectStage::OBSERVATION_CONTRACT);
+      continue;
+    }
 
     // Family/lineage has no vertical authority.  Any vertical check remains
     // sourced exclusively from the current exact group and the existing
@@ -1225,7 +1291,11 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         previous.vertical_uncertainty_m;
     const double dz = std::abs(group.descriptor.physical_vertical_z -
                                previous.physical_vertical_z);
-    if (!requires_post_unique_z && dz > z_limit) continue;
+    if (!requires_post_unique_z && dz > z_limit) {
+      set_observation_reject_stage(
+          CargoLineageRejectStage::VERTICAL_GATE);
+      continue;
+    }
     if (!requires_post_unique_z) {
       const double current_z_extent = group.descriptor.aggregate_extent.z();
       const double previous_z_extent = previous.aggregate_extent.z();
@@ -1234,6 +1304,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
                    std::abs(previous_z_extent)), kEpsilon);
       if (std::abs(current_z_extent - previous_z_extent) / denominator >
           config_.maximum_size_relative_step) {
+        set_observation_reject_stage(
+            CargoLineageRejectStage::VERTICAL_GATE);
         continue;
       }
     }
@@ -1261,6 +1333,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         selected_history = proposal.history;
       } else if (selected_history != proposal.history) {
         decision_.group_diagnostics[gi].lineage_ambiguous = true;
+        decision_.group_diagnostics[gi].lineage_reject_stage =
+            CargoLineageRejectStage::HISTORY_COMPETITION;
         group_ambiguous[gi] = true;
       }
       if (proposal.observation->source_frame_offset < best_offset) {
@@ -1273,6 +1347,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     }
     if (best_count > 1U) {
       decision_.group_diagnostics[gi].lineage_ambiguous = true;
+      decision_.group_diagnostics[gi].lineage_reject_stage =
+          CargoLineageRejectStage::HISTORY_COMPETITION;
       group_ambiguous[gi] = true;
     }
   }
@@ -1285,6 +1361,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     for (std::size_t gi = 0U; gi < selected_lineage.size(); ++gi) {
       if (selected_lineage[gi] && selected_lineage[gi]->history == hi) {
         decision_.group_diagnostics[gi].lineage_ambiguous = true;
+        decision_.group_diagnostics[gi].lineage_reject_stage =
+            CargoLineageRejectStage::HISTORY_COMPETITION;
         group_ambiguous[gi] = true;
       }
     }
@@ -1329,6 +1407,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     diagnostic.lineage_source_age_sec = observation.source_age_sec;
     diagnostic.lineage_source_frame_offset =
         observation.source_frame_offset;
+    diagnostic.lineage_reject_stage = CargoLineageRejectStage::SELECTED;
     diagnostic.lineage_xy_after_m = pair.xy;
     diagnostic.lineage_extent_after = pair.extent_step;
   }
@@ -1403,6 +1482,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       matched_pair->reject_reason = "Z_GATE";
       diagnostic.association_reject_reason = "Z_GATE";
       diagnostic.new_history_reason = "Z_GATE";
+      diagnostic.lineage_reject_stage =
+          CargoLineageRejectStage::VERTICAL_GATE;
       group_match[gi] = -1;
       group_lineage[gi] = nullptr;
     }
@@ -1491,14 +1572,29 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     history->last_descriptor = history_descriptor;
     history->last_representative_center = group.representative.center;
     history->last_stamp_sec = group.descriptor.stamp_sec;
-    if (group_lineage[gi]) {
-      history->last_lineage_component_ids = {
-          group_lineage[gi]->current_component_id};
-      history->last_lineage_source_stamp_sec =
-          group_lineage[gi]->source_stamp_sec;
-    } else {
-      history->last_lineage_component_ids = group.member_component_ids;
-      history->last_lineage_source_stamp_sec = group.descriptor.stamp_sec;
+    LineageProvenanceSnapshot provenance;
+    provenance.source_stamp_sec = group.descriptor.stamp_sec;
+    provenance.component_ids = group_lineage[gi]
+        ? std::vector<std::uint64_t>{
+              group_lineage[gi]->current_component_id}
+        : canonicalMembers(group.member_component_ids);
+    auto& recent_provenance = history->recent_lineage_provenance;
+    recent_provenance.erase(
+        std::remove_if(
+            recent_provenance.begin(), recent_provenance.end(),
+            [&](const LineageProvenanceSnapshot& snapshot) {
+              const double age = provenance.source_stamp_sec -
+                  snapshot.source_stamp_sec;
+              return !std::isfinite(snapshot.source_stamp_sec) ||
+                  age < -kEpsilon ||
+                  age > config_.maximum_observation_gap_sec + kEpsilon ||
+                  std::abs(age) <= kEpsilon;
+            }),
+        recent_provenance.end());
+    recent_provenance.push_back(std::move(provenance));
+    while (recent_provenance.size() >
+           kMaximumLineageProvenanceFrames) {
+      recent_provenance.pop_front();
     }
 
     const bool supported = group.descriptor.vertical_mode ==
