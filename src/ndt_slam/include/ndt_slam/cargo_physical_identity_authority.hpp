@@ -247,6 +247,9 @@ struct CargoPhysicalGroupDiagnostic {
   double lineage_extent_after = std::numeric_limits<double>::quiet_NaN();
   std::uint64_t lineage_previous_component_id = 0U;
   std::uint64_t lineage_current_component_id = 0U;
+  double lineage_source_age_sec =
+      std::numeric_limits<double>::quiet_NaN();
+  std::uint64_t lineage_source_frame_offset = 0U;
   std::string association_reject_reason = "NO_HISTORY";
   std::string new_history_reason = "NO_HISTORY";
   bool validated_history_conflict = false;

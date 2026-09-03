@@ -191,6 +191,8 @@ CargoIdentitySupportLineageObservation lineageObservation(
   observation.state = CargoIdentityLineageState::MATCHED;
   observation.previous_source_stamp_sec = previous_stamp;
   observation.source_stamp_sec = stamp;
+  observation.source_age_sec = stamp - previous_stamp;
+  observation.source_frame_offset = 1U;
   observation.previous_component_id = previous_component_id;
   observation.current_component_id = current_component_id;
   observation.exact_seed_frame_group_id = exact_seed_frame_group_id;
@@ -597,7 +599,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
-     AuxiliaryGravityEmptyPreservesStrictLidarExistenceSemantics) {
+     AuxiliaryEmptyCannotAdvanceLiftConfirmation) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(input(1.0, HookLoadSignalRole::AUXILIARY, true,
                          HookLoadState::EMPTY, 0.0, 0.4));
@@ -609,12 +611,32 @@ TEST(CargoPhysicalIdentityAuthorityTest,
         HookLoadState::EMPTY, 0.0, 0.7));
     EXPECT_FALSE(pending.cargo_exists);
   }
-  const auto confirmed = authority.update(input(
+  const auto inhibited = authority.update(input(
       1.4, HookLoadSignalRole::AUXILIARY, true,
       HookLoadState::EMPTY, 0.0, 0.7));
-  EXPECT_TRUE(confirmed.cargo_exists);
-  EXPECT_EQ(confirmed.existence_source, CargoExistenceSource::STRICT_LIDAR);
-  EXPECT_EQ(confirmed.required_lift_confirm_frames, 4);
+  EXPECT_FALSE(inhibited.cargo_exists);
+  EXPECT_FALSE(inhibited.lift_confirmed);
+  EXPECT_EQ(inhibited.lift_confirm_count, 0);
+  ASSERT_EQ(inhibited.group_diagnostics.size(), 1U);
+  EXPECT_EQ(inhibited.group_diagnostics.front().lift_confirm_required, 4);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     AuxiliaryEmptyCannotValidateSixFrameSurfaceJump) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(input(1.0, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  authority.update(input(1.05, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  CargoPhysicalIdentityDecision decision;
+  for (int frame = 1; frame <= 6; ++frame) {
+    decision = authority.update(input(
+        1.05 + frame * 0.05, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::EMPTY, 0.0, 0.9));
+    EXPECT_FALSE(decision.lift_confirmed);
+    EXPECT_EQ(decision.lift_confirm_count, 0);
+    EXPECT_NE(decision.identity, CargoPhysicalIdentityState::VALIDATED);
+  }
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
@@ -638,15 +660,15 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 TEST(CargoPhysicalIdentityAuthorityTest,
      AuxiliaryGravityEmptyConflictCannotRetireValidatedLidarHistory) {
   CargoPhysicalIdentityAuthority authority(testConfig());
-  authority.update(input(1.0, HookLoadSignalRole::AUXILIARY, true,
-                         HookLoadState::EMPTY, 0.0, 0.4));
-  authority.update(input(1.05, HookLoadSignalRole::AUXILIARY, true,
-                         HookLoadState::EMPTY, 0.0, 0.4));
+  authority.update(input(1.0, HookLoadSignalRole::AUXILIARY, false,
+                         HookLoadState::UNKNOWN, 0.0, 0.4));
+  authority.update(input(1.05, HookLoadSignalRole::AUXILIARY, false,
+                         HookLoadState::UNKNOWN, 0.0, 0.4));
   CargoPhysicalIdentityDecision validated;
-  for (int frame = 1; frame <= 4; ++frame) {
+  for (int frame = 1; frame <= 3; ++frame) {
     validated = authority.update(input(
-        1.0 + frame * 0.1, HookLoadSignalRole::AUXILIARY, true,
-        HookLoadState::EMPTY, 0.0, 0.7));
+        1.0 + frame * 0.1, HookLoadSignalRole::AUXILIARY, false,
+        HookLoadState::UNKNOWN, 0.0, 0.7));
   }
   ASSERT_EQ(validated.identity, CargoPhysicalIdentityState::VALIDATED);
   const std::uint64_t history_id = validated.physical_history_id;
@@ -2039,6 +2061,102 @@ TEST(CargoPhysicalIdentityAuthorityTest,
       CargoGroupVerticalMode::CONTINUITY_ONLY;
   decision = authority.update(next);
   EXPECT_NE(decision.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_FALSE(decision.lift_confirmed);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LineageCanBridgeTransientProductAmbiguityWithoutCreatingHistory) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto first = authority.update(lineageInput(
+      1.0, HookLoadState::EMPTY, 0.0, 0.40, 101U));
+  ASSERT_EQ(first.group_diagnostics.size(), 1U);
+  const std::uint64_t original_history_id =
+      first.group_diagnostics.front().matched_history_id;
+  ASSERT_NE(original_history_id, 0U);
+
+  auto ambiguous = lineageInput(
+      1.1, HookLoadState::LOADED, 1.0, 0.40, 202U);
+  ambiguous.groups.front().group_ambiguous = true;
+  const auto middle = authority.update(ambiguous);
+  EXPECT_NE(middle.identity, CargoPhysicalIdentityState::VALIDATED);
+
+  auto newest = lineageObservation(
+      202U, 303U, 1U, 1.1, 1.2, 0.05, 0.40, 0.40,
+      CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE,
+      1.0, 1.0);
+  auto older = lineageObservation(
+      101U, 303U, 1U, 1.0, 1.2, 0.05, 0.40, 0.40,
+      CargoIdentityMotionObservabilityState::EGO_MOTION_OBSERVABLE,
+      2.0, 2.0);
+  newest.source_frame_offset = 1U;
+  older.source_frame_offset = 2U;
+  auto current = lineageInput(
+      1.2, HookLoadState::LOADED, 2.0, 0.40, 303U);
+  current.lineage_observations = {newest, older};
+  const auto bridged = authority.update(current);
+  ASSERT_EQ(bridged.group_diagnostics.size(), 1U);
+  EXPECT_EQ(bridged.group_diagnostics.front().association,
+            CargoCandidateAssociationState::MATCHED);
+  EXPECT_TRUE(bridged.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_EQ(bridged.group_diagnostics.front().lineage_previous_component_id,
+            101U);
+  EXPECT_EQ(bridged.group_diagnostics.front().lineage_source_frame_offset,
+            2U);
+  EXPECT_NEAR(bridged.group_diagnostics.front().lineage_source_age_sec,
+              0.2, 1.0e-9);
+  EXPECT_EQ(bridged.group_diagnostics.front().matched_history_id,
+            original_history_id);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LineageOlderFallbackCompetitionFailsClosed) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  CargoPhysicalIdentityInput first;
+  first.pipeline_stamp_sec = 1.0;
+  first.lifecycle_id = 7U;
+  first.hook_role = HookLoadSignalRole::REQUIRED;
+  first.gravity_valid = true;
+  first.gravity_state = HookLoadState::EMPTY;
+  auto left = group(1U, 1.0, -1.0, 0.40, {101U});
+  auto right = group(2U, 1.0, 1.0, 0.40, {102U});
+  left.frame_group_id = 1U;
+  right.frame_group_id = 2U;
+  first.groups = {left, right};
+  authority.update(first);
+
+  auto from_left = lineageObservation(
+      101U, 303U, 1U, 1.0, 1.2, -0.95);
+  auto from_right = lineageObservation(
+      102U, 303U, 1U, 1.0, 1.2, 1.05);
+  from_left.source_frame_offset = 2U;
+  from_right.source_frame_offset = 2U;
+  auto current = lineageInput(
+      1.2, HookLoadState::LOADED, 4.0, 0.40, 303U);
+  current.lineage_observations = {from_left, from_right};
+  const auto decision = authority.update(current);
+  ASSERT_EQ(decision.group_diagnostics.size(), 1U);
+  EXPECT_TRUE(decision.group_diagnostics.front().lineage_ambiguous);
+  EXPECT_FALSE(decision.group_diagnostics.front().lineage_rescue_used);
+  EXPECT_NE(decision.group_diagnostics.front().association,
+            CargoCandidateAssociationState::MATCHED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LineageOlderFallbackCannotCreateHistoryOrProvideVertical) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  auto observation = lineageObservation(
+      101U, 202U, 1U, 1.0, 1.2, 0.05);
+  observation.source_frame_offset = 2U;
+  auto current = lineageInput(
+      1.2, HookLoadState::LOADED, 2.0, 10.0, 202U,
+      &observation);
+  current.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::INVALID;
+  const auto decision = authority.update(current);
+  ASSERT_EQ(decision.group_diagnostics.size(), 1U);
+  EXPECT_EQ(decision.group_diagnostics.front().association,
+            CargoCandidateAssociationState::NEW_HISTORY);
+  EXPECT_FALSE(decision.group_diagnostics.front().lineage_rescue_used);
   EXPECT_FALSE(decision.lift_confirmed);
 }
 

@@ -15035,7 +15035,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "lineage_attempted,lineage_rescue_used,"
                 << "lineage_exact_path_won,lineage_ambiguous,"
                 << "lineage_previous_component_id,"
-                << "lineage_current_component_id,lineage_xy_before,"
+                << "lineage_current_component_id,lineage_source_age_sec,"
+                << "lineage_source_frame_offset,lineage_xy_before,"
                 << "lineage_xy_after,lineage_extent_before,"
                 << "lineage_extent_after,lineage_pair_count,"
                 << "lineage_match_count,lineage_ambiguous_count,"
@@ -15154,6 +15155,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << (diagnostic.lineage_ambiguous ? 1 : 0) << ','
                 << diagnostic.lineage_previous_component_id << ','
                 << diagnostic.lineage_current_component_id << ','
+                << diagnostic.lineage_source_age_sec << ','
+                << diagnostic.lineage_source_frame_offset << ','
                 << diagnostic.lineage_xy_before_m << ','
                 << diagnostic.lineage_xy_after_m << ','
                 << diagnostic.lineage_extent_before << ','

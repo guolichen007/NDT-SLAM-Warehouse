@@ -1131,6 +1131,15 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         input.gravity_state == HookLoadState::LOADED;
     const bool observation_contract_valid =
         current_component_belongs_to_exact_seed &&
+        observation.source_frame_offset >= 1U &&
+        observation.source_frame_offset <= 3U &&
+        std::isfinite(observation.source_age_sec) &&
+        observation.source_age_sec > 0.0 &&
+        observation.source_age_sec <=
+            config_.maximum_observation_gap_sec + kEpsilon &&
+        std::abs(observation.source_age_sec -
+                 (observation.source_stamp_sec -
+                  observation.previous_source_stamp_sec)) <= kEpsilon &&
         std::abs(observation.source_stamp_sec -
                  exact_group.descriptor.stamp_sec) <= kEpsilon &&
         observation.robust_xy_center.allFinite() &&
@@ -1235,25 +1244,57 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         group_index, history_index, pair, &observation});
   }
 
-  // Family evidence is rejection-only under competition.  Do not rank or
-  // choose among multiple lineage paths even if one has a lower cost.
-  for (const LineageProposal& proposal : lineage_proposals) {
-    const std::size_t same_group = static_cast<std::size_t>(std::count_if(
-        lineage_proposals.begin(), lineage_proposals.end(),
-        [&](const LineageProposal& other) {
-          return other.group == proposal.group;
-        }));
-    const std::size_t same_history = static_cast<std::size_t>(std::count_if(
-        lineage_proposals.begin(), lineage_proposals.end(),
-        [&](const LineageProposal& other) {
-          return other.history == proposal.history;
-        }));
-    auto& diagnostic = decision_.group_diagnostics[proposal.group];
-    if (same_group != 1U || same_history != 1U) {
-      diagnostic.lineage_ambiguous = true;
-      group_ambiguous[proposal.group] = true;
-      continue;
+  // Authority, not the compact correspondence cache, decides whether an
+  // older source frame is legally bound to a Cargo history.  For one group,
+  // multiple recent observations may refer to the same history; keep only
+  // the newest such provenance.  Different histories, duplicate newest
+  // claims, or multiple groups claiming one history remain fail-closed.
+  std::vector<const LineageProposal*> selected_lineage(
+      input.groups.size(), nullptr);
+  for (std::size_t gi = 0U; gi < input.groups.size(); ++gi) {
+    std::size_t selected_history = histories_.size();
+    std::uint64_t best_offset = std::numeric_limits<std::uint64_t>::max();
+    std::size_t best_count = 0U;
+    for (const LineageProposal& proposal : lineage_proposals) {
+      if (proposal.group != gi) continue;
+      if (selected_history == histories_.size()) {
+        selected_history = proposal.history;
+      } else if (selected_history != proposal.history) {
+        decision_.group_diagnostics[gi].lineage_ambiguous = true;
+        group_ambiguous[gi] = true;
+      }
+      if (proposal.observation->source_frame_offset < best_offset) {
+        best_offset = proposal.observation->source_frame_offset;
+        selected_lineage[gi] = &proposal;
+        best_count = 1U;
+      } else if (proposal.observation->source_frame_offset == best_offset) {
+        ++best_count;
+      }
     }
+    if (best_count > 1U) {
+      decision_.group_diagnostics[gi].lineage_ambiguous = true;
+      group_ambiguous[gi] = true;
+    }
+  }
+  for (std::size_t hi = 0U; hi < histories_.size(); ++hi) {
+    std::size_t claimant_count = 0U;
+    for (const LineageProposal* proposal : selected_lineage) {
+      if (proposal && proposal->history == hi) ++claimant_count;
+    }
+    if (claimant_count <= 1U) continue;
+    for (std::size_t gi = 0U; gi < selected_lineage.size(); ++gi) {
+      if (selected_lineage[gi] && selected_lineage[gi]->history == hi) {
+        decision_.group_diagnostics[gi].lineage_ambiguous = true;
+        group_ambiguous[gi] = true;
+      }
+    }
+  }
+
+  for (std::size_t gi = 0U; gi < selected_lineage.size(); ++gi) {
+    const LineageProposal* selected = selected_lineage[gi];
+    if (!selected || group_ambiguous[gi]) continue;
+    const LineageProposal& proposal = *selected;
+    auto& diagnostic = decision_.group_diagnostics[proposal.group];
 
     Pair& pair = *proposal.pair;
     const auto& observation = *proposal.observation;
@@ -1282,6 +1323,12 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     group_match[proposal.group] = static_cast<int>(proposal.history);
     group_lineage[proposal.group] = proposal.observation;
     diagnostic.lineage_rescue_used = true;
+    diagnostic.lineage_previous_component_id =
+        observation.previous_component_id;
+    diagnostic.lineage_current_component_id = observation.current_component_id;
+    diagnostic.lineage_source_age_sec = observation.source_age_sec;
+    diagnostic.lineage_source_frame_offset =
+        observation.source_frame_offset;
     diagnostic.lineage_xy_after_m = pair.xy;
     diagnostic.lineage_extent_after = pair.extent_step;
   }
@@ -1603,7 +1650,17 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         history->last_supported_footprint = footprintSnapshot(
             group.representative, group.descriptor.stamp_sec);
       }
-      if (delta >= threshold) {
+      // A valid EMPTY gravity observation is explicit evidence that lift has
+      // not begun.  AUXILIARY keeps its independent LiDAR pre-lift/reference
+      // path, but EMPTY may not be accumulated into a false lift transition.
+      // Already-confirmed histories retain the existing conflict/retention
+      // behavior; this gate only prevents an unconfirmed false -> true edge.
+      const bool empty_inhibits_unconfirmed_lift =
+          input.hook_role == HookLoadSignalRole::AUXILIARY &&
+          gravity_empty && !history->lift_confirmed;
+      if (empty_inhibits_unconfirmed_lift) {
+        history->lift_confirm_count = 0;
+      } else if (delta >= threshold) {
         ++history->lift_confirm_count;
         const int required = requiredFrames(
             input.hook_role, input.gravity_valid, input.gravity_state,

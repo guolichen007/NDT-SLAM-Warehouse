@@ -7,6 +7,7 @@
 #include <Eigen/Core>
 
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -56,6 +57,8 @@ struct CargoIdentitySupportLineageObservation {
   CargoIdentityLineageState state = CargoIdentityLineageState::UNAVAILABLE;
   double previous_source_stamp_sec = 0.0;
   double source_stamp_sec = 0.0;
+  double source_age_sec = 0.0;
+  std::uint64_t source_frame_offset = 0U;
   std::uint64_t previous_component_id = 0U;
   std::uint64_t current_component_id = 0U;
   std::uint64_t exact_seed_frame_group_id = 0U;
@@ -106,9 +109,10 @@ struct CargoIdentityComponentLineageResult {
   std::string reset_reason = "none";
 };
 
-// Owns exactly one previous source frame of compact descriptors.  It owns no
-// Cargo identity: CargoPhysicalIdentityAuthority remains the sole temporal
-// owner of Cargo histories, pre-lift reference, lift and validation state.
+// Owns at most three recent source frames of compact descriptors.  This is a
+// bounded correspondence cache, not a Cargo tracker: it owns no Cargo id,
+// point cloud, prediction, baseline, lift, validation, safety or map state.
+// CargoPhysicalIdentityAuthority remains the sole temporal owner of histories.
 class CargoIdentityComponentLineage {
  public:
   explicit CargoIdentityComponentLineage(
@@ -120,9 +124,9 @@ class CargoIdentityComponentLineage {
       const CargoIdentityComponentLineageFrame& frame);
 
  private:
+  static constexpr std::size_t kMaximumRecentSourceFrames = 3U;
   CargoIdentityComponentLineageConfig config_;
-  CargoIdentityComponentLineageFrame previous_;
-  bool has_previous_ = false;
+  std::deque<CargoIdentityComponentLineageFrame> recent_frames_;
   std::string reset_reason_ = "constructed";
 };
 

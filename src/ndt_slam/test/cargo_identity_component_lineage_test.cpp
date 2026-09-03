@@ -266,7 +266,7 @@ TEST(CargoIdentityComponentLineageTest, DoesNotMutateCurrentDescriptors) {
 }
 
 TEST(CargoIdentityComponentLineageTest,
-     EmptyAcceptedComponentFrameBreaksLineageWithoutSkipping) {
+     LineageCanBridgeOneMissingSourceFrameWithinExistingGap) {
   CargoIdentityComponentLineage lineage;
   lineage.update(frame(
       1U, 1.0, 0.0, {component(1U, 1U, 1.0, 0.0)}));
@@ -276,8 +276,74 @@ TEST(CargoIdentityComponentLineageTest,
 
   const auto after_empty = lineage.update(frame(
       3U, 1.2, 2.0, {component(3U, 1U, 1.2, 0.02)}));
-  EXPECT_TRUE(after_empty.observations.empty());
-  EXPECT_EQ(after_empty.pair_count, 0U);
+  ASSERT_EQ(after_empty.observations.size(), 1U);
+  EXPECT_EQ(after_empty.observations.front().previous_component_id, 1U);
+  EXPECT_EQ(after_empty.observations.front().current_component_id, 3U);
+  EXPECT_EQ(after_empty.observations.front().source_frame_offset, 2U);
+  EXPECT_NEAR(after_empty.observations.front().source_age_sec, 0.2, 1.0e-9);
+}
+
+TEST(CargoIdentityComponentLineageTest,
+     LineageOlderFallbackStillRequiresReciprocalUniqueness) {
+  CargoIdentityComponentLineage lineage;
+  lineage.update(frame(
+      1U, 1.0, 0.0,
+      {component(10U, 1U, 1.0, 0.00),
+       component(11U, 2U, 1.0, 0.08)}));
+  lineage.update(frame(2U, 1.1, 1.0, {}));
+  const auto result = lineage.update(frame(
+      3U, 1.2, 2.0, {component(20U, 1U, 1.2, 0.04)}));
+  EXPECT_TRUE(result.observations.empty());
+  EXPECT_GT(result.ambiguous_count, 0U);
+}
+
+TEST(CargoIdentityComponentLineageTest,
+     OlderAmbiguityDoesNotInvalidateNewerUniqueMatch) {
+  CargoIdentityComponentLineage lineage;
+  lineage.update(frame(
+      1U, 1.0, 0.0,
+      {component(10U, 1U, 1.0, 0.00),
+       component(11U, 2U, 1.0, 0.08)}));
+  lineage.update(frame(
+      2U, 1.1, 1.0, {component(12U, 3U, 1.1, 0.04)}));
+
+  const auto result = lineage.update(frame(
+      3U, 1.2, 2.0, {component(20U, 4U, 1.2, 0.05)}));
+  ASSERT_EQ(result.observations.size(), 1U);
+  EXPECT_EQ(result.observations.front().previous_component_id, 12U);
+  EXPECT_EQ(result.observations.front().current_component_id, 20U);
+  EXPECT_EQ(result.observations.front().source_frame_offset, 1U);
+  EXPECT_NEAR(result.observations.front().source_age_sec, 0.1, 1.0e-9);
+}
+
+TEST(CargoIdentityComponentLineageTest,
+     LineageOlderFallbackCannotCrossObservationGap) {
+  CargoIdentityComponentLineage lineage;
+  lineage.update(frame(
+      1U, 1.0, 0.0, {component(1U, 1U, 1.0, 0.0)}));
+  lineage.update(frame(2U, 1.4, 1.0, {}));
+  const auto result = lineage.update(frame(
+      3U, 1.6, 2.0, {component(3U, 1U, 1.6, 0.02)}));
+  EXPECT_TRUE(result.observations.empty());
+}
+
+TEST(CargoIdentityComponentLineageTest,
+     LineageOlderFallbackCannotCrossLifecycleOrPoseAuthority) {
+  CargoIdentityComponentLineage lifecycle;
+  lifecycle.update(frame(
+      1U, 1.0, 0.0, {component(1U, 1U, 1.0, 0.0)}, 7U));
+  lifecycle.update(frame(2U, 1.1, 1.0, {}, 8U));
+  const auto after_lifecycle = lifecycle.update(frame(
+      3U, 1.2, 2.0, {component(3U, 1U, 1.2, 0.02)}, 8U));
+  EXPECT_TRUE(after_lifecycle.observations.empty());
+
+  CargoIdentityComponentLineage authority;
+  authority.update(frame(
+      1U, 1.0, 0.0, {component(1U, 1U, 1.0, 0.0)}, 7U, 1U));
+  authority.update(frame(2U, 1.1, 1.0, {}, 7U, 2U));
+  const auto after_authority = authority.update(frame(
+      3U, 1.2, 2.0, {component(3U, 1U, 1.2, 0.02)}, 7U, 2U));
+  EXPECT_TRUE(after_authority.observations.empty());
 }
 
 TEST(CargoIdentityComponentLineageTest, CompactTypeOwnsNoPointCloud) {
