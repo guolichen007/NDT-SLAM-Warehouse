@@ -399,6 +399,10 @@ class CargoPhysicalIdentityAuthority {
     std::vector<PreLiftSample> earliest_prelift_samples;
     std::uint64_t physical_cargo_epoch_id = 0U;
     bool prelift_reference_frozen = false;
+    // Latched only when a valid LOADED edge observes an already-frozen
+    // pre-load reference. A reference first assembled after startup-loaded
+    // or during the loaded epoch can never use the reduced confirmation.
+    bool loaded_reduced_confirmation_eligible = false;
     double prelift_reference_z = std::numeric_limits<double>::quiet_NaN();
     double prelift_reference_uncertainty_m = 0.20;
     double prelift_reference_first_stamp = 0.0;

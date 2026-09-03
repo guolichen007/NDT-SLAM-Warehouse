@@ -857,6 +857,24 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   const bool gravity_empty = input.gravity_valid &&
       input.gravity_state == HookLoadState::EMPTY;
   const bool pre_load_phase = gravity_empty;
+  const auto required_lift_frames = [&](
+      const History& history,
+      CargoGroupVerticalMode current_vertical_mode) {
+    const int base_required = requiredFrames(
+        input.hook_role, input.gravity_valid, input.gravity_state,
+        config_.lift_confirm_frames);
+    const bool loaded_frozen_prelift_evidence =
+        input.hook_role == HookLoadSignalRole::AUXILIARY &&
+        gravity_loaded && history.baseline_frozen &&
+        history.prelift_reference_frozen &&
+        history.loaded_reduced_confirmation_eligible &&
+        history.baseline_source ==
+            CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE &&
+        current_vertical_mode ==
+            CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
+    if (!loaded_frozen_prelift_evidence) return base_required;
+    return std::max(3, config_.lift_confirm_frames - 1);
+  };
   if (gravity_empty && previous_existence_phase_ &&
       input.hook_role == HookLoadSignalRole::REQUIRED) {
     histories_.clear();
@@ -871,6 +889,12 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   const bool gravity_load_edge = gravity_loaded && !previous_existence_phase_;
   if (gravity_load_edge) {
     ++load_epoch_;
+    for (History& history : histories_) {
+      history.loaded_reduced_confirmation_eligible =
+          history.baseline_frozen && history.prelift_reference_frozen &&
+          history.baseline_source ==
+              CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE;
+    }
     if (input.hook_role == HookLoadSignalRole::REQUIRED) {
       started_loaded_without_baseline_ = input.node_started_loaded &&
           std::none_of(histories_.begin(), histories_.end(),
@@ -1758,9 +1782,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         history->lift_confirm_count = 0;
       } else if (delta >= threshold) {
         ++history->lift_confirm_count;
-        const int required = requiredFrames(
-            input.hook_role, input.gravity_valid, input.gravity_state,
-            config_.lift_confirm_frames);
+        const int required = required_lift_frames(
+            *history, group.descriptor.vertical_mode);
         if (history->lift_confirm_count >= required &&
             !history->lift_confirmed) {
           history->lift_confirmed = true;
@@ -1978,9 +2001,10 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       decision_.current_candidate_fresh = current_group != nullptr;
       decision_.lift_confirmed = selected->lift_confirmed;
       decision_.lift_confirm_count = selected->lift_confirm_count;
-      decision_.required_lift_confirm_frames = requiredFrames(
-          input.hook_role, input.gravity_valid, input.gravity_state,
-          config_.lift_confirm_frames);
+      decision_.required_lift_confirm_frames = required_lift_frames(
+          *selected, current_group
+              ? current_group->descriptor.vertical_mode
+              : CargoGroupVerticalMode::INVALID);
       decision_.baseline_z95 = selected->baseline_z95;
       decision_.current_z95 = current_group
           ? current_group->descriptor.physical_vertical_z
@@ -2038,9 +2062,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       diagnostic.last_supported_evidence_stamp =
           history.last_supported_evidence_stamp_sec;
       diagnostic.lift_confirm_count = history.lift_confirm_count;
-      diagnostic.lift_confirm_required = requiredFrames(
-          input.hook_role, input.gravity_valid, input.gravity_state,
-          config_.lift_confirm_frames);
+      diagnostic.lift_confirm_required = required_lift_frames(
+          history, input.groups[gi].descriptor.vertical_mode);
       diagnostic.lift_confirmed = history.lift_confirmed;
       if (history.baseline_frozen &&
           input.groups[gi].descriptor.vertical_mode ==

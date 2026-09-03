@@ -640,6 +640,219 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
+     AuxiliaryLoadedFrozenPreliftConfirmsAfterThreeSignificantFrames) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  for (int frame = 0; frame < 4; ++frame) {
+    authority.update(input(
+        1.0 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::EMPTY, 0.0, 0.40));
+  }
+  CargoPhysicalIdentityDecision result;
+  for (int frame = 0; frame < 3; ++frame) {
+    result = authority.update(input(
+        1.4 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::LOADED, 0.0, 0.90));
+  }
+  EXPECT_EQ(result.required_lift_confirm_frames, 3);
+  EXPECT_EQ(result.lift_confirm_count, 3);
+  EXPECT_TRUE(result.lift_confirmed);
+  EXPECT_EQ(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_EQ(result.baseline_source,
+            CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     AuxiliaryLoadedTwoFramesCannotValidate) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  for (int frame = 0; frame < 4; ++frame) {
+    authority.update(input(
+        1.0 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::EMPTY, 0.0, 0.40));
+  }
+  authority.update(input(1.4, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::LOADED, 0.0, 0.90));
+  const auto result = authority.update(input(
+      1.5, HookLoadSignalRole::AUXILIARY, true,
+      HookLoadState::LOADED, 0.0, 0.90));
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_required, 3);
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_count, 2);
+  EXPECT_FALSE(result.lift_confirmed);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     AuxiliaryUnknownThreeFramesCannotValidate) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  for (int frame = 0; frame < 4; ++frame) {
+    authority.update(input(
+        1.0 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::EMPTY, 0.0, 0.40));
+  }
+  CargoPhysicalIdentityDecision result;
+  for (int frame = 0; frame < 3; ++frame) {
+    result = authority.update(input(
+        1.4 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::UNKNOWN, 0.0, 0.90));
+  }
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_required, 5);
+  EXPECT_FALSE(result.lift_confirmed);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     AuxiliaryEmptyThreeFramesCannotValidate) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  for (int frame = 0; frame < 4; ++frame) {
+    authority.update(input(
+        1.0 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::EMPTY, 0.0, 0.40));
+  }
+  CargoPhysicalIdentityDecision result;
+  for (int frame = 0; frame < 3; ++frame) {
+    result = authority.update(input(
+        1.4 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::EMPTY, 0.0, 0.90));
+  }
+  EXPECT_EQ(result.lift_confirm_count, 0);
+  EXPECT_FALSE(result.lift_confirmed);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LoadedWithoutFrozenPreloadCannotUseReducedConfirmation) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  authority.update(input(1.0, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::EMPTY, 0.0, 0.40));
+  authority.update(input(1.1, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::EMPTY, 0.0, 0.40));
+  authority.update(input(1.2, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::LOADED, 0.0, 0.40));
+  authority.update(input(1.3, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::LOADED, 0.0, 0.40));
+  CargoPhysicalIdentityDecision result;
+  for (int frame = 0; frame < 3; ++frame) {
+    result = authority.update(input(
+        1.4 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::LOADED, 0.0, 0.90));
+  }
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_required, 4);
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_count, 3);
+  EXPECT_FALSE(result.lift_confirmed);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     StartedLoadedCannotUseReducedConfirmation) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  for (int frame = 0; frame < 4; ++frame) {
+    auto loaded = input(
+        1.0 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::LOADED, 0.0, 0.40);
+    loaded.node_started_loaded = true;
+    authority.update(loaded);
+  }
+  CargoPhysicalIdentityDecision result;
+  for (int frame = 0; frame < 3; ++frame) {
+    auto loaded = input(
+        1.4 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::LOADED, 0.0, 0.90);
+    loaded.node_started_loaded = true;
+    result = authority.update(loaded);
+  }
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_required, 4);
+  EXPECT_FALSE(result.lift_confirmed);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LoadedConfirmationStillUsesExactCurrentVertical) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  for (int frame = 0; frame < 4; ++frame) {
+    authority.update(input(
+        1.0 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::EMPTY, 0.0, 0.40));
+  }
+  authority.update(input(1.4, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::LOADED, 0.0, 0.90));
+  authority.update(input(1.5, HookLoadSignalRole::AUXILIARY, true,
+                         HookLoadState::LOADED, 0.0, 0.90));
+  auto continuity = input(1.6, HookLoadSignalRole::AUXILIARY, true,
+                          HookLoadState::LOADED, 0.0, 0.90);
+  continuity.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::CONTINUITY_ONLY;
+  const auto result = authority.update(continuity);
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_count, 2);
+  EXPECT_FALSE(result.lift_confirmed);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LoadedThreeFramesCannotSelectDifferentCargoHistory) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  CargoPhysicalIdentityDecision frozen;
+  for (int frame = 0; frame < 4; ++frame) {
+    frozen = authority.update(input(
+        1.0 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::EMPTY, 0.0, 0.40));
+  }
+  ASSERT_EQ(frozen.group_diagnostics.size(), 1U);
+  const std::uint64_t frozen_history_id =
+      frozen.group_diagnostics.front().matched_history_id;
+  ASSERT_NE(frozen_history_id, 0U);
+  CargoPhysicalIdentityDecision result;
+  for (int frame = 0; frame < 3; ++frame) {
+    result = authority.update(input(
+        1.4 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::LOADED, 5.0, 0.90));
+  }
+  EXPECT_FALSE(result.lift_confirmed);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  ASSERT_EQ(result.group_diagnostics.size(), 1U);
+  EXPECT_NE(result.group_diagnostics.front().matched_history_id,
+            frozen_history_id);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest, NoBagLoadedNoiseCannotValidate) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  for (int frame = 0; frame < 4; ++frame) {
+    authority.update(input(
+        1.0 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::EMPTY, 0.0, 0.40));
+  }
+  CargoPhysicalIdentityDecision result;
+  const double noise[] = {0.45, 0.50, 0.54, 0.48};
+  for (int frame = 0; frame < 4; ++frame) {
+    result = authority.update(input(
+        1.4 + 0.1 * frame, HookLoadSignalRole::AUXILIARY, true,
+        HookLoadState::LOADED, 0.0, noise[frame]));
+  }
+  EXPECT_EQ(result.lift_confirm_count, 0);
+  EXPECT_FALSE(result.lift_confirmed);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
      AuxiliaryGravityUnavailableUsesStrictLidarExistence) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(input(1.0, HookLoadSignalRole::AUXILIARY, false,
