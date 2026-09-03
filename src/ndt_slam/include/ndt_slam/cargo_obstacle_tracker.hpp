@@ -191,6 +191,10 @@ struct CargoObstacleTrackerDecision {
   bool valid = false;
   bool hazard_observed = false;
   bool confirmed_hazard = false;
+  // Current dense (or independently mature sparse) hazard evidence that is
+  // safe only for downstream Code 29 review. It deliberately does not claim
+  // the confirmed true-far authority required by formal Code 17/18.
+  bool no_far_review_hazard = false;
   std::uint16_t warning_code = 0U;
   std::uint64_t selected_track_id = 0U;
   std::size_t selected_source_index = 0U;

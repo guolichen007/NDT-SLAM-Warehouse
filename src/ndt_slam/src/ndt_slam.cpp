@@ -22177,8 +22177,11 @@ void NdtSlamNode::runPendingCargoAvoidance(
         pending_obstacle_decision.reason =
             warning_state_reason;
     }
+    const bool pending_warning_evidence_authorized =
+        pending_obstacle_decision.confirmed_hazard ||
+        pending_obstacle_decision.no_far_review_hazard;
     const CargoSafetyClusterEvidence* selected_pending_evidence = nullptr;
-    if (pending_obstacle_decision.confirmed_hazard &&
+    if (pending_warning_evidence_authorized &&
         pending_obstacle_decision.selected_source_index <
             external_live_result.cluster_evidence.size()) {
         const CargoSafetyClusterEvidence& selected =
@@ -22201,7 +22204,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
         fusion_input.pending_self_evidence_valid &&
         !pending_observations.empty();
     fusion_input.pending_external_obstacle_authorized =
-        pending_obstacle_decision.confirmed_hazard &&
+        pending_warning_evidence_authorized &&
         selected_pending_evidence != nullptr;
     fusion_input.pending_external_obstacle_track_id =
         fusion_input.pending_external_obstacle_authorized
@@ -22213,7 +22216,7 @@ void NdtSlamNode::runPendingCargoAvoidance(
                   pending_obstacle_decision.selected_geometry_confirm_count)
             : 0U;
     fusion_input.pending_external_provenance_valid =
-        pending_obstacle_decision.confirmed_hazard &&
+        pending_warning_evidence_authorized &&
         pending_obstacle_decision.selected_provenance !=
             ExternalProvenance::NONE;
     fusion_input.pending_external_geometry_valid =
@@ -26484,6 +26487,9 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         last_cargo_safety_result_.evidence_state = evidence_state;
         last_cargo_safety_result_.reason = reason;
     };
+    const bool current_warning_evidence_authorized =
+        obstacle_track_decision.confirmed_hazard ||
+        obstacle_track_decision.no_far_review_hazard;
 
     if (raw_cargo_safety_result.input_valid &&
         raw_cargo_safety_result.warning_valid &&
@@ -26501,7 +26507,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         cargo_temporal_candidate_count_ =
             obstacle_track_decision.selected_confirm_count;
         cargo_used_previous_confirmation_ = false;
-        if (obstacle_track_decision.confirmed_hazard &&
+        if (current_warning_evidence_authorized &&
             obstacle_track_decision.selected_source_index <
                 raw_cargo_safety_result.cluster_evidence.size()) {
             const CargoSafetyClusterEvidence& selected =
@@ -26894,7 +26900,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     avoidance_input.live.pose_generation = formal_pose_continuity;
     avoidance_input.live.map_generation = formal_map_generation;
     avoidance_input.live.confidence =
-        obstacle_track_decision.confirmed_hazard ? 1.0F : 0.0F;
+        current_warning_evidence_authorized ? 1.0F : 0.0F;
     avoidance_input.live.far_field_history_valid =
         obstacle_track_decision.selected_far_field_history_valid;
     avoidance_input.live.provenance_valid =

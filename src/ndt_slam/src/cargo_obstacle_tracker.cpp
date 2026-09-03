@@ -17,9 +17,21 @@ constexpr double kStampEpsilonSec = 1.0e-4;
 constexpr float kAssociationCostEpsilon = 1.0e-5F;
 constexpr std::size_t kMinimumSparseObservationPoints = 5U;
 constexpr std::size_t kSparseSupportRingCapacity = 3U;
+constexpr float kMinimumVerticalClearanceM = 0.80F;
 
 bool warningCode(std::uint16_t code) {
   return code == kLevel1 || code == kLevel2;
+}
+
+bool currentNearHazardGeometryValid(
+    const CargoObstacleTrack& track,
+    const CargoObstacleTrackerConfig& config) {
+  return track.current_hazard_geometry_valid &&
+      std::isfinite(track.footprint_distance_m) &&
+      track.footprint_distance_m >= 0.0F &&
+      track.footprint_distance_m <= config.level2_warning_distance_m &&
+      std::isfinite(track.conservative_clearance_m) &&
+      track.conservative_clearance_m < kMinimumVerticalClearanceM;
 }
 
 std::size_t cellIntersectionCount(
@@ -1026,6 +1038,7 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
 
   decision.valid = true;
   const CargoObstacleTrack* selected = nullptr;
+  const CargoObstacleTrack* review_selected = nullptr;
   const CargoObstacleTrack* candidate = nullptr;
   for (const CargoObstacleTrack& track : tracks_) {
     if (track.support_kind == ObstacleSupportKind::SPARSE_MULTI_FRAME) {
@@ -1041,7 +1054,12 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     const bool support_mature =
         track.support_kind == ObstacleSupportKind::DENSE_CURRENT_FRAME ||
         track.sparse_independent_frames >= config_.confirm_frames;
-    const bool warning_authorized = support_mature &&
+    // A formal 17/18 keeps the commissioned true-far/static provenance
+    // contract.  A no-far review is deliberately separate: Code 29 exists
+    // for a valid current near hazard that cannot claim formal history.  It
+    // may reach the fusion layer as warning evidence, but the missing-history
+    // bit below prevents it from ever being promoted to 17/18.
+    const bool formal_warning_authorized = support_mature &&
         track.current_warning_eligible &&
         warningCode(track.warning_code) && track.confirmed &&
         (!config_.require_far_field_history_for_warnings ||
@@ -1056,13 +1074,30 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
          track.provenance_valid) &&
         (!authority_policy.require_static_cargo_for_warning ||
          track.static_obstacle);
-    if (warning_authorized &&
+    const bool no_far_review_authorized =
+        config_.require_far_field_history_for_warnings &&
+        !track.far_field_history_valid &&
+        !track.certified_static_provenance &&
+        support_mature && track.observed_this_cycle &&
+        !track.association_ambiguous &&
+        track.current_warning_eligible &&
+        warningCode(track.warning_code) &&
+        track.current_source_validated &&
+        currentNearHazardGeometryValid(track, config_) &&
+        (!track.current_embedded ||
+         track.separated_obstacle_history_valid ||
+         track.provenance_valid);
+    if (formal_warning_authorized &&
         (selected == nullptr || moreDangerous(track, *selected))) {
       selected = &track;
+    } else if (no_far_review_authorized &&
+               (review_selected == nullptr ||
+                moreDangerous(track, *review_selected))) {
+      review_selected = &track;
     }
   }
   const CargoObstacleTrack* diagnostic = selected != nullptr
-      ? selected : candidate;
+      ? selected : review_selected != nullptr ? review_selected : candidate;
   if (diagnostic != nullptr) {
     decision.selected_track_id = diagnostic->track_id;
     decision.selected_source_index = diagnostic->current_source_index;
@@ -1128,6 +1163,10 @@ CargoObstacleTrackerDecision CargoObstacleTracker::update(
     decision.confirmed_hazard = true;
     decision.warning_code = selected->warning_code;
     decision.reason = "persistent_obstacle_track_confirmed";
+  } else if (review_selected != nullptr) {
+    decision.no_far_review_hazard = true;
+    decision.warning_code = review_selected->warning_code;
+    decision.reason = "near_hazard_without_true_far_history_review";
   } else if (decision.hazard_observed) {
     if (diagnostic == nullptr) {
       decision.reason = "static_track_association_reset";

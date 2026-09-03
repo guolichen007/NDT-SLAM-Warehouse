@@ -461,6 +461,79 @@ TEST(CargoAvoidanceFusion,
   EXPECT_EQ(result.reason, "review_warning_without_true_far_history");
 }
 
+TEST(CargoAvoidanceFusion, NearHazardWithoutTrueFarHistoryProduces29) {
+  CargoAvoidanceFusionInput input = validInput();
+  input.live.hazard = true;
+  input.live.warning_code = 18;
+  input.live.distance_m = 4.0F;
+  input.live.clearance_m = 0.10F;
+  input.live.obstacle_track_id = 801U;
+  input.live_near_field_history_authorized = false;
+
+  const auto result = fuseCargoAvoidanceRisk(input);
+
+  ASSERT_TRUE(result.official_valid);
+  EXPECT_EQ(result.official_code, 29);
+  EXPECT_TRUE(result.anomaly_review_live);
+  ASSERT_TRUE(result.authoritative_hazard.valid);
+  EXPECT_EQ(result.authoritative_hazard.obstacle_track_id, 801U);
+}
+
+TEST(CargoAvoidanceFusion, Code29DoesNotRequireFarHistory) {
+  CargoAvoidanceFusionInput input = validInput();
+  input.live.hazard = true;
+  input.live.warning_code = 17;
+  input.live.distance_m = 2.0F;
+  input.live.clearance_m = 0.0F;
+  input.live_near_field_history_authorized = false;
+
+  const auto result = fuseCargoAvoidanceRisk(input);
+
+  EXPECT_EQ(result.official_code, 29);
+  EXPECT_FALSE(result.authoritative_hazard.far_field_history_valid);
+}
+
+TEST(CargoAvoidanceFusion, Code17StillRequiresTrueFarHistory) {
+  CargoAvoidanceFusionInput input = validInput();
+  input.live.hazard = true;
+  input.live.warning_code = 17;
+  input.live.distance_m = 2.0F;
+  input.live.clearance_m = 0.10F;
+  input.live_near_field_history_authorized = false;
+
+  EXPECT_EQ(fuseCargoAvoidanceRisk(input).official_code, 29);
+  input.live_near_field_history_authorized = true;
+  EXPECT_EQ(fuseCargoAvoidanceRisk(input).official_code, 17);
+}
+
+TEST(CargoAvoidanceFusion, Code18StillRequiresTrueFarHistory) {
+  CargoAvoidanceFusionInput input = validInput();
+  input.live.hazard = true;
+  input.live.warning_code = 18;
+  input.live.distance_m = 4.0F;
+  input.live.clearance_m = 0.10F;
+  input.live_near_field_history_authorized = false;
+
+  EXPECT_EQ(fuseCargoAvoidanceRisk(input).official_code, 29);
+  input.live_near_field_history_authorized = true;
+  EXPECT_EQ(fuseCargoAvoidanceRisk(input).official_code, 18);
+}
+
+TEST(CargoAvoidanceFusion, NoFarReviewCannotAuthorizeClear) {
+  CargoAvoidanceFusionInput input = validInput();
+  input.live.hazard = true;
+  input.live.warning_code = 18;
+  input.live.distance_m = 4.0F;
+  input.live.clearance_m = 0.10F;
+  input.live_near_field_history_authorized = false;
+  input.formal_clear_authorized = true;
+
+  const auto result = fuseCargoAvoidanceRisk(input);
+
+  EXPECT_EQ(result.official_code, 29);
+  EXPECT_NE(result.official_code, 14);
+}
+
 TEST(CargoAvoidanceFusion,
      StaticFarHistoryCannotAuthorizeSuddenLiveLevel1) {
   CargoAvoidanceFusionInput input = validInput();

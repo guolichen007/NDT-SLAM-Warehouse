@@ -396,7 +396,7 @@ TEST(CargoObstacleTracker,
 }
 
 TEST(CargoObstacleTracker,
-     Level1FirstSeenInsideThreeMetersWaitsForFarFieldHistory) {
+     NearHazardWithoutTrueFarHistoryProduces29ReviewEvidence) {
   CargoObstacleTrackerConfig config = ordinaryHazardConfig();
   config.require_far_field_history_for_warnings = true;
   CargoObstacleTracker tracker(config);
@@ -407,10 +407,12 @@ TEST(CargoObstacleTracker,
   const CargoObstacleTrackerDecision suppressed =
       tracker.update(1.4, {near});
   EXPECT_FALSE(suppressed.confirmed_hazard);
+  EXPECT_TRUE(suppressed.no_far_review_hazard) << suppressed.reason;
   EXPECT_TRUE(suppressed.selected_near_field);
   EXPECT_FALSE(suppressed.selected_near_field_authorized);
   EXPECT_FALSE(suppressed.selected_far_field_history_valid);
-  EXPECT_EQ(suppressed.reason, "warning_track_missing_true_far_history");
+  EXPECT_EQ(suppressed.reason,
+            "near_hazard_without_true_far_history_review");
 
   CargoObstacleObservation far = near;
   far.footprint_distance_m = 6.0F;
@@ -425,6 +427,66 @@ TEST(CargoObstacleTracker,
   EXPECT_TRUE(authorized.selected_near_field_authorized);
   EXPECT_TRUE(authorized.selected_far_field_history_valid);
   EXPECT_EQ(authorized.warning_code, 17U);
+}
+
+TEST(CargoObstacleTracker,
+     DenseCurrentValidNearHazardCanProduceReviewWithoutFarHistory) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  CargoObstacleTracker tracker(config);
+
+  const CargoObstacleTrackerDecision review =
+      tracker.update(1.0, {hazard(0U, 0.0F, 0.0F, 18U)});
+
+  EXPECT_FALSE(review.confirmed_hazard);
+  EXPECT_TRUE(review.no_far_review_hazard) << review.reason;
+  EXPECT_EQ(review.warning_code, 18U);
+  EXPECT_FALSE(review.selected_far_field_history_valid);
+  EXPECT_EQ(review.reason,
+            "near_hazard_without_true_far_history_review");
+}
+
+TEST(CargoObstacleTracker, SingleSparseFrameCannotProduceNoFarReview) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation sparse = hazard(0U, 0.0F, 0.0F, 18U);
+  sparse.point_count = 8U;
+  sparse.occupied_map_cells = {10, 11, 12};
+
+  const CargoObstacleTrackerDecision decision =
+      tracker.update(1.0, {sparse});
+
+  EXPECT_FALSE(decision.confirmed_hazard);
+  EXPECT_EQ(decision.reason, "sparse_support_pending");
+}
+
+TEST(CargoObstacleTracker, InvalidSourceCannotProduceNoFarReview) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation invalid = hazard(0U, 0.0F, 0.0F, 18U);
+  invalid.source_validated = false;
+
+  const CargoObstacleTrackerDecision decision =
+      tracker.update(1.0, {invalid});
+
+  EXPECT_FALSE(decision.confirmed_hazard);
+  EXPECT_EQ(decision.reason, "current_source_unvalidated");
+}
+
+TEST(CargoObstacleTracker, ClearanceAboveThresholdCannotProduceNoFarReview) {
+  CargoObstacleTrackerConfig config = ordinaryHazardConfig();
+  config.require_far_field_history_for_warnings = true;
+  CargoObstacleTracker tracker(config);
+  CargoObstacleObservation clear = hazard(0U, 0.0F, 0.0F, 18U);
+  clear.conservative_clearance_m = 0.80F;
+
+  const CargoObstacleTrackerDecision decision =
+      tracker.update(1.0, {clear});
+
+  EXPECT_FALSE(decision.confirmed_hazard);
+  EXPECT_EQ(decision.reason, "warning_track_missing_true_far_history");
 }
 
 TEST(CargoObstacleTracker,
