@@ -149,6 +149,10 @@ struct CargoPhysicalComponentObservation {
 struct CargoShadowFrameEvidence {
   double source_stamp_sec = 0.0;
   pcl::PointCloud<pcl::PointXYZ>::ConstPtr raw_roi_current_frame;
+  // Range-filtered current-frame cloud BEFORE the narrow Cargo ROI crop and
+  // voxel clustering.  It exists only to re-measure the already-identified
+  // Cargo's current vertical; it never selects identity.
+  pcl::PointCloud<pcl::PointXYZ>::ConstPtr range_cloud_current_frame;
   bool ground_reference_valid = false;
   float ground_z_base = std::numeric_limits<float>::quiet_NaN();
 };
@@ -314,6 +318,15 @@ struct CargoPhysicalGroupDiagnostic {
   double current_surface_z = std::numeric_limits<double>::quiet_NaN();
   std::size_t current_surface_owner_overlap_cells = 0U;
   double current_surface_owner_coverage = 0.0;
+  std::string current_surface_reject_reason = "not_evaluated";
+  bool v31_owner_locked_valid = false;
+  double v31_owner_locked_surface_z =
+      std::numeric_limits<double>::quiet_NaN();
+  std::string v31_owner_locked_reject_reason = "not_evaluated";
+  std::size_t v31_owner_cells = 0U;
+  std::size_t v31_frozen_cells = 0U;
+  std::size_t v31_authorized_cells = 0U;
+  std::size_t v31_raw_points_measured = 0U;
   CargoPhysicalIdentityState identity = CargoPhysicalIdentityState::UNKNOWN;
 };
 
@@ -404,6 +417,40 @@ struct CargoPhysicalIdentityDecision {
   double preload_boundary_edge_delta_sec =
       std::numeric_limits<double>::quiet_NaN();
   std::string preload_handoff_trigger_mode = "NONE";
+  // Diagnostic Surface Reference Lock (Phase A counterfactual).
+  bool ref_lock_frozen = false;
+  std::string ref_lock_phase = "NONE";
+  bool ref_lock_history_id_changed = false;
+  std::uint64_t ref_lock_source_history_id = 0U;
+  std::uint64_t ref_lock_current_history_id = 0U;
+  std::size_t ref_lock_postload_history_id_change_count = 0U;
+  int ref_lock_lift_confirm_count = 0;
+  bool ref_lock_lift_confirmed = false;
+  bool ref_lock_simulated_validated = false;
+  std::size_t ref_lock_empty_lift_confirm_advance = 0U;
+  bool ref_lock_v31_valid = false;
+  std::size_t ref_lock_significant_frames_after_split = 0U;
+  // Diagnostic current-frame owner assembly.
+  bool assembly_valid = false;
+  int assembly_seed_group = -1;
+  std::size_t assembly_member_count = 0U;
+  bool assembly_high_z_exists = false;
+  bool assembly_high_z_joined = false;
+  std::string assembly_high_z_reject_reason = "none";
+  std::string assembly_reject_reason = "not_evaluated";
+  double assembly_surface_z = std::numeric_limits<double>::quiet_NaN();
+  double assembly_lift_delta = std::numeric_limits<double>::quiet_NaN();
+  bool assembly_lift_significant = false;
+  int assembly_lift_confirm_count = 0;
+  bool assembly_simulated_validated = false;
+  // Diagnostic pre-cluster vertical evidence.
+  bool precluster_surface_valid = false;
+  double precluster_surface_z = std::numeric_limits<double>::quiet_NaN();
+  std::string precluster_reject_reason = "not_evaluated";
+  double precluster_lift_delta = std::numeric_limits<double>::quiet_NaN();
+  bool precluster_lift_significant = false;
+  int precluster_lift_confirm_count = 0;
+  bool precluster_simulated_validated = false;
   double identity_validation_stamp_sec = 0.0;
   std::vector<CargoPhysicalGroupDiagnostic> group_diagnostics;
   std::string reason = "uninitialized";
@@ -457,6 +504,10 @@ class CargoPhysicalIdentityAuthority {
     double prelift_reference_last_stamp = 0.0;
     std::string prelift_close_reason = "none";
     CargoFootprintSnapshot frozen_preload_footprint;
+    // V3.1: the XY grid cells owned by the pre-load surface reference.  Only
+    // cell indices are retained (no point cloud, no historical Z, no identity,
+    // no ownership authority).  Bounded by the footprint grid extent.
+    std::vector<CargoFootprintGridIndex> frozen_preload_owner_surface_cells;
     bool surface_lift_reference_frozen = false;
     double surface_baseline_z = std::numeric_limits<double>::quiet_NaN();
     double surface_baseline_uncertainty_m = 0.20;
@@ -525,6 +576,40 @@ class CargoPhysicalIdentityAuthority {
     PreLoadBoundaryPhase phase = PreLoadBoundaryPhase::NONE;
   };
 
+  // Diagnostic-only surface reference lock (Phase A counterfactual).  It owns
+  // the surface reference and post-load lift accumulator independent of the
+  // ephemeral detector History id, so a History split cannot discard it.  It
+  // never stores point clouds, prediction, lineage ownership, map authority,
+  // Bottom or Safety state.  At most one exists.
+  struct DiagnosticSurfaceReferenceLock {
+    enum class Phase : std::uint8_t { NONE = 0, PRELOAD_ACTIVE, POSTLOAD_ACTIVE };
+    Phase phase = Phase::NONE;
+    bool frozen = false;
+    double baseline_z = std::numeric_limits<double>::quiet_NaN();
+    double baseline_uncertainty_m = 0.20;
+    CargoFootprintSnapshot frozen_footprint;
+    std::vector<CargoFootprintGridIndex> frozen_owner_cells;
+    std::uint64_t source_lifecycle_id = 0U;
+    std::uint64_t source_physical_epoch = 0U;
+    std::uint64_t source_history_id = 0U;
+    std::uint64_t current_history_id = 0U;
+    double last_owner_refresh_stamp = 0.0;
+    std::vector<PreLiftSample> sample_window;
+    bool window_restarted = false;
+    std::string window_restart_reason = "none";
+    int lift_confirm_count = 0;
+    bool lift_confirmed = false;
+    int assembly_lift_confirm_count = 0;
+    bool assembly_lift_confirmed = false;
+    int precluster_lift_confirm_count = 0;
+    bool precluster_lift_confirmed = false;
+    std::size_t postload_history_id_change_count = 0U;
+    std::size_t postload_valid_v31_after_split = 0U;
+    std::size_t significant_frames_after_split = 0U;
+    std::size_t empty_lift_confirm_advance = 0U;
+    std::size_t pre_freeze_outlier_windows = 0U;
+  };
+
   static constexpr std::size_t kMaximumLineageProvenanceFrames = 3U;
 
   CargoPhysicalIdentityConfig config_;
@@ -544,6 +629,7 @@ class CargoPhysicalIdentityAuthority {
   double last_pipeline_stamp_sec_ = 0.0;
   PreLoadHandoffSnapshot preload_handoff_;
   PendingPreLoadBoundary preload_boundary_;
+  DiagnosticSurfaceReferenceLock diagnostic_reference_lock_;
   std::string reset_reason_ = "constructed";
 
   // Captures the frozen preload reference from the currently-unique eligible

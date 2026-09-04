@@ -15038,6 +15038,29 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "surface_baseline_uncertainty,current_surface_vertical_valid,"
                 << "current_surface_z,current_surface_owner_overlap_cells,"
                 << "current_surface_owner_coverage,lift_vertical_source,"
+                << "current_surface_reject_reason,"
+                << "v31_owner_locked_valid,v31_owner_locked_surface_z,"
+                << "v31_owner_locked_reject_reason,v31_owner_cells,"
+                << "v31_frozen_cells,v31_authorized_cells,"
+                << "v31_raw_points_measured,"
+                << "ref_lock_frozen,ref_lock_phase,"
+                << "ref_lock_history_id_changed,"
+                << "ref_lock_source_history_id,ref_lock_current_history_id,"
+                << "ref_lock_postload_history_id_change_count,"
+                << "ref_lock_lift_confirm_count,ref_lock_lift_confirmed,"
+                << "ref_lock_simulated_validated,"
+                << "ref_lock_empty_lift_confirm_advance,"
+                << "ref_lock_significant_frames_after_split,ref_lock_v31_valid,"
+                << "assembly_valid,assembly_seed_group,assembly_member_count,"
+                << "assembly_high_z_exists,assembly_high_z_joined,"
+                << "assembly_high_z_reject_reason,assembly_reject_reason,"
+                << "assembly_surface_z,assembly_lift_delta,"
+                << "assembly_lift_significant,assembly_lift_confirm_count,"
+                << "assembly_simulated_validated,"
+                << "precluster_surface_valid,precluster_surface_z,"
+                << "precluster_reject_reason,precluster_lift_delta,"
+                << "precluster_lift_significant,precluster_lift_confirm_count,"
+                << "precluster_simulated_validated,"
                 << "preload_boundary_pending,preload_boundary_phase,"
                 << "preload_boundary_lifecycle_seen,"
                 << "preload_boundary_load_seen,"
@@ -15182,6 +15205,65 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << (diagnostic.current_surface_vertical_valid
                         ? "FROZEN_PRELOAD_FOOTPRINT_RAW_ROI_OWNER_PROOF"
                         : "NONE") << ','
+                << diagnostic.current_surface_reject_reason << ','
+                << (diagnostic.v31_owner_locked_valid ? 1 : 0) << ','
+                << diagnostic.v31_owner_locked_surface_z << ','
+                << diagnostic.v31_owner_locked_reject_reason << ','
+                << diagnostic.v31_owner_cells << ','
+                << diagnostic.v31_frozen_cells << ','
+                << diagnostic.v31_authorized_cells << ','
+                << diagnostic.v31_raw_points_measured << ','
+                << (integrated_identity_decision_.ref_lock_frozen ? 1 : 0) << ','
+                << integrated_identity_decision_.ref_lock_phase << ','
+                << (integrated_identity_decision_.ref_lock_history_id_changed
+                        ? 1 : 0) << ','
+                << integrated_identity_decision_.ref_lock_source_history_id
+                << ','
+                << integrated_identity_decision_.ref_lock_current_history_id
+                << ','
+                << integrated_identity_decision_
+                       .ref_lock_postload_history_id_change_count << ','
+                << integrated_identity_decision_.ref_lock_lift_confirm_count
+                << ','
+                << (integrated_identity_decision_.ref_lock_lift_confirmed
+                        ? 1 : 0) << ','
+                << (integrated_identity_decision_.ref_lock_simulated_validated
+                        ? 1 : 0) << ','
+                << integrated_identity_decision_
+                       .ref_lock_empty_lift_confirm_advance << ','
+                << integrated_identity_decision_
+                       .ref_lock_significant_frames_after_split << ','
+                << (integrated_identity_decision_.ref_lock_v31_valid ? 1 : 0)
+                << ','
+                << (integrated_identity_decision_.assembly_valid ? 1 : 0) << ','
+                << integrated_identity_decision_.assembly_seed_group << ','
+                << integrated_identity_decision_.assembly_member_count << ','
+                << (integrated_identity_decision_.assembly_high_z_exists ? 1 : 0)
+                << ','
+                << (integrated_identity_decision_.assembly_high_z_joined ? 1 : 0)
+                << ','
+                << integrated_identity_decision_.assembly_high_z_reject_reason
+                << ','
+                << integrated_identity_decision_.assembly_reject_reason << ','
+                << integrated_identity_decision_.assembly_surface_z << ','
+                << integrated_identity_decision_.assembly_lift_delta << ','
+                << (integrated_identity_decision_.assembly_lift_significant ? 1 : 0)
+                << ','
+                << integrated_identity_decision_.assembly_lift_confirm_count
+                << ','
+                << (integrated_identity_decision_.assembly_simulated_validated
+                        ? 1 : 0) << ','
+                << (integrated_identity_decision_.precluster_surface_valid
+                        ? 1 : 0) << ','
+                << integrated_identity_decision_.precluster_surface_z << ','
+                << integrated_identity_decision_.precluster_reject_reason << ','
+                << integrated_identity_decision_.precluster_lift_delta << ','
+                << (integrated_identity_decision_.precluster_lift_significant
+                        ? 1 : 0) << ','
+                << integrated_identity_decision_.precluster_lift_confirm_count
+                << ','
+                << (integrated_identity_decision_.precluster_simulated_validated
+                        ? 1 : 0) << ','
                 << (integrated_identity_decision_.preload_boundary_pending
                         ? 1 : 0) << ','
                 << integrated_identity_decision_.preload_boundary_phase << ','
@@ -15435,6 +15517,7 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     if (integrated_cargo_identity_shadow_enabled_) {
         result.shadow_frame_evidence.source_stamp_sec = stamp.toSec();
         result.shadow_frame_evidence.raw_roi_current_frame = crop_cloud;
+        result.shadow_frame_evidence.range_cloud_current_frame = cloud_base;
     }
     last_detection_pipeline_trace_.roi_points = crop_cloud->size();
     last_detection_pipeline_trace_.roi_z95 = cloudZPercentile(*crop_cloud, 0.95F);
