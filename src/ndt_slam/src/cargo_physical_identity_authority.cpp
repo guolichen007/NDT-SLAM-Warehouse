@@ -833,7 +833,65 @@ void CargoPhysicalIdentityAuthority::reset(const std::string& reason) {
   prelift_blocked_until_new_epoch_ = false;
   last_pipeline_stamp_sec_ = 0.0;
   preload_handoff_ = PreLoadHandoffSnapshot{};
+  preload_boundary_ = PendingPreLoadBoundary{};
   reset_reason_ = reason;
+}
+
+bool CargoPhysicalIdentityAuthority::captureUniqueEligiblePreloadReference(
+    const CargoPhysicalIdentityInput& input, PreLoadHandoffSnapshot* snapshot,
+    std::size_t* eligible_count) const {
+  std::vector<const History*> eligible;
+  for (const History& history : histories_) {
+    const double support_age = input.pipeline_stamp_sec -
+        history.last_supported_evidence_stamp_sec;
+    const bool fresh_exact_support =
+        history.last_supported_evidence_stamp_sec > 0.0 &&
+        support_age >= 0.0 &&
+        support_age <= config_.maximum_observation_gap_sec;
+    if (history.prelift_reference_frozen && history.baseline_frozen &&
+        history.baseline_source ==
+            CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE &&
+        history.surface_lift_reference_frozen &&
+        fresh_exact_support && !history.association_ambiguous &&
+        history.frozen_preload_footprint.valid) {
+      eligible.push_back(&history);
+    }
+  }
+  if (eligible_count != nullptr) {
+    *eligible_count = eligible.size();
+  }
+  if (eligible.size() != 1U || snapshot == nullptr) {
+    return false;
+  }
+  const History& source = *eligible.front();
+  PreLoadHandoffSnapshot handoff;
+  handoff.valid = true;
+  handoff.source_lifecycle_id = lifecycle_id_;
+  handoff.source_physical_epoch = source.physical_cargo_epoch_id;
+  handoff.source_history_id = source.id;
+  handoff.baseline_z = source.surface_baseline_z;
+  handoff.baseline_uncertainty_m =
+      source.surface_baseline_uncertainty_m;
+  handoff.baseline_stamp_sec = source.baseline_stamp_sec;
+  handoff.frozen_preload_footprint = source.frozen_preload_footprint;
+  handoff.last_exact_support_stamp =
+      source.last_supported_evidence_stamp_sec;
+  handoff.robust_xy_center =
+      source.frozen_preload_footprint.center_base.cast<double>();
+  handoff.robust_xy_extent =
+      source.frozen_preload_footprint.size_xy.cast<double>();
+  handoff.robust_x05 = handoff.robust_xy_center.x() -
+      0.5 * handoff.robust_xy_extent.x();
+  handoff.robust_x95 = handoff.robust_xy_center.x() +
+      0.5 * handoff.robust_xy_extent.x();
+  handoff.robust_y05 = handoff.robust_xy_center.y() -
+      0.5 * handoff.robust_xy_extent.y();
+  handoff.robust_y95 = handoff.robust_xy_center.y() +
+      0.5 * handoff.robust_xy_extent.y();
+  handoff.yaw_rad = source.frozen_preload_footprint.yaw_base_rad;
+  handoff.captured_at_load_edge_stamp = input.pipeline_stamp_sec;
+  *snapshot = handoff;
+  return true;
 }
 
 CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
@@ -870,6 +928,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     histories_.clear();
     validated_history_id_ = 0U;
     preload_handoff_ = PreLoadHandoffSnapshot{};
+    preload_boundary_ = PendingPreLoadBoundary{};
     prelift_blocked_until_new_epoch_ = true;
     decision_.prelift_state = CargoPreLiftReferenceState::CLOSED;
     decision_.prelift_close_reason = "SOURCE_TIME_ROLLBACK";
@@ -898,73 +957,130 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     }
   }
 
-  // Capture the reference certificate before the normal lifecycle reset.
-  // Only an explicit, observed EMPTY -> LOADED edge may cross this boundary;
-  // the old History itself is never retained.
-  if (!time_rollback && !input.rearm && lifecycle_changed &&
-      empty_to_loaded_transition) {
-    std::vector<const History*> eligible;
-    for (const History& history : histories_) {
-      const double support_age = input.pipeline_stamp_sec -
-          history.last_supported_evidence_stamp_sec;
-      const bool fresh_exact_support =
-          history.last_supported_evidence_stamp_sec > 0.0 &&
-          support_age >= 0.0 &&
-          support_age <= config_.maximum_observation_gap_sec;
-      if (history.prelift_reference_frozen && history.baseline_frozen &&
-          history.baseline_source ==
-              CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE &&
-          history.surface_lift_reference_frozen &&
-          fresh_exact_support && !history.association_ambiguous &&
-          history.frozen_preload_footprint.valid) {
-        eligible.push_back(&history);
+  // Capture the frozen preload reference across the load boundary.  The
+  // lifecycle edge and the EMPTY -> LOADED gravity edge are independent
+  // publisher events and may arrive in adjacent source frames.  A single
+  // pending reference is retained until the complementary edge arrives within
+  // the source-time contract; the old History itself is never retained.
+  const bool boundary_edge_lifecycle = lifecycle_changed;
+  const bool boundary_edge_load = empty_to_loaded_transition;
+  const bool boundary_capture_allowed = !time_rollback && !input.rearm;
+
+  if (input.rearm && (preload_handoff_.valid || preload_boundary_.valid)) {
+    preload_handoff_ = PreLoadHandoffSnapshot{};
+    preload_boundary_ = PendingPreLoadBoundary{};
+    decision_.preload_handoff_reject_reason = "REARM_CLEARED_BOUNDARY";
+  }
+
+  // Promote a pending boundary once its complementary edge arrives within the
+  // source-time contract; otherwise it expires fail-closed.
+  if (boundary_capture_allowed && preload_boundary_.valid &&
+      !preload_handoff_.valid) {
+    const double pending_age = input.pipeline_stamp_sec -
+        preload_boundary_.first_edge_stamp_sec;
+    const bool complementary =
+        (preload_boundary_.phase == PreLoadBoundaryPhase::WAITING_FOR_LOAD &&
+         boundary_edge_load) ||
+        (preload_boundary_.phase ==
+             PreLoadBoundaryPhase::WAITING_FOR_LIFECYCLE &&
+         boundary_edge_lifecycle);
+    const bool repeat_edge =
+        (preload_boundary_.phase == PreLoadBoundaryPhase::WAITING_FOR_LOAD &&
+         boundary_edge_lifecycle) ||
+        (preload_boundary_.phase ==
+             PreLoadBoundaryPhase::WAITING_FOR_LIFECYCLE &&
+         boundary_edge_load);
+    const bool gravity_invalid_while_waiting =
+        preload_boundary_.phase == PreLoadBoundaryPhase::WAITING_FOR_LOAD &&
+        !gravity_loaded && !gravity_empty;
+    if (complementary && pending_age >= 0.0 &&
+        pending_age <= config_.maximum_observation_gap_sec) {
+      if (preload_boundary_.phase == PreLoadBoundaryPhase::WAITING_FOR_LOAD) {
+        preload_boundary_.load_edge_seen = true;
+        preload_boundary_.load_edge_stamp_sec = input.pipeline_stamp_sec;
+        decision_.preload_handoff_trigger_mode = "LIFECYCLE_THEN_LOAD";
+      } else {
+        preload_boundary_.lifecycle_edge_seen = true;
+        preload_boundary_.lifecycle_edge_stamp_sec = input.pipeline_stamp_sec;
+        preload_boundary_.target_lifecycle_id = input.lifecycle_id;
+        decision_.preload_handoff_trigger_mode = "LOAD_THEN_LIFECYCLE";
       }
-    }
-    if (eligible.size() == 1U) {
-      const History& source = *eligible.front();
-      PreLoadHandoffSnapshot handoff;
-      handoff.valid = true;
-      handoff.source_lifecycle_id = lifecycle_id_;
-      handoff.source_physical_epoch = source.physical_cargo_epoch_id;
-      handoff.source_history_id = source.id;
-      handoff.baseline_z = source.surface_baseline_z;
-      handoff.baseline_uncertainty_m =
-          source.surface_baseline_uncertainty_m;
-      handoff.baseline_stamp_sec = source.baseline_stamp_sec;
-      handoff.frozen_preload_footprint = source.frozen_preload_footprint;
-      handoff.last_exact_support_stamp =
-          source.last_supported_evidence_stamp_sec;
-      handoff.robust_xy_center =
-          source.frozen_preload_footprint.center_base.cast<double>();
-      handoff.robust_xy_extent =
-          source.frozen_preload_footprint.size_xy.cast<double>();
-      handoff.robust_x05 = handoff.robust_xy_center.x() -
-          0.5 * handoff.robust_xy_extent.x();
-      handoff.robust_x95 = handoff.robust_xy_center.x() +
-          0.5 * handoff.robust_xy_extent.x();
-      handoff.robust_y05 = handoff.robust_xy_center.y() -
-          0.5 * handoff.robust_xy_extent.y();
-      handoff.robust_y95 = handoff.robust_xy_center.y() +
-          0.5 * handoff.robust_xy_extent.y();
-      handoff.yaw_rad = source.frozen_preload_footprint.yaw_base_rad;
-      handoff.captured_at_load_edge_stamp = input.pipeline_stamp_sec;
-      preload_handoff_ = handoff;
+      decision_.preload_boundary_edge_delta_sec = pending_age;
+      preload_handoff_ = preload_boundary_.reference;
       decision_.preload_handoff_captured = true;
-      decision_.preload_handoff_source_history_id = source.id;
+      decision_.preload_handoff_source_history_id =
+          preload_handoff_.source_history_id;
       decision_.preload_handoff_source_epoch =
-          source.physical_cargo_epoch_id;
+          preload_handoff_.source_physical_epoch;
       decision_.preload_handoff_reject_reason = "NONE";
+      preload_boundary_ = PendingPreLoadBoundary{};
+    } else if (pending_age > config_.maximum_observation_gap_sec ||
+               repeat_edge || gravity_invalid_while_waiting) {
+      preload_boundary_ = PendingPreLoadBoundary{};
+      decision_.preload_handoff_reject_reason = "PENDING_BOUNDARY_STALE";
+    }
+  }
+
+  // Capture a fresh boundary (same-frame or the first of two adjacent edges).
+  if (boundary_capture_allowed && !preload_handoff_.valid &&
+      !preload_boundary_.valid &&
+      (boundary_edge_lifecycle || boundary_edge_load)) {
+    PreLoadHandoffSnapshot handoff;
+    std::size_t eligible_count = 0U;
+    if (captureUniqueEligiblePreloadReference(
+            input, &handoff, &eligible_count)) {
+      if (boundary_edge_lifecycle && boundary_edge_load) {
+        preload_handoff_ = handoff;
+        decision_.preload_handoff_captured = true;
+        decision_.preload_handoff_source_history_id = handoff.source_history_id;
+        decision_.preload_handoff_source_epoch = handoff.source_physical_epoch;
+        decision_.preload_handoff_reject_reason = "NONE";
+        decision_.preload_handoff_trigger_mode = "SAME_FRAME";
+      } else if (boundary_edge_lifecycle && gravity_empty) {
+        PendingPreLoadBoundary pending;
+        pending.valid = true;
+        pending.reference = handoff;
+        pending.lifecycle_edge_seen = true;
+        pending.first_edge_stamp_sec = input.pipeline_stamp_sec;
+        pending.lifecycle_edge_stamp_sec = input.pipeline_stamp_sec;
+        pending.source_lifecycle_id = lifecycle_id_;
+        pending.target_lifecycle_id = input.lifecycle_id;
+        pending.phase = PreLoadBoundaryPhase::WAITING_FOR_LOAD;
+        preload_boundary_ = pending;
+      } else {
+        PendingPreLoadBoundary pending;
+        pending.valid = true;
+        pending.reference = handoff;
+        pending.load_edge_seen = true;
+        pending.first_edge_stamp_sec = input.pipeline_stamp_sec;
+        pending.load_edge_stamp_sec = input.pipeline_stamp_sec;
+        pending.source_lifecycle_id = lifecycle_id_;
+        pending.target_lifecycle_id = lifecycle_id_;
+        pending.phase = PreLoadBoundaryPhase::WAITING_FOR_LIFECYCLE;
+        preload_boundary_ = pending;
+      }
     } else {
-      preload_handoff_ = PreLoadHandoffSnapshot{};
-      decision_.preload_handoff_reject_reason = eligible.empty()
+      decision_.preload_handoff_reject_reason = eligible_count == 0U
           ? "NO_ELIGIBLE_PRELOAD_HISTORY"
           : "AMBIGUOUS_PRELOAD_HISTORIES";
     }
-  } else if ((input.rearm || lifecycle_changed) &&
-             !empty_to_loaded_transition) {
-    preload_handoff_ = PreLoadHandoffSnapshot{};
-    decision_.preload_handoff_reject_reason =
-        "LIFECYCLE_RESET_WITHOUT_EMPTY_TO_LOADED";
+  }
+
+  // Emit pending-boundary telemetry after the coalescer has run.
+  if (preload_boundary_.valid) {
+    decision_.preload_boundary_pending = true;
+    decision_.preload_boundary_phase =
+        preload_boundary_.phase == PreLoadBoundaryPhase::WAITING_FOR_LOAD
+            ? "WAITING_FOR_LOAD" : "WAITING_FOR_LIFECYCLE";
+    decision_.preload_boundary_lifecycle_seen =
+        preload_boundary_.lifecycle_edge_seen;
+    decision_.preload_boundary_load_seen = preload_boundary_.load_edge_seen;
+    decision_.preload_boundary_first_edge_stamp =
+        preload_boundary_.first_edge_stamp_sec;
+    decision_.preload_boundary_lifecycle_stamp =
+        preload_boundary_.lifecycle_edge_stamp_sec;
+    decision_.preload_boundary_load_stamp =
+        preload_boundary_.load_edge_stamp_sec;
   }
 
   if (input.rearm || (initialized_ && input.lifecycle_id != lifecycle_id_)) {

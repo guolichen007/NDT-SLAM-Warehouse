@@ -78,6 +78,19 @@ enum class CargoLineageRejectStage : std::uint8_t {
   SELECTED,
 };
 
+// A bounded two-event load-boundary coalescer.  The lifecycle edge and the
+// EMPTY->LOADED gravity edge are independent publisher events and may arrive
+// in adjacent source frames.  A single pending reference is retained until the
+// complementary edge arrives within maximum_observation_gap_sec, after which
+// the frozen preload reference is handed off.  This is not a tracker: it owns
+// no points, identity, ownership, lift state, prediction, Bottom, Safety or
+// map authority, and at most one pending boundary may exist at a time.
+enum class PreLoadBoundaryPhase : std::uint8_t {
+  NONE = 0,
+  WAITING_FOR_LOAD,
+  WAITING_FOR_LIFECYCLE,
+};
+
 const char* cargoCandidateAssociationStateName(
     CargoCandidateAssociationState state) noexcept;
 const char* cargoPhysicalAssociationModeName(
@@ -381,6 +394,16 @@ struct CargoPhysicalIdentityDecision {
   std::size_t current_surface_owner_overlap_cells = 0U;
   double current_surface_owner_coverage = 0.0;
   std::string lift_vertical_source = "NONE";
+  bool preload_boundary_pending = false;
+  std::string preload_boundary_phase = "NONE";
+  bool preload_boundary_lifecycle_seen = false;
+  bool preload_boundary_load_seen = false;
+  double preload_boundary_first_edge_stamp = 0.0;
+  double preload_boundary_lifecycle_stamp = 0.0;
+  double preload_boundary_load_stamp = 0.0;
+  double preload_boundary_edge_delta_sec =
+      std::numeric_limits<double>::quiet_NaN();
+  std::string preload_handoff_trigger_mode = "NONE";
   double identity_validation_stamp_sec = 0.0;
   std::vector<CargoPhysicalGroupDiagnostic> group_diagnostics;
   std::string reason = "uninitialized";
@@ -486,6 +509,22 @@ class CargoPhysicalIdentityAuthority {
     double captured_at_load_edge_stamp = 0.0;
   };
 
+  // A pending, not-yet-complete load boundary.  It holds a captured frozen
+  // preload reference until the complementary edge (load or lifecycle) arrives
+  // within the source-time contract.  At most one exists at a time.
+  struct PendingPreLoadBoundary {
+    bool valid = false;
+    PreLoadHandoffSnapshot reference;
+    bool lifecycle_edge_seen = false;
+    bool load_edge_seen = false;
+    double first_edge_stamp_sec = 0.0;
+    double lifecycle_edge_stamp_sec = 0.0;
+    double load_edge_stamp_sec = 0.0;
+    std::uint64_t source_lifecycle_id = 0U;
+    std::uint64_t target_lifecycle_id = 0U;
+    PreLoadBoundaryPhase phase = PreLoadBoundaryPhase::NONE;
+  };
+
   static constexpr std::size_t kMaximumLineageProvenanceFrames = 3U;
 
   CargoPhysicalIdentityConfig config_;
@@ -504,7 +543,15 @@ class CargoPhysicalIdentityAuthority {
   bool prelift_blocked_until_new_epoch_ = false;
   double last_pipeline_stamp_sec_ = 0.0;
   PreLoadHandoffSnapshot preload_handoff_;
+  PendingPreLoadBoundary preload_boundary_;
   std::string reset_reason_ = "constructed";
+
+  // Captures the frozen preload reference from the currently-unique eligible
+  // pre-load history.  Returns whether a reference was captured; fills
+  // *eligible_count with 0/1/2+ so the caller can emit a precise reject reason.
+  bool captureUniqueEligiblePreloadReference(
+      const CargoPhysicalIdentityInput& input, PreLoadHandoffSnapshot* snapshot,
+      std::size_t* eligible_count) const;
 };
 
 }  // namespace ndt_slam

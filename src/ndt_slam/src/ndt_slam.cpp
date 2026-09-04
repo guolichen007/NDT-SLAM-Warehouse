@@ -15038,6 +15038,14 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "surface_baseline_uncertainty,current_surface_vertical_valid,"
                 << "current_surface_z,current_surface_owner_overlap_cells,"
                 << "current_surface_owner_coverage,lift_vertical_source,"
+                << "preload_boundary_pending,preload_boundary_phase,"
+                << "preload_boundary_lifecycle_seen,"
+                << "preload_boundary_load_seen,"
+                << "preload_boundary_first_edge_stamp,"
+                << "preload_boundary_lifecycle_stamp,"
+                << "preload_boundary_load_stamp,"
+                << "preload_boundary_edge_delta_sec,"
+                << "preload_handoff_trigger_mode,"
                 << "lift_delta,lift_threshold,last_supported_evidence_stamp,"
                 << "maximum_observation_gap_sec,"
                 << "lift_confirm_count,lift_confirm_required,lift_confirmed,"
@@ -15174,6 +15182,23 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << (diagnostic.current_surface_vertical_valid
                         ? "FROZEN_PRELOAD_FOOTPRINT_RAW_ROI_OWNER_PROOF"
                         : "NONE") << ','
+                << (integrated_identity_decision_.preload_boundary_pending
+                        ? 1 : 0) << ','
+                << integrated_identity_decision_.preload_boundary_phase << ','
+                << (integrated_identity_decision_.preload_boundary_lifecycle_seen
+                        ? 1 : 0) << ','
+                << (integrated_identity_decision_.preload_boundary_load_seen
+                        ? 1 : 0) << ','
+                << integrated_identity_decision_.preload_boundary_first_edge_stamp
+                << ','
+                << integrated_identity_decision_.preload_boundary_lifecycle_stamp
+                << ','
+                << integrated_identity_decision_.preload_boundary_load_stamp
+                << ','
+                << integrated_identity_decision_.preload_boundary_edge_delta_sec
+                << ','
+                << integrated_identity_decision_.preload_handoff_trigger_mode
+                << ','
                 << diagnostic.lift_delta_m
                 << ',' << diagnostic.lift_threshold_m << ','
                 << diagnostic.last_supported_evidence_stamp << ','
