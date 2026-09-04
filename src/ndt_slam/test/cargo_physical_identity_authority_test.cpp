@@ -122,6 +122,18 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr cloudFromPoints(
   return cloud;
 }
 
+void attachCurrentRawRoi(CargoPhysicalIdentityInput* frame) {
+  ASSERT_NE(frame, nullptr);
+  std::vector<Eigen::Vector3f> points;
+  for (const auto& physical_group : frame->groups) {
+    points.insert(points.end(), physical_group.union_points_base.begin(),
+                  physical_group.union_points_base.end());
+  }
+  frame->frame_evidence.source_stamp_sec = frame->pipeline_stamp_sec;
+  frame->frame_evidence.raw_roi_current_frame = cloudFromPoints(points);
+  frame->vertical_config = verticalConfig();
+}
+
 std::vector<CargoPhysicalGroupObservation> buildGroupsWithRawRoi(
     const std::vector<CargoPhysicalCandidateObservation>& candidates,
     std::vector<CargoPhysicalComponentObservation> components,
@@ -174,7 +186,38 @@ CargoPhysicalIdentityInput input(
   result.gravity_valid = gravity_valid;
   result.gravity_state = gravity_state;
   result.groups = {group(10U, stamp, x, z)};
+  result.frame_evidence.source_stamp_sec = stamp;
+  result.frame_evidence.raw_roi_current_frame =
+      cloudFromPoints(componentPoints(x, z));
+  result.vertical_config = verticalConfig();
   return result;
+}
+
+CargoPhysicalIdentityInput rawSurfaceInput(
+    double stamp, std::uint64_t lifecycle_id, HookLoadState gravity_state,
+    double group_x, double descriptor_z, double raw_surface_z,
+    HookLoadSignalRole role = HookLoadSignalRole::REQUIRED) {
+  CargoPhysicalIdentityInput result = input(
+      stamp, role, true, gravity_state, group_x, descriptor_z);
+  result.lifecycle_id = lifecycle_id;
+  result.frame_evidence.source_stamp_sec = stamp;
+  result.frame_evidence.raw_roi_current_frame =
+      cloudFromPoints(componentPoints(group_x, raw_surface_z));
+  result.vertical_config = verticalConfig();
+  return result;
+}
+
+CargoPhysicalIdentityDecision freezeSurfaceReference(
+    CargoPhysicalIdentityAuthority* authority, std::uint64_t lifecycle_id,
+    double first_stamp = 1.0, double surface_z = 0.40,
+    int sample_count = 4) {
+  CargoPhysicalIdentityDecision decision;
+  for (int sample = 0; sample < sample_count; ++sample) {
+    decision = authority->update(rawSurfaceInput(
+        first_stamp + 0.05 * sample, lifecycle_id, HookLoadState::EMPTY,
+        0.0, surface_z, surface_z));
+  }
+  return decision;
 }
 
 CargoIdentitySupportLineageObservation lineageObservation(
@@ -223,6 +266,10 @@ CargoPhysicalIdentityInput lineageInput(
   result.groups = {group(
       component_id, stamp, exact_group_x, exact_vertical_z,
       {component_id})};
+  result.frame_evidence.source_stamp_sec = stamp;
+  result.frame_evidence.raw_roi_current_frame =
+      cloudFromPoints(componentPoints(exact_group_x, exact_vertical_z));
+  result.vertical_config = verticalConfig();
   if (lineage) result.lineage_observations.push_back(*lineage);
   return result;
 }
@@ -373,6 +420,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   authority.update(authorized);
   authorized.pipeline_stamp_sec = 1.2;
   authorized.groups = {group(10U, 1.2, 0.0, 0.4)};
+  attachCurrentRawRoi(&authorized);
   const auto frozen = authority.update(authorized);
   ASSERT_EQ(frozen.group_diagnostics.size(), 1U);
   EXPECT_EQ(frozen.group_diagnostics.front().prelift_state,
@@ -380,7 +428,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
-     ReferenceCannotCrossPhysicalCargoEpoch) {
+     LoadLifecycleChangeUsesOneShotReferenceWithoutCarryingIdentity) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   auto first = input(1.0, HookLoadSignalRole::REQUIRED, true,
                      HookLoadState::EMPTY, 0.0, 0.4);
@@ -388,6 +436,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   authority.update(first);
   first.pipeline_stamp_sec = 1.05;
   first.groups = {group(10U, 1.05, 0.0, 0.4)};
+  attachCurrentRawRoi(&first);
   auto frozen = authority.update(first);
   ASSERT_EQ(frozen.group_diagnostics.size(), 1U);
   EXPECT_EQ(frozen.group_diagnostics.front().prelift_state,
@@ -397,9 +446,13 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   replacement.lifecycle_id = 12U;
   const auto result = authority.update(replacement);
   EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_TRUE(result.preload_handoff_captured);
+  EXPECT_TRUE(result.preload_handoff_consumed);
   ASSERT_EQ(result.group_diagnostics.size(), 1U);
   EXPECT_NE(result.group_diagnostics.front().physical_cargo_epoch_id, 11U);
-  EXPECT_FALSE(std::isfinite(result.group_diagnostics.front().baseline_z));
+  EXPECT_TRUE(std::isfinite(result.group_diagnostics.front().baseline_z));
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_count, 1);
+  EXPECT_FALSE(result.group_diagnostics.front().lift_confirmed);
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
@@ -689,11 +742,17 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   ASSERT_EQ(first.prelift_sample_count, 1U);
   const auto frozen = authority.update(input(
       1.05, HookLoadSignalRole::AUXILIARY, true,
-      HookLoadState::LOADED, 0.0, 0.4));
+      HookLoadState::EMPTY, 0.0, 0.4));
   ASSERT_EQ(frozen.group_diagnostics.size(), 1U);
   EXPECT_EQ(frozen.group_diagnostics.front().prelift_state,
             CargoPreLiftReferenceState::FROZEN);
   EXPECT_NEAR(frozen.group_diagnostics.front().baseline_z, 0.4, 1.0e-6);
+  const auto loaded = authority.update(input(
+      1.10, HookLoadSignalRole::AUXILIARY, true,
+      HookLoadState::LOADED, 0.0, 0.4));
+  EXPECT_EQ(loaded.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::FROZEN);
+  EXPECT_NEAR(loaded.group_diagnostics.front().baseline_z, 0.4, 1.0e-6);
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
@@ -1010,19 +1069,21 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
-     StaticLowAndLiftingCargoNeverShareHistory) {
+     MultipleExactGroupsCannotBorrowCurrentSurfaceForLift) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   auto frame = input(1.0, HookLoadSignalRole::REQUIRED, true,
                      HookLoadState::EMPTY, 0.0, 0.3);
   frame.groups = buildGroups({
       candidate(1U, 1.0, -0.20, 0.30, {1U}),
       candidate(2U, 1.0, 0.20, 0.27, {2U})});
+  attachCurrentRawRoi(&frame);
   authority.update(frame);
   frame.pipeline_stamp_sec = 1.05;
   for (auto& group_observation : frame.groups) {
     group_observation.descriptor.stamp_sec = 1.05;
     group_observation.representative.stamp_sec = 1.05;
   }
+  attachCurrentRawRoi(&frame);
   authority.update(frame);
   for (int index = 1; index <= 3; ++index) {
     const double stamp = 1.0 + 0.1 * index;
@@ -1032,6 +1093,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
     frame.groups = buildGroups({
         candidate(10U + index, stamp, -0.20, 0.30, {8U}),
         candidate(20U + index, stamp, 0.20, cargo_z, {9U})});
+    attachCurrentRawRoi(&frame);
     const auto result = authority.update(frame);
     if (index == 3) {
       ASSERT_EQ(result.group_diagnostics.size(), 2U);
@@ -1041,19 +1103,20 @@ TEST(CargoPhysicalIdentityAuthorityTest,
       const auto& static_group = first.descriptor.physical_vertical_z <
               second.descriptor.physical_vertical_z ? first : second;
       EXPECT_FALSE(static_group.lift_confirmed);
-      EXPECT_EQ(result.identity, CargoPhysicalIdentityState::VALIDATED);
+      EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
     }
   }
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
-     TwoFrozenHistoriesOneLiftsKeepsDistinctOwners) {
+     MultiplePreloadHistoriesCannotFreezeSurfaceReference) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   auto frame = input(1.0, HookLoadSignalRole::REQUIRED, true,
                      HookLoadState::EMPTY, 0.0, 0.3);
   frame.groups = buildGroups({
       candidate(1U, 1.0, -0.20, 0.30, {1U}),
       candidate(2U, 1.0, 0.20, 0.27, {2U})});
+  attachCurrentRawRoi(&frame);
   const auto first_empty = authority.update(frame);
   ASSERT_EQ(first_empty.group_diagnostics.size(), 2U);
   const std::uint64_t static_history_id =
@@ -1064,33 +1127,26 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   ASSERT_NE(lifting_history_id, 0U);
   ASSERT_NE(static_history_id, lifting_history_id);
   EXPECT_EQ(first_empty.group_diagnostics[0].prelift_state,
-            CargoPreLiftReferenceState::ACQUIRING);
+            CargoPreLiftReferenceState::UNSEEN);
   EXPECT_EQ(first_empty.group_diagnostics[1].prelift_state,
-            CargoPreLiftReferenceState::ACQUIRING);
+            CargoPreLiftReferenceState::UNSEEN);
 
   frame = input(1.05, HookLoadSignalRole::REQUIRED, true,
                 HookLoadState::EMPTY, 0.0, 0.3);
   frame.groups = buildGroups({
       candidate(3U, 1.05, -0.20, 0.30, {3U}),
       candidate(4U, 1.05, 0.20, 0.27, {4U})});
+  attachCurrentRawRoi(&frame);
   const auto second_empty = authority.update(frame);
   ASSERT_EQ(second_empty.group_diagnostics.size(), 2U);
   EXPECT_EQ(second_empty.group_diagnostics[0].matched_history_id,
             static_history_id);
   EXPECT_EQ(second_empty.group_diagnostics[1].matched_history_id,
             lifting_history_id);
-  EXPECT_EQ(second_empty.group_diagnostics[0].prelift_state,
+  EXPECT_NE(second_empty.group_diagnostics[0].prelift_state,
             CargoPreLiftReferenceState::FROZEN);
-  EXPECT_EQ(second_empty.group_diagnostics[1].prelift_state,
+  EXPECT_NE(second_empty.group_diagnostics[1].prelift_state,
             CargoPreLiftReferenceState::FROZEN);
-  EXPECT_DOUBLE_EQ(
-      second_empty.group_diagnostics[0].prelift_reference_first_stamp, 1.0);
-  EXPECT_DOUBLE_EQ(
-      second_empty.group_diagnostics[0].prelift_reference_last_stamp, 1.05);
-  EXPECT_DOUBLE_EQ(
-      second_empty.group_diagnostics[1].prelift_reference_first_stamp, 1.0);
-  EXPECT_DOUBLE_EQ(
-      second_empty.group_diagnostics[1].prelift_reference_last_stamp, 1.05);
 
   for (int index = 1; index <= 3; ++index) {
     const double stamp = 1.0 + 0.1 * index;
@@ -1100,6 +1156,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
     frame.groups = buildGroups({
         candidate(10U + index, stamp, -0.20, 0.30, {8U}),
         candidate(20U + index, stamp, 0.20, cargo_z, {9U})});
+    attachCurrentRawRoi(&frame);
     const auto result = authority.update(frame);
     ASSERT_EQ(result.group_diagnostics.size(), 2U);
     EXPECT_EQ(result.group_diagnostics[0].matched_history_id,
@@ -1107,11 +1164,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
     EXPECT_EQ(result.group_diagnostics[1].matched_history_id,
               lifting_history_id) << "stamp=" << stamp;
     EXPECT_FALSE(result.group_diagnostics[0].lift_confirmed);
-    if (index == 1) {
-      EXPECT_EQ(result.group_diagnostics[1].lift_confirm_count, 0);
-    } else if (index == 2) {
-      EXPECT_EQ(result.group_diagnostics[1].lift_confirm_count, 1);
-    }
+    EXPECT_EQ(result.group_diagnostics[1].lift_confirm_count, 0);
     if (index == 3) {
       const auto& first = result.group_diagnostics[0];
       const auto& second = result.group_diagnostics[1];
@@ -1119,7 +1172,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
       const auto& static_group = first.descriptor.physical_vertical_z <
               second.descriptor.physical_vertical_z ? first : second;
       EXPECT_FALSE(static_group.lift_confirmed);
-      EXPECT_EQ(result.identity, CargoPhysicalIdentityState::VALIDATED);
+      EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
     }
   }
 }
@@ -1132,6 +1185,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   frame.groups = buildGroups({
       candidate(1U, 1.0, -0.20, 0.30, {1U}),
       candidate(2U, 1.0, 0.20, 0.30, {2U})});
+  attachCurrentRawRoi(&frame);
   authority.update(frame);
 
   frame = input(1.05, HookLoadSignalRole::REQUIRED, true,
@@ -1139,11 +1193,12 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   frame.groups = buildGroups({
       candidate(3U, 1.05, -0.20, 0.30, {3U}),
       candidate(4U, 1.05, 0.20, 0.30, {4U})});
+  attachCurrentRawRoi(&frame);
   const auto frozen = authority.update(frame);
   ASSERT_EQ(frozen.group_diagnostics.size(), 2U);
-  ASSERT_EQ(frozen.group_diagnostics[0].prelift_state,
+  ASSERT_NE(frozen.group_diagnostics[0].prelift_state,
             CargoPreLiftReferenceState::FROZEN);
-  ASSERT_EQ(frozen.group_diagnostics[1].prelift_state,
+  ASSERT_NE(frozen.group_diagnostics[1].prelift_state,
             CargoPreLiftReferenceState::FROZEN);
 
   frame = input(1.10, HookLoadSignalRole::REQUIRED, true,
@@ -1524,12 +1579,14 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   frame.groups = buildGroups({
       candidate(1U, 1.0, -1.0, 0.30, {1U}),
       candidate(2U, 1.0, 1.0, 0.30, {2U})});
+  attachCurrentRawRoi(&frame);
   authority.update(frame);
   frame.pipeline_stamp_sec = 1.05;
   for (auto& group_observation : frame.groups) {
     group_observation.descriptor.stamp_sec = 1.05;
     group_observation.representative.stamp_sec = 1.05;
   }
+  attachCurrentRawRoi(&frame);
   authority.update(frame);
   for (int index = 1; index <= 3; ++index) {
     const double stamp = 1.0 + 0.1 * index;
@@ -1539,6 +1596,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
     frame.groups = buildGroups({
         candidate(10U + index, stamp, -1.0, z, {10U}),
         candidate(20U + index, stamp, 1.0, z, {20U})});
+    attachCurrentRawRoi(&frame);
     const auto result = authority.update(frame);
     if (index == 3) {
       EXPECT_EQ(result.identity, CargoPhysicalIdentityState::AMBIGUOUS);
@@ -1792,7 +1850,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
-     FamilyRescueExistingHistoryUsesExactCurrentVertical) {
+     FamilyRescueCannotProvideLiftVerticalWithoutCurrentOwnerProof) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(lineageInput(
       1.0, HookLoadState::EMPTY, 0.0, 0.40, 101U));
@@ -1807,10 +1865,9 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_TRUE(decision.group_diagnostics.front().lineage_rescue_used);
   EXPECT_EQ(decision.group_diagnostics.front().association,
             CargoCandidateAssociationState::MATCHED);
-  EXPECT_EQ(decision.group_diagnostics.front().prelift_state,
+  EXPECT_NE(decision.group_diagnostics.front().prelift_state,
             CargoPreLiftReferenceState::FROZEN);
-  EXPECT_NEAR(decision.group_diagnostics.front().baseline_z,
-              0.40, 1.0e-5);
+  EXPECT_FALSE(decision.group_diagnostics.front().current_surface_vertical_valid);
 
   observation = lineageObservation(
       202U, 303U, 1U, 1.1, 1.2, 0.10);
@@ -1827,9 +1884,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   decision = authority.update(lineageInput(
       1.4, HookLoadState::LOADED, 2.0, 0.70, 505U,
       &observation));
-  EXPECT_EQ(decision.identity, CargoPhysicalIdentityState::VALIDATED);
-  EXPECT_NEAR(decision.current_z95, 0.70, 1.0e-5);
-  EXPECT_NEAR(decision.lift_delta_m, 0.30, 1.0e-5);
+  EXPECT_NE(decision.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_FALSE(decision.current_surface_vertical_valid);
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
@@ -1943,7 +1999,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
-     LoadLineageUsesCurrentExactVertical) {
+     LineageCannotProvideLiftVerticalWithoutFrozenFootprintOwnerProof) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(lineageInput(
       1.0, HookLoadState::EMPTY, 0.0, 0.40, 101U));
@@ -1962,9 +2018,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
       0.05, 0.07);
   const auto decision = authority.update(lineageInput(
       1.3, HookLoadState::LOADED, 2.0, 0.70, 303U, &second));
-  EXPECT_EQ(decision.identity, CargoPhysicalIdentityState::VALIDATED);
-  EXPECT_NEAR(decision.current_z95, 0.70, 1.0e-5);
-  EXPECT_NEAR(decision.lift_delta_m, 0.30, 1.0e-5);
+  EXPECT_NE(decision.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_FALSE(decision.current_surface_vertical_valid);
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
@@ -2359,6 +2414,447 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_FALSE(decision.group_diagnostics.front().lineage_rescue_used);
   EXPECT_NE(decision.group_diagnostics.front().association,
             CargoCandidateAssociationState::MATCHED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LoadLifecycleChangeCapturesSingleFrozenPreloadHandoff) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 10U);
+  ASSERT_TRUE(frozen.surface_reference_frozen);
+  const std::uint64_t preload_history =
+      frozen.group_diagnostics.front().matched_history_id;
+  const auto loaded = authority.update(rawSurfaceInput(
+      1.20, 11U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_TRUE(loaded.preload_handoff_captured);
+  EXPECT_TRUE(loaded.preload_handoff_consumed);
+  EXPECT_EQ(loaded.preload_handoff_source_history_id, preload_history);
+  EXPECT_NE(loaded.postload_history_id, preload_history);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LifecycleResetStillClearsCargoHistories) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 20U);
+  const auto loaded = authority.update(rawSurfaceInput(
+      1.20, 21U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  ASSERT_TRUE(loaded.preload_handoff_consumed);
+  EXPECT_NE(frozen.group_diagnostics.front().matched_history_id,
+            loaded.group_diagnostics.front().matched_history_id);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     HandoffDoesNotCarryValidatedIdentity) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 30U);
+  const auto loaded = authority.update(rawSurfaceInput(
+      1.20, 31U, HookLoadState::LOADED, 0.0, 0.40, 0.40));
+  EXPECT_TRUE(loaded.preload_handoff_consumed);
+  EXPECT_NE(loaded.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     HandoffDoesNotCarryLiftConfirmCount) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 40U);
+  const auto loaded = authority.update(rawSurfaceInput(
+      1.20, 41U, HookLoadState::LOADED, 0.0, 0.40, 0.40));
+  ASSERT_TRUE(loaded.preload_handoff_consumed);
+  EXPECT_EQ(loaded.group_diagnostics.front().lift_confirm_count, 0);
+  EXPECT_FALSE(loaded.group_diagnostics.front().lift_confirmed);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     HandoffRequiresEmptyToLoadedTransition) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 50U);
+  auto unknown = rawSurfaceInput(
+      1.20, 51U, HookLoadState::UNKNOWN, 0.0, 0.70, 0.70);
+  unknown.gravity_valid = false;
+  const auto result = authority.update(unknown);
+  EXPECT_FALSE(result.preload_handoff_captured);
+  EXPECT_FALSE(result.preload_handoff_consumed);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     HandoffRequiresExactlyOneEligibleHistory) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 2;
+  CargoPhysicalIdentityAuthority authority(config);
+  auto frame = rawSurfaceInput(
+      1.0, 60U, HookLoadState::EMPTY, 0.0, 0.30, 0.30);
+  frame.groups = buildGroups({
+      candidate(1U, 1.0, -1.0, 0.30, {1U}),
+      candidate(2U, 1.0, 1.0, 0.30, {2U})});
+  attachCurrentRawRoi(&frame);
+  authority.update(frame);
+  frame.pipeline_stamp_sec = 1.05;
+  for (auto& physical_group : frame.groups) {
+    physical_group.descriptor.stamp_sec = 1.05;
+    physical_group.representative.stamp_sec = 1.05;
+  }
+  attachCurrentRawRoi(&frame);
+  authority.update(frame);
+  const auto loaded = authority.update(rawSurfaceInput(
+      1.10, 61U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_FALSE(loaded.preload_handoff_captured);
+  EXPECT_FALSE(loaded.preload_handoff_consumed);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     AmbiguousPreloadHistoriesCannotCreateHandoff) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 2;
+  CargoPhysicalIdentityAuthority authority(config);
+  auto frame = rawSurfaceInput(
+      1.0, 70U, HookLoadState::EMPTY, 0.0, 0.30, 0.30);
+  frame.groups = buildGroups({
+      candidate(1U, 1.0, -0.2, 0.30, {1U}),
+      candidate(2U, 1.0, 0.2, 0.30, {2U})});
+  attachCurrentRawRoi(&frame);
+  authority.update(frame);
+  const auto loaded = authority.update(rawSurfaceInput(
+      1.10, 71U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_FALSE(loaded.preload_handoff_captured);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     StalePreloadHistoryCannotCreateHandoff) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 80U);
+  const auto loaded = authority.update(rawSurfaceInput(
+      2.0, 81U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_FALSE(loaded.preload_handoff_captured);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PostloadHandoffRequiresUniqueCurrentGroup) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 90U);
+  auto loaded = rawSurfaceInput(
+      1.20, 91U, HookLoadState::LOADED, 0.0, 0.70, 0.70);
+  loaded.groups = buildGroups({
+      candidate(11U, 1.20, -0.10, 0.70, {11U}),
+      candidate(12U, 1.20, 0.10, 0.70, {12U})});
+  attachCurrentRawRoi(&loaded);
+  const auto result = authority.update(loaded);
+  EXPECT_TRUE(result.preload_handoff_captured);
+  EXPECT_FALSE(result.preload_handoff_consumed);
+  EXPECT_EQ(result.preload_handoff_reject_reason,
+            "AMBIGUOUS_POSTLOAD_GROUPS");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PostloadHandoffWrongXYFailsClosed) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 100U);
+  const auto result = authority.update(rawSurfaceInput(
+      1.20, 101U, HookLoadState::LOADED, 2.0, 0.70, 0.70));
+  EXPECT_FALSE(result.preload_handoff_consumed);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PostloadHandoffExtentMismatchFailsClosed) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 110U);
+  auto loaded = rawSurfaceInput(
+      1.20, 111U, HookLoadState::LOADED, 0.0, 0.70, 0.70);
+  loaded.groups = {groupWithSupport(
+      20U, 20U, 1.20, -1.5, 1.5, 0.70)};
+  attachCurrentRawRoi(&loaded);
+  const auto result = authority.update(loaded);
+  EXPECT_FALSE(result.preload_handoff_consumed);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PostloadHandoffCompetitionFailsClosed) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 120U);
+  auto loaded = rawSurfaceInput(
+      1.20, 121U, HookLoadState::LOADED, 0.0, 0.70, 0.70);
+  loaded.groups = buildGroups({
+      candidate(21U, 1.20, -0.05, 0.70, {21U}),
+      candidate(22U, 1.20, 0.05, 0.70, {22U})});
+  attachCurrentRawRoi(&loaded);
+  const auto result = authority.update(loaded);
+  EXPECT_FALSE(result.preload_handoff_consumed);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     HandoffCanBeConsumedOnlyOnce) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 130U);
+  const auto first = authority.update(rawSurfaceInput(
+      1.20, 131U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  ASSERT_TRUE(first.preload_handoff_consumed);
+  const auto second = authority.update(rawSurfaceInput(
+      1.25, 131U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_FALSE(second.preload_handoff_consumed);
+  EXPECT_EQ(second.group_diagnostics.front().matched_history_id,
+            first.postload_history_id);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     HandoffCannotSeedTwoHistories) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 140U);
+  auto loaded = rawSurfaceInput(
+      1.20, 141U, HookLoadState::LOADED, 0.0, 0.70, 0.70);
+  loaded.groups = buildGroups({
+      candidate(31U, 1.20, -0.05, 0.70, {31U}),
+      candidate(32U, 1.20, 0.05, 0.70, {32U})});
+  attachCurrentRawRoi(&loaded);
+  const auto result = authority.update(loaded);
+  EXPECT_EQ(static_cast<int>(std::count_if(
+      result.group_diagnostics.begin(), result.group_diagnostics.end(),
+      [](const CargoPhysicalGroupDiagnostic& diagnostic) {
+        return diagnostic.preload_handoff_consumed;
+      })), 0);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     StartedLoadedCannotCreateOrConsumePreloadHandoff) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  auto loaded = rawSurfaceInput(
+      1.0, 150U, HookLoadState::LOADED, 0.0, 0.70, 0.70);
+  loaded.node_started_loaded = true;
+  const auto result = authority.update(loaded);
+  EXPECT_FALSE(result.preload_handoff_captured);
+  EXPECT_FALSE(result.preload_handoff_consumed);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PreloadSurfaceReferenceUsesCurrentRawRoi) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  CargoPhysicalIdentityDecision result;
+  for (int frame = 0; frame < 4; ++frame) {
+    result = authority.update(rawSurfaceInput(
+        1.0 + 0.05 * frame, 160U, HookLoadState::EMPTY,
+        0.0, 0.90, 0.40));
+  }
+  ASSERT_TRUE(result.surface_reference_frozen);
+  EXPECT_NEAR(result.surface_baseline_z, 0.40, 1.0e-5);
+  EXPECT_NEAR(result.group_diagnostics.front().descriptor.physical_vertical_z,
+              0.90, 1.0e-5);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PreloadSurfaceReferenceRequiresCurrentOwnerProof) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  auto frame = rawSurfaceInput(
+      1.0, 170U, HookLoadState::EMPTY, 0.0, 0.40, 0.40);
+  frame.frame_evidence.raw_roi_current_frame =
+      cloudFromPoints(componentPoints(2.0, 0.40));
+  const auto result = authority.update(frame);
+  EXPECT_FALSE(result.current_surface_vertical_valid);
+  EXPECT_EQ(result.prelift_sample_count, 0U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     FrozenPreloadFootprintIsImmutableAfterLoad) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 180U);
+  ASSERT_TRUE(frozen.surface_reference_footprint.valid);
+  const Eigen::Vector2f center = frozen.surface_reference_footprint.center_base;
+  authority.update(rawSurfaceInput(
+      1.20, 180U, HookLoadState::LOADED, 0.20, 0.70, 0.70));
+  const auto current = authority.update(rawSurfaceInput(
+      1.25, 180U, HookLoadState::LOADED, 0.20, 0.70, 0.70));
+  EXPECT_TRUE(current.surface_reference_footprint.valid);
+  EXPECT_TRUE(current.surface_reference_footprint.center_base.isApprox(center));
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     BaselineAndCurrentLiftUseSameVerticalSource) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 190U);
+  const auto current = authority.update(rawSurfaceInput(
+      1.20, 190U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_TRUE(current.current_surface_vertical_valid);
+  EXPECT_NEAR(current.surface_baseline_z, 0.40, 1.0e-5);
+  EXPECT_NEAR(current.current_surface_z, 0.70, 1.0e-5);
+  EXPECT_EQ(current.lift_vertical_source,
+            "FROZEN_PRELOAD_FOOTPRINT_RAW_ROI_OWNER_PROOF");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     HistoricalZCannotSelectCurrentSurface) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 200U);
+  auto current = rawSurfaceInput(
+      1.20, 200U, HookLoadState::LOADED, 0.0, 0.45, 0.45);
+  std::vector<Eigen::Vector3f> points = componentPoints(0.0, 0.45);
+  const auto high = componentPoints(0.0, 0.75);
+  points.insert(points.end(), high.begin(), high.end());
+  current.frame_evidence.raw_roi_current_frame = cloudFromPoints(points);
+  const auto result = authority.update(current);
+  ASSERT_TRUE(result.current_surface_vertical_valid);
+  EXPECT_NEAR(result.current_surface_z, 0.75, 1.0e-5);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     CurrentOwnerProofFailureCannotAdvanceLift) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 210U);
+  auto current = rawSurfaceInput(
+      1.20, 210U, HookLoadState::LOADED, 0.30, 0.70, 0.70);
+  current.frame_evidence.raw_roi_current_frame =
+      cloudFromPoints(componentPoints(-0.20, 0.70));
+  const auto result = authority.update(current);
+  EXPECT_FALSE(result.current_surface_vertical_valid);
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_count, 0);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     SurfaceSwitchCannotProduceFalseLift) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 220U);
+  CargoPhysicalIdentityDecision result;
+  for (int frame = 0; frame < 4; ++frame) {
+    result = authority.update(rawSurfaceInput(
+        1.20 + 0.05 * frame, 220U, HookLoadState::LOADED,
+        0.0, 0.90, 0.40));
+  }
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_count, 0);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     EmptySurfaceSwitchCannotAdvanceLift) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 230U);
+  const auto result = authority.update(rawSurfaceInput(
+      1.20, 230U, HookLoadState::EMPTY, 0.0, 0.90, 0.70));
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_count, 0);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     TrueLoadedLiftRequiresFourCurrentSupportedFrames) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 240U);
+  CargoPhysicalIdentityDecision result;
+  for (int frame = 0; frame < 3; ++frame) {
+    result = authority.update(rawSurfaceInput(
+        1.20 + 0.05 * frame, 241U, HookLoadState::LOADED,
+        0.0, 0.70, 0.70));
+    EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  }
+  result = authority.update(rawSurfaceInput(
+      1.35, 241U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_EQ(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_EQ(result.required_lift_confirm_frames, 4);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ContinuityEvidenceCannotProvideLiftVerticalByItself) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 250U);
+  auto current = rawSurfaceInput(
+      1.20, 250U, HookLoadState::LOADED, 0.0, 0.70, 0.70);
+  current.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::CONTINUITY_ONLY;
+  const auto result = authority.update(current);
+  EXPECT_FALSE(result.current_surface_vertical_valid);
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_count, 0);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LineageCannotProvideLiftVertical) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(lineageInput(
+      1.0, HookLoadState::EMPTY, 0.0, 0.40, 101U));
+  const auto observation = lineageObservation(
+      101U, 202U, 1U, 1.0, 1.1, 0.05);
+  const auto result = authority.update(lineageInput(
+      1.1, HookLoadState::LOADED, 2.0, 0.70, 202U, &observation));
+  EXPECT_FALSE(result.current_surface_vertical_valid);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     HandoffBaselineCannotValidateWithoutCurrentLift) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 260U);
+  CargoPhysicalIdentityDecision result;
+  for (int frame = 0; frame < 5; ++frame) {
+    result = authority.update(rawSurfaceInput(
+        1.20 + 0.05 * frame, 261U, HookLoadState::LOADED,
+        0.0, 0.40, 0.40));
+  }
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_EQ(result.group_diagnostics.front().lift_confirm_count, 0);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LoadedFourFramesValidateOnlySameHandoffHistory) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 270U);
+  std::uint64_t postload_history = 0U;
+  CargoPhysicalIdentityDecision result;
+  for (int frame = 0; frame < 4; ++frame) {
+    result = authority.update(rawSurfaceInput(
+        1.20 + 0.05 * frame, 271U, HookLoadState::LOADED,
+        0.0, 0.70, 0.70));
+    if (frame == 0) postload_history = result.postload_history_id;
+    ASSERT_EQ(result.group_diagnostics.front().matched_history_id,
+              postload_history);
+  }
+  EXPECT_EQ(result.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_EQ(result.physical_history_id, postload_history);
 }
 
 }  // namespace

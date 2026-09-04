@@ -15029,6 +15029,15 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "prelift_reference_first_stamp,"
                 << "prelift_reference_last_stamp,prelift_close_reason,"
                 << "lift_baseline_source,baseline_z,"
+                << "baseline_frozen,preload_handoff_captured,"
+                << "preload_handoff_consumed,preload_handoff_reject_reason,"
+                << "preload_handoff_source_history_id,"
+                << "preload_handoff_source_epoch,postload_history_id,"
+                << "surface_reference_frozen,"
+                << "surface_reference_footprint_valid,surface_baseline_z,"
+                << "surface_baseline_uncertainty,current_surface_vertical_valid,"
+                << "current_surface_z,current_surface_owner_overlap_cells,"
+                << "current_surface_owner_coverage,lift_vertical_source,"
                 << "lift_delta,lift_threshold,last_supported_evidence_stamp,"
                 << "maximum_observation_gap_sec,"
                 << "lift_confirm_count,lift_confirm_required,lift_confirmed,"
@@ -15142,7 +15151,30 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << diagnostic.prelift_close_reason << ','
                 << cargoLiftBaselineSourceName(
                        diagnostic.baseline_source) << ','
-                << diagnostic.baseline_z << ',' << diagnostic.lift_delta_m
+                << diagnostic.baseline_z << ','
+                << (diagnostic.baseline_frozen ? 1 : 0) << ','
+                << (integrated_identity_decision_.preload_handoff_captured
+                        ? 1 : 0) << ','
+                << (diagnostic.preload_handoff_consumed ? 1 : 0) << ','
+                << integrated_identity_decision_.preload_handoff_reject_reason
+                << ','
+                << integrated_identity_decision_
+                       .preload_handoff_source_history_id << ','
+                << integrated_identity_decision_.preload_handoff_source_epoch
+                << ',' << integrated_identity_decision_.postload_history_id
+                << ',' << (diagnostic.surface_reference_frozen ? 1 : 0)
+                << ','
+                << (diagnostic.surface_reference_footprint_valid ? 1 : 0)
+                << ',' << diagnostic.baseline_z << ','
+                << diagnostic.surface_baseline_uncertainty_m << ','
+                << (diagnostic.current_surface_vertical_valid ? 1 : 0)
+                << ',' << diagnostic.current_surface_z << ','
+                << diagnostic.current_surface_owner_overlap_cells << ','
+                << diagnostic.current_surface_owner_coverage << ','
+                << (diagnostic.current_surface_vertical_valid
+                        ? "FROZEN_PRELOAD_FOOTPRINT_RAW_ROI_OWNER_PROOF"
+                        : "NONE") << ','
+                << diagnostic.lift_delta_m
                 << ',' << diagnostic.lift_threshold_m << ','
                 << diagnostic.last_supported_evidence_stamp << ','
                 << integrated_identity_config_.maximum_observation_gap_sec
@@ -24021,7 +24053,16 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                 << "prelift_reference_uncertainty,"
                 << "prelift_reference_first_stamp,"
                 << "prelift_reference_last_stamp,prelift_close_reason,"
-                << "baseline_source,"
+                << "baseline_source,baseline_frozen,"
+                << "preload_handoff_captured,preload_handoff_consumed,"
+                << "preload_handoff_reject_reason,"
+                << "preload_handoff_source_history_id,"
+                << "preload_handoff_source_epoch,postload_history_id,"
+                << "surface_reference_frozen,"
+                << "surface_reference_footprint_valid,surface_baseline_z,"
+                << "surface_baseline_uncertainty,current_surface_vertical_valid,"
+                << "current_surface_z,current_surface_owner_overlap_cells,"
+                << "current_surface_owner_coverage,lift_vertical_source,"
                 << "product_predicted_center_score,product_overlap_score,"
                 << "product_identity_confidence,product_overall_lock_confidence,"
                 << "lift_delta_m,lift_threshold_m,lift_confirm_count,"
@@ -24098,6 +24139,30 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             << integrated_identity_decision_.prelift_close_reason << ','
             << cargoLiftBaselineSourceName(
                    integrated_identity_decision_.baseline_source) << ','
+            << (integrated_identity_decision_.baseline_frozen ? 1 : 0) << ','
+            << (integrated_identity_decision_.preload_handoff_captured
+                    ? 1 : 0) << ','
+            << (integrated_identity_decision_.preload_handoff_consumed
+                    ? 1 : 0) << ','
+            << integrated_identity_decision_.preload_handoff_reject_reason
+            << ','
+            << integrated_identity_decision_.preload_handoff_source_history_id
+            << ',' << integrated_identity_decision_.preload_handoff_source_epoch
+            << ',' << integrated_identity_decision_.postload_history_id << ','
+            << (integrated_identity_decision_.surface_reference_frozen
+                    ? 1 : 0) << ','
+            << (integrated_identity_decision_.surface_reference_footprint_valid
+                    ? 1 : 0) << ','
+            << integrated_identity_decision_.surface_baseline_z << ','
+            << integrated_identity_decision_.surface_baseline_uncertainty_m
+            << ','
+            << (integrated_identity_decision_.current_surface_vertical_valid
+                    ? 1 : 0) << ','
+            << integrated_identity_decision_.current_surface_z << ','
+            << integrated_identity_decision_
+                   .current_surface_owner_overlap_cells << ','
+            << integrated_identity_decision_.current_surface_owner_coverage
+            << ',' << integrated_identity_decision_.lift_vertical_source << ','
             << std::numeric_limits<double>::quiet_NaN() << ','
             << std::numeric_limits<double>::quiet_NaN() << ','
             << std::numeric_limits<double>::quiet_NaN() << ','
