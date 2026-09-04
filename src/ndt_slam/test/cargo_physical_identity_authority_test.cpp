@@ -2857,5 +2857,150 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_EQ(result.physical_history_id, postload_history);
 }
 
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LifecycleThenLoadWithinGapCapturesHandoff) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 310U);
+  ASSERT_TRUE(frozen.surface_reference_frozen);
+  const std::uint64_t preload_history =
+      frozen.group_diagnostics.front().matched_history_id;
+  // Lifecycle edge first, gravity still EMPTY.
+  const auto lifecycle_first = authority.update(rawSurfaceInput(
+      1.20, 311U, HookLoadState::EMPTY, 0.0, 0.40, 0.40));
+  EXPECT_FALSE(lifecycle_first.preload_handoff_captured);
+  EXPECT_TRUE(lifecycle_first.preload_boundary_pending);
+  EXPECT_EQ(lifecycle_first.preload_boundary_phase, "WAITING_FOR_LOAD");
+  // Load edge within the gap.
+  const auto loaded = authority.update(rawSurfaceInput(
+      1.25, 311U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_TRUE(loaded.preload_handoff_captured);
+  EXPECT_EQ(loaded.preload_handoff_trigger_mode, "LIFECYCLE_THEN_LOAD");
+  EXPECT_EQ(loaded.preload_handoff_source_history_id, preload_history);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LoadThenLifecycleWithinGapCapturesHandoff) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 320U);
+  ASSERT_TRUE(frozen.surface_reference_frozen);
+  const std::uint64_t preload_history =
+      frozen.group_diagnostics.front().matched_history_id;
+  // Load edge first, lifecycle unchanged.
+  const auto load_first = authority.update(rawSurfaceInput(
+      1.20, 320U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_FALSE(load_first.preload_handoff_captured);
+  EXPECT_TRUE(load_first.preload_boundary_pending);
+  EXPECT_EQ(load_first.preload_boundary_phase, "WAITING_FOR_LIFECYCLE");
+  // Lifecycle edge within the gap.
+  const auto lifecycle = authority.update(rawSurfaceInput(
+      1.25, 321U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_TRUE(lifecycle.preload_handoff_captured);
+  EXPECT_EQ(lifecycle.preload_handoff_trigger_mode, "LOAD_THEN_LIFECYCLE");
+  EXPECT_EQ(lifecycle.preload_handoff_source_history_id, preload_history);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LifecycleThenLoadBeyondGapFailsClosed) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 330U);
+  const auto lifecycle_first = authority.update(rawSurfaceInput(
+      1.20, 331U, HookLoadState::EMPTY, 0.0, 0.40, 0.40));
+  EXPECT_TRUE(lifecycle_first.preload_boundary_pending);
+  const auto loaded = authority.update(rawSurfaceInput(
+      2.00, 331U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_FALSE(loaded.preload_handoff_captured);
+  EXPECT_FALSE(loaded.preload_boundary_pending);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LoadThenLifecycleBeyondGapFailsClosed) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 340U);
+  const auto load_first = authority.update(rawSurfaceInput(
+      1.20, 340U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_TRUE(load_first.preload_boundary_pending);
+  const auto lifecycle = authority.update(rawSurfaceInput(
+      2.00, 341U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_FALSE(lifecycle.preload_handoff_captured);
+  EXPECT_FALSE(lifecycle.preload_boundary_pending);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     SecondLifecycleBeforeLoadFailsClosed) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 350U);
+  const auto first = authority.update(rawSurfaceInput(
+      1.20, 351U, HookLoadState::EMPTY, 0.0, 0.40, 0.40));
+  EXPECT_TRUE(first.preload_boundary_pending);
+  // A second unrelated lifecycle change before the load edge must clear the
+  // pending reference rather than hand off a stale frozen footprint.
+  const auto second = authority.update(rawSurfaceInput(
+      1.25, 352U, HookLoadState::EMPTY, 0.0, 0.40, 0.40));
+  EXPECT_FALSE(second.preload_boundary_pending);
+  EXPECT_FALSE(second.preload_handoff_captured);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     RearmClearsPendingBoundary) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 360U);
+  const auto lifecycle_first = authority.update(rawSurfaceInput(
+      1.20, 361U, HookLoadState::EMPTY, 0.0, 0.40, 0.40));
+  EXPECT_TRUE(lifecycle_first.preload_boundary_pending);
+  auto rearm = rawSurfaceInput(
+      1.25, 362U, HookLoadState::LOADED, 0.0, 0.70, 0.70);
+  rearm.rearm = true;
+  const auto result = authority.update(rearm);
+  EXPECT_FALSE(result.preload_boundary_pending);
+  EXPECT_FALSE(result.preload_handoff_captured);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PendingBoundaryDoesNotValidateIdentity) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 370U);
+  const auto lifecycle_first = authority.update(rawSurfaceInput(
+      1.20, 371U, HookLoadState::EMPTY, 0.0, 0.40, 0.40));
+  ASSERT_TRUE(lifecycle_first.preload_boundary_pending);
+  EXPECT_NE(lifecycle_first.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_EQ(lifecycle_first.group_diagnostics.front().lift_confirm_count, 0);
+  EXPECT_FALSE(lifecycle_first.lift_confirmed);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     StartedLoadedCannotCreatePendingBoundary) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  // No pre-load EMPTY phase: a LOADED start has no eligible frozen reference.
+  auto started_loaded = rawSurfaceInput(
+      1.0, 380U, HookLoadState::LOADED, 0.0, 0.70, 0.70);
+  started_loaded.node_started_loaded = true;
+  const auto result = authority.update(started_loaded);
+  EXPECT_FALSE(result.preload_boundary_pending);
+  EXPECT_FALSE(result.preload_handoff_captured);
+}
+
 }  // namespace
 }  // namespace ndt_slam
