@@ -230,12 +230,31 @@ CargoFootprintSnapshot footprintSnapshot(
   return snapshot;
 }
 
+CargoFootprintSnapshot robustFootprintSnapshot(
+    const CargoPhysicalGroupObservation& group) {
+  CargoFootprintSnapshot snapshot;
+  snapshot.valid = group.geometry_resolved && !group.group_ambiguous &&
+      group.descriptor.robust_xy_center.allFinite() &&
+      group.descriptor.robust_xy_extent.allFinite() &&
+      (group.descriptor.robust_xy_extent.array() > 0.0).all() &&
+      std::isfinite(group.representative.yaw_rad) &&
+      std::isfinite(group.descriptor.stamp_sec) &&
+      group.descriptor.stamp_sec > 0.0;
+  snapshot.center_base =
+      group.descriptor.robust_xy_center.cast<float>();
+  snapshot.size_xy = group.descriptor.robust_xy_extent.cast<float>();
+  snapshot.yaw_base_rad = static_cast<float>(group.representative.yaw_rad);
+  snapshot.source_stamp_sec = group.descriptor.stamp_sec;
+  return snapshot;
+}
+
 AssociationOnlyReacquiredVerticalEvidence reacquireAssociationVertical(
     const CargoShadowFrameEvidence& frame,
     const CargoFootprintSnapshot& footprint,
     const std::vector<Eigen::Vector3f>& owner_points,
     const CargoVerticalEvidenceConfig& config,
-    double uncertainty_m) {
+    double uncertainty_m,
+    const std::vector<Eigen::Vector3f>* competing_owner_points = nullptr) {
   AssociationOnlyReacquiredVerticalEvidence result;
   result.source_stamp_sec = frame.source_stamp_sec;
   result.uncertainty_m = uncertainty_m;
@@ -267,6 +286,27 @@ AssociationOnlyReacquiredVerticalEvidence reacquireAssociationVertical(
   if (!ownership.valid) {
     result.reason = "raw_history_footprint_owner_proof_failed";
     return result;
+  }
+  if (competing_owner_points && !competing_owner_points->empty()) {
+    std::set<CargoFootprintGridIndex> competing_cells;
+    for (const Eigen::Vector3f& point : *competing_owner_points) {
+      if (!point.allFinite() || !cargoPointInsideFootprint(
+              point, input, config.footprint_margin_m)) {
+        continue;
+      }
+      competing_cells.insert(makeCargoFootprintGridIndex(
+          point, input, config.xy_cell_size_m));
+    }
+    const bool competing_column_support = std::any_of(
+        evidence.top_surface_cell_indices.begin(),
+        evidence.top_surface_cell_indices.end(),
+        [&](const CargoFootprintGridIndex& cell) {
+          return competing_cells.count(cell) > 0U;
+        });
+    if (competing_column_support) {
+      result.reason = "raw_history_footprint_competing_owner_column";
+      return result;
+    }
   }
   result.valid = true;
   result.top_z_base = evidence.top_z_base;
@@ -787,9 +827,12 @@ void CargoPhysicalIdentityAuthority::reset(const std::string& reason) {
   validated_history_id_ = 0U;
   initialized_ = false;
   previous_existence_phase_ = false;
+  previous_gravity_valid_ = false;
+  previous_gravity_state_ = HookLoadState::UNKNOWN;
   started_loaded_without_baseline_ = false;
   prelift_blocked_until_new_epoch_ = false;
   last_pipeline_stamp_sec_ = 0.0;
+  preload_handoff_ = PreLoadHandoffSnapshot{};
   reset_reason_ = reason;
 }
 
@@ -801,6 +844,15 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   decision_.hook_role_source = input.hook_role_source;
   decision_.strict_lidar_existence_path =
       input.hook_role != HookLoadSignalRole::REQUIRED;
+  const bool gravity_loaded = input.gravity_valid &&
+      input.gravity_state == HookLoadState::LOADED;
+  const bool gravity_empty = input.gravity_valid &&
+      input.gravity_state == HookLoadState::EMPTY;
+  const bool empty_to_loaded_transition = initialized_ &&
+      previous_gravity_valid_ &&
+      previous_gravity_state_ == HookLoadState::EMPTY && gravity_loaded;
+  const bool lifecycle_changed = initialized_ &&
+      input.lifecycle_id != lifecycle_id_;
   const bool time_rollback = initialized_ &&
       std::isfinite(input.pipeline_stamp_sec) &&
       input.pipeline_stamp_sec + kEpsilon < last_pipeline_stamp_sec_;
@@ -817,6 +869,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     }
     histories_.clear();
     validated_history_id_ = 0U;
+    preload_handoff_ = PreLoadHandoffSnapshot{};
     prelift_blocked_until_new_epoch_ = true;
     decision_.prelift_state = CargoPreLiftReferenceState::CLOSED;
     decision_.prelift_close_reason = "SOURCE_TIME_ROLLBACK";
@@ -833,6 +886,86 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     return decision_;
   }
   decision_.valid_input = true;
+
+  if (preload_handoff_.valid) {
+    const double handoff_age = input.pipeline_stamp_sec -
+        preload_handoff_.last_exact_support_stamp;
+    if (!gravity_loaded || !(handoff_age >= 0.0) ||
+        handoff_age > config_.maximum_observation_gap_sec) {
+      decision_.preload_handoff_reject_reason = !gravity_loaded
+          ? "POSTLOAD_GRAVITY_NOT_LOADED" : "PRELOAD_HANDOFF_STALE";
+      preload_handoff_ = PreLoadHandoffSnapshot{};
+    }
+  }
+
+  // Capture the reference certificate before the normal lifecycle reset.
+  // Only an explicit, observed EMPTY -> LOADED edge may cross this boundary;
+  // the old History itself is never retained.
+  if (!time_rollback && !input.rearm && lifecycle_changed &&
+      empty_to_loaded_transition) {
+    std::vector<const History*> eligible;
+    for (const History& history : histories_) {
+      const double support_age = input.pipeline_stamp_sec -
+          history.last_supported_evidence_stamp_sec;
+      const bool fresh_exact_support =
+          history.last_supported_evidence_stamp_sec > 0.0 &&
+          support_age >= 0.0 &&
+          support_age <= config_.maximum_observation_gap_sec;
+      if (history.prelift_reference_frozen && history.baseline_frozen &&
+          history.baseline_source ==
+              CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE &&
+          history.surface_lift_reference_frozen &&
+          fresh_exact_support && !history.association_ambiguous &&
+          history.frozen_preload_footprint.valid) {
+        eligible.push_back(&history);
+      }
+    }
+    if (eligible.size() == 1U) {
+      const History& source = *eligible.front();
+      PreLoadHandoffSnapshot handoff;
+      handoff.valid = true;
+      handoff.source_lifecycle_id = lifecycle_id_;
+      handoff.source_physical_epoch = source.physical_cargo_epoch_id;
+      handoff.source_history_id = source.id;
+      handoff.baseline_z = source.surface_baseline_z;
+      handoff.baseline_uncertainty_m =
+          source.surface_baseline_uncertainty_m;
+      handoff.baseline_stamp_sec = source.baseline_stamp_sec;
+      handoff.frozen_preload_footprint = source.frozen_preload_footprint;
+      handoff.last_exact_support_stamp =
+          source.last_supported_evidence_stamp_sec;
+      handoff.robust_xy_center =
+          source.frozen_preload_footprint.center_base.cast<double>();
+      handoff.robust_xy_extent =
+          source.frozen_preload_footprint.size_xy.cast<double>();
+      handoff.robust_x05 = handoff.robust_xy_center.x() -
+          0.5 * handoff.robust_xy_extent.x();
+      handoff.robust_x95 = handoff.robust_xy_center.x() +
+          0.5 * handoff.robust_xy_extent.x();
+      handoff.robust_y05 = handoff.robust_xy_center.y() -
+          0.5 * handoff.robust_xy_extent.y();
+      handoff.robust_y95 = handoff.robust_xy_center.y() +
+          0.5 * handoff.robust_xy_extent.y();
+      handoff.yaw_rad = source.frozen_preload_footprint.yaw_base_rad;
+      handoff.captured_at_load_edge_stamp = input.pipeline_stamp_sec;
+      preload_handoff_ = handoff;
+      decision_.preload_handoff_captured = true;
+      decision_.preload_handoff_source_history_id = source.id;
+      decision_.preload_handoff_source_epoch =
+          source.physical_cargo_epoch_id;
+      decision_.preload_handoff_reject_reason = "NONE";
+    } else {
+      preload_handoff_ = PreLoadHandoffSnapshot{};
+      decision_.preload_handoff_reject_reason = eligible.empty()
+          ? "NO_ELIGIBLE_PRELOAD_HISTORY"
+          : "AMBIGUOUS_PRELOAD_HISTORIES";
+    }
+  } else if ((input.rearm || lifecycle_changed) &&
+             !empty_to_loaded_transition) {
+    preload_handoff_ = PreLoadHandoffSnapshot{};
+    decision_.preload_handoff_reject_reason =
+        "LIFECYCLE_RESET_WITHOUT_EMPTY_TO_LOADED";
+  }
 
   if (input.rearm || (initialized_ && input.lifecycle_id != lifecycle_id_)) {
     histories_.clear();
@@ -852,10 +985,6 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   last_pipeline_stamp_sec_ = input.pipeline_stamp_sec;
   initialized_ = true;
 
-  const bool gravity_loaded = input.gravity_valid &&
-      input.gravity_state == HookLoadState::LOADED;
-  const bool gravity_empty = input.gravity_valid &&
-      input.gravity_state == HookLoadState::EMPTY;
   const bool pre_load_phase = gravity_empty;
   if (gravity_empty && previous_existence_phase_ &&
       input.hook_role == HookLoadSignalRole::REQUIRED) {
@@ -1078,6 +1207,97 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       group_match[gi] = best_hi;
     } else {
       group_ambiguous[gi] = true;
+    }
+  }
+
+  int preload_handoff_group = -1;
+  std::vector<AssociationOnlyReacquiredVerticalEvidence>
+      preload_handoff_vertical(input.groups.size());
+  if (preload_handoff_.valid) {
+    decision_.preload_handoff_source_history_id =
+        preload_handoff_.source_history_id;
+    decision_.preload_handoff_source_epoch =
+        preload_handoff_.source_physical_epoch;
+    int matching_group_count = 0;
+    int geometric_candidate_count = 0;
+    for (std::size_t gi = 0U; gi < input.groups.size(); ++gi) {
+      const auto& group = input.groups[gi];
+      if (group.group_ambiguous || group_ambiguous[gi] ||
+          !group.geometry_resolved || group.union_points_base.empty() ||
+          !finiteDescriptor(group.descriptor) ||
+          group.descriptor.vertical_mode !=
+              CargoGroupVerticalMode::SUPPORTED_EVIDENCE) {
+        continue;
+      }
+      const double source_gap = group.descriptor.stamp_sec -
+          preload_handoff_.last_exact_support_stamp;
+      if (!(source_gap > 0.0) ||
+          source_gap > config_.maximum_observation_gap_sec) {
+        continue;
+      }
+      const double xy_step = (group.descriptor.robust_xy_center -
+          preload_handoff_.robust_xy_center).norm();
+      const double intersection_x = std::min(
+          group.descriptor.robust_x95, preload_handoff_.robust_x95) -
+          std::max(group.descriptor.robust_x05,
+                   preload_handoff_.robust_x05);
+      const double intersection_y = std::min(
+          group.descriptor.robust_y95, preload_handoff_.robust_y95) -
+          std::max(group.descriptor.robust_y05,
+                   preload_handoff_.robust_y05);
+      const bool xy_ok = xy_step <= config_.maximum_xy_step_m ||
+          (intersection_x > kEpsilon && intersection_y > kEpsilon &&
+           intersection_x * intersection_y > kEpsilon);
+      bool extent_ok = true;
+      for (int axis = 0; axis < 2; ++axis) {
+        const double current_extent =
+            group.descriptor.robust_xy_extent[axis];
+        const double previous_extent =
+            preload_handoff_.robust_xy_extent[axis];
+        const double denominator = std::max(
+            std::max(std::abs(current_extent), std::abs(previous_extent)),
+            kEpsilon);
+        extent_ok = extent_ok &&
+            std::abs(current_extent - previous_extent) / denominator <=
+                config_.maximum_size_relative_step;
+      }
+      if (!xy_ok || !extent_ok ||
+          !input.frame_evidence.raw_roi_current_frame ||
+          std::abs(input.frame_evidence.source_stamp_sec -
+                   group.descriptor.stamp_sec) > kEpsilon) {
+        continue;
+      }
+      ++geometric_candidate_count;
+      std::vector<Eigen::Vector3f> competing_owner_points;
+      for (std::size_t other = 0U; other < input.groups.size(); ++other) {
+        if (other == gi) continue;
+        competing_owner_points.insert(
+            competing_owner_points.end(),
+            input.groups[other].union_points_base.begin(),
+            input.groups[other].union_points_base.end());
+      }
+      auto vertical = reacquireAssociationVertical(
+          input.frame_evidence, preload_handoff_.frozen_preload_footprint,
+          group.union_points_base, input.vertical_config,
+          preload_handoff_.baseline_uncertainty_m,
+          &competing_owner_points);
+      if (!vertical.valid) continue;
+      preload_handoff_vertical[gi] = std::move(vertical);
+      preload_handoff_group = static_cast<int>(gi);
+      ++matching_group_count;
+    }
+    if (matching_group_count != 1 || geometric_candidate_count != 1) {
+      if (!input.groups.empty() || matching_group_count > 1 ||
+          geometric_candidate_count > 1) {
+        decision_.preload_handoff_reject_reason =
+            geometric_candidate_count > 1 || matching_group_count > 1
+            ? "AMBIGUOUS_POSTLOAD_GROUPS"
+            : "NO_UNIQUE_POSTLOAD_MATCH";
+        preload_handoff_ = PreLoadHandoffSnapshot{};
+      }
+      preload_handoff_group = -1;
+    } else {
+      decision_.preload_handoff_reject_reason = "NONE";
     }
   }
 
@@ -1538,6 +1758,44 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       history = &histories_.back();
       history->id = next_history_id_++;
       history->physical_cargo_epoch_id = physical_cargo_epoch_id_;
+      if (static_cast<int>(gi) == preload_handoff_group &&
+          preload_handoff_.valid) {
+        history->prelift_state = CargoPreLiftReferenceState::FROZEN;
+        history->prelift_reference_frozen = true;
+        history->prelift_reference_z = preload_handoff_.baseline_z;
+        history->prelift_reference_uncertainty_m =
+            preload_handoff_.baseline_uncertainty_m;
+        history->prelift_reference_first_stamp =
+            preload_handoff_.baseline_stamp_sec;
+        history->prelift_reference_last_stamp =
+            preload_handoff_.baseline_stamp_sec;
+        history->baseline_frozen = true;
+        history->baseline_source =
+            CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE;
+        history->baseline_z95 = preload_handoff_.baseline_z;
+        history->baseline_uncertainty_m =
+            preload_handoff_.baseline_uncertainty_m;
+        history->baseline_stamp_sec = preload_handoff_.baseline_stamp_sec;
+        history->frozen_preload_footprint =
+            preload_handoff_.frozen_preload_footprint;
+        history->surface_lift_reference_frozen = true;
+        history->surface_baseline_z = preload_handoff_.baseline_z;
+        history->surface_baseline_uncertainty_m =
+            preload_handoff_.baseline_uncertainty_m;
+        history->last_supported_footprint =
+            preload_handoff_.frozen_preload_footprint;
+        history->lift_confirm_count = 0;
+        history->lift_confirmed = false;
+        history->validation_stamp_sec = 0.0;
+        decision_.preload_handoff_consumed = true;
+        decision_.postload_history_id = history->id;
+        decision_.preload_handoff_source_history_id =
+            preload_handoff_.source_history_id;
+        decision_.preload_handoff_source_epoch =
+            preload_handoff_.source_physical_epoch;
+        diagnostic.preload_handoff_consumed = true;
+        preload_handoff_ = PreLoadHandoffSnapshot{};
+      }
       if (prelift_blocked_until_new_epoch_) {
         history->prelift_state = CargoPreLiftReferenceState::CLOSED;
         history->prelift_close_reason = "CURRENT_EPOCH_PRELIFT_BLOCKED";
@@ -1602,13 +1860,60 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     const bool role_allows_reference_acquisition =
         input.hook_role == HookLoadSignalRole::REQUIRED
             ? pre_load_phase : !started_loaded_without_baseline_;
+    const bool surface_reference_acquisition_phase =
+        role_allows_reference_acquisition &&
+        (input.hook_role == HookLoadSignalRole::DISABLED || !gravity_loaded);
     const bool evidence_authorized = input.localization_authorized &&
         input.pose_authority_identity_valid && supported &&
         !group.group_ambiguous && history->physical_cargo_epoch_id ==
             physical_cargo_epoch_id_;
+    const bool unique_current_exact_group = !group.group_ambiguous &&
+        !group_ambiguous[gi] && group.geometry_resolved &&
+        !group.union_points_base.empty() && finiteDescriptor(group.descriptor) &&
+        group.descriptor.vertical_mode ==
+            CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
+    if (!history->frozen_preload_footprint.valid &&
+        unique_current_exact_group && evidence_authorized &&
+        surface_reference_acquisition_phase &&
+        !prelift_blocked_until_new_epoch_) {
+      history->frozen_preload_footprint = robustFootprintSnapshot(group);
+    }
+
+    AssociationOnlyReacquiredVerticalEvidence current_surface_vertical;
+    if (static_cast<int>(gi) == preload_handoff_group &&
+        preload_handoff_vertical[gi].valid) {
+      current_surface_vertical = preload_handoff_vertical[gi];
+    } else if (unique_current_exact_group && evidence_authorized &&
+               history->frozen_preload_footprint.valid &&
+               input.frame_evidence.raw_roi_current_frame &&
+               std::abs(input.frame_evidence.source_stamp_sec -
+                        group.descriptor.stamp_sec) <= kEpsilon) {
+      std::vector<Eigen::Vector3f> competing_owner_points;
+      for (std::size_t other = 0U; other < input.groups.size(); ++other) {
+        if (other == gi) continue;
+        competing_owner_points.insert(
+            competing_owner_points.end(),
+            input.groups[other].union_points_base.begin(),
+            input.groups[other].union_points_base.end());
+      }
+      current_surface_vertical = reacquireAssociationVertical(
+          input.frame_evidence, history->frozen_preload_footprint,
+          group.union_points_base, input.vertical_config,
+          group.descriptor.vertical_uncertainty_m,
+          &competing_owner_points);
+    }
+    diagnostic.current_surface_vertical_valid =
+        current_surface_vertical.valid;
+    diagnostic.current_surface_z = current_surface_vertical.top_z_base;
+    diagnostic.current_surface_owner_overlap_cells =
+        current_surface_vertical.owner_overlap_cell_count;
+    diagnostic.current_surface_owner_coverage =
+        current_surface_vertical.owner_overlap_coverage;
+    const bool surface_evidence_authorized = evidence_authorized &&
+        unique_current_exact_group && current_surface_vertical.valid;
     if (!history->prelift_reference_frozen &&
         history->prelift_state != CargoPreLiftReferenceState::CLOSED &&
-        role_allows_reference_acquisition && evidence_authorized &&
+        surface_reference_acquisition_phase && surface_evidence_authorized &&
         !prelift_blocked_until_new_epoch_) {
       if (!history->earliest_prelift_samples.empty()) {
         const double gap = group.descriptor.stamp_sec -
@@ -1624,8 +1929,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         history->prelift_close_reason = "none";
         history->earliest_prelift_samples.push_back(PreLiftSample{
             group.descriptor.stamp_sec,
-            group.descriptor.physical_vertical_z,
-            group.descriptor.vertical_uncertainty_m});
+            current_surface_vertical.top_z_base,
+            current_surface_vertical.uncertainty_m});
         const std::size_t required_samples = static_cast<std::size_t>(
             std::max(1, config_.lift_confirm_frames));
         if (history->earliest_prelift_samples.size() == required_samples) {
@@ -1680,6 +1985,9 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             history->baseline_uncertainty_m = uncertainty;
             history->baseline_stamp_sec =
                 history->prelift_reference_last_stamp;
+            history->surface_lift_reference_frozen = true;
+            history->surface_baseline_z = reference;
+            history->surface_baseline_uncertainty_m = uncertainty;
           } else {
             history->prelift_state = CargoPreLiftReferenceState::CLOSED;
             history->prelift_close_reason = monotonic_departure
@@ -1692,12 +2000,14 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     } else if (!history->prelift_reference_frozen &&
                history->prelift_state ==
                    CargoPreLiftReferenceState::ACQUIRING &&
-               role_allows_reference_acquisition && !supported) {
+               surface_reference_acquisition_phase &&
+               !surface_evidence_authorized) {
       history->prelift_state = CargoPreLiftReferenceState::PAUSED;
     } else if (!history->prelift_reference_frozen &&
                history->prelift_state ==
                    CargoPreLiftReferenceState::PAUSED &&
-               role_allows_reference_acquisition && evidence_authorized) {
+               surface_reference_acquisition_phase &&
+               surface_evidence_authorized) {
       history->prelift_state = CargoPreLiftReferenceState::ACQUIRING;
     }
     if (!history->prelift_reference_frozen && gravity_load_edge &&
@@ -1707,35 +2017,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       history->earliest_prelift_samples.clear();
     }
 
-    if (!supported) {
-      if (history->last_supported_evidence_stamp_sec > 0.0 &&
-          group.descriptor.stamp_sec -
-              history->last_supported_evidence_stamp_sec >
-                  config_.maximum_observation_gap_sec) {
-        history->lift_confirm_count = 0;
-        history->lift_confirmed = false;
-        history->validation_stamp_sec = 0.0;
-      }
-      continue;
-    }
-
-    const double supported_gap = group.descriptor.stamp_sec -
-        history->last_supported_evidence_stamp_sec;
-    if (history->last_supported_evidence_stamp_sec > 0.0 &&
-        supported_gap > config_.maximum_observation_gap_sec) {
-      history->lift_confirm_count = 0;
-      history->lift_confirmed = false;
-      history->validation_stamp_sec = 0.0;
-    }
-    if (!history->baseline_frozen) continue;
-    const double threshold = liftSignificanceThreshold(
-        config_, history->baseline_uncertainty_m,
-        group.descriptor.vertical_uncertainty_m);
-    const double delta = group.descriptor.physical_vertical_z -
-        history->baseline_z95;
-    const bool evidence_advanced = group.descriptor.stamp_sec >
-        history->last_supported_evidence_stamp_sec + kEpsilon;
-    if (evidence_advanced) {
+    if (supported && group.descriptor.stamp_sec >
+            history->last_supported_evidence_stamp_sec + kEpsilon) {
       history->last_supported_evidence_stamp_sec =
           group.descriptor.stamp_sec;
       history->last_supported_vertical_z =
@@ -1746,6 +2029,49 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         history->last_supported_footprint = footprintSnapshot(
             group.representative, group.descriptor.stamp_sec);
       }
+    }
+
+    if (!surface_evidence_authorized) {
+      if (history->last_lift_surface_evidence_stamp_sec > 0.0 &&
+          group.descriptor.stamp_sec -
+              history->last_lift_surface_evidence_stamp_sec >
+                  config_.maximum_observation_gap_sec) {
+        history->lift_confirm_count = 0;
+        history->lift_confirmed = false;
+        history->validation_stamp_sec = 0.0;
+      }
+      continue;
+    }
+
+    const double surface_gap = group.descriptor.stamp_sec -
+        history->last_lift_surface_evidence_stamp_sec;
+    if (history->last_lift_surface_evidence_stamp_sec > 0.0 &&
+        surface_gap > config_.maximum_observation_gap_sec) {
+      history->lift_confirm_count = 0;
+      history->lift_confirmed = false;
+      history->validation_stamp_sec = 0.0;
+    }
+    if (!history->baseline_frozen ||
+        !history->surface_lift_reference_frozen) {
+      continue;
+    }
+    const double threshold = liftSignificanceThreshold(
+        config_, history->baseline_uncertainty_m,
+        current_surface_vertical.uncertainty_m);
+    const double delta = current_surface_vertical.top_z_base -
+        history->baseline_z95;
+    const bool evidence_advanced = group.descriptor.stamp_sec >
+        history->last_lift_surface_evidence_stamp_sec + kEpsilon;
+    if (evidence_advanced) {
+      history->last_lift_surface_evidence_stamp_sec =
+          group.descriptor.stamp_sec;
+      history->last_lift_surface_z = current_surface_vertical.top_z_base;
+      history->last_lift_surface_uncertainty_m =
+          current_surface_vertical.uncertainty_m;
+      history->last_lift_surface_owner_overlap_cells =
+          current_surface_vertical.owner_overlap_cell_count;
+      history->last_lift_surface_owner_coverage =
+          current_surface_vertical.owner_overlap_coverage;
       // A valid EMPTY gravity observation is explicit evidence that lift has
       // not begun.  AUXILIARY keeps its independent LiDAR pre-lift/reference
       // path, but EMPTY may not be accumulated into a false lift transition.
@@ -1768,7 +2094,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         }
       } else if (!history->lift_confirmed) {
         const double retention_margin = config_.significance_sigma *
-            group.descriptor.vertical_uncertainty_m;
+            current_surface_vertical.uncertainty_m;
         const double retention_floor =
             std::max(0.0, threshold - retention_margin);
         if (delta < retention_floor) history->lift_confirm_count = 0;
@@ -1934,15 +2260,17 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     decision_.identity = CargoPhysicalIdentityState::AMBIGUOUS;
     decision_.reason = "multiple_or_ambiguous_physical_groups";
   } else if (validated_history_id_ != 0U && decision_.cargo_exists) {
-    History* selected = nullptr;
+      History* selected = nullptr;
     for (History& history : histories_) {
       if (history.id == validated_history_id_) selected = &history;
     }
     if (selected) {
       const CargoPhysicalGroupObservation* current_group = nullptr;
+      std::size_t current_group_index = input.groups.size();
       for (std::size_t gi = 0; gi < input.groups.size(); ++gi) {
         if (group_history_ids[gi] == selected->id) {
           current_group = &input.groups[gi];
+          current_group_index = gi;
           break;
         }
       }
@@ -1965,6 +2293,16 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
           ? current_group->representative.member_component_ids
           : std::vector<std::uint64_t>{};
       decision_.baseline_source = selected->baseline_source;
+      decision_.baseline_frozen = selected->baseline_frozen;
+      decision_.surface_reference_frozen =
+          selected->surface_lift_reference_frozen;
+      decision_.surface_reference_footprint_valid =
+          selected->frozen_preload_footprint.valid;
+      decision_.surface_reference_footprint =
+          selected->frozen_preload_footprint;
+      decision_.surface_baseline_z = selected->surface_baseline_z;
+      decision_.surface_baseline_uncertainty_m =
+          selected->surface_baseline_uncertainty_m;
       decision_.prelift_state = selected->prelift_state;
       decision_.prelift_sample_count =
           selected->earliest_prelift_samples.size();
@@ -1982,17 +2320,30 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
           input.hook_role, input.gravity_valid, input.gravity_state,
           config_.lift_confirm_frames);
       decision_.baseline_z95 = selected->baseline_z95;
-      decision_.current_z95 = current_group
-          ? current_group->descriptor.physical_vertical_z
-          : std::numeric_limits<double>::quiet_NaN();
-      if (decision_.current_vertical_evidence_valid) {
+      if (current_group_index < decision_.group_diagnostics.size()) {
+        const auto& current_diagnostic =
+            decision_.group_diagnostics[current_group_index];
+        decision_.current_surface_vertical_valid =
+            current_diagnostic.current_surface_vertical_valid;
+        decision_.current_surface_z = current_diagnostic.current_surface_z;
+        decision_.current_surface_owner_overlap_cells =
+            current_diagnostic.current_surface_owner_overlap_cells;
+        decision_.current_surface_owner_coverage =
+            current_diagnostic.current_surface_owner_coverage;
+      }
+      decision_.current_z95 = decision_.current_surface_z;
+      decision_.lift_vertical_source =
+          decision_.current_surface_vertical_valid
+              ? "FROZEN_PRELOAD_FOOTPRINT_RAW_ROI_OWNER_PROOF"
+              : "NONE";
+      if (decision_.current_surface_vertical_valid) {
         decision_.lift_delta_m =
             decision_.current_z95 - decision_.baseline_z95;
         decision_.lift_threshold_m = std::max(
             config_.minimum_significant_change_m,
             config_.significance_sigma * std::hypot(
                 selected->baseline_uncertainty_m,
-                current_group->descriptor.vertical_uncertainty_m));
+                selected->last_lift_surface_uncertainty_m));
       }
       decision_.evidence_age_sec = input.pipeline_stamp_sec -
           selected->last_supported_evidence_stamp_sec;
@@ -2035,6 +2386,15 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
           history.prelift_reference_last_stamp;
       diagnostic.prelift_close_reason = history.prelift_close_reason;
       diagnostic.baseline_z = history.baseline_z95;
+      diagnostic.baseline_frozen = history.baseline_frozen;
+      diagnostic.surface_reference_frozen =
+          history.surface_lift_reference_frozen;
+      diagnostic.surface_reference_footprint_valid =
+          history.frozen_preload_footprint.valid;
+      diagnostic.surface_reference_footprint =
+          history.frozen_preload_footprint;
+      diagnostic.surface_baseline_uncertainty_m =
+          history.surface_baseline_uncertainty_m;
       diagnostic.last_supported_evidence_stamp =
           history.last_supported_evidence_stamp_sec;
       diagnostic.lift_confirm_count = history.lift_confirm_count;
@@ -2043,16 +2403,14 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
           config_.lift_confirm_frames);
       diagnostic.lift_confirmed = history.lift_confirmed;
       if (history.baseline_frozen &&
-          input.groups[gi].descriptor.vertical_mode ==
-              CargoGroupVerticalMode::SUPPORTED_EVIDENCE) {
+          diagnostic.current_surface_vertical_valid) {
         diagnostic.lift_delta_m =
-            input.groups[gi].descriptor.physical_vertical_z -
-            history.baseline_z95;
+            diagnostic.current_surface_z - history.baseline_z95;
         diagnostic.lift_threshold_m = std::max(
             config_.minimum_significant_change_m,
             config_.significance_sigma * std::hypot(
                 history.baseline_uncertainty_m,
-                input.groups[gi].descriptor.vertical_uncertainty_m));
+                history.last_lift_surface_uncertainty_m));
       }
       diagnostic.identity = history.id == validated_history_id_
           ? CargoPhysicalIdentityState::VALIDATED
@@ -2078,9 +2436,32 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     decision_.prelift_reference_last_stamp =
         diagnostic.prelift_reference_last_stamp;
     decision_.prelift_close_reason = diagnostic.prelift_close_reason;
+    decision_.baseline_frozen = diagnostic.baseline_frozen;
+    decision_.surface_reference_frozen =
+        diagnostic.surface_reference_frozen;
+    decision_.surface_reference_footprint_valid =
+        diagnostic.surface_reference_footprint_valid;
+    decision_.surface_reference_footprint =
+        diagnostic.surface_reference_footprint;
+    decision_.surface_baseline_z = diagnostic.baseline_z;
+    decision_.surface_baseline_uncertainty_m =
+        diagnostic.surface_baseline_uncertainty_m;
+    decision_.current_surface_vertical_valid =
+        diagnostic.current_surface_vertical_valid;
+    decision_.current_surface_z = diagnostic.current_surface_z;
+    decision_.current_surface_owner_overlap_cells =
+        diagnostic.current_surface_owner_overlap_cells;
+    decision_.current_surface_owner_coverage =
+        diagnostic.current_surface_owner_coverage;
+    decision_.lift_vertical_source =
+        diagnostic.current_surface_vertical_valid
+            ? "FROZEN_PRELOAD_FOOTPRINT_RAW_ROI_OWNER_PROOF"
+            : "NONE";
   }
 
   previous_existence_phase_ = gravity_loaded || decision_.cargo_exists;
+  previous_gravity_valid_ = input.gravity_valid;
+  previous_gravity_state_ = input.gravity_state;
   return decision_;
 }
 

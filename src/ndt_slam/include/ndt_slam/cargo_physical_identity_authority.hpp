@@ -284,12 +284,23 @@ struct CargoPhysicalGroupDiagnostic {
   double prelift_reference_last_stamp = 0.0;
   std::string prelift_close_reason = "none";
   double baseline_z = std::numeric_limits<double>::quiet_NaN();
+  bool baseline_frozen = false;
+  bool surface_reference_frozen = false;
+  bool surface_reference_footprint_valid = false;
+  CargoFootprintSnapshot surface_reference_footprint;
+  double surface_baseline_uncertainty_m =
+      std::numeric_limits<double>::quiet_NaN();
   double lift_delta_m = std::numeric_limits<double>::quiet_NaN();
   double lift_threshold_m = std::numeric_limits<double>::quiet_NaN();
   double last_supported_evidence_stamp = 0.0;
   int lift_confirm_count = 0;
   int lift_confirm_required = 0;
   bool lift_confirmed = false;
+  bool preload_handoff_consumed = false;
+  bool current_surface_vertical_valid = false;
+  double current_surface_z = std::numeric_limits<double>::quiet_NaN();
+  std::size_t current_surface_owner_overlap_cells = 0U;
+  double current_surface_owner_coverage = 0.0;
   CargoPhysicalIdentityState identity = CargoPhysicalIdentityState::UNKNOWN;
 };
 
@@ -352,6 +363,24 @@ struct CargoPhysicalIdentityDecision {
   CargoGroupVerticalMode current_vertical_mode =
       CargoGroupVerticalMode::INVALID;
   bool current_vertical_evidence_valid = false;
+  bool baseline_frozen = false;
+  bool preload_handoff_captured = false;
+  bool preload_handoff_consumed = false;
+  std::string preload_handoff_reject_reason = "not_evaluated";
+  std::uint64_t preload_handoff_source_history_id = 0U;
+  std::uint64_t preload_handoff_source_epoch = 0U;
+  std::uint64_t postload_history_id = 0U;
+  bool surface_reference_frozen = false;
+  bool surface_reference_footprint_valid = false;
+  CargoFootprintSnapshot surface_reference_footprint;
+  double surface_baseline_z = std::numeric_limits<double>::quiet_NaN();
+  double surface_baseline_uncertainty_m =
+      std::numeric_limits<double>::quiet_NaN();
+  bool current_surface_vertical_valid = false;
+  double current_surface_z = std::numeric_limits<double>::quiet_NaN();
+  std::size_t current_surface_owner_overlap_cells = 0U;
+  double current_surface_owner_coverage = 0.0;
+  std::string lift_vertical_source = "NONE";
   double identity_validation_stamp_sec = 0.0;
   std::vector<CargoPhysicalGroupDiagnostic> group_diagnostics;
   std::string reason = "uninitialized";
@@ -404,6 +433,10 @@ class CargoPhysicalIdentityAuthority {
     double prelift_reference_first_stamp = 0.0;
     double prelift_reference_last_stamp = 0.0;
     std::string prelift_close_reason = "none";
+    CargoFootprintSnapshot frozen_preload_footprint;
+    bool surface_lift_reference_frozen = false;
+    double surface_baseline_z = std::numeric_limits<double>::quiet_NaN();
+    double surface_baseline_uncertainty_m = 0.20;
     bool baseline_frozen = false;
     CargoLiftBaselineSource baseline_source =
         CargoLiftBaselineSource::POST_LOAD_FIRST_FRESH_OBSERVATION;
@@ -414,6 +447,11 @@ class CargoPhysicalIdentityAuthority {
     double last_supported_vertical_z = std::numeric_limits<double>::quiet_NaN();
     double last_supported_vertical_uncertainty_m = 0.20;
     CargoFootprintSnapshot last_supported_footprint;
+    double last_lift_surface_evidence_stamp_sec = 0.0;
+    double last_lift_surface_z = std::numeric_limits<double>::quiet_NaN();
+    double last_lift_surface_uncertainty_m = 0.20;
+    std::size_t last_lift_surface_owner_overlap_cells = 0U;
+    double last_lift_surface_owner_coverage = 0.0;
     // Bounded exact-component provenance for the same three source frames
     // inspected by CargoIdentityComponentLineage.  This is not a tracker: it
     // owns no points, pose, prediction, Cargo id, baseline, lift or geometry.
@@ -422,6 +460,30 @@ class CargoPhysicalIdentityAuthority {
     bool lift_confirmed = false;
     double validation_stamp_sec = 0.0;
     bool association_ambiguous = false;
+  };
+
+  // A one-shot load-boundary reference certificate.  It deliberately carries
+  // no point cloud, identity, ownership, lift state, prediction, Bottom,
+  // Safety, or map authority.  Histories still reset at the lifecycle edge.
+  struct PreLoadHandoffSnapshot {
+    bool valid = false;
+    std::uint64_t source_lifecycle_id = 0U;
+    std::uint64_t source_physical_epoch = 0U;
+    std::uint64_t source_history_id = 0U;  // diagnostic only
+    double baseline_z = std::numeric_limits<double>::quiet_NaN();
+    double baseline_uncertainty_m =
+        std::numeric_limits<double>::quiet_NaN();
+    double baseline_stamp_sec = 0.0;
+    CargoFootprintSnapshot frozen_preload_footprint;
+    double last_exact_support_stamp = 0.0;
+    Eigen::Vector2d robust_xy_center = Eigen::Vector2d::Zero();
+    Eigen::Vector2d robust_xy_extent = Eigen::Vector2d::Zero();
+    double robust_x05 = std::numeric_limits<double>::quiet_NaN();
+    double robust_x95 = std::numeric_limits<double>::quiet_NaN();
+    double robust_y05 = std::numeric_limits<double>::quiet_NaN();
+    double robust_y95 = std::numeric_limits<double>::quiet_NaN();
+    double yaw_rad = 0.0;
+    double captured_at_load_edge_stamp = 0.0;
   };
 
   static constexpr std::size_t kMaximumLineageProvenanceFrames = 3U;
@@ -436,9 +498,12 @@ class CargoPhysicalIdentityAuthority {
   std::uint64_t validated_history_id_ = 0U;
   bool initialized_ = false;
   bool previous_existence_phase_ = false;
+  bool previous_gravity_valid_ = false;
+  HookLoadState previous_gravity_state_ = HookLoadState::UNKNOWN;
   bool started_loaded_without_baseline_ = false;
   bool prelift_blocked_until_new_epoch_ = false;
   double last_pipeline_stamp_sec_ = 0.0;
+  PreLoadHandoffSnapshot preload_handoff_;
   std::string reset_reason_ = "constructed";
 };
 
