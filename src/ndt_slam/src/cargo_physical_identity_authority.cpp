@@ -3371,7 +3371,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
               computePreClusterSurfaceVertical(
                   input.frame_evidence, logical_owner.current_footprint,
                   input.vertical_config, &competing_points,
-                  &logical_owner.current_owner_cells);
+                  nullptr);
           decision_.precluster_surface_valid = pc.valid;
           precluster_z = pc.surface_z;
           precluster_uncertainty = pc.surface_uncertainty;
