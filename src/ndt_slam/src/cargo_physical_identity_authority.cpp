@@ -601,9 +601,11 @@ LogicalCurrentCargoObservation reconstructLogicalCurrentCargoImpl(
   const std::set<CargoFootprintGridIndex> frozen_mask(
       frozen_owner_cells.begin(), frozen_owner_cells.end());
 
-  // Step 1: collect eligible current-frame groups (exact, non-ambiguous,
-  // geometry resolved, finite).  NO frozen-reference pre-filter — fragments
-  // are reconstructed into a logical owner before any reference matching.
+  // Step 1: collect eligible current-frame groups.  The frozen-reference local
+  // shape + extent pre-filter is PROVEN necessary by counterfactual: removing
+  // it (pure "fragment first") lets unrelated same-shape objects form a
+  // too-large union and regresses NO_CURRENT_OWNER / AMBIGUOUS.  Each fragment
+  // must individually match the frozen local shape before clique formation.
   std::vector<int> eligible;
   for (std::size_t gi = 0U; gi < groups.size(); ++gi) {
     const auto& g = groups[gi];
@@ -611,7 +613,18 @@ LogicalCurrentCargoObservation reconstructLogicalCurrentCargoImpl(
         g.union_points_base.empty() || !finiteDescriptor(g.descriptor)) {
       continue;
     }
-    if (!robustFootprintSnapshot(g).valid) continue;
+    const CargoFootprintSnapshot fp = robustFootprintSnapshot(g);
+    if (!fp.valid) continue;
+    if (!extentCompatible(fp.size_xy, frozen_footprint.size_xy,
+                          maximum_size_relative_step)) {
+      continue;
+    }
+    const auto cells = localCellsOfGroup(g, config);
+    std::size_t overlap = 0U;
+    for (const auto& cell : cells) {
+      if (frozen_mask.count(cell) > 0U) ++overlap;
+    }
+    if (overlap < config.minimum_surface_cells) continue;
     eligible.push_back(static_cast<int>(gi));
   }
   if (eligible.empty()) {
