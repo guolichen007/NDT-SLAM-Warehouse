@@ -677,64 +677,48 @@ LogicalCurrentCargoObservation reconstructLogicalCurrentCargoImpl(
   std::vector<std::vector<int>> cliques;
   maximalCliquesRec(compat, {}, all_vertices, {}, &cliques);
 
-  // Step 4: for each maximal clique, union member points -> robust footprint
-  // -> local owner cells -> match the UNION against the frozen reference.
-  // A single unique match becomes the canonical logical owner.
-  int match_count = 0;
-  for (const auto& clique : cliques) {
-    std::vector<Eigen::Vector3f> union_points;
-    std::size_t primary = 0U;
-    std::size_t primary_count = 0U;
-    for (std::size_t k = 0U; k < clique.size(); ++k) {
-      const auto& g = groups[static_cast<std::size_t>(eligible[clique[k]])];
-      union_points.insert(union_points.end(), g.union_points_base.begin(),
-                          g.union_points_base.end());
-      if (g.union_points_base.size() > primary_count) {
-        primary_count = g.union_points_base.size();
-        primary = k;
-      }
-    }
-    const double yaw_rad =
-        groups[static_cast<std::size_t>(eligible[clique[primary]])]
-            .representative.yaw_rad;
-    const CargoFootprintSnapshot union_footprint =
-        robustFootprintFromPoints(union_points, yaw_rad);
-    if (!union_footprint.valid) continue;
-    const auto local_cells =
-        localCellsOfPoints(union_points, union_footprint, config);
-    std::size_t overlap = 0U;
-    for (const auto& cell : local_cells) {
-      if (frozen_mask.count(cell) > 0U) ++overlap;
-    }
-    if (overlap < config.minimum_surface_cells ||
-        !extentCompatible(union_footprint.size_xy, frozen_footprint.size_xy,
-                          maximum_size_relative_step)) {
-      continue;
-    }
-    ++match_count;
-    if (match_count > 1) {
-      result.ambiguous = true;
-      result.reject_reason = "CURRENT_OWNER_AMBIGUOUS";
-      return result;
-    }
-    result.union_points_base = std::move(union_points);
-    result.current_footprint = union_footprint;
-    result.current_owner_cells.assign(local_cells.begin(), local_cells.end());
-    for (std::size_t k = 0U; k < clique.size(); ++k) {
-      const auto& g = groups[static_cast<std::size_t>(eligible[clique[k]])];
-      result.member_group_indices.push_back(eligible[clique[k]]);
-      result.member_component_ids.insert(result.member_component_ids.end(),
-                                         g.member_component_ids.begin(),
-                                         g.member_component_ids.end());
-    }
-    result.member_component_ids =
-        canonicalMembers(std::move(result.member_component_ids));
-  }
-  if (match_count == 0) {
-    result.reject_reason = "NO_CURRENT_OWNER";
+  // Step 4: exactly one maximal clique is the canonical logical owner.  The
+  // frozen local-shape + extent pre-filter (step 1) already matched each
+  // fragment and the clique (step 2) already proved same-owner, so no separate
+  // union-vs-reference match is needed — one was measured to regress, because
+  // the union footprint normalizes to its own (possibly shifted) center and
+  // spuriously rejects valid owners.
+  if (cliques.size() != 1U) {
+    result.ambiguous = true;
+    result.reject_reason = "CURRENT_OWNER_AMBIGUOUS";
     return result;
   }
-  // Canonical order-invariant member set (permutation invariance).
+  const auto& clique = cliques.front();
+  std::vector<Eigen::Vector3f> union_points;
+  std::size_t primary = 0U;
+  std::size_t primary_count = 0U;
+  for (std::size_t k = 0U; k < clique.size(); ++k) {
+    const auto& g = groups[static_cast<std::size_t>(eligible[clique[k]])];
+    union_points.insert(union_points.end(), g.union_points_base.begin(),
+                        g.union_points_base.end());
+    if (g.union_points_base.size() > primary_count) {
+      primary_count = g.union_points_base.size();
+      primary = k;
+    }
+  }
+  const double yaw_rad =
+      groups[static_cast<std::size_t>(eligible[clique[primary]])]
+          .representative.yaw_rad;
+  result.current_footprint = robustFootprintFromPoints(union_points, yaw_rad);
+  const auto union_local_cells = localCellsOfPoints(
+      union_points, result.current_footprint, config);
+  result.current_owner_cells.assign(union_local_cells.begin(),
+                                    union_local_cells.end());
+  result.union_points_base = std::move(union_points);
+  for (std::size_t k = 0U; k < clique.size(); ++k) {
+    const auto& g = groups[static_cast<std::size_t>(eligible[clique[k]])];
+    result.member_group_indices.push_back(eligible[clique[k]]);
+    result.member_component_ids.insert(result.member_component_ids.end(),
+                                       g.member_component_ids.begin(),
+                                       g.member_component_ids.end());
+  }
+  result.member_component_ids =
+      canonicalMembers(std::move(result.member_component_ids));
   std::sort(result.member_group_indices.begin(),
             result.member_group_indices.end());
   result.valid = true;

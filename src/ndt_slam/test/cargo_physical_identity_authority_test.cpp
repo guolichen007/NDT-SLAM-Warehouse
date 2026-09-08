@@ -3118,20 +3118,19 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
-     SeparatedSameShapeObjectsFailClosedOnUnionExtent) {
-  // Two identical shapes at disjoint world-XY merge into one owner under
-  // local-normalized membership, but their union footprint is ~7 m wide and
-  // fails the frozen-reference extent match — fail-closed (never a false
-  // single owner, never a spurious Z).
+     TwoIndependentCliquesRemainAmbiguous) {
+  // Two fragments with disjoint local footprints (different extents) each pass
+  // the individual frozen filter but are NOT pairwise SAME_OWNER_FRAGMENT, so
+  // the maximal cliques are {A} and {B} -> ambiguous, not a single owner.
   const std::vector<CargoPhysicalGroupObservation> groups = {
-      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40),
-      makeFragment(2U, 2U, 1.0, 5.0, 0.0, 0.40)};
+      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40, 1.0),
+      makeFragment(2U, 2U, 1.0, 0.0, 0.0, 0.40, 4.0)};
   const auto owner = reconstructLogicalCurrentCargo(
       groups, frozenFootprint(0.0, 0.0, 2.0, 2.0),
-      frozenOwnerCells(-1, 1, -1, 1), reconstructConfig(), 0.60);
+      frozenOwnerCells(-2, 2, -2, 2), reconstructConfig(), 0.60);
   EXPECT_FALSE(owner.valid);
-  EXPECT_FALSE(owner.ambiguous);
-  EXPECT_EQ(owner.reject_reason, "NO_CURRENT_OWNER");
+  EXPECT_TRUE(owner.ambiguous);
+  EXPECT_EQ(owner.reject_reason, "CURRENT_OWNER_AMBIGUOUS");
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
