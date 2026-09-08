@@ -322,6 +322,8 @@ struct OwnerLockedSurfaceResult {
   bool valid = false;
   double surface_z = std::numeric_limits<double>::quiet_NaN();
   double surface_uncertainty = std::numeric_limits<double>::quiet_NaN();
+  double surface_z_before_static = std::numeric_limits<double>::quiet_NaN();
+  std::size_t static_rejected_points = 0U;
   std::size_t owner_cells = 0U;
   std::size_t frozen_cells = 0U;
   std::size_t authorized_cells = 0U;
@@ -433,23 +435,138 @@ OwnerLockedSurfaceResult computeOwnerLockedSurfaceVertical(
   return result;
 }
 
-// Diagnostic-only current-frame owner assembly (Phase A counterfactual).  It
-// proves, within a single source frame and against the frozen reference cell
-// mask, whether the low and high vertical fragments belong to the same cargo
-// owner.  It is XY/cell authority only: it never produces Z, lift, identity,
-// Bottom, Safety or map authority.
-struct CurrentFrameOwnerAssemblyResult {
-  bool valid = false;
-  int seed_group = -1;
-  std::vector<int> member_groups;
-  std::size_t assembly_count = 0U;
-  std::size_t authorized_owner_cells = 0U;
-  std::string reject_reason = "not_evaluated";
-  bool high_z_group_exists = false;
-  bool high_z_group_joined = false;
-  std::string high_z_group_reject_reason = "none";
-  double high_z_group_z95 = std::numeric_limits<double>::quiet_NaN();
-};
+// ===========================================================================
+// Canonical current-frame fragment reconstruction.
+//
+// The logical current cargo owner is reconstructed from the current frame's
+// groups BEFORE any reference matching.  Fragment membership uses CURRENT
+// WORLD-XY cell support (never local-normalized shape overlap), and the owner
+// set must be a complete clique (no chaining).  Only the reconstructed UNION
+// is matched against the frozen reference; the union footprint and owner cells
+// are then the single source for the current vertical.
+// ===========================================================================
+
+// Canonical min/max extent pair (yaw invariant).
+bool extentCompatible(const Eigen::Vector2f& a, const Eigen::Vector2f& b,
+                      double maximum_size_relative_step) {
+  const auto canonical_extent = [](const Eigen::Vector2f& e) {
+    return std::pair<float, float>(std::min(e.x(), e.y()),
+                                   std::max(e.x(), e.y()));
+  };
+  const auto ea = canonical_extent(a);
+  const auto eb = canonical_extent(b);
+  const double rel_min = std::abs(ea.first - eb.first) /
+      std::max(std::max(std::abs(ea.first), std::abs(eb.first)), 1e-9F);
+  const double rel_max = std::abs(ea.second - eb.second) /
+      std::max(std::max(std::abs(ea.second), std::abs(eb.second)), 1e-9F);
+  return rel_min <= maximum_size_relative_step &&
+      rel_max <= maximum_size_relative_step;
+}
+
+// World-XY cells: the group's points indexed in the shared base-frame grid
+// (no per-group normalization).  Two fragments of the same cargo occupy the
+// same world XY; two different objects at different XY occupy disjoint cells.
+std::set<CargoFootprintGridIndex> worldCellsOfGroup(
+    const CargoPhysicalGroupObservation& group,
+    const CargoVerticalEvidenceConfig& config) {
+  std::set<CargoFootprintGridIndex> cells;
+  for (const Eigen::Vector3f& point : group.union_points_base) {
+    if (!point.allFinite()) continue;
+    cells.insert({
+        static_cast<int>(std::floor(point.x() / config.xy_cell_size_m)),
+        static_cast<int>(std::floor(point.y() / config.xy_cell_size_m))});
+  }
+  return cells;
+}
+
+// Robust XY footprint computed directly from a raw point set (the union of a
+// clique's member points).  Never derived from a single group descriptor.
+CargoFootprintSnapshot robustFootprintFromPoints(
+    const std::vector<Eigen::Vector3f>& points, double yaw_base_rad) {
+  CargoFootprintSnapshot snapshot;
+  std::vector<double> xs;
+  std::vector<double> ys;
+  xs.reserve(points.size());
+  ys.reserve(points.size());
+  for (const Eigen::Vector3f& point : points) {
+    if (!point.allFinite()) continue;
+    xs.push_back(static_cast<double>(point.x()));
+    ys.push_back(static_cast<double>(point.y()));
+  }
+  if (xs.size() < 2U) return snapshot;
+  const double x05 = quantile(xs, 0.05);
+  const double x95 = quantile(xs, 0.95);
+  const double y05 = quantile(ys, 0.05);
+  const double y95 = quantile(ys, 0.95);
+  const double center_x = 0.5 * (x05 + x95);
+  const double center_y = 0.5 * (y05 + y95);
+  const double extent_x = x95 - x05;
+  const double extent_y = y95 - y05;
+  if (!(extent_x > 0.0 && extent_y > 0.0)) return snapshot;
+  snapshot.valid = true;
+  snapshot.center_base = Eigen::Vector2f(
+      static_cast<float>(center_x), static_cast<float>(center_y));
+  snapshot.size_xy = Eigen::Vector2f(
+      static_cast<float>(extent_x), static_cast<float>(extent_y));
+  snapshot.yaw_base_rad = static_cast<float>(yaw_base_rad);
+  return snapshot;
+}
+
+// Owner-local cells of a raw point set expressed in the union footprint frame.
+std::set<CargoFootprintGridIndex> localCellsOfPoints(
+    const std::vector<Eigen::Vector3f>& points,
+    const CargoFootprintSnapshot& footprint,
+    const CargoVerticalEvidenceConfig& config) {
+  std::set<CargoFootprintGridIndex> cells;
+  if (!footprint.valid) return cells;
+  CargoVerticalEvidenceInput input;
+  input.footprint_valid = true;
+  input.footprint_center_base = footprint.center_base;
+  input.footprint_size_xy = footprint.size_xy;
+  input.footprint_yaw_base_rad = footprint.yaw_base_rad;
+  for (const Eigen::Vector3f& point : points) {
+    if (!point.allFinite() || !cargoPointInsideFootprint(
+            point, input, config.footprint_margin_m)) {
+      continue;
+    }
+    cells.insert(makeCargoFootprintGridIndex(
+        point, input, config.xy_cell_size_m));
+  }
+  return cells;
+}
+
+// Bron-Kerbosch maximal-clique enumeration (N is small).  The compatibility
+// matrix diagonal is false; a singleton is reported when a vertex has no
+// compatible neighbour.
+void maximalCliquesRec(const std::vector<std::vector<bool>>& compat,
+                       std::vector<int> r, std::vector<int> p,
+                       std::vector<int> x,
+                       std::vector<std::vector<int>>* out) {
+  if (p.empty() && x.empty()) {
+    out->push_back(std::move(r));
+    return;
+  }
+  const std::vector<int> p_snapshot = p;
+  for (const int v : p_snapshot) {
+    std::vector<int> r_next = r;
+    r_next.push_back(v);
+    std::vector<int> p_next;
+    std::vector<int> x_next;
+    for (const int w : p) {
+      if (compat[static_cast<std::size_t>(v)][static_cast<std::size_t>(w)]) {
+        p_next.push_back(w);
+      }
+    }
+    for (const int w : x) {
+      if (compat[static_cast<std::size_t>(v)][static_cast<std::size_t>(w)]) {
+        x_next.push_back(w);
+      }
+    }
+    maximalCliquesRec(compat, r_next, p_next, x_next, out);
+    p.erase(std::remove(p.begin(), p.end(), v), p.end());
+    x.push_back(v);
+  }
+}
 
 std::set<CargoFootprintGridIndex> cellsOfGroup(
     const CargoPhysicalGroupObservation& group,
@@ -467,114 +584,141 @@ std::set<CargoFootprintGridIndex> cellsOfGroup(
   return cells;
 }
 
-// Owner-local cells: the group's cells expressed in its OWN robust footprint
-// frame (center + yaw).  This makes the owner-cell pattern translation and yaw
-// invariant, so a lifted/swung cargo keeps matching the frozen local shape
-// instead of being required to stay on the pre-load world XY.
-std::set<CargoFootprintGridIndex> localCellsOfGroup(
-    const CargoPhysicalGroupObservation& group,
-    const CargoVerticalEvidenceConfig& config) {
-  const CargoFootprintSnapshot footprint = robustFootprintSnapshot(group);
-  if (!footprint.valid) return {};
-  CargoVerticalEvidenceInput input;
-  input.footprint_valid = true;
-  input.footprint_center_base = footprint.center_base;
-  input.footprint_size_xy = footprint.size_xy;
-  input.footprint_yaw_base_rad = footprint.yaw_base_rad;
-  return cellsOfGroup(group, input, config);
-}
-
-CurrentFrameOwnerAssemblyResult assembleCurrentFrameOwner(
+LogicalCurrentCargoObservation reconstructLogicalCurrentCargoImpl(
     const std::vector<CargoPhysicalGroupObservation>& groups,
     const CargoFootprintSnapshot& frozen_footprint,
     const std::vector<CargoFootprintGridIndex>& frozen_owner_cells,
     const CargoVerticalEvidenceConfig& config,
-    double high_z_threshold_m) {
-  CurrentFrameOwnerAssemblyResult result;
+    double maximum_size_relative_step) {
+  LogicalCurrentCargoObservation result;
   if (!frozen_footprint.valid || frozen_owner_cells.empty()) {
     result.reject_reason = "NO_FROZEN_REFERENCE";
     return result;
   }
-  std::set<CargoFootprintGridIndex> frozen_mask(
+  const std::set<CargoFootprintGridIndex> frozen_mask(
       frozen_owner_cells.begin(), frozen_owner_cells.end());
 
-  // Seed: exactly one current group whose cells overlap the frozen mask with
-  // at least minimum_surface_cells support.
-  int seed = -1;
-  int seed_count = 0;
-  std::set<CargoFootprintGridIndex> seed_cells;
+  // Step 1: collect eligible current-frame groups (exact, non-ambiguous,
+  // geometry resolved, finite).  NO frozen-reference pre-filter — fragments
+  // are reconstructed into a logical owner before any reference matching.
+  std::vector<int> eligible;
   for (std::size_t gi = 0U; gi < groups.size(); ++gi) {
     const auto& g = groups[gi];
     if (g.group_ambiguous || !g.geometry_resolved ||
         g.union_points_base.empty() || !finiteDescriptor(g.descriptor)) {
       continue;
     }
-    const auto cells = localCellsOfGroup(g, config);
+    if (!robustFootprintSnapshot(g).valid) continue;
+    eligible.push_back(static_cast<int>(gi));
+  }
+  if (eligible.empty()) {
+    result.reject_reason = "NO_CURRENT_OWNER";
+    return result;
+  }
+
+  // Step 2: pairwise SAME_OWNER_FRAGMENT on CURRENT world-XY cell support plus
+  // canonical extent compatibility (yaw invariant).  No local normalization.
+  const std::size_t n = eligible.size();
+  std::vector<std::vector<bool>> compat(n, std::vector<bool>(n, false));
+  std::vector<std::set<CargoFootprintGridIndex>> world_cells(n);
+  std::vector<CargoFootprintSnapshot> footprints(n);
+  for (std::size_t i = 0U; i < n; ++i) {
+    const auto& g = groups[static_cast<std::size_t>(eligible[i])];
+    world_cells[i] = worldCellsOfGroup(g, config);
+    footprints[i] = robustFootprintSnapshot(g);
+  }
+  for (std::size_t i = 0U; i < n; ++i) {
+    for (std::size_t j = i + 1U; j < n; ++j) {
+      std::size_t intersection = 0U;
+      for (const auto& cell : world_cells[i]) {
+        if (world_cells[j].count(cell) > 0U) ++intersection;
+      }
+      const double coverage_i = static_cast<double>(intersection) /
+          static_cast<double>(std::max<std::size_t>(1U, world_cells[i].size()));
+      const double coverage_j = static_cast<double>(intersection) /
+          static_cast<double>(std::max<std::size_t>(1U, world_cells[j].size()));
+      const bool extent_ok = footprints[i].valid && footprints[j].valid &&
+          extentCompatible(footprints[i].size_xy, footprints[j].size_xy,
+                           maximum_size_relative_step);
+      const bool compatible = intersection >= config.minimum_surface_cells &&
+          coverage_i >= config.minimum_surface_coverage_ratio &&
+          coverage_j >= config.minimum_surface_coverage_ratio && extent_ok;
+      compat[i][j] = compatible;
+      compat[j][i] = compatible;
+    }
+  }
+
+  // Step 3: enumerate maximal cliques (singletons are legal cliques).
+  std::vector<int> all_vertices;
+  all_vertices.reserve(n);
+  for (std::size_t i = 0U; i < n; ++i) {
+    all_vertices.push_back(static_cast<int>(i));
+  }
+  std::vector<std::vector<int>> cliques;
+  maximalCliquesRec(compat, {}, all_vertices, {}, &cliques);
+
+  // Step 4: for each maximal clique, union member points -> robust footprint
+  // -> local owner cells -> match the UNION against the frozen reference.
+  // A single unique match becomes the canonical logical owner.
+  int match_count = 0;
+  for (const auto& clique : cliques) {
+    std::vector<Eigen::Vector3f> union_points;
+    std::size_t primary = 0U;
+    std::size_t primary_count = 0U;
+    for (std::size_t k = 0U; k < clique.size(); ++k) {
+      const auto& g = groups[static_cast<std::size_t>(eligible[clique[k]])];
+      union_points.insert(union_points.end(), g.union_points_base.begin(),
+                          g.union_points_base.end());
+      if (g.union_points_base.size() > primary_count) {
+        primary_count = g.union_points_base.size();
+        primary = k;
+      }
+    }
+    const double yaw_rad =
+        groups[static_cast<std::size_t>(eligible[clique[primary]])]
+            .representative.yaw_rad;
+    const CargoFootprintSnapshot union_footprint =
+        robustFootprintFromPoints(union_points, yaw_rad);
+    if (!union_footprint.valid) continue;
+    const auto local_cells =
+        localCellsOfPoints(union_points, union_footprint, config);
     std::size_t overlap = 0U;
-    for (const auto& cell : cells) {
+    for (const auto& cell : local_cells) {
       if (frozen_mask.count(cell) > 0U) ++overlap;
     }
-    if (overlap >= config.minimum_surface_cells) {
-      ++seed_count;
-      if (seed < 0) { seed = static_cast<int>(gi); seed_cells = cells; }
-    }
-  }
-  if (seed_count == 0) { result.reject_reason = "NO_CURRENT_OWNER"; return result; }
-  if (seed_count > 1) { result.reject_reason = "CURRENT_OWNER_AMBIGUOUS"; return result; }
-  result.seed_group = seed;
-  result.member_groups.push_back(seed);
-
-  // Vertical fragments: high-Z current groups that overlap both the frozen
-  // mask and the seed cells (current-frame XY support) and are not a competing
-  // independent owner.
-  bool high_z_exists = false;
-  for (std::size_t gi = 0U; gi < groups.size(); ++gi) {
-    if (static_cast<int>(gi) == seed) continue;
-    const auto& g = groups[gi];
-    if (g.group_ambiguous || !g.geometry_resolved ||
-        g.union_points_base.empty() || !finiteDescriptor(g.descriptor)) {
+    if (overlap < config.minimum_surface_cells ||
+        !extentCompatible(union_footprint.size_xy, frozen_footprint.size_xy,
+                          maximum_size_relative_step)) {
       continue;
     }
-    const double z95 = g.descriptor.diagnostic_z95;
-    const bool high_z = std::isfinite(z95) && z95 > high_z_threshold_m;
-    if (high_z) {
-      high_z_exists = true;
-      result.high_z_group_z95 = z95;
+    ++match_count;
+    if (match_count > 1) {
+      result.ambiguous = true;
+      result.reject_reason = "CURRENT_OWNER_AMBIGUOUS";
+      return result;
     }
-    if (!high_z) continue;
-    const auto cells = localCellsOfGroup(g, config);
-    std::size_t frozen_overlap = 0U;
-    std::size_t seed_overlap = 0U;
-    for (const auto& cell : cells) {
-      if (frozen_mask.count(cell) > 0U) ++frozen_overlap;
-      if (seed_cells.count(cell) > 0U) ++seed_overlap;
+    result.union_points_base = std::move(union_points);
+    result.current_footprint = union_footprint;
+    result.current_owner_cells.assign(local_cells.begin(), local_cells.end());
+    for (std::size_t k = 0U; k < clique.size(); ++k) {
+      const auto& g = groups[static_cast<std::size_t>(eligible[clique[k]])];
+      result.member_group_indices.push_back(eligible[clique[k]]);
+      result.member_component_ids.insert(result.member_component_ids.end(),
+                                         g.member_component_ids.begin(),
+                                         g.member_component_ids.end());
     }
-    const bool frozen_ok = frozen_overlap >= config.minimum_surface_cells;
-    const bool seed_ok = seed_overlap > 0U;
-    if (!frozen_ok) {
-      result.high_z_group_reject_reason = "HIGH_Z_NO_FROZEN_CELL_OVERLAP";
-      continue;
-    }
-    if (!seed_ok) {
-      result.high_z_group_reject_reason = "HIGH_Z_NO_SEED_CELL_OVERLAP";
-      continue;
-    }
-    result.member_groups.push_back(static_cast<int>(gi));
-    result.high_z_group_joined = true;
+    result.member_component_ids =
+        canonicalMembers(std::move(result.member_component_ids));
   }
-  result.high_z_group_exists = high_z_exists;
-
-  std::set<CargoFootprintGridIndex> authorized;
-  for (const int gi : result.member_groups) {
-    const auto cells = localCellsOfGroup(
-        groups[static_cast<std::size_t>(gi)], config);
-    authorized.insert(cells.begin(), cells.end());
+  if (match_count == 0) {
+    result.reject_reason = "NO_CURRENT_OWNER";
+    return result;
   }
-  result.authorized_owner_cells = authorized.size();
-  result.assembly_count = result.member_groups.size();
+  // Canonical order-invariant member set (permutation invariance).
+  std::sort(result.member_group_indices.begin(),
+            result.member_group_indices.end());
   result.valid = true;
-  result.reject_reason = result.high_z_group_exists && !result.high_z_group_joined
-      ? "HIGH_Z_FRAGMENT_NOT_JOINED" : "assembly_valid";
+  result.reject_reason = "logical_owner_valid";
   return result;
 }
 
@@ -585,7 +729,9 @@ CurrentFrameOwnerAssemblyResult assembleCurrentFrameOwner(
 OwnerLockedSurfaceResult computePreClusterSurfaceVertical(
     const CargoShadowFrameEvidence& frame,
     const CargoFootprintSnapshot& current_owner_footprint,
-    const CargoVerticalEvidenceConfig& config) {
+    const CargoVerticalEvidenceConfig& config,
+    const std::vector<Eigen::Vector3f>* competing_owner_points = nullptr,
+    const std::vector<CargoFootprintGridIndex>* owner_cells = nullptr) {
   OwnerLockedSurfaceResult result;
   if (!current_owner_footprint.valid ||
       !frame.range_cloud_current_frame ||
@@ -602,17 +748,60 @@ OwnerLockedSurfaceResult computePreClusterSurfaceVertical(
   input.ground_reference_valid = frame.ground_reference_valid;
   input.ground_z_base = frame.ground_z_base;
 
+  // Owner-cell gating: when the caller supplies the logical owner's authorized
+  // cells, the vertical may only be measured inside those cells (never the
+  // wider rectangle footprint), so unrelated background points cannot steal Z.
+  const std::set<CargoFootprintGridIndex> owner_cell_set =
+      owner_cells != nullptr && !owner_cells->empty()
+          ? std::set<CargoFootprintGridIndex>(owner_cells->begin(),
+                                              owner_cells->end())
+          : std::set<CargoFootprintGridIndex>{};
+  const bool owner_cell_gate_active = !owner_cell_set.empty();
+
+  const bool static_context_valid = frame.static_conflict_context_valid &&
+      frame.range_static_conflict_mask &&
+      frame.range_static_conflict_mask->size() ==
+          frame.range_cloud_current_frame->size();
+  std::vector<Eigen::Vector3f> all_footprint_points;
   std::vector<Eigen::Vector3f> footprint_points;
-  for (const pcl::PointXYZ& p : frame.range_cloud_current_frame->points) {
+  std::size_t static_rejected_points = 0U;
+  for (std::size_t pi = 0U; pi < frame.range_cloud_current_frame->size();
+       ++pi) {
+    const pcl::PointXYZ& p = frame.range_cloud_current_frame->points[pi];
     const Eigen::Vector3f pt(p.x, p.y, p.z);
     if (!pt.allFinite() || !cargoPointInsideFootprint(
             pt, input, config.footprint_margin_m)) {
       continue;
     }
+    if (owner_cell_gate_active) {
+      const CargoFootprintGridIndex cell = makeCargoFootprintGridIndex(
+          pt, input, config.xy_cell_size_m);
+      if (owner_cell_set.count(cell) == 0U) continue;
+    }
+    all_footprint_points.push_back(pt);
+    if (static_context_valid &&
+        (*frame.range_static_conflict_mask)[pi] == 1U) {
+      ++static_rejected_points;
+      continue;
+    }
     footprint_points.push_back(pt);
   }
+  // Surface BEFORE static filtering (diagnostic: shows the background top that
+  // Guard C must remove).
+  if (!all_footprint_points.empty()) {
+    CargoVerticalEvidenceInput before_input = input;
+    before_input.selected_points_base = all_footprint_points;
+    const CargoVerticalEvidence before_evidence =
+        extractCargoVerticalEvidence(before_input, config);
+    if (before_evidence.valid && std::isfinite(before_evidence.top_z_base)) {
+      result.surface_z_before_static = before_evidence.top_z_base;
+    }
+  }
+  result.static_rejected_points = static_rejected_points;
   if (footprint_points.empty()) {
-    result.reject_reason = "NO_RANGE_POINTS_IN_OWNER_FOOTPRINT";
+    result.reject_reason = static_rejected_points > 0U
+        ? "MATURE_STATIC_FILTER_INSUFFICIENT_CARGO_SUPPORT"
+        : "NO_RANGE_POINTS_IN_OWNER_FOOTPRINT";
     return result;
   }
   CargoVerticalEvidenceInput owner_input = input;
@@ -622,6 +811,26 @@ OwnerLockedSurfaceResult computePreClusterSurfaceVertical(
   if (!evidence.valid || !std::isfinite(evidence.top_z_base)) {
     result.reject_reason = "OWNER_SURFACE_INVALID:" + evidence.reject_reason;
     return result;
+  }
+  // Guard B: competing current owner column veto — if another independent
+  // current group owns any of the top surface columns, the vertical is invalid.
+  if (competing_owner_points != nullptr && !competing_owner_points->empty()) {
+    std::set<CargoFootprintGridIndex> competing_cells;
+    for (const Eigen::Vector3f& point : *competing_owner_points) {
+      if (!point.allFinite() || !cargoPointInsideFootprint(
+              point, input, config.footprint_margin_m)) {
+        continue;
+      }
+      competing_cells.insert(makeCargoFootprintGridIndex(
+          point, input, config.xy_cell_size_m));
+    }
+    for (const CargoFootprintGridIndex& cell :
+         evidence.top_surface_cell_indices) {
+      if (competing_cells.count(cell) > 0U) {
+        result.reject_reason = "COMPETING_OWNER_COLUMN";
+        return result;
+      }
+    }
   }
   result.surface_z = evidence.top_z_base;
   // Surface uncertainty comes from the measured surface band itself, never
@@ -659,6 +868,17 @@ int requiredFrames(HookLoadSignalRole role, bool gravity_valid,
 }
 
 }  // namespace
+
+LogicalCurrentCargoObservation reconstructLogicalCurrentCargo(
+    const std::vector<CargoPhysicalGroupObservation>& groups,
+    const CargoFootprintSnapshot& frozen_footprint,
+    const std::vector<CargoFootprintGridIndex>& frozen_owner_cells,
+    const CargoVerticalEvidenceConfig& config,
+    double maximum_size_relative_step) {
+  return reconstructLogicalCurrentCargoImpl(groups, frozen_footprint,
+                                            frozen_owner_cells, config,
+                                            maximum_size_relative_step);
+}
 
 const char* cargoCandidateAssociationStateName(
     CargoCandidateAssociationState state) noexcept {
@@ -2502,8 +2722,28 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             diagnostic_reference_lock_.phase =
                 DiagnosticSurfaceReferenceLock::Phase::PRELOAD_ACTIVE;
             diagnostic_reference_lock_.frozen = true;
-            diagnostic_reference_lock_.baseline_z = reference;
-            diagnostic_reference_lock_.baseline_uncertainty_m = uncertainty;
+            // ROOT-A: baseline Z and uncertainty must come from the SAME
+            // measured pre-cluster surface (never the inherited group vertical
+            // uncertainty).
+            {
+              const CargoFootprintSnapshot baseline_footprint =
+                  robustFootprintSnapshot(group);
+              const OwnerLockedSurfaceResult baseline_surface =
+                  computePreClusterSurfaceVertical(
+                      input.frame_evidence, baseline_footprint,
+                      input.vertical_config, nullptr);
+              if (baseline_surface.valid &&
+                  std::isfinite(baseline_surface.surface_z) &&
+                  std::isfinite(baseline_surface.surface_uncertainty)) {
+                diagnostic_reference_lock_.baseline_z =
+                    baseline_surface.surface_z;
+                diagnostic_reference_lock_.baseline_uncertainty_m =
+                    baseline_surface.surface_uncertainty;
+              } else {
+                diagnostic_reference_lock_.baseline_z = reference;
+                diagnostic_reference_lock_.baseline_uncertainty_m = uncertainty;
+              }
+            }
             diagnostic_reference_lock_.frozen_footprint =
                 history->frozen_preload_footprint;
             diagnostic_reference_lock_.frozen_owner_cells =
@@ -3012,22 +3252,37 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     if (lock.frozen &&
         lock.phase ==
             DiagnosticSurfaceReferenceLock::Phase::POSTLOAD_ACTIVE) {
-      // Current-frame owner assembly: seed + high-Z vertical fragments.
-      const CurrentFrameOwnerAssemblyResult assembly =
-          assembleCurrentFrameOwner(input.groups, lock.frozen_footprint,
-                                    lock.frozen_owner_cells,
-                                    input.vertical_config, 1.2);
-      decision_.assembly_valid = assembly.valid;
-      decision_.assembly_seed_group = assembly.seed_group;
-      decision_.assembly_member_count = assembly.member_groups.size();
-      decision_.assembly_high_z_exists = assembly.high_z_group_exists;
-      decision_.assembly_high_z_joined = assembly.high_z_group_joined;
-      decision_.assembly_high_z_reject_reason =
-          assembly.high_z_group_reject_reason;
-      decision_.assembly_reject_reason = assembly.reject_reason;
+      // Canonical current-frame logical owner: fragment reconstruction happens
+      // BEFORE reference matching (complete clique on world-XY, then union).
+      const LogicalCurrentCargoObservation logical_owner =
+          reconstructLogicalCurrentCargo(input.groups, lock.frozen_footprint,
+                                         lock.frozen_owner_cells,
+                                         input.vertical_config,
+                                         config_.maximum_size_relative_step);
+      decision_.assembly_valid = logical_owner.valid;
+      decision_.assembly_seed_group = logical_owner.member_group_indices.empty()
+          ? -1 : logical_owner.member_group_indices.front();
+      decision_.assembly_member_count =
+          logical_owner.member_group_indices.size();
+      decision_.assembly_strict_clique =
+          logical_owner.member_group_indices.size() > 1U;
+      decision_.assembly_high_z_exists = false;
+      decision_.assembly_high_z_joined = false;
+      decision_.assembly_high_z_reject_reason = "none";
+      for (const int gi : logical_owner.member_group_indices) {
+        const double z95 = input.groups[static_cast<std::size_t>(gi)]
+            .descriptor.diagnostic_z95;
+        if (std::isfinite(z95) && z95 > 1.2) {
+          decision_.assembly_high_z_exists = true;
+        }
+      }
+      decision_.assembly_high_z_joined =
+          decision_.assembly_high_z_exists &&
+          logical_owner.member_group_indices.size() > 1U;
+      decision_.assembly_reject_reason = logical_owner.reject_reason;
 
       double assembly_surface_z = std::numeric_limits<double>::quiet_NaN();
-      if (assembly.valid && !assembly.member_groups.empty() &&
+      if (logical_owner.valid && !logical_owner.member_group_indices.empty() &&
           input.frame_evidence.raw_roi_current_frame) {
         CargoVerticalEvidenceInput asm_input;
         asm_input.footprint_valid = true;
@@ -3039,7 +3294,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             input.frame_evidence.ground_reference_valid;
         asm_input.ground_z_base = input.frame_evidence.ground_z_base;
         std::set<CargoFootprintGridIndex> authorized;
-        for (const int gi : assembly.member_groups) {
+        for (const int gi : logical_owner.member_group_indices) {
           const auto cells = cellsOfGroup(
               input.groups[static_cast<std::size_t>(gi)], asm_input,
               input.vertical_config);
@@ -3097,18 +3352,36 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         double precluster_uncertainty =
             std::numeric_limits<double>::quiet_NaN();
         std::string precluster_reason = "NO_CURRENT_OWNER";
-        if (assembly.valid && assembly.seed_group >= 0) {
-          const CargoFootprintSnapshot seed_footprint =
-              robustFootprintSnapshot(
-                  input.groups[static_cast<std::size_t>(
-                      assembly.seed_group)]);
+        if (logical_owner.valid && logical_owner.current_footprint.valid) {
+          std::vector<Eigen::Vector3f> competing_points;
+          for (std::size_t other = 0U; other < input.groups.size(); ++other) {
+            const bool is_member = std::find(
+                logical_owner.member_group_indices.begin(),
+                logical_owner.member_group_indices.end(),
+                static_cast<int>(other)) !=
+                logical_owner.member_group_indices.end();
+            if (is_member) continue;
+            const auto& og = input.groups[other];
+            if (og.group_ambiguous || !og.geometry_resolved) continue;
+            competing_points.insert(competing_points.end(),
+                                    og.union_points_base.begin(),
+                                    og.union_points_base.end());
+          }
           const OwnerLockedSurfaceResult pc =
               computePreClusterSurfaceVertical(
-                  input.frame_evidence, seed_footprint, input.vertical_config);
+                  input.frame_evidence, logical_owner.current_footprint,
+                  input.vertical_config, &competing_points,
+                  &logical_owner.current_owner_cells);
           decision_.precluster_surface_valid = pc.valid;
           precluster_z = pc.surface_z;
           precluster_uncertainty = pc.surface_uncertainty;
           precluster_reason = pc.reject_reason;
+          decision_.precluster_surface_z_before_static =
+              pc.surface_z_before_static;
+          decision_.precluster_static_rejected_points =
+              pc.static_rejected_points;
+          decision_.precluster_static_context_valid =
+              input.frame_evidence.static_conflict_context_valid;
         }
         decision_.precluster_surface_z = precluster_z;
         decision_.precluster_reject_reason = precluster_reason;

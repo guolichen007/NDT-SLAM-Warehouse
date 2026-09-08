@@ -153,6 +153,13 @@ struct CargoShadowFrameEvidence {
   // voxel clustering.  It exists only to re-measure the already-identified
   // Cargo's current vertical; it never selects identity.
   pcl::PointCloud<pcl::PointXYZ>::ConstPtr range_cloud_current_frame;
+  // Guard C: per-point mature-static conflict mask, same size as
+  // range_cloud_current_frame.  1 = point belongs to a known mature static
+  // structure (and must be excluded from the Cargo vertical), 0 = otherwise.
+  // Read-only, current-frame only; never cached into History/Reference.
+  std::shared_ptr<const std::vector<std::uint8_t>>
+      range_static_conflict_mask;
+  bool static_conflict_context_valid = false;
   bool ground_reference_valid = false;
   float ground_z_base = std::numeric_limits<float>::quiet_NaN();
 };
@@ -347,6 +354,37 @@ struct CargoPhysicalIdentityInput {
   CargoVerticalEvidenceConfig vertical_config;
 };
 
+// The canonical current-frame cargo observation.  ONE source frame yields AT
+// MOST ONE logical owner.  It is the single source of truth for current owner,
+// current footprint, current owner cells, and current surface.  It never
+// derives authority from a detector group id, a seed, a History, lineage,
+// prediction, or a previous owner.
+struct LogicalCurrentCargoObservation {
+  bool valid = false;
+  bool ambiguous = false;
+  double source_stamp_sec = 0.0;
+  std::vector<int> member_group_indices;
+  std::vector<std::uint64_t> member_component_ids;
+  std::vector<Eigen::Vector3f> union_points_base;
+  CargoFootprintSnapshot current_footprint;
+  std::vector<CargoFootprintGridIndex> current_owner_cells;
+  double surface_z = std::numeric_limits<double>::quiet_NaN();
+  double surface_uncertainty = std::numeric_limits<double>::quiet_NaN();
+  bool surface_valid = false;
+  std::string reject_reason = "not_evaluated";
+};
+
+// Reconstructs the canonical current-frame logical cargo owner from the
+// current frame's groups BEFORE any reference matching: complete clique on
+// world-XY cell support, union footprint, then a single reference match.
+// Pure and stateless; exposed for direct unit testing.
+LogicalCurrentCargoObservation reconstructLogicalCurrentCargo(
+    const std::vector<CargoPhysicalGroupObservation>& groups,
+    const CargoFootprintSnapshot& frozen_footprint,
+    const std::vector<CargoFootprintGridIndex>& frozen_owner_cells,
+    const CargoVerticalEvidenceConfig& config,
+    double maximum_size_relative_step);
+
 struct CargoPhysicalIdentityDecision {
   bool valid_input = false;
   bool cargo_exists = false;
@@ -434,6 +472,7 @@ struct CargoPhysicalIdentityDecision {
   bool assembly_valid = false;
   int assembly_seed_group = -1;
   std::size_t assembly_member_count = 0U;
+  bool assembly_strict_clique = false;
   bool assembly_high_z_exists = false;
   bool assembly_high_z_joined = false;
   std::string assembly_high_z_reject_reason = "none";
@@ -451,6 +490,11 @@ struct CargoPhysicalIdentityDecision {
   bool precluster_lift_significant = false;
   int precluster_lift_confirm_count = 0;
   bool precluster_simulated_validated = false;
+  // Guard C telemetry.
+  double precluster_surface_z_before_static =
+      std::numeric_limits<double>::quiet_NaN();
+  std::size_t precluster_static_rejected_points = 0U;
+  bool precluster_static_context_valid = false;
   double identity_validation_stamp_sec = 0.0;
   std::vector<CargoPhysicalGroupDiagnostic> group_diagnostics;
   std::string reason = "uninitialized";

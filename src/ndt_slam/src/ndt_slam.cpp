@@ -14922,6 +14922,61 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
              .safety_localization_authorized);
     input.pose_authority_identity_valid = input.localization_authorized;
     input.gravity_valid = hook.valid;
+    // Guard C: build the per-point mature-static conflict mask for the range
+    // cloud (base -> map -> static grid key -> mature cell + Z interval).
+    // Read-only and current-frame only; the Cargo authority never touches the
+    // Map, the Snapshot, or the pose authority.
+    if (frame_evidence.range_cloud_current_frame && frame_context) {
+      const auto static_snapshot = static_obstacle_evidence_index_.snapshot();
+      const float static_cell_size =
+          static_obstacle_evidence_index_.config().cell_size_m;
+      const float static_height_tol =
+          static_obstacle_evidence_index_.config().height_tolerance_m;
+      const std::uint64_t map_gen =
+          frame_context->pose_identity.map_rebuild_generation;
+      const bool static_context_ok = static_snapshot != nullptr &&
+          static_snapshot->map_generation == map_gen &&
+          static_snapshot->authority !=
+              StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+      frame_evidence.static_conflict_context_valid = static_context_ok;
+      if (static_context_ok) {
+        auto mask = std::make_shared<std::vector<std::uint8_t>>(
+            frame_evidence.range_cloud_current_frame->size(), 0U);
+        const Sophus::SE3d pose_map_base = frame_context->runtime_pose;
+        for (std::size_t pi = 0U;
+             pi < frame_evidence.range_cloud_current_frame->size(); ++pi) {
+          const pcl::PointXYZ& point =
+              frame_evidence.range_cloud_current_frame->points[pi];
+          if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+              !std::isfinite(point.z)) {
+            continue;
+          }
+          const Eigen::Vector3d map_point =
+              pose_map_base * Eigen::Vector3d(point.x, point.y, point.z);
+          const std::int32_t grid_x = static_cast<std::int32_t>(
+              std::floor(map_point.x() / static_cell_size));
+          const std::int32_t grid_y = static_cast<std::int32_t>(
+              std::floor(map_point.y() / static_cell_size));
+          const std::int64_t grid_key =
+              packStaticEvidenceCell(grid_x, grid_y);
+          const auto cell_it = static_snapshot->cells.find(grid_key);
+          if (cell_it == static_snapshot->cells.end()) continue;
+          const StaticEvidenceCell& cell = cell_it->second;
+          if (!cell.clean_map_confirmed || !cell.temporally_mature ||
+              cell.map_generation != static_snapshot->map_generation) {
+            continue;
+          }
+          if (map_point.z() <
+                  static_cast<double>(cell.min_z) - static_height_tol ||
+              map_point.z() >
+                  static_cast<double>(cell.max_z) + static_height_tol) {
+            continue;
+          }
+          (*mask)[pi] = 1U;
+        }
+        frame_evidence.range_static_conflict_mask = mask;
+      }
+    }
     input.frame_evidence = std::move(frame_evidence);
     input.vertical_config = cargo_vertical_evidence_v2_config_;
     switch (hook.state) {
@@ -15052,6 +15107,7 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "ref_lock_empty_lift_confirm_advance,"
                 << "ref_lock_significant_frames_after_split,ref_lock_v31_valid,"
                 << "assembly_valid,assembly_seed_group,assembly_member_count,"
+                << "assembly_strict_clique,"
                 << "assembly_high_z_exists,assembly_high_z_joined,"
                 << "assembly_high_z_reject_reason,assembly_reject_reason,"
                 << "assembly_surface_z,assembly_lift_delta,"
@@ -15061,6 +15117,9 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "precluster_reject_reason,precluster_lift_delta,"
                 << "precluster_lift_significant,precluster_lift_confirm_count,"
                 << "precluster_simulated_validated,"
+                << "precluster_surface_z_before_static,"
+                << "precluster_static_rejected_points,"
+                << "precluster_static_context_valid,"
                 << "preload_boundary_pending,preload_boundary_phase,"
                 << "preload_boundary_lifecycle_seen,"
                 << "preload_boundary_load_seen,"
@@ -15238,6 +15297,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << (integrated_identity_decision_.assembly_valid ? 1 : 0) << ','
                 << integrated_identity_decision_.assembly_seed_group << ','
                 << integrated_identity_decision_.assembly_member_count << ','
+                << (integrated_identity_decision_.assembly_strict_clique ? 1 : 0)
+                << ','
                 << (integrated_identity_decision_.assembly_high_z_exists ? 1 : 0)
                 << ','
                 << (integrated_identity_decision_.assembly_high_z_joined ? 1 : 0)
@@ -15263,6 +15324,12 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << integrated_identity_decision_.precluster_lift_confirm_count
                 << ','
                 << (integrated_identity_decision_.precluster_simulated_validated
+                        ? 1 : 0) << ','
+                << integrated_identity_decision_.precluster_surface_z_before_static
+                << ','
+                << integrated_identity_decision_.precluster_static_rejected_points
+                << ','
+                << (integrated_identity_decision_.precluster_static_context_valid
                         ? 1 : 0) << ','
                 << (integrated_identity_decision_.preload_boundary_pending
                         ? 1 : 0) << ','

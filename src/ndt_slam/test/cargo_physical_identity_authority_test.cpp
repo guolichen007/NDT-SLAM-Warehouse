@@ -3002,5 +3002,213 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_FALSE(result.preload_handoff_captured);
 }
 
+// ===========================================================================
+// Canonical fragment reconstruction unit tests (reconstructLogicalCurrentCargo).
+// A coarse 1.0 m XY cell is used so world-XY cell arithmetic is exact (integer
+// coordinates), removing float-boundary dependence from clique/union asserts.
+// ===========================================================================
+
+CargoVerticalEvidenceConfig reconstructConfig() {
+  CargoVerticalEvidenceConfig config = verticalConfig();
+  config.xy_cell_size_m = 1.0F;
+  config.minimum_surface_cells = 2U;
+  config.minimum_surface_coverage_ratio = 0.0F;
+  return config;
+}
+
+CargoPhysicalGroupObservation makeFragment(std::uint64_t frame_group_id,
+                                           std::uint64_t component_id,
+                                           double stamp, double cx, double cy,
+                                           double z, double extent = 2.0) {
+  CargoPhysicalGroupObservation g;
+  g.frame_group_id = frame_group_id;
+  g.member_component_ids = {component_id};
+  g.geometry_resolved = true;
+  g.group_ambiguous = false;
+  const float half = static_cast<float>(0.5 * extent);
+  for (float dx : {-half, 0.0F, half}) {
+    for (float dy : {-half, 0.0F, half}) {
+      g.union_points_base.emplace_back(static_cast<float>(cx) + dx,
+                                       static_cast<float>(cy) + dy,
+                                       static_cast<float>(z));
+    }
+  }
+  g.descriptor.valid = true;
+  g.descriptor.stamp_sec = stamp;
+  g.descriptor.stable_anchor = Eigen::Vector3d(cx, cy, z);
+  g.descriptor.aggregate_extent = Eigen::Vector3d(extent, extent, 0.40);
+  g.descriptor.robust_x05 = cx - 0.5 * extent;
+  g.descriptor.robust_x95 = cx + 0.5 * extent;
+  g.descriptor.robust_y05 = cy - 0.5 * extent;
+  g.descriptor.robust_y95 = cy + 0.5 * extent;
+  g.descriptor.robust_xy_center = Eigen::Vector2d(cx, cy);
+  g.descriptor.robust_xy_extent = Eigen::Vector2d(extent, extent);
+  g.descriptor.aggregate_point_support = 9U;
+  g.descriptor.vertical_mode = CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
+  g.descriptor.physical_vertical_z = z;
+  g.descriptor.vertical_uncertainty_m = 0.05;
+  g.descriptor.diagnostic_z05 = z - 0.20;
+  g.descriptor.diagnostic_z95 = z;
+  g.representative.candidate_id = frame_group_id;
+  g.representative.stamp_sec = stamp;
+  g.representative.center = Eigen::Vector3d(cx, cy, z);
+  g.representative.size = Eigen::Vector3d(extent, extent, 0.40);
+  g.representative.yaw_rad = 0.0;
+  return g;
+}
+
+CargoFootprintSnapshot frozenFootprint(double cx, double cy, double sx,
+                                       double sy, double yaw = 0.0) {
+  CargoFootprintSnapshot f;
+  f.valid = true;
+  f.center_base = Eigen::Vector2f(static_cast<float>(cx),
+                                  static_cast<float>(cy));
+  f.size_xy = Eigen::Vector2f(static_cast<float>(sx), static_cast<float>(sy));
+  f.yaw_base_rad = static_cast<float>(yaw);
+  f.source_stamp_sec = 1.0;
+  return f;
+}
+
+std::vector<CargoFootprintGridIndex> frozenOwnerCells(int x_min, int x_max,
+                                                      int y_min, int y_max) {
+  std::vector<CargoFootprintGridIndex> cells;
+  for (int x = x_min; x <= x_max; ++x) {
+    for (int y = y_min; y <= y_max; ++y) {
+      cells.push_back({x, y});
+    }
+  }
+  return cells;
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest, SingletonGroupCanBecomeLogicalOwner) {
+  const std::vector<CargoPhysicalGroupObservation> groups = {
+      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40)};
+  const auto owner = reconstructLogicalCurrentCargo(
+      groups, frozenFootprint(0.0, 0.0, 2.0, 2.0),
+      frozenOwnerCells(-1, 1, -1, 1), reconstructConfig(), 0.60);
+  ASSERT_TRUE(owner.valid);
+  EXPECT_FALSE(owner.ambiguous);
+  ASSERT_EQ(owner.member_group_indices.size(), 1U);
+  EXPECT_EQ(owner.member_group_indices.front(), 0);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     TwoFragmentsSameWorldXYBecomeOneLogicalOwner) {
+  const std::vector<CargoPhysicalGroupObservation> groups = {
+      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40),
+      makeFragment(2U, 2U, 1.0, 0.0, 0.0, 1.50)};
+  const auto owner = reconstructLogicalCurrentCargo(
+      groups, frozenFootprint(0.0, 0.0, 2.0, 2.0),
+      frozenOwnerCells(-1, 1, -1, 1), reconstructConfig(), 0.60);
+  ASSERT_TRUE(owner.valid);
+  EXPECT_EQ(owner.member_group_indices.size(), 2U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ThreeFragmentsCompleteCliqueBecomeOneLogicalOwner) {
+  const std::vector<CargoPhysicalGroupObservation> groups = {
+      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.30),
+      makeFragment(2U, 2U, 1.0, 0.0, 0.0, 0.80),
+      makeFragment(3U, 3U, 1.0, 0.0, 0.0, 1.50)};
+  const auto owner = reconstructLogicalCurrentCargo(
+      groups, frozenFootprint(0.0, 0.0, 2.0, 2.0),
+      frozenOwnerCells(-1, 1, -1, 1), reconstructConfig(), 0.60);
+  ASSERT_TRUE(owner.valid);
+  EXPECT_EQ(owner.member_group_indices.size(), 3U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest, AB_BC_ButNotACCannotChain) {
+  // A at x=0, B at x=1.5, C at x=3.  A~B share cells {0,1}; B~C share {2};
+  // A~C share nothing.  A valid reconstruction must not chain A+B+C into a
+  // single owner: the maximal cliques are {A,B} and {B,C}, and both match the
+  // generous reference, so the result is ambiguous, not a 3-member owner.
+  const std::vector<CargoPhysicalGroupObservation> groups = {
+      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40),
+      makeFragment(2U, 2U, 1.0, 1.5, 0.0, 0.40),
+      makeFragment(3U, 3U, 1.0, 3.0, 0.0, 0.40)};
+  const auto owner = reconstructLogicalCurrentCargo(
+      groups, frozenFootprint(0.0, 0.0, 2.0, 2.0),
+      frozenOwnerCells(-5, 5, -2, 2), reconstructConfig(), 0.60);
+  EXPECT_FALSE(owner.valid);
+  EXPECT_TRUE(owner.ambiguous);
+  EXPECT_EQ(owner.reject_reason, "CURRENT_OWNER_AMBIGUOUS");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     SeparatedSameShapeObjectsCannotMergeByLocalNormalization) {
+  // Two identical shapes at disjoint world-XY must not merge into one owner
+  // via local normalization; each is a separate singleton matching the
+  // reference, so the result is ambiguous, not a single 2-member owner.
+  const std::vector<CargoPhysicalGroupObservation> groups = {
+      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40),
+      makeFragment(2U, 2U, 1.0, 5.0, 0.0, 0.40)};
+  const auto owner = reconstructLogicalCurrentCargo(
+      groups, frozenFootprint(0.0, 0.0, 2.0, 2.0),
+      frozenOwnerCells(-1, 1, -1, 1), reconstructConfig(), 0.60);
+  EXPECT_FALSE(owner.valid);
+  EXPECT_TRUE(owner.ambiguous);
+  EXPECT_EQ(owner.reject_reason, "CURRENT_OWNER_AMBIGUOUS");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     GroupOrderPermutationDoesNotChangeLogicalOwner) {
+  const std::vector<CargoPhysicalGroupObservation> groups_ab = {
+      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40),
+      makeFragment(2U, 2U, 1.0, 0.0, 0.0, 1.50)};
+  const std::vector<CargoPhysicalGroupObservation> groups_ba = {
+      makeFragment(2U, 2U, 1.0, 0.0, 0.0, 1.50),
+      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40)};
+  const auto fp = frozenFootprint(0.0, 0.0, 2.0, 2.0);
+  const auto cells = frozenOwnerCells(-1, 1, -1, 1);
+  const auto owner_ab = reconstructLogicalCurrentCargo(
+      groups_ab, fp, cells, reconstructConfig(), 0.60);
+  const auto owner_ba = reconstructLogicalCurrentCargo(
+      groups_ba, fp, cells, reconstructConfig(), 0.60);
+  ASSERT_TRUE(owner_ab.valid);
+  ASSERT_TRUE(owner_ba.valid);
+  EXPECT_EQ(owner_ab.member_group_indices, owner_ba.member_group_indices);
+  EXPECT_NEAR(owner_ab.current_footprint.center_base.x(),
+              owner_ba.current_footprint.center_base.x(), 1e-6);
+  EXPECT_NEAR(owner_ab.current_footprint.size_xy.x(),
+              owner_ba.current_footprint.size_xy.x(), 1e-6);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest, LogicalOwnerFootprintUsesUnionPoints) {
+  // Two overlapping fragments; the logical footprint must span BOTH (3.0 m
+  // wide), never a single fragment's 2.0 m footprint.
+  const std::vector<CargoPhysicalGroupObservation> groups = {
+      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40),
+      makeFragment(2U, 2U, 1.0, 1.0, 0.0, 0.40)};
+  const auto owner = reconstructLogicalCurrentCargo(
+      groups, frozenFootprint(0.5, 0.0, 3.0, 2.0),
+      frozenOwnerCells(-2, 2, -1, 1), reconstructConfig(), 0.60);
+  ASSERT_TRUE(owner.valid);
+  EXPECT_NEAR(owner.current_footprint.size_xy.x(), 3.0, 1e-3);
+  EXPECT_NEAR(owner.current_footprint.size_xy.y(), 2.0, 1e-3);
+  EXPECT_NEAR(owner.current_footprint.center_base.x(), 0.5, 1e-3);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     NoCurrentOwnerWhenUnionExtentMismatches) {
+  const std::vector<CargoPhysicalGroupObservation> groups = {
+      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40, 2.0)};
+  const auto owner = reconstructLogicalCurrentCargo(
+      groups, frozenFootprint(0.0, 0.0, 0.4, 0.4),
+      frozenOwnerCells(-1, 1, -1, 1), reconstructConfig(), 0.60);
+  EXPECT_FALSE(owner.valid);
+  EXPECT_FALSE(owner.ambiguous);
+  EXPECT_EQ(owner.reject_reason, "NO_CURRENT_OWNER");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest, EmptySceneCannotReconstructOwner) {
+  const std::vector<CargoPhysicalGroupObservation> groups = {};
+  const auto owner = reconstructLogicalCurrentCargo(
+      groups, frozenFootprint(0.0, 0.0, 2.0, 2.0),
+      frozenOwnerCells(-1, 1, -1, 1), reconstructConfig(), 0.60);
+  EXPECT_FALSE(owner.valid);
+  EXPECT_FALSE(owner.ambiguous);
+  EXPECT_EQ(owner.reject_reason, "NO_CURRENT_OWNER");
+}
+
 }  // namespace
 }  // namespace ndt_slam
