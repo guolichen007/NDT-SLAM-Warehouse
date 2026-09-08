@@ -636,16 +636,15 @@ LogicalCurrentCargoObservation reconstructLogicalCurrentCargoImpl(
   // canonical extent compatibility (yaw invariant).  Local normalization makes
   // the membership translation/yaw invariant: fragments of the same cargo
   // share the same local footprint even when the sparse top-surface cluster is
-  // detected at a shifted world-XY.  A genuinely different object is still
-  // rejected later by the union-extent reference match (fail-closed).
+  // detected at a shifted world-XY.  Extent compatibility is enforced against
+  // the frozen reference in step 1; it is deliberately NOT re-checked pairwise
+  // (re-checking it fragments the clique and regresses ambiguity).
   const std::size_t n = eligible.size();
   std::vector<std::vector<bool>> compat(n, std::vector<bool>(n, false));
   std::vector<std::set<CargoFootprintGridIndex>> local_cells(n);
-  std::vector<CargoFootprintSnapshot> footprints(n);
   for (std::size_t i = 0U; i < n; ++i) {
     const auto& g = groups[static_cast<std::size_t>(eligible[i])];
     local_cells[i] = localCellsOfGroup(g, config);
-    footprints[i] = robustFootprintSnapshot(g);
   }
   for (std::size_t i = 0U; i < n; ++i) {
     for (std::size_t j = i + 1U; j < n; ++j) {
@@ -657,12 +656,9 @@ LogicalCurrentCargoObservation reconstructLogicalCurrentCargoImpl(
           static_cast<double>(std::max<std::size_t>(1U, local_cells[i].size()));
       const double coverage_j = static_cast<double>(intersection) /
           static_cast<double>(std::max<std::size_t>(1U, local_cells[j].size()));
-      const bool extent_ok = footprints[i].valid && footprints[j].valid &&
-          extentCompatible(footprints[i].size_xy, footprints[j].size_xy,
-                           maximum_size_relative_step);
       const bool compatible = intersection >= config.minimum_surface_cells &&
           coverage_i >= config.minimum_surface_coverage_ratio &&
-          coverage_j >= config.minimum_surface_coverage_ratio && extent_ok;
+          coverage_j >= config.minimum_surface_coverage_ratio;
       compat[i][j] = compatible;
       compat[j][i] = compatible;
     }
