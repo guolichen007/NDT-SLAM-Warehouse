@@ -463,22 +463,6 @@ bool extentCompatible(const Eigen::Vector2f& a, const Eigen::Vector2f& b,
       rel_max <= maximum_size_relative_step;
 }
 
-// World-XY cells: the group's points indexed in the shared base-frame grid
-// (no per-group normalization).  Two fragments of the same cargo occupy the
-// same world XY; two different objects at different XY occupy disjoint cells.
-std::set<CargoFootprintGridIndex> worldCellsOfGroup(
-    const CargoPhysicalGroupObservation& group,
-    const CargoVerticalEvidenceConfig& config) {
-  std::set<CargoFootprintGridIndex> cells;
-  for (const Eigen::Vector3f& point : group.union_points_base) {
-    if (!point.allFinite()) continue;
-    cells.insert({
-        static_cast<int>(std::floor(point.x() / config.xy_cell_size_m)),
-        static_cast<int>(std::floor(point.y() / config.xy_cell_size_m))});
-  }
-  return cells;
-}
-
 // Robust XY footprint computed directly from a raw point set (the union of a
 // clique's member points).  Never derived from a single group descriptor.
 CargoFootprintSnapshot robustFootprintFromPoints(
@@ -584,6 +568,25 @@ std::set<CargoFootprintGridIndex> cellsOfGroup(
   return cells;
 }
 
+// Owner-local cells: the group's cells expressed in its OWN robust footprint
+// frame (center + yaw).  This makes the owner-cell pattern translation and yaw
+// invariant, so a lifted/swung cargo keeps matching the frozen local shape.
+// Used for SAME_OWNER_FRAGMENT pairwise membership: fragments of the same
+// cargo share the same local footprint even when a sparse top-surface cluster
+// lands at a shifted XY.
+std::set<CargoFootprintGridIndex> localCellsOfGroup(
+    const CargoPhysicalGroupObservation& group,
+    const CargoVerticalEvidenceConfig& config) {
+  const CargoFootprintSnapshot footprint = robustFootprintSnapshot(group);
+  if (!footprint.valid) return {};
+  CargoVerticalEvidenceInput input;
+  input.footprint_valid = true;
+  input.footprint_center_base = footprint.center_base;
+  input.footprint_size_xy = footprint.size_xy;
+  input.footprint_yaw_base_rad = footprint.yaw_base_rad;
+  return cellsOfGroup(group, input, config);
+}
+
 LogicalCurrentCargoObservation reconstructLogicalCurrentCargoImpl(
     const std::vector<CargoPhysicalGroupObservation>& groups,
     const CargoFootprintSnapshot& frozen_footprint,
@@ -616,27 +619,31 @@ LogicalCurrentCargoObservation reconstructLogicalCurrentCargoImpl(
     return result;
   }
 
-  // Step 2: pairwise SAME_OWNER_FRAGMENT on CURRENT world-XY cell support plus
-  // canonical extent compatibility (yaw invariant).  No local normalization.
+  // Step 2: pairwise SAME_OWNER_FRAGMENT on owner-LOCAL cell support plus
+  // canonical extent compatibility (yaw invariant).  Local normalization makes
+  // the membership translation/yaw invariant: fragments of the same cargo
+  // share the same local footprint even when the sparse top-surface cluster is
+  // detected at a shifted world-XY.  A genuinely different object is still
+  // rejected later by the union-extent reference match (fail-closed).
   const std::size_t n = eligible.size();
   std::vector<std::vector<bool>> compat(n, std::vector<bool>(n, false));
-  std::vector<std::set<CargoFootprintGridIndex>> world_cells(n);
+  std::vector<std::set<CargoFootprintGridIndex>> local_cells(n);
   std::vector<CargoFootprintSnapshot> footprints(n);
   for (std::size_t i = 0U; i < n; ++i) {
     const auto& g = groups[static_cast<std::size_t>(eligible[i])];
-    world_cells[i] = worldCellsOfGroup(g, config);
+    local_cells[i] = localCellsOfGroup(g, config);
     footprints[i] = robustFootprintSnapshot(g);
   }
   for (std::size_t i = 0U; i < n; ++i) {
     for (std::size_t j = i + 1U; j < n; ++j) {
       std::size_t intersection = 0U;
-      for (const auto& cell : world_cells[i]) {
-        if (world_cells[j].count(cell) > 0U) ++intersection;
+      for (const auto& cell : local_cells[i]) {
+        if (local_cells[j].count(cell) > 0U) ++intersection;
       }
       const double coverage_i = static_cast<double>(intersection) /
-          static_cast<double>(std::max<std::size_t>(1U, world_cells[i].size()));
+          static_cast<double>(std::max<std::size_t>(1U, local_cells[i].size()));
       const double coverage_j = static_cast<double>(intersection) /
-          static_cast<double>(std::max<std::size_t>(1U, world_cells[j].size()));
+          static_cast<double>(std::max<std::size_t>(1U, local_cells[j].size()));
       const bool extent_ok = footprints[i].valid && footprints[j].valid &&
           extentCompatible(footprints[i].size_xy, footprints[j].size_xy,
                            maximum_size_relative_step);

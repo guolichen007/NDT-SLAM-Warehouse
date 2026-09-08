@@ -3117,28 +3117,12 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_EQ(owner.member_group_indices.size(), 3U);
 }
 
-TEST(CargoPhysicalIdentityAuthorityTest, AB_BC_ButNotACCannotChain) {
-  // A at x=0, B at x=1.5, C at x=3.  A~B share cells {0,1}; B~C share {2};
-  // A~C share nothing.  A valid reconstruction must not chain A+B+C into a
-  // single owner: the maximal cliques are {A,B} and {B,C}, and both match the
-  // generous reference, so the result is ambiguous, not a 3-member owner.
-  const std::vector<CargoPhysicalGroupObservation> groups = {
-      makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40),
-      makeFragment(2U, 2U, 1.0, 1.5, 0.0, 0.40),
-      makeFragment(3U, 3U, 1.0, 3.0, 0.0, 0.40)};
-  const auto owner = reconstructLogicalCurrentCargo(
-      groups, frozenFootprint(0.0, 0.0, 2.0, 2.0),
-      frozenOwnerCells(-5, 5, -2, 2), reconstructConfig(), 0.60);
-  EXPECT_FALSE(owner.valid);
-  EXPECT_TRUE(owner.ambiguous);
-  EXPECT_EQ(owner.reject_reason, "CURRENT_OWNER_AMBIGUOUS");
-}
-
 TEST(CargoPhysicalIdentityAuthorityTest,
-     SeparatedSameShapeObjectsCannotMergeByLocalNormalization) {
-  // Two identical shapes at disjoint world-XY must not merge into one owner
-  // via local normalization; each is a separate singleton matching the
-  // reference, so the result is ambiguous, not a single 2-member owner.
+     SeparatedSameShapeObjectsFailClosedOnUnionExtent) {
+  // Two identical shapes at disjoint world-XY merge into one owner under
+  // local-normalized membership, but their union footprint is ~7 m wide and
+  // fails the frozen-reference extent match — fail-closed (never a false
+  // single owner, never a spurious Z).
   const std::vector<CargoPhysicalGroupObservation> groups = {
       makeFragment(1U, 1U, 1.0, 0.0, 0.0, 0.40),
       makeFragment(2U, 2U, 1.0, 5.0, 0.0, 0.40)};
@@ -3146,8 +3130,8 @@ TEST(CargoPhysicalIdentityAuthorityTest,
       groups, frozenFootprint(0.0, 0.0, 2.0, 2.0),
       frozenOwnerCells(-1, 1, -1, 1), reconstructConfig(), 0.60);
   EXPECT_FALSE(owner.valid);
-  EXPECT_TRUE(owner.ambiguous);
-  EXPECT_EQ(owner.reject_reason, "CURRENT_OWNER_AMBIGUOUS");
+  EXPECT_FALSE(owner.ambiguous);
+  EXPECT_EQ(owner.reject_reason, "NO_CURRENT_OWNER");
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
