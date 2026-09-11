@@ -385,6 +385,21 @@ LogicalCurrentCargoObservation reconstructLogicalCurrentCargo(
     const CargoVerticalEvidenceConfig& config,
     double maximum_size_relative_step);
 
+// Three-state lift evidence classification.  POSITIVE accumulates the lift
+// confirm counter; UNOBSERVABLE (owner missing with no ambiguity, or surface
+// points/cells insufficient) does NOT reset it (gap-gated by the caller);
+// CONTRADICTORY (ambiguity / competing owner / valid surface but lift not
+// significant) resets immediately.
+enum class LiftEvidenceClass : std::uint8_t {
+  POSITIVE = 0,
+  UNOBSERVABLE,
+  CONTRADICTORY,
+};
+
+LiftEvidenceClass classifyLiftEvidence(
+    bool significant, bool owner_valid, bool owner_ambiguous,
+    bool surface_valid) noexcept;
+
 struct CargoPhysicalIdentityDecision {
   bool valid_input = false;
   bool cargo_exists = false;

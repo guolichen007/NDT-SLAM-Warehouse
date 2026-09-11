@@ -3193,5 +3193,35 @@ TEST(CargoPhysicalIdentityAuthorityTest, EmptySceneCannotReconstructOwner) {
   EXPECT_EQ(owner.reject_reason, "NO_CURRENT_OWNER");
 }
 
+// ===========================================================================
+// Three-state lift evidence classification.
+// ===========================================================================
+
+TEST(CargoPhysicalIdentityAuthorityTest, SignificantLiftIsPositive) {
+  EXPECT_EQ(classifyLiftEvidence(true, true, false, true),
+            LiftEvidenceClass::POSITIVE);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest, MissingOwnerWithoutAmbiguityIsUnobservable) {
+  EXPECT_EQ(classifyLiftEvidence(false, false, false, false),
+            LiftEvidenceClass::UNOBSERVABLE);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest, AmbiguousOwnerIsContradictory) {
+  EXPECT_EQ(classifyLiftEvidence(false, false, true, false),
+            LiftEvidenceClass::CONTRADICTORY);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest, MissingSurfaceIsUnobservable) {
+  EXPECT_EQ(classifyLiftEvidence(false, true, false, false),
+            LiftEvidenceClass::UNOBSERVABLE);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ValidSurfaceNotSignificantIsContradictory) {
+  EXPECT_EQ(classifyLiftEvidence(false, true, false, true),
+            LiftEvidenceClass::CONTRADICTORY);
+}
+
 }  // namespace
 }  // namespace ndt_slam

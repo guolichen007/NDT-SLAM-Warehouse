@@ -880,6 +880,16 @@ LogicalCurrentCargoObservation reconstructLogicalCurrentCargo(
                                             maximum_size_relative_step);
 }
 
+LiftEvidenceClass classifyLiftEvidence(
+    bool significant, bool owner_valid, bool owner_ambiguous,
+    bool surface_valid) noexcept {
+  if (significant) return LiftEvidenceClass::POSITIVE;
+  const bool owner_missing = !owner_valid && !owner_ambiguous;
+  const bool surface_missing = owner_valid && !surface_valid;
+  if (owner_missing || surface_missing) return LiftEvidenceClass::UNOBSERVABLE;
+  return LiftEvidenceClass::CONTRADICTORY;
+}
+
 const char* cargoCandidateAssociationStateName(
     CargoCandidateAssociationState state) noexcept {
   switch (state) {
@@ -3396,22 +3406,16 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             pc_lift > pc_threshold + kEpsilon;
         decision_.precluster_lift_delta = pc_lift;
         decision_.precluster_lift_significant = pc_significant;
-        // Three-state lift evidence:
-        //   POSITIVE       — significant lift (POSTLOAD_ACTIVE implies gravity
-        //                    was LOADED) -> accumulate.
-        //   UNOBSERVABLE   — owner missing (NO_CURRENT_OWNER, no ambiguity) or
-        //                    surface points/cells insufficient -> do NOT reset;
-        //                    only gap-gate by maximum_observation_gap_sec.
-        //   CONTRADICTORY  — ambiguity / competing owner / valid surface but
-        //                    lift not significant -> reset immediately.
-        const bool owner_ambiguous = logical_owner.ambiguous;
-        const bool owner_missing = !logical_owner.valid && !owner_ambiguous;
-        const bool surface_missing = logical_owner.valid &&
-            !decision_.precluster_surface_valid;
-        if (pc_significant) {
+        // Three-state lift evidence: POSITIVE accumulates, UNOBSERVABLE does
+        // NOT reset (only gap-gates by maximum_observation_gap_sec), and
+        // CONTRADICTORY resets immediately.
+        const LiftEvidenceClass evidence_class = classifyLiftEvidence(
+            pc_significant, logical_owner.valid, logical_owner.ambiguous,
+            decision_.precluster_surface_valid);
+        if (evidence_class == LiftEvidenceClass::POSITIVE) {
           ++lock.precluster_lift_confirm_count;
           lock.last_positive_evidence_stamp = input.pipeline_stamp_sec;
-        } else if (owner_missing || surface_missing) {
+        } else if (evidence_class == LiftEvidenceClass::UNOBSERVABLE) {
           const bool gap_exceeded = lock.last_positive_evidence_stamp > 0.0 &&
               input.pipeline_stamp_sec - lock.last_positive_evidence_stamp >
                   config_.maximum_observation_gap_sec;
