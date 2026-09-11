@@ -647,6 +647,10 @@ class CargoPhysicalIdentityAuthority {
     bool assembly_lift_confirmed = false;
     int precluster_lift_confirm_count = 0;
     bool precluster_lift_confirmed = false;
+    // Stamp of the last POSITIVE lift evidence sample.  UNOBSERVABLE frames
+    // do NOT reset precluster_lift_confirm_count; they only gate it by
+    // maximum_observation_gap_sec against this stamp.
+    double last_positive_evidence_stamp = 0.0;
     std::size_t postload_history_id_change_count = 0U;
     std::size_t postload_valid_v31_after_split = 0U;
     std::size_t significant_frames_after_split = 0U;

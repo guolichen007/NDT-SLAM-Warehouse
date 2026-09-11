@@ -3396,10 +3396,31 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             pc_lift > pc_threshold + kEpsilon;
         decision_.precluster_lift_delta = pc_lift;
         decision_.precluster_lift_significant = pc_significant;
+        // Three-state lift evidence:
+        //   POSITIVE       — significant lift (POSTLOAD_ACTIVE implies gravity
+        //                    was LOADED) -> accumulate.
+        //   UNOBSERVABLE   — owner missing (NO_CURRENT_OWNER, no ambiguity) or
+        //                    surface points/cells insufficient -> do NOT reset;
+        //                    only gap-gate by maximum_observation_gap_sec.
+        //   CONTRADICTORY  — ambiguity / competing owner / valid surface but
+        //                    lift not significant -> reset immediately.
+        const bool owner_ambiguous = logical_owner.ambiguous;
+        const bool owner_missing = !logical_owner.valid && !owner_ambiguous;
+        const bool surface_missing = logical_owner.valid &&
+            !decision_.precluster_surface_valid;
         if (pc_significant) {
           ++lock.precluster_lift_confirm_count;
+          lock.last_positive_evidence_stamp = input.pipeline_stamp_sec;
+        } else if (owner_missing || surface_missing) {
+          const bool gap_exceeded = lock.last_positive_evidence_stamp > 0.0 &&
+              input.pipeline_stamp_sec - lock.last_positive_evidence_stamp >
+                  config_.maximum_observation_gap_sec;
+          if (gap_exceeded) {
+            lock.precluster_lift_confirm_count = 0;
+          }
         } else {
           lock.precluster_lift_confirm_count = 0;
+          lock.last_positive_evidence_stamp = 0.0;
         }
         if (lock.precluster_lift_confirm_count >=
             std::max(1, config_.lift_confirm_frames)) {
