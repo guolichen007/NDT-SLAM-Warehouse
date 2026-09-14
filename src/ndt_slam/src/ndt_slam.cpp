@@ -24988,7 +24988,11 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     last_shadow_vertical_stamp_ = stamp;
     if (cargo_vertical_evidence_v2_enabled_) {
         CargoVerticalEvidenceInput shadow_input;
-        shadow_input.selected_points_base = observation.points_base;
+        // B2: measure the product current top from the raw/pre-ROI range cloud
+        // (which still holds the true high surface) instead of the detector
+        // core points, which lose it in ROI/clustering.  Unifies Lift and
+        // Safety on the same current physical vertical observation family.
+        shadow_input.selected_cloud_base = last_cargo_range_cloud_;
         shadow_input.footprint_valid = observation.footprint_valid;
         shadow_input.footprint_center_base =
             observation.footprint_center_base;
