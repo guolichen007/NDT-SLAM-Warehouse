@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ndt_slam/cargo_domain_contracts.hpp"
+
 #include <string>
 
 namespace ndt_slam {
@@ -11,6 +13,8 @@ struct CargoCapabilityInput {
   bool lifecycle_valid = false;
   bool horizontal_envelope_valid = false;
   bool vertical_geometry_valid = false;
+  CargoVerticalAuthority vertical_authority =
+      CargoVerticalAuthority::INVALID;
   bool cloud_fresh = false;
   bool positive_identity_authorized = false;
   bool formal_geometry_valid = false;

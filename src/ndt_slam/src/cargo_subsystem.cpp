@@ -104,6 +104,8 @@ const CargoSubsystemSnapshot& CargoSubsystem::update(
       next.envelope.horizontal_valid;
   capability_input.vertical_geometry_valid =
       next.envelope.vertical_valid;
+  capability_input.vertical_authority =
+      next.geometry.vertical_authority;
   capability_input.cloud_fresh = input.cloud_fresh;
   capability_input.positive_identity_authorized =
       input.positive_identity_authorized;

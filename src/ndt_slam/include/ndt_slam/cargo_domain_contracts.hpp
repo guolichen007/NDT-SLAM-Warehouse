@@ -24,6 +24,16 @@ enum class CargoVerticalAuthority : std::uint8_t {
   FRESH_HELD_FORMAL,
 };
 
+// A finite bottom/top value is NOT vertical authority.  Only these three
+// sources carry a real physical vertical (bottom) evidence and may authorize
+// safety clearance / 17/18/29 / CLEAR.
+inline bool isSafetyAuthorizedCargoVerticalAuthority(
+    CargoVerticalAuthority authority) noexcept {
+  return authority == CargoVerticalAuthority::DIRECT_BOTTOM ||
+      authority == CargoVerticalAuthority::SUPPORTED_TOP_MINUS_FROZEN_HEIGHT ||
+      authority == CargoVerticalAuthority::FRESH_HELD_FORMAL;
+}
+
 struct CargoTrackSnapshot {
   double source_stamp_sec = 0.0;
   double evaluation_stamp_sec = 0.0;

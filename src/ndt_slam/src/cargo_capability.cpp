@@ -36,6 +36,13 @@ CargoCapability deriveCargoCapability(const CargoCapabilityInput& input) {
     output.warning_reason = "vertical_geometry_invalid";
     return output;
   }
+  // A finite bottom/top alone is NOT safety authority.  The vertical must come
+  // from a real physical source (DIRECT_BOTTOM / SUPPORTED_TOP_MINUS_FROZEN_
+  // HEIGHT / FRESH_HELD_FORMAL), otherwise no clearance claim is authorized.
+  if (!isSafetyAuthorizedCargoVerticalAuthority(input.vertical_authority)) {
+    output.warning_reason = "vertical_authority_not_safety_authorized";
+    return output;
+  }
   output.positive_warning = input.positive_identity_authorized;
   output.formal_warning = input.formal_geometry_valid;
   output.clear = input.formal_geometry_valid &&

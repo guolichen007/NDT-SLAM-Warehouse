@@ -21738,6 +21738,21 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
     cargo_pending_avoidance_pub_.publish(fusion_debug);
 }
 
+CargoVerticalAuthority NdtSlamNode::derivePendingCargoVerticalAuthority(
+    const PendingCargoEnvelope& envelope, bool pose_physically_plausible) {
+  // A pending envelope's bottom/top is geometry-derived (center_z ±
+  // 0.5*height) and is NOT a physical bottom measurement.  Only a real
+  // physical vertical evidence may authorize safety clearance.  The pending
+  // path has no CargoBottomFusion (DIRECT_BOTTOM) and no prior formal vertical
+  // hold (FRESH_HELD_FORMAL); a SUPPORTED_TOP_MINUS_FROZEN_HEIGHT bottom is
+  // wired into the safety path separately via the frozen-thickness contract.
+  // Until a real vertical source is available, the authority is INVALID
+  // (fail-closed: Code33, no 17/18/29, no CLEAR).
+  (void)envelope;
+  (void)pose_physically_plausible;
+  return CargoVerticalAuthority::INVALID;
+}
+
 void NdtSlamNode::runPendingCargoAvoidance(
     const PendingCargoEnvelope& envelope,
     const HookLoadSnapshot& hook,
@@ -21859,10 +21874,15 @@ void NdtSlamNode::runPendingCargoAvoidance(
         std::isfinite(envelope.bottom_z_base) &&
         std::isfinite(envelope.top_z_base) &&
         envelope.top_z_base > envelope.bottom_z_base;
+    // A finite bottom/top is NOT vertical authority.  The pending envelope is
+    // geometry-derived (center_z ± 0.5*height) and has no physical bottom
+    // measurement, so it must never authorize a safety clearance claim.  The
+    // real vertical authority is derived below from an actual physical source
+    // (DIRECT_BOTTOM / SUPPORTED_TOP_MINUS_FROZEN_HEIGHT / FRESH_HELD_FORMAL),
+    // or stays INVALID (fail-closed: Code33, no 17/18/29, no CLEAR).
     subsystem_input.vertical_authority =
-        subsystem_input.vertical_geometry_valid
-            ? CargoVerticalAuthority::FRESH_HELD_FORMAL
-            : CargoVerticalAuthority::INVALID;
+        derivePendingCargoVerticalAuthority(
+            envelope, pending_pose_physically_plausible);
     subsystem_input.positive_identity_authorized =
         positive_identity_authorized_by_recognition &&
         pending_identity_context_valid &&
@@ -21964,7 +21984,9 @@ void NdtSlamNode::runPendingCargoAvoidance(
     live_input.frame_id = base_frame_;
     live_input.evaluation_time_sec = stamp.toSec();
     live_input.height.valid = envelope.valid &&
-        std::isfinite(envelope.bottom_z_base);
+        std::isfinite(envelope.bottom_z_base) &&
+        isSafetyAuthorizedCargoVerticalAuthority(
+            subsystem_input.vertical_authority);
     live_input.height.stamp_sec = stamp.toSec();
     live_input.height.bottom_z = envelope.bottom_z_base;
     live_input.height.bottom_uncertainty_m =

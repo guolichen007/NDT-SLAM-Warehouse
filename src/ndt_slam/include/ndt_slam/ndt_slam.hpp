@@ -2742,6 +2742,9 @@ private:
         const ros::Time& stamp,
         const ros::Time& obstacle_cloud_stamp,
         double processing_age_sec);
+    CargoVerticalAuthority derivePendingCargoVerticalAuthority(
+        const PendingCargoEnvelope& envelope,
+        bool pose_physically_plausible);
     void publishCargoRecognitionStatus(
         const HookLoadSnapshot& hook, const ros::Time& stamp);
     void updateAndPublishCargoSwing(
