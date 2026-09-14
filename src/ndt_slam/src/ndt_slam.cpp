@@ -25003,6 +25003,66 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             std::isfinite(cargo_lift_origin_result_.revealed_thickness_m);
         observation.map_diff_height_m =
             cargo_lift_origin_result_.revealed_thickness_m;
+
+        // Formal vertical state: a node-local vertical-continuity state fed
+        // only by physical current vertical evidence (supported top minus
+        // frozen thickness).  It gates the wrong-static low surface (1.75 ->
+        // 0.47 in one frame violates the existing z-speed bound) and supplies
+        // the bottom-fusion track center Z, decoupling the bottom from the
+        // stale detector/live-pose Z.  It never creates Safety authority.
+        if (observation.current_top_valid &&
+            observation.current_top_support_valid &&
+            observation.frozen_thickness_valid) {
+            const float candidate_center_z = observation.current_top_z_base -
+                0.5F * observation.frozen_thickness_m;
+            bool reject = false;
+            if (formal_cargo_vertical_state_.valid &&
+                formal_cargo_vertical_state_.track_id == observation.track_id &&
+                formal_cargo_vertical_state_.lifecycle_id ==
+                    cargo_lifecycle_id_) {
+                const double dt = std::max(
+                    0.0, observation.stamp_sec -
+                        formal_cargo_vertical_state_.evidence_stamp_sec);
+                if (dt <= cargo_lift_origin_config_.maximum_observation_gap_sec) {
+                    const float allowed_dz = static_cast<float>(
+                        hook_lock_config_.live_pose_max_z_speed_mps * dt) +
+                        hook_lock_config_.live_pose_step_margin_m;
+                    if (std::abs(candidate_center_z -
+                            formal_cargo_vertical_state_.center_z_base) >
+                        allowed_dz) {
+                        // VERTICAL_KINEMATIC_CONTRADICTION: reject the low
+                        // surface and keep it out of the POINTS vertical
+                        // source too.
+                        reject = true;
+                    }
+                }
+            }
+            if (reject) {
+                observation.current_top_valid = false;
+                observation.current_top_support_valid = false;
+                observation.points_base.clear();
+            } else {
+                formal_cargo_vertical_state_.valid = true;
+                formal_cargo_vertical_state_.center_z_base = candidate_center_z;
+                formal_cargo_vertical_state_.top_z_base =
+                    observation.current_top_z_base;
+                formal_cargo_vertical_state_.bottom_z_base =
+                    observation.current_top_z_base -
+                    observation.frozen_thickness_m;
+                formal_cargo_vertical_state_.evidence_stamp_sec =
+                    observation.stamp_sec;
+                formal_cargo_vertical_state_.lifecycle_id =
+                    cargo_lifecycle_id_;
+                formal_cargo_vertical_state_.track_id = observation.track_id;
+                formal_cargo_vertical_state_.authority =
+                    CargoVerticalAuthority::SUPPORTED_TOP_MINUS_FROZEN_HEIGHT;
+            }
+        }
+        if (formal_cargo_vertical_state_.valid &&
+            formal_cargo_vertical_state_.track_id == cargo_fusion_track_id_) {
+            observation.track_center_base.z() =
+                formal_cargo_vertical_state_.center_z_base;
+        }
     }
 
     // Phase B1 SHADOW: evaluate the already-selected physical Cargo with an

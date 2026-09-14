@@ -34,6 +34,23 @@ inline bool isSafetyAuthorizedCargoVerticalAuthority(
       authority == CargoVerticalAuthority::FRESH_HELD_FORMAL;
 }
 
+// A node-local vertical-continuity state.  It serves ONLY the cargo vertical
+// track center / plausibility gate used by CargoBottomFusion.  It never
+// creates identity, ownership, CLEAR, or 17/18/29 — Safety bottom authority
+// still comes exclusively from the isSafetyAuthorizedCargoVerticalAuthority
+// sources above.  It is updated only from physical current vertical evidence
+// (supported top minus frozen thickness), never from a detector centroid Z.
+struct FormalCargoVerticalState {
+  bool valid = false;
+  float center_z_base = 0.0F;
+  float top_z_base = 0.0F;
+  float bottom_z_base = 0.0F;
+  double evidence_stamp_sec = 0.0;
+  std::uint64_t lifecycle_id = 0U;
+  std::uint64_t track_id = 0U;
+  CargoVerticalAuthority authority = CargoVerticalAuthority::INVALID;
+};
+
 struct CargoTrackSnapshot {
   double source_stamp_sec = 0.0;
   double evaluation_stamp_sec = 0.0;

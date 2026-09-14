@@ -2216,6 +2216,9 @@ private:
     ros::Publisher static_evidence_streak_histogram_pub_;
 
     CargoBottomFusion cargo_bottom_fusion_;
+    // Node-local vertical-continuity state feeding the bottom-fusion
+    // track center Z and the kinematic low-surface plausibility gate.
+    FormalCargoVerticalState formal_cargo_vertical_state_;
     // Phase B1 shadow path. These values are diagnostics-only and are never
     // read by product geometry, safety, tracking, or map mutation.
     bool cargo_vertical_evidence_v2_enabled_ = false;
