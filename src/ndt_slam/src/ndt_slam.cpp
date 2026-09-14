@@ -23816,6 +23816,31 @@ ProductCargoContext NdtSlamNode::prepareV6ProductCargoContext(
                 integrated_group_evidence_.resolved_geometry.size.y()));
         bottom_input.footprint_yaw_base_rad = static_cast<float>(
             integrated_group_evidence_.resolved_geometry.yaw_rad);
+        // B2: measure the current top from the raw/pre-ROI range cloud within
+        // the current footprint, instead of the detector supported_top_z which
+        // loses the true high surface (ROI/clustering drop).  Unifies Lift and
+        // Safety on the same current physical vertical observation.
+        if (last_cargo_range_cloud_ && !last_cargo_range_cloud_->empty()) {
+            CargoVerticalEvidenceInput current_top_input;
+            current_top_input.selected_cloud_base = last_cargo_range_cloud_;
+            current_top_input.footprint_valid = true;
+            current_top_input.footprint_center_base =
+                bottom_input.footprint_center_base;
+            current_top_input.footprint_size_xy =
+                bottom_input.footprint_size_xy;
+            current_top_input.footprint_yaw_base_rad =
+                bottom_input.footprint_yaw_base_rad;
+            const CargoVerticalEvidence current_top_evidence =
+                extractCargoVerticalEvidence(
+                    current_top_input, cargo_vertical_evidence_v2_config_);
+            if (current_top_evidence.valid &&
+                std::isfinite(current_top_evidence.top_z_base)) {
+                bottom_input.points_base =
+                    current_top_evidence.clean_vertical_points_base;
+                bottom_input.current_top_z_base =
+                    current_top_evidence.top_z_base;
+            }
+        }
         bottom_input.track_center_valid =
             integrated_group_evidence_.stable_anchor.allFinite();
         bottom_input.track_center_base =
@@ -24988,11 +25013,7 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
     last_shadow_vertical_stamp_ = stamp;
     if (cargo_vertical_evidence_v2_enabled_) {
         CargoVerticalEvidenceInput shadow_input;
-        // B2: measure the product current top from the raw/pre-ROI range cloud
-        // (which still holds the true high surface) instead of the detector
-        // core points, which lose it in ROI/clustering.  Unifies Lift and
-        // Safety on the same current physical vertical observation family.
-        shadow_input.selected_cloud_base = last_cargo_range_cloud_;
+        shadow_input.selected_points_base = observation.points_base;
         shadow_input.footprint_valid = observation.footprint_valid;
         shadow_input.footprint_center_base =
             observation.footprint_center_base;
