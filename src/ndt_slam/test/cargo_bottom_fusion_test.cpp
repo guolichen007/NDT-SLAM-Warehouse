@@ -650,5 +650,117 @@ TEST(CargoBottomFusion, MapCornersUseSameStampTransform) {
     }
 }
 
+CargoBottomObservation supportedTopWithCenter(std::uint64_t track,
+                                               double stamp,
+                                               float top,
+                                               float thickness,
+                                               float track_center_z) {
+    CargoBottomObservation obs =
+        supportedTopObservation(track, stamp, top, thickness);
+    obs.track_center_valid = true;
+    obs.track_center_base = Eigen::Vector3f(0.0F, 0.0F, track_center_z);
+    return obs;
+}
+
+// A hoisting cargo is a moving *absolute* measurement: DIRECT_TOP_FROZEN must
+// follow the true bottom instead of freezing at the pre-lift height.
+TEST(CargoBottomFusion, MovingDirectTopFrozenConfirmsLargeUpwardTransition) {
+    CargoBottomFusion fusion;
+    // Pre-lift: the range cloud has not yet found the true high surface.
+    const CargoBottomResult base =
+        fusion.update(supportedTopWithCenter(1U, 1.0, 0.70F, 0.388F, 0.26F));
+    ASSERT_TRUE(base.valid);
+    EXPECT_NEAR(base.geometry.bottom_z_base, 0.312F, 0.05F);
+
+    // Range cloud finds the true top -> large upward jump.  It must be held
+    // (not immediately accepted) to avoid a false CLEAR.
+    const CargoBottomResult r1 =
+        fusion.update(supportedTopWithCenter(1U, 1.1, 1.75F, 0.388F, 0.26F));
+    EXPECT_NEAR(r1.geometry.bottom_z_base, 0.312F, 0.05F);
+    const CargoBottomResult r2 =
+        fusion.update(supportedTopWithCenter(1U, 1.2, 1.75F, 0.388F, 0.26F));
+    EXPECT_NEAR(r2.geometry.bottom_z_base, 0.312F, 0.05F);
+    // Third consecutive current sample confirms; accept the latest absolute
+    // bottom, not a stale pre-lift height.
+    const CargoBottomResult r3 =
+        fusion.update(supportedTopWithCenter(1U, 1.3, 1.75F, 0.388F, 0.26F));
+    ASSERT_TRUE(r3.valid);
+    EXPECT_EQ(r3.source, CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS);
+    EXPECT_NEAR(r3.geometry.bottom_z_base, 1.362F, 0.05F);
+}
+
+// A single high frame cannot by itself raise the bottom (false CLEAR guard).
+TEST(CargoBottomFusion, SingleFrameHighDirectTopCannotCreateImmediateFalseClear) {
+    CargoBottomFusion fusion;
+    ASSERT_TRUE(fusion.update(
+        supportedTopWithCenter(2U, 1.0, 0.70F, 0.388F, 0.26F)).valid);
+    const CargoBottomResult high =
+        fusion.update(supportedTopWithCenter(2U, 1.1, 1.75F, 0.388F, 0.26F));
+    EXPECT_NEAR(high.geometry.bottom_z_base, 0.312F, 0.05F);
+    // Evidence disappears: the held pre-lift bottom stays (RECENT_STABLE), so
+    // the single high frame never became a clearance-raising bottom.
+    const CargoBottomResult held = fusion.update(observation(2U, 1.2, {}));
+    ASSERT_TRUE(held.valid) << held.reason;
+    EXPECT_NEAR(held.geometry.bottom_z_base, 0.312F, 0.05F);
+}
+
+// A lower absolute bottom shrinks clearance and must never be held at a stale
+// higher value (that would be a false CLEAR).
+TEST(CargoBottomFusion, LargeDownwardBottomCannotBeHeldAtUnsafeHighValue) {
+    CargoBottomFusion fusion;
+    ASSERT_TRUE(fusion.update(
+        supportedTopWithCenter(3U, 1.0, 1.75F, 0.388F, 0.26F)).valid);
+    // Top drops sharply (cargo lowered / obstacle intrusion): accept now.
+    const CargoBottomResult down =
+        fusion.update(supportedTopWithCenter(3U, 1.1, 0.60F, 0.388F, 0.26F));
+    ASSERT_TRUE(down.valid);
+    EXPECT_NEAR(down.geometry.bottom_z_base, 0.212F, 0.05F);
+}
+
+// DIRECT_TOP_FROZEN is absolute: a stale/perturbed track center Z must not
+// shift its derived bottom.
+TEST(CargoBottomFusion, DirectTopFrozenAbsoluteBottomUnaffectedByStaleCenter) {
+    CargoBottomFusion fusion;
+    CargoBottomObservation first =
+        supportedTopWithCenter(4U, 1.0, 1.75F, 0.388F, 0.26F);
+    ASSERT_TRUE(fusion.update(first).valid);
+    // Same top, but the (stale) track center jumps wildly.
+    CargoBottomObservation second =
+        supportedTopWithCenter(4U, 1.1, 1.75F, 0.388F, 5.0F);
+    const CargoBottomResult r = fusion.update(second);
+    ASSERT_TRUE(r.valid);
+    EXPECT_NEAR(r.geometry.bottom_z_base, 1.362F, 0.05F);
+}
+
+// A missing DIRECT_TOP_FROZEN frame breaks the confirmation streak.
+TEST(CargoBottomFusion, MissingDirectTopEvidenceBreaksConfirmation) {
+    CargoBottomFusion fusion;
+    ASSERT_TRUE(fusion.update(
+        supportedTopWithCenter(5U, 1.0, 0.70F, 0.388F, 0.26F)).valid);
+    // Two consecutive high samples (confirmation not yet reached).
+    fusion.update(supportedTopWithCenter(5U, 1.1, 1.75F, 0.388F, 0.26F));
+    fusion.update(supportedTopWithCenter(5U, 1.2, 1.75F, 0.388F, 0.26F));
+    // Gap: no current top evidence.
+    fusion.update(observation(5U, 1.3, {}));
+    // The next high sample must start a fresh confirmation streak.
+    const CargoBottomResult next =
+        fusion.update(supportedTopWithCenter(5U, 1.4, 1.75F, 0.388F, 0.26F));
+    EXPECT_NEAR(next.geometry.bottom_z_base, 0.312F, 0.05F);
+}
+
+// A track change resets the confirmation streak.
+TEST(CargoBottomFusion, DirectTopConfirmationRequiresSameTrack) {
+    CargoBottomFusion fusion;
+    ASSERT_TRUE(fusion.update(
+        supportedTopWithCenter(6U, 1.0, 0.70F, 0.388F, 0.26F)).valid);
+    fusion.update(supportedTopWithCenter(6U, 1.1, 1.75F, 0.388F, 0.26F));
+    fusion.update(supportedTopWithCenter(6U, 1.2, 1.75F, 0.388F, 0.26F));
+    // New track: confirmation cannot carry over.
+    const CargoBottomResult next =
+        fusion.update(supportedTopWithCenter(7U, 1.3, 1.75F, 0.388F, 0.26F));
+    ASSERT_TRUE(next.valid);
+    EXPECT_NEAR(next.geometry.bottom_z_base, 1.362F, 0.05F);
+}
+
 }  // namespace
 }  // namespace ndt_slam

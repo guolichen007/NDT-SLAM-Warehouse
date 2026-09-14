@@ -1010,33 +1010,50 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
         return result;
     }
 
+    // DIRECT_TOP_FROZEN_THICKNESS is an absolute current-frame bottom
+    // measurement (current supported top minus frozen physical thickness). It
+    // must never be expressed relative to a possibly-stale track center nor
+    // smoothed through a track-center-relative EMA, which would freeze it at
+    // the pre-lift height while the cargo hoists.
+    const bool absolute_current_vertical =
+        selected.source == CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS;
+
     if (selected.source != CargoBottomSource::RECENT_STABLE) {
-        const bool use_track_center = observation.track_center_valid;
-        float bottom_value = selected.bottom_z_base;
-        float top_value = selected.top_z_base;
-        if (use_track_center) {
-            bottom_value -= observation.track_center_base.z();
-            top_value -= observation.track_center_base.z();
+        if (absolute_current_vertical) {
+            // Keep selected.bottom_z_base / top_z_base as absolute base-frame
+            // values.  Clear the EMA so a later source switch cannot resume
+            // from a track-center-relative offset stored by another source.
+            ema_valid_ = false;
+            ema_source_ = CargoBottomSource::INVALID;
+            ema_uses_track_center_ = false;
+        } else {
+            const bool use_track_center = observation.track_center_valid;
+            float bottom_value = selected.bottom_z_base;
+            float top_value = selected.top_z_base;
+            if (use_track_center) {
+                bottom_value -= observation.track_center_base.z();
+                top_value -= observation.track_center_base.z();
+            }
+            if (ema_valid_ && ema_source_ == selected.source &&
+                ema_uses_track_center_ == use_track_center) {
+                const float alpha = std::clamp(config_.ema_alpha, 0.0F, 1.0F);
+                bottom_value = alpha * bottom_value +
+                    (1.0F - alpha) * ema_bottom_z_base_;
+                top_value = alpha * top_value +
+                    (1.0F - alpha) * ema_top_z_base_;
+            }
+            ema_valid_ = true;
+            ema_source_ = selected.source;
+            ema_uses_track_center_ = use_track_center;
+            ema_bottom_z_base_ = bottom_value;
+            ema_top_z_base_ = top_value;
+            selected.bottom_z_base = use_track_center
+                ? observation.track_center_base.z() + bottom_value
+                : bottom_value;
+            selected.top_z_base = use_track_center
+                ? observation.track_center_base.z() + top_value
+                : top_value;
         }
-        if (ema_valid_ && ema_source_ == selected.source &&
-            ema_uses_track_center_ == use_track_center) {
-            const float alpha = std::clamp(config_.ema_alpha, 0.0F, 1.0F);
-            bottom_value = alpha * bottom_value +
-                (1.0F - alpha) * ema_bottom_z_base_;
-            top_value = alpha * top_value +
-                (1.0F - alpha) * ema_top_z_base_;
-        }
-        ema_valid_ = true;
-        ema_source_ = selected.source;
-        ema_uses_track_center_ = use_track_center;
-        ema_bottom_z_base_ = bottom_value;
-        ema_top_z_base_ = top_value;
-        selected.bottom_z_base = use_track_center
-            ? observation.track_center_base.z() + bottom_value
-            : bottom_value;
-        selected.top_z_base = use_track_center
-            ? observation.track_center_base.z() + top_value
-            : top_value;
     }
 
     // Apply one source-independent output gate after all source-specific
@@ -1080,61 +1097,86 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
             pending_large_jump_ = false;
             pending_large_jump_count_ = 0U;
         } else {
-            const bool same_pending = pending_large_jump_ &&
-                pending_source_ == selected.source &&
-                std::abs(pending_bottom_value_ - selected.bottom_z_base) <=
-                    config_.large_jump_confirmation_tolerance &&
-                std::abs(pending_top_value_ - selected.top_z_base) <=
-                    config_.large_jump_confirmation_tolerance;
-            if (same_pending) {
-                ++pending_large_jump_count_;
-            } else {
-                pending_large_jump_ = true;
-                pending_source_ = selected.source;
-                pending_bottom_value_ = selected.bottom_z_base;
-                pending_top_value_ = selected.top_z_base;
-                pending_large_jump_count_ = 1U;
-            }
-            if (pending_large_jump_count_ <
-                config_.large_jump_confirm_frames) {
-                selected.bottom_z_base = previous_bottom;
-                selected.top_z_base = previous_top;
-                selected.source = final_source_;
-                selected.reason = "large_jump_confirmation_pending";
-                final_transition_held = true;
-                if (stable_.valid) {
-                    selected.stats = stable_.stats;
-                    selected.memory_center_base = stable_.center_base;
-                    selected.memory_size_xy = stable_.size_xy;
-                    selected.confidence = stable_.confidence * 0.50F;
-                    selected.age_sec =
-                        observation.stamp_sec - stable_.stamp_sec;
-                    result.evidence_stamp_sec = stable_.stamp_sec;
-                    selected.pose_authority = stable_.pose_authority;
-                } else {
-                    selected.stats = CargoVerticalStats{};
-                    selected.confidence = 0.0F;
-                }
-                selected.points_base.clear();
-                selected.uncertainty = std::clamp(
-                    std::max(stable_.uncertainty,
-                             config_.recent_stable_uncertainty_min) +
-                        std::min(jump, config_.invalid_uncertainty),
-                    config_.recent_stable_uncertainty_min,
-                    config_.invalid_uncertainty);
-            } else {
-                selected.bottom_z_base = pending_bottom_value_;
-                selected.top_z_base = pending_top_value_;
-                selected.reason += ";large_jump_confirmed";
+            if (absolute_current_vertical &&
+                selected.bottom_z_base < previous_bottom) {
+                // A lower absolute bottom shrinks clearance.  A stale higher
+                // value must never be held through a transition filter (that
+                // would emit a false CLEAR): accept the lower value now.
                 pending_large_jump_ = false;
                 pending_large_jump_count_ = 0U;
+                selected.reason += ";absolute_downward_accepted";
+            } else {
+                // For an absolute current vertical source, confirmation means
+                // *current physical evidence* continuity (same source, with
+                // track/pose-authority continuity already enforced by resets),
+                // NOT a static absolute height -- a hoisting cargo never has
+                // one.  Other sources keep the static-height confirmation.
+                const bool require_static_height =
+                    !absolute_current_vertical;
+                const bool same_pending = pending_large_jump_ &&
+                    pending_source_ == selected.source &&
+                    (!require_static_height ||
+                     (std::abs(pending_bottom_value_ -
+                                   selected.bottom_z_base) <=
+                          config_.large_jump_confirmation_tolerance &&
+                      std::abs(pending_top_value_ -
+                                   selected.top_z_base) <=
+                          config_.large_jump_confirmation_tolerance));
+                if (same_pending) {
+                    ++pending_large_jump_count_;
+                } else {
+                    pending_large_jump_ = true;
+                    pending_source_ = selected.source;
+                    pending_bottom_value_ = selected.bottom_z_base;
+                    pending_top_value_ = selected.top_z_base;
+                    pending_large_jump_count_ = 1U;
+                }
+                if (pending_large_jump_count_ <
+                    config_.large_jump_confirm_frames) {
+                    selected.bottom_z_base = previous_bottom;
+                    selected.top_z_base = previous_top;
+                    selected.source = final_source_;
+                    selected.reason = "large_jump_confirmation_pending";
+                    final_transition_held = true;
+                    if (stable_.valid) {
+                        selected.stats = stable_.stats;
+                        selected.memory_center_base = stable_.center_base;
+                        selected.memory_size_xy = stable_.size_xy;
+                        selected.confidence = stable_.confidence * 0.50F;
+                        selected.age_sec =
+                            observation.stamp_sec - stable_.stamp_sec;
+                        result.evidence_stamp_sec = stable_.stamp_sec;
+                        selected.pose_authority = stable_.pose_authority;
+                    } else {
+                        selected.stats = CargoVerticalStats{};
+                        selected.confidence = 0.0F;
+                    }
+                    selected.points_base.clear();
+                    selected.uncertainty = std::clamp(
+                        std::max(stable_.uncertainty,
+                                 config_.recent_stable_uncertainty_min) +
+                            std::min(jump, config_.invalid_uncertainty),
+                        config_.recent_stable_uncertainty_min,
+                        config_.invalid_uncertainty);
+                } else {
+                    if (require_static_height) {
+                        selected.bottom_z_base = pending_bottom_value_;
+                        selected.top_z_base = pending_top_value_;
+                    }
+                    // For an absolute source, keep the latest absolute bottom
+                    // already held in `selected`, not a stale pending average.
+                    selected.reason += ";large_jump_confirmed";
+                    pending_large_jump_ = false;
+                    pending_large_jump_count_ = 0U;
+                }
             }
         }
     }
 
     final_valid_ = true;
     final_source_ = selected.source;
-    final_uses_track_center_ = observation.track_center_valid;
+    final_uses_track_center_ =
+        !absolute_current_vertical && observation.track_center_valid;
     final_bottom_value_ = final_uses_track_center_
         ? selected.bottom_z_base - observation.track_center_base.z()
         : selected.bottom_z_base;
@@ -1175,7 +1217,8 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
             result.geometry.size_base.head<2>().array() -
             2.0F * std::max(0.0F, config_.footprint_margin)).max(
                 config_.min_footprint_size).matrix();
-        stable_.track_center_valid = observation.track_center_valid;
+        stable_.track_center_valid =
+            !absolute_current_vertical && observation.track_center_valid;
         if (stable_.track_center_valid) {
             stable_.bottom_offset_from_track_center =
                 selected.bottom_z_base - observation.track_center_base.z();
