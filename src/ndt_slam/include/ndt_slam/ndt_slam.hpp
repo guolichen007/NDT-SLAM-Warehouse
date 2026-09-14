@@ -684,6 +684,10 @@ private:
     // Target actually bound to NDT.  Content versions, not frame numbers,
     // decide whether setInputTarget() must rebuild NDT's target structure.
     pcl::PointCloud<pcl::PointXYZ>::ConstPtr last_bound_ndt_target_;
+    // Raw/pre-ROI current-frame range cloud, retained ONLY for Cargo current
+    // vertical measurement (B2: recover the true high surface lost by the ROI
+    // crop and voxel clustering).  It never feeds identity/NDT/map/obstacle.
+    pcl::PointCloud<pcl::PointXYZ>::ConstPtr last_cargo_range_cloud_;
     uint64_t last_bound_ndt_target_version_ = 0;
     uint64_t local_map_version_ = 0;
     bool bootstrap_local_map_complete_ = false;

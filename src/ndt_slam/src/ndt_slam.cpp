@@ -15581,6 +15581,10 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
         }
     }
     result.roi_finite_points = crop_cloud->size();
+    // B2: retain the raw/pre-ROI range cloud for Cargo current vertical
+    // measurement.  This cloud still holds the true high surface that the
+    // narrow ROI crop and voxel clustering drop.
+    last_cargo_range_cloud_ = cloud_base;
     if (integrated_cargo_identity_shadow_enabled_) {
         result.shadow_frame_evidence.source_stamp_sec = stamp.toSec();
         result.shadow_frame_evidence.raw_roi_current_frame = crop_cloud;
@@ -24903,6 +24907,33 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
             hook_lock_.live_pose.center_base.allFinite();
         observation.track_center_base =
             hook_lock_.live_pose.center_base;
+        // B2: measure the current top from the raw/pre-ROI range cloud within
+        // the current hook-fixed Cargo footprint, instead of the detector z95
+        // which loses the true high surface (ROI crop + voxel clustering drop).
+        // This is the same current physical vertical observation family the
+        // Lift evidence uses; it never feeds identity / NDT / map / obstacle.
+        if (observation.footprint_valid &&
+            last_cargo_range_cloud_ && !last_cargo_range_cloud_->empty()) {
+            CargoVerticalEvidenceInput current_top_input;
+            current_top_input.selected_cloud_base = last_cargo_range_cloud_;
+            current_top_input.footprint_valid = true;
+            current_top_input.footprint_center_base =
+                observation.footprint_center_base;
+            current_top_input.footprint_size_xy =
+                observation.footprint_size_xy;
+            current_top_input.footprint_yaw_base_rad =
+                observation.footprint_yaw_base_rad;
+            const CargoVerticalEvidence current_top_evidence =
+                extractCargoVerticalEvidence(
+                    current_top_input, cargo_vertical_evidence_v2_config_);
+            if (current_top_evidence.valid &&
+                std::isfinite(current_top_evidence.top_z_base)) {
+                observation.current_top_valid = true;
+                observation.current_top_support_valid = true;
+                observation.current_top_z_base =
+                    current_top_evidence.top_z_base;
+            }
+        }
         const bool origin_height_matches_track = cargo_origin_height_valid_ &&
             cargo_origin_height_track_id_ == cargo_fusion_track_id_;
         observation.prior_height_valid = origin_height_matches_track;
