@@ -2219,6 +2219,15 @@ private:
     // Node-local vertical-continuity state feeding the bottom-fusion
     // track center Z and the kinematic low-surface plausibility gate.
     FormalCargoVerticalState formal_cargo_vertical_state_;
+    // Pending upward reacquisition: a large upward jump is held until
+    // large_jump_confirm_frames consecutive current samples agree.
+    struct VerticalReacquisitionPending {
+      bool active = false;
+      std::uint64_t track_id = 0U;
+      std::uint64_t lifecycle_id = 0U;
+      int count = 0;
+    };
+    VerticalReacquisitionPending vertical_reacquisition_pending_;
     // Phase B1 shadow path. These values are diagnostics-only and are never
     // read by product geometry, safety, tracking, or map mutation.
     bool cargo_vertical_evidence_v2_enabled_ = false;

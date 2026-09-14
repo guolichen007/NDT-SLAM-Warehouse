@@ -25027,13 +25027,43 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                     const float allowed_dz = static_cast<float>(
                         hook_lock_config_.live_pose_max_z_speed_mps * dt) +
                         hook_lock_config_.live_pose_step_margin_m;
-                    if (std::abs(candidate_center_z -
-                            formal_cargo_vertical_state_.center_z_base) >
-                        allowed_dz) {
-                        // VERTICAL_KINEMATIC_CONTRADICTION: reject the low
-                        // surface and keep it out of the POINTS vertical
-                        // source too.
+                    const float diff = candidate_center_z -
+                        formal_cargo_vertical_state_.center_z_base;
+                    if (diff < -allowed_dz) {
+                        // Large downward jump is physically impossible under
+                        // the existing z-speed bound: a wrong-static low
+                        // surface. Reject immediately (safety) and reset any
+                        // pending reacquisition.
                         reject = true;
+                        vertical_reacquisition_pending_.active = false;
+                        vertical_reacquisition_pending_.count = 0;
+                    } else if (diff > allowed_dz) {
+                        // Large upward jump: hold until consecutive current
+                        // samples agree, then rebase the formal vertical state.
+                        if (vertical_reacquisition_pending_.active &&
+                            vertical_reacquisition_pending_.track_id ==
+                                observation.track_id &&
+                            vertical_reacquisition_pending_.lifecycle_id ==
+                                cargo_lifecycle_id_) {
+                            ++vertical_reacquisition_pending_.count;
+                        } else {
+                            vertical_reacquisition_pending_.active = true;
+                            vertical_reacquisition_pending_.track_id =
+                                observation.track_id;
+                            vertical_reacquisition_pending_.lifecycle_id =
+                                cargo_lifecycle_id_;
+                            vertical_reacquisition_pending_.count = 1;
+                        }
+                        if (vertical_reacquisition_pending_.count >=
+                            static_cast<int>(
+                                cargo_bottom_fusion_.config()
+                                    .large_jump_confirm_frames)) {
+                            vertical_reacquisition_pending_.active = false;
+                            vertical_reacquisition_pending_.count = 0;
+                            // accept: fall through to update formal state
+                        } else {
+                            reject = true;  // hold until confirmed
+                        }
                     }
                 }
             }
