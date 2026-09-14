@@ -317,6 +317,11 @@ private:
     float pending_top_value_ = 0.0F;
     CargoBottomSource pending_source_ = CargoBottomSource::INVALID;
     std::size_t pending_large_jump_count_ = 0;
+    // Latest confirmed absolute current evidence (used to gap-gate an
+    // unobservable pause and to accept the latest sample, not a stale one).
+    double pending_last_positive_stamp_ = 0.0;
+    float pending_latest_positive_bottom_ = 0.0F;
+    float pending_latest_positive_top_ = 0.0F;
     bool last_result_available_ = false;
     CargoBottomResult last_result_;
 

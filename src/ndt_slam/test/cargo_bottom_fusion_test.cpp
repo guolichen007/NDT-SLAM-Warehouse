@@ -733,18 +733,31 @@ TEST(CargoBottomFusion, DirectTopFrozenAbsoluteBottomUnaffectedByStaleCenter) {
 }
 
 // A missing DIRECT_TOP_FROZEN frame breaks the confirmation streak.
-TEST(CargoBottomFusion, MissingDirectTopEvidenceBreaksConfirmation) {
+TEST(CargoBottomFusion, UpwardConfirmationSurvivesSingleUnobservableGap) {
     CargoBottomFusion fusion;
     ASSERT_TRUE(fusion.update(
         supportedTopWithCenter(5U, 1.0, 0.70F, 0.388F, 0.26F)).valid);
     // Two consecutive high samples (confirmation not yet reached).
     fusion.update(supportedTopWithCenter(5U, 1.1, 1.75F, 0.388F, 0.26F));
     fusion.update(supportedTopWithCenter(5U, 1.2, 1.75F, 0.388F, 0.26F));
-    // Gap: no current top evidence.
+    // Unobservable gap within stable_hold_sec: does not reset, does not count.
     fusion.update(observation(5U, 1.3, {}));
-    // The next high sample must start a fresh confirmation streak.
+    // The next high sample is the 3rd positive sample and confirms.
     const CargoBottomResult next =
         fusion.update(supportedTopWithCenter(5U, 1.4, 1.75F, 0.388F, 0.26F));
+    EXPECT_NEAR(next.geometry.bottom_z_base, 1.362F, 0.05F);
+}
+
+TEST(CargoBottomFusion, UnobservableGapTimeoutResetsConfirmation) {
+    CargoBottomFusion fusion;
+    ASSERT_TRUE(fusion.update(
+        supportedTopWithCenter(15U, 1.0, 0.70F, 0.388F, 0.26F)).valid);
+    fusion.update(supportedTopWithCenter(15U, 1.1, 1.75F, 0.388F, 0.26F));
+    // Unobservable gap beyond stable_hold_sec (0.50s) but below stale reset.
+    fusion.update(observation(15U, 1.7, {}));
+    // The next high sample restarts a fresh confirmation (held low).
+    const CargoBottomResult next =
+        fusion.update(supportedTopWithCenter(15U, 1.8, 1.75F, 0.388F, 0.26F));
     EXPECT_NEAR(next.geometry.bottom_z_base, 0.312F, 0.05F);
 }
 

@@ -585,6 +585,9 @@ void CargoBottomFusion::resetTemporalState() {
     pending_top_value_ = 0.0F;
     pending_source_ = CargoBottomSource::INVALID;
     pending_large_jump_count_ = 0;
+    pending_last_positive_stamp_ = 0.0;
+    pending_latest_positive_bottom_ = 0.0F;
+    pending_latest_positive_top_ = 0.0F;
     last_result_available_ = false;
     last_result_ = CargoBottomResult{};
 }
@@ -998,6 +1001,15 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
     }
 
     if (!selected.valid) {
+        // Unobservable beyond stable_hold_sec: reset an in-flight upward
+        // confirmation so a stale pending streak cannot be resumed long after
+        // the last positive sample.
+        if (pending_large_jump_ &&
+            observation.stamp_sec - pending_last_positive_stamp_ >
+                config_.stable_hold_sec) {
+            pending_large_jump_ = false;
+            pending_large_jump_count_ = 0U;
+        }
         result.reason = "no_supported_height_source:points=" +
             result.points_stats.reject_reason + ";map_diff=" +
             result.map_diff_stats.reject_reason + ";direct_top_frozen=" +
@@ -1081,8 +1093,20 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
             std::abs(candidate_height - previous_height);
         const float jump = std::max({bottom_jump, top_jump, height_jump});
         if (jump <= config_.direct_update_max_jump) {
-            pending_large_jump_ = false;
-            pending_large_jump_count_ = 0U;
+            // UNOBSERVABLE (a RECENT_STABLE hold with no current vertical
+            // evidence) must not reset an in-flight upward confirmation; it
+            // pauses and is gap-gated by the existing stable_hold_sec. A real
+            // current source (POINTS/MAP_*/ORIGIN) still resets.
+            if (selected.source != CargoBottomSource::RECENT_STABLE) {
+                pending_large_jump_ = false;
+                pending_large_jump_count_ = 0U;
+            } else if (pending_large_jump_ &&
+                       observation.stamp_sec -
+                               pending_last_positive_stamp_ >
+                           config_.stable_hold_sec) {
+                pending_large_jump_ = false;
+                pending_large_jump_count_ = 0U;
+            }
         } else if (jump <= config_.soft_update_max_jump) {
             const float alpha = config_.soft_update_alpha;
             selected.bottom_z_base = alpha * selected.bottom_z_base +
@@ -1131,6 +1155,14 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
                     pending_top_value_ = selected.top_z_base;
                     pending_large_jump_count_ = 1U;
                 }
+                // Record the latest positive current evidence so an
+                // unobservable gap can be time-gated and the confirmed result
+                // is the latest sample, not a stale pre-lift stable.
+                if (!require_static_height) {
+                    pending_last_positive_stamp_ = observation.stamp_sec;
+                    pending_latest_positive_bottom_ = selected.bottom_z_base;
+                    pending_latest_positive_top_ = selected.top_z_base;
+                }
                 if (pending_large_jump_count_ <
                     config_.large_jump_confirm_frames) {
                     selected.bottom_z_base = previous_bottom;
@@ -1162,9 +1194,13 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
                     if (require_static_height) {
                         selected.bottom_z_base = pending_bottom_value_;
                         selected.top_z_base = pending_top_value_;
+                    } else {
+                        // Accept the LATEST current absolute sample, not a
+                        // stale pending average or the pre-lift stable.
+                        selected.bottom_z_base =
+                            pending_latest_positive_bottom_;
+                        selected.top_z_base = pending_latest_positive_top_;
                     }
-                    // For an absolute source, keep the latest absolute bottom
-                    // already held in `selected`, not a stale pending average.
                     selected.reason += ";large_jump_confirmed";
                     pending_large_jump_ = false;
                     pending_large_jump_count_ = 0U;
