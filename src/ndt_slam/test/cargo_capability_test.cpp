@@ -33,6 +33,7 @@ TEST(CargoCapability, VerticalInvalidPreservesPhysicalTrackingOnly) {
 TEST(CargoCapability, PositiveOnlyCanWarnButCannotClearRemoveOrMap) {
   CargoCapabilityInput input = physicalInput();
   input.vertical_geometry_valid = true;
+  input.vertical_authority = CargoVerticalAuthority::DIRECT_BOTTOM;
   input.positive_identity_authorized = true;
   const CargoCapability capability = deriveCargoCapability(input);
   EXPECT_TRUE(capability.positive_warning);
@@ -45,6 +46,7 @@ TEST(CargoCapability, PositiveOnlyCanWarnButCannotClearRemoveOrMap) {
 TEST(CargoCapability, FormalContractsAuthorizeEachCapabilityIndependently) {
   CargoCapabilityInput input = physicalInput();
   input.vertical_geometry_valid = true;
+  input.vertical_authority = CargoVerticalAuthority::DIRECT_BOTTOM;
   input.formal_geometry_valid = true;
   input.formal_clear_contract_valid = true;
   input.formal_removal_contract_valid = false;
@@ -59,12 +61,41 @@ TEST(CargoCapability, InvalidConfigClosesEveryCapability) {
   CargoCapabilityInput input = physicalInput();
   input.config_valid = false;
   input.vertical_geometry_valid = true;
+  input.vertical_authority = CargoVerticalAuthority::DIRECT_BOTTOM;
   input.formal_geometry_valid = true;
   const CargoCapability capability = deriveCargoCapability(input);
   EXPECT_FALSE(capability.perception);
   EXPECT_FALSE(capability.tracking);
   EXPECT_FALSE(capability.formal_warning);
   EXPECT_EQ(capability.warning_reason, "config_invalid");
+}
+
+// A finite bottom/top is NOT safety authority.  The geometry may be finite
+// (vertical_geometry_valid=true) but if the authority is INVALID (no physical
+// bottom measurement) the warning must stay closed while tracking survives.
+TEST(CargoCapability, FiniteGeometryWithoutAuthorityCannotWarn) {
+  CargoCapabilityInput input = physicalInput();
+  input.vertical_geometry_valid = true;
+  input.vertical_authority = CargoVerticalAuthority::INVALID;
+  input.positive_identity_authorized = true;
+  const CargoCapability capability = deriveCargoCapability(input);
+  EXPECT_TRUE(capability.perception);
+  EXPECT_TRUE(capability.tracking);
+  EXPECT_FALSE(capability.positive_warning);
+  EXPECT_FALSE(capability.formal_warning);
+  EXPECT_FALSE(capability.clear);
+  EXPECT_EQ(capability.warning_reason, "vertical_authority_not_safety_authorized");
+}
+
+TEST(CargoCapability, OnlySafetyAuthorizedAuthoritiesCanWarn) {
+  EXPECT_TRUE(isSafetyAuthorizedCargoVerticalAuthority(
+      CargoVerticalAuthority::DIRECT_BOTTOM));
+  EXPECT_TRUE(isSafetyAuthorizedCargoVerticalAuthority(
+      CargoVerticalAuthority::SUPPORTED_TOP_MINUS_FROZEN_HEIGHT));
+  EXPECT_TRUE(isSafetyAuthorizedCargoVerticalAuthority(
+      CargoVerticalAuthority::FRESH_HELD_FORMAL));
+  EXPECT_FALSE(isSafetyAuthorizedCargoVerticalAuthority(
+      CargoVerticalAuthority::INVALID));
 }
 
 }  // namespace
