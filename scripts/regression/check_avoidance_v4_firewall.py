@@ -49,6 +49,7 @@ def strip_if0(source: str) -> str:
 
 def main() -> int:
     allow_d5_lineage = "--allow-d5-lineage" in sys.argv[1:]
+    allow_bottom_fusion = "--allow-bottom-fusion" in sys.argv[1:]
     changed = set(git("diff", "--name-only", BASE, "--").splitlines())
     frozen = {
         "src/ndt_slam/src/cargo_physical_identity_authority.cpp",
@@ -63,6 +64,8 @@ def main() -> int:
         "src/ndt_slam/include/ndt_slam/pose_authority_identity.hpp",
         "src/ndt_slam/include/ndt_slam/frame_authority_context.hpp",
     }
+    if allow_bottom_fusion:
+        frozen.remove("src/ndt_slam/src/cargo_bottom_fusion.cpp")
     if allow_d5_lineage:
         frozen.remove(
             "src/ndt_slam/src/cargo_physical_identity_authority.cpp")

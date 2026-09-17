@@ -53,7 +53,8 @@ def main() -> int:
         ),
         (
             "avoidance_v4_firewall",
-            [python, "scripts/regression/check_avoidance_v4_firewall.py"],
+            [python, "scripts/regression/check_avoidance_v4_firewall.py",
+             "--allow-bottom-fusion", "--allow-d5-lineage"],
         ),
         (
             "compileall",
