@@ -1650,6 +1650,8 @@ void CargoPhysicalIdentityAuthority::reset(const std::string& reason) {
   diagnostic_reference_lock_ = DiagnosticSurfaceReferenceLock{};
   frozen_preload_reference_ = FrozenPreloadReferenceCertificate{};
   frozen_preload_reference_invalidate_reason_ = "none";
+  formal_lift_boundary_authorized_ = false;
+  formal_lift_load_edge_stamp_sec_ = 0.0;
   reset_reason_ = reason;
 }
 
@@ -1732,6 +1734,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     preload_boundary_ = PendingPreLoadBoundary{};
     diagnostic_reference_lock_ = DiagnosticSurfaceReferenceLock{};
     invalidateFrozenPreloadReference("SOURCE_TIME_ROLLBACK");
+    formal_lift_boundary_authorized_ = false;
     prelift_blocked_until_new_epoch_ = true;
     decision_.prelift_state = CargoPreLiftReferenceState::CLOSED;
     decision_.prelift_close_reason = "SOURCE_TIME_ROLLBACK";
@@ -1773,6 +1776,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     preload_handoff_ = PreLoadHandoffSnapshot{};
     preload_boundary_ = PendingPreLoadBoundary{};
     invalidateFrozenPreloadReference("REARM");
+    formal_lift_boundary_authorized_ = false;
     decision_.preload_handoff_reject_reason = "REARM_CLEARED_BOUNDARY";
   }
 
@@ -1819,6 +1823,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       decision_.preload_handoff_source_epoch =
           preload_handoff_.source_physical_epoch;
       decision_.preload_handoff_reject_reason = "NONE";
+      formal_lift_boundary_authorized_ = true;
+      formal_lift_load_edge_stamp_sec_ = preload_handoff_.load_edge_stamp_sec;
       preload_boundary_ = PendingPreLoadBoundary{};
     } else if (pending_age > config_.maximum_observation_gap_sec ||
                repeat_edge || gravity_invalid_while_waiting) {
@@ -1844,6 +1850,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         decision_.preload_handoff_source_epoch = handoff.source_physical_epoch;
         decision_.preload_handoff_reject_reason = "NONE";
         decision_.preload_handoff_trigger_mode = "SAME_FRAME";
+        formal_lift_boundary_authorized_ = true;
+        formal_lift_load_edge_stamp_sec_ = handoff.load_edge_stamp_sec;
       } else if (boundary_edge_lifecycle && gravity_empty) {
         PendingPreLoadBoundary pending;
         pending.valid = true;
@@ -1901,6 +1909,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     started_loaded_without_baseline_ = false;
     prelift_blocked_until_new_epoch_ = false;
     invalidateFrozenPreloadReference("PHYSICAL_EPOCH_END");
+    formal_lift_boundary_authorized_ = false;
     ++load_epoch_;
     physical_cargo_epoch_id_ = input.lifecycle_id != 0U
         ? input.lifecycle_id : physical_cargo_epoch_id_ + 1U;
@@ -1921,6 +1930,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     started_loaded_without_baseline_ = false;
     prelift_blocked_until_new_epoch_ = false;
     invalidateFrozenPreloadReference("UNLOAD");
+    formal_lift_boundary_authorized_ = false;
     ++load_epoch_;
     physical_cargo_epoch_id_ = input.lifecycle_id != 0U &&
             input.lifecycle_id != lifecycle_id_
@@ -3573,12 +3583,18 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   // Diagnostic Surface Reference Lock (Phase A counterfactual).
   {
     auto& lock = diagnostic_reference_lock_;
-    if (lock.frozen && gravity_loaded &&
+    // Formal lift may enter POSTLOAD_ACTIVE only after the B6 load/lifecycle
+    // boundary has legitimately closed (formal_lift_boundary_authorized_), not
+    // merely because gravity reports LOADED.
+    if (lock.frozen && formal_lift_boundary_authorized_ && gravity_loaded &&
         lock.phase ==
             DiagnosticSurfaceReferenceLock::Phase::PRELOAD_ACTIVE) {
       lock.phase = DiagnosticSurfaceReferenceLock::Phase::POSTLOAD_ACTIVE;
       lock.lift_confirm_count = 0;
       lock.lift_confirmed = false;
+      lock.precluster_lift_confirm_count = 0;
+      lock.precluster_lift_confirmed = false;
+      lock.last_positive_evidence_stamp = 0.0;
     }
     if (lock.frozen &&
         lock.phase ==
@@ -3848,6 +3864,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       frozen_preload_reference_.reference_freeze_stamp_sec;
   decision_.preload_reference_certificate_invalidate_reason =
       frozen_preload_reference_invalidate_reason_;
+  decision_.formal_lift_boundary_authorized =
+      formal_lift_boundary_authorized_;
 
   previous_existence_phase_ = gravity_loaded || decision_.cargo_exists;
   previous_gravity_valid_ = input.gravity_valid;

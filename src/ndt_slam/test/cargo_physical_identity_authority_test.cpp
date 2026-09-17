@@ -2667,6 +2667,24 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
+     GravityLoadedWithoutBoundaryCannotActivateFormalLift) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  // Started loaded: gravity LOADED but no pre-load EMPTY phase, so no frozen
+  // certificate and no B6 load/lifecycle boundary can ever close.  The formal
+  // lift authority must NOT activate from gravity alone.
+  auto loaded = rawSurfaceInput(
+      1.0, 600U, HookLoadState::LOADED, 0.0, 0.70, 0.70);
+  loaded.node_started_loaded = true;
+  const auto result = authority.update(loaded);
+  EXPECT_FALSE(result.formal_lift_boundary_authorized);
+  EXPECT_FALSE(result.formal_lift_lock_active);
+  EXPECT_FALSE(result.formal_lift_confirmed);
+  EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
      PreloadSurfaceReferenceUsesCurrentRawRoi) {
   CargoPhysicalIdentityConfig config = testConfig();
   config.lift_confirm_frames = 4;

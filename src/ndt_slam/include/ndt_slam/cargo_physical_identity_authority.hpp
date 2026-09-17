@@ -486,6 +486,7 @@ struct CargoPhysicalIdentityDecision {
   bool formal_lift_lock_active = false;
   int formal_lift_confirm_count = 0;
   bool formal_lift_confirmed = false;
+  bool formal_lift_boundary_authorized = false;
   // Diagnostic Surface Reference Lock (Phase A counterfactual).
   bool ref_lock_frozen = false;
   std::string ref_lock_phase = "NONE";
@@ -736,6 +737,13 @@ class CargoPhysicalIdentityAuthority {
   FrozenPreloadReferenceCertificate frozen_preload_reference_;
   std::string frozen_preload_reference_invalidate_reason_ = "none";
   std::string reset_reason_ = "constructed";
+  // Formal lift boundary authorization: true only after the B6 load/lifecycle
+  // coalescer has legitimately closed (not merely gravity_loaded).  The formal
+  // Reference Lock may enter POSTLOAD_ACTIVE and confirm lift only when this is
+  // set.  It survives handoff staleness and is revoked only on explicit epoch
+  // events.
+  bool formal_lift_boundary_authorized_ = false;
+  double formal_lift_load_edge_stamp_sec_ = 0.0;
 
   // Builds the load-boundary handoff snapshot from the frozen preload reference
   // certificate.  Returns false when no certificate exists.  The caller sets
