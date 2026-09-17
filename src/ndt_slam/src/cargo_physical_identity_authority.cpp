@@ -435,6 +435,122 @@ OwnerLockedSurfaceResult computeOwnerLockedSurfaceVertical(
   return result;
 }
 
+// B6 post-load handoff vertical proof.  Unlike reacquireAssociationVertical,
+// which measures the surface across the FULL frozen footprint and then demands
+// the current owner cover it, this measures Z only in the cells authorized by
+// BOTH the frozen preload owner cells AND the current exact owner cells.  That
+// accepts a transient current-footprint shrink without letting a wrong current
+// group self-certify: the frozen reference still bounds the spatial aperture.
+// frozen_owner_cells must be non-empty (Reference Freeze atomic contract); a
+// missing frozen owner-cell set fails closed rather than falling back to the
+// current owner cells.
+AssociationOnlyReacquiredVerticalEvidence reacquirePostLoadHandoffVertical(
+    const CargoShadowFrameEvidence& frame,
+    const CargoFootprintSnapshot& frozen_footprint,
+    const std::vector<CargoFootprintGridIndex>& frozen_owner_cells,
+    const std::vector<Eigen::Vector3f>& current_owner_points,
+    const CargoVerticalEvidenceConfig& config,
+    double uncertainty_m,
+    const std::vector<Eigen::Vector3f>* competing_owner_points) {
+  AssociationOnlyReacquiredVerticalEvidence result;
+  result.source_stamp_sec = frame.source_stamp_sec;
+  result.uncertainty_m = uncertainty_m;
+  if (!frozen_footprint.valid || !frame.raw_roi_current_frame ||
+      !std::isfinite(frame.source_stamp_sec) ||
+      frame.source_stamp_sec <= 0.0) {
+    result.reason = "postload_frozen_footprint_or_frame_invalid";
+    return result;
+  }
+  if (frozen_owner_cells.empty()) {
+    result.reason = "POSTLOAD_FROZEN_OWNER_CELLS_MISSING";
+    return result;
+  }
+  CargoVerticalEvidenceInput input;
+  input.footprint_valid = true;
+  input.footprint_center_base = frozen_footprint.center_base;
+  input.footprint_size_xy = frozen_footprint.size_xy;
+  input.footprint_yaw_base_rad = frozen_footprint.yaw_base_rad;
+  input.ground_reference_valid = frame.ground_reference_valid;
+  input.ground_z_base = frame.ground_z_base;
+
+  std::set<CargoFootprintGridIndex> current_owner_cells;
+  for (const Eigen::Vector3f& point : current_owner_points) {
+    if (!point.allFinite() || !cargoPointInsideFootprint(
+            point, input, config.footprint_margin_m)) {
+      continue;
+    }
+    current_owner_cells.insert(makeCargoFootprintGridIndex(
+        point, input, config.xy_cell_size_m));
+  }
+  if (current_owner_cells.empty()) {
+    result.reason = "POSTLOAD_NO_CURRENT_EXACT_OWNER";
+    return result;
+  }
+
+  std::set<CargoFootprintGridIndex> authorized_cells;
+  for (const CargoFootprintGridIndex& cell : frozen_owner_cells) {
+    if (current_owner_cells.count(cell) > 0U) {
+      authorized_cells.insert(cell);
+    }
+  }
+  result.owner_overlap_cell_count = authorized_cells.size();
+  result.owner_overlap_coverage =
+      static_cast<double>(authorized_cells.size()) /
+      static_cast<double>(frozen_owner_cells.size());
+  if (authorized_cells.empty()) {
+    result.reason = "POSTLOAD_OWNER_OVERLAP_INSUFFICIENT";
+    return result;
+  }
+
+  std::set<CargoFootprintGridIndex> competing_cells;
+  if (competing_owner_points != nullptr) {
+    for (const Eigen::Vector3f& point : *competing_owner_points) {
+      if (!point.allFinite() || !cargoPointInsideFootprint(
+              point, input, config.footprint_margin_m)) {
+        continue;
+      }
+      competing_cells.insert(makeCargoFootprintGridIndex(
+          point, input, config.xy_cell_size_m));
+    }
+  }
+
+  std::vector<Eigen::Vector3f> authorized_raw_points;
+  for (const pcl::PointXYZ& point : frame.raw_roi_current_frame->points) {
+    const Eigen::Vector3f p(point.x, point.y, point.z);
+    if (!p.allFinite() || !cargoPointInsideFootprint(
+            p, input, config.footprint_margin_m)) {
+      continue;
+    }
+    const CargoFootprintGridIndex cell = makeCargoFootprintGridIndex(
+        p, input, config.xy_cell_size_m);
+    if (authorized_cells.count(cell) == 0U) {
+      continue;
+    }
+    if (competing_cells.count(cell) > 0U) {
+      result.reason = "POSTLOAD_COMPETING_OWNER_COLUMN";
+      return result;
+    }
+    authorized_raw_points.push_back(p);
+  }
+  if (authorized_raw_points.empty()) {
+    result.reason = "POSTLOAD_RAW_AUTHORIZED_SURFACE_INVALID";
+    return result;
+  }
+
+  CargoVerticalEvidenceInput owner_input = input;
+  owner_input.selected_points_base = std::move(authorized_raw_points);
+  const CargoVerticalEvidence evidence = extractCargoVerticalEvidence(
+      owner_input, config);
+  if (!evidence.valid || !std::isfinite(evidence.top_z_base)) {
+    result.reason = "POSTLOAD_OWNER_SURFACE_INVALID:" + evidence.reject_reason;
+    return result;
+  }
+  result.valid = true;
+  result.top_z_base = evidence.top_z_base;
+  result.reason = "postload_owner_cell_vertical_valid";
+  return result;
+}
+
 // ===========================================================================
 // Canonical current-frame fragment reconstruction.
 //
@@ -1418,6 +1534,7 @@ bool CargoPhysicalIdentityAuthority::buildPreloadHandoffFromFrozenCertificate(
   handoff.baseline_uncertainty_m = certificate.baseline_uncertainty_m;
   handoff.baseline_stamp_sec = certificate.reference_freeze_stamp_sec;
   handoff.frozen_preload_footprint = certificate.frozen_footprint;
+  handoff.frozen_owner_cells = certificate.frozen_owner_cells;
   handoff.reference_freeze_stamp_sec = certificate.reference_freeze_stamp_sec;
   handoff.robust_xy_center =
       certificate.frozen_footprint.center_base.cast<double>();
@@ -1953,8 +2070,9 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             input.groups[other].union_points_base.begin(),
             input.groups[other].union_points_base.end());
       }
-      auto vertical = reacquireAssociationVertical(
+      auto vertical = reacquirePostLoadHandoffVertical(
           input.frame_evidence, preload_handoff_.frozen_preload_footprint,
+          preload_handoff_.frozen_owner_cells,
           group.union_points_base, input.vertical_config,
           preload_handoff_.baseline_uncertainty_m,
           &competing_owner_points);
@@ -1962,6 +2080,14 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       preload_handoff_vertical[gi] = std::move(vertical);
       preload_handoff_group = static_cast<int>(gi);
       ++matching_group_count;
+    }
+    decision_.postload_geometric_candidates = geometric_candidate_count;
+    decision_.postload_matching_groups = matching_group_count;
+    decision_.postload_vertical_valid = matching_group_count == 1;
+    if (preload_handoff_group >= 0) {
+      decision_.postload_authorized_owner_cells =
+          preload_handoff_vertical[static_cast<std::size_t>(
+              preload_handoff_group)].owner_overlap_cell_count;
     }
     if (matching_group_count != 1 || geometric_candidate_count != 1) {
       if (!input.groups.empty() || matching_group_count > 1 ||

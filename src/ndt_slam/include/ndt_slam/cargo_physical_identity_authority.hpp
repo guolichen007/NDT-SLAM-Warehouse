@@ -477,6 +477,11 @@ struct CargoPhysicalIdentityDecision {
   std::uint64_t preload_reference_certificate_source_epoch = 0U;
   double preload_reference_certificate_freeze_stamp = 0.0;
   std::string preload_reference_certificate_invalidate_reason = "none";
+  // B6 post-load owner-cell vertical proof telemetry.
+  int postload_geometric_candidates = 0;
+  int postload_matching_groups = 0;
+  bool postload_vertical_valid = false;
+  std::size_t postload_authorized_owner_cells = 0U;
   // Diagnostic Surface Reference Lock (Phase A counterfactual).
   bool ref_lock_frozen = false;
   std::string ref_lock_phase = "NONE";
@@ -635,6 +640,7 @@ class CargoPhysicalIdentityAuthority {
         std::numeric_limits<double>::quiet_NaN();
     double baseline_stamp_sec = 0.0;
     CargoFootprintSnapshot frozen_preload_footprint;
+    std::vector<CargoFootprintGridIndex> frozen_owner_cells;
     double reference_freeze_stamp_sec = 0.0;
     Eigen::Vector2d robust_xy_center = Eigen::Vector2d::Zero();
     Eigen::Vector2d robust_xy_extent = Eigen::Vector2d::Zero();

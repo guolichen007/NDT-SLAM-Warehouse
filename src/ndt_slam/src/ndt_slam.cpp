@@ -15092,6 +15092,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "preload_cert_source_history_id,"
                 << "preload_cert_source_epoch,preload_cert_freeze_stamp,"
                 << "preload_cert_invalidate_reason,"
+                << "postload_geometric_candidates,postload_matching_groups,"
+                << "postload_vertical_valid,postload_authorized_owner_cells,"
                 << "surface_reference_frozen,"
                 << "surface_reference_footprint_valid,surface_baseline_z,"
                 << "surface_baseline_uncertainty,current_surface_vertical_valid,"
@@ -15268,6 +15270,14 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                                .preload_reference_certificate_freeze_stamp
                 << ',' << integrated_identity_decision_
                                .preload_reference_certificate_invalidate_reason
+                << ',' << integrated_identity_decision_
+                               .postload_geometric_candidates
+                << ',' << integrated_identity_decision_
+                               .postload_matching_groups
+                << ',' << (integrated_identity_decision_
+                               .postload_vertical_valid ? 1 : 0)
+                << ',' << integrated_identity_decision_
+                               .postload_authorized_owner_cells
                 << ',' << (diagnostic.surface_reference_frozen ? 1 : 0)
                 << ','
                 << (diagnostic.surface_reference_footprint_valid ? 1 : 0)
@@ -24304,6 +24314,8 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                 << "preload_cert_source_history_id,"
                 << "preload_cert_source_epoch,preload_cert_freeze_stamp,"
                 << "preload_cert_invalidate_reason,"
+                << "postload_geometric_candidates,postload_matching_groups,"
+                << "postload_vertical_valid,postload_authorized_owner_cells,"
                 << "surface_reference_frozen,"
                 << "surface_reference_footprint_valid,surface_baseline_z,"
                 << "surface_baseline_uncertainty,current_surface_vertical_valid,"
@@ -24407,6 +24419,13 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                    .preload_reference_certificate_freeze_stamp << ','
             << integrated_identity_decision_
                    .preload_reference_certificate_invalidate_reason << ','
+            << integrated_identity_decision_.postload_geometric_candidates
+            << ','
+            << integrated_identity_decision_.postload_matching_groups << ','
+            << (integrated_identity_decision_.postload_vertical_valid ? 1 : 0)
+            << ','
+            << integrated_identity_decision_.postload_authorized_owner_cells
+            << ','
             << (integrated_identity_decision_.surface_reference_frozen
                     ? 1 : 0) << ','
             << (integrated_identity_decision_.surface_reference_footprint_valid
