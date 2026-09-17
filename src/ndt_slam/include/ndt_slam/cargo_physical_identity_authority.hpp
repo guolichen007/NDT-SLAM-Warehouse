@@ -470,6 +470,13 @@ struct CargoPhysicalIdentityDecision {
   double preload_boundary_edge_delta_sec =
       std::numeric_limits<double>::quiet_NaN();
   std::string preload_handoff_trigger_mode = "NONE";
+  // Frozen preload reference certificate (B6 lifetime decoupling).
+  bool preload_reference_certificate_created = false;
+  bool preload_reference_certificate_valid = false;
+  std::uint64_t preload_reference_certificate_source_history_id = 0U;
+  std::uint64_t preload_reference_certificate_source_epoch = 0U;
+  double preload_reference_certificate_freeze_stamp = 0.0;
+  std::string preload_reference_certificate_invalidate_reason = "none";
   // Diagnostic Surface Reference Lock (Phase A counterfactual).
   bool ref_lock_frozen = false;
   std::string ref_lock_phase = "NONE";
@@ -595,6 +602,26 @@ class CargoPhysicalIdentityAuthority {
     bool association_ambiguous = false;
   };
 
+  // The immutable frozen pre-load reference certificate.  Created atomically
+  // the same source frame the formal pre-load reference freezes, and survives
+  // EMPTY idle (no observation freshness applies).  One physical epoch has at
+  // most one certificate; History splits never replace or duplicate it.  It
+  // carries no point cloud, identity, ownership, lift, prediction, Bottom,
+  // Safety or map authority — only the frozen baseline, footprint, owner cells
+  // and physical-epoch provenance.
+  struct FrozenPreloadReferenceCertificate {
+    bool valid = false;
+    std::uint64_t source_lifecycle_id = 0U;
+    std::uint64_t source_physical_epoch = 0U;
+    double baseline_z = std::numeric_limits<double>::quiet_NaN();
+    double baseline_uncertainty_m =
+        std::numeric_limits<double>::quiet_NaN();
+    CargoFootprintSnapshot frozen_footprint;
+    std::vector<CargoFootprintGridIndex> frozen_owner_cells;
+    double reference_freeze_stamp_sec = 0.0;
+    std::uint64_t source_history_id = 0U;  // diagnostic only
+  };
+
   // A one-shot load-boundary reference certificate.  It deliberately carries
   // no point cloud, identity, ownership, lift state, prediction, Bottom,
   // Safety, or map authority.  Histories still reset at the lifecycle edge.
@@ -608,7 +635,7 @@ class CargoPhysicalIdentityAuthority {
         std::numeric_limits<double>::quiet_NaN();
     double baseline_stamp_sec = 0.0;
     CargoFootprintSnapshot frozen_preload_footprint;
-    double last_exact_support_stamp = 0.0;
+    double reference_freeze_stamp_sec = 0.0;
     Eigen::Vector2d robust_xy_center = Eigen::Vector2d::Zero();
     Eigen::Vector2d robust_xy_extent = Eigen::Vector2d::Zero();
     double robust_x05 = std::numeric_limits<double>::quiet_NaN();
@@ -616,7 +643,10 @@ class CargoPhysicalIdentityAuthority {
     double robust_y05 = std::numeric_limits<double>::quiet_NaN();
     double robust_y95 = std::numeric_limits<double>::quiet_NaN();
     double yaw_rad = 0.0;
-    double captured_at_load_edge_stamp = 0.0;
+    // The source stamp of the actual EMPTY -> LOADED edge.  Distinct from the
+    // reference freeze stamp: freshness gates for post-load matching and
+    // handoff self-clean run against this stamp, never against the freeze time.
+    double load_edge_stamp_sec = 0.0;
   };
 
   // A pending, not-yet-complete load boundary.  It holds a captured frozen
@@ -693,14 +723,20 @@ class CargoPhysicalIdentityAuthority {
   PreLoadHandoffSnapshot preload_handoff_;
   PendingPreLoadBoundary preload_boundary_;
   DiagnosticSurfaceReferenceLock diagnostic_reference_lock_;
+  FrozenPreloadReferenceCertificate frozen_preload_reference_;
+  std::string frozen_preload_reference_invalidate_reason_ = "none";
   std::string reset_reason_ = "constructed";
 
-  // Captures the frozen preload reference from the currently-unique eligible
-  // pre-load history.  Returns whether a reference was captured; fills
-  // *eligible_count with 0/1/2+ so the caller can emit a precise reject reason.
-  bool captureUniqueEligiblePreloadReference(
-      const CargoPhysicalIdentityInput& input, PreLoadHandoffSnapshot* snapshot,
-      std::size_t* eligible_count) const;
+  // Builds the load-boundary handoff snapshot from the frozen preload reference
+  // certificate.  Returns false when no certificate exists.  The caller sets
+  // load_edge_stamp_sec once the actual load edge is observed.
+  bool buildPreloadHandoffFromFrozenCertificate(
+      PreLoadHandoffSnapshot* snapshot) const;
+
+  // Invalidates the frozen preload reference certificate on an explicit event
+  // (reset, rearm, source-time rollback, physical-epoch end, unload, or a
+  // contradictory pre-load owner).  Idle EMPTY observation does not.
+  void invalidateFrozenPreloadReference(const std::string& reason);
 };
 
 }  // namespace ndt_slam

@@ -2487,7 +2487,7 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
-     HandoffRequiresExactlyOneEligibleHistory) {
+     SingleCertificateHandoffWithMultipleFrozenHistories) {
   CargoPhysicalIdentityConfig config = testConfig();
   config.lift_confirm_frames = 2;
   CargoPhysicalIdentityAuthority authority(config);
@@ -2504,10 +2504,20 @@ TEST(CargoPhysicalIdentityAuthorityTest,
     physical_group.representative.stamp_sec = 1.05;
   }
   attachCurrentRawRoi(&frame);
-  authority.update(frame);
+  const auto frozen = authority.update(frame);
+  // Two histories freeze, but only ONE certificate is minted (first freeze).
+  EXPECT_TRUE(frozen.preload_reference_certificate_created);
+  EXPECT_TRUE(frozen.preload_reference_certificate_valid);
+  const std::uint64_t certificate_history =
+      frozen.preload_reference_certificate_source_history_id;
+  EXPECT_NE(certificate_history, 0U);
   const auto loaded = authority.update(rawSurfaceInput(
       1.10, 61U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
-  EXPECT_FALSE(loaded.preload_handoff_captured);
+  // The single certificate hands off (no history ambiguity), but the current
+  // group at x=0.0 does not match the certificate footprint, so it fails
+  // closed instead of consuming.
+  EXPECT_TRUE(loaded.preload_handoff_captured);
+  EXPECT_EQ(loaded.preload_handoff_source_history_id, certificate_history);
   EXPECT_FALSE(loaded.preload_handoff_consumed);
 }
 
@@ -2529,15 +2539,19 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
-     StalePreloadHistoryCannotCreateHandoff) {
+     FrozenReferenceSurvivesIdleEmptyBeyondObservationGap) {
   CargoPhysicalIdentityConfig config = testConfig();
   config.lift_confirm_frames = 4;
   config.maximum_observation_gap_sec = 0.50;
   CargoPhysicalIdentityAuthority authority(config);
-  freezeSurfaceReference(&authority, 80U);
+  const auto frozen = freezeSurfaceReference(&authority, 80U);
+  ASSERT_TRUE(frozen.preload_reference_certificate_valid);
+  // The reference froze at ~1.15s; the load edge arrives at 2.0s, far beyond
+  // the 0.50s observation gap.  The immutable certificate still hands off.
   const auto loaded = authority.update(rawSurfaceInput(
       2.0, 81U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
-  EXPECT_FALSE(loaded.preload_handoff_captured);
+  EXPECT_TRUE(loaded.preload_handoff_captured);
+  EXPECT_TRUE(loaded.preload_handoff_consumed);
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
@@ -3000,6 +3014,122 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   const auto result = authority.update(started_loaded);
   EXPECT_FALSE(result.preload_boundary_pending);
   EXPECT_FALSE(result.preload_handoff_captured);
+}
+
+// ===========================================================================
+// Frozen preload reference certificate lifecycle (B6 lifetime decoupling).
+// ===========================================================================
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     RearmInvalidatesFrozenCertificate) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 500U);
+  ASSERT_TRUE(frozen.preload_reference_certificate_valid);
+  auto rearm = rawSurfaceInput(
+      1.25, 500U, HookLoadState::EMPTY, 0.0, 0.40, 0.40);
+  rearm.rearm = true;
+  const auto result = authority.update(rearm);
+  EXPECT_FALSE(result.preload_reference_certificate_valid);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     SourceTimeRollbackInvalidatesFrozenCertificate) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 510U);
+  ASSERT_TRUE(frozen.preload_reference_certificate_valid);
+  // A backward source-time jump invalidates the certificate fail-closed.
+  const auto result = authority.update(rawSurfaceInput(
+      0.5, 510U, HookLoadState::EMPTY, 0.0, 0.40, 0.40));
+  EXPECT_FALSE(result.preload_reference_certificate_valid);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PhysicalEpochEndInvalidatesFrozenCertificate) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 520U);
+  ASSERT_TRUE(frozen.preload_reference_certificate_valid);
+  // A lifecycle edge while gravity is still EMPTY consumes the certificate into
+  // a pending boundary, then invalidates it at the physical-epoch boundary.
+  const auto result = authority.update(rawSurfaceInput(
+      1.20, 521U, HookLoadState::EMPTY, 0.0, 0.40, 0.40));
+  EXPECT_FALSE(result.preload_reference_certificate_valid);
+  EXPECT_TRUE(result.preload_boundary_pending);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     UnobservablePreloadFrameDoesNotInvalidateCertificate) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 530U);
+  ASSERT_TRUE(frozen.preload_reference_certificate_valid);
+  auto unobservable = rawSurfaceInput(
+      1.20, 530U, HookLoadState::EMPTY, 0.0, 0.40, 0.40);
+  unobservable.groups.clear();
+  unobservable.frame_evidence.raw_roi_current_frame = cloudFromPoints({});
+  const auto result = authority.update(unobservable);
+  EXPECT_TRUE(result.preload_reference_certificate_valid);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ContradictoryPreloadOwnerInvalidatesCertificate) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 540U);
+  ASSERT_TRUE(frozen.preload_reference_certificate_valid);
+  // A clearly different current owner (x=2.0 vs frozen x=0.0) invalidates.
+  const auto result = authority.update(rawSurfaceInput(
+      1.20, 540U, HookLoadState::EMPTY, 2.0, 0.40, 0.40));
+  EXPECT_FALSE(result.preload_reference_certificate_valid);
+  EXPECT_EQ(result.preload_reference_certificate_invalidate_reason,
+            "CONTRADICTORY_PRELOAD_OWNER");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LoadThenLifecycleConsumesFrozenCertificateBeyondIdleGap) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 550U);
+  ASSERT_TRUE(frozen.preload_reference_certificate_valid);
+  // Load edge at 2.0s (0.85s idle after the ~1.15s freeze) still captures the
+  // certificate into a pending boundary.
+  const auto load_first = authority.update(rawSurfaceInput(
+      2.0, 550U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_FALSE(load_first.preload_handoff_captured);
+  EXPECT_TRUE(load_first.preload_boundary_pending);
+  EXPECT_EQ(load_first.preload_boundary_phase, "WAITING_FOR_LIFECYCLE");
+  const auto lifecycle = authority.update(rawSurfaceInput(
+      2.05, 551U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_TRUE(lifecycle.preload_handoff_captured);
+  EXPECT_EQ(lifecycle.preload_handoff_trigger_mode, "LOAD_THEN_LIFECYCLE");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LifecycleThenLoadConsumesFrozenCertificateBeyondIdleGap) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  config.maximum_observation_gap_sec = 0.50;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 560U);
+  ASSERT_TRUE(frozen.preload_reference_certificate_valid);
+  const auto lifecycle_first = authority.update(rawSurfaceInput(
+      2.0, 561U, HookLoadState::EMPTY, 0.0, 0.40, 0.40));
+  EXPECT_FALSE(lifecycle_first.preload_handoff_captured);
+  EXPECT_TRUE(lifecycle_first.preload_boundary_pending);
+  EXPECT_EQ(lifecycle_first.preload_boundary_phase, "WAITING_FOR_LOAD");
+  const auto loaded = authority.update(rawSurfaceInput(
+      2.05, 561U, HookLoadState::LOADED, 0.0, 0.70, 0.70));
+  EXPECT_TRUE(loaded.preload_handoff_captured);
+  EXPECT_EQ(loaded.preload_handoff_trigger_mode, "LIFECYCLE_THEN_LOAD");
 }
 
 // ===========================================================================

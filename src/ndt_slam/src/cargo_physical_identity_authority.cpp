@@ -1397,52 +1397,32 @@ void CargoPhysicalIdentityAuthority::reset(const std::string& reason) {
   preload_handoff_ = PreLoadHandoffSnapshot{};
   preload_boundary_ = PendingPreLoadBoundary{};
   diagnostic_reference_lock_ = DiagnosticSurfaceReferenceLock{};
+  frozen_preload_reference_ = FrozenPreloadReferenceCertificate{};
+  frozen_preload_reference_invalidate_reason_ = "none";
   reset_reason_ = reason;
 }
 
-bool CargoPhysicalIdentityAuthority::captureUniqueEligiblePreloadReference(
-    const CargoPhysicalIdentityInput& input, PreLoadHandoffSnapshot* snapshot,
-    std::size_t* eligible_count) const {
-  std::vector<const History*> eligible;
-  for (const History& history : histories_) {
-    const double support_age = input.pipeline_stamp_sec -
-        history.last_supported_evidence_stamp_sec;
-    const bool fresh_exact_support =
-        history.last_supported_evidence_stamp_sec > 0.0 &&
-        support_age >= 0.0 &&
-        support_age <= config_.maximum_observation_gap_sec;
-    if (history.prelift_reference_frozen && history.baseline_frozen &&
-        history.baseline_source ==
-            CargoLiftBaselineSource::PRE_LOAD_FROZEN_BASELINE &&
-        history.surface_lift_reference_frozen &&
-        fresh_exact_support && !history.association_ambiguous &&
-        history.frozen_preload_footprint.valid) {
-      eligible.push_back(&history);
-    }
-  }
-  if (eligible_count != nullptr) {
-    *eligible_count = eligible.size();
-  }
-  if (eligible.size() != 1U || snapshot == nullptr) {
+bool CargoPhysicalIdentityAuthority::buildPreloadHandoffFromFrozenCertificate(
+    PreLoadHandoffSnapshot* snapshot) const {
+  if (snapshot == nullptr || !frozen_preload_reference_.valid) {
     return false;
   }
-  const History& source = *eligible.front();
+  const FrozenPreloadReferenceCertificate& certificate =
+      frozen_preload_reference_;
   PreLoadHandoffSnapshot handoff;
   handoff.valid = true;
-  handoff.source_lifecycle_id = lifecycle_id_;
-  handoff.source_physical_epoch = source.physical_cargo_epoch_id;
-  handoff.source_history_id = source.id;
-  handoff.baseline_z = source.surface_baseline_z;
-  handoff.baseline_uncertainty_m =
-      source.surface_baseline_uncertainty_m;
-  handoff.baseline_stamp_sec = source.baseline_stamp_sec;
-  handoff.frozen_preload_footprint = source.frozen_preload_footprint;
-  handoff.last_exact_support_stamp =
-      source.last_supported_evidence_stamp_sec;
+  handoff.source_lifecycle_id = certificate.source_lifecycle_id;
+  handoff.source_physical_epoch = certificate.source_physical_epoch;
+  handoff.source_history_id = certificate.source_history_id;
+  handoff.baseline_z = certificate.baseline_z;
+  handoff.baseline_uncertainty_m = certificate.baseline_uncertainty_m;
+  handoff.baseline_stamp_sec = certificate.reference_freeze_stamp_sec;
+  handoff.frozen_preload_footprint = certificate.frozen_footprint;
+  handoff.reference_freeze_stamp_sec = certificate.reference_freeze_stamp_sec;
   handoff.robust_xy_center =
-      source.frozen_preload_footprint.center_base.cast<double>();
+      certificate.frozen_footprint.center_base.cast<double>();
   handoff.robust_xy_extent =
-      source.frozen_preload_footprint.size_xy.cast<double>();
+      certificate.frozen_footprint.size_xy.cast<double>();
   handoff.robust_x05 = handoff.robust_xy_center.x() -
       0.5 * handoff.robust_xy_extent.x();
   handoff.robust_x95 = handoff.robust_xy_center.x() +
@@ -1451,10 +1431,16 @@ bool CargoPhysicalIdentityAuthority::captureUniqueEligiblePreloadReference(
       0.5 * handoff.robust_xy_extent.y();
   handoff.robust_y95 = handoff.robust_xy_center.y() +
       0.5 * handoff.robust_xy_extent.y();
-  handoff.yaw_rad = source.frozen_preload_footprint.yaw_base_rad;
-  handoff.captured_at_load_edge_stamp = input.pipeline_stamp_sec;
+  handoff.yaw_rad = certificate.frozen_footprint.yaw_base_rad;
+  handoff.load_edge_stamp_sec = 0.0;  // set by the caller at the load edge
   *snapshot = handoff;
   return true;
+}
+
+void CargoPhysicalIdentityAuthority::invalidateFrozenPreloadReference(
+    const std::string& reason) {
+  frozen_preload_reference_ = FrozenPreloadReferenceCertificate{};
+  frozen_preload_reference_invalidate_reason_ = reason;
 }
 
 CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
@@ -1493,6 +1479,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     preload_handoff_ = PreLoadHandoffSnapshot{};
     preload_boundary_ = PendingPreLoadBoundary{};
     diagnostic_reference_lock_ = DiagnosticSurfaceReferenceLock{};
+    invalidateFrozenPreloadReference("SOURCE_TIME_ROLLBACK");
     prelift_blocked_until_new_epoch_ = true;
     decision_.prelift_state = CargoPreLiftReferenceState::CLOSED;
     decision_.prelift_close_reason = "SOURCE_TIME_ROLLBACK";
@@ -1512,7 +1499,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
 
   if (preload_handoff_.valid) {
     const double handoff_age = input.pipeline_stamp_sec -
-        preload_handoff_.last_exact_support_stamp;
+        preload_handoff_.load_edge_stamp_sec;
     if (!gravity_loaded || !(handoff_age >= 0.0) ||
         handoff_age > config_.maximum_observation_gap_sec) {
       decision_.preload_handoff_reject_reason = !gravity_loaded
@@ -1533,6 +1520,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   if (input.rearm && (preload_handoff_.valid || preload_boundary_.valid)) {
     preload_handoff_ = PreLoadHandoffSnapshot{};
     preload_boundary_ = PendingPreLoadBoundary{};
+    invalidateFrozenPreloadReference("REARM");
     decision_.preload_handoff_reject_reason = "REARM_CLEARED_BOUNDARY";
   }
 
@@ -1562,6 +1550,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       if (preload_boundary_.phase == PreLoadBoundaryPhase::WAITING_FOR_LOAD) {
         preload_boundary_.load_edge_seen = true;
         preload_boundary_.load_edge_stamp_sec = input.pipeline_stamp_sec;
+        preload_boundary_.reference.load_edge_stamp_sec =
+            input.pipeline_stamp_sec;
         decision_.preload_handoff_trigger_mode = "LIFECYCLE_THEN_LOAD";
       } else {
         preload_boundary_.lifecycle_edge_seen = true;
@@ -1586,14 +1576,16 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   }
 
   // Capture a fresh boundary (same-frame or the first of two adjacent edges).
+  // The reference comes from the frozen preload reference certificate, not a
+  // History scan, so EMPTY idle beyond the observation gap never discards it.
   if (boundary_capture_allowed && !preload_handoff_.valid &&
       !preload_boundary_.valid &&
       (boundary_edge_lifecycle || boundary_edge_load)) {
     PreLoadHandoffSnapshot handoff;
-    std::size_t eligible_count = 0U;
-    if (captureUniqueEligiblePreloadReference(
-            input, &handoff, &eligible_count)) {
+    const bool captured_ok = buildPreloadHandoffFromFrozenCertificate(&handoff);
+    if (captured_ok) {
       if (boundary_edge_lifecycle && boundary_edge_load) {
+        handoff.load_edge_stamp_sec = input.pipeline_stamp_sec;
         preload_handoff_ = handoff;
         decision_.preload_handoff_captured = true;
         decision_.preload_handoff_source_history_id = handoff.source_history_id;
@@ -1615,6 +1607,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         PendingPreLoadBoundary pending;
         pending.valid = true;
         pending.reference = handoff;
+        pending.reference.load_edge_stamp_sec = input.pipeline_stamp_sec;
         pending.load_edge_seen = true;
         pending.first_edge_stamp_sec = input.pipeline_stamp_sec;
         pending.load_edge_stamp_sec = input.pipeline_stamp_sec;
@@ -1623,10 +1616,12 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         pending.phase = PreLoadBoundaryPhase::WAITING_FOR_LIFECYCLE;
         preload_boundary_ = pending;
       }
+      // The certificate is a one-shot handoff: once consumed into the handoff
+      // (or a pending boundary), it must not be re-captured by a later edge,
+      // even if that pending boundary later expires fail-closed.
+      invalidateFrozenPreloadReference("CONSUMED_AT_BOUNDARY_EDGE");
     } else {
-      decision_.preload_handoff_reject_reason = eligible_count == 0U
-          ? "NO_ELIGIBLE_PRELOAD_HISTORY"
-          : "AMBIGUOUS_PRELOAD_HISTORIES";
+      decision_.preload_handoff_reject_reason = "NO_FROZEN_PRELOAD_REFERENCE";
     }
   }
 
@@ -1653,6 +1648,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     previous_existence_phase_ = false;
     started_loaded_without_baseline_ = false;
     prelift_blocked_until_new_epoch_ = false;
+    invalidateFrozenPreloadReference("PHYSICAL_EPOCH_END");
     ++load_epoch_;
     physical_cargo_epoch_id_ = input.lifecycle_id != 0U
         ? input.lifecycle_id : physical_cargo_epoch_id_ + 1U;
@@ -1672,6 +1668,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     validated_history_id_ = 0U;
     started_loaded_without_baseline_ = false;
     prelift_blocked_until_new_epoch_ = false;
+    invalidateFrozenPreloadReference("UNLOAD");
     ++load_epoch_;
     physical_cargo_epoch_id_ = input.lifecycle_id != 0U &&
             input.lifecycle_id != lifecycle_id_
@@ -1910,8 +1907,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         continue;
       }
       const double source_gap = group.descriptor.stamp_sec -
-          preload_handoff_.last_exact_support_stamp;
-      if (!(source_gap > 0.0) ||
+          preload_handoff_.load_edge_stamp_sec;
+      if (source_gap < -kEpsilon ||
           source_gap > config_.maximum_observation_gap_sec) {
         continue;
       }
@@ -2765,6 +2762,29 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             diagnostic_reference_lock_.current_history_id = history->id;
             diagnostic_reference_lock_.last_owner_refresh_stamp =
                 group.descriptor.stamp_sec;
+            // B6 frozen preload reference certificate: created atomically with
+            // the formal freeze, independent of ephemeral History id.  One
+            // physical epoch yields at most one certificate; a History split
+            // can neither replace it nor mint a second one.
+            if (!frozen_preload_reference_.valid) {
+              FrozenPreloadReferenceCertificate certificate;
+              certificate.valid = true;
+              certificate.source_lifecycle_id = lifecycle_id_;
+              certificate.source_physical_epoch =
+                  history->physical_cargo_epoch_id;
+              certificate.baseline_z = reference;
+              certificate.baseline_uncertainty_m = uncertainty;
+              certificate.frozen_footprint =
+                  history->frozen_preload_footprint;
+              certificate.frozen_owner_cells =
+                  history->frozen_preload_owner_surface_cells;
+              certificate.reference_freeze_stamp_sec =
+                  group.descriptor.stamp_sec;
+              certificate.source_history_id = history->id;
+              frozen_preload_reference_ = certificate;
+              frozen_preload_reference_invalidate_reason_ = "none";
+              decision_.preload_reference_certificate_created = true;
+            }
           } else if (monotonic_departure) {
             // A genuinely rising surface during EMPTY is a real departure, not
             // a stable reference.  Keep the pre-existing permanent close so a
@@ -2894,6 +2914,52 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         history->lift_confirmed = false;
         history->validation_stamp_sec = 0.0;
       }
+    }
+  }
+
+  // Pre-load contradiction gate: a frozen preload reference certificate is
+  // invalidated only by a clearly swapped current owner — exactly one
+  // non-ambiguous, supported current group whose footprint is incompatible
+  // with the frozen footprint.  Idle EMPTY observation (no such group) is
+  // UNOBSERVABLE and keeps the certificate; the post-load matching contract
+  // still fail-closes on ambiguity or a wrong object at the load edge.
+  if (frozen_preload_reference_.valid && pre_load_phase) {
+    int unique_exact_group_count = 0;
+    int incompatible_owner_count = 0;
+    for (std::size_t gi = 0U; gi < input.groups.size(); ++gi) {
+      const auto& group = input.groups[gi];
+      if (group.group_ambiguous || group_ambiguous[gi]) continue;
+      const bool unique_current_exact_group =
+          group.geometry_resolved && !group.union_points_base.empty() &&
+          finiteDescriptor(group.descriptor) &&
+          group.descriptor.vertical_mode ==
+              CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
+      if (!unique_current_exact_group) continue;
+      ++unique_exact_group_count;
+      const CargoFootprintSnapshot& frozen =
+          frozen_preload_reference_.frozen_footprint;
+      if (!frozen.valid) continue;
+      const Eigen::Vector2d current_center = group.descriptor.robust_xy_center;
+      const Eigen::Vector2d frozen_center = frozen.center_base.cast<double>();
+      const double xy_step = (current_center - frozen_center).norm();
+      bool extent_compatible = true;
+      for (int axis = 0; axis < 2; ++axis) {
+        const double current_extent = group.descriptor.robust_xy_extent[axis];
+        const double frozen_extent =
+            static_cast<double>(frozen.size_xy[axis]);
+        const double denominator = std::max(
+            std::max(std::abs(current_extent), std::abs(frozen_extent)),
+            kEpsilon);
+        extent_compatible = extent_compatible &&
+            std::abs(current_extent - frozen_extent) / denominator <=
+                config_.maximum_size_relative_step;
+      }
+      if (xy_step > config_.maximum_xy_step_m || !extent_compatible) {
+        ++incompatible_owner_count;
+      }
+    }
+    if (unique_exact_group_count == 1 && incompatible_owner_count == 1) {
+      invalidateFrozenPreloadReference("CONTRADICTORY_PRELOAD_OWNER");
     }
   }
 
@@ -3489,6 +3555,17 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             DiagnosticSurfaceReferenceLock::Phase::POSTLOAD_ACTIVE &&
         decision_.ref_lock_lift_confirm_count > 0;
   }
+
+  decision_.preload_reference_certificate_valid =
+      frozen_preload_reference_.valid;
+  decision_.preload_reference_certificate_source_history_id =
+      frozen_preload_reference_.source_history_id;
+  decision_.preload_reference_certificate_source_epoch =
+      frozen_preload_reference_.source_physical_epoch;
+  decision_.preload_reference_certificate_freeze_stamp =
+      frozen_preload_reference_.reference_freeze_stamp_sec;
+  decision_.preload_reference_certificate_invalidate_reason =
+      frozen_preload_reference_invalidate_reason_;
 
   previous_existence_phase_ = gravity_loaded || decision_.cargo_exists;
   previous_gravity_valid_ = input.gravity_valid;
