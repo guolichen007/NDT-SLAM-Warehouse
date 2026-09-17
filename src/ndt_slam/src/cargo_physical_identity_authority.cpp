@@ -2918,14 +2918,15 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   }
 
   // Pre-load contradiction gate: a frozen preload reference certificate is
-  // invalidated only by a clearly swapped current owner — exactly one
-  // non-ambiguous, supported current group whose footprint is incompatible
-  // with the frozen footprint.  Idle EMPTY observation (no such group) is
-  // UNOBSERVABLE and keeps the certificate; the post-load matching contract
-  // still fail-closes on ambiguity or a wrong object at the load edge.
+  // invalidated only by a clearly swapped current owner — a supported current
+  // group at the frozen center whose extent no longer matches the frozen
+  // footprint.  A group at a DIFFERENT XY is a separate object (e.g. a static
+  // structure always present during EMPTY), not a swap, and is ignored.  Idle
+  // EMPTY observation (no group at the frozen center) is UNOBSERVABLE and
+  // keeps the certificate; the post-load matching contract still fail-closes
+  // on ambiguity or a wrong object at the load edge.
   if (frozen_preload_reference_.valid && pre_load_phase) {
-    int unique_exact_group_count = 0;
-    int incompatible_owner_count = 0;
+    bool certificate_contradicted = false;
     for (std::size_t gi = 0U; gi < input.groups.size(); ++gi) {
       const auto& group = input.groups[gi];
       if (group.group_ambiguous || group_ambiguous[gi]) continue;
@@ -2935,13 +2936,15 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
           group.descriptor.vertical_mode ==
               CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
       if (!unique_current_exact_group) continue;
-      ++unique_exact_group_count;
       const CargoFootprintSnapshot& frozen =
           frozen_preload_reference_.frozen_footprint;
       if (!frozen.valid) continue;
       const Eigen::Vector2d current_center = group.descriptor.robust_xy_center;
       const Eigen::Vector2d frozen_center = frozen.center_base.cast<double>();
       const double xy_step = (current_center - frozen_center).norm();
+      // Only a group at the frozen center is the "current owner"; a group far
+      // from it is a different object and never a swap.
+      if (xy_step > config_.maximum_xy_step_m) continue;
       bool extent_compatible = true;
       for (int axis = 0; axis < 2; ++axis) {
         const double current_extent = group.descriptor.robust_xy_extent[axis];
@@ -2954,11 +2957,12 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             std::abs(current_extent - frozen_extent) / denominator <=
                 config_.maximum_size_relative_step;
       }
-      if (xy_step > config_.maximum_xy_step_m || !extent_compatible) {
-        ++incompatible_owner_count;
+      if (!extent_compatible) {
+        certificate_contradicted = true;
+        break;
       }
     }
-    if (unique_exact_group_count == 1 && incompatible_owner_count == 1) {
+    if (certificate_contradicted) {
       invalidateFrozenPreloadReference("CONTRADICTORY_PRELOAD_OWNER");
     }
   }

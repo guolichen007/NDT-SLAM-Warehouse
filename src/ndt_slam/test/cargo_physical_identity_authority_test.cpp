@@ -3084,12 +3084,30 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   CargoPhysicalIdentityAuthority authority(config);
   const auto frozen = freezeSurfaceReference(&authority, 540U);
   ASSERT_TRUE(frozen.preload_reference_certificate_valid);
-  // A clearly different current owner (x=2.0 vs frozen x=0.0) invalidates.
-  const auto result = authority.update(rawSurfaceInput(
-      1.20, 540U, HookLoadState::EMPTY, 2.0, 0.40, 0.40));
+  // A swapped owner at the SAME frozen center (x=0.0) but a much larger
+  // extent invalidates.
+  auto contradiction = rawSurfaceInput(
+      1.20, 540U, HookLoadState::EMPTY, 0.0, 0.40, 0.40);
+  contradiction.groups = {groupWithSupport(50U, 50U, 1.20, -1.5, 1.5, 0.40)};
+  attachCurrentRawRoi(&contradiction);
+  const auto result = authority.update(contradiction);
   EXPECT_FALSE(result.preload_reference_certificate_valid);
   EXPECT_EQ(result.preload_reference_certificate_invalidate_reason,
             "CONTRADICTORY_PRELOAD_OWNER");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     DifferentObjectFarFromFrozenCenterDoesNotInvalidateCertificate) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  const auto frozen = freezeSurfaceReference(&authority, 541U);
+  ASSERT_TRUE(frozen.preload_reference_certificate_valid);
+  // A separate object at x=2.0 (far from the frozen center x=0.0) is a
+  // different object, not a swap; the certificate must survive it.
+  const auto result = authority.update(rawSurfaceInput(
+      1.20, 541U, HookLoadState::EMPTY, 2.0, 0.40, 0.40));
+  EXPECT_TRUE(result.preload_reference_certificate_valid);
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
