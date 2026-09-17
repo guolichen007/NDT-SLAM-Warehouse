@@ -15094,6 +15094,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "preload_cert_invalidate_reason,"
                 << "postload_geometric_candidates,postload_matching_groups,"
                 << "postload_vertical_valid,postload_authorized_owner_cells,"
+                << "formal_lift_lock_active,formal_lift_confirm_count,"
+                << "formal_lift_confirmed,"
                 << "surface_reference_frozen,"
                 << "surface_reference_footprint_valid,surface_baseline_z,"
                 << "surface_baseline_uncertainty,current_surface_vertical_valid,"
@@ -15278,6 +15280,12 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                                .postload_vertical_valid ? 1 : 0)
                 << ',' << integrated_identity_decision_
                                .postload_authorized_owner_cells
+                << ',' << (integrated_identity_decision_
+                               .formal_lift_lock_active ? 1 : 0)
+                << ',' << integrated_identity_decision_
+                               .formal_lift_confirm_count
+                << ',' << (integrated_identity_decision_
+                               .formal_lift_confirmed ? 1 : 0)
                 << ',' << (diagnostic.surface_reference_frozen ? 1 : 0)
                 << ','
                 << (diagnostic.surface_reference_footprint_valid ? 1 : 0)
@@ -24316,6 +24324,8 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                 << "preload_cert_invalidate_reason,"
                 << "postload_geometric_candidates,postload_matching_groups,"
                 << "postload_vertical_valid,postload_authorized_owner_cells,"
+                << "formal_lift_lock_active,formal_lift_confirm_count,"
+                << "formal_lift_confirmed,"
                 << "surface_reference_frozen,"
                 << "surface_reference_footprint_valid,surface_baseline_z,"
                 << "surface_baseline_uncertainty,current_surface_vertical_valid,"
@@ -24425,6 +24435,11 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             << (integrated_identity_decision_.postload_vertical_valid ? 1 : 0)
             << ','
             << integrated_identity_decision_.postload_authorized_owner_cells
+            << ','
+            << (integrated_identity_decision_.formal_lift_lock_active ? 1 : 0)
+            << ','
+            << integrated_identity_decision_.formal_lift_confirm_count << ','
+            << (integrated_identity_decision_.formal_lift_confirmed ? 1 : 0)
             << ','
             << (integrated_identity_decision_.surface_reference_frozen
                     ? 1 : 0) << ','

@@ -482,6 +482,10 @@ struct CargoPhysicalIdentityDecision {
   int postload_matching_groups = 0;
   bool postload_vertical_valid = false;
   std::size_t postload_authorized_owner_cells = 0U;
+  // Formal Reference-Lock lift authority (History-split independent).
+  bool formal_lift_lock_active = false;
+  int formal_lift_confirm_count = 0;
+  bool formal_lift_confirmed = false;
   // Diagnostic Surface Reference Lock (Phase A counterfactual).
   bool ref_lock_frozen = false;
   std::string ref_lock_phase = "NONE";

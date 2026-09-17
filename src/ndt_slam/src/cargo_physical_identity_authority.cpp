@@ -3583,6 +3583,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     if (lock.frozen &&
         lock.phase ==
             DiagnosticSurfaceReferenceLock::Phase::POSTLOAD_ACTIVE) {
+      decision_.formal_lift_lock_active = true;
       // Canonical current-frame logical owner: fragment reconstruction happens
       // BEFORE reference matching (complete clique on world-XY, then union).
       const LogicalCurrentCargoObservation logical_owner =
@@ -3755,6 +3756,32 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
             lock.precluster_lift_confirm_count;
         decision_.precluster_simulated_validated =
             lock.precluster_lift_confirmed;
+        // Formal lift authority bridge: the Reference Lock's lift state is
+        // independent of ephemeral History id, so project it onto the current
+        // canonical anchor History.  History splits therefore cannot reset the
+        // lift confirmation.  The canonical anchor is the first (sorted)
+        // member of the current strict logical owner; only that one History is
+        // marked so fragment histories cannot both validate.
+        decision_.formal_lift_confirm_count =
+            lock.precluster_lift_confirm_count;
+        decision_.formal_lift_confirmed = lock.precluster_lift_confirmed;
+        if (lock.precluster_lift_confirmed && logical_owner.valid &&
+            !logical_owner.member_group_indices.empty()) {
+          const std::uint64_t anchor_history = group_history_ids[
+              static_cast<std::size_t>(
+                  logical_owner.member_group_indices.front())];
+          if (anchor_history != 0U) {
+            for (History& history : histories_) {
+              if (history.id == anchor_history) {
+                history.lift_confirmed = true;
+                history.lift_confirm_count =
+                    lock.precluster_lift_confirm_count;
+                history.validation_stamp_sec = input.pipeline_stamp_sec;
+                break;
+              }
+            }
+          }
+        }
       }
     }
     if (lock.frozen &&
