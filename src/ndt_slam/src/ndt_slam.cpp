@@ -15088,6 +15088,10 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "preload_handoff_consumed,preload_handoff_reject_reason,"
                 << "preload_handoff_source_history_id,"
                 << "preload_handoff_source_epoch,postload_history_id,"
+                << "preload_cert_created,preload_cert_valid,"
+                << "preload_cert_source_history_id,"
+                << "preload_cert_source_epoch,preload_cert_freeze_stamp,"
+                << "preload_cert_invalidate_reason,"
                 << "surface_reference_frozen,"
                 << "surface_reference_footprint_valid,surface_baseline_z,"
                 << "surface_baseline_uncertainty,current_surface_vertical_valid,"
@@ -15252,6 +15256,18 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                        .preload_handoff_source_history_id << ','
                 << integrated_identity_decision_.preload_handoff_source_epoch
                 << ',' << integrated_identity_decision_.postload_history_id
+                << ',' << (integrated_identity_decision_
+                               .preload_reference_certificate_created ? 1 : 0)
+                << ',' << (integrated_identity_decision_
+                               .preload_reference_certificate_valid ? 1 : 0)
+                << ',' << integrated_identity_decision_
+                               .preload_reference_certificate_source_history_id
+                << ',' << integrated_identity_decision_
+                               .preload_reference_certificate_source_epoch
+                << ',' << integrated_identity_decision_
+                               .preload_reference_certificate_freeze_stamp
+                << ',' << integrated_identity_decision_
+                               .preload_reference_certificate_invalidate_reason
                 << ',' << (diagnostic.surface_reference_frozen ? 1 : 0)
                 << ','
                 << (diagnostic.surface_reference_footprint_valid ? 1 : 0)
@@ -24284,6 +24300,10 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                 << "preload_handoff_reject_reason,"
                 << "preload_handoff_source_history_id,"
                 << "preload_handoff_source_epoch,postload_history_id,"
+                << "preload_cert_created,preload_cert_valid,"
+                << "preload_cert_source_history_id,"
+                << "preload_cert_source_epoch,preload_cert_freeze_stamp,"
+                << "preload_cert_invalidate_reason,"
                 << "surface_reference_frozen,"
                 << "surface_reference_footprint_valid,surface_baseline_z,"
                 << "surface_baseline_uncertainty,current_surface_vertical_valid,"
@@ -24375,6 +24395,18 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             << integrated_identity_decision_.preload_handoff_source_history_id
             << ',' << integrated_identity_decision_.preload_handoff_source_epoch
             << ',' << integrated_identity_decision_.postload_history_id << ','
+            << (integrated_identity_decision_
+                    .preload_reference_certificate_created ? 1 : 0) << ','
+            << (integrated_identity_decision_
+                    .preload_reference_certificate_valid ? 1 : 0) << ','
+            << integrated_identity_decision_
+                   .preload_reference_certificate_source_history_id << ','
+            << integrated_identity_decision_
+                   .preload_reference_certificate_source_epoch << ','
+            << integrated_identity_decision_
+                   .preload_reference_certificate_freeze_stamp << ','
+            << integrated_identity_decision_
+                   .preload_reference_certificate_invalidate_reason << ','
             << (integrated_identity_decision_.surface_reference_frozen
                     ? 1 : 0) << ','
             << (integrated_identity_decision_.surface_reference_footprint_valid
