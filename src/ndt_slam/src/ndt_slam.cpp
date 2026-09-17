@@ -15158,8 +15158,16 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
         integrated_identity_groups_csv_init_ = true;
     }
     if (integrated_identity_groups_csv_.is_open()) {
-        for (const CargoPhysicalGroupDiagnostic& diagnostic :
-             integrated_identity_decision_.group_diagnostics) {
+        // On a frame with zero physical groups (e.g. the load-edge capture
+        // frame), still write ONE frame-level row so decision-level boundary
+        // telemetry (handoff_captured / formal_lift_boundary_authorized) is
+        // recorded, not lost to the per-group CSV gap.
+        const std::vector<CargoPhysicalGroupDiagnostic> frame_rows =
+            integrated_identity_decision_.group_diagnostics.empty()
+            ? std::vector<CargoPhysicalGroupDiagnostic>{
+                  CargoPhysicalGroupDiagnostic{}}
+            : integrated_identity_decision_.group_diagnostics;
+        for (const CargoPhysicalGroupDiagnostic& diagnostic : frame_rows) {
             std::ostringstream member_ids;
             for (std::size_t index = 0U;
                  index < diagnostic.member_component_ids.size(); ++index) {

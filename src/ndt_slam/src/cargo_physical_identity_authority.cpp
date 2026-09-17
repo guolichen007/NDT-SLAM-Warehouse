@@ -1909,7 +1909,10 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     started_loaded_without_baseline_ = false;
     prelift_blocked_until_new_epoch_ = false;
     invalidateFrozenPreloadReference("PHYSICAL_EPOCH_END");
-    formal_lift_boundary_authorized_ = false;
+    // NOTE: the lifecycle change IS the load/lifecycle boundary closure, so it
+    // must NOT revoke formal_lift_boundary_authorized_ here — the capture block
+    // authorizes on this same edge.  The boundary authorization is revoked on
+    // the subsequent unload / new preload episode instead.
     ++load_epoch_;
     physical_cargo_epoch_id_ = input.lifecycle_id != 0U
         ? input.lifecycle_id : physical_cargo_epoch_id_ + 1U;
