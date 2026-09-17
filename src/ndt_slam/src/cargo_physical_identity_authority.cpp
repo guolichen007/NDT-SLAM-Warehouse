@@ -435,12 +435,26 @@ OwnerLockedSurfaceResult computeOwnerLockedSurfaceVertical(
   return result;
 }
 
+// Forward declaration: strict current-frame same-owner fragment clique (defined
+// after cellsOfGroup, which lives later in this translation unit).
+std::vector<std::size_t> postLoadSameOwnerFragmentClique(
+    const std::vector<CargoPhysicalGroupObservation>& groups,
+    std::size_t anchor_index,
+    const CargoFootprintSnapshot& frozen_footprint,
+    const std::vector<CargoFootprintGridIndex>& frozen_owner_cells,
+    const CargoVerticalEvidenceConfig& config);
+
 // B6 post-load handoff vertical proof.  Unlike reacquireAssociationVertical,
 // which measures the surface across the FULL frozen footprint and then demands
 // the current owner cover it, this measures Z only in the cells authorized by
 // BOTH the frozen preload owner cells AND the current exact owner cells.  That
 // accepts a transient current-footprint shrink without letting a wrong current
 // group self-certify: the frozen reference still bounds the spatial aperture.
+//
+// The current owner is the anchor (the unique geometric candidate) expanded by
+// a strict same-owner fragment clique on current-frame frozen-owner-cell
+// support.  Only fragments strictly proven to be the same Cargo are folded in;
+// every other group (including geometry-fail groups) stays a competitor.
 // frozen_owner_cells must be non-empty (Reference Freeze atomic contract); a
 // missing frozen owner-cell set fails closed rather than falling back to the
 // current owner cells.
@@ -448,10 +462,10 @@ AssociationOnlyReacquiredVerticalEvidence reacquirePostLoadHandoffVertical(
     const CargoShadowFrameEvidence& frame,
     const CargoFootprintSnapshot& frozen_footprint,
     const std::vector<CargoFootprintGridIndex>& frozen_owner_cells,
-    const std::vector<Eigen::Vector3f>& current_owner_points,
+    const std::vector<CargoPhysicalGroupObservation>& groups,
+    std::size_t anchor_group_index,
     const CargoVerticalEvidenceConfig& config,
-    double uncertainty_m,
-    const std::vector<Eigen::Vector3f>* competing_owner_points) {
+    double uncertainty_m) {
   AssociationOnlyReacquiredVerticalEvidence result;
   result.source_stamp_sec = frame.source_stamp_sec;
   result.uncertainty_m = uncertainty_m;
@@ -473,14 +487,23 @@ AssociationOnlyReacquiredVerticalEvidence reacquirePostLoadHandoffVertical(
   input.ground_reference_valid = frame.ground_reference_valid;
   input.ground_z_base = frame.ground_z_base;
 
+  const std::vector<std::size_t> clique = postLoadSameOwnerFragmentClique(
+      groups, anchor_group_index, frozen_footprint, frozen_owner_cells, config);
+  if (clique.empty()) {
+    result.reason = "POSTLOAD_FRAGMENT_AMBIGUOUS";
+    return result;
+  }
+
   std::set<CargoFootprintGridIndex> current_owner_cells;
-  for (const Eigen::Vector3f& point : current_owner_points) {
-    if (!point.allFinite() || !cargoPointInsideFootprint(
-            point, input, config.footprint_margin_m)) {
-      continue;
+  for (const std::size_t gi : clique) {
+    for (const Eigen::Vector3f& point : groups[gi].union_points_base) {
+      if (!point.allFinite() || !cargoPointInsideFootprint(
+              point, input, config.footprint_margin_m)) {
+        continue;
+      }
+      current_owner_cells.insert(makeCargoFootprintGridIndex(
+          point, input, config.xy_cell_size_m));
     }
-    current_owner_cells.insert(makeCargoFootprintGridIndex(
-        point, input, config.xy_cell_size_m));
   }
   if (current_owner_cells.empty()) {
     result.reason = "POSTLOAD_NO_CURRENT_EXACT_OWNER";
@@ -502,9 +525,12 @@ AssociationOnlyReacquiredVerticalEvidence reacquirePostLoadHandoffVertical(
     return result;
   }
 
+  // Competitors = every group NOT strictly proven to be the same Cargo.  A true
+  // external object that failed the frozen geometry gate remains a competitor.
   std::set<CargoFootprintGridIndex> competing_cells;
-  if (competing_owner_points != nullptr) {
-    for (const Eigen::Vector3f& point : *competing_owner_points) {
+  for (std::size_t gi = 0U; gi < groups.size(); ++gi) {
+    if (std::find(clique.begin(), clique.end(), gi) != clique.end()) continue;
+    for (const Eigen::Vector3f& point : groups[gi].union_points_base) {
       if (!point.allFinite() || !cargoPointInsideFootprint(
               point, input, config.footprint_margin_m)) {
         continue;
@@ -682,6 +708,115 @@ std::set<CargoFootprintGridIndex> cellsOfGroup(
         point, input, config.xy_cell_size_m));
   }
   return cells;
+}
+
+// Strict current-frame same-owner fragment clique, used ONLY by the B6
+// post-load handoff vertical proof.  Starting from the already-determined
+// geometric anchor, it proves which other current groups are the SAME Cargo
+// fragment using current-frame frozen-owner-cell support: each group must have
+// non-empty frozen-owner-cell overlap, pairwise compatibility requires a
+// complete clique (no transitive chaining), and the anchor must lie in exactly
+// one maximal clique.  It never selects identity; it only returns the fragment
+// set to fold into the current owner.  Returns empty on ambiguity.
+std::vector<std::size_t> postLoadSameOwnerFragmentClique(
+    const std::vector<CargoPhysicalGroupObservation>& groups,
+    std::size_t anchor_index,
+    const CargoFootprintSnapshot& frozen_footprint,
+    const std::vector<CargoFootprintGridIndex>& frozen_owner_cells,
+    const CargoVerticalEvidenceConfig& config) {
+  if (anchor_index >= groups.size() || !frozen_footprint.valid) {
+    return {};
+  }
+  CargoVerticalEvidenceInput frozen_input;
+  frozen_input.footprint_valid = true;
+  frozen_input.footprint_center_base = frozen_footprint.center_base;
+  frozen_input.footprint_size_xy = frozen_footprint.size_xy;
+  frozen_input.footprint_yaw_base_rad = frozen_footprint.yaw_base_rad;
+  const std::set<CargoFootprintGridIndex> frozen_mask(
+      frozen_owner_cells.begin(), frozen_owner_cells.end());
+
+  std::vector<std::size_t> eligible;
+  std::vector<std::set<CargoFootprintGridIndex>> eligible_cells;
+  for (std::size_t gi = 0U; gi < groups.size(); ++gi) {
+    const auto& group = groups[gi];
+    if (group.group_ambiguous || group.union_points_base.empty()) {
+      continue;
+    }
+    const std::set<CargoFootprintGridIndex> cells =
+        cellsOfGroup(group, frozen_input, config);
+    std::set<CargoFootprintGridIndex> frozen_owner_overlap;
+    for (const CargoFootprintGridIndex& cell : cells) {
+      if (frozen_mask.count(cell) > 0U) {
+        frozen_owner_overlap.insert(cell);
+      }
+    }
+    if (frozen_owner_overlap.empty()) {
+      continue;
+    }
+    eligible.push_back(gi);
+    eligible_cells.push_back(std::move(frozen_owner_overlap));
+  }
+
+  std::size_t anchor_pos = eligible.size();
+  for (std::size_t i = 0U; i < eligible.size(); ++i) {
+    if (eligible[i] == anchor_index) {
+      anchor_pos = i;
+      break;
+    }
+  }
+  if (anchor_pos == eligible.size()) {
+    return {};
+  }
+
+  const std::size_t n = eligible.size();
+  std::vector<std::vector<bool>> compat(n, std::vector<bool>(n, false));
+  for (std::size_t i = 0U; i < n; ++i) {
+    for (std::size_t j = i + 1U; j < n; ++j) {
+      std::size_t intersection = 0U;
+      for (const CargoFootprintGridIndex& cell : eligible_cells[i]) {
+        if (eligible_cells[j].count(cell) > 0U) {
+          ++intersection;
+        }
+      }
+      const double coverage_i = static_cast<double>(intersection) /
+          static_cast<double>(std::max<std::size_t>(1U, eligible_cells[i].size()));
+      const double coverage_j = static_cast<double>(intersection) /
+          static_cast<double>(std::max<std::size_t>(1U, eligible_cells[j].size()));
+      const bool compatible = intersection >= config.minimum_surface_cells &&
+          coverage_i >= config.minimum_surface_coverage_ratio &&
+          coverage_j >= config.minimum_surface_coverage_ratio;
+      compat[i][j] = compatible;
+      compat[j][i] = compatible;
+    }
+  }
+
+  std::vector<int> all_vertices;
+  all_vertices.reserve(n);
+  for (std::size_t i = 0U; i < n; ++i) {
+    all_vertices.push_back(static_cast<int>(i));
+  }
+  std::vector<std::vector<int>> cliques;
+  maximalCliquesRec(compat, {}, all_vertices, {}, &cliques);
+
+  const std::vector<int>* chosen = nullptr;
+  for (const std::vector<int>& clique : cliques) {
+    if (std::find(clique.begin(), clique.end(),
+                  static_cast<int>(anchor_pos)) != clique.end()) {
+      if (chosen != nullptr) {
+        return {};  // >1 maximal clique contains the anchor
+      }
+      chosen = &clique;
+    }
+  }
+  if (chosen == nullptr) {
+    return {};
+  }
+  std::vector<std::size_t> result;
+  result.reserve(chosen->size());
+  for (const int vertex : *chosen) {
+    result.push_back(eligible[static_cast<std::size_t>(vertex)]);
+  }
+  return result;
 }
 
 // Owner-local cells: the group's cells expressed in its OWN robust footprint
@@ -2062,20 +2197,10 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         continue;
       }
       ++geometric_candidate_count;
-      std::vector<Eigen::Vector3f> competing_owner_points;
-      for (std::size_t other = 0U; other < input.groups.size(); ++other) {
-        if (other == gi) continue;
-        competing_owner_points.insert(
-            competing_owner_points.end(),
-            input.groups[other].union_points_base.begin(),
-            input.groups[other].union_points_base.end());
-      }
       auto vertical = reacquirePostLoadHandoffVertical(
           input.frame_evidence, preload_handoff_.frozen_preload_footprint,
-          preload_handoff_.frozen_owner_cells,
-          group.union_points_base, input.vertical_config,
-          preload_handoff_.baseline_uncertainty_m,
-          &competing_owner_points);
+          preload_handoff_.frozen_owner_cells, input.groups, gi,
+          input.vertical_config, preload_handoff_.baseline_uncertainty_m);
       if (!vertical.valid) continue;
       preload_handoff_vertical[gi] = std::move(vertical);
       preload_handoff_group = static_cast<int>(gi);
