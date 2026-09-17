@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <set>
@@ -757,13 +759,13 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
                    track_pose_authority_, observation.pose_authority) &&
                (!observation.points_base.empty() ||
                 observation.current_top_valid)) {
-        resetTemporalState();
+        // A pose-authority change (SLAM keyframe / relocalization) shifts the
+        // map frame but NOT the base-frame absolute current bottom.  Resetting
+        // here dropped the confirmed base-frame stable bottom back to zero and
+        // re-broke every upward confirmation.  Same physical track, so keep
+        // the base-frame continuity and only adopt the new pose authority.
         track_pose_authority_ = observation.pose_authority;
-        last_stamp_sec_ = observation.stamp_sec;
-        result.reason = "pose_authority_changed_reset";
-        last_result_ = result;
-        last_result_available_ = true;
-        return result;
+        // Fall through to the normal update path.
     } else if (observation.stamp_sec + config_.backwards_tolerance_sec <
                last_stamp_sec_) {
         resetTemporalState();
@@ -1219,6 +1221,35 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
     final_top_value_ = final_uses_track_center_
         ? selected.top_z_base - observation.track_center_base.z()
         : selected.top_z_base;
+
+    if (std::getenv("NDT_BF_EPISODE")) {
+        const bool dtf = result.direct_top_frozen_stats.valid &&
+            result.direct_top_frozen_stats.z05 > 1.0F;
+        if (dtf || pending_large_jump_ || selected.source ==
+                CargoBottomSource::DIRECT_TOP_FROZEN_THICKNESS) {
+            fprintf(stderr,
+                "[BFEP] t=%.3f tid=%llu src=%d bot=%.3f dtf=%d/%.3f md=%d/%.3f "
+                "oh=%d/%.3f pts=%d/%.3f pend=%d/%zu/last=%.2f "
+                "stable=%d/%.3f\n",
+                observation.stamp_sec,
+                static_cast<unsigned long long>(observation.track_id),
+                static_cast<int>(selected.source),
+                static_cast<double>(selected.bottom_z_base),
+                result.direct_top_frozen_stats.valid ? 1 : 0,
+                static_cast<double>(result.direct_top_frozen_stats.z05),
+                result.map_diff_stats.valid ? 1 : 0,
+                static_cast<double>(result.map_diff_stats.z05),
+                result.origin_height_stats.valid ? 1 : 0,
+                static_cast<double>(result.origin_height_stats.z05),
+                result.points_stats.valid ? 1 : 0,
+                static_cast<double>(result.points_stats.z05),
+                pending_large_jump_ ? 1 : 0,
+                static_cast<unsigned long>(pending_large_jump_count_),
+                pending_last_positive_stamp_,
+                stable_.valid ? 1 : 0,
+                static_cast<double>(stable_.bottom_z_base));
+        }
+    }
 
     result.geometry = makeGeometry(
         observation, selected.points_base, selected.bottom_z_base,
