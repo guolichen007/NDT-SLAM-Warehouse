@@ -760,11 +760,14 @@ CargoBottomResult CargoBottomFusion::update(const CargoBottomObservation& observ
                (!observation.points_base.empty() ||
                 observation.current_top_valid)) {
         // A pose-authority change (SLAM keyframe / relocalization) shifts the
-        // map frame but NOT the base-frame absolute current bottom.  Resetting
-        // here dropped the confirmed base-frame stable bottom back to zero and
-        // re-broke every upward confirmation.  Same physical track, so keep
-        // the base-frame continuity and only adopt the new pose authority.
+        // map frame but NOT the base-frame absolute current bottom.  Only the
+        // map-frame accumulated points become stale; the base-frame stable
+        // bottom and any in-flight upward confirmation must survive so the
+        // bottom never drops back to zero mid-hoist.
         track_pose_authority_ = observation.pose_authority;
+        accumulated_frames_.clear();
+        accumulated_point_count_ = 0U;
+        newest_points_stamp_sec_ = 0.0;
         // Fall through to the normal update path.
     } else if (observation.stamp_sec + config_.backwards_tolerance_sec <
                last_stamp_sec_) {
