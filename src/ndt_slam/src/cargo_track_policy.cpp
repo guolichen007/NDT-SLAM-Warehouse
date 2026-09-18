@@ -464,11 +464,14 @@ CargoCandidateIdentityScore scoreCargoCandidateIdentity(
     score.predicted_center_score = score.hook_distance_score;
     score.overlap_score = 0.0F;
     score.motion_confidence = score.hook_distance_score;
+    // point_support_confidence is an observability quality only: it must never
+    // grant a dense static component owner-selection authority over a sparse
+    // but physically-cargo candidate.  It is still computed and reported, but
+    // it no longer participates in the pre-lock identity ranking.
     score.identity_confidence =
-        0.45F * score.hook_distance_score +
-        0.25F * score.point_support_confidence +
-        0.20F * score.suspension_confidence +
-        0.10F * score.shape_confidence;
+        0.60F * score.hook_distance_score +
+        0.27F * score.suspension_confidence +
+        0.13F * score.shape_confidence;
   }
   score.overall_lock_confidence = std::clamp(
       0.35F * score.identity_confidence +
