@@ -3439,5 +3439,95 @@ TEST(CargoPhysicalIdentityAuthorityTest,
             LiftEvidenceClass::CONTRADICTORY);
 }
 
+// ============ G/H production-owner latch (immutable owner) ============
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     UniqueValidatedHistoryLatchesProductionOwner) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto decision = validateRequired(&authority);
+  ASSERT_EQ(decision.identity, CargoPhysicalIdentityState::VALIDATED);
+  EXPECT_TRUE(decision.production_owner_locked);
+  EXPECT_NE(decision.production_owner_history_id, 0U);
+  EXPECT_NE(decision.production_owner_lock_generation, 0U);
+  EXPECT_GT(decision.production_owner_lock_stamp_sec, 0.0);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ProductionOwnerCannotSwitchAfterLatch) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  ASSERT_TRUE(validated.production_owner_locked);
+  const std::uint64_t owner_id = validated.production_owner_history_id;
+  const std::uint64_t generation = validated.production_owner_lock_generation;
+  // Churn (further same-history frames) must never rewrite the latched owner.
+  for (double stamp = 1.4; stamp <= 1.9; stamp += 0.1) {
+    const auto result = authority.update(input(
+        stamp, HookLoadSignalRole::REQUIRED, true, HookLoadState::LOADED,
+        0.0, 0.7));
+    ASSERT_TRUE(result.production_owner_locked);
+    EXPECT_EQ(result.production_owner_history_id, owner_id);
+    EXPECT_EQ(result.production_owner_lock_generation, generation);
+  }
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest, UnloadClearsProductionOwner) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  ASSERT_TRUE(validated.production_owner_locked);
+  // A fresh authoritative EMPTY retires the epoch and clears the owner.
+  const auto unloaded = authority.update(input(
+      2.0, HookLoadSignalRole::REQUIRED, true, HookLoadState::EMPTY, 0.0,
+      0.7));
+  EXPECT_FALSE(unloaded.production_owner_locked);
+  EXPECT_EQ(unloaded.production_owner_history_id, 0U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest, EpochResetClearsProductionOwner) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  ASSERT_TRUE(validated.production_owner_locked);
+  CargoPhysicalIdentityInput next = input(
+      2.0, HookLoadSignalRole::REQUIRED, true, HookLoadState::EMPTY, 0.0,
+      0.4);
+  next.lifecycle_id = 8U;  // epoch change (validateRequired used lifecycle 7)
+  const auto reset = authority.update(next);
+  EXPECT_FALSE(reset.production_owner_locked);
+  EXPECT_EQ(reset.production_owner_history_id, 0U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     SourceTimeRollbackClearsProductionOwner) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  ASSERT_TRUE(validated.production_owner_locked);
+  // A source-time rollback (earlier pipeline stamp) must clear the owner.
+  const auto rolled = authority.update(input(
+      0.5, HookLoadSignalRole::REQUIRED, true, HookLoadState::LOADED, 0.0,
+      0.7));
+  EXPECT_FALSE(rolled.production_owner_locked);
+  EXPECT_EQ(rolled.production_owner_history_id, 0U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     RecoveryHoldDoesNotAccumulateValidation) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  authority.update(input(1.1, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.0, 0.4));
+  authority.update(input(1.2, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.0, 0.7));
+  // A run of INVALID (RECOVERY_HOLD) frames must not coast into VALIDATED.
+  for (double stamp = 1.3; stamp <= 1.8; stamp += 0.1) {
+    auto invalid = input(stamp, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.0, 0.7);
+    invalid.groups.front().descriptor.vertical_mode =
+        CargoGroupVerticalMode::INVALID;
+    const auto result = authority.update(invalid);
+    EXPECT_NE(result.identity, CargoPhysicalIdentityState::VALIDATED);
+    EXPECT_FALSE(result.production_owner_locked);
+  }
+}
+
 }  // namespace
 }  // namespace ndt_slam

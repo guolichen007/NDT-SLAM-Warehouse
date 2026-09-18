@@ -14215,6 +14215,44 @@ void NdtSlamNode::writeRuntimeStatus() {
     f << "  \"cargo_v6_legacy_clear_rejected_count\": "
       << cargo_v6_legacy_clear_rejected_count_.load(
              std::memory_order_relaxed) << ",\n";
+    f << "  \"owner_lock_acquired_count\": "
+      << owner_lock_acquired_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"owner_switch_after_lock_count\": "
+      << owner_switch_after_lock_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"rank_winner_differs_from_locked_owner_count\": "
+      << rank_winner_differs_from_locked_owner_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"owner_fresh_measurement_count\": "
+      << owner_fresh_measurement_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"owner_fresh_measurement_miss_count\": "
+      << owner_fresh_measurement_miss_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"owner_recovery_hold_geometry_reject_count\": "
+      << owner_recovery_hold_geometry_reject_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"bottom_from_locked_owner_count\": "
+      << bottom_from_locked_owner_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"bottom_without_valid_lock_count\": "
+      << bottom_without_valid_lock_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"bottom_without_fresh_owner_count\": "
+      << bottom_without_fresh_owner_count_.load(std::memory_order_relaxed)
+      << ",\n";
+    f << "  \"bottom_from_nonowner_count\": "
+      << bottom_from_nonowner_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"legacy_provisional_formal_allowed_count\": "
+      << legacy_provisional_formal_allowed_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"production_owner_formal_allowed_count\": "
+      << production_owner_formal_allowed_count_.load(
+             std::memory_order_relaxed) << ",\n";
+    f << "  \"history_recovery_hold_count\": "
+      << history_recovery_hold_count_.load(std::memory_order_relaxed) << ",\n";
+    f << "  \"recovery_ambiguous_count\": "
+      << recovery_ambiguous_count_.load(std::memory_order_relaxed) << ",\n";
     f << "  \"cargo_v6_broad_quarantine_product_usage\": "
       << cargo_v6_broad_quarantine_product_count_.load(
              std::memory_order_relaxed) << ",\n";
@@ -15168,6 +15206,15 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                   CargoPhysicalGroupDiagnostic{}}
             : integrated_identity_decision_.group_diagnostics;
         for (const CargoPhysicalGroupDiagnostic& diagnostic : frame_rows) {
+            if (diagnostic.association ==
+                CargoCandidateAssociationState::RECOVERY_HOLD) {
+                history_recovery_hold_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+            } else if (diagnostic.association ==
+                       CargoCandidateAssociationState::AMBIGUOUS) {
+                recovery_ambiguous_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
             std::ostringstream member_ids;
             for (std::size_t index = 0U;
                  index < diagnostic.member_component_ids.size(); ++index) {
@@ -17555,7 +17602,79 @@ void NdtSlamNode::clearHookLock() {
     hook_lock_.last_accepted_size.setZero();
     hook_lock_.candidate_compact_profile = false;
     hook_lock_.has_last_accepted = false;
+    // Production-owner binding is cleared only on this lifecycle reset path
+    // (and the time-rollback path). Rank/provisional churn never clears it.
+    hook_lock_.production_owner_history_id = 0U;
+    hook_lock_.production_owner_lock_generation = 0U;
+    hook_lock_.production_owner_lock_stamp_sec = 0.0;
+    hook_lock_.production_owner_last_fresh_stamp_sec = 0.0;
+    hook_lock_.production_owner_measurement_fresh = false;
 }
+
+namespace {
+// G/H unified production-owner measurement lookup. This is the single source
+// of truth for "does the current frame carry a fresh, same-owner physical
+// measurement for the immutable production owner". It returns found=true only
+// for a STRONG_MATCH (association == MATCHED) group bound to the latched
+// owner_history_id. RECOVERY_HOLD / AMBIGUOUS / NEW_HISTORY / prediction-only /
+// stale descriptors never qualify as fresh owner geometry.
+struct FreshProductionOwnerMeasurement {
+    bool found = false;
+    std::uint64_t history_id = 0U;
+    double measurement_stamp_sec = 0.0;
+    Eigen::Vector3d center_base = Eigen::Vector3d::Zero();
+    Eigen::Vector3d size_base = Eigen::Vector3d::Zero();
+    double top_z_base = std::numeric_limits<double>::quiet_NaN();
+    double vertical_uncertainty_m =
+        std::numeric_limits<double>::quiet_NaN();
+    CargoCandidateAssociationState association =
+        CargoCandidateAssociationState::NEW_HISTORY;
+};
+
+FreshProductionOwnerMeasurement findFreshProductionOwnerMeasurement(
+    const CargoPhysicalIdentityDecision& decision) {
+    FreshProductionOwnerMeasurement out;
+    if (!decision.production_owner_locked ||
+        decision.production_owner_history_id == 0U) {
+        return out;
+    }
+    const CargoPhysicalGroupDiagnostic* owner = nullptr;
+    for (const CargoPhysicalGroupDiagnostic& diag :
+         decision.group_diagnostics) {
+        if (diag.matched_history_id !=
+            decision.production_owner_history_id) {
+            continue;
+        }
+        if (owner != nullptr) return out;  // >1 group claims owner: ambiguous
+        owner = &diag;
+    }
+    if (owner == nullptr) return out;
+    out.association = owner->association;
+    if (owner->association != CargoCandidateAssociationState::MATCHED) {
+        // RECOVERY_HOLD / AMBIGUOUS / NEW_HISTORY: continuity-only or
+        // unconfirmed; it carries no fresh geometry authority.
+        return out;
+    }
+    const CargoPhysicalGroupDescriptor& d = owner->descriptor;
+    if (!d.robust_xy_center.allFinite() || !d.robust_xy_extent.allFinite() ||
+        !d.stable_anchor.allFinite() ||
+        !std::isfinite(d.physical_vertical_z) ||
+        !d.aggregate_extent.allFinite() ||
+        !(d.aggregate_extent.array() > 0.0).all()) {
+        return out;
+    }
+    out.found = true;
+    out.history_id = decision.production_owner_history_id;
+    out.measurement_stamp_sec = d.stamp_sec;
+    out.center_base = Eigen::Vector3d(
+        d.robust_xy_center.x(), d.robust_xy_center.y(),
+        d.stable_anchor.z());
+    out.size_base = d.aggregate_extent;
+    out.top_z_base = d.physical_vertical_z;
+    out.vertical_uncertainty_m = d.vertical_uncertainty_m;
+    return out;
+}
+}  // namespace
 
 void NdtSlamNode::updateHookCargoLock(
     const HookCargoDetection& det,
@@ -18168,16 +18287,34 @@ void NdtSlamNode::updateHookCargoLock(
             hook_lock_.provisional_summary.suspension_confidence,
             hook_lock_.provisional_summary.overall_lock_confidence,
             hook_lock_.provisional_summary.reason.c_str());
-        if (!hook_lock_.provisional_summary.formal_lock_allowed ||
-            !candidate_policy.allow_lock ||
-            !physical_authority.allowed) {
+        // G: owner authority now comes from the physical identity authority's
+        // immutable production owner (a unique VALIDATED history), not from the
+        // churn-prone provisional median window. The provisional summary is
+        // retained only as legacy/forensic telemetry and no longer grants
+        // LOCKED. Global safety gates (allow_lock, physical_authority.allowed,
+        // shape bounds) are preserved unchanged and remain mandatory.
+        const bool production_owner_authority =
+            integrated_identity_decision_.production_owner_locked &&
+            integrated_identity_decision_.production_owner_history_id != 0U;
+        const bool global_lock_eligibility =
+            candidate_policy.allow_lock && physical_authority.allowed;
+        const bool formal_lock_allowed_new =
+            production_owner_authority && global_lock_eligibility;
+        if (!formal_lock_allowed_new) {
+            if (hook_lock_.provisional_summary.formal_lock_allowed) {
+                legacy_provisional_formal_allowed_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
             ROS_DEBUG_THROTTLE(
                 1.0,
-                "[CargoProvisionalAuthority] track=%llu geometry=%d "
-                "authority=%s clearance=%.2f lift=%.2f "
-                "suspended_frames=%d lift_frames=%d margin=%.2f reason=%s",
+                "[CargoProvisionalAuthority] track=%llu owner_authority=%d "
+                "global_eligible=%d provisional_legacy=%d authority=%s "
+                "clearance=%.2f lift=%.2f suspended_frames=%d lift_frames=%d "
+                "margin=%.2f reason=%s",
                 static_cast<unsigned long long>(
                     hook_lock_.provisional_track_id),
+                production_owner_authority ? 1 : 0,
+                global_lock_eligibility ? 1 : 0,
                 hook_lock_.provisional_summary.formal_lock_allowed ? 1 : 0,
                 cargoLockAuthoritySourceName(physical_authority.source),
                 hook_lock_.ground_clearance_m,
@@ -18185,54 +18322,79 @@ void NdtSlamNode::updateHookCargoLock(
                 hook_lock_.suspension_confirm_count,
                 hook_lock_.lift_confirm_count,
                 det.candidate_score_margin,
-                !candidate_policy.allow_lock
-                    ? candidate_policy.reason.c_str()
-                    : (physical_authority.allowed
-                        ? hook_lock_.provisional_summary.reason.c_str()
+                !production_owner_authority
+                    ? "owner_authority_not_locked"
+                    : (!candidate_policy.allow_lock
+                        ? candidate_policy.reason.c_str()
                         : physical_authority.reason.c_str()));
             break;
         }
+        production_owner_formal_allowed_count_.fetch_add(
+            1U, std::memory_order_relaxed);
+
+        // Owner fresh measurement is the sole LOCKED-init geometry source. If
+        // the owner is latched but the current frame carries no fresh same-owner
+        // STRONG_MATCH, fail-closed: never enter LOCKED with stale geometry.
+        const FreshProductionOwnerMeasurement owner_measurement =
+            findFreshProductionOwnerMeasurement(integrated_identity_decision_);
+        if (!owner_measurement.found) {
+            owner_fresh_measurement_miss_count_.fetch_add(
+                1U, std::memory_order_relaxed);
+            if (owner_measurement.association ==
+                CargoCandidateAssociationState::RECOVERY_HOLD) {
+                owner_recovery_hold_geometry_reject_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
+            ROS_DEBUG_THROTTLE(
+                1.0,
+                "[CargoLock] owner locked but no fresh owner measurement "
+                "association=%s; fail-closed",
+                cargoCandidateAssociationStateName(
+                    owner_measurement.association));
+            break;
+        }
+        owner_fresh_measurement_count_.fetch_add(
+            1U, std::memory_order_relaxed);
 
         const CargoProvisionalLockSummary& summary =
             hook_lock_.provisional_summary;
-        const bool formal_shape_valid =
-            summary.median_center.allFinite() &&
-            summary.median_size.allFinite() &&
-            summary.median_size.x() >= odom_anchor_config_.min_size_x &&
-            summary.median_size.y() >= odom_anchor_config_.min_size_y &&
-            summary.median_size.z() >= odom_anchor_config_.min_size_z &&
-            summary.median_size.x() >= summary.median_size.y();
-        if (!formal_shape_valid) {
-            // Never enter LOCKED and then discover that its sole formal OBB is
-            // zero, non-finite or below the configured physical dimensions.
-            // Keep collecting a fresh provisional window instead.
-            hook_lock_.provisional_summary.formal_lock_allowed = false;
-            hook_lock_.provisional_summary.reason =
-                "formal_shape_out_of_physical_bounds";
+        const Eigen::Vector3f owner_center =
+            owner_measurement.center_base.cast<float>();
+        const Eigen::Vector3f owner_size =
+            owner_measurement.size_base.cast<float>();
+        const float owner_top_z =
+            static_cast<float>(owner_measurement.top_z_base);
+        const bool owner_shape_valid =
+            owner_center.allFinite() && owner_size.allFinite() &&
+            std::isfinite(owner_top_z) &&
+            owner_size.x() >= odom_anchor_config_.min_size_x &&
+            owner_size.y() >= odom_anchor_config_.min_size_y &&
+            owner_size.z() >= odom_anchor_config_.min_size_z &&
+            owner_size.x() >= owner_size.y();
+        if (!owner_shape_valid) {
             hook_lock_.association_reject_reason =
-                hook_lock_.provisional_summary.reason;
+                "owner_shape_out_of_physical_bounds";
             ROS_ERROR_THROTTLE(
                 1.0,
-                "[CargoLock] formal transition rejected: "
-                "center=(%.3f,%.3f,%.3f) shape=(%.3f,%.3f,%.3f)",
-                summary.median_center.x(), summary.median_center.y(),
-                summary.median_center.z(), summary.median_size.x(),
-                summary.median_size.y(), summary.median_size.z());
+                "[CargoLock] owner formal transition rejected: "
+                "center=(%.3f,%.3f,%.3f) shape=(%.3f,%.3f,%.3f) top=%.3f",
+                owner_center.x(), owner_center.y(), owner_center.z(),
+                owner_size.x(), owner_size.y(), owner_size.z(), owner_top_z);
             break;
         }
 
         hook_lock_.state = HookCargoLockState::LOCKED;
         hook_lock_.lock_authority_source = physical_authority.source;
         observation_associated = true;
-        hook_lock_.locked_shape.length_m = summary.median_size.x();
-        hook_lock_.locked_shape.width_m = summary.median_size.y();
-        hook_lock_.locked_shape.height_m = summary.median_size.z();
-        hook_lock_.locked_shape.yaw_base_rad =
-            hook_lock_config_.axis_aligned_yaw_after_lock
-                ? quantizeCargoAxialYawToOrthogonal(summary.axial_yaw_rad)
-                : summary.axial_yaw_rad;
-        hook_lock_.locked_shape.orientation_confidence =
-            summary.orientation_confidence;
+        hook_lock_.locked_shape.length_m = owner_size.x();
+        hook_lock_.locked_shape.width_m = owner_size.y();
+        hook_lock_.locked_shape.height_m = owner_size.z();
+        // The authority's owner descriptor is an axis-aligned robust box
+        // (robust_x05/x95/y05/y95), so the locked yaw is axis-aligned by
+        // construction; it is never borrowed from the rank top-1 or the
+        // provisional median orientation.
+        hook_lock_.locked_shape.yaw_base_rad = 0.0F;
+        hook_lock_.locked_shape.orientation_confidence = 1.0F;
         hook_lock_.locked_shape.valid =
             hook_lock_.locked_shape.length_m >=
                 hook_lock_.locked_shape.width_m &&
@@ -18240,27 +18402,35 @@ void NdtSlamNode::updateHookCargoLock(
             hook_lock_.locked_shape.height_m > 0.0F;
         hook_lock_.shape_height_valid =
             hook_lock_.locked_shape.height_m > 0.0F;
-        hook_lock_.locked_size = summary.median_size;
+        hook_lock_.locked_size = owner_size;
         hook_lock_.has_locked_size = hook_lock_.locked_shape.valid;
         hook_lock_.locked_stamp = stamp;
         hook_lock_.last_accepted_core_points = det.core_points_base;
-        hook_lock_.last_accepted_center = observation.center;
-        hook_lock_.last_accepted_size = observation.size;
+        hook_lock_.last_accepted_center = owner_center;
+        hook_lock_.last_accepted_size = owner_size;
         hook_lock_.has_last_accepted = true;
+        // Bind the immutable production owner to this lock. Never rewritten by
+        // rank/provisional churn; cleared only on lifecycle reset.
+        hook_lock_.production_owner_history_id = owner_measurement.history_id;
+        hook_lock_.production_owner_lock_generation =
+            integrated_identity_decision_.production_owner_lock_generation;
+        hook_lock_.production_owner_lock_stamp_sec =
+            integrated_identity_decision_.production_owner_lock_stamp_sec;
+        hook_lock_.production_owner_last_fresh_stamp_sec =
+            owner_measurement.measurement_stamp_sec;
+        hook_lock_.production_owner_measurement_fresh = true;
+        owner_lock_acquired_count_.fetch_add(1U, std::memory_order_relaxed);
         HookCargoBottomEstimate lock_bottom = bottom;
-        lock_bottom.valid = summary.median_center.allFinite() &&
-            summary.median_size.z() > 0.0F;
-        lock_bottom.bottom_z_base = summary.median_center.z() -
-            0.5F * summary.median_size.z();
-        lock_bottom.top_z_base = summary.median_center.z() +
-            0.5F * summary.median_size.z();
-        lock_bottom.height = summary.median_size.z();
-        lock_bottom.source = "provisional_median";
+        lock_bottom.valid = owner_size.z() > 0.0F && std::isfinite(owner_top_z);
+        lock_bottom.bottom_z_base = owner_top_z - owner_size.z();
+        lock_bottom.top_z_base = owner_top_z;
+        lock_bottom.height = owner_size.z();
+        lock_bottom.source = "locked_owner_fresh_measurement";
+        bottom_from_locked_owner_count_.fetch_add(1U, std::memory_order_relaxed);
         updateLockedHeight(lock_bottom, stamp, true);
         HookCargoDetection lock_detection = det;
-        lock_detection.center_base = summary.median_center;
-        lock_detection.footprint_center_base =
-            summary.median_center.head<2>();
+        lock_detection.center_base = owner_center;
+        lock_detection.footprint_center_base = owner_center.head<2>();
         lock_detection.z95 = lock_bottom.top_z_base;
         updateLiveCargoPose(
             lock_detection, lock_bottom, stamp,
@@ -18313,24 +18483,90 @@ void NdtSlamNode::updateHookCargoLock(
         break;
     }
 
-    case HookCargoLockState::LOCKED:
+    case HookCargoLockState::LOCKED: {
+        // H: with a latched production owner, the Bottom vertical authority is
+        // the SAME owner's current fresh physical measurement (never the rank
+        // top-1 current_top). When the owner is latched but carries no fresh
+        // measurement this frame, vertical refresh is fail-closed.
+        bool owner_vertical_authorized = true;
+        HookCargoBottomEstimate owner_bottom = bottom;
+        if (hook_lock_.production_owner_history_id != 0U) {
+            // Guard: the immutable owner must never switch after latch. A
+            // mismatch here is a wiring regression, never normal operation.
+            if (integrated_identity_decision_.production_owner_locked &&
+                integrated_identity_decision_.production_owner_history_id != 0U &&
+                integrated_identity_decision_.production_owner_history_id !=
+                    hook_lock_.production_owner_history_id) {
+                owner_switch_after_lock_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
+            const FreshProductionOwnerMeasurement owner_measurement =
+                findFreshProductionOwnerMeasurement(
+                    integrated_identity_decision_);
+            if (owner_measurement.found) {
+                owner_bottom.valid =
+                    owner_measurement.size_base.z() > 0.0 &&
+                    std::isfinite(owner_measurement.top_z_base);
+                owner_bottom.bottom_z_base =
+                    static_cast<float>(owner_measurement.top_z_base) -
+                    static_cast<float>(owner_measurement.size_base.z());
+                owner_bottom.top_z_base =
+                    static_cast<float>(owner_measurement.top_z_base);
+                owner_bottom.height =
+                    static_cast<float>(owner_measurement.size_base.z());
+                owner_bottom.source = "locked_owner_fresh_measurement";
+                if (owner_measurement.measurement_stamp_sec >
+                    hook_lock_.production_owner_last_fresh_stamp_sec) {
+                    hook_lock_.production_owner_last_fresh_stamp_sec =
+                        owner_measurement.measurement_stamp_sec;
+                }
+                hook_lock_.production_owner_measurement_fresh = true;
+                owner_fresh_measurement_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+                bottom_from_locked_owner_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+            } else {
+                hook_lock_.production_owner_measurement_fresh = false;
+                owner_vertical_authorized = false;
+                owner_fresh_measurement_miss_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+                if (owner_measurement.association ==
+                    CargoCandidateAssociationState::RECOVERY_HOLD) {
+                    owner_recovery_hold_geometry_reject_count_.fetch_add(
+                        1U, std::memory_order_relaxed);
+                }
+                rank_winner_differs_from_locked_owner_count_.fetch_add(
+                    1U, std::memory_order_relaxed);
+            }
+        } else {
+            // Guard: after G, LOCKED always carries a latched owner. Reaching
+            // here with no owner means the legacy provisional path re-entered
+            // LOCKED, which is a wiring regression.
+            bottom_without_valid_lock_count_.fetch_add(
+                1U, std::memory_order_relaxed);
+            bottom_from_nonowner_count_.fetch_add(
+                1U, std::memory_order_relaxed);
+        }
+        const HookCargoBottomEstimate& effective_bottom =
+            hook_lock_.production_owner_history_id != 0U
+                ? owner_bottom : bottom;
         if (strong || weak) {
             // Association gate：检查检测是否与 locked box 一致
             std::string reject_reason;
             bool accepted = isDetectionConsistentWithLockedBox(det, bottom, &reject_reason);
             hook_lock_.association_reject_reason = reject_reason;
 
-            if (accepted) {
+            if (accepted && owner_vertical_authorized) {
                 observation_associated = true;
                 hook_lock_.last_seen_stamp = stamp;
                 // 更新高度和尺寸
-                updateLockedHeightAfterAssociation(bottom, stamp);
+                updateLockedHeightAfterAssociation(effective_bottom, stamp);
                 updateLiveCargoPose(
-                    det, bottom, stamp,
+                    det, effective_bottom, stamp,
                     CargoPoseSource::CURRENT_ASSOCIATED_LIDAR);
                 rememberTrustedCargoPose(stamp);
                 if (!hook_lock_config_.freeze_geometry_after_lock && strong) {
-                    maybeUpdateLockedSize(det, bottom);
+                    maybeUpdateLockedSize(det, effective_bottom);
                 }
 
                 // 更新 last accepted
@@ -18349,6 +18585,12 @@ void NdtSlamNode::updateHookCargoLock(
                          det.core_points_base ? det.core_points_base->size() : 0);
             } else {
                 // 不更新高度和尺寸，保持 last good
+                if (accepted && !owner_vertical_authorized) {
+                    // Owner latched but no fresh same-owner measurement this
+                    // frame: fail-closed (no rank top-1 vertical fallback).
+                    bottom_without_fresh_owner_count_.fetch_add(
+                        1U, std::memory_order_relaxed);
+                }
                 growUncertainty();
 
                 auto anchor = getCargoAnchorXY();
@@ -18387,6 +18629,7 @@ void NdtSlamNode::updateHookCargoLock(
             }
         }
         break;
+    }
 
     case HookCargoLockState::LOST_HOLD:
         if (strong || weak) {
@@ -18699,7 +18942,11 @@ void NdtSlamNode::updateHookCargoLock(
                     << "formal_lock_allowed,allow_candidate,allow_lock,"
                     << "identity_confidence,shape_confidence,overall_lock_confidence,"
                     << "selected_center_x,selected_center_y,selected_center_z,"
-                    << "selected_size_x,selected_size_y,selected_size_z,selected_point_count\n";
+                    << "selected_size_x,selected_size_y,selected_size_z,selected_point_count,"
+                    << "production_owner_locked,production_owner_history_id,"
+                    << "production_owner_lock_generation,"
+                    << "production_owner_measurement_fresh,"
+                    << "production_owner_last_fresh_stamp_sec\n";
             }
             lock_state_csv_init_ = true;
         }
@@ -18741,7 +18988,12 @@ void NdtSlamNode::updateHookCargoLock(
                 << det.overall_lock_confidence << ','
                 << det.center_base.x() << ',' << det.center_base.y() << ',' << det.center_base.z() << ','
                 << det.size_visible.x() << ',' << det.size_visible.y() << ',' << det.size_visible.z() << ','
-                << (det.core_points_base ? det.core_points_base->size() : 0U) << '\n';
+                << (det.core_points_base ? det.core_points_base->size() : 0U) << ','
+                << (integrated_identity_decision_.production_owner_locked ? 1 : 0) << ','
+                << hook_lock_.production_owner_history_id << ','
+                << hook_lock_.production_owner_lock_generation << ','
+                << (hook_lock_.production_owner_measurement_fresh ? 1 : 0) << ','
+                << hook_lock_.production_owner_last_fresh_stamp_sec << '\n';
         }
     }
 

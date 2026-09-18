@@ -2133,6 +2133,16 @@ private:
         Eigen::Vector3f last_accepted_size = Eigen::Vector3f::Zero();
         bool candidate_compact_profile = false;
         CargoProvisionalLockSummary provisional_summary;
+
+        // G/H production-owner binding. Latched from the physical identity
+        // authority's immutable ProductionOwnerLock; never rewritten by rank
+        // top-1, the provisional winner, or nearest-candidate heuristics.
+        // Cleared only on lifecycle reset (unload/epoch/rearm/time-rollback).
+        std::uint64_t production_owner_history_id = 0U;
+        std::uint64_t production_owner_lock_generation = 0U;
+        double production_owner_lock_stamp_sec = 0.0;
+        double production_owner_last_fresh_stamp_sec = 0.0;
+        bool production_owner_measurement_fresh = false;
     };
 
     HookCargoLockConfig hook_lock_config_;
@@ -2286,6 +2296,27 @@ private:
     std::atomic<std::uint64_t> cargo_v6_broad_quarantine_product_count_{0U};
     std::atomic<std::uint64_t>
         cargo_v6_exact_candidate_quarantine_removed_points_{0U};
+
+    // G/H production-owner forensic counters (diagnostic-only). These close
+    // the Cargo V6 physical identity authority chain: they let the four-bag
+    // gate distinguish which layer (owner lock / owner fresh measurement /
+    // Bottom source) first fails, instead of re-opening the ranker/history.
+    std::atomic<std::uint64_t> owner_lock_acquired_count_{0U};
+    std::atomic<std::uint64_t> owner_switch_after_lock_count_{0U};
+    std::atomic<std::uint64_t>
+        rank_winner_differs_from_locked_owner_count_{0U};
+    std::atomic<std::uint64_t> owner_fresh_measurement_count_{0U};
+    std::atomic<std::uint64_t> owner_fresh_measurement_miss_count_{0U};
+    std::atomic<std::uint64_t>
+        owner_recovery_hold_geometry_reject_count_{0U};
+    std::atomic<std::uint64_t> bottom_from_locked_owner_count_{0U};
+    std::atomic<std::uint64_t> bottom_without_valid_lock_count_{0U};
+    std::atomic<std::uint64_t> bottom_without_fresh_owner_count_{0U};
+    std::atomic<std::uint64_t> bottom_from_nonowner_count_{0U};
+    std::atomic<std::uint64_t> legacy_provisional_formal_allowed_count_{0U};
+    std::atomic<std::uint64_t> production_owner_formal_allowed_count_{0U};
+    std::atomic<std::uint64_t> history_recovery_hold_count_{0U};
+    std::atomic<std::uint64_t> recovery_ambiguous_count_{0U};
     std::atomic<std::uint64_t>
         cargo_v6_historical_sweep_blocked_count_{0U};
     std::atomic<std::uint64_t>
