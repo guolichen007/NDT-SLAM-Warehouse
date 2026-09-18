@@ -19,6 +19,7 @@ enum class CargoCandidateAssociationState : std::uint8_t {
   MATCHED = 0,
   AMBIGUOUS,
   NEW_HISTORY,
+  RECOVERY_HOLD,
 };
 
 enum class CargoPhysicalAssociationMode : std::uint8_t {
@@ -26,6 +27,7 @@ enum class CargoPhysicalAssociationMode : std::uint8_t {
   SUPPORT_OVERLAP_CONTINUITY,
   COMPONENT_LINEAGE_CONTINUITY,
   NEW_HISTORY,
+  RECOVERY_HOLD,
 };
 
 enum class CargoPhysicalIdentityState : std::uint8_t {
@@ -119,6 +121,14 @@ struct CargoPhysicalIdentityConfig {
   double maximum_observation_gap_sec = 0.50;
   double maximum_source_age_sec = 0.50;
   int lift_confirm_frames = 4;
+  // Bounded recovery-hold lifetime.  When a group cannot STRONG_MATCH any
+  // history (INVALID vertical, or XY/extent churn) but a single recent history
+  // is spatially compatible, the history is held WITHOUT new validation
+  // evidence for at most this long before it is allowed to expire and a fresh
+  // history is created.  This bounds the "coast" window and prevents an
+  // INVALID/sparse tail from either fragmenting identity or being熬成
+  // VALIDATED.
+  double history_hold_ttl_sec = 1.0;
 };
 
 // A geometry hypothesis is exported before product top-1 selection. Product
@@ -422,6 +432,12 @@ struct CargoPhysicalIdentityDecision {
   std::string hook_role_source = "unspecified";
   bool strict_lidar_existence_path = false;
   std::uint64_t physical_history_id = 0U;
+  // Immutable production owner lock (see ProductionOwnerLock).  Once locked,
+  // production consumes this fixed owner identity; it never silently switches.
+  bool production_owner_locked = false;
+  std::uint64_t production_owner_history_id = 0U;
+  std::uint64_t production_owner_lock_generation = 0U;
+  double production_owner_lock_stamp_sec = 0.0;
   std::uint64_t frame_group_id = 0U;
   std::uint64_t resolved_candidate_id = 0U;
   std::vector<std::uint64_t> resolved_member_component_ids;
@@ -610,6 +626,15 @@ class CargoPhysicalIdentityAuthority {
     bool lift_confirmed = false;
     double validation_stamp_sec = 0.0;
     bool association_ambiguous = false;
+    // Bounded hold/recovery bookkeeping.  last_stamp_sec is the last time ANY
+    // observation touched this history; last_strong_match_stamp_sec is the
+    // last time a STRONG_MATCH (XY+extent+Z-rate all passed) confirmed it.
+    // The two diverge only during RECOVERY_HOLD: an INVALID / XY-extent-churned
+    // group keeps the history alive within hold_ttl_sec WITHOUT accumulating
+    // validation evidence, so a transient B2 top-surface dropout cannot either
+    // fragment the history or be "熬成" (coasted into) a false VALIDATED.
+    double last_strong_match_stamp_sec = 0.0;
+    double hold_start_stamp_sec = 0.0;
   };
 
   // The immutable frozen pre-load reference certificate.  Created atomically
@@ -716,6 +741,18 @@ class CargoPhysicalIdentityAuthority {
 
   static constexpr std::size_t kMaximumLineageProvenanceFrames = 3U;
 
+  // Immutable production owner lock.  Once VALIDATED promotes a physical
+  // history to LOCKED, its identity is fixed for the lock lifecycle: a later
+  // "more attractive" candidate may NOT silently switch the owner.  It is
+  // cleared only by explicit reset / rearm / physical-epoch-end / unload —
+  // never by a transient ambiguous or INVALID frame.
+  struct ProductionOwnerLock {
+    bool valid = false;
+    std::uint64_t locked_history_id = 0U;
+    std::uint64_t lock_generation = 0U;
+    double lock_stamp_sec = 0.0;
+  };
+
   CargoPhysicalIdentityConfig config_;
   std::vector<History> histories_;
   CargoPhysicalIdentityDecision decision_;
@@ -724,6 +761,8 @@ class CargoPhysicalIdentityAuthority {
   std::uint64_t lifecycle_id_ = 0U;
   std::uint64_t physical_cargo_epoch_id_ = 0U;
   std::uint64_t validated_history_id_ = 0U;
+  ProductionOwnerLock production_owner_lock_;
+  std::uint64_t next_lock_generation_ = 1U;
   bool initialized_ = false;
   bool previous_existence_phase_ = false;
   bool previous_gravity_valid_ = false;

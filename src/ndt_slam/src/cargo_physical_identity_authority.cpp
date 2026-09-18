@@ -1147,6 +1147,7 @@ const char* cargoCandidateAssociationStateName(
     case CargoCandidateAssociationState::MATCHED: return "MATCHED";
     case CargoCandidateAssociationState::AMBIGUOUS: return "AMBIGUOUS";
     case CargoCandidateAssociationState::NEW_HISTORY: return "NEW_HISTORY";
+    case CargoCandidateAssociationState::RECOVERY_HOLD: return "RECOVERY_HOLD";
   }
   return "INVALID";
 }
@@ -1161,6 +1162,7 @@ const char* cargoPhysicalAssociationModeName(
     case CargoPhysicalAssociationMode::COMPONENT_LINEAGE_CONTINUITY:
       return "COMPONENT_LINEAGE_CONTINUITY";
     case CargoPhysicalAssociationMode::NEW_HISTORY: return "NEW_HISTORY";
+    case CargoPhysicalAssociationMode::RECOVERY_HOLD: return "RECOVERY_HOLD";
   }
   return "INVALID";
 }
@@ -1627,6 +1629,7 @@ void CargoPhysicalIdentityAuthority::setConfig(
     config_.maximum_source_age_sec = 0.50;
   }
   config_.lift_confirm_frames = std::max(1, config_.lift_confirm_frames);
+  if (!(config_.history_hold_ttl_sec > 0.0)) config_.history_hold_ttl_sec = 1.0;
   reset("config_changed");
 }
 
@@ -1638,6 +1641,8 @@ void CargoPhysicalIdentityAuthority::reset(const std::string& reason) {
   lifecycle_id_ = 0U;
   physical_cargo_epoch_id_ = 0U;
   validated_history_id_ = 0U;
+  production_owner_lock_ = ProductionOwnerLock{};
+  next_lock_generation_ = 1U;
   initialized_ = false;
   previous_existence_phase_ = false;
   previous_gravity_valid_ = false;
@@ -1730,6 +1735,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     }
     histories_.clear();
     validated_history_id_ = 0U;
+    production_owner_lock_ = ProductionOwnerLock{};
     preload_handoff_ = PreLoadHandoffSnapshot{};
     preload_boundary_ = PendingPreLoadBoundary{};
     diagnostic_reference_lock_ = DiagnosticSurfaceReferenceLock{};
@@ -1905,6 +1911,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   if (input.rearm || (initialized_ && input.lifecycle_id != lifecycle_id_)) {
     histories_.clear();
     validated_history_id_ = 0U;
+    production_owner_lock_ = ProductionOwnerLock{};
     previous_existence_phase_ = false;
     started_loaded_without_baseline_ = false;
     prelift_blocked_until_new_epoch_ = false;
@@ -1930,6 +1937,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       input.hook_role == HookLoadSignalRole::REQUIRED) {
     histories_.clear();
     validated_history_id_ = 0U;
+    production_owner_lock_ = ProductionOwnerLock{};
     started_loaded_without_baseline_ = false;
     prelift_blocked_until_new_epoch_ = false;
     invalidateFrozenPreloadReference("UNLOAD");
@@ -2667,7 +2675,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       diagnostic.new_history_reason = "AMBIGUOUS";
       continue;
     }
-    if (!finiteDescriptor(group.descriptor)) continue;
+    const bool vertical_valid =
+        group.descriptor.vertical_mode != CargoGroupVerticalMode::INVALID;
 
     History* history = nullptr;
     if (group_match[gi] >= 0) {
@@ -2695,6 +2704,76 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         }
       }
     } else {
+      // RECOVERY_HOLD: a single recent, spatially-overlapping history may be
+      // held alive through a bounded INVALID / XY-extent-churn gap WITHOUT
+      // accumulating validation evidence.  Multiple candidates fail closed.
+      int recovery_history = -1;
+      int recovery_candidates = 0;
+      const double now_stamp = group.descriptor.stamp_sec;
+      for (std::size_t hi = 0; hi < histories_.size(); ++hi) {
+        const History& candidate = histories_[hi];
+        if (candidate.last_strong_match_stamp_sec <= 0.0) continue;
+        const double strong_age = now_stamp -
+            candidate.last_strong_match_stamp_sec;
+        if (strong_age < 0.0 || strong_age > config_.history_hold_ttl_sec) {
+          continue;
+        }
+        if (!hasPositiveAreaSupportOverlap(group.descriptor,
+                                           candidate.last_descriptor)) {
+          continue;
+        }
+        if (vertical_valid) {
+          const double dt = now_stamp - candidate.last_stamp_sec;
+          if (!(dt > 0.0) || dt > config_.maximum_observation_gap_sec) {
+            continue;
+          }
+          const double z_limit = config_.maximum_z_speed_mps * dt +
+              config_.z_step_margin_m +
+              group.descriptor.vertical_uncertainty_m +
+              candidate.last_descriptor.vertical_uncertainty_m;
+          if (std::abs(group.descriptor.physical_vertical_z -
+                       candidate.last_descriptor.physical_vertical_z) >
+              z_limit) {
+            continue;
+          }
+        }
+        recovery_history = static_cast<int>(hi);
+        ++recovery_candidates;
+      }
+      if (recovery_candidates > 1) {
+        frame_has_any_ambiguity = true;
+        diagnostic.association = CargoCandidateAssociationState::AMBIGUOUS;
+        diagnostic.association_mode = CargoPhysicalAssociationMode::NEW_HISTORY;
+        diagnostic.association_reject_reason = "RECOVERY_AMBIGUOUS";
+        diagnostic.new_history_reason = "RECOVERY_AMBIGUOUS";
+        continue;
+      }
+      if (recovery_history >= 0) {
+        history = &histories_[static_cast<std::size_t>(recovery_history)];
+        history->last_stamp_sec = now_stamp;
+        if (history->hold_start_stamp_sec <= 0.0 ||
+            history->hold_start_stamp_sec <
+                history->last_strong_match_stamp_sec) {
+          history->hold_start_stamp_sec = now_stamp;
+        }
+        diagnostic.association = CargoCandidateAssociationState::RECOVERY_HOLD;
+        diagnostic.association_mode =
+            CargoPhysicalAssociationMode::RECOVERY_HOLD;
+        diagnostic.association_reject_reason = "RECOVERY_HOLD";
+        diagnostic.new_history_reason = "RECOVERY_HOLD";
+        diagnostic.matched_history_id = history->id;
+        group_history_ids[gi] = history->id;
+        history->association_ambiguous = false;
+        continue;  // held frames never update geometry or accumulate evidence
+      }
+      if (!vertical_valid) {
+        // INVALID vertical with no recovery history must not fragment identity.
+        diagnostic.association = CargoCandidateAssociationState::NEW_HISTORY;
+        diagnostic.association_mode = CargoPhysicalAssociationMode::NEW_HISTORY;
+        diagnostic.association_reject_reason = "VERTICAL_INVALID";
+        diagnostic.new_history_reason = "VERTICAL_INVALID";
+        continue;
+      }
       histories_.push_back(History{});
       history = &histories_.back();
       history->id = next_history_id_++;
@@ -2771,6 +2850,10 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     history->last_descriptor = history_descriptor;
     history->last_representative_center = group.representative.center;
     history->last_stamp_sec = group.descriptor.stamp_sec;
+    // A MATCHED / newly-created history has just observed strong (or at least
+    // geometry-confirming) evidence; this is the timestamp RECOVERY_HOLD keys
+    // its bounded coast window from.  Held frames do NOT advance it.
+    history->last_strong_match_stamp_sec = group.descriptor.stamp_sec;
     LineageProvenanceSnapshot provenance;
     provenance.source_stamp_sec = group.descriptor.stamp_sec;
     provenance.component_ids = group_lineage[gi]
@@ -3487,6 +3570,26 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         ? "existence_without_candidate_identity"
         : "cargo_existence_not_proven";
   }
+
+  // Production owner lock latch.  VALIDATED promotes the unique physical
+  // history to an immutable owner for the epoch.  The latch fires ONLY on the
+  // first validation; a later UNKNOWN / AMBIGUOUS / different-validated frame
+  // must NOT switch the owner.  The lock is cleared only by reset()/rearm/
+  // epoch-end/unload, never by a transient frame or a competing candidate.
+  if (decision_.identity == CargoPhysicalIdentityState::VALIDATED &&
+      validated_history_id_ != 0U && !production_owner_lock_.valid) {
+    production_owner_lock_.valid = true;
+    production_owner_lock_.locked_history_id = validated_history_id_;
+    production_owner_lock_.lock_stamp_sec = input.pipeline_stamp_sec;
+    production_owner_lock_.lock_generation = next_lock_generation_++;
+  }
+  decision_.production_owner_locked = production_owner_lock_.valid;
+  decision_.production_owner_history_id =
+      production_owner_lock_.locked_history_id;
+  decision_.production_owner_lock_generation =
+      production_owner_lock_.lock_generation;
+  decision_.production_owner_lock_stamp_sec =
+      production_owner_lock_.lock_stamp_sec;
 
   for (std::size_t gi = 0; gi < input.groups.size(); ++gi) {
     auto& diagnostic = decision_.group_diagnostics[gi];

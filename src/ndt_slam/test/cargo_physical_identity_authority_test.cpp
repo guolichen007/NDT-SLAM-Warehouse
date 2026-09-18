@@ -1406,21 +1406,71 @@ TEST(CargoPhysicalIdentityAuthorityTest,
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
-     InvalidRobustZBreaksHistoryInsteadOfUsingPreviousZ) {
+     InvalidVerticalHoldsHistoryInsteadOfBreakingOrReusingZ) {
   CargoPhysicalIdentityAuthority authority(testConfig());
   authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
                          HookLoadState::EMPTY, 0.0, 0.4));
   auto invalid = input(1.1, HookLoadSignalRole::REQUIRED, true,
                        HookLoadState::LOADED, 0.0, 0.4);
-  invalid.groups.front().descriptor.valid = false;
   invalid.groups.front().descriptor.vertical_mode =
       CargoGroupVerticalMode::INVALID;
   const auto result = authority.update(invalid);
-  EXPECT_EQ(result.association, CargoCandidateAssociationState::NEW_HISTORY);
   ASSERT_EQ(result.group_diagnostics.size(), 1U);
-  EXPECT_EQ(result.group_diagnostics.front().association_reject_reason,
-            "VERTICAL_INVALID");
-  EXPECT_EQ(result.group_diagnostics.front().matched_history_id, 0U);
+  // INVALID vertical with overlapping XY holds the existing history (bounded
+  // RECOVERY_HOLD) instead of fragmenting into a new history, and must not
+  // reuse/advance the previous Z nor accumulate validation evidence.
+  EXPECT_EQ(result.group_diagnostics.front().association,
+            CargoCandidateAssociationState::RECOVERY_HOLD);
+  EXPECT_NE(result.group_diagnostics.front().matched_history_id, 0U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     InvalidVerticalRecoveryReturnsToOriginalHistory) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  auto invalid = input(1.1, HookLoadSignalRole::REQUIRED, true,
+                       HookLoadState::LOADED, 0.0, 0.4);
+  invalid.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::INVALID;
+  const auto held = authority.update(invalid);
+  const std::uint64_t held_id =
+      held.group_diagnostics.front().matched_history_id;
+  EXPECT_NE(held_id, 0U);
+  auto valid = input(1.2, HookLoadSignalRole::REQUIRED, true,
+                     HookLoadState::LOADED, 0.0, 0.4);
+  const auto recovered = authority.update(valid);
+  ASSERT_EQ(recovered.group_diagnostics.size(), 1U);
+  EXPECT_EQ(recovered.group_diagnostics.front().matched_history_id, held_id);
+  EXPECT_EQ(recovered.group_diagnostics.front().association,
+            CargoCandidateAssociationState::MATCHED);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     RecoveryHoldExpiresAfterTtlWithoutFragmenting) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.history_hold_ttl_sec = 1.0;
+  CargoPhysicalIdentityAuthority authority(config);
+  authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  auto invalid = input(1.5, HookLoadSignalRole::REQUIRED, true,
+                       HookLoadState::LOADED, 0.0, 0.4);
+  invalid.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::INVALID;
+  const auto held = authority.update(invalid);
+  EXPECT_EQ(held.group_diagnostics.front().association,
+            CargoCandidateAssociationState::RECOVERY_HOLD);
+  // Beyond the hold TTL, an INVALID group no longer holds the history, but it
+  // must NOT fragment identity either (no fresh history is spawned).
+  auto late = input(2.6, HookLoadSignalRole::REQUIRED, true,
+                    HookLoadState::LOADED, 0.0, 0.4);
+  late.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::INVALID;
+  const auto after = authority.update(late);
+  ASSERT_EQ(after.group_diagnostics.size(), 1U);
+  EXPECT_NE(after.group_diagnostics.front().association,
+            CargoCandidateAssociationState::RECOVERY_HOLD);
+  EXPECT_EQ(after.group_diagnostics.front().matched_history_id, 0U);
 }
 
 TEST(CargoPhysicalIdentityAuthorityTest,
