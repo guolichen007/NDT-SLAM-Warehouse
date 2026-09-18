@@ -15904,13 +15904,12 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
                 hook_lock_.live_pose.position_uncertainty_m +
                 hook_lock_.horizontal_tracking_residual_m);
     } else if (!hook_lock_.provisional_observations.empty()) {
-        const CargoCandidateDescriptor& previous =
-            hook_lock_.provisional_observations.back();
-        identity_context.predicted_track_valid = true;
-        b3a_predicted_source = 2;  // PROVISIONAL
-        identity_context.predicted_center = previous.center;
-        identity_context.predicted_size = previous.size;
-        identity_context.predicted_yaw_rad = previous.yaw_rad;
+        // PROVISIONAL: the previous-frame selected candidate must NOT grant
+        // predicted ranking authority (self-reference loop).  Provisional
+        // observations still accumulate for multi-frame consistency and formal
+        // lock, but current candidates are ranked with current-frame-independent
+        // evidence only (predicted_track_valid stays false).
+        b3a_predicted_source = 2;  // PROVISIONAL (non-predicted)
         identity_context.association_radius_m =
             hook_lock_config_.lock_max_center_step_m;
     } else if (retired_cargo_signature_valid_ &&
