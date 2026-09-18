@@ -487,6 +487,17 @@ struct CargoPhysicalIdentityDecision {
   int formal_lift_confirm_count = 0;
   bool formal_lift_confirmed = false;
   bool formal_lift_boundary_authorized = false;
+  // OWNERLESS current vertical recovery (NO_CURRENT_OWNER only).
+  bool ownerless_recovery_attempted = false;
+  bool ownerless_recovery_valid = false;
+  double ownerless_recovery_top_z = std::numeric_limits<double>::quiet_NaN();
+  double ownerless_recovery_uncertainty =
+      std::numeric_limits<double>::quiet_NaN();
+  std::size_t ownerless_recovery_raw_points = 0U;
+  std::size_t ownerless_recovery_owner_cells = 0U;
+  double ownerless_recovery_anchor_age =
+      std::numeric_limits<double>::quiet_NaN();
+  std::string ownerless_recovery_reject_reason = "not_evaluated";
   // Diagnostic Surface Reference Lock (Phase A counterfactual).
   bool ref_lock_frozen = false;
   std::string ref_lock_phase = "NONE";
@@ -707,6 +718,12 @@ class CargoPhysicalIdentityAuthority {
     // do NOT reset precluster_lift_confirm_count; they only gate it by
     // maximum_observation_gap_sec against this stamp.
     double last_positive_evidence_stamp = 0.0;
+    // Recent strict-owner GEOMETRY anchor for OWNERLESS current vertical
+    // recovery.  Updated when the strict current owner is valid (unambiguous,
+    // frozen-geometry compatible), and does NOT require a valid surface Z
+    // (which may be wrong due to ranker selection).  The ownerless recovery
+    // must never refresh this anchor (prevents chaining across a 0.50s gap).
+    double last_strict_owner_stamp = 0.0;
     std::size_t postload_history_id_change_count = 0U;
     std::size_t postload_valid_v31_after_split = 0U;
     std::size_t significant_frames_after_split = 0U;

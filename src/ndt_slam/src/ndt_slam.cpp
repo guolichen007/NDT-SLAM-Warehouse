@@ -15096,6 +15096,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "postload_vertical_valid,postload_authorized_owner_cells,"
                 << "formal_lift_lock_active,formal_lift_confirm_count,"
                 << "formal_lift_confirmed,formal_lift_boundary_authorized,"
+                << "ownerless_recovery_valid,ownerless_recovery_top_z,"
+                << "ownerless_recovery_reject_reason,"
                 << "surface_reference_frozen,"
                 << "surface_reference_footprint_valid,surface_baseline_z,"
                 << "surface_baseline_uncertainty,current_surface_vertical_valid,"
@@ -15296,6 +15298,12 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                                .formal_lift_confirmed ? 1 : 0)
                 << ',' << (integrated_identity_decision_
                                .formal_lift_boundary_authorized ? 1 : 0)
+                << ',' << (integrated_identity_decision_
+                               .ownerless_recovery_valid ? 1 : 0)
+                << ',' << integrated_identity_decision_
+                               .ownerless_recovery_top_z
+                << ',' << integrated_identity_decision_
+                               .ownerless_recovery_reject_reason
                 << ',' << (diagnostic.surface_reference_frozen ? 1 : 0)
                 << ','
                 << (diagnostic.surface_reference_footprint_valid ? 1 : 0)
@@ -24336,6 +24344,8 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                 << "postload_vertical_valid,postload_authorized_owner_cells,"
                 << "formal_lift_lock_active,formal_lift_confirm_count,"
                 << "formal_lift_confirmed,formal_lift_boundary_authorized,"
+                << "ownerless_recovery_valid,ownerless_recovery_top_z,"
+                << "ownerless_recovery_reject_reason,"
                 << "surface_reference_frozen,"
                 << "surface_reference_footprint_valid,surface_baseline_z,"
                 << "surface_baseline_uncertainty,current_surface_vertical_valid,"
@@ -24453,6 +24463,11 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
             << ','
             << (integrated_identity_decision_.formal_lift_boundary_authorized
                     ? 1 : 0) << ','
+            << (integrated_identity_decision_.ownerless_recovery_valid ? 1 : 0)
+            << ','
+            << integrated_identity_decision_.ownerless_recovery_top_z << ','
+            << integrated_identity_decision_.ownerless_recovery_reject_reason
+            << ','
             << (integrated_identity_decision_.surface_reference_frozen
                     ? 1 : 0) << ','
             << (integrated_identity_decision_.surface_reference_footprint_valid
@@ -25036,6 +25051,18 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
                 observation.current_top_z_base =
                     current_top_evidence.top_z_base;
             }
+        }
+        // OWNERLESS current vertical recovery: when the strict logical owner
+        // vanished (NO_CURRENT_OWNER) but the frozen owner cells still hold the
+        // Cargo surface, use the recovered current top for the absolute
+        // current-frame bottom.  It only supplies a current top; identity, lift
+        // and Bottom source priority are untouched.
+        if (integrated_identity_decision_.ownerless_recovery_valid &&
+            std::isfinite(integrated_identity_decision_.ownerless_recovery_top_z)) {
+            observation.current_top_valid = true;
+            observation.current_top_support_valid = true;
+            observation.current_top_z_base = static_cast<float>(
+                integrated_identity_decision_.ownerless_recovery_top_z);
         }
         const bool origin_height_matches_track = cargo_origin_height_valid_ &&
             cargo_origin_height_track_id_ == cargo_fusion_track_id_;

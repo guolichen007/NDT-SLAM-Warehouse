@@ -1106,6 +1106,87 @@ OwnerLockedSurfaceResult computePreClusterSurfaceVertical(
   return result;
 }
 
+// OWNERLESS current vertical recovery.  When the strict logical owner cannot
+// be reconstructed (NO_CURRENT_OWNER) but the raw range still holds the Cargo
+// surface inside the frozen owner cells, this measures the current top Z so
+// the Bottom's DIRECT_TOP_FROZEN_THICKNESS can keep an absolute current-frame
+// bottom instead of falling back to a stale low height.  It never produces an
+// owner, identity, or lift evidence, and never refreshes the strict anchor
+// (so it cannot chain across a 0.50s owner gap).
+struct OwnerlessCurrentVerticalEvidence {
+  bool valid = false;
+  double top_z_base = std::numeric_limits<double>::quiet_NaN();
+  double uncertainty_m = std::numeric_limits<double>::quiet_NaN();
+  std::size_t raw_points_used = 0U;
+  std::size_t owner_cells_used = 0U;
+  double anchor_age_sec = std::numeric_limits<double>::quiet_NaN();
+  double source_stamp_sec = 0.0;
+  std::string reject_reason = "not_evaluated";
+};
+
+OwnerlessCurrentVerticalEvidence recoverOwnerlessCurrentVertical(
+    const CargoShadowFrameEvidence& frame,
+    const CargoFootprintSnapshot& frozen_footprint,
+    const std::vector<CargoFootprintGridIndex>& frozen_owner_cells,
+    double last_strict_owner_stamp,
+    double preload_baseline_top,
+    double load_edge_stamp,
+    const CargoVerticalEvidenceConfig& config,
+    double maximum_observation_gap_sec,
+    double maximum_z_speed_mps,
+    double z_step_margin_m) {
+  OwnerlessCurrentVerticalEvidence result;
+  result.source_stamp_sec = frame.source_stamp_sec;
+  if (!frozen_footprint.valid || frozen_owner_cells.empty() ||
+      !frame.range_cloud_current_frame ||
+      !std::isfinite(frame.source_stamp_sec) ||
+      frame.source_stamp_sec <= 0.0) {
+    result.reject_reason = "NO_RANGE_OR_FROZEN_REFERENCE";
+    return result;
+  }
+  // Recent strict-owner GEOMETRY anchor: proves the Cargo's current-frame owner
+  // was recently present.  It does NOT require a valid surface Z.
+  const double owner_age = frame.source_stamp_sec - last_strict_owner_stamp;
+  result.anchor_age_sec = owner_age;
+  if (last_strict_owner_stamp <= 0.0 || owner_age < 0.0 ||
+      owner_age > maximum_observation_gap_sec) {
+    result.reject_reason = "OWNERLESS_RECOVERY_STALE_ANCHOR";
+    return result;
+  }
+  // Measure the current surface strictly inside the frozen owner cells; static
+  // conflict filtering and the existing vertical estimator still apply.
+  const OwnerLockedSurfaceResult surface = computePreClusterSurfaceVertical(
+      frame, frozen_footprint, config, nullptr, &frozen_owner_cells);
+  if (!surface.valid || !std::isfinite(surface.surface_z)) {
+    result.reject_reason = "OWNERLESS_RECOVERY_SURFACE_INVALID:" +
+        surface.reject_reason;
+    return result;
+  }
+  result.raw_points_used = surface.raw_points_measured;
+  result.owner_cells_used = surface.authorized_cells;
+  // Reject-only kinematic envelope from the immutable preload reference and the
+  // actual load edge (NOT from the possibly-wrong strict surface Z): reject an
+  // impossible upward jump (e.g. a ceiling).  A downward surface is always
+  // accepted (never held high), so Safety keeps shrinking clearance.
+  const double elapsed = frame.source_stamp_sec - load_edge_stamp;
+  if (elapsed < 0.0) {
+    result.reject_reason = "OWNERLESS_RECOVERY_BEFORE_LOAD_EDGE";
+    return result;
+  }
+  const double maximum_physical_top = preload_baseline_top +
+      maximum_z_speed_mps * elapsed + z_step_margin_m +
+      surface.surface_uncertainty;
+  if (surface.surface_z > maximum_physical_top) {
+    result.reject_reason = "OWNERLESS_RECOVERY_KINEMATIC_HIGH";
+    return result;
+  }
+  result.valid = true;
+  result.top_z_base = surface.surface_z;
+  result.uncertainty_m = surface.surface_uncertainty;
+  result.reject_reason = "ownerless_recovery_valid";
+  return result;
+}
+
 int requiredFrames(HookLoadSignalRole role, bool gravity_valid,
                    HookLoadState gravity_state, int base) {
   if (role != HookLoadSignalRole::AUXILIARY) return std::max(1, base);
@@ -3703,6 +3784,12 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         double precluster_uncertainty =
             std::numeric_limits<double>::quiet_NaN();
         std::string precluster_reason = "NO_CURRENT_OWNER";
+        // Update the recent strict-owner GEOMETRY anchor from a valid (unique)
+        // current owner.  This does NOT require a valid surface Z (which may be
+        // wrong).  The ownerless recovery never refreshes this anchor.
+        if (logical_owner.valid) {
+          lock.last_strict_owner_stamp = input.pipeline_stamp_sec;
+        }
         if (logical_owner.valid && logical_owner.current_footprint.valid) {
           std::vector<Eigen::Vector3f> competing_points;
           for (std::size_t other = 0U; other < input.groups.size(); ++other) {
@@ -3733,6 +3820,32 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
               pc.static_rejected_points;
           decision_.precluster_static_context_valid =
               input.frame_evidence.static_conflict_context_valid;
+        } else if (!logical_owner.valid && !logical_owner.ambiguous &&
+                   formal_lift_boundary_authorized_ && gravity_loaded) {
+          // OWNERLESS current vertical recovery: the strict owner vanished
+          // (NO_CURRENT_OWNER), but the raw range may still hold the Cargo
+          // surface inside the frozen owner cells.  This only produces a
+          // current top measurement; it never creates an owner, identity, or
+          // lift evidence.
+          const OwnerlessCurrentVerticalEvidence recovery =
+              recoverOwnerlessCurrentVertical(
+                  input.frame_evidence, lock.frozen_footprint,
+                  lock.frozen_owner_cells,
+                  lock.last_strict_owner_stamp,
+                  lock.baseline_z,
+                  formal_lift_load_edge_stamp_sec_,
+                  input.vertical_config,
+                  config_.maximum_observation_gap_sec,
+                  config_.maximum_z_speed_mps,
+                  config_.z_step_margin_m);
+          decision_.ownerless_recovery_attempted = true;
+          decision_.ownerless_recovery_valid = recovery.valid;
+          decision_.ownerless_recovery_top_z = recovery.top_z_base;
+          decision_.ownerless_recovery_uncertainty = recovery.uncertainty_m;
+          decision_.ownerless_recovery_raw_points = recovery.raw_points_used;
+          decision_.ownerless_recovery_owner_cells = recovery.owner_cells_used;
+          decision_.ownerless_recovery_anchor_age = recovery.anchor_age_sec;
+          decision_.ownerless_recovery_reject_reason = recovery.reject_reason;
         }
         decision_.precluster_surface_z = precluster_z;
         decision_.precluster_reject_reason = precluster_reason;
