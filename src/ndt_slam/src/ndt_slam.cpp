@@ -18933,6 +18933,7 @@ void NdtSlamNode::updateHookCargoLock(
                     << "production_owner_generation,"
                     << "production_owner_original_history_id,"
                     << "production_owner_handoff_count,"
+                    << "production_owner_fresh_measurement_valid,"
                     << "production_owner_lock_generation,"
                     << "production_owner_measurement_fresh,"
                     << "production_owner_last_fresh_stamp_sec\n";
@@ -18983,6 +18984,7 @@ void NdtSlamNode::updateHookCargoLock(
                 << integrated_identity_decision_.production_owner_generation << ','
                 << integrated_identity_decision_.production_owner_original_history_id << ','
                 << integrated_identity_decision_.production_owner_handoff_count << ','
+                << (integrated_identity_decision_.production_owner_fresh_measurement_valid ? 1 : 0) << ','
                 << hook_lock_.production_owner_lock_generation << ','
                 << (hook_lock_.production_owner_measurement_fresh ? 1 : 0) << ','
                 << hook_lock_.production_owner_last_fresh_stamp_sec << '\n';
