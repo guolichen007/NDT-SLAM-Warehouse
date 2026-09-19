@@ -3628,16 +3628,19 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       const CargoPhysicalGroupDescriptor* successor_descriptor = nullptr;
       const bool continuity_available =
           production_owner_lock_.last_fresh_descriptor.valid;
-      for (const History* successor : fresh_confirmed) {
-        if (successor->id == production_owner_lock_.active_history_id) {
+      for (const History& successor : histories_) {
+        if (successor.id == production_owner_lock_.active_history_id) {
           continue;
         }
-        if (successor->physical_cargo_epoch_id != physical_cargo_epoch_id_) {
+        // The successor must have already reached lift confirmation under the
+        // existing authority (no lowered VALIDATED standard).
+        if (!successor.lift_confirmed) continue;
+        if (successor.physical_cargo_epoch_id != physical_cargo_epoch_id_) {
           continue;
         }
         const CargoPhysicalGroupDiagnostic* successor_diag = nullptr;
         for (std::size_t gi = 0; gi < group_history_ids.size(); ++gi) {
-          if (group_history_ids[gi] == successor->id &&
+          if (group_history_ids[gi] == successor.id &&
               decision_.group_diagnostics[gi].association ==
                   CargoCandidateAssociationState::MATCHED) {
             successor_diag = &decision_.group_diagnostics[gi];
@@ -3652,7 +3655,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
               successor_diag->lineage_exact_path_won;
           if (!continuous) continue;
         }
-        successor_id = successor->id;
+        successor_id = successor.id;
         successor_descriptor = &successor_diag->descriptor;
         ++successor_count;
       }
