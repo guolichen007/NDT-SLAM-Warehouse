@@ -18477,12 +18477,15 @@ void NdtSlamNode::updateHookCargoLock(
         bool owner_vertical_authorized = true;
         HookCargoBottomEstimate owner_bottom = bottom;
         if (hook_lock_.production_owner_history_id != 0U) {
-            // Guard: the immutable owner must never switch after latch. A
-            // mismatch here is a wiring regression, never normal operation.
+            // Guard: the immutable PHYSICAL owner generation must never switch
+            // after latch.  Only a generation change counts as a switch; the
+            // active_history_id handoff is a legitimate observation-binding
+            // change and must NOT be reported as an owner switch.
             if (integrated_identity_decision_.production_owner_locked &&
-                integrated_identity_decision_.production_owner_history_id != 0U &&
-                integrated_identity_decision_.production_owner_history_id !=
-                    hook_lock_.production_owner_history_id) {
+                hook_lock_.production_owner_lock_generation != 0U &&
+                integrated_identity_decision_.production_owner_generation != 0U &&
+                integrated_identity_decision_.production_owner_generation !=
+                    hook_lock_.production_owner_lock_generation) {
                 owner_switch_after_lock_count_.fetch_add(
                     1U, std::memory_order_relaxed);
             }
