@@ -3579,21 +3579,97 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         : "cargo_existence_not_proven";
   }
 
-  // Production owner lock latch.  VALIDATED promotes the unique physical
-  // history to an immutable owner for the epoch.  The latch fires ONLY on the
-  // first validation; a later UNKNOWN / AMBIGUOUS / different-validated frame
-  // must NOT switch the owner.  The lock is cleared only by reset()/rearm/
-  // epoch-end/unload, never by a transient frame or a competing candidate.
+  // Production owner lock latch + OWNER_FRAGMENT_HANDOFF.  VALIDATED promotes
+  // the unique physical cargo to an immutable PHYSICAL_OWNER_GENERATION for
+  // the epoch.  The latch fires ONLY on the first validation; a later UNKNOWN /
+  // AMBIGUOUS / different-validated frame must NOT switch the physical owner.
+  // The active observation history id is deliberately decoupled from the
+  // physical owner: D5 may split one confirmed cargo into several observation
+  // fragments, and active_history_id may handoff to a successor fragment only
+  // under the strict same-object contract (same epoch, unique VALIDATED
+  // successor, temporal continuity).  OWNER_SWITCH_AFTER_LOCK counts physical
+  // generation changes only, never legitimate observation handoff.
   if (decision_.identity == CargoPhysicalIdentityState::VALIDATED &&
       validated_history_id_ != 0U && !production_owner_lock_.valid) {
     production_owner_lock_.valid = true;
-    production_owner_lock_.locked_history_id = validated_history_id_;
+    production_owner_lock_.physical_owner_generation = next_lock_generation_++;
+    production_owner_lock_.original_history_id = validated_history_id_;
+    production_owner_lock_.active_history_id = validated_history_id_;
     production_owner_lock_.lock_stamp_sec = input.pipeline_stamp_sec;
-    production_owner_lock_.lock_generation = next_lock_generation_++;
+    production_owner_lock_.lock_generation =
+        production_owner_lock_.physical_owner_generation;
+    production_owner_lock_.history_handoff_count = 0U;
+  }
+  if (production_owner_lock_.valid) {
+    // Resolve the active owner's fresh STRONG_MATCH group this frame.
+    const CargoPhysicalGroupDiagnostic* active_diag = nullptr;
+    for (std::size_t gi = 0; gi < group_history_ids.size(); ++gi) {
+      if (group_history_ids[gi] == production_owner_lock_.active_history_id &&
+          decision_.group_diagnostics[gi].association ==
+              CargoCandidateAssociationState::MATCHED) {
+        active_diag = &decision_.group_diagnostics[gi];
+        break;
+      }
+    }
+    if (active_diag != nullptr) {
+      production_owner_lock_.last_fresh_owner_stamp_sec =
+          input.pipeline_stamp_sec;
+      production_owner_lock_.last_fresh_descriptor = active_diag->descriptor;
+    } else {
+      // OWNER_FRAGMENT_HANDOFF: the active observation fragment has no fresh
+      // measurement this frame.  Find a unique same-object successor among the
+      // current VALIDATED / fresh_confirmed histories.
+      std::uint64_t successor_id = 0U;
+      int successor_count = 0;
+      const CargoPhysicalGroupDescriptor* successor_descriptor = nullptr;
+      const bool continuity_available =
+          production_owner_lock_.last_fresh_descriptor.valid;
+      for (const History* successor : fresh_confirmed) {
+        if (successor->id == production_owner_lock_.active_history_id) {
+          continue;
+        }
+        if (successor->physical_cargo_epoch_id != physical_cargo_epoch_id_) {
+          continue;
+        }
+        const CargoPhysicalGroupDiagnostic* successor_diag = nullptr;
+        for (std::size_t gi = 0; gi < group_history_ids.size(); ++gi) {
+          if (group_history_ids[gi] == successor->id &&
+              decision_.group_diagnostics[gi].association ==
+                  CargoCandidateAssociationState::MATCHED) {
+            successor_diag = &decision_.group_diagnostics[gi];
+            break;
+          }
+        }
+        if (successor_diag == nullptr) continue;
+        if (continuity_available) {
+          const bool continuous = hasPositiveAreaSupportOverlap(
+              production_owner_lock_.last_fresh_descriptor,
+              successor_diag->descriptor) ||
+              successor_diag->lineage_exact_path_won;
+          if (!continuous) continue;
+        }
+        successor_id = successor->id;
+        successor_descriptor = &successor_diag->descriptor;
+        ++successor_count;
+      }
+      if (successor_count == 1) {
+        production_owner_lock_.active_history_id = successor_id;
+        ++production_owner_lock_.history_handoff_count;
+        production_owner_lock_.last_fresh_owner_stamp_sec =
+            input.pipeline_stamp_sec;
+        production_owner_lock_.last_fresh_descriptor = *successor_descriptor;
+      }
+    }
   }
   decision_.production_owner_locked = production_owner_lock_.valid;
   decision_.production_owner_history_id =
-      production_owner_lock_.locked_history_id;
+      production_owner_lock_.active_history_id;
+  decision_.production_owner_generation =
+      production_owner_lock_.physical_owner_generation;
+  decision_.production_owner_original_history_id =
+      production_owner_lock_.original_history_id;
+  decision_.production_owner_handoff_count =
+      production_owner_lock_.history_handoff_count;
   decision_.production_owner_lock_generation =
       production_owner_lock_.lock_generation;
   decision_.production_owner_lock_stamp_sec =

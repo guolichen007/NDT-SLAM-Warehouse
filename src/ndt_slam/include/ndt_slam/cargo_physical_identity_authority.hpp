@@ -433,9 +433,13 @@ struct CargoPhysicalIdentityDecision {
   bool strict_lidar_existence_path = false;
   std::uint64_t physical_history_id = 0U;
   // Immutable production owner lock (see ProductionOwnerLock).  Once locked,
-  // production consumes this fixed owner identity; it never silently switches.
+  // the PHYSICAL owner generation never switches; only the active observation
+  // history id may handoff under the strict OWNER_FRAGMENT_HANDOFF contract.
   bool production_owner_locked = false;
-  std::uint64_t production_owner_history_id = 0U;
+  std::uint64_t production_owner_history_id = 0U;  // == active_history_id
+  std::uint64_t production_owner_generation = 0U;
+  std::uint64_t production_owner_original_history_id = 0U;
+  std::uint64_t production_owner_handoff_count = 0U;
   std::uint64_t production_owner_lock_generation = 0U;
   double production_owner_lock_stamp_sec = 0.0;
   std::uint64_t frame_group_id = 0U;
@@ -742,15 +746,28 @@ class CargoPhysicalIdentityAuthority {
   static constexpr std::size_t kMaximumLineageProvenanceFrames = 3U;
 
   // Immutable production owner lock.  Once VALIDATED promotes a physical
-  // history to LOCKED, its identity is fixed for the lock lifecycle: a later
-  // "more attractive" candidate may NOT silently switch the owner.  It is
-  // cleared only by explicit reset / rearm / physical-epoch-end / unload —
-  // never by a transient ambiguous or INVALID frame.
+  // cargo to an owner, its PHYSICAL_OWNER_GENERATION is fixed for the lock
+  // lifecycle: a later "more attractive" candidate may NOT silently switch
+  // the physical owner.  It is cleared only by explicit reset / rearm /
+  // physical-epoch-end / unload — never by a transient ambiguous or INVALID
+  // frame.
+  //
+  // The physical owner identity is deliberately NOT the ephemeral history id.
+  // D5 component clustering may split one confirmed cargo into several
+  // observation fragments (history 203 -> 138 -> 130 ...).  The immutable
+  // physical_owner_generation stays fixed while active_history_id may handoff
+  // to a successor fragment only under the strict OWNER_FRAGMENT_HANDOFF
+  // contract (same epoch, unique VALIDATED successor, temporal continuity).
   struct ProductionOwnerLock {
     bool valid = false;
-    std::uint64_t locked_history_id = 0U;
+    std::uint64_t physical_owner_generation = 0U;
+    std::uint64_t original_history_id = 0U;
+    std::uint64_t active_history_id = 0U;
     std::uint64_t lock_generation = 0U;
     double lock_stamp_sec = 0.0;
+    std::uint64_t history_handoff_count = 0U;
+    double last_fresh_owner_stamp_sec = 0.0;
+    CargoPhysicalGroupDescriptor last_fresh_descriptor;
   };
 
   CargoPhysicalIdentityConfig config_;

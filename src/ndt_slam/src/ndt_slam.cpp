@@ -18944,6 +18944,9 @@ void NdtSlamNode::updateHookCargoLock(
                     << "selected_center_x,selected_center_y,selected_center_z,"
                     << "selected_size_x,selected_size_y,selected_size_z,selected_point_count,"
                     << "production_owner_locked,production_owner_history_id,"
+                    << "production_owner_generation,"
+                    << "production_owner_original_history_id,"
+                    << "production_owner_handoff_count,"
                     << "production_owner_lock_generation,"
                     << "production_owner_measurement_fresh,"
                     << "production_owner_last_fresh_stamp_sec\n";
@@ -18991,6 +18994,9 @@ void NdtSlamNode::updateHookCargoLock(
                 << (det.core_points_base ? det.core_points_base->size() : 0U) << ','
                 << (integrated_identity_decision_.production_owner_locked ? 1 : 0) << ','
                 << hook_lock_.production_owner_history_id << ','
+                << integrated_identity_decision_.production_owner_generation << ','
+                << integrated_identity_decision_.production_owner_original_history_id << ','
+                << integrated_identity_decision_.production_owner_handoff_count << ','
                 << hook_lock_.production_owner_lock_generation << ','
                 << (hook_lock_.production_owner_measurement_fresh ? 1 : 0) << ','
                 << hook_lock_.production_owner_last_fresh_stamp_sec << '\n';

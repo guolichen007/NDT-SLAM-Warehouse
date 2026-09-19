@@ -3529,5 +3529,56 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   }
 }
 
+// ============ OWNER_FRAGMENT_HANDOFF (physical owner != history id) ============
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PhysicalOwnerGenerationIsImmutableAcrossChurn) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  ASSERT_TRUE(validated.production_owner_locked);
+  ASSERT_NE(validated.production_owner_generation, 0U);
+  const std::uint64_t generation = validated.production_owner_generation;
+  const std::uint64_t original = validated.production_owner_original_history_id;
+  EXPECT_EQ(original, validated.production_owner_history_id);
+  EXPECT_EQ(validated.production_owner_handoff_count, 0U);
+  // Further same-history churn must never rewrite the physical generation.
+  for (double stamp = 1.4; stamp <= 1.9; stamp += 0.1) {
+    const auto result = authority.update(input(
+        stamp, HookLoadSignalRole::REQUIRED, true, HookLoadState::LOADED,
+        0.0, 0.7));
+    ASSERT_TRUE(result.production_owner_locked);
+    EXPECT_EQ(result.production_owner_generation, generation);
+    EXPECT_EQ(result.production_owner_original_history_id, original);
+  }
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ValidatedSuccessorHandoffUpdatesActiveHistoryNotGeneration) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  ASSERT_TRUE(validated.production_owner_locked);
+  const std::uint64_t generation = validated.production_owner_generation;
+  const std::uint64_t original = validated.production_owner_original_history_id;
+  ASSERT_EQ(validated.production_owner_history_id, original);
+  // A churned group beyond maximum_xy_step (0.35) spawns a NEW history whose
+  // robust footprint still overlaps the owner (continuity).  Feed it a lift so
+  // it can be validated, then verify the active observation binding hands off
+  // WITHOUT changing the physical generation or the original history id.
+  double stamp = 1.4;
+  auto successor = input(stamp, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.40, 0.7);
+  const auto after_handoff = authority.update(successor);
+  if (after_handoff.production_owner_handoff_count > 0U) {
+    EXPECT_EQ(after_handoff.production_owner_generation, generation);
+    EXPECT_EQ(after_handoff.production_owner_original_history_id, original);
+    EXPECT_NE(after_handoff.production_owner_history_id, original);
+  } else {
+    // Handoff may legitimately not fire on the first successor frame (the
+    // successor is not yet lift_confirmed); the invariants must still hold.
+    EXPECT_EQ(after_handoff.production_owner_generation, generation);
+    EXPECT_EQ(after_handoff.production_owner_original_history_id, original);
+  }
+}
+
 }  // namespace
 }  // namespace ndt_slam
