@@ -17635,27 +17635,12 @@ FreshProductionOwnerMeasurement findFreshProductionOwnerMeasurement(
     const CargoPhysicalIdentityDecision& decision) {
     FreshProductionOwnerMeasurement out;
     if (!decision.production_owner_locked ||
-        decision.production_owner_history_id == 0U) {
+        decision.production_owner_history_id == 0U ||
+        !decision.production_owner_fresh_measurement_valid) {
         return out;
     }
-    const CargoPhysicalGroupDiagnostic* owner = nullptr;
-    for (const CargoPhysicalGroupDiagnostic& diag :
-         decision.group_diagnostics) {
-        if (diag.matched_history_id !=
-            decision.production_owner_history_id) {
-            continue;
-        }
-        if (owner != nullptr) return out;  // >1 group claims owner: ambiguous
-        owner = &diag;
-    }
-    if (owner == nullptr) return out;
-    out.association = owner->association;
-    if (owner->association != CargoCandidateAssociationState::MATCHED) {
-        // RECOVERY_HOLD / AMBIGUOUS / NEW_HISTORY: continuity-only or
-        // unconfirmed; it carries no fresh geometry authority.
-        return out;
-    }
-    const CargoPhysicalGroupDescriptor& d = owner->descriptor;
+    const CargoPhysicalGroupDescriptor& d =
+        decision.production_owner_fresh_descriptor;
     if (!d.robust_xy_center.allFinite() || !d.robust_xy_extent.allFinite() ||
         !d.stable_anchor.allFinite() ||
         !std::isfinite(d.physical_vertical_z) ||
@@ -17665,7 +17650,8 @@ FreshProductionOwnerMeasurement findFreshProductionOwnerMeasurement(
     }
     out.found = true;
     out.history_id = decision.production_owner_history_id;
-    out.measurement_stamp_sec = d.stamp_sec;
+    out.association = CargoCandidateAssociationState::MATCHED;
+    out.measurement_stamp_sec = decision.production_owner_fresh_measurement_stamp_sec;
     out.center_base = Eigen::Vector3d(
         d.robust_xy_center.x(), d.robust_xy_center.y(),
         d.stable_anchor.z());

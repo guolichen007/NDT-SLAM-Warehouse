@@ -3615,6 +3615,10 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       production_owner_lock_.last_fresh_owner_stamp_sec =
           input.pipeline_stamp_sec;
       production_owner_lock_.last_fresh_descriptor = active_diag->descriptor;
+      decision_.production_owner_fresh_measurement_valid = true;
+      decision_.production_owner_fresh_measurement_stamp_sec =
+          input.pipeline_stamp_sec;
+      decision_.production_owner_fresh_descriptor = active_diag->descriptor;
     } else {
       // OWNER_FRAGMENT_HANDOFF: the active observation fragment has no fresh
       // measurement this frame.  Find a unique same-object successor among the
@@ -3658,6 +3662,12 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         production_owner_lock_.last_fresh_owner_stamp_sec =
             input.pipeline_stamp_sec;
         production_owner_lock_.last_fresh_descriptor = *successor_descriptor;
+        decision_.production_owner_fresh_measurement_valid = true;
+        decision_.production_owner_fresh_measurement_stamp_sec =
+            input.pipeline_stamp_sec;
+        decision_.production_owner_fresh_descriptor = *successor_descriptor;
+      } else {
+        decision_.production_owner_fresh_measurement_valid = false;
       }
     }
   }

@@ -442,6 +442,13 @@ struct CargoPhysicalIdentityDecision {
   std::uint64_t production_owner_handoff_count = 0U;
   std::uint64_t production_owner_lock_generation = 0U;
   double production_owner_lock_stamp_sec = 0.0;
+  // The owner's CURRENT fresh physical measurement, resolved by the authority
+  // in the same update (no consumer-side group_diagnostics scan, no one-frame
+  // staleness).  Valid only when the owner has a fresh STRONG_MATCH this frame
+  // (or just handed off to a fresh successor).
+  bool production_owner_fresh_measurement_valid = false;
+  double production_owner_fresh_measurement_stamp_sec = 0.0;
+  CargoPhysicalGroupDescriptor production_owner_fresh_descriptor;
   std::uint64_t frame_group_id = 0U;
   std::uint64_t resolved_candidate_id = 0U;
   std::vector<std::uint64_t> resolved_member_component_ids;
