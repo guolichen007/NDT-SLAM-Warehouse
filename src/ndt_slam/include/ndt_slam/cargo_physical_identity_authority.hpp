@@ -410,6 +410,33 @@ LiftEvidenceClass classifyLiftEvidence(
     bool significant, bool owner_valid, bool owner_ambiguous,
     bool surface_valid) noexcept;
 
+// OWNER_CONTINUATION_GATE verdict.  Once a physical owner is locked, its active
+// observation history id may hand off to a successor fragment that is the SAME
+// already-confirmed cargo's next observation.  The successor does NOT re-prove
+// Cargo identity (no lift_confirmed / VALIDATED); it only proves bounded
+// same-object continuity with the last fresh owner measurement.  This is the
+// strict short-time physical contract that separates initial owner acquisition
+// (immutable) from locked-owner observation continuation (rebindable).
+struct OwnerContinuationVerdict {
+  bool eligible = false;
+  std::string reject_reason = "none";
+};
+
+// Pure, stateless continuity gate (exposed for direct unit testing).  Requires:
+//   TEMPORAL  dt in [0, history_hold_ttl_sec]
+//   VERTICAL  |delta_z| within maximum_z_speed_mps (existing Z gate)
+//   SHAPE     extentCompatible against maximum_size_relative_step
+//   BRIDGE    positive XY footprint overlap OR exact lineage continuity
+// It compares against the LAST FRESH owner descriptor, never a stale frozen
+// preload footprint.  It grants no Cargo identity and can only run once a
+// physical owner generation already exists.
+OwnerContinuationVerdict evaluateOwnerContinuation(
+    const CargoPhysicalGroupDescriptor& last_fresh_owner,
+    double last_fresh_owner_stamp_sec,
+    const CargoPhysicalGroupDescriptor& successor,
+    bool successor_lineage_exact_path_won,
+    const CargoPhysicalIdentityConfig& config);
+
 struct CargoPhysicalIdentityDecision {
   bool valid_input = false;
   bool cargo_exists = false;
@@ -440,6 +467,10 @@ struct CargoPhysicalIdentityDecision {
   std::uint64_t production_owner_generation = 0U;
   std::uint64_t production_owner_original_history_id = 0U;
   std::uint64_t production_owner_handoff_count = 0U;
+  // Per-frame flag: the OWNER_CONTINUATION_GATE found >1 eligible successors
+  // (fail-closed, no nearest-choose).  Cumulative count mirrors the lock.
+  bool production_owner_handoff_ambiguous = false;
+  std::uint64_t production_owner_handoff_ambiguous_count = 0U;
   std::uint64_t production_owner_lock_generation = 0U;
   double production_owner_lock_stamp_sec = 0.0;
   // The owner's CURRENT fresh physical measurement, resolved by the authority
@@ -773,6 +804,7 @@ class CargoPhysicalIdentityAuthority {
     std::uint64_t lock_generation = 0U;
     double lock_stamp_sec = 0.0;
     std::uint64_t history_handoff_count = 0U;
+    std::uint64_t history_handoff_ambiguous_count = 0U;
     double last_fresh_owner_stamp_sec = 0.0;
     CargoPhysicalGroupDescriptor last_fresh_descriptor;
   };

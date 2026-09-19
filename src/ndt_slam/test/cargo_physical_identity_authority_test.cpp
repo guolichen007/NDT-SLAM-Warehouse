@@ -3574,10 +3574,202 @@ TEST(CargoPhysicalIdentityAuthorityTest,
     EXPECT_NE(after_handoff.production_owner_history_id, original);
   } else {
     // Handoff may legitimately not fire on the first successor frame (the
-    // successor is not yet lift_confirmed); the invariants must still hold.
+    // successor has no continuity evidence yet); the invariants must still hold.
     EXPECT_EQ(after_handoff.production_owner_generation, generation);
     EXPECT_EQ(after_handoff.production_owner_original_history_id, original);
   }
+}
+
+// ============ OWNER_CONTINUATION_GATE (pure continuity gate) ============
+// The successor no longer re-proves it is Cargo (no lift_confirmed).  These
+// tests exercise the strict short-time physical continuity contract directly.
+
+CargoPhysicalGroupDescriptor continuationDescriptor(
+    double stamp, double center_x, double extent_x, double extent_y,
+    double z) {
+  CargoPhysicalGroupDescriptor d;
+  d.valid = true;
+  d.stamp_sec = stamp;
+  d.stable_anchor = Eigen::Vector3d(center_x, 0.0, z);
+  d.aggregate_extent = Eigen::Vector3d(extent_x, extent_y, 0.4);
+  d.robust_x05 = center_x - 0.5 * extent_x;
+  d.robust_x95 = center_x + 0.5 * extent_x;
+  d.robust_y05 = -0.5 * extent_y;
+  d.robust_y95 = 0.5 * extent_y;
+  d.robust_xy_center = Eigen::Vector2d(center_x, 0.0);
+  d.robust_xy_extent = Eigen::Vector2d(extent_x, extent_y);
+  d.aggregate_point_support = 10U;
+  d.vertical_mode = CargoGroupVerticalMode::SUPPORTED_EVIDENCE;
+  d.physical_vertical_z = z;
+  d.vertical_uncertainty_m = 0.01;
+  return d;
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     OwnerContinuationAcceptsOverlappingSuccessor) {
+  const auto config = testConfig();
+  const auto last = continuationDescriptor(1.0, 0.0, 1.0, 1.0, 0.7);
+  const auto successor = continuationDescriptor(1.2, 0.2, 1.0, 1.0, 0.7);
+  const auto verdict = evaluateOwnerContinuation(last, 1.0, successor, false,
+                                                 config);
+  EXPECT_TRUE(verdict.eligible) << verdict.reject_reason;
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     OwnerContinuationAcceptsLineageWithoutOverlap) {
+  const auto config = testConfig();
+  // Successor center moved far enough that footprints no longer overlap, but
+  // exact lineage continuity still bridges the observation.
+  const auto last = continuationDescriptor(1.0, 0.0, 1.0, 1.0, 0.7);
+  const auto successor = continuationDescriptor(1.2, 2.0, 1.0, 1.0, 0.7);
+  const auto verdict = evaluateOwnerContinuation(last, 1.0, successor, true,
+                                                 config);
+  EXPECT_TRUE(verdict.eligible) << verdict.reject_reason;
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     OwnerContinuationRejectsTemporalGap) {
+  const auto config = testConfig();
+  const auto last = continuationDescriptor(1.0, 0.0, 1.0, 1.0, 0.7);
+  const auto successor = continuationDescriptor(2.5, 0.2, 1.0, 1.0, 0.7);
+  const auto verdict = evaluateOwnerContinuation(last, 1.0, successor, false,
+                                                 config);
+  EXPECT_FALSE(verdict.eligible);
+  EXPECT_EQ(verdict.reject_reason, "TEMPORAL_GAP_TOO_LARGE");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     OwnerContinuationRejectsBackwardsTime) {
+  const auto config = testConfig();
+  const auto last = continuationDescriptor(1.0, 0.0, 1.0, 1.0, 0.7);
+  const auto successor = continuationDescriptor(0.9, 0.2, 1.0, 1.0, 0.7);
+  const auto verdict = evaluateOwnerContinuation(last, 1.0, successor, false,
+                                                 config);
+  EXPECT_FALSE(verdict.eligible);
+  EXPECT_EQ(verdict.reject_reason, "TEMPORAL_BACKWARDS");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     OwnerContinuationRejectsVerticalRate) {
+  const auto config = testConfig();  // maximum_z_speed_mps = 5.0
+  const auto last = continuationDescriptor(1.0, 0.0, 1.0, 1.0, 0.7);
+  // 0.1 s and a 2.0 m jump far exceed the Z gate.
+  const auto successor = continuationDescriptor(1.1, 0.2, 1.0, 1.0, 2.7);
+  const auto verdict = evaluateOwnerContinuation(last, 1.0, successor, false,
+                                                 config);
+  EXPECT_FALSE(verdict.eligible);
+  EXPECT_EQ(verdict.reject_reason, "VERTICAL_RATE_EXCEEDED");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     OwnerContinuationRejectsExtentMismatch) {
+  const auto config = testConfig();  // maximum_size_relative_step = 0.60
+  const auto last = continuationDescriptor(1.0, 0.0, 1.0, 1.0, 0.7);
+  // Extent grows 4x (relative step 3.0) — far beyond the contract.
+  const auto successor = continuationDescriptor(1.1, 0.0, 4.0, 4.0, 0.7);
+  const auto verdict = evaluateOwnerContinuation(last, 1.0, successor, false,
+                                                 config);
+  EXPECT_FALSE(verdict.eligible);
+  EXPECT_EQ(verdict.reject_reason, "EXTENT_INCOMPATIBLE");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     OwnerContinuationRejectsNoBridge) {
+  const auto config = testConfig();
+  const auto last = continuationDescriptor(1.0, 0.0, 1.0, 1.0, 0.7);
+  // No footprint overlap and no lineage: continuity cannot be established.
+  const auto successor = continuationDescriptor(1.1, 3.0, 1.0, 1.0, 0.7);
+  const auto verdict = evaluateOwnerContinuation(last, 1.0, successor, false,
+                                                 config);
+  EXPECT_FALSE(verdict.eligible);
+  EXPECT_EQ(verdict.reject_reason, "NO_CONTINUITY_EVIDENCE");
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     OwnerContinuationRejectsNonFreshSuccessor) {
+  const auto config = testConfig();
+  const auto last = continuationDescriptor(1.0, 0.0, 1.0, 1.0, 0.7);
+  CargoPhysicalGroupDescriptor stale;
+  const auto verdict = evaluateOwnerContinuation(last, 1.0, stale, false,
+                                                 config);
+  EXPECT_FALSE(verdict.eligible);
+  EXPECT_EQ(verdict.reject_reason, "SUCCESSOR_NOT_FRESH");
+}
+
+// ============ OWNER_CONTINUATION_GATE (authority-level fail-closed) ============
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     HandoffRequiresExistingPhysicalOwnerGeneration) {
+  // Without a locked physical owner, no observation handoff may occur, and no
+  // fresh owner measurement may be produced.
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  authority.update(input(1.1, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.0, 0.4));
+  const auto decision = authority.update(input(
+      1.2, HookLoadSignalRole::REQUIRED, true, HookLoadState::LOADED, 0.0,
+      0.7));
+  EXPECT_FALSE(decision.production_owner_locked);
+  EXPECT_EQ(decision.production_owner_handoff_count, 0U);
+  EXPECT_FALSE(decision.production_owner_fresh_measurement_valid);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     UnvalidatedFragmentCannotCreatePhysicalOwner) {
+  // A fresh MATCHED observation that never reaches unique VALIDATED must not
+  // latch a physical owner — owner acquisition stays as strict as before.
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  authority.update(input(1.0, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  authority.update(input(1.1, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::EMPTY, 0.0, 0.4));
+  // Two LOADED frames are not enough to confirm lift (lift_confirm_frames=2),
+  // so identity never reaches VALIDATED and no owner is created.
+  authority.update(input(1.2, HookLoadSignalRole::REQUIRED, true,
+                         HookLoadState::LOADED, 0.0, 0.4));
+  const auto decision = authority.update(input(
+      1.3, HookLoadSignalRole::REQUIRED, true, HookLoadState::LOADED, 0.0,
+      0.7));
+  EXPECT_FALSE(decision.production_owner_locked);
+  EXPECT_EQ(decision.production_owner_history_id, 0U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     HandoffKeepsOriginalHistoryImmutable) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  ASSERT_TRUE(validated.production_owner_locked);
+  const std::uint64_t original = validated.production_owner_original_history_id;
+  const std::uint64_t generation = validated.production_owner_generation;
+  ASSERT_NE(original, 0U);
+  // Churn through several frames; original_history_id and generation never move.
+  for (double stamp = 1.4; stamp <= 2.0; stamp += 0.1) {
+    const auto result = authority.update(input(
+        stamp, HookLoadSignalRole::REQUIRED, true, HookLoadState::LOADED,
+        0.0, 0.7));
+    EXPECT_EQ(result.production_owner_original_history_id, original);
+    EXPECT_EQ(result.production_owner_generation, generation);
+  }
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     RecoveryHoldCannotBeHandoffSuccessor) {
+  CargoPhysicalIdentityAuthority authority(testConfig());
+  const auto validated = validateRequired(&authority);
+  ASSERT_TRUE(validated.production_owner_locked);
+  // A RECOVERY_HOLD group (INVALID vertical, held to the owner's history) is
+  // not MATCHED, so it can never act as a fresh successor and the owner's fresh
+  // measurement stays false.
+  auto held = input(1.4, HookLoadSignalRole::REQUIRED, true,
+                    HookLoadState::LOADED, 0.0, 0.7);
+  held.groups.front().descriptor.vertical_mode =
+      CargoGroupVerticalMode::INVALID;
+  const auto decision = authority.update(held);
+  ASSERT_EQ(decision.group_diagnostics.size(), 1U);
+  EXPECT_EQ(decision.group_diagnostics.front().association,
+            CargoCandidateAssociationState::RECOVERY_HOLD);
+  EXPECT_FALSE(decision.production_owner_fresh_measurement_valid);
 }
 
 }  // namespace

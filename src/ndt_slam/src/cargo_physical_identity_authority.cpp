@@ -1141,6 +1141,59 @@ LiftEvidenceClass classifyLiftEvidence(
   return LiftEvidenceClass::CONTRADICTORY;
 }
 
+OwnerContinuationVerdict evaluateOwnerContinuation(
+    const CargoPhysicalGroupDescriptor& last_fresh_owner,
+    double last_fresh_owner_stamp_sec,
+    const CargoPhysicalGroupDescriptor& successor,
+    bool successor_lineage_exact_path_won,
+    const CargoPhysicalIdentityConfig& config) {
+  OwnerContinuationVerdict verdict;
+  if (!successor.valid || !(successor.stamp_sec > 0.0) ||
+      !std::isfinite(successor.stamp_sec)) {
+    verdict.reject_reason = "SUCCESSOR_NOT_FRESH";
+    return verdict;
+  }
+  // (a) Bounded temporal continuity: reuse the existing recovery-hold lifetime;
+  // no new handoff TTL knob is introduced.
+  const double dt = successor.stamp_sec - last_fresh_owner_stamp_sec;
+  if (!(dt >= 0.0)) {
+    verdict.reject_reason = "TEMPORAL_BACKWARDS";
+    return verdict;
+  }
+  if (dt > config.history_hold_ttl_sec) {
+    verdict.reject_reason = "TEMPORAL_GAP_TOO_LARGE";
+    return verdict;
+  }
+  // (b) Kinematic continuity: vertical rate within the frozen Z gate.
+  if (std::isfinite(last_fresh_owner.physical_vertical_z) &&
+      std::isfinite(successor.physical_vertical_z)) {
+    const double z_limit = config.maximum_z_speed_mps * dt +
+        config.z_step_margin_m +
+        last_fresh_owner.vertical_uncertainty_m +
+        successor.vertical_uncertainty_m;
+    if (std::abs(successor.physical_vertical_z -
+                 last_fresh_owner.physical_vertical_z) > z_limit) {
+      verdict.reject_reason = "VERTICAL_RATE_EXCEEDED";
+      return verdict;
+    }
+  }
+  // (c) Shape continuity: extent within the existing contract.
+  if (!extentCompatible(last_fresh_owner.robust_xy_extent.cast<float>(),
+                        successor.robust_xy_extent.cast<float>(),
+                        config.maximum_size_relative_step)) {
+    verdict.reject_reason = "EXTENT_INCOMPATIBLE";
+    return verdict;
+  }
+  // (d) Identity bridge: recent footprint overlap OR exact lineage continuity.
+  if (!hasPositiveAreaSupportOverlap(last_fresh_owner, successor) &&
+      !successor_lineage_exact_path_won) {
+    verdict.reject_reason = "NO_CONTINUITY_EVIDENCE";
+    return verdict;
+  }
+  verdict.eligible = true;
+  return verdict;
+}
+
 const char* cargoCandidateAssociationStateName(
     CargoCandidateAssociationState state) noexcept {
   switch (state) {
@@ -3585,10 +3638,12 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
   // AMBIGUOUS / different-validated frame must NOT switch the physical owner.
   // The active observation history id is deliberately decoupled from the
   // physical owner: D5 may split one confirmed cargo into several observation
-  // fragments, and active_history_id may handoff to a successor fragment only
-  // under the strict same-object contract (same epoch, unique VALIDATED
-  // successor, temporal continuity).  OWNER_SWITCH_AFTER_LOCK counts physical
-  // generation changes only, never legitimate observation handoff.
+  // fragments, and active_history_id may handoff to a successor fragment ONLY
+  // under the OWNER_CONTINUATION_GATE (see evaluateOwnerContinuation).  The
+  // successor never re-proves it is Cargo; it only proves bounded same-object
+  // continuity with the last fresh owner measurement.  OWNER_SWITCH_AFTER_LOCK
+  // counts physical generation changes only, never legitimate observation
+  // handoff.
   if (decision_.identity == CargoPhysicalIdentityState::VALIDATED &&
       validated_history_id_ != 0U && !production_owner_lock_.valid) {
     production_owner_lock_.valid = true;
@@ -3599,6 +3654,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     production_owner_lock_.lock_generation =
         production_owner_lock_.physical_owner_generation;
     production_owner_lock_.history_handoff_count = 0U;
+    production_owner_lock_.history_handoff_ambiguous_count = 0U;
   }
   if (production_owner_lock_.valid) {
     // Resolve the active owner's fresh STRONG_MATCH group this frame.
@@ -3622,7 +3678,12 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     } else {
       // OWNER_FRAGMENT_HANDOFF: the active observation fragment has no fresh
       // measurement this frame.  Find a unique same-object successor among the
-      // current VALIDATED / fresh_confirmed histories.
+      // current fresh MATCHED groups.  The successor is NOT required to be
+      // lift_confirmed / VALIDATED — it is not competing to be "the Cargo",
+      // only proving it is the same already-confirmed cargo's next observation.
+      // Note: the world-static veto (Guard C) is enforced downstream at the
+      // Bottom vertical re-measurement, not here; a static-vetoed group still
+      // fails finiteDescriptor (invalid vertical) or is filtered at Bottom.
       std::uint64_t successor_id = 0U;
       int successor_count = 0;
       const CargoPhysicalGroupDescriptor* successor_descriptor = nullptr;
@@ -3632,9 +3693,6 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         if (successor.id == production_owner_lock_.active_history_id) {
           continue;
         }
-        // The successor must have already reached lift confirmation under the
-        // existing authority (no lowered VALIDATED standard).
-        if (!successor.lift_confirmed) continue;
         if (successor.physical_cargo_epoch_id != physical_cargo_epoch_id_) {
           continue;
         }
@@ -3648,13 +3706,17 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
           }
         }
         if (successor_diag == nullptr) continue;
-        if (continuity_available) {
-          const bool continuous = hasPositiveAreaSupportOverlap(
-              production_owner_lock_.last_fresh_descriptor,
-              successor_diag->descriptor) ||
-              successor_diag->lineage_exact_path_won;
-          if (!continuous) continue;
-        }
+        // Fresh finite unambiguous non-hold observation: MATCHED already
+        // excludes RECOVERY_HOLD and AMBIGUOUS.
+        if (!finiteDescriptor(successor_diag->descriptor)) continue;
+        if (!continuity_available) continue;  // fail-closed: cannot verify
+        const OwnerContinuationVerdict verdict = evaluateOwnerContinuation(
+            production_owner_lock_.last_fresh_descriptor,
+            production_owner_lock_.last_fresh_owner_stamp_sec,
+            successor_diag->descriptor,
+            successor_diag->lineage_exact_path_won,
+            config_);
+        if (!verdict.eligible) continue;
         successor_id = successor.id;
         successor_descriptor = &successor_diag->descriptor;
         ++successor_count;
@@ -3669,8 +3731,13 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         decision_.production_owner_fresh_measurement_stamp_sec =
             input.pipeline_stamp_sec;
         decision_.production_owner_fresh_descriptor = *successor_descriptor;
+        decision_.production_owner_handoff_ambiguous = false;
       } else {
         decision_.production_owner_fresh_measurement_valid = false;
+        if (successor_count > 1) {
+          ++production_owner_lock_.history_handoff_ambiguous_count;
+          decision_.production_owner_handoff_ambiguous = true;
+        }
       }
     }
   }
@@ -3683,6 +3750,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       production_owner_lock_.original_history_id;
   decision_.production_owner_handoff_count =
       production_owner_lock_.history_handoff_count;
+  decision_.production_owner_handoff_ambiguous_count =
+      production_owner_lock_.history_handoff_ambiguous_count;
   decision_.production_owner_lock_generation =
       production_owner_lock_.lock_generation;
   decision_.production_owner_lock_stamp_sec =
