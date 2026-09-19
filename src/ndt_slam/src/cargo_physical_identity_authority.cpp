@@ -2675,8 +2675,7 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       diagnostic.new_history_reason = "AMBIGUOUS";
       continue;
     }
-    const bool vertical_valid =
-        group.descriptor.vertical_mode != CargoGroupVerticalMode::INVALID;
+    if (!finiteDescriptor(group.descriptor)) continue;
 
     History* history = nullptr;
     if (group_match[gi] >= 0) {
@@ -2704,76 +2703,6 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         }
       }
     } else {
-      // RECOVERY_HOLD: a single recent, spatially-overlapping history may be
-      // held alive through a bounded INVALID / XY-extent-churn gap WITHOUT
-      // accumulating validation evidence.  Multiple candidates fail closed.
-      int recovery_history = -1;
-      int recovery_candidates = 0;
-      const double now_stamp = group.descriptor.stamp_sec;
-      for (std::size_t hi = 0; hi < histories_.size(); ++hi) {
-        const History& candidate = histories_[hi];
-        if (candidate.last_strong_match_stamp_sec <= 0.0) continue;
-        const double strong_age = now_stamp -
-            candidate.last_strong_match_stamp_sec;
-        if (strong_age < 0.0 || strong_age > config_.history_hold_ttl_sec) {
-          continue;
-        }
-        if (!hasPositiveAreaSupportOverlap(group.descriptor,
-                                           candidate.last_descriptor)) {
-          continue;
-        }
-        if (vertical_valid) {
-          const double dt = now_stamp - candidate.last_stamp_sec;
-          if (!(dt > 0.0) || dt > config_.maximum_observation_gap_sec) {
-            continue;
-          }
-          const double z_limit = config_.maximum_z_speed_mps * dt +
-              config_.z_step_margin_m +
-              group.descriptor.vertical_uncertainty_m +
-              candidate.last_descriptor.vertical_uncertainty_m;
-          if (std::abs(group.descriptor.physical_vertical_z -
-                       candidate.last_descriptor.physical_vertical_z) >
-              z_limit) {
-            continue;
-          }
-        }
-        recovery_history = static_cast<int>(hi);
-        ++recovery_candidates;
-      }
-      if (recovery_candidates > 1) {
-        frame_has_any_ambiguity = true;
-        diagnostic.association = CargoCandidateAssociationState::AMBIGUOUS;
-        diagnostic.association_mode = CargoPhysicalAssociationMode::NEW_HISTORY;
-        diagnostic.association_reject_reason = "RECOVERY_AMBIGUOUS";
-        diagnostic.new_history_reason = "RECOVERY_AMBIGUOUS";
-        continue;
-      }
-      if (recovery_history >= 0) {
-        history = &histories_[static_cast<std::size_t>(recovery_history)];
-        history->last_stamp_sec = now_stamp;
-        if (history->hold_start_stamp_sec <= 0.0 ||
-            history->hold_start_stamp_sec <
-                history->last_strong_match_stamp_sec) {
-          history->hold_start_stamp_sec = now_stamp;
-        }
-        diagnostic.association = CargoCandidateAssociationState::RECOVERY_HOLD;
-        diagnostic.association_mode =
-            CargoPhysicalAssociationMode::RECOVERY_HOLD;
-        diagnostic.association_reject_reason = "RECOVERY_HOLD";
-        diagnostic.new_history_reason = "RECOVERY_HOLD";
-        diagnostic.matched_history_id = history->id;
-        group_history_ids[gi] = history->id;
-        history->association_ambiguous = false;
-        continue;  // held frames never update geometry or accumulate evidence
-      }
-      if (!vertical_valid) {
-        // INVALID vertical with no recovery history must not fragment identity.
-        diagnostic.association = CargoCandidateAssociationState::NEW_HISTORY;
-        diagnostic.association_mode = CargoPhysicalAssociationMode::NEW_HISTORY;
-        diagnostic.association_reject_reason = "VERTICAL_INVALID";
-        diagnostic.new_history_reason = "VERTICAL_INVALID";
-        continue;
-      }
       histories_.push_back(History{});
       history = &histories_.back();
       history->id = next_history_id_++;
@@ -2850,10 +2779,6 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     history->last_descriptor = history_descriptor;
     history->last_representative_center = group.representative.center;
     history->last_stamp_sec = group.descriptor.stamp_sec;
-    // A MATCHED / newly-created history has just observed strong (or at least
-    // geometry-confirming) evidence; this is the timestamp RECOVERY_HOLD keys
-    // its bounded coast window from.  Held frames do NOT advance it.
-    history->last_strong_match_stamp_sec = group.descriptor.stamp_sec;
     LineageProvenanceSnapshot provenance;
     provenance.source_stamp_sec = group.descriptor.stamp_sec;
     provenance.component_ids = group_lineage[gi]
