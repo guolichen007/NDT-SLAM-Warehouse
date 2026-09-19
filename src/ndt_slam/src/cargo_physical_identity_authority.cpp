@@ -3689,6 +3689,20 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       const CargoPhysicalGroupDescriptor* successor_descriptor = nullptr;
       const bool continuity_available =
           production_owner_lock_.last_fresh_descriptor.valid;
+      // Temporal reference is the active owner's LAST OBSERVATION stamp (which
+      // advances during RECOVERY_HOLD), NOT the last fresh STRONG_MATCH stamp
+      // (which stalls while the fragment churns).  Using the stale fresh stamp
+      // would reject the very fragments the handoff is meant to bridge.
+      const History* active_history = nullptr;
+      for (const History& h : histories_) {
+        if (h.id == production_owner_lock_.active_history_id) {
+          active_history = &h;
+          break;
+        }
+      }
+      const double temporal_reference_stamp = active_history != nullptr
+          ? active_history->last_stamp_sec
+          : production_owner_lock_.last_fresh_owner_stamp_sec;
       for (const History& successor : histories_) {
         if (successor.id == production_owner_lock_.active_history_id) {
           continue;
@@ -3708,15 +3722,30 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
         if (successor_diag == nullptr) continue;
         // Fresh finite unambiguous non-hold observation: MATCHED already
         // excludes RECOVERY_HOLD and AMBIGUOUS.
-        if (!finiteDescriptor(successor_diag->descriptor)) continue;
-        if (!continuity_available) continue;  // fail-closed: cannot verify
+        if (!finiteDescriptor(successor_diag->descriptor)) {
+          decision_.production_owner_handoff_reject_reason =
+              "SUCCESSOR_NOT_FINITE";
+          ++decision_.production_owner_handoff_rejected_successors;
+          continue;
+        }
+        if (!continuity_available) {
+          decision_.production_owner_handoff_reject_reason =
+              "NO_LAST_FRESH_OWNER";
+          ++decision_.production_owner_handoff_rejected_successors;
+          continue;  // fail-closed: cannot verify continuity
+        }
         const OwnerContinuationVerdict verdict = evaluateOwnerContinuation(
             production_owner_lock_.last_fresh_descriptor,
-            production_owner_lock_.last_fresh_owner_stamp_sec,
+            temporal_reference_stamp,
             successor_diag->descriptor,
             successor_diag->lineage_exact_path_won,
             config_);
-        if (!verdict.eligible) continue;
+        if (!verdict.eligible) {
+          decision_.production_owner_handoff_reject_reason =
+              verdict.reject_reason;
+          ++decision_.production_owner_handoff_rejected_successors;
+          continue;
+        }
         successor_id = successor.id;
         successor_descriptor = &successor_diag->descriptor;
         ++successor_count;

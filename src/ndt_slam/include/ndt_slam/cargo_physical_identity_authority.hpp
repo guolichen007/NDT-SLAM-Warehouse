@@ -471,6 +471,10 @@ struct CargoPhysicalIdentityDecision {
   // (fail-closed, no nearest-choose).  Cumulative count mirrors the lock.
   bool production_owner_handoff_ambiguous = false;
   std::uint64_t production_owner_handoff_ambiguous_count = 0U;
+  // Forensic: last continuity-gate rejection reason and per-frame count of
+  // rejected successor candidates (diagnostic only, no authority).
+  std::string production_owner_handoff_reject_reason = "none";
+  std::size_t production_owner_handoff_rejected_successors = 0U;
   std::uint64_t production_owner_lock_generation = 0U;
   double production_owner_lock_stamp_sec = 0.0;
   // The owner's CURRENT fresh physical measurement, resolved by the authority
