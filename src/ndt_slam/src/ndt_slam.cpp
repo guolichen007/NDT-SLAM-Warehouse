@@ -14973,10 +14973,17 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
           static_obstacle_evidence_index_.config().cell_size_m;
       const float static_height_tol =
           static_obstacle_evidence_index_.config().height_tolerance_m;
-      const std::uint64_t map_gen =
-          frame_context->pose_identity.map_rebuild_generation;
+      // Static snapshot identity is bound to the static-evidence epoch, NOT the
+      // pose map_rebuild_generation.  The two are independent lifecycle domains:
+      // a source-time rollback advances map_rebuild_generation while the spatial
+      // static evidence (and its epoch) is deliberately preserved, so comparing
+      // the snapshot generation against map_rebuild_generation would wrongly
+      // fail-closed (and has: it kept static_conflict_context_valid=false for
+      // the whole replay).  Pose authority is validated separately below.
+      const std::uint64_t static_epoch =
+          static_evidence_epoch_.load(std::memory_order_acquire);
       const bool static_context_ok = static_snapshot != nullptr &&
-          static_snapshot->map_generation == map_gen &&
+          static_snapshot->map_generation == static_epoch &&
           static_snapshot->authority !=
               StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
       frame_evidence.static_conflict_context_valid = static_context_ok;
