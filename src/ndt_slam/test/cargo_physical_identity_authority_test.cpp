@@ -3930,5 +3930,48 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_EQ(bundles.front().member_component_ids.size(), 2U);
 }
 
+// ============ Canonical owner shape semantics (aggregate_extent vs L/W) ============
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     GroupDescriptorCarriesCanonicalLongShortAndYaw) {
+  // A Y-long cargo: canonical size x=LONG=1.77, y=SHORT=1.43, yaw=pi/2.  The
+  // descriptor must carry the canonical size/yaw (not derive L/W from the
+  // axis-aligned aggregate extent whose x/y are base-axis extents).
+  auto observation = candidate(10U, 1.0, 0.0, 0.7);
+  observation.size = Eigen::Vector3d(1.77, 1.43, 0.40);
+  observation.yaw_rad = 1.5707963267948966;  // pi/2
+  const auto groups = buildGroups({observation});
+  ASSERT_EQ(groups.size(), 1U);
+  EXPECT_TRUE(groups.front().descriptor.canonical_size.allFinite());
+  EXPECT_NEAR(groups.front().descriptor.canonical_size.x(), 1.77, 1e-9);
+  EXPECT_NEAR(groups.front().descriptor.canonical_size.y(), 1.43, 1e-9);
+  EXPECT_NEAR(groups.front().descriptor.yaw_rad, 1.5707963267948966, 1e-9);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     CanonicalLengthExceedsShortForYLongCargo) {
+  // A Y-long cargo must still satisfy canonical length >= short.  The axis
+  // extent (aggregate_extent) x/y may be inverted (x<y), but the canonical
+  // size.x/y is LONG/SHORT by construction.
+  auto observation = candidate(10U, 1.0, 0.0, 0.7);
+  observation.size = Eigen::Vector3d(1.77, 1.43, 0.40);
+  observation.yaw_rad = 1.5707963267948966;
+  const auto groups = buildGroups({observation});
+  ASSERT_EQ(groups.size(), 1U);
+  EXPECT_GE(groups.front().descriptor.canonical_size.x(),
+            groups.front().descriptor.canonical_size.y());
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     DefaultCandidateCanonicalSizeIsLongShort) {
+  // The default candidate() size (1.0, 0.8, 0.4) is already LONG/SHORT/HEIGHT.
+  const auto groups = buildGroups({candidate(10U, 1.0, 0.0, 0.7)});
+  ASSERT_EQ(groups.size(), 1U);
+  EXPECT_NEAR(groups.front().descriptor.canonical_size.x(), 1.0, 1e-9);
+  EXPECT_NEAR(groups.front().descriptor.canonical_size.y(), 0.8, 1e-9);
+  EXPECT_GE(groups.front().descriptor.canonical_size.x(),
+            groups.front().descriptor.canonical_size.y());
+}
+
 }  // namespace
 }  // namespace ndt_slam

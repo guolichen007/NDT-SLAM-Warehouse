@@ -204,7 +204,16 @@ struct CargoPhysicalGroupDescriptor {
   bool valid = false;
   double stamp_sec = 0.0;
   Eigen::Vector3d stable_anchor = Eigen::Vector3d::Zero();
+  // Axis-aligned base/world X/Y/Z bounding-box extent (maximum - minimum).
+  // This is NOT length/width/height: its x/y fields are base-axis extents and
+  // must never feed a "length >= width" invariant. Use canonical_size for that.
   Eigen::Vector3d aggregate_extent = Eigen::Vector3d::Zero();
+  // Canonical oriented size (x = LONG, y = SHORT, z = HEIGHT) and the OBB yaw,
+  // inherited from the current group's representative candidate (which is
+  // itself sourced from CargoOrientedFootprint.size_long_short). This is the
+  // only geometry that may drive a formal locked-shape length/width gate.
+  Eigen::Vector3d canonical_size = Eigen::Vector3d::Zero();
+  double yaw_rad = 0.0;
   double robust_x05 = std::numeric_limits<double>::quiet_NaN();
   double robust_x95 = std::numeric_limits<double>::quiet_NaN();
   double robust_y05 = std::numeric_limits<double>::quiet_NaN();

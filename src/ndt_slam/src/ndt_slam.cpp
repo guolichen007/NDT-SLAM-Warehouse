@@ -17675,7 +17675,13 @@ struct FreshProductionOwnerMeasurement {
     std::uint64_t history_id = 0U;
     double measurement_stamp_sec = 0.0;
     Eigen::Vector3d center_base = Eigen::Vector3d::Zero();
+    // Axis-aligned base X/Y/Z extent (diagnostics/continuity only; its x/y
+    // fields are base-axis extents, NOT length/width).
     Eigen::Vector3d size_base = Eigen::Vector3d::Zero();
+    // Canonical oriented size (x = LONG, y = SHORT, z = HEIGHT) and OBB yaw.
+    // This is the sole geometry that may feed the formal locked-shape gate.
+    Eigen::Vector3d canonical_size = Eigen::Vector3d::Zero();
+    double yaw_rad = 0.0;
     double top_z_base = std::numeric_limits<double>::quiet_NaN();
     double vertical_uncertainty_m =
         std::numeric_limits<double>::quiet_NaN();
@@ -17700,6 +17706,14 @@ FreshProductionOwnerMeasurement findFreshProductionOwnerMeasurement(
         !(d.aggregate_extent.array() > 0.0).all()) {
         return out;
     }
+    // Canonical geometry must be independently valid: finite, positive
+    // length/width/height, and a finite yaw. A missing/zero canonical size
+    // fails closed (never fall back to axis extent for the shape gate).
+    if (!d.canonical_size.allFinite() ||
+        !(d.canonical_size.array() > 0.0).all() ||
+        !std::isfinite(d.yaw_rad)) {
+        return out;
+    }
     out.found = true;
     out.history_id = decision.production_owner_history_id;
     out.association = CargoCandidateAssociationState::MATCHED;
@@ -17708,6 +17722,8 @@ FreshProductionOwnerMeasurement findFreshProductionOwnerMeasurement(
         d.robust_xy_center.x(), d.robust_xy_center.y(),
         d.stable_anchor.z());
     out.size_base = d.aggregate_extent;
+    out.canonical_size = d.canonical_size;
+    out.yaw_rad = d.yaw_rad;
     out.top_z_base = d.physical_vertical_z;
     out.vertical_uncertainty_m = d.vertical_uncertainty_m;
     return out;
@@ -18398,13 +18414,18 @@ void NdtSlamNode::updateHookCargoLock(
             hook_lock_.provisional_summary;
         const Eigen::Vector3f owner_center =
             owner_measurement.center_base.cast<float>();
+        // Canonical owner geometry (LONG / SHORT / HEIGHT), NOT the axis-aligned
+        // aggregate_extent whose x/y fields are base-axis extents.  The
+        // "length >= width" invariant is valid only for canonical size.
         const Eigen::Vector3f owner_size =
-            owner_measurement.size_base.cast<float>();
+            owner_measurement.canonical_size.cast<float>();
+        const float owner_yaw = quantizeCargoAxialYawToOrthogonal(
+            static_cast<float>(owner_measurement.yaw_rad));
         const float owner_top_z =
             static_cast<float>(owner_measurement.top_z_base);
         const bool owner_shape_valid =
             owner_center.allFinite() && owner_size.allFinite() &&
-            std::isfinite(owner_top_z) &&
+            std::isfinite(owner_top_z) && std::isfinite(owner_yaw) &&
             owner_size.x() >= odom_anchor_config_.min_size_x &&
             owner_size.y() >= odom_anchor_config_.min_size_y &&
             owner_size.z() >= odom_anchor_config_.min_size_z &&
@@ -18415,9 +18436,11 @@ void NdtSlamNode::updateHookCargoLock(
             ROS_ERROR_THROTTLE(
                 1.0,
                 "[CargoLock] owner formal transition rejected: "
-                "center=(%.3f,%.3f,%.3f) shape=(%.3f,%.3f,%.3f) top=%.3f",
+                "center=(%.3f,%.3f,%.3f) canonical_shape=(%.3f,%.3f,%.3f) "
+                "yaw=%.2f top=%.3f",
                 owner_center.x(), owner_center.y(), owner_center.z(),
-                owner_size.x(), owner_size.y(), owner_size.z(), owner_top_z);
+                owner_size.x(), owner_size.y(), owner_size.z(),
+                owner_yaw, owner_top_z);
             break;
         }
 
@@ -18427,11 +18450,11 @@ void NdtSlamNode::updateHookCargoLock(
         hook_lock_.locked_shape.length_m = owner_size.x();
         hook_lock_.locked_shape.width_m = owner_size.y();
         hook_lock_.locked_shape.height_m = owner_size.z();
-        // The authority's owner descriptor is an axis-aligned robust box
-        // (robust_x05/x95/y05/y95), so the locked yaw is axis-aligned by
-        // construction; it is never borrowed from the rank top-1 or the
-        // provisional median orientation.
-        hook_lock_.locked_shape.yaw_base_rad = 0.0F;
+        // The owner geometry is the canonical oriented OBB (size_long_short).
+        // Its yaw is quantized to the orthogonal axes (0 / ±π/2); a large
+        // cargo whose long axis lies along Y yields length>width with yaw≈π/2,
+        // which is a fully valid locked orientation.
+        hook_lock_.locked_shape.yaw_base_rad = owner_yaw;
         hook_lock_.locked_shape.orientation_confidence = 1.0F;
         hook_lock_.locked_shape.valid =
             hook_lock_.locked_shape.length_m >=

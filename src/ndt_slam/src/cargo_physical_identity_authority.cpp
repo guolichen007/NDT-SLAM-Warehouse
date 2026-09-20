@@ -1597,6 +1597,8 @@ std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
 
     CargoPhysicalGroupDescriptor& descriptor = group.descriptor;
     descriptor.stamp_sec = group.representative.stamp_sec;
+    descriptor.canonical_size = group.representative.size;
+    descriptor.yaw_rad = group.representative.yaw_rad;
     descriptor.aggregate_point_support = zs.size();
     double maximum_uncertainty = 0.0;
     for (const auto& hypothesis : group.hypotheses) {
