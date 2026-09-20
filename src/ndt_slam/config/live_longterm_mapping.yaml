@@ -1275,7 +1275,7 @@ odom_anchored_cargo_box:
   anchor_y: 0.0
 
   # 检测和 marker 降频
-  detect_rate_hz: 5.0
+  detect_rate_hz: 10.0
   marker_rate_hz: 5.0
 
   # debug 点云发布（默认关闭）
