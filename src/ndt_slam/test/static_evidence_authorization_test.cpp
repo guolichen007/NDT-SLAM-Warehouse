@@ -46,5 +46,47 @@ TEST(StaticEvidenceAuthorizationTest, FormalAuthoritiesEnableAllGates) {
   }
 }
 
+// Guard C static-conflict context identity is bound to the static-evidence
+// epoch, never to the pose map-rebuild generation. These tests pin that the
+// two lifecycle domains are not cross-compared.
+
+TEST(StaticEvidenceAuthorizationTest, MatchingStaticEvidenceEpochIsAccepted) {
+  const auto ctx = evaluateStaticConflictContextAuthority(
+      /*snapshot_present=*/true, /*snapshot_generation=*/7,
+      /*expected_static_evidence_epoch=*/7,
+      StaticEvidenceAuthority::RUNTIME_MATURE,
+      /*pose_authority_valid=*/true);
+  EXPECT_TRUE(ctx.valid);
+  EXPECT_EQ(ctx.reason, "none");
+}
+
+TEST(StaticEvidenceAuthorizationTest, StaticEvidenceEpochMismatchFailsClosed) {
+  const auto ctx = evaluateStaticConflictContextAuthority(
+      true, 7, 8, StaticEvidenceAuthority::RUNTIME_MATURE, true);
+  EXPECT_FALSE(ctx.valid);
+  EXPECT_EQ(ctx.reason, "static_evidence_epoch_mismatch");
+}
+
+TEST(StaticEvidenceAuthorizationTest, MissingStaticSnapshotFailsClosed) {
+  const auto ctx = evaluateStaticConflictContextAuthority(
+      false, 0, 7, StaticEvidenceAuthority::RUNTIME_MATURE, true);
+  EXPECT_FALSE(ctx.valid);
+  EXPECT_EQ(ctx.reason, "static_snapshot_missing");
+}
+
+TEST(StaticEvidenceAuthorizationTest, UnverifiedLoadedCleanStillFailsClosed) {
+  const auto ctx = evaluateStaticConflictContextAuthority(
+      true, 7, 7, StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN, true);
+  EXPECT_FALSE(ctx.valid);
+  EXPECT_EQ(ctx.reason, "static_authority_unverified");
+}
+
+TEST(StaticEvidenceAuthorizationTest, InvalidPoseAuthorityStillFailsClosed) {
+  const auto ctx = evaluateStaticConflictContextAuthority(
+      true, 7, 7, StaticEvidenceAuthority::RUNTIME_MATURE, false);
+  EXPECT_FALSE(ctx.valid);
+  EXPECT_EQ(ctx.reason, "pose_authority_invalid");
+}
+
 }  // namespace
 }  // namespace ndt_slam

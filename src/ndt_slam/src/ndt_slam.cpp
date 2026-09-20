@@ -14979,13 +14979,16 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
       // static evidence (and its epoch) is deliberately preserved, so comparing
       // the snapshot generation against map_rebuild_generation would wrongly
       // fail-closed (and has: it kept static_conflict_context_valid=false for
-      // the whole replay).  Pose authority is validated separately below.
-      const std::uint64_t static_epoch =
-          static_evidence_epoch_.load(std::memory_order_acquire);
-      const bool static_context_ok = static_snapshot != nullptr &&
-          static_snapshot->map_generation == static_epoch &&
-          static_snapshot->authority !=
-              StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN;
+      // the whole replay).  Pose authority is validated independently here.
+      const StaticConflictContextAuthority static_context =
+          evaluateStaticConflictContextAuthority(
+              static_snapshot != nullptr,
+              static_snapshot != nullptr ? static_snapshot->map_generation : 0U,
+              static_evidence_epoch_.load(std::memory_order_acquire),
+              static_snapshot != nullptr ? static_snapshot->authority
+                  : StaticEvidenceAuthority::UNVERIFIED_LOADED_CLEAN,
+              input.pose_authority_identity_valid);
+      const bool static_context_ok = static_context.valid;
       frame_evidence.static_conflict_context_valid = static_context_ok;
       if (static_context_ok) {
         auto mask = std::make_shared<std::vector<std::uint8_t>>(
