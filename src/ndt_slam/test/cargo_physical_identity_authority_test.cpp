@@ -3973,5 +3973,62 @@ TEST(CargoPhysicalIdentityAuthorityTest,
             groups.front().descriptor.canonical_size.y());
 }
 
+// ============ Formal lift static-conflict fail-closed ============
+
+CargoPhysicalIdentityInput liftedSurfaceInput(
+    double stamp, std::uint64_t lifecycle_id, HookLoadState gravity_state,
+    double group_x, double descriptor_z, double raw_surface_z) {
+  CargoPhysicalIdentityInput result = rawSurfaceInput(
+      stamp, lifecycle_id, gravity_state, group_x, descriptor_z,
+      raw_surface_z);
+  // Supply a valid range cloud + an all-clear (no static) conflict mask so the
+  // caller can explicitly toggle static_conflict_context_valid.
+  result.frame_evidence.range_cloud_current_frame =
+      cloudFromPoints(componentPoints(group_x, raw_surface_z));
+  result.frame_evidence.range_static_conflict_mask =
+      std::make_shared<std::vector<std::uint8_t>>(
+          result.frame_evidence.range_cloud_current_frame->size(), 0U);
+  return result;
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     InvalidStaticConflictContextCannotAdvanceFormalLift) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 7U);  // PRELOAD baseline z=0.40
+  // POSTLOAD (lifecycle 8) with a clearly lifted raw surface (z=1.0), but the
+  // static conflict context is invalid (default false).  The vertical cannot be
+  // proven non-static, so formal lift must remain UNOBSERVABLE and never
+  // advance, no matter how many frames arrive.
+  CargoPhysicalIdentityDecision decision;
+  for (double stamp = 1.2; stamp <= 1.7; stamp += 0.1) {
+    decision = authority.update(rawSurfaceInput(
+        stamp, 8U, HookLoadState::LOADED, 0.0, 1.0, 1.0));
+    EXPECT_FALSE(decision.precluster_lift_significant);
+    EXPECT_FALSE(decision.formal_lift_confirmed);
+    EXPECT_EQ(decision.precluster_lift_confirm_count, 0);
+  }
+  EXPECT_FALSE(decision.formal_lift_confirmed);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     ValidStaticContextAllowsRealCargoLiftEvidence) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  freezeSurfaceReference(&authority, 9U);
+  CargoPhysicalIdentityDecision decision;
+  for (double stamp = 1.2; stamp <= 1.7; stamp += 0.1) {
+    auto frame = liftedSurfaceInput(
+        stamp, 10U, HookLoadState::LOADED, 0.0, 1.0, 1.0);
+    frame.frame_evidence.static_conflict_context_valid = true;
+    decision = authority.update(frame);
+  }
+  // With a valid (all-clear) static context, the real lifted surface may now
+  // accumulate POSITIVE formal lift evidence.
+  EXPECT_TRUE(decision.formal_lift_confirmed);
+}
+
 }  // namespace
 }  // namespace ndt_slam

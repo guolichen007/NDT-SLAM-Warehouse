@@ -4191,6 +4191,19 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
               pc.static_rejected_points;
           decision_.precluster_static_context_valid =
               input.frame_evidence.static_conflict_context_valid;
+          // Static conflict context fail-closed.  The raw-range precluster
+          // surface may contain mature-static points; only a valid per-point
+          // conflict mask proves the measured Z is cargo rather than the
+          // environment.  Without it, the vertical is UNOBSERVABLE, never a
+          // POSITIVE formal-lift evidence frame (the 3-state contract then
+          // keeps the count unchanged and gap-gates instead of accumulating).
+          if (!input.frame_evidence.static_conflict_context_valid) {
+            decision_.precluster_surface_valid = false;
+            precluster_reason = "STATIC_CONFLICT_CONTEXT_UNAVAILABLE";
+            precluster_z = std::numeric_limits<double>::quiet_NaN();
+            precluster_uncertainty =
+                std::numeric_limits<double>::quiet_NaN();
+          }
         }
         decision_.precluster_surface_z = precluster_z;
         decision_.precluster_reject_reason = precluster_reason;
