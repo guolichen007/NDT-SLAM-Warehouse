@@ -4461,6 +4461,9 @@ void NdtSlamNode::resetCargoForHookState(
     cargo_last_reliable_offset_lifecycle_id_ = 0U;
     cargo_last_hook_anchor_source_.clear();
     cargo_lifecycle_id_ = 0U;
+    cargo_lifecycle_static_snapshot_.reset();
+    cargo_static_evidence_lifecycle_boundary_valid_ = false;
+    cargo_static_evidence_track_start_sequence_ = 0U;
     cargo_track_segment_id_ = 0U;
     if (!preserve_retired_signature) {
         retired_cargo_shape_ = LockedCargoShape{};
@@ -14968,7 +14971,12 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
     // Read-only and current-frame only; the Cargo authority never touches the
     // Map, the Snapshot, or the pose authority.
     if (frame_evidence.range_cloud_current_frame && frame_context) {
-      const auto static_snapshot = static_obstacle_evidence_index_.snapshot();
+      // Consume the immutable cargo-lifecycle static snapshot when one is
+      // frozen at the load edge; before the first load edge (preload) fall back
+      // to the live index so environment static can still be built.
+      const auto static_snapshot = cargo_lifecycle_static_snapshot_
+          ? cargo_lifecycle_static_snapshot_
+          : static_obstacle_evidence_index_.snapshot();
       const float static_cell_size =
           static_obstacle_evidence_index_.config().cell_size_m;
       const float static_height_tol =
@@ -20583,6 +20591,12 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         cargo_static_evidence_track_start_sequence_ =
             static_obstacle_evidence_index_.latestObservationSequence();
         cargo_static_evidence_lifecycle_boundary_valid_ = true;
+        // Freeze the static snapshot for the whole cargo lifecycle. Guard C and
+        // formal lift consume this immutable snapshot, so post-load static
+        // maturity (including the current cargo itself) can never retroactively
+        // veto the cargo's own owner formation.
+        cargo_lifecycle_static_snapshot_ =
+            static_obstacle_evidence_index_.snapshot();
         cargo_lift_origin_binder_.reset();
         cargo_geometry_fusion_.reset();
         cargo_frozen_geometry_ = CargoFrozenGeometry{};
@@ -20633,6 +20647,13 @@ void NdtSlamNode::updateCargoLiftAndGeometryFusion(
         // track segment. Capture that already-associated LiDAR pose now so a
         // loss on the next frame still has a same-segment physical reference.
         rememberTrustedCargoPose(stamp);
+    }
+    // Release the frozen cargo-lifecycle static snapshot on the LOADED->EMPTY
+    // transition, so the next EMPTY phase rebuilds environment static from the
+    // live index rather than the previous lifecycle's frozen snapshot.
+    if (cargo_previous_hook_loaded_ && !hook_loaded) {
+        cargo_lifecycle_static_snapshot_.reset();
+        cargo_static_evidence_lifecycle_boundary_valid_ = false;
     }
     cargo_hook_state_initialized_ = true;
     cargo_previous_hook_loaded_ = hook_loaded;

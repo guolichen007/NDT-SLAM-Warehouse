@@ -2551,6 +2551,13 @@ private:
     std::atomic<std::uint64_t> avoidance_pose_generation_{1U};
     std::uint64_t cargo_static_evidence_track_start_sequence_ = 0U;
     bool cargo_static_evidence_lifecycle_boundary_valid_ = false;
+    // Immutable static-evidence snapshot captured at the EMPTY->LOADED
+    // boundary. Guard C / formal lift / owner formation consume this
+    // frozen snapshot, never the live index that mutates during the
+    // loaded lifecycle (which would let the current cargo mature into
+    // its own static-conflict veto). Released on unload/epoch change.
+    std::shared_ptr<const StaticEvidenceSnapshot>
+        cargo_lifecycle_static_snapshot_;
     std::uint64_t advanceStaticEvidenceEpoch();
     std::uint64_t advanceAvoidancePoseGeneration(const std::string& reason);
     CargoMotionCorridorConfig cargo_motion_corridor_config_;
