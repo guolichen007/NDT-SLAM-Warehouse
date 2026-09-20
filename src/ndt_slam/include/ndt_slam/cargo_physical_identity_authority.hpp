@@ -264,6 +264,51 @@ std::vector<CargoPhysicalGroupObservation> groupCargoPhysicalCandidates(
     double equivalent_size_relative_tolerance,
     CargoPhysicalGroupingTelemetry* telemetry = nullptr);
 
+// D5 current-frame Cargo component bundle contract.  This view only answers
+// "may these same-frame D5 fragments belong to ONE physical Cargo observation"
+// — it never selects an owner, never grants authority, never uses history /
+// prediction / previous-winner / frozen footprint / point-count rank.  It is
+// disabled during PRELOAD (the caller enables it only in POSTLOAD).
+struct CargoPhysicalBundleConfig {
+  bool enabled = false;
+  // Fragments whose vertical top separation exceeds this gap are never
+  // bundled.  Conservative value derived from the existing cargo physical
+  // height contract (bottom-fusion vertical gap 0.30 m .. maximum height
+  // 2.00 m); a large gap here would merge cargo + low static.
+  double maximum_internal_vertical_gap_m = 0.60;
+  // Combined footprint must stay inside the existing cargo size contract.
+  double maximum_combined_long_side_m = 3.50;
+  double maximum_combined_short_side_m = 2.00;
+};
+
+// A non-destructive, current-frame consolidation of two or more D5 components
+// that are geometrically consistent with a single Cargo.  Raw components and
+// raw candidates remain available; a bundle only produces ADDITIONAL synthetic
+// component + candidate hypotheses for the Cargo identity consumer.
+struct CargoPhysicalBundleObservation {
+  std::vector<std::uint64_t> member_component_ids;
+  std::vector<Eigen::Vector3f> union_points_base;
+  Eigen::Vector3d center = Eigen::Vector3d::Zero();
+  Eigen::Vector3d size = Eigen::Vector3d::Zero();
+  double z05 = std::numeric_limits<double>::quiet_NaN();
+  double z50 = std::numeric_limits<double>::quiet_NaN();
+  double z95 = std::numeric_limits<double>::quiet_NaN();
+  double robust_x05 = std::numeric_limits<double>::quiet_NaN();
+  double robust_x95 = std::numeric_limits<double>::quiet_NaN();
+  double robust_y05 = std::numeric_limits<double>::quiet_NaN();
+  double robust_y95 = std::numeric_limits<double>::quiet_NaN();
+  double internal_vertical_gap_m = 0.0;
+  std::size_t raw_component_count = 0U;
+  std::string generation_reason = "none";
+};
+
+// Pure, stateless, current-frame only.  Builds bundle hypotheses from the raw
+// D5 component point clouds (each component contributes once).  Returns an
+// empty vector when disabled or when fewer than two components exist.
+std::vector<CargoPhysicalBundleObservation> buildCargoComponentBundles(
+    const std::vector<CargoPhysicalComponentObservation>& components,
+    const CargoPhysicalBundleConfig& config);
+
 struct CargoPhysicalGroupDiagnostic {
   std::uint64_t frame_group_id = 0U;
   std::vector<std::uint64_t> member_component_ids;

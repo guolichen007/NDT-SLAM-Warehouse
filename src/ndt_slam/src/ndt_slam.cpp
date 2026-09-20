@@ -2788,6 +2788,8 @@ void NdtSlamNode::initializeParameters(const std::string& config_file_path) {
             odom_anchor_config_.max_size_x = oac["max_size_x"].as<float>(2.50f);
             odom_anchor_config_.max_size_y = oac["max_size_y"].as<float>(2.00f);
             odom_anchor_config_.max_size_z = oac["max_size_z"].as<float>(2.00f);
+            odom_anchor_config_.cargo_bundle_max_internal_vertical_gap_m =
+                oac["cargo_bundle_max_internal_vertical_gap_m"].as<float>(0.60f);
             odom_anchor_config_.size_margin_x = oac["size_margin_x"].as<float>(0.10f);
             odom_anchor_config_.size_margin_y = oac["size_margin_y"].as<float>(0.10f);
             odom_anchor_config_.size_margin_z = oac["size_margin_z"].as<float>(0.05f);
@@ -5780,7 +5782,8 @@ void NdtSlamNode::processCloudThread() {
         if (!skip_hook_this_frame && hook_detection_due &&
             hook_allows_tracking &&
             hook_input_cloud && !hook_input_cloud->empty()) {
-            hook_fixed_cargo_ = detectCargoAroundOdomAnchor(hook_input_cloud, msg->header.stamp);
+            hook_fixed_cargo_ = detectCargoAroundOdomAnchor(
+                hook_input_cloud, msg->header.stamp, hook_allows_tracking);
                 if (integrated_cargo_identity_shadow_enabled_) {
                     integrated_shadow_deferred_frame =
                         std::move(hook_fixed_cargo_.shadow_frame_evidence);
@@ -15564,7 +15567,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
 
 NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
-    const ros::Time& stamp) {
+    const ros::Time& stamp,
+    bool enable_cargo_bundle) {
 
     HookCargoDetection result;
     result.valid = false;
@@ -16339,6 +16343,54 @@ NdtSlamNode::HookCargoDetection NdtSlamNode::detectCargoAroundOdomAnchor(
                     point.x, point.y, point.z);
             }
             component_observations.push_back(std::move(observation));
+        }
+        // D5 current-frame Cargo component bundle view (POSTLOAD only).  It
+        // only consolidates same-frame fragments that are geometrically
+        // consistent with ONE Cargo observation; it never selects an owner,
+        // never uses history/prediction/frozen-footprint/point-count, and the
+        // raw components continue to feed the obstacle/map/V4 path unchanged.
+        if (enable_cargo_bundle && component_observations.size() >= 2U) {
+            CargoPhysicalBundleConfig bundle_config;
+            bundle_config.enabled = true;
+            bundle_config.maximum_internal_vertical_gap_m =
+                static_cast<double>(
+                    odom_anchor_config_.cargo_bundle_max_internal_vertical_gap_m);
+            bundle_config.maximum_combined_long_side_m = static_cast<double>(
+                std::max(odom_anchor_config_.max_size_x,
+                         odom_anchor_config_.max_size_y));
+            bundle_config.maximum_combined_short_side_m = static_cast<double>(
+                std::min(odom_anchor_config_.max_size_x,
+                         odom_anchor_config_.max_size_y));
+            const std::vector<CargoPhysicalBundleObservation> bundles =
+                buildCargoComponentBundles(component_observations, bundle_config);
+            for (std::size_t bi = 0U; bi < bundles.size(); ++bi) {
+                const CargoPhysicalBundleObservation& bundle = bundles[bi];
+                const std::uint64_t synthetic_component_id =
+                    static_cast<std::uint64_t>(component_observations.size() +
+                                               bi);
+                CargoPhysicalComponentObservation synthetic_component;
+                synthetic_component.component_id = synthetic_component_id;
+                synthetic_component.points_base = bundle.union_points_base;
+                component_observations.push_back(std::move(synthetic_component));
+                CargoPhysicalCandidateObservation synthetic_candidate;
+                synthetic_candidate.candidate_id = static_cast<std::uint64_t>(
+                    observations.size() + bi + 1U);
+                synthetic_candidate.stamp_sec = stamp.toSec();
+                synthetic_candidate.member_component_ids =
+                    {synthetic_component_id};
+                synthetic_candidate.center = bundle.center;
+                synthetic_candidate.size = bundle.size;
+                synthetic_candidate.z05 = bundle.z05;
+                synthetic_candidate.z50 = bundle.z50;
+                synthetic_candidate.z95 = bundle.z95;
+                synthetic_candidate.vertical_uncertainty_m = std::max(
+                    0.01, static_cast<double>(
+                        cargo_vertical_evidence_v2_config_
+                            .surface_band_height_m));
+                synthetic_candidate.point_support =
+                    bundle.union_points_base.size();
+                observations.push_back(std::move(synthetic_candidate));
+            }
         }
         const double equivalent_center_tolerance_m = std::max(
             0.01, static_cast<double>(

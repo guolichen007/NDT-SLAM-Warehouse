@@ -3772,5 +3772,163 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_FALSE(decision.production_owner_fresh_measurement_valid);
 }
 
+// ============ D5 current-frame Cargo component bundle view ============
+
+CargoPhysicalComponentObservation bundleComponent(
+    std::uint64_t id, double cx, double cy, double z_lo, double z_hi,
+    double ex, double ey) {
+  CargoPhysicalComponentObservation component;
+  component.component_id = id;
+  for (double x : {cx - 0.5 * ex, cx + 0.5 * ex}) {
+    for (double y : {cy - 0.5 * ey, cy + 0.5 * ey}) {
+      for (double z : {z_lo, 0.5 * (z_lo + z_hi), z_hi}) {
+        component.points_base.emplace_back(
+            static_cast<float>(x), static_cast<float>(y),
+            static_cast<float>(z));
+      }
+    }
+  }
+  return component;
+}
+
+CargoPhysicalBundleConfig bundleConfig(double vertical_gap = 0.60) {
+  CargoPhysicalBundleConfig config;
+  config.enabled = true;
+  config.maximum_internal_vertical_gap_m = vertical_gap;
+  config.maximum_combined_long_side_m = 3.50;
+  config.maximum_combined_short_side_m = 2.00;
+  return config;
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest, PreloadDoesNotUseCargoBundle) {
+  // Disabled (PRELOAD): even two clearly-overlapping fragments produce no bundle.
+  std::vector<CargoPhysicalComponentObservation> components = {
+      bundleComponent(0U, 0.0, 0.0, 0.0, 0.8, 1.0, 1.0),
+      bundleComponent(1U, 0.1, 0.0, 0.0, 0.8, 1.0, 1.0)};
+  CargoPhysicalBundleConfig config = bundleConfig();
+  config.enabled = false;
+  EXPECT_TRUE(buildCargoComponentBundles(components, config).empty());
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     PostloadSplitCargoFragmentsMayFormBundle) {
+  std::vector<CargoPhysicalComponentObservation> components = {
+      bundleComponent(0U, 0.0, 0.0, 0.0, 0.8, 1.0, 1.0),
+      bundleComponent(1U, 0.2, 0.0, 0.0, 0.8, 1.0, 1.0)};
+  const auto bundles = buildCargoComponentBundles(components, bundleConfig());
+  ASSERT_EQ(bundles.size(), 1U);
+  EXPECT_EQ(bundles.front().raw_component_count, 2U);
+  EXPECT_EQ(bundles.front().member_component_ids.size(), 2U);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     VerticallySeparatedOverlappingCargoFragmentsCanBundle) {
+  // Overlapping XY, vertically separated by ~0.2 m (within the 0.60 gap).
+  std::vector<CargoPhysicalComponentObservation> components = {
+      bundleComponent(0U, 0.0, 0.0, 0.2, 0.5, 1.0, 1.0),
+      bundleComponent(1U, 0.1, 0.0, 0.7, 1.0, 1.0, 1.0)};
+  const auto bundles = buildCargoComponentBundles(components, bundleConfig());
+  ASSERT_EQ(bundles.size(), 1U);
+  EXPECT_LT(bundles.front().internal_vertical_gap_m, 0.60);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     UnrelatedXYSeparatedComponentsCannotBundle) {
+  // No XY footprint overlap: two fragments far apart must not bundle.
+  std::vector<CargoPhysicalComponentObservation> components = {
+      bundleComponent(0U, 0.0, 0.0, 0.0, 0.8, 1.0, 1.0),
+      bundleComponent(1U, 3.0, 0.0, 0.0, 0.8, 1.0, 1.0)};
+  EXPECT_TRUE(buildCargoComponentBundles(components, bundleConfig()).empty());
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     CombinedExtentBeyondCargoBoundsCannotBundle) {
+  // Overlapping XY but the combined footprint exceeds the cargo size contract.
+  std::vector<CargoPhysicalComponentObservation> components = {
+      bundleComponent(0U, 0.0, 0.0, 0.0, 0.8, 2.5, 1.0),
+      bundleComponent(1U, 1.5, 0.0, 0.0, 0.8, 2.5, 1.0)};
+  EXPECT_TRUE(buildCargoComponentBundles(components, bundleConfig()).empty());
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     StaticGroundComponentIsNotDestructivelyMerged) {
+  // A low static component vertically separated beyond the gap must not be
+  // bundled into the Cargo fragment (and the raw components are never mutated).
+  std::vector<CargoPhysicalComponentObservation> components = {
+      bundleComponent(0U, 0.0, 0.0, 1.0, 1.5, 1.0, 1.0),
+      bundleComponent(1U, 0.1, 0.0, 0.0, 0.05, 1.0, 1.0)};
+  const auto before = components;
+  const auto bundles = buildCargoComponentBundles(components, bundleConfig());
+  EXPECT_TRUE(bundles.empty());
+  EXPECT_EQ(components.size(), before.size());  // not destructive
+  EXPECT_EQ(components[0].component_id, before[0].component_id);
+  EXPECT_EQ(components[1].component_id, before[1].component_id);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     BundleMemberProvenanceIsPreserved) {
+  std::vector<CargoPhysicalComponentObservation> components = {
+      bundleComponent(7U, 0.0, 0.0, 0.0, 0.8, 1.0, 1.0),
+      bundleComponent(11U, 0.2, 0.0, 0.0, 0.8, 1.0, 1.0)};
+  const auto bundles = buildCargoComponentBundles(components, bundleConfig());
+  ASSERT_EQ(bundles.size(), 1U);
+  const auto& members = bundles.front().member_component_ids;
+  EXPECT_EQ(members.size(), 2U);
+  EXPECT_NE(std::find(members.begin(), members.end(), 7U), members.end());
+  EXPECT_NE(std::find(members.begin(), members.end(), 11U), members.end());
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     BundleDoesNotUsePointCountAsOwnerEvidence) {
+  // The bundle geometry must not depend on member point count (no point-count
+  // authority).  A sparse and a dense fragment with the same footprint yield
+  // the same consolidated bundle geometry.
+  const auto sparse = bundleComponent(0U, 0.0, 0.0, 0.0, 0.8, 1.0, 1.0);
+  auto dense = sparse;
+  dense.component_id = 1U;
+  dense.points_base.reserve(400U);
+  for (int i = 0; i < 100; ++i) {
+    dense.points_base.emplace_back(0.0F, 0.0F, 0.4F);  // same footprint centre
+  }
+  const auto bundles_sparse = buildCargoComponentBundles(
+      {sparse, sparse}, bundleConfig());
+  const auto bundles_dense = buildCargoComponentBundles(
+      {sparse, dense}, bundleConfig());
+  ASSERT_EQ(bundles_sparse.size(), 1U);
+  ASSERT_EQ(bundles_dense.size(), 1U);
+  // Extent is point-count independent (robust footprint).
+  EXPECT_NEAR(bundles_sparse.front().size.x(), bundles_dense.front().size.x(),
+              0.30);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     BundleUsesCurrentFrameOnlyAndIsStateless) {
+  // The bundle builder is a pure function: same input -> same output, no
+  // retained history / previous-winner state.
+  std::vector<CargoPhysicalComponentObservation> components = {
+      bundleComponent(0U, 0.0, 0.0, 0.0, 0.8, 1.0, 1.0),
+      bundleComponent(1U, 0.2, 0.0, 0.0, 0.8, 1.0, 1.0)};
+  const auto first = buildCargoComponentBundles(components, bundleConfig());
+  const auto second = buildCargoComponentBundles(components, bundleConfig());
+  ASSERT_EQ(first.size(), second.size());
+  if (!first.empty()) {
+    EXPECT_NEAR(first.front().center.x(), second.front().center.x(), 1e-9);
+  }
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     CargoBundleCannotCreatePhysicalOwner) {
+  // A bundle observation is a geometry hypothesis, not an identity decision;
+  // it carries no owner/generation/history authority fields.
+  std::vector<CargoPhysicalComponentObservation> components = {
+      bundleComponent(0U, 0.0, 0.0, 0.0, 0.8, 1.0, 1.0),
+      bundleComponent(1U, 0.2, 0.0, 0.0, 0.8, 1.0, 1.0)};
+  const auto bundles = buildCargoComponentBundles(components, bundleConfig());
+  ASSERT_EQ(bundles.size(), 1U);
+  // The bundle type has no physical-owner / generation / history authority
+  // fields, so it cannot latch an owner by construction.
+  EXPECT_EQ(bundles.front().member_component_ids.size(), 2U);
+}
+
 }  // namespace
 }  // namespace ndt_slam

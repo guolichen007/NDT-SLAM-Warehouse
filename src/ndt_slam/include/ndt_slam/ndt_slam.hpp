@@ -1675,6 +1675,11 @@ private:
         float max_size_x = 2.50f;
         float max_size_y = 2.00f;
         float max_size_z = 2.00f;
+        // D5 current-frame Cargo bundle view (POSTLOAD only).  Fragments of the
+        // same Cargo separated vertically by more than this gap are never
+        // bundled (never merges cargo + low static).  Does NOT change global
+        // clustering or the obstacle/map/V4 path.
+        float cargo_bundle_max_internal_vertical_gap_m = 0.60f;
 
         float size_margin_x = 0.10f;
         float size_margin_y = 0.10f;
@@ -2697,7 +2702,8 @@ private:
     // OdomAnchorBox 新函数
     HookCargoDetection detectCargoAroundOdomAnchor(
         const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_base,
-        const ros::Time& stamp);
+        const ros::Time& stamp,
+        bool enable_cargo_bundle = false);
     void updateIntegratedCargoIdentityShadow(
         const HookCargoDetection& detection,
         CargoShadowFrameEvidence frame_evidence,

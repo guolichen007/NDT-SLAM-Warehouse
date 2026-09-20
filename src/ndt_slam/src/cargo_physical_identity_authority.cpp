@@ -1194,6 +1194,164 @@ OwnerContinuationVerdict evaluateOwnerContinuation(
   return verdict;
 }
 
+std::vector<CargoPhysicalBundleObservation> buildCargoComponentBundles(
+    const std::vector<CargoPhysicalComponentObservation>& components,
+    const CargoPhysicalBundleConfig& config) {
+  std::vector<CargoPhysicalBundleObservation> bundles;
+  if (!config.enabled || components.size() < 2U) return bundles;
+
+  // Per-component current-frame geometry, computed from the raw points only.
+  // No history, prediction, previous winner, frozen footprint, or point-count
+  // authority is consulted anywhere in this function.
+  struct ComponentGeom {
+    bool valid = false;
+    double robust_x05 = std::numeric_limits<double>::quiet_NaN();
+    double robust_x95 = std::numeric_limits<double>::quiet_NaN();
+    double robust_y05 = std::numeric_limits<double>::quiet_NaN();
+    double robust_y95 = std::numeric_limits<double>::quiet_NaN();
+    double min_z = std::numeric_limits<double>::quiet_NaN();
+    double max_z = std::numeric_limits<double>::quiet_NaN();
+  };
+  std::vector<ComponentGeom> geoms(components.size());
+  for (std::size_t i = 0U; i < components.size(); ++i) {
+    ComponentGeom& geom = geoms[i];
+    std::vector<double> xs;
+    std::vector<double> ys;
+    xs.reserve(components[i].points_base.size());
+    ys.reserve(components[i].points_base.size());
+    for (const Eigen::Vector3f& point : components[i].points_base) {
+      if (!point.allFinite()) continue;
+      xs.push_back(static_cast<double>(point.x()));
+      ys.push_back(static_cast<double>(point.y()));
+      if (!std::isfinite(geom.min_z) || point.z() < geom.min_z) {
+        geom.min_z = static_cast<double>(point.z());
+      }
+      if (!std::isfinite(geom.max_z) || point.z() > geom.max_z) {
+        geom.max_z = static_cast<double>(point.z());
+      }
+    }
+    if (xs.size() < 2U) continue;
+    geom.robust_x05 = quantile(xs, 0.05);
+    geom.robust_x95 = quantile(xs, 0.95);
+    geom.robust_y05 = quantile(ys, 0.05);
+    geom.robust_y95 = quantile(ys, 0.95);
+    geom.valid = (geom.robust_x95 - geom.robust_x05) > 0.0 &&
+        (geom.robust_y95 - geom.robust_y05) > 0.0 &&
+        std::isfinite(geom.min_z) && std::isfinite(geom.max_z);
+  }
+
+  // Frozen geometry contract for a same-frame Cargo bundle:
+  //   (a) positive-area XY footprint overlap;
+  //   (b) combined footprint within the cargo size contract;
+  //   (c) vertical Z-range separation within the cargo physical contract.
+  const auto can_bundle = [&](const ComponentGeom& a, const ComponentGeom& b) {
+    if (!a.valid || !b.valid) return false;
+    const double ix = std::min(a.robust_x95, b.robust_x95) -
+        std::max(a.robust_x05, b.robust_x05);
+    const double iy = std::min(a.robust_y95, b.robust_y95) -
+        std::max(a.robust_y05, b.robust_y05);
+    if (!(ix > 0.0 && iy > 0.0)) return false;
+    const double union_x = std::max(a.robust_x95, b.robust_x95) -
+        std::min(a.robust_x05, b.robust_x05);
+    const double union_y = std::max(a.robust_y95, b.robust_y95) -
+        std::min(a.robust_y05, b.robust_y05);
+    const double long_side = std::max(union_x, union_y);
+    const double short_side = std::min(union_x, union_y);
+    if (long_side > config.maximum_combined_long_side_m) return false;
+    if (short_side > config.maximum_combined_short_side_m) return false;
+    const double vertical_gap = std::max(
+        0.0, std::max(a.min_z, b.min_z) - std::min(a.max_z, b.max_z));
+    if (vertical_gap > config.maximum_internal_vertical_gap_m) return false;
+    return true;
+  };
+
+  // Connected components over the "can bundle" graph.  Ambiguity is kept
+  // (multi-hypothesis): we never force a single winner, we only emit the
+  // maximal connected set per component cluster.
+  std::vector<int> parent(components.size());
+  for (std::size_t i = 0U; i < components.size(); ++i) parent[i] = i;
+  const auto find_root = [&parent](int node) {
+    int root = node;
+    while (parent[root] != root) root = parent[root];
+    while (parent[node] != root) {
+      const int next = parent[node];
+      parent[node] = root;
+      node = next;
+    }
+    return root;
+  };
+  for (std::size_t i = 0U; i < components.size(); ++i) {
+    for (std::size_t j = i + 1U; j < components.size(); ++j) {
+      if (can_bundle(geoms[i], geoms[j])) {
+        const int ri = find_root(static_cast<int>(i));
+        const int rj = find_root(static_cast<int>(j));
+        if (ri != rj) parent[ri] = rj;
+      }
+    }
+  }
+  std::map<int, std::vector<std::size_t>> clusters;
+  for (std::size_t i = 0U; i < components.size(); ++i) {
+    clusters[find_root(static_cast<int>(i))].push_back(i);
+  }
+
+  for (const auto& entry : clusters) {
+    const std::vector<std::size_t>& members = entry.second;
+    if (members.size() < 2U) continue;
+    CargoPhysicalBundleObservation bundle;
+    bundle.raw_component_count = members.size();
+    bundle.member_component_ids.reserve(members.size());
+    double max_internal_gap = 0.0;
+    for (std::size_t member : members) {
+      bundle.member_component_ids.push_back(components[member].component_id);
+      bundle.union_points_base.insert(bundle.union_points_base.end(),
+                                      components[member].points_base.begin(),
+                                      components[member].points_base.end());
+    }
+    for (std::size_t a = 0U; a < members.size(); ++a) {
+      for (std::size_t b = a + 1U; b < members.size(); ++b) {
+        max_internal_gap = std::max(max_internal_gap, std::max(
+            0.0, std::max(geoms[members[a]].min_z,
+                          geoms[members[b]].min_z) -
+                std::min(geoms[members[a]].max_z,
+                         geoms[members[b]].max_z)));
+      }
+    }
+    bundle.internal_vertical_gap_m = max_internal_gap;
+
+    // Combined geometry from the union points (each component contributes once).
+    std::vector<double> xs, ys, zs;
+    xs.reserve(bundle.union_points_base.size());
+    ys.reserve(bundle.union_points_base.size());
+    zs.reserve(bundle.union_points_base.size());
+    for (const Eigen::Vector3f& point : bundle.union_points_base) {
+      if (!point.allFinite()) continue;
+      xs.push_back(static_cast<double>(point.x()));
+      ys.push_back(static_cast<double>(point.y()));
+      zs.push_back(static_cast<double>(point.z()));
+    }
+    if (xs.size() < 2U) continue;
+    std::sort(zs.begin(), zs.end());
+    bundle.robust_x05 = quantile(xs, 0.05);
+    bundle.robust_x95 = quantile(xs, 0.95);
+    bundle.robust_y05 = quantile(ys, 0.05);
+    bundle.robust_y95 = quantile(ys, 0.95);
+    bundle.z05 = zs[static_cast<std::size_t>(0.05 * (zs.size() - 1U))];
+    bundle.z50 = zs[zs.size() / 2U];
+    bundle.z95 = zs[static_cast<std::size_t>(0.95 * (zs.size() - 1U))];
+    bundle.center = Eigen::Vector3d(
+        0.5 * (bundle.robust_x05 + bundle.robust_x95),
+        0.5 * (bundle.robust_y05 + bundle.robust_y95),
+        0.5 * (bundle.z05 + bundle.z95));
+    bundle.size = Eigen::Vector3d(
+        bundle.robust_x95 - bundle.robust_x05,
+        bundle.robust_y95 - bundle.robust_y05,
+        bundle.z95 - bundle.z05);
+    bundle.generation_reason = "XY_OVERLAP_EXTENT_VERTICAL";
+    bundles.push_back(std::move(bundle));
+  }
+  return bundles;
+}
+
 const char* cargoCandidateAssociationStateName(
     CargoCandidateAssociationState state) noexcept {
   switch (state) {
