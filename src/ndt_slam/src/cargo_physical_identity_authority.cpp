@@ -4267,7 +4267,16 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
                 history.lift_confirm_count =
                     lock.precluster_lift_confirm_count;
                 history.validation_stamp_sec = input.pipeline_stamp_sec;
-                break;
+              } else if (history.lift_confirmed) {
+                // Clear a stale formal-lift projection left on a previous
+                // fragment anchor. Without this, a fragment permutation leaves
+                // multiple lift_confirmed histories and the V6 validation sees
+                // a false multi-owner ambiguity (fresh_confirmed.size()>1).
+                // The formal lift remains owned by the history-independent
+                // Reference Lock; History is representation only.
+                history.lift_confirmed = false;
+                history.lift_confirm_count = 0;
+                history.validation_stamp_sec = 0.0;
               }
             }
           }
