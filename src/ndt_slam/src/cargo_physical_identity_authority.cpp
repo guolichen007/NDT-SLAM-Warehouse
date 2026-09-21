@@ -1915,6 +1915,37 @@ void CargoPhysicalIdentityAuthority::invalidateFrozenPreloadReference(
   frozen_preload_reference_invalidate_reason_ = reason;
 }
 
+void CargoPhysicalIdentityAuthority::initializeFormalReferenceLockFromCertificate(
+    const FrozenPreloadReferenceCertificate& certificate) {
+  diagnostic_reference_lock_.phase =
+      DiagnosticSurfaceReferenceLock::Phase::PRELOAD_ACTIVE;
+  diagnostic_reference_lock_.frozen = true;
+  diagnostic_reference_lock_.baseline_z = certificate.baseline_z;
+  diagnostic_reference_lock_.baseline_uncertainty_m =
+      certificate.baseline_uncertainty_m;
+  diagnostic_reference_lock_.frozen_footprint = certificate.frozen_footprint;
+  diagnostic_reference_lock_.frozen_owner_cells =
+      certificate.frozen_owner_cells;
+  diagnostic_reference_lock_.source_lifecycle_id =
+      certificate.source_lifecycle_id;
+  diagnostic_reference_lock_.source_physical_epoch =
+      certificate.source_physical_epoch;
+  diagnostic_reference_lock_.source_history_id = certificate.source_history_id;
+  diagnostic_reference_lock_.current_history_id = certificate.source_history_id;
+  diagnostic_reference_lock_.last_owner_refresh_stamp =
+      certificate.reference_freeze_stamp_sec;
+  // Lift accumulators begin empty at the formal freeze; only POSITIVE
+  // post-load evidence may advance them.
+  diagnostic_reference_lock_.lift_confirm_count = 0;
+  diagnostic_reference_lock_.lift_confirmed = false;
+  diagnostic_reference_lock_.assembly_lift_confirm_count = 0;
+  diagnostic_reference_lock_.assembly_lift_confirmed = false;
+  diagnostic_reference_lock_.precluster_lift_confirm_count = 0;
+  diagnostic_reference_lock_.precluster_lift_confirmed = false;
+  diagnostic_reference_lock_.last_positive_evidence_stamp = 0.0;
+  ++diagnostic_reference_lock_.freeze_count;
+}
+
 CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
     const CargoPhysicalIdentityInput& input) {
   decision_ = CargoPhysicalIdentityDecision{};
@@ -3293,53 +3324,24 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
               history->frozen_preload_owner_surface_cells.assign(
                   owner_cells.begin(), owner_cells.end());
             }
-            // Diagnostic Reference Lock freeze (Phase A counterfactual).
-            diagnostic_reference_lock_.phase =
-                DiagnosticSurfaceReferenceLock::Phase::PRELOAD_ACTIVE;
-            diagnostic_reference_lock_.frozen = true;
-            // ROOT-A: baseline Z and uncertainty must come from the SAME
-            // measured pre-cluster surface (never the inherited group vertical
-            // uncertainty).
-            {
-              const CargoFootprintSnapshot baseline_footprint =
-                  robustFootprintSnapshot(group);
-              const OwnerLockedSurfaceResult baseline_surface =
-                  computePreClusterSurfaceVertical(
-                      input.frame_evidence, baseline_footprint,
-                      input.vertical_config, nullptr);
-              if (baseline_surface.valid &&
-                  std::isfinite(baseline_surface.surface_z) &&
-                  std::isfinite(baseline_surface.surface_uncertainty)) {
-                diagnostic_reference_lock_.baseline_z =
-                    baseline_surface.surface_z;
-                diagnostic_reference_lock_.baseline_uncertainty_m =
-                    baseline_surface.surface_uncertainty;
-              } else {
-                diagnostic_reference_lock_.baseline_z = reference;
-                diagnostic_reference_lock_.baseline_uncertainty_m = uncertainty;
-              }
-            }
-            diagnostic_reference_lock_.frozen_footprint =
-                history->frozen_preload_footprint;
-            diagnostic_reference_lock_.frozen_owner_cells =
-                history->frozen_preload_owner_surface_cells;
-            diagnostic_reference_lock_.source_lifecycle_id = lifecycle_id_;
-            diagnostic_reference_lock_.source_physical_epoch =
-                history->physical_cargo_epoch_id;
-            diagnostic_reference_lock_.source_history_id = history->id;
-            diagnostic_reference_lock_.current_history_id = history->id;
-            diagnostic_reference_lock_.last_owner_refresh_stamp =
-                group.descriptor.stamp_sec;
-            // B6 frozen preload reference certificate: created atomically with
-            // the formal freeze, independent of ephemeral History id.  One
-            // physical epoch yields at most one certificate; a History split
-            // can neither replace it nor mint a second one.
+            // Single-writer formal reference authority.  The frozen preload
+            // reference certificate and the formal Reference Lock are created
+            // ATOMICALLY at the same source frame.  One physical epoch yields
+            // at most one certificate and one formal lock; a later fragment
+            // History that reaches its own preload freeze only records an
+            // overwrite attempt for telemetry and never mutates the immutable
+            // baseline / footprint / owner cells / provenance of either.
             if (!frozen_preload_reference_.valid) {
               FrozenPreloadReferenceCertificate certificate;
               certificate.valid = true;
               certificate.source_lifecycle_id = lifecycle_id_;
               certificate.source_physical_epoch =
                   history->physical_cargo_epoch_id;
+              // Single baseline authority: median of the prelift owner-surface
+              // samples — the SAME reference as the History baseline.  A
+              // separate pre-cluster surface measurement would capture the
+              // ground (or another XY-overlapping but Z-inconsistent surface)
+              // and mint a false lift.
               certificate.baseline_z = reference;
               certificate.baseline_uncertainty_m = uncertainty;
               certificate.frozen_footprint =
@@ -3352,6 +3354,9 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
               frozen_preload_reference_ = certificate;
               frozen_preload_reference_invalidate_reason_ = "none";
               decision_.preload_reference_certificate_created = true;
+              initializeFormalReferenceLockFromCertificate(certificate);
+            } else {
+              ++diagnostic_reference_lock_.overwrite_attempt_count;
             }
           } else if (monotonic_departure) {
             // A genuinely rising surface during EMPTY is a real departure, not
@@ -4316,6 +4321,10 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
                    : "NONE");
     decision_.ref_lock_source_history_id = lock.source_history_id;
     decision_.ref_lock_current_history_id = lock.current_history_id;
+    decision_.ref_lock_source_epoch = lock.source_physical_epoch;
+    decision_.ref_lock_baseline_z = lock.baseline_z;
+    decision_.ref_lock_freeze_count = lock.freeze_count;
+    decision_.ref_lock_overwrite_attempt_count = lock.overwrite_attempt_count;
     decision_.ref_lock_history_id_changed =
         lock.current_history_id != 0U &&
         lock.current_history_id != lock.source_history_id;
@@ -4345,6 +4354,8 @@ CargoPhysicalIdentityDecision CargoPhysicalIdentityAuthority::update(
       frozen_preload_reference_.source_physical_epoch;
   decision_.preload_reference_certificate_freeze_stamp =
       frozen_preload_reference_.reference_freeze_stamp_sec;
+  decision_.preload_reference_certificate_baseline_z =
+      frozen_preload_reference_.baseline_z;
   decision_.preload_reference_certificate_invalidate_reason =
       frozen_preload_reference_invalidate_reason_;
   decision_.formal_lift_boundary_authorized =

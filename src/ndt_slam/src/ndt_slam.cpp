@@ -15150,7 +15150,7 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "preload_cert_created,preload_cert_valid,"
                 << "preload_cert_source_history_id,"
                 << "preload_cert_source_epoch,preload_cert_freeze_stamp,"
-                << "preload_cert_invalidate_reason,"
+                << "preload_cert_baseline_z,preload_cert_invalidate_reason,"
                 << "postload_geometric_candidates,postload_matching_groups,"
                 << "postload_vertical_valid,postload_authorized_owner_cells,"
                 << "formal_lift_lock_active,formal_lift_confirm_count,"
@@ -15168,6 +15168,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << "ref_lock_frozen,ref_lock_phase,"
                 << "ref_lock_history_id_changed,"
                 << "ref_lock_source_history_id,ref_lock_current_history_id,"
+                << "ref_lock_source_epoch,ref_lock_baseline_z,"
+                << "ref_lock_freeze_count,ref_lock_overwrite_attempt_count,"
                 << "ref_lock_postload_history_id_change_count,"
                 << "ref_lock_lift_confirm_count,ref_lock_lift_confirmed,"
                 << "ref_lock_simulated_validated,"
@@ -15347,6 +15349,8 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << ',' << integrated_identity_decision_
                                .preload_reference_certificate_freeze_stamp
                 << ',' << integrated_identity_decision_
+                               .preload_reference_certificate_baseline_z
+                << ',' << integrated_identity_decision_
                                .preload_reference_certificate_invalidate_reason
                 << ',' << integrated_identity_decision_
                                .postload_geometric_candidates
@@ -15391,6 +15395,11 @@ void NdtSlamNode::updateIntegratedCargoIdentityShadow(
                 << integrated_identity_decision_.ref_lock_source_history_id
                 << ','
                 << integrated_identity_decision_.ref_lock_current_history_id
+                << ','
+                << integrated_identity_decision_.ref_lock_source_epoch << ','
+                << integrated_identity_decision_.ref_lock_baseline_z << ','
+                << integrated_identity_decision_.ref_lock_freeze_count << ','
+                << integrated_identity_decision_.ref_lock_overwrite_attempt_count
                 << ','
                 << integrated_identity_decision_
                        .ref_lock_postload_history_id_change_count << ','
@@ -24693,7 +24702,7 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                 << "preload_cert_created,preload_cert_valid,"
                 << "preload_cert_source_history_id,"
                 << "preload_cert_source_epoch,preload_cert_freeze_stamp,"
-                << "preload_cert_invalidate_reason,"
+                << "preload_cert_baseline_z,preload_cert_invalidate_reason,"
                 << "postload_geometric_candidates,postload_matching_groups,"
                 << "postload_vertical_valid,postload_authorized_owner_cells,"
                 << "formal_lift_lock_active,formal_lift_confirm_count,"
@@ -24799,6 +24808,8 @@ void NdtSlamNode::evaluateIntegratedCargoIdentityShadow(
                    .preload_reference_certificate_source_epoch << ','
             << integrated_identity_decision_
                    .preload_reference_certificate_freeze_stamp << ','
+            << integrated_identity_decision_
+                   .preload_reference_certificate_baseline_z << ','
             << integrated_identity_decision_
                    .preload_reference_certificate_invalidate_reason << ','
             << integrated_identity_decision_.postload_geometric_candidates

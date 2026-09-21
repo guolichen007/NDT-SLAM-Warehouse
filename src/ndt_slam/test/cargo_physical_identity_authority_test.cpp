@@ -4030,5 +4030,123 @@ TEST(CargoPhysicalIdentityAuthorityTest,
   EXPECT_TRUE(decision.formal_lift_confirmed);
 }
 
+TEST(CargoPhysicalIdentityAuthorityTest,
+     FormalReferenceLockAndCertificateFreezeAtomically) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  CargoPhysicalIdentityDecision decision;
+  double stamp = 1.0;
+  for (double z : {0.655, 0.660, 0.658, 0.662}) {
+    decision = authority.update(input(
+        stamp, HookLoadSignalRole::REQUIRED, true,
+        HookLoadState::EMPTY, 0.0, z));
+    stamp += 0.05;
+  }
+  ASSERT_EQ(decision.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::FROZEN);
+  EXPECT_TRUE(decision.preload_reference_certificate_valid);
+  EXPECT_TRUE(decision.ref_lock_frozen);
+  // Lock and certificate are created from the same source frame: baseline,
+  // source history and source epoch must be byte-equivalent.
+  EXPECT_NEAR(decision.ref_lock_baseline_z,
+              decision.preload_reference_certificate_baseline_z, 1.0e-9);
+  EXPECT_EQ(decision.ref_lock_source_history_id,
+            decision.preload_reference_certificate_source_history_id);
+  EXPECT_EQ(decision.ref_lock_source_epoch,
+            decision.preload_reference_certificate_source_epoch);
+  EXPECT_NE(decision.ref_lock_source_history_id, 0U);
+  EXPECT_EQ(decision.ref_lock_freeze_count, 1);
+  EXPECT_EQ(decision.ref_lock_overwrite_attempt_count, 0);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LaterFragmentFreezeCannotOverwriteFormalBaseline) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  // Canonical History A freezes first at baseline ~0.66.
+  CargoPhysicalIdentityDecision canonical;
+  double stamp = 1.0;
+  for (double z : {0.655, 0.660, 0.658, 0.662}) {
+    canonical = authority.update(input(
+        stamp, HookLoadSignalRole::REQUIRED, true,
+        HookLoadState::EMPTY, 0.0, z));
+    stamp += 0.05;
+  }
+  ASSERT_EQ(canonical.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::FROZEN);
+  const double canonical_baseline = canonical.ref_lock_baseline_z;
+  const std::uint64_t canonical_source_history =
+      canonical.ref_lock_source_history_id;
+  ASSERT_NE(canonical_source_history, 0U);
+
+  // A later fragment History B (distinct component id, far XY) reaches its own
+  // preload freeze at baseline ~0.24.
+  CargoPhysicalIdentityDecision fragment;
+  for (double z : {0.235, 0.240, 0.238, 0.243}) {
+    CargoPhysicalIdentityInput frame;
+    frame.pipeline_stamp_sec = stamp;
+    frame.lifecycle_id = 7U;
+    frame.hook_role = HookLoadSignalRole::REQUIRED;
+    frame.gravity_valid = true;
+    frame.gravity_state = HookLoadState::EMPTY;
+    frame.groups = {group(20U, stamp, 1.5, z, {2U})};
+    frame.frame_evidence.source_stamp_sec = stamp;
+    frame.frame_evidence.raw_roi_current_frame =
+        cloudFromPoints(componentPoints(1.5, z));
+    frame.vertical_config = verticalConfig();
+    fragment = authority.update(frame);
+    stamp += 0.05;
+  }
+  // The fragment History itself may freeze (its own per-History baseline), but
+  // the singleton formal Reference Lock baseline must be unchanged.
+  EXPECT_EQ(fragment.group_diagnostics.front().prelift_state,
+            CargoPreLiftReferenceState::FROZEN);
+  EXPECT_NEAR(fragment.ref_lock_baseline_z, canonical_baseline, 1.0e-9);
+  EXPECT_NEAR(fragment.preload_reference_certificate_baseline_z,
+              canonical_baseline, 1.0e-9);
+  EXPECT_EQ(fragment.ref_lock_source_history_id, canonical_source_history);
+  EXPECT_EQ(fragment.ref_lock_freeze_count, 1);
+  EXPECT_EQ(fragment.ref_lock_overwrite_attempt_count, 1);
+}
+
+TEST(CargoPhysicalIdentityAuthorityTest,
+     LaterFragmentFreezeCannotChangeFormalSourceEpoch) {
+  CargoPhysicalIdentityConfig config = testConfig();
+  config.lift_confirm_frames = 4;
+  CargoPhysicalIdentityAuthority authority(config);
+  double stamp = 1.0;
+  CargoPhysicalIdentityDecision canonical;
+  for (double z : {0.655, 0.660, 0.658, 0.662}) {
+    canonical = authority.update(input(
+        stamp, HookLoadSignalRole::REQUIRED, true,
+        HookLoadState::EMPTY, 0.0, z));
+    stamp += 0.05;
+  }
+  const std::uint64_t canonical_epoch = canonical.ref_lock_source_epoch;
+  ASSERT_NE(canonical_epoch, 0U);
+
+  for (double z : {0.235, 0.240, 0.238, 0.243}) {
+    CargoPhysicalIdentityInput frame;
+    frame.pipeline_stamp_sec = stamp;
+    frame.lifecycle_id = 7U;
+    frame.hook_role = HookLoadSignalRole::REQUIRED;
+    frame.gravity_valid = true;
+    frame.gravity_state = HookLoadState::EMPTY;
+    frame.groups = {group(20U, stamp, 1.5, z, {2U})};
+    frame.frame_evidence.source_stamp_sec = stamp;
+    frame.frame_evidence.raw_roi_current_frame =
+        cloudFromPoints(componentPoints(1.5, z));
+    frame.vertical_config = verticalConfig();
+    authority.update(frame);
+    stamp += 0.05;
+  }
+  const auto decision = authority.decision();
+  EXPECT_EQ(decision.ref_lock_source_epoch, canonical_epoch);
+  EXPECT_EQ(decision.preload_reference_certificate_source_epoch,
+            canonical_epoch);
+}
+
 }  // namespace
 }  // namespace ndt_slam

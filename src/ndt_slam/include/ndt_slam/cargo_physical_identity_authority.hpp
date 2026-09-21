@@ -592,6 +592,8 @@ struct CargoPhysicalIdentityDecision {
   std::uint64_t preload_reference_certificate_source_history_id = 0U;
   std::uint64_t preload_reference_certificate_source_epoch = 0U;
   double preload_reference_certificate_freeze_stamp = 0.0;
+  double preload_reference_certificate_baseline_z =
+      std::numeric_limits<double>::quiet_NaN();
   std::string preload_reference_certificate_invalidate_reason = "none";
   // B6 post-load owner-cell vertical proof telemetry.
   int postload_geometric_candidates = 0;
@@ -609,6 +611,10 @@ struct CargoPhysicalIdentityDecision {
   bool ref_lock_history_id_changed = false;
   std::uint64_t ref_lock_source_history_id = 0U;
   std::uint64_t ref_lock_current_history_id = 0U;
+  std::uint64_t ref_lock_source_epoch = 0U;
+  double ref_lock_baseline_z = std::numeric_limits<double>::quiet_NaN();
+  int ref_lock_freeze_count = 0;
+  int ref_lock_overwrite_attempt_count = 0;
   std::size_t ref_lock_postload_history_id_change_count = 0U;
   int ref_lock_lift_confirm_count = 0;
   bool ref_lock_lift_confirmed = false;
@@ -837,6 +843,11 @@ class CargoPhysicalIdentityAuthority {
     std::size_t significant_frames_after_split = 0U;
     std::size_t empty_lift_confirm_advance = 0U;
     std::size_t pre_freeze_outlier_windows = 0U;
+    // Single-writer contract counters.  A physical epoch freezes the formal
+    // Reference Lock exactly once; any later fragment-History freeze attempt
+    // only bumps the overwrite counter and never mutates the lock.
+    int freeze_count = 0;
+    int overwrite_attempt_count = 0;
   };
 
   static constexpr std::size_t kMaximumLineageProvenanceFrames = 3U;
@@ -908,6 +919,13 @@ class CargoPhysicalIdentityAuthority {
   // (reset, rearm, source-time rollback, physical-epoch end, unload, or a
   // contradictory pre-load owner).  Idle EMPTY observation does not.
   void invalidateFrozenPreloadReference(const std::string& reason);
+
+  // Initializes the singleton formal Reference Lock from a freshly created
+  // FrozenPreloadReferenceCertificate.  Only invoked inside the certificate's
+  // single-writer branch, so the lock and the certificate are byte-semantic
+  // equivalent and a later fragment-History freeze can never touch either.
+  void initializeFormalReferenceLockFromCertificate(
+      const FrozenPreloadReferenceCertificate& certificate);
 };
 
 }  // namespace ndt_slam
