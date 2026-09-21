@@ -185,5 +185,33 @@ TEST(CargoV6AuthorityAdapter,
       pcl::PointXYZ(0.51F, 0.25F, 0.6F)));
 }
 
+TEST(CargoV6AuthorityAdapter, ConfigParsesV6AuthorityMode) {
+  CargoAuthorityMode mode = CargoAuthorityMode::LEGACY;
+
+  EXPECT_TRUE(parseCargoAuthorityMode("V6_AUTHORITY", &mode));
+  EXPECT_EQ(mode, CargoAuthorityMode::V6_AUTHORITY);
+  EXPECT_TRUE(parseCargoAuthorityMode("v6_authority", &mode));
+  EXPECT_EQ(mode, CargoAuthorityMode::V6_AUTHORITY);
+  EXPECT_TRUE(parseCargoAuthorityMode("AUTHORITY", &mode));
+  EXPECT_EQ(mode, CargoAuthorityMode::V6_AUTHORITY);
+
+  EXPECT_TRUE(parseCargoAuthorityMode("V6_SHADOW", &mode));
+  EXPECT_EQ(mode, CargoAuthorityMode::V6_SHADOW);
+  EXPECT_TRUE(parseCargoAuthorityMode("SHADOW", &mode));
+  EXPECT_EQ(mode, CargoAuthorityMode::V6_SHADOW);
+
+  EXPECT_TRUE(parseCargoAuthorityMode("LEGACY", &mode));
+  EXPECT_EQ(mode, CargoAuthorityMode::LEGACY);
+
+  EXPECT_FALSE(parseCargoAuthorityMode("bogus", &mode));
+  EXPECT_FALSE(parseCargoAuthorityMode("V6_AUTHORITY", nullptr));
+
+  EXPECT_STREQ(cargoAuthorityModeName(CargoAuthorityMode::V6_AUTHORITY),
+               "V6_AUTHORITY");
+  EXPECT_STREQ(cargoAuthorityModeName(CargoAuthorityMode::V6_SHADOW),
+               "V6_SHADOW");
+  EXPECT_STREQ(cargoAuthorityModeName(CargoAuthorityMode::LEGACY), "LEGACY");
+}
+
 }  // namespace
 }  // namespace ndt_slam

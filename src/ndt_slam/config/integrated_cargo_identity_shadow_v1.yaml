@@ -2,7 +2,8 @@ schema_version: 1
 
 integrated_cargo_physical_identity_shadow:
   enabled: true
-  shadow_only: true
+  mode: "V6_AUTHORITY"
+  shadow_only: false
 
   # Defaults deliberately mirror existing acquisition/lift contracts. Site
   # replay may override them only through an audited investigation config.
