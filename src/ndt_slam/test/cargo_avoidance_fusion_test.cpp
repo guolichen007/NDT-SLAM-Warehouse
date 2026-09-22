@@ -493,6 +493,20 @@ TEST(CargoAvoidanceFusion, Code29DoesNotRequireFarHistory) {
   EXPECT_FALSE(result.authoritative_hazard.far_field_history_valid);
 }
 
+TEST(CargoAvoidanceFusion, ZeroDistanceResidualCannotProduce29) {
+  CargoAvoidanceFusionInput input = validInput();
+  input.live.hazard = true;
+  input.live.warning_code = 17;
+  input.live.distance_m = 0.0F;  // 残留点与 cargo 重合，非真实障碍
+  input.live.clearance_m = 0.0F;
+  input.live_near_field_history_authorized = false;
+
+  const auto result = fuseCargoAvoidanceRisk(input);
+
+  EXPECT_FALSE(result.authoritative_hazard.valid);
+  EXPECT_NE(result.official_code, 29);
+}
+
 TEST(CargoAvoidanceFusion, Code17StillRequiresTrueFarHistory) {
   CargoAvoidanceFusionInput input = validInput();
   input.live.hazard = true;

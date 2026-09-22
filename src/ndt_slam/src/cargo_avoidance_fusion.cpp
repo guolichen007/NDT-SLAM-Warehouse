@@ -48,7 +48,7 @@ AuthoritativeCargoHazard selectHazard(
       CargoAvoidanceHazardSource source,
       const CargoAvoidanceSourceRisk& risk) {
     if (!risk.hazard || !warningCode(risk.warning_code) ||
-        !std::isfinite(risk.distance_m) || risk.distance_m < 0.0F ||
+        !std::isfinite(risk.distance_m) || risk.distance_m <= 0.0F ||
         !lowClearance(risk.clearance_m)) {
       return;
     }
@@ -94,7 +94,7 @@ AuthoritativeCargoHazard selectReviewHazard(
       CargoAvoidanceHazardSource source,
       const CargoAvoidanceSourceRisk& risk) {
     if (!risk.hazard || !warningCode(risk.warning_code) ||
-        !std::isfinite(risk.distance_m) || risk.distance_m < 0.0F ||
+        !std::isfinite(risk.distance_m) || risk.distance_m <= 0.0F ||
         !lowClearance(risk.clearance_m)) {
       return;
     }
