@@ -225,12 +225,11 @@ for name in ("persistent_map_manifest.json", "static_evidence_manifest.json"):
     if os.path.exists(p):
         with open(p) as f:
             d = json.load(f)
-        schema_version = d.get("schema_version", 1)
-        if schema_version >= 2:
-            # schema2: path-independent map_frame_uuid must stay byte-identical
-            # across sandbox copies; never restamp the semantic identity.
-            mf = d.get("map_frame_uuid", "")
-            print(f"  sandbox {name} schema2: map_frame_uuid preserved ({mf})")
+        if d.get("map_frame_uuid"):
+            # schema2 persistent map: path-independent map_frame_uuid must stay
+            # byte-identical across sandbox copies; never restamp semantic id.
+            print(f"  sandbox {name}: map_frame_uuid preserved "
+                  f"({d['map_frame_uuid']})")
             continue
         if d.get("map_uuid") != uuid:
             d["map_uuid"] = uuid
