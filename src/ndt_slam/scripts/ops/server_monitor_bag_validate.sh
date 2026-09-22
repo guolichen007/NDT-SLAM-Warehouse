@@ -206,6 +206,32 @@ if [[ -n "$MAP_SOURCE" && -d "$MAP_SOURCE" ]]; then
   rsync -a "$MAP_SOURCE/" "$MAP_SANDBOX/"
   echo "Map copied to sandbox ($(find "$MAP_SANDBOX" -type f | wc -l) files)"
 
+  # Persistent map uuid contract: map_uuid is the FNV-1a hash of root_path.
+  # The sandbox path differs from the source path, so re-stamp the manifest
+  # map_uuid to the sandbox path before node startup (else loader FATALs with
+  # persistent_manifest_uuid_mismatch). This mutates only the sandbox copy.
+  python3 - "$MAP_SANDBOX" <<'PYEOF'
+import sys, json, os
+def fnv1a(path):
+    v = 14695981039346656037
+    for b in path.encode():
+        v ^= b
+        v = (v * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return str(v)
+sandbox = os.path.realpath(sys.argv[1])
+uuid = fnv1a(sandbox)
+for name in ("persistent_map_manifest.json", "static_evidence_manifest.json"):
+    p = os.path.join(sandbox, name)
+    if os.path.exists(p):
+        with open(p) as f:
+            d = json.load(f)
+        if d.get("map_uuid") != uuid:
+            d["map_uuid"] = uuid
+            with open(p, "w") as f:
+                json.dump(d, f, indent=2)
+            print(f"  sandbox manifest map_uuid re-stamped: {name} -> {uuid}")
+PYEOF
+
   # Record sandbox hash before
   MAP_HASH_BEFORE="$(find "$MAP_SANDBOX" -type f -print0 | sort -z | xargs -0 sha256sum 2>/dev/null)"
   echo "$MAP_HASH_BEFORE" > "$RUN_DIR/reports/map_hash_before.txt"
