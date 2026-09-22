@@ -74,7 +74,8 @@ class PersistentRegistrationLoaderTest : public ::testing::Test {
            << "\",\n"
            << "  \"yaw_reference\": {\n"
            << "    \"schema_version\": 1,\n"
-           << "    \"verified\": true,\n"
+           << "    \"verified\": "
+           << (reference.verified ? "true" : "false") << ",\n"
            << "    \"rail_yaw_in_map_rad\": "
            << reference.rail_yaw_in_map_rad << ",\n"
            << "    \"source\": \""
@@ -215,6 +216,27 @@ TEST_F(PersistentRegistrationLoaderTest,
       << result.reason;
   EXPECT_FALSE(result.rail_write_authorized);
   EXPECT_TRUE(result.map_frame_uuid.empty());
+}
+
+TEST_F(PersistentRegistrationLoaderTest,
+       SemanticMapIdentityUnverifiedYawIsRailReadOnly) {
+  const fs::path tile = writeTile();
+  RailYawReference reference;
+  reference.verified = false;
+  reference.rail_yaw_in_map_rad = 0.0;
+  reference.source = YawReferenceSource::CONFIG_SITE_REFERENCE;
+  reference.map_frame_uuid = "unverified-map-frame";
+  reference.map_frame_convention_id = "";
+  reference.sensor_rig_calibration_id = "";
+  reference.reference_uuid = "";
+  writeSemanticManifest(tile, reference);
+
+  const auto result = loadPersistentRegistrationLayer(
+      root_.string(), "any-legacy-path-id", 20.0);
+  ASSERT_EQ(result.status, PersistentRegistrationLoadStatus::RESTORED)
+      << result.reason;
+  EXPECT_FALSE(result.rail_write_authorized);
+  EXPECT_EQ(result.map_frame_uuid, "unverified-map-frame");
 }
 
 TEST_F(PersistentRegistrationLoaderTest, HashMismatchFailsClosed) {
