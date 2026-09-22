@@ -61,5 +61,52 @@ TEST(CargoFrameDecisionTest, NonWarningPathDoesNotRequireIdentity) {
   EXPECT_EQ(result.status_code, 34);
 }
 
+// Code 29 is a positive safety outcome (review episode), not a neutral
+// status. It must bind the same-frame authoritative hazard identity even when
+// positive_warning_confirmed_this_frame is false (the review path does not
+// always confirm a periodic warning).
+
+TEST(CargoFrameDecisionTest, Code29ReviewRejectsInvalidAuthoritativeHazard) {
+  CargoFrameDecision decision = warningDecision();
+  decision.warning_code = 29;
+  decision.authoritative_warning_code = 29;
+  decision.positive_warning_confirmed_this_frame = false;
+  decision.authoritative_hazard_valid = false;
+  const auto result = commitCargoFrameDecision(decision);
+  EXPECT_FALSE(result.authorized);
+  EXPECT_EQ(result.status_code, 35);
+}
+
+TEST(CargoFrameDecisionTest, Code29ReviewRejectsMissingObstacleTrack) {
+  CargoFrameDecision decision = warningDecision();
+  decision.warning_code = 29;
+  decision.authoritative_warning_code = 29;
+  decision.positive_warning_confirmed_this_frame = false;
+  decision.obstacle_track_id = 0U;
+  const auto result = commitCargoFrameDecision(decision);
+  EXPECT_FALSE(result.authorized);
+  EXPECT_EQ(result.status_code, 35);
+}
+
+TEST(CargoFrameDecisionTest, Code29ReviewRejectsAuthoritativeCodeMismatch) {
+  CargoFrameDecision decision = warningDecision();
+  decision.warning_code = 29;
+  decision.authoritative_warning_code = 17;
+  decision.positive_warning_confirmed_this_frame = false;
+  const auto result = commitCargoFrameDecision(decision);
+  EXPECT_FALSE(result.authorized);
+  EXPECT_EQ(result.status_code, 35);
+}
+
+TEST(CargoFrameDecisionTest, Code29ReviewWithValidHazardCommits) {
+  CargoFrameDecision decision = warningDecision();
+  decision.warning_code = 29;
+  decision.authoritative_warning_code = 29;
+  decision.positive_warning_confirmed_this_frame = false;
+  const auto result = commitCargoFrameDecision(decision);
+  EXPECT_TRUE(result.authorized);
+  EXPECT_EQ(result.status_code, 29);
+}
+
 }  // namespace
 }  // namespace ndt_slam
