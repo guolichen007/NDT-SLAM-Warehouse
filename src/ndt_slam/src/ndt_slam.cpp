@@ -27918,14 +27918,35 @@ void NdtSlamNode::updateAndPublishCargoSafetyPipeline(
         last_cargo_safety_result_.evidence_state =
             CargoSafetyEvidenceState::REVIEW_REQUIRED;
         last_cargo_safety_result_.reason = fused_avoidance.reason;
-        if (fused_avoidance.anomaly_review_live &&
-            selected_source_evidence != nullptr) {
-            last_cargo_safety_result_.has_cluster_evidence = true;
-            last_cargo_safety_result_.most_dangerous_cluster =
-                *selected_source_evidence;
-            last_cargo_safety_result_.most_dangerous_cluster.warning_code =
-                CargoSafetyEvaluator::kReviewCode;
-            last_cargo_safety_result_.evaluated_cluster_count = 1U;
+        if (fused_avoidance.anomaly_review_live) {
+            if (selected_source_evidence != nullptr) {
+                last_cargo_safety_result_.has_cluster_evidence = true;
+                last_cargo_safety_result_.most_dangerous_cluster =
+                    *selected_source_evidence;
+                last_cargo_safety_result_.most_dangerous_cluster.warning_code =
+                    CargoSafetyEvaluator::kReviewCode;
+                last_cargo_safety_result_.evaluated_cluster_count = 1U;
+            } else if (fused_avoidance.authoritative_hazard.valid) {
+                // 兜底：authoritative hazard 有效但 selected_source_evidence
+                // 缺失时，从 authoritative hazard 填充 geometry，避免
+                // dist=0 / clearance=0 默认值泄漏。
+                CargoSafetyClusterEvidence evidence;
+                evidence.valid = true;
+                evidence.source_validated = true;
+                evidence.source_reason = fused_avoidance.reason;
+                evidence.warning_code = CargoSafetyEvaluator::kReviewCode;
+                evidence.footprint_distance_m =
+                    fused_avoidance.authoritative_hazard.distance_m;
+                evidence.conservative_clearance_m =
+                    fused_avoidance.authoritative_hazard.clearance_m;
+                evidence.obstacle_uncertainty_m =
+                    fused_avoidance.authoritative_hazard.uncertainty_m;
+                evidence.obstacle_top_z95_m =
+                    fused_avoidance.authoritative_hazard.obstacle_top_z_map;
+                last_cargo_safety_result_.has_cluster_evidence = true;
+                last_cargo_safety_result_.most_dangerous_cluster = evidence;
+                last_cargo_safety_result_.evaluated_cluster_count = 1U;
+            }
         } else if (fused_avoidance.anomaly_review_static &&
                    static_height_result.matched_cells > 0U) {
             CargoSafetyClusterEvidence evidence;
