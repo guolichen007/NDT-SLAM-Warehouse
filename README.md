@@ -210,6 +210,48 @@ rosbag play /path/to/warehouse.bag --clock
 - [已知问题](docs/project/known_issues.md)
 - [发布流程](docs/project/release_process.md)
 
+## 定位与 Yaw
+
+当前生产定位模式为 **LEGACY**：
+
+```text
+双 3D LiDAR → 时间同步与外参变换 → base_link 合并点云
+→ Registration Cloud → NDT_OMP + CraneMotionEKF
+→ 地图/定位状态 → Cargo V6 / Avoidance V4 / Safety / Persistent Map
+```
+
+Rail Yaw authority 已具备软件身份基础，但**当前不作为生产运行模式**：
+
+- path-independent `map_frame_uuid`（semantic 坐标帧身份）
+- `sensor_rig_calibration_id`（双雷达外参语义身份）
+- `yaw_reference` semantic hash（跨语言 contract）
+- map-frame lifecycle contract（正常更新复用身份，显式迁移才换身份）
+
+`runtime_yaw_authority.mode` 保持 `LEGACY`，`verified=false`。现场 rail yaw
+正式测量与 commissioning 完成前，不得设置 production `verified=true`，
+不得切换 `SHADOW` / `RAIL_AUTHORITY`。
+
+## 地图身份
+
+- `map_uuid`：legacy/catalog 兼容身份（path-derived，仅兼容旧部署）。
+- `map_frame_uuid`：path-independent semantic 坐标帧身份。
+
+二者语义不同，不得混用。Persistent map schema v2 使用 `map_frame_uuid`
+作为语义身份，复制到任意路径不变。
+
+## 双雷达标定身份
+
+`sensor_rig_calibration_id` 只绑定双雷达外参语义（两台 `Lidar2BaseExtrinsic`
++ 矩阵约定），同步窗口、`voxel_size`、队列等运行参数不属于标定身份。
+
+## 当前功能状态
+
+- Cargo V6：功能基线已冻结
+- Avoidance V4：功能基线已冻结
+- Yaw：生产保持 LEGACY
+- Semantic map identity：已完成
+- Production Rail Authority：未启用
+
 ## 许可证与安全说明
 
 MIT License。详见 [LICENSE](LICENSE)。
