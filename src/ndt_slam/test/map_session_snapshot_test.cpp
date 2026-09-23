@@ -125,6 +125,44 @@ TEST_F(MapSessionSnapshotTest,
             loaded_second.metadata.yaw_reference.reference_hash);
 }
 
+TEST_F(MapSessionSnapshotTest, NormalMapUpdateReusesMapFrameUuid) {
+  // 地图内容正常增长（map_generation 变），坐标系身份不变 → map_frame_uuid 复用。
+  auto first = request(root_ / "update-a");
+  first.metadata.map_frame_uuid = "map-frame-stable-uuid";
+  std::string reason;
+  ASSERT_TRUE(MapSessionSnapshot::saveAtomic(first, &reason)) << reason;
+
+  auto second = request(root_ / "update-b");
+  second.metadata.map_frame_uuid = "map-frame-stable-uuid";
+  second.metadata.map_generation = 10U;  // 地图增长
+  ASSERT_TRUE(MapSessionSnapshot::saveAtomic(second, &reason)) << reason;
+
+  const auto loaded =
+      MapSessionSnapshot::loadVerified((root_ / "update-b").string());
+  ASSERT_TRUE(loaded.valid) << loaded.reason;
+  EXPECT_EQ(loaded.metadata.map_frame_uuid, "map-frame-stable-uuid");
+}
+
+TEST_F(MapSessionSnapshotTest, OldYawReferenceWithNewMapFrameUuidFailsClosed) {
+  // 显式 frame migration mint 了新 map_frame_uuid，但旧 verified yaw reference
+  // 仍绑定旧 uuid → 必须 fail-closed，不能静默接受。
+  auto req = request(root_ / "mismatch");
+  req.metadata.map_frame_uuid = "map-frame-new-uuid";
+  req.metadata.frame_id = "map";
+  req.metadata.base_frame_id = "base_link";
+  req.metadata.yaw_reference.verified = true;
+  req.metadata.yaw_reference.rail_yaw_in_map_rad = 0.125;
+  req.metadata.yaw_reference.source = YawReferenceSource::CONFIG_SITE_REFERENCE;
+  req.metadata.yaw_reference.map_frame_uuid = "map-frame-old-uuid";
+  req.metadata.yaw_reference.map_frame_id = "map";
+  req.metadata.yaw_reference.base_frame_id = "base_link";
+  req.metadata.yaw_reference.map_frame_convention_id = "rail-x-axis-v1";
+  req.metadata.yaw_reference.sensor_rig_calibration_id = "test-rig-v1";
+  req.metadata.yaw_reference.reference_uuid = "reference-old-uuid";
+  std::string reason;
+  EXPECT_FALSE(MapSessionSnapshot::saveAtomic(req, &reason));
+}
+
 TEST_F(MapSessionSnapshotTest, Sha256MatchesPublishedVector) {
   const fs::path input = root_ / "abc.txt";
   std::ofstream stream(input, std::ios::binary);
