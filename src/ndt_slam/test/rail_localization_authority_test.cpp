@@ -22,6 +22,14 @@ RailYawReference reference(double yaw = 0.25) {
   return result;
 }
 
+TEST(RailYawAuthorityTest, SemanticYawReferenceHashKnownValue) {
+  // Cross-check against scripts/validation/build_yaw_reference_manifest.py
+  // (canonicalReference + fnv1a64 + hex64). The Python tool must reproduce
+  // this exact digest for the same reference fields.
+  const auto ref = reference(0.25);
+  EXPECT_EQ(ref.reference_hash, "f715ee02fc208881");
+}
+
 TEST(RailYawAuthorityTest, RepeatedRawNdtYawBiasCannotMutateRailAuthority) {
   RailYawAuthority authority;
   ASSERT_TRUE(authority.initialize(
