@@ -1,259 +1,79 @@
 # NDT-SLAM Warehouse
 
-双雷达室内天车定位、长期建图、吊物跟踪与碰撞避障系统。
+双雷达室内天车定位、长期建图、吊物跟踪与碰撞避障系统（ROS1 Noetic）。
 
-## 项目简介
+## 当前正式基线
 
-NDT-SLAM Warehouse 是面向室内仓库和天车作业的 ROS1 Noetic 工程。系统同时维护
-NDT 定位、长期在线建图、五层地图输出和一条完整的吊物安全协议。
+```text
+FIELD_BASELINE_TAG = baseline-field-legacy-20260923
+FIELD_BASELINE_SHA = 18619e7c160eb462ac42c97ad9a03a922a6b8b86
+```
 
-当前现场验证基线：[`validation-obstacle-avoidance-20260728`](https://github.com/guolichen007/NDT-SLAM-Warehouse/tree/validation-obstacle-avoidance-20260728)（`8d7d7ee`）。
+当前生产模式：
+
+```text
+Production Yaw Mode       = LEGACY
+Production Rail Authority = DISABLED
+Production Yaw Reference  = verified=false
+```
 
 > 本软件不是安全认证设备。部署时必须保留外部急停、限位开关和现场安全策略。
 
-当前主线已包含 NDT fitness 自适应熔断、重定位多帧确认、全图静态地图恢复、
-长期失败看门狗、Pending 静态障碍正向告警和定位地图报告原子写入。当前实现的
-Windows 静态检查与历史现场证据分开管理；现场验证 Tag 不会随代码提交自动前移。
+## 支持环境
 
-## 核心能力
+- ROS1 Noetic
+- Ubuntu 20.04
+- PCL / Eigen / Sophus
 
-- **双雷达融合定位**：结构优先 NDT 配准 + 各向异性 EKF + 静止保持策略。结构不足时进入 prediction-only，不回退到整片地面。
-- **定位故障隔离**：按目标云分布建立自适应 fitness 基线；持续恶化时隔离 NDT 测量和地图提交，恢复后再闭合。异步重定位结果需满足身份、时效和多帧一致性。
-- **定位自动恢复**：局部恢复失败后优先使用 `objects_clean` 静态地图做有界全图搜索；长期无法恢复时由看门狗落盘证据并请求 systemd 重启全栈，同时限制重启风暴。
-- **长期在线建图**：MotionGate 静止不建图，关键帧 active window，20m×20m tile 增量落盘，MemoryGuard/DiskGuard 保护。
-- **五层地图输出**：registration / display / ground / objects / objects_clean，同代发布，`header.seq` 一致。
-- **吊物刚体跟踪**：稳健二维 OBB 检测，锁定后冻结长/宽/高/yaw，作业期间只更新中心。起升不会导致错误丢失。
-- **多源几何融合**：Formal Geometry（冻结形状，经静态+实时来源连续一致授权）和 Degraded Geometry（仅实时正向告警）。
-- **Pending 静态风险**：实时障碍暂缺时，只有通过来源排除、稳定地图区域和连续确认的静态风险可以产生 17/18；该路径不能产生 CLEAR。
-- **障碍物追踪与安全码**：Code 14（CLEAR）/ 17（≤3m）/ 18（3-5m）/ 30-35（故障），只由真实空间碰撞风险产生正向告警。
-- **主控集成**：Code 18 → 外部主控程序 → S3 语音告警，已取得现场证据。
-- **服务器监控**：统一运维入口、SHA 门禁验证、CSV 诊断输出、只读安全窗口。
+## 核心架构
 
-## 系统架构
-
-```
-双雷达 → pointcloud_merger → /merged_points
-  │
-  ├── 定位链路
-  │   ├── RegistrationCloudBuilder（结构保持）
-  │   ├── NDT + NdtObservability
-  │   ├── NdtFitnessCircuitBreaker
-  │   ├── 局部/全局重定位（objects_clean 静态地图优先）
-  │   ├── 各向异性 EKF（CraneMotionEKF）
-  │   ├── StationaryMotionPolicy
-  │   ├── MapCommit → Clean Worker → 五层 MapLayerBundle
-  │   └── NDT Recovery Watchdog → systemd 全栈监督
-  │
-  └── 吊物安全链路
-      ├── Cargo Observation → 生命周期（EMPTY→CANDIDATE→LOCKED→LOST_HOLD）
-      ├── CargoGeometryFusion
-      │   ├── Formal Geometry（可 CLEAR、可 map exclusion、可 MapCommit）
-      │   └── Degraded Geometry（仅正向 17/18 告警）
-      ├── Cargo Bottom
-      ├── CargoObstacleTracker
-      ├── CargoAvoidanceFusion → CargoSafetyStatus
-      └── cargo_alarm_heartbeat_node → /cargo_avoidance/status_code
+```text
+双 3D LiDAR
+    ↓ 时间同步与外参变换
+base_link 合并点云
+    ↓ 结构保持 Registration Cloud
+NDT_OMP + CraneMotionEKF
+    ↓
+地图/定位状态
+    ├── Cargo V6（吊物身份/几何/安全）
+    ├── Avoidance V4（障碍追踪 + 17/18/29 避障）
+    ├── Safety Authority（安全授权）
+    └── Persistent Map（长期多层地图）
 ```
 
-## 吊物避障安全协议
-
-### 安全码
-
-| Code | 含义 | 授权来源 |
-|---:|---|---|
-| 14 | CLEAR — 无碰撞风险 | 仅 Formal Geometry + 全部合同满足 |
-| 17 | NEAR_3M — ≤3m，垂直净空<0.8m | Formal 或 Degraded Geometry |
-| 18 | NEAR_5M — 3-5m，垂直净空<0.8m | Formal 或 Degraded Geometry |
-| 30 | 系统未就绪 / 时间轴回退 | 故障 |
-| 31 | 定位无效 | 故障 |
-| 32 | Gravity/称重信号无效 | 故障 |
-| 33 | 吊物证据无效 | 故障 |
-| 34 | 障碍证据不足 | 故障 |
-| 35 | 内部合同错误 | 故障 |
-
-### 几何权限
-
-| 操作 | Formal Geometry | Degraded Geometry |
-|---|---|---|
-| 正向 17/18 告警 | 允许 | 允许 |
-| CLEAR 14 | 允许（全部合同满足） | **禁止** |
-| 货物点从 registration 剔除 | 允许 | **禁止** |
-| 静态地图排除 | 允许 | **禁止** |
-| MapCommit 排除 | 允许 | **禁止** |
-
-### Heartbeat 节点
-
-`cargo_alarm_heartbeat_node` 对类型化 `CargoSafetyStatus` 做协议校验，接受前进时间戳的新状态，以 5Hz 重发当前安全码。重复时间戳不产生新证据。时序确认由上游安全/障碍追踪管线负责。
-
-## 构建
-
-Ubuntu / ROS Noetic：
+## 快速构建
 
 ```bash
-cd ~/NDT-slam-ws
-catkin config --extend /opt/ros/noetic --cmake-args -DCMAKE_BUILD_TYPE=Release
-catkin clean -y
-catkin build --no-status
+source /opt/ros/noetic/setup.bash
+catkin_make
 source devel/setup.bash
 ```
 
-Windows 仅用于源码编辑和静态合同检查，不能替代 ROS/PCL/Sophus 编译与 bag 验收。
-
-## 启动
-
-手动调试/验收（真实传感器时间、带 RViz 和看门狗）：
+## 快速启动
 
 ```bash
-cd ~/NDT-slam-ws
-source devel/setup.bash
-export NDT_SLAM_DATA_ROOT="$PWD/maps/live/current"
-roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
-  use_sim_time:=false use_rviz:=true persistent_map:=true \
-  use_ndt_recovery_watchdog:=true
+# 长期在线建图与吊物安全
+roslaunch ndt_slam warehouse_live_longterm_mapping.launch
+
+# 运行时定位
+roslaunch ndt_slam warehouse_runtime.launch
 ```
 
-手动运行没有外部进程监督；看门狗请求硬恢复时会安全结束 launch，但不会自行重拉。
-长期生产使用 systemd：
+## 关键接口
 
-```bash
-sudo rosrun ndt_slam install_server_services.sh \
-  --workspace ~/NDT-slam-ws --user "$(id -un)" \
-  --data-root ~/NDT-slam-ws/maps/live/current --yes --enable
-sudo systemctl start ndt-slam.service ndt-slam-monitor.service
-sudo systemctl status ndt-slam.service ndt-slam-monitor.service
-```
-
-停止生产服务：
-
-```bash
-sudo systemctl stop ndt-slam-monitor.service ndt-slam.service
-```
-
-服务器验收统一入口：
-
-```bash
-rosrun ndt_slam run_server_validation.sh prepare \
-  --workspace ~/NDT-slam-ws --expected-sha <SHA> --run-id rc1-live-001
-rosrun ndt_slam run_server_validation.sh start \
-  --workspace ~/NDT-slam-ws --expected-sha <SHA> --run-id rc1-live-001
-```
-
-Bag 验收（仿真时间）：
-
-```bash
-roslaunch ndt_slam warehouse_live_longterm_mapping.launch \
-  use_sim_time:=true use_rviz:=true persistent_map:=false
-rosbag play /path/to/warehouse.bag --clock
-```
-
-该 launch 默认启动 SLAM、NDT 恢复看门狗和 RViz。RViz 中全量
-`display_map` 默认关闭以避免大点云拖慢界面，需要时可手工开启；这不会关闭
-`objects_clean` 等运行显示。生产 systemd 服务固定使用 `use_rviz:=false`。
-完整安装、有效配置检查和故障恢复命令见[部署](src/ndt_slam/doc/deployment.md)与
-[运行与运维](src/ndt_slam/doc/operations.md)。
-
-## 主要话题与接口
-
-| Topic | 类型 | 说明 |
-|---|---|---|
-| `/odom` | `nav_msgs::Odometry` | 运行位姿 |
-| `/ndt_slam/runtime_path` | `nav_msgs::Path` | 实时轨迹 |
-| `/merged_points` | `sensor_msgs::PointCloud2` | 合并后当前帧点云 |
-| `/map` | `sensor_msgs::PointCloud2` | registration 层 |
-| `/display_map` | `sensor_msgs::PointCloud2` | 全量显示层 |
-| `/display_map_ground` | `sensor_msgs::PointCloud2` | 地面层 |
-| `/display_map_objects` | `sensor_msgs::PointCloud2` | 原始静态物体层 |
-| `/display_map_objects_clean` | `sensor_msgs::PointCloud2` | 清理后静态物体层 |
-| `/cargo_core_bbox_marker` | `visualization_msgs::Marker` | 正式冻结形状吊物框 |
-| `/cargo_tight_box_marker` | `visualization_msgs::Marker` | 兼容框（相同刚体几何） |
-| `/cargo_warning_zone_marker` | `visualization_msgs::Marker` | 3m/5m 方向一致告警区域 |
-| `/cargo_avoidance/safety_status` | `lidar_slam2_msgs/CargoSafetyStatus` | 正式安全输出（主控必须订阅） |
-| `/cargo_avoidance/status_code` | `std_msgs/Int32` | Heartbeat 简码输出 |
-
-完整接口文档见 [对外接口](src/ndt_slam/doc/api.md)。
-
-## 现场验证基线
-
-验证 Tag：[`validation-obstacle-avoidance-20260728`](https://github.com/guolichen007/NDT-SLAM-Warehouse/tree/validation-obstacle-avoidance-20260728) → `8d7d7ee`
-
-已取得现场证据：
-- SLAM 侧：已观测 Code 17/18 正向安全告警（235×18, 53×17, 24 独立避障片段）
-- 外部主控侧：已观测 Code 18 接收并触发 S3 语音告警（243×Code18, 224×S3, <1s 延迟）
-
-详细证据：[避障端到端现场验证](docs/validation/obstacle_avoidance_e2e_20260727_20260728.md)
-
-2026-07-29/30 的长时间运行数据已完成证据边界审查。它补充证明历史链路持续输出
-17/18，但因版本原因串与 `f57d68a` 不一致、SLAM 与主控数据不同步，不能作为
-`f57d68a` 新增路径的现场验收结论。详见
-[避障运行证据审查](docs/validation/obstacle_avoidance_runtime_evidence_review_20260729_20260730.md)。
+- 对外接口：[api.md](src/ndt_slam/doc/api.md)
+- 安全合同：[SAFETY.md](SAFETY.md) + [cargo_tracking_and_safety.md](src/ndt_slam/doc/cargo_tracking_and_safety.md)
+- 定位运行时：[localization_runtime.md](src/ndt_slam/doc/localization_runtime.md)
+- 配置说明：[configuration.md](src/ndt_slam/doc/configuration.md)
+- 部署：[deployment.md](src/ndt_slam/doc/deployment.md)
 
 ## 文档导航
 
-**技术文档（当前 master 参考）：**
-- [系统架构](src/ndt_slam/doc/architecture.md)
-- [对外接口](src/ndt_slam/doc/api.md)
-- [定位运行时](src/ndt_slam/doc/localization_runtime.md)
-- [吊物跟踪与安全](src/ndt_slam/doc/cargo_tracking_and_safety.md)
-- [地图生命周期](src/ndt_slam/doc/map_lifecycle.md)
-- [长期在线建图](src/ndt_slam/doc/longterm_mapping.md)
-- [配置说明](src/ndt_slam/doc/configuration.md)
-- [部署](src/ndt_slam/doc/deployment.md)
-- [运行与运维](src/ndt_slam/doc/operations.md)
-- [服务器监控](src/ndt_slam/doc/server_monitoring.md)
-- [服务器验收 Runbook](src/ndt_slam/doc/server_validation_runbook.md)
-- [测试与验收](src/ndt_slam/doc/testing_and_acceptance.md)
-- [故障排查](src/ndt_slam/doc/troubleshooting.md)
+- 文档中心：[docs/README.md](docs/README.md)
+- 当前项目状态：[docs/project/status.md](docs/project/status.md)
+- 技术文档：[src/ndt_slam/doc/](src/ndt_slam/doc/)
 
-**项目管理：**
-- [项目状态](docs/project/status.md)
-- [开发路线](docs/project/roadmap.md)
-- [已知问题](docs/project/known_issues.md)
-- [发布流程](docs/project/release_process.md)
+## 许可证与安全
 
-## 定位与 Yaw
-
-当前生产定位模式为 **LEGACY**：
-
-```text
-双 3D LiDAR → 时间同步与外参变换 → base_link 合并点云
-→ Registration Cloud → NDT_OMP + CraneMotionEKF
-→ 地图/定位状态 → Cargo V6 / Avoidance V4 / Safety / Persistent Map
-```
-
-Rail Yaw authority 已具备软件身份基础，但**当前不作为生产运行模式**：
-
-- path-independent `map_frame_uuid`（semantic 坐标帧身份）
-- `sensor_rig_calibration_id`（双雷达外参语义身份）
-- `yaw_reference` semantic hash（跨语言 contract）
-- map-frame lifecycle contract（正常更新复用身份，显式迁移才换身份）
-
-`runtime_yaw_authority.mode` 保持 `LEGACY`，`verified=false`。现场 rail yaw
-正式测量与 commissioning 完成前，不得设置 production `verified=true`，
-不得切换 `SHADOW` / `RAIL_AUTHORITY`。
-
-## 地图身份
-
-- `map_uuid`：legacy/catalog 兼容身份（path-derived，仅兼容旧部署）。
-- `map_frame_uuid`：path-independent semantic 坐标帧身份。
-
-二者语义不同，不得混用。Persistent map schema v2 使用 `map_frame_uuid`
-作为语义身份，复制到任意路径不变。
-
-## 双雷达标定身份
-
-`sensor_rig_calibration_id` 只绑定双雷达外参语义（两台 `Lidar2BaseExtrinsic`
-+ 矩阵约定），同步窗口、`voxel_size`、队列等运行参数不属于标定身份。
-
-## 当前功能状态
-
-- Cargo V6：功能基线已冻结
-- Avoidance V4：功能基线已冻结
-- Yaw：生产保持 LEGACY
-- Semantic map identity：已完成
-- Production Rail Authority：未启用
-
-## 许可证与安全说明
-
-MIT License。详见 [LICENSE](LICENSE)。
-
-运行安全声明见 [SAFETY.md](SAFETY.md)，软件安全策略见 [SECURITY.md](SECURITY.md)。
+MIT License，详见 [LICENSE](LICENSE)。运行安全声明见 [SAFETY.md](SAFETY.md)，
+软件安全策略见 [SECURITY.md](SECURITY.md)。

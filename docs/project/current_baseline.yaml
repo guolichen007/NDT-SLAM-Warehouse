@@ -1,0 +1,17 @@
+schema_version: 1
+
+field_baseline:
+  tag: baseline-field-legacy-20260923
+  sha: 18619e7c160eb462ac42c97ad9a03a922a6b8b86
+
+production:
+  yaw_mode: LEGACY
+  rail_authority_enabled: false
+  yaw_reference_verified: false
+
+quality:
+  clean_build: PASS
+  gtest_total: 1000
+  gtest_failures: 0
+  python_total: 107
+  python_failures: 0

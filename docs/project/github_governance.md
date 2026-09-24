@@ -2,14 +2,26 @@
 
 ## 分支保护
 
-当前 master 分支保护状态：**待审查**（gtest 14 个活跃失败未清零前不建议强制要求 full CI）
+当前事实：
 
-建议目标配置：
-- 禁止 force push
-- 禁止删除分支
-- PR 合并（不允许直接 push）
-- 要求对话解决后合并
-- 要求 CI 通过（gtest 全绿后启用）
+```text
+FULL_GTEST = 1000 / 0
+PYTHON     = 107 / 0
+master protected = false
+```
+
+目标配置（测试已全绿，可启用）：
+
+```text
+master protected = true
+force push disabled
+branch deletion disabled
+PR required
+required checks enabled
+CODEOWNERS review required（按团队需求）
+```
+
+本轮仅记录治理目标，不改动 GitHub branch protection 设置，除非另行授权。
 
 ## 分支命名规范
 

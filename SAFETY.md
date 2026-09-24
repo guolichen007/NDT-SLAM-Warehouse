@@ -85,7 +85,22 @@ RViz marker（cargo_core_bbox_marker、cargo_tight_box_marker、cargo_warning_zo
 - 通过静态合同、clean build、gtest、bag 和现场验证
 - 不能仅依赖 Windows 检查
 
-## 现场验证基线
+## 当前生产软件基线
+
+当前生产软件基线为：
+
+```text
+baseline-field-legacy-20260923
+18619e7c160eb462ac42c97ad9a03a922a6b8b86
+```
+
+该基线通过 Clean build、Full GTest 1000/0、Python 107/0，Cargo V6 / Avoidance V4
+功能基线冻结，生产 Yaw 保持 LEGACY。
+
+**注意**：当前基线尚未完成真实 Bag 的 Code 17/18 正向覆盖（`REAL_17_18_POSITIVE_COVERAGE`
+未关闭）。下述历史现场证据不得作为当前 SHA 的 17/18 覆盖证明。
+
+## 历史现场验证证据（非当前基线）
 
 | 证据 | 日期 | 内容 |
 |---|---|---|
@@ -94,7 +109,7 @@ RViz marker（cargo_core_bbox_marker、cargo_tight_box_marker、cargo_warning_zo
 
 两次现场运行为不同日期独立运行，不是同步逐帧一一对应。S3 独立闸门路径（总闸关闭场景）未被此批 case 覆盖。
 
-验证基线 SHA：`8d7d7eed0548321bf0646232f374fe95a29990dd`
-验证 Tag：`validation-obstacle-avoidance-20260728`
+历史验证 SHA：`8d7d7eed0548321bf0646232f374fe95a29990dd`
+历史验证 Tag：`validation-obstacle-avoidance-20260728`
 
-如怀疑安全行为退化，回滚到该 SHA。
+此为历史现场正向 17/18 证据，不是当前代码回滚目标。

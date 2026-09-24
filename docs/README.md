@@ -1,32 +1,49 @@
-# 项目文档
+# 文档中心
 
-本目录存放历史证据、设计决策、事故报告和项目管理文档。
+本文件是仓库文档的唯一导航入口。
 
-当前技术参考文档见 [src/ndt_slam/doc/](../src/ndt_slam/doc/)。
+## 当前项目状态
 
-## 项目管理
+- [project/status.md](project/status.md) — 当前实现状态、验证矩阵、剩余 blocker
+- [project/document_inventory.md](project/document_inventory.md) — 文档资产清单
+- [project/github_governance.md](project/github_governance.md) — GitHub 治理
 
-- [项目状态](project/status.md) — 能力状态矩阵、编译测试状态
-- [开发路线](project/roadmap.md) — P0/P1/P2 优先级规划
-- [已知问题](project/known_issues.md) — KI 编号、现象、安全影响、修复计划
-- [发布流程](project/release_process.md) — Tag 规范、RC 条件、回滚
-- [文档保留策略](project/documentation_policy.md) — 哪些文档进 Git、哪些不保留
-- [GitHub 治理](project/github_governance.md) — 分支保护、CI 策略、Code Owner
+## 当前技术参考
 
-## 验证证据
+- [src/ndt_slam/doc/](../src/ndt_slam/doc/) — 当前 master 技术事实
+  - [api.md](../src/ndt_slam/doc/api.md)
+  - [architecture.md](../src/ndt_slam/doc/architecture.md)
+  - [cargo_tracking_and_safety.md](../src/ndt_slam/doc/cargo_tracking_and_safety.md)
+  - [configuration.md](../src/ndt_slam/doc/configuration.md)
+  - [deployment.md](../src/ndt_slam/doc/deployment.md)
+  - [localization_runtime.md](../src/ndt_slam/doc/localization_runtime.md)
+  - [operations.md](../src/ndt_slam/doc/operations.md)
 
-- [避障运行证据审查 2026-07-29/30](validation/obstacle_avoidance_runtime_evidence_review_20260729_20260730.md) — 长时间运行统计、版本边界与补充验收项
-- [避障端到端现场验证 2026-07-27/28](validation/obstacle_avoidance_e2e_20260727_20260728.md)
-- [实图审计 2026-07-21](validation/real_map_audit_20260721.md)
-- [Windows 静态合同结果 2026-07-21](validation/windows_static_contract_result_20260721.md)
-- [Ubuntu 吊物静态高度融合验证](validation/ubuntu_validation_cargo_static_map_height_fusion_v1.md)
+## 发布与冻结
 
-## 设计
+- [release/](release/) — 封板、限制、发布矩阵
 
-- [吊物静态地图高度融合设计](design/cargo_static_map_height_fusion_design.md)
+## 正式验证证据
 
-## 事故分析
+- [validation/](validation/) — 不可变验收证据（绑定 SHA，不代表当前实现）
 
-- [Episode 4：吊物避障根因修复 2026-07-23](incidents/episode4_cargo_avoidance_root_cause_fix_20260723.md)
-- [吊物运行时 Episode 1-4 修复 2026-07-24](incidents/cargo_episode_1_4_runtime_fix_20260724.md)
-- [Pending Cargo Growth 误报 17 修复 2026-07-24](incidents/pending_cargo_growth_false17_fix_20260724.md)
+## 设计合同
+
+- [design/](design/) — 长期设计 / 坐标约定合同
+
+## 历史归档
+
+- [archive/](archive/) — 历史取证，不得作为生产配置依据
+  - [archive/audits/](archive/audits/)
+  - [archive/incidents/](archive/incidents/)
+  - [archive/legacy/](archive/legacy/)
+
+## 目录职责
+
+```text
+src/ndt_slam/doc/   = 当前 master 技术事实
+docs/validation/    = 不可变证据，不代表当前实现
+docs/release/       = 封板与限制
+docs/design/        = 长期设计/合同
+docs/archive/       = 历史取证，不得作为生产配置依据
+```
