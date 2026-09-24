@@ -1,5 +1,11 @@
 # Cargo Warning V1
 
+> ARCHIVED / SUPERSEDED
+>
+> 该文档仅保留历史开发背景。当前正式安全合同以 `SAFETY.md` 和
+> `src/ndt_slam/doc/cargo_tracking_and_safety.md` 为准。
+> 不得用于生产配置或验收。
+
 ## 目标
 
 实现货物预警系统 V1，包括：
