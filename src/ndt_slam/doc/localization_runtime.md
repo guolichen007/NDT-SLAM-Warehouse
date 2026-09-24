@@ -84,3 +84,17 @@ map-frame 重定位被清除。
 
 该机制隔离错误测量，不把 prediction-only 位姿升级为地图证据。它不等同于现场重定位
 成功率保证，仍需 Ubuntu 编译、Bag 和现场数据验收。
+
+## Map Frame Convention（冻结）
+
+```text
+map_frame_convention_id = ndt-map-rh-zup-yaw-ccw-rail-angle-from-map-x-v1
+```
+
+- 坐标系：右手系，+Z 向上，Yaw 正方向绕 +Z 逆时针。
+- `rail_yaw_in_map`：从 `map +X` 到「轨道正方向」的有符号角，规范化到 `(-pi, pi]`。
+- `map` frame 原点与轴向由 persistent map 冻结时定义，由 `map_frame_uuid`
+  （path-independent semantic identity）唯一标识。
+
+生产 Yaw 模式保持 `LEGACY`、`verified=false`。现场只测量「轨道正方向」与
+`rail_yaw_in_map_rad` 真实值，不重新定义坐标系约定。

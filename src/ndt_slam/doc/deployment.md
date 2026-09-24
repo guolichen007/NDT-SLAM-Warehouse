@@ -99,4 +99,4 @@ bag 验收使用 `use_sim_time:=true` 且 `rosbag play --clock`。第二次播�
 - 根目录 `LICENSE` 与 `package.xml` 的 MIT 声明一致；发布仍需 exact SHA、
   clean build、gtest 和服务器验收报告。
 
-完整部署到归档流程见 [Server Validation Runbook](server_validation_runbook.md)。
+完整部署到归档流程见 [测试与验收](testing_and_acceptance.md)。

@@ -250,6 +250,20 @@ def check_baseline_consistency():
     return errors
 
 
+def check_no_historical_dirs():
+    """历史目录（archive/validation/design）不允许在当前树重新出现。"""
+    forbidden_dirs = [
+        os.path.join(REPO_ROOT, 'docs', 'archive'),
+        os.path.join(REPO_ROOT, 'docs', 'validation'),
+        os.path.join(REPO_ROOT, 'docs', 'design'),
+    ]
+    errors = []
+    for d in forbidden_dirs:
+        if os.path.isdir(d):
+            errors.append(f"{d} 历史目录不应在当前树重新出现（由 Git 历史承担）")
+    return errors
+
+
 def main():
     all_errors = []
 
@@ -288,6 +302,9 @@ def main():
 
     # 8. baseline 一致性
     all_errors.extend(check_baseline_consistency())
+
+    # 9. 历史目录不允许重新出现
+    all_errors.extend(check_no_historical_dirs())
 
     if all_errors:
         print("文档合同检查发现以下问题：")
