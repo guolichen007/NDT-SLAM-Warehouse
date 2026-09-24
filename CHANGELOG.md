@@ -13,7 +13,7 @@
 - semantic map identity tooling（schema2 `map_frame_uuid` path-independent）
 - production yaw authority = LEGACY，`verified=false`
 - Full GTest 1000/0，Python 107/0
-- 历史取证文档归档至 `docs/archive/`，当前事实统一为单一入口
+- 历史取证文档与生成数据从当前工作树移除，由 Git 历史承担
 
 ## Cargo V6 / Avoidance V4 Freeze（2026-08 ~ 2026-09）
 

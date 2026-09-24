@@ -1,49 +1,36 @@
 # 文档保留策略
 
-## 哪些文档应进入 Git 并长期保留
+## 原则
 
-| 类型 | 示例 | 位置 |
-|---|---|---|
-| 当前技术合同 | 架构、API、安全协议、配置说明 | `src/ndt_slam/doc/` |
-| 项目管理 | 状态、路线图、已知问题、发布流程 | `docs/project/` |
-| 正式验证证据 | 与正式 Tag 和不可变 SHA 绑定的现场验证报告 | `docs/validation/` |
-| 候选证据审查 | 已提炼、可追溯且明确版本边界的运行证据审查 | `docs/validation/` |
-| 设计决策 | 重要设计文档 | `docs/design/` |
-| 事故复盘 | 有长期安全价值的事故分析 | `docs/incidents/` |
+当前源码树只保留「当前工程事实」：技术方案、架构、接口、配置、部署、运维、
+安全、测试准入、当前版本状态。历史过程数据由 Git 历史 / Tag / Release / CI
+artifact 承担，不在当前树继续堆积。
 
-## 哪些不应进入 Git 或应定期清理
+## 长期保留
 
-| 类型 | 原因 |
+| 类型 | 位置 |
 |---|---|
-| 临时 branch status | Git 历史本身就是记录 |
-| PR body 草稿 | 提炼到 design doc 后删除原文 |
-| 一次性 TODO / 聊天总结 | 不构成正式工程文档 |
-| 普通 CI failure note | 提炼规则到 CONTRIBUTING 后删除 |
-| 运行日志 / 大 JSON / bag / PCD / server_runs | `.gitignore` 已排除 |
-| 自动生成报告 | 放入 Actions artifact 或 release asset |
+| 当前技术合同（架构、API、安全协议、配置） | `src/ndt_slam/doc/` |
+| 项目管理（状态、路线图、发布流程、治理） | `docs/project/` |
+| 当前版本基线 | `docs/release/current_baseline.md` |
 
-## 候选证据审查要求
+## 不进入 Git 当前树
 
-尚未绑定正式 Tag 的运行数据只有满足以下条件，才可作为“候选证据审查”进入 Git：
+以下内容由 Git history / Tag / Release / CI artifacts / server_runs 承担：
 
-- 不提交原始日志、Bag、PCD、完整 CSV 或自动生成报告，只保留经复核的指标和结论。
-- 写明原始数据标识、采集时间、运行时 SHA 的获取方式；无法确认 SHA 时必须标为
-  `UNBOUND`，不得据此前移现场验证基线。
-- 将“数据直接证明”“由代码审查推断”和“仍需验证”分开记录。
-- 不同场次的 SLAM 与主控数据只能作为分段链路证据，不能宣称逐事件端到端闭环。
-- 没有独立真值标注时，不得宣称零误报、零漏报或百分之百召回。
-- 数字枚举必须按采集 SHA 对应的消息 Schema 解释，不能按报告作者自定义含义重命名。
+- 历史审计过程（audits）
+- incident 长报告（incidents）
+- branch handoff（investigations）
+- runtime metrics dump
+- Bag replay report
+- CI generated report
+- 自动验收输出（metrics.json / final_report.md / CSV）
+- 历史 validation 报告
 
 ## 技术文档要求
 
-`src/ndt_slam/doc/` 下的每一篇文档必须：
+`src/ndt_slam/doc/` 下每篇文档必须：
+
 - 描述当前 master 的真实行为
 - 不引用已删除的类、文件、Topic、参数
 - 不含待办事项或道路规划
-- 含"最后更新"或对应版本标注
-
-## 禁止
-
-- 在 README 中列出已知问题、待完成项、测试失败
-- 在技术文档中引用不存在的头文件或类
-- 用"看起来合理"代替与代码的逐项核对
