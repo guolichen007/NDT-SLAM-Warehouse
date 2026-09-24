@@ -180,6 +180,76 @@ def check_docs_index_links(index_dir):
     return errors
 
 
+STALE_CURRENT_PATTERNS = [
+    (r'\b944\b.*\btests\b', '944 tests 过期状态'),
+    (r'14\s*failures', '14 failures 过期状态'),
+    (r'\b2759128\b', '旧 baseline 2759128'),
+    (r'ros2\s+(launch|run|param)', 'ros2 命令（项目是 ROS1 Noetic）'),
+    (r'ros__parameters', 'ros__parameters（ROS2 遗留）'),
+    (r'alarm_code\s*=\s*0', 'alarm_code=0 作为当前 clear（旧协议）'),
+    (r'当前现场验证基线[^\n]*8d7d7ee', '8d7d7ee 写成当前基线'),
+]
+
+
+def check_stale_current_content():
+    """检查 current docs 是否含过期事实（排除 archive 与 validation 历史证据）。"""
+    current_targets = [
+        os.path.join(REPO_ROOT, 'README.md'),
+        os.path.join(REPO_ROOT, 'CHANGELOG.md'),
+        os.path.join(REPO_ROOT, 'SAFETY.md'),
+        os.path.join(REPO_ROOT, 'docs', 'project'),
+        os.path.join(REPO_ROOT, 'docs', 'design'),
+        os.path.join(REPO_ROOT, 'src', 'ndt_slam', 'doc'),
+    ]
+    errors = []
+    for target in current_targets:
+        paths = []
+        if os.path.isfile(target):
+            paths.append(target)
+        elif os.path.isdir(target):
+            for dp, _, fns in os.walk(target):
+                for fn in fns:
+                    if fn.endswith('.md'):
+                        paths.append(os.path.join(dp, fn))
+        for p in paths:
+            with open(p, 'r', encoding='utf-8', errors='replace') as f:
+                for lineno, line in enumerate(f, 1):
+                    for pat, desc in STALE_CURRENT_PATTERNS:
+                        if re.search(pat, line):
+                            errors.append(
+                                f"{p}:{lineno}: 过期事实 '{desc}': "
+                                f"{line.strip()[:60]}")
+    return errors
+
+
+def check_baseline_consistency():
+    """校验 README / status 的 baseline 与 current_baseline.yaml 一致。"""
+    baseline_yaml = os.path.join(REPO_ROOT, 'docs', 'project',
+                                 'current_baseline.yaml')
+    if not os.path.exists(baseline_yaml):
+        return ["docs/project/current_baseline.yaml 不存在"]
+    import yaml
+    with open(baseline_yaml, 'r', encoding='utf-8') as f:
+        baseline = yaml.safe_load(f)
+    tag = baseline.get('field_baseline', {}).get('tag', '')
+    sha = baseline.get('field_baseline', {}).get('sha', '')
+    errors = []
+    for doc_name, path in [
+        ('README.md', os.path.join(REPO_ROOT, 'README.md')),
+        ('status.md', os.path.join(REPO_ROOT, 'docs', 'project', 'status.md')),
+    ]:
+        if not os.path.exists(path):
+            errors.append(f"{doc_name} 不存在")
+            continue
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        if tag and tag not in content:
+            errors.append(f"{doc_name} 缺少 baseline tag '{tag}'")
+        if sha and sha not in content:
+            errors.append(f"{doc_name} 缺少 baseline sha '{sha}'")
+    return errors
+
+
 def main():
     all_errors = []
 
@@ -212,6 +282,12 @@ def main():
         all_errors.extend(check_docs_index_links(docs_dir))
     if os.path.isdir(tech_doc_dir):
         all_errors.extend(check_docs_index_links(tech_doc_dir))
+
+    # 7. 过期事实禁止（current docs）
+    all_errors.extend(check_stale_current_content())
+
+    # 8. baseline 一致性
+    all_errors.extend(check_baseline_consistency())
 
     if all_errors:
         print("文档合同检查发现以下问题：")
