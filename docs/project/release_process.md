@@ -41,10 +41,15 @@
 
 ## 回滚
 
-若怀疑安全行为退化，回滚到最近验证 Tag：
+若怀疑安全行为退化，回滚到当前正式基线：
 
 ```bash
-git checkout validation-obstacle-avoidance-20260728
+git switch --detach baseline-field-legacy-20260923
+# 或
+git checkout 18619e7c160eb462ac42c97ad9a03a922a6b8b86
 ```
 
 重新编译、部署、验证。
+
+历史 Tag `validation-obstacle-avoidance-20260728`（`8d7d7ee`）仅作为历史 17/18
+现场正向证据，不作为默认生产 rollback 目标。

@@ -4,6 +4,12 @@
 
 无未发布生产行为变更。
 
+### Repository Governance — 2026-09-24
+
+- 历史取证文档与生成数据从当前工作树移除，由 Git 历史承担
+- 技术文档收敛（19→12），docs 目录精简为 project/release
+- CI job ID 改 ASCII，SAFETY schema v7 + Code 29，删除旧离线建图半成品
+
 ## baseline-field-legacy-20260923
 
 当前现场 LEGACY 运行基线（`18619e7`）。
@@ -13,7 +19,6 @@
 - semantic map identity tooling（schema2 `map_frame_uuid` path-independent）
 - production yaw authority = LEGACY，`verified=false`
 - Full GTest 1000/0，Python 107/0
-- 历史取证文档与生成数据从当前工作树移除，由 Git 历史承担
 
 ## Cargo V6 / Avoidance V4 Freeze（2026-08 ~ 2026-09）
 

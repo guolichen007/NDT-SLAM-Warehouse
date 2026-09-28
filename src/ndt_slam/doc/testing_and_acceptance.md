@@ -73,7 +73,6 @@ python -m unittest discover -s tests -p "test_*.py"
 
 服务器运行必须保留 `run_manifest.json`、`final_summary.json` 和 `final_report.md`。报告中的 Ubuntu build、gtest、Bag、soak 若未实际执行，必须为 `NOT_RUN`，不得用监控采样自动替代。操作顺序见本文档「服务器验收」章节。
 
-对应版本：`f57d68a`。
 
 
 ## Server Validation Runbook

@@ -48,5 +48,11 @@ Python       = 107 / 0
 
 ## 回滚
 
+```bash
+git switch --detach baseline-field-legacy-20260923
+# 或
+git checkout 18619e7c160eb462ac42c97ad9a03a922a6b8b86
+```
+
 历史现场正向 17/18 证据见 Tag `validation-obstacle-avoidance-20260728`
-（`8d7d7ee`），但该历史证据不得作为当前 SHA 的 17/18 覆盖证明。
+（`8d7d7ee`），但该历史证据不得作为当前 SHA 的 17/18 覆盖证明，也不作为默认回滚目标。

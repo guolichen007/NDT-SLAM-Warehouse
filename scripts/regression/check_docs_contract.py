@@ -188,6 +188,8 @@ STALE_CURRENT_PATTERNS = [
     (r'ros__parameters', 'ros__parameters（ROS2 遗留）'),
     (r'alarm_code\s*=\s*0', 'alarm_code=0 作为当前 clear（旧协议）'),
     (r'当前现场验证基线[^\n]*8d7d7ee', '8d7d7ee 写成当前基线'),
+    (r'schema\s+v6\b', 'CargoSafetyStatus schema 版本过期（当前 v7）'),
+    (r'\bf57d68a\b', '历史 SHA f57d68a'),
 ]
 
 
@@ -264,6 +266,25 @@ def check_no_historical_dirs():
     return errors
 
 
+def check_no_hardcoded_paths():
+    """operational scripts 禁止硬编码 /home/ydkj 等本地路径。"""
+    scripts_dir = os.path.join(REPO_ROOT, 'src', 'ndt_slam', 'scripts')
+    errors = []
+    if not os.path.isdir(scripts_dir):
+        return errors
+    for dp, _, fns in os.walk(scripts_dir):
+        for fn in fns:
+            if not (fn.endswith('.sh') or fn.endswith('.py')):
+                continue
+            p = os.path.join(dp, fn)
+            with open(p, 'r', encoding='utf-8', errors='replace') as f:
+                for lineno, line in enumerate(f, 1):
+                    if '/home/ydkj' in line:
+                        errors.append(
+                            f"{p}:{lineno}: 硬编码本地路径 /home/ydkj")
+    return errors
+
+
 def main():
     all_errors = []
 
@@ -305,6 +326,9 @@ def main():
 
     # 9. 历史目录不允许重新出现
     all_errors.extend(check_no_historical_dirs())
+
+    # 10. operational scripts 禁止硬编码本地路径
+    all_errors.extend(check_no_hardcoded_paths())
 
     if all_errors:
         print("文档合同检查发现以下问题：")

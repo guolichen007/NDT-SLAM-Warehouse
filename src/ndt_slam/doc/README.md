@@ -18,7 +18,6 @@
 - [配置说明](configuration.md) — YAML 参考
 - [部署](deployment.md) — 安装、systemd、launch
 - [运行与运维](operations.md) — 运行时命令、监控、内存/磁盘保护
-- [工程建图指南](engineering_mapping_guide.md) — 现场建图流程
 
 ## 质量
 

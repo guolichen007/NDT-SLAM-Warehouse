@@ -24,7 +24,7 @@ max_z_step  = max_z_speed  * sensor_dt + margin
 
 ## 几何融合（CargoGeometryFusion）
 
-`CargoGeometryFusion` 是 8d7d7ee 基线核心设计，管理两种几何授权级别：
+`CargoGeometryFusion` 管理两种几何授权级别：
 
 ### Formal Geometry（正式几何）
 
@@ -127,5 +127,3 @@ EMPTY 阶段可采集起吊前高度，但无抬升/运动证据不得把地面�
 - Skew-pull：持续性方向偏移
 - Torsion：扭转（需要非正方形货物）
 - 吊钩锚点授权（真实 hoist 信号 vs 配置值）
-
-对应版本：`f57d68a`。
