@@ -13,7 +13,8 @@ permissions:
   contents: read
 
 jobs:
-  静态合同:
+  static_contract:
+    name: 静态合同
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -24,7 +25,8 @@ jobs:
         run: |
           python3 scripts/regression/run_static_contracts.py
 
-  文档合同:
+  docs_contract:
+    name: 文档合同
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -35,10 +37,11 @@ jobs:
         run: |
           python3 scripts/regression/check_docs_contract.py
 
-  ROS编译与测试:
+  ros_build_test:
+    name: ROS编译与测试
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    needs: [静态合同, 文档合同]
+    needs: [static_contract, docs_contract]
     container: ros:noetic-ros-base-focal
     steps:
       - name: 安装检出依赖
